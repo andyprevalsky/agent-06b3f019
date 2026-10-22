@@ -42,6 +42,7 @@ from benchmarks.auth_test_site import (
     validate_outcome_check as validate_auth_test_site_outcome_check,
 )
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+from benchmarks.tree_feedback_routing import validate_mid_run_feedback
 
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {
@@ -80,6 +81,14 @@ RUNTIME_STATIC_CHECK_TYPES = {
     AUTH_TEST_SITE_OUTCOME_CHECK,
     "root_deliverable_markers",
     "tree_agent_status",
+    # tree-feedback-routing — implemented in benchmarks/tree_feedback_routing.py.
+    "mid_run_feedback_active_layers",
+    "agent_message_routed_to_subtree",
+    "agent_message_not_routed_to_subtree",
+    "structured_output_signature",
+    "list_agents_listed",
+    "mid_run_feedback_background_task_active",
+    "background_task_message_routed",
     "expected_gate",
     "expected_payment_receipt",
     "attention_kind_sequence",
@@ -461,6 +470,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
             raise ValueError(
                 f"{item_id}: incomplete synthetic evals must declare the fixtures/services they are missing"
             )
+    validate_mid_run_feedback(raw.get("mid_run_feedback"), item_id)
     evaluators = raw.get("evaluators")
     if evaluators:
         _validate_evaluators(evaluators, item_id)

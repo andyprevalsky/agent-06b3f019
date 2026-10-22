@@ -25,6 +25,9 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
+from helpers.agent_addressing import ensure_planned_task_name
+from helpers.background_agents import is_agent_authored_user_metadata
+from helpers.context_compaction import is_excluded_from_model
 from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
@@ -32,26 +35,28 @@ from tools.base import EventType, MessageStatus, ToolEvent
 from utils.error_utils import error_chain_has_type
 from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from utils.tool_call_ids import spawn_group_id
+from utils.tool_schemas import TOOL_ALIASES
 
 logger = structlog.get_logger()
 
 STRUCTURED_OUTPUT_ERROR_TYPE = "LLMStructuredOutputError"
 STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
+# A new message mid-DAG cancels in-flight blocking tasks immediately, except
+# these: cancelling a phone call hangs up a live call, and a pending user
+# approval / question must still reach the user. They keep running and report
+# as they normally would.
+DAG_UNINTERRUPTIBLE_TOOLS = frozenset({"call_phone_number", "message_person"})
+
+
+def _is_uninterruptible_dag_call(tool_name: str, params: Dict[str, Any]) -> bool:
+    if tool_name in DAG_UNINTERRUPTIBLE_TOOLS:
+        return True
+    return tool_name.startswith("send_message_to_user") and params.get("is_question") is True
+
 
 DAG_REASONING_UI_TOOL_NAME = "thought"
 DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
 DAG_REASONING_FINISHED_TITLE = "Thought"
-
-# Planning-time aliases → Execution-time tool names
-# Planner uses separate names (spawn_browser_agent, etc.) that map to unified spawn_agent
-TOOL_ALIASES = {
-    "spawn_explore_agent": "spawn_agent",
-    "spawn_browser_agent": "spawn_agent",
-    "spawn_code_agent": "spawn_agent",
-    "spawn_general_purpose_agent": "spawn_agent",
-    "spawn_general_purpose_agent_for_each": "spawn_agent",
-    "wait_seconds": "wait_for",  # Backward compat for old plans
-}
 
 # When aliases resolve to spawn_agent, force the correct type param
 # so the param-populator LLM can't pick the wrong agent type.
@@ -83,7 +88,7 @@ class ParamPopulationContractError(ValueError):
     """The param-populator returned a call that cannot execute the planned DAG node."""
 
 
-def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+def _apply_alias_override(params: Dict[str, Any], tool_name: str, task_index: int = 0) -> Dict[str, Any]:
     """Merge an alias's type/start_phase override into a populated param dict.
 
     ``type`` is forced (the param-populator can't be trusted to pick it), but
@@ -91,7 +96,8 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
     an already-cached fan-out keeps its children on their existing cache keys;
     the alias default only fills a missing/None start_phase (the intermittent
     prod failure where the DAG for_each spawned without start_phase and was
-    rejected by SpawnAgentTool). Mutates and returns ``params``.
+    rejected by SpawnAgentTool). ``task_name`` is likewise a fallback
+    (``planned_task_name``: goal slug + task number). Mutates and returns ``params``.
     """
     type_override = ALIAS_TYPE_OVERRIDES.get(tool_name)
     if not type_override:
@@ -100,7 +106,9 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
     if override.get("start_phase") and params.get("start_phase"):
         override.pop("start_phase")
     params.update(override)
-    return params
+    # spawn_agent requires task_name (the child's address <path>/<task_name>);
+    # a planned task gets a deterministic one unless the populator chose a valid one.
+    return ensure_planned_task_name(params, task_index)
 
 
 def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
@@ -274,9 +282,7 @@ def _dag_has_completed_for_each(dag: "TaskDAG") -> bool:
 OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP = 6
 
 
-def _oai_demo_reasoning_fast_mode_step(
-    task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]
-) -> int:
+def _oai_demo_reasoning_fast_mode_step(task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]) -> int:
     """Replay assemble-final from the July p:6 slot on catalog demo trees."""
     if task.tool_name != "reasoning":
         return task.index
@@ -373,6 +379,12 @@ class DAGTask:
     depends_on: List[int] = field(default_factory=list)
     state: TaskState = TaskState.PENDING
     tool_call_id: Optional[str] = None
+    # Set once a planned spawn_agent started in the background: the task's
+    # model-visible result is its "started" row; it completes on the child's
+    # completion (DagInterrupts.await_background).
+    background_task_id: Optional[str] = None
+    # A live call / pending user approval or question: a mid-plan message never cancels it.
+    uninterruptible: bool = False
 
 
 class TaskDAG:
@@ -394,6 +406,11 @@ class TaskDAG:
         """
         self.tasks: List[DAGTask] = []
         self.join: str = plan_data.get("join", "all")
+        # Set when a new message interrupts the DAG: cancelled tasks post an
+        # "interrupted" terminal row instead of the sibling-failure one.
+        self.interrupted_by_message: bool = False
+        # Uninterruptible tasks left running when a message handed the DAG back.
+        self.detached_tasks: List[asyncio.Task] = []
 
         # Parse tasks
         raw_tasks = plan_data.get("tasks", [])
@@ -470,6 +487,9 @@ class TaskDAG:
         """
         completed: List[int] = []
         tool_call_to_task: Dict[str, int] = {}
+        # A planned spawn started in the background is done only once its
+        # completion notification (status completed) is in the transcript.
+        completed_background_ids = set()
 
         for msg in context:
             metadata = msg.get("metadata") or {}
@@ -479,10 +499,20 @@ class TaskDAG:
             dag_task_index = metadata.get("dagTaskIndex")
             if isinstance(tool_call_id, str) and isinstance(dag_task_index, int):
                 tool_call_to_task[tool_call_id] = dag_task_index
+            if metadata.get("agentNotification") is True and metadata.get("status") == "completed":
+                completed_background_ids.add(metadata.get("backgroundTaskId"))
 
         for msg in context:
             metadata = msg.get("metadata") or {}
             if not isinstance(metadata, dict):
+                continue
+            if metadata.get("excludeFromModel"):
+                # UI-only rows (a background spawn's executor rows share its id):
+                # the "started" row + completion notification decide the task.
+                continue
+            if metadata.get("runInBackground") is True and (
+                metadata.get("backgroundTaskId") not in completed_background_ids
+            ):
                 continue
             is_finished_tool = metadata.get("toolStatus") == "FINISHED" and not metadata.get("error")
             is_finished_reasoning = (
@@ -566,7 +596,8 @@ def _is_hidden_or_internal_user(metadata: Dict[str, Any]) -> bool:
         return True
     if metadata.get("isResponseSchemaUpdate") is True:
         return True
-    return False
+    # Agent notifications / agent-to-agent messages are agent-authored.
+    return is_agent_authored_user_metadata(metadata)
 
 
 def plan_superseded_by_new_user_instruction(context: List[Dict[str, Any]]) -> bool:
@@ -608,11 +639,7 @@ def plan_superseded_by_new_user_instruction(context: List[Dict[str, Any]]) -> bo
             last_final_summary_idx = idx
     if last_final_summary_idx is not None:
         return True
-    return (
-        last_set_plan_idx is not None
-        and last_user_idx is not None
-        and last_user_idx > last_set_plan_idx
-    )
+    return last_set_plan_idx is not None and last_user_idx is not None and last_user_idx > last_set_plan_idx
 
 
 def latest_real_user_instruction(context: List[Dict[str, Any]]) -> Optional[str]:
@@ -631,6 +658,54 @@ def latest_real_user_instruction(context: List[Dict[str, Any]]) -> Optional[str]
         if text:
             last_text = text
     return last_text
+
+
+def is_dag_interrupt_message(msg: Dict[str, Any]) -> bool:
+    """True for a polled row that must hand a running DAG back to the LLM loop.
+
+    A real user instruction or an agent-to-agent message interrupts. Agent
+    notifications (a planned background spawn's completion is its DAG
+    dependency, not new input), hidden/schema-refresh rows and attention-gate
+    answers (they resolve a waiting tool, not the plan) do not. Neither do rows
+    hidden from this agent's model: a task-addressed agent message
+    (``recipientTaskId`` + ``excludeFromModel``) is read by that task's own
+    activity inbox, and the backend never signals the owner's loop for it.
+    Metadata only, never message text.
+    """
+    if not isinstance(msg, dict) or str(msg.get("role") or "").upper() != "USER":
+        return False
+    metadata = msg.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if is_excluded_from_model(msg) or metadata.get("recipientTaskId"):
+        return False
+    if metadata.get("agentMessage") is True:
+        return True
+    if metadata.get("source") == "attention_response" or metadata.get("attentionRequestId"):
+        return False
+    return not _is_hidden_or_internal_user(metadata)
+
+
+@dataclass
+class DagInterrupts:
+    """Workflow hooks that let a new message interrupt a running DAG.
+
+    ``seq`` reads the workflow's wake counter (bumped by user/agent message
+    signals); ``wait(seq)`` resolves once it moves past ``seq`` (a
+    ``workflow.wait_condition`` in the workflow, no timer, no polling loop).
+    ``message_pending()`` reports a message signalled after the context poll
+    the plan was built from (before ``seq`` was read), so the first batch is
+    preceded by a poll. ``await_background(task_id)`` is a planned spawn's dependency wait: it
+    resolves when that background spawn finishes (True = completed, False =
+    failed/stopped) or with a ``generation_handoff`` payload.
+    """
+
+    seq: Callable[[], int]
+    wait: Callable[[int], Awaitable[Any]]
+    await_background: Callable[[str], Awaitable[Any]]
+    # True when a user / agent message was signalled after the context poll the
+    # plan was built from: the DAG polls before starting its first batch.
+    message_pending: Callable[[], bool] = lambda: False
 
 
 def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
@@ -679,9 +754,35 @@ async def execute_dag(
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
     system_prompt_text: Optional[str] = None,
     tool_names: Optional[List[str]] = None,
+    interrupts: Optional[DagInterrupts] = None,
 ) -> Dict[str, Any]:
     """
     Execute DAG with maximum parallelism.
+
+    New-message interrupt (``interrupts`` + ``poll_messages``)::
+
+        asyncio.wait(FIRST_COMPLETED) over {DAG tasks, interrupts.wait(seq)}
+              │ wake (user / agent message signal)
+              ▼
+        poll ──▶ is_dag_interrupt_message? ──no──▶ keep waiting
+              │ yes
+              ▼
+        no new task starts
+        planned spawns already started ─▶ keep running in the background (their
+                                         "started" row is the result; one
+                                         notification each, nothing special)
+        phone call / pending approval /
+        question (uninterruptible) ────▶ keep running, report normally
+        other in-flight tasks ─────────▶ cancelled immediately with a paired
+                                         ERROR "interrupted" row
+        return needs_llm ──────────────▶ run_agent sees the message; unstarted
+                                         plan tasks have no result rows
+
+    Planned spawns (``interrupts`` given) start in the background like LLM
+    spawns: the task posts the immediate "started … Address" row, then waits
+    in ``interrupts.await_background`` and completes when the child does. Its
+    notification row is polled into ``context`` before dependents populate
+    their params, so they read the child's result like a foreground result.
 
     Fires tasks immediately when their dependencies complete.
     Uses asyncio.wait(FIRST_COMPLETED) for efficient scheduling.
@@ -726,11 +827,34 @@ async def execute_dag(
             except Exception:
                 pass
 
+    interrupt_enabled = interrupts is not None and poll_messages is not None
+    interrupt_seq = interrupts.seq() if interrupts is not None and interrupt_enabled else 0
+    polled_rows: List[Dict[str, Any]] = []
+
+    async def _recording_poll(since: datetime) -> List[Dict]:
+        assert poll_messages is not None
+        rows = await poll_messages(since)
+        polled_rows.extend(rows or [])
+        return rows
+
     while not dag.is_complete() and not dag.has_failed():
-        # Poll DB for new messages before starting next batch
-        # (skip first iteration — nothing has completed yet)
-        if poll_messages and not first_iteration:
-            last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+        # Poll DB for new messages before starting next batch (skip the first
+        # iteration — nothing has completed yet — unless a message arrived after
+        # the context snapshot the plan was built from).
+        pending_first = (
+            first_iteration and interrupt_enabled and interrupts is not None and interrupts.message_pending()
+        )
+        if poll_messages and (not first_iteration or pending_first):
+            polled_rows.clear()
+            last_checked = await poll_and_update_context(
+                _recording_poll if interrupt_enabled else poll_messages, context, last_checked
+            )
+            if (
+                interrupts is not None
+                and interrupt_enabled
+                and any(is_dag_interrupt_message(row) for row in polled_rows)
+            ):
+                return await _hand_back_for_new_message(dag, pending_tasks, task_to_index, context)
         first_iteration = False
 
         # Start newly ready tasks
@@ -768,6 +892,7 @@ async def execute_dag(
                     tool_names=tool_names,
                     param_cache_seed_event=param_cache_seed_event,
                     param_cache_seed_lock=param_cache_seed_lock,
+                    await_background=interrupts.await_background if interrupts is not None else None,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -782,8 +907,22 @@ async def execute_dag(
                 "message": "DAG execution stalled before all planned tasks completed.",
             }
 
-        # Wait for ANY task to complete
-        done, _ = await asyncio.wait(pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED)
+        # Wait for ANY task to complete (or, with interrupts, a new message signal)
+        interrupt_waiter: Optional[asyncio.Task] = None
+        if interrupt_enabled and interrupts is not None:
+            interrupt_waiter = asyncio.create_task(interrupts.wait(interrupt_seq))
+        done, _ = await asyncio.wait(
+            [*pending_tasks.values(), *([interrupt_waiter] if interrupt_waiter is not None else [])],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if interrupt_waiter is not None and interrupts is not None:
+            done.discard(interrupt_waiter)
+            if not interrupt_waiter.done():
+                interrupt_waiter.cancel()
+                await asyncio.gather(interrupt_waiter, return_exceptions=True)
+            # Re-read the counter: the next poll (top of loop) covers every
+            # signal up to here, so no wake is lost between waits.
+            interrupt_seq = interrupts.seq()
 
         # Process completed tasks
         for completed_future in done:
@@ -799,8 +938,7 @@ async def execute_dag(
 
             if isinstance(task_result, dict) and task_result.get("generation_handoff"):
                 workflow.logger.info(
-                    f"[DAG] Task {task_index} interrupted for generation handoff — "
-                    "canceling remaining DAG work"
+                    f"[DAG] Task {task_index} interrupted for generation handoff — canceling remaining DAG work"
                 )
                 remaining = list(pending_tasks.values())
                 for pending in remaining:
@@ -865,6 +1003,79 @@ async def execute_dag(
     }
 
 
+async def _hand_back_for_new_message(
+    dag: TaskDAG,
+    pending_tasks: Dict[int, asyncio.Task],
+    task_to_index: Dict[asyncio.Task, int],
+    context: List[Dict],
+) -> Dict[str, Any]:
+    """A user/agent message arrived mid-DAG: return control to the LLM loop.
+
+    No new task starts. Planned spawns already running in the background stay
+    running (their "started" row is the planned call's result and their
+    completion posts the usual notification); only the DAG's dependency wait
+    on them ends, silently. A live phone call or a pending user approval /
+    question keeps running and reports as it normally would. Every other
+    in-flight task is cancelled immediately and posts an ERROR "interrupted"
+    row under its own tool call id. Unstarted tasks have no rows; the model
+    sees them as not done in the plan.
+    """
+    dag.interrupted_by_message = True
+    background: List[int] = []
+    kept: List[int] = []
+    cancelled: List[int] = []
+    handoff: Optional[Dict[str, Any]] = None
+    to_drain: List[asyncio.Task] = []
+    for index, running in list(pending_tasks.items()):
+        task = dag.tasks[index]
+        if running.done():
+            try:
+                outcome = running.result()
+            except BaseException:
+                outcome = False
+            if isinstance(outcome, dict) and outcome.get("generation_handoff"):
+                handoff = handoff or outcome
+            elif outcome is True:
+                dag.mark_completed(index)
+            else:
+                dag.mark_failed(index)
+            continue
+        if task.uninterruptible:
+            kept.append(index)
+            dag.detached_tasks.append(running)
+            continue
+        if task.background_task_id is not None:
+            background.append(index)  # only the dependency wait ends (silently)
+        else:
+            cancelled.append(index)
+        running.cancel()
+        to_drain.append(running)
+    if to_drain:
+        await asyncio.gather(*to_drain, return_exceptions=True)
+    pending_tasks.clear()
+    task_to_index.clear()
+    unstarted = [task.index + 1 for task in dag.tasks if task.state == TaskState.PENDING]
+    workflow.logger.info(
+        f"[DAG] New message arrived; handing back to the LLM loop. Still running in background="
+        f"{[index + 1 for index in background]} interrupted={[index + 1 for index in cancelled]} "
+        f"kept running={[index + 1 for index in kept]} "
+        f"not started={unstarted}"
+    )
+    if handoff is not None:
+        return {
+            "status": "generation_handoff",
+            "handoff_task_queue": handoff.get("handoff_task_queue"),
+            "context": context,
+            "message": "Planned task interrupted for generation handoff.",
+        }
+    return {
+        "status": "needs_llm",
+        "interrupted_by_message": True,
+        "context": context,
+        "message": "A new message arrived during DAG execution.",
+    }
+
+
 async def _execute_single_task(
     task: DAGTask,
     dag: TaskDAG,
@@ -888,6 +1099,7 @@ async def _execute_single_task(
     tool_names: Optional[List[str]] = None,
     param_cache_seed_event: Optional[asyncio.Event] = None,
     param_cache_seed_lock: Optional[asyncio.Lock] = None,
+    await_background: Optional[Callable[[str], Awaitable[Any]]] = None,
 ) -> bool | dict[str, Any]:
     """
     Execute a single task from the DAG.
@@ -1229,7 +1441,7 @@ async def _execute_single_task(
             # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
             if type_override:
-                _apply_alias_override(params, task.tool_name)
+                _apply_alias_override(params, task.tool_name, task.index)
                 workflow.logger.info(
                     f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}"
                 )
@@ -1250,6 +1462,12 @@ async def _execute_single_task(
                 if type_override.get("type") in {"general_purpose", "for_each"}:
                     params["_spawn_group_id"] = spawn_group_id(tool_call_id)
 
+            # With DAG interrupts every planned spawn is a background record
+            # (its child survives a mid-plan hand-back and keeps its task
+            # path), so the populator cannot opt one into the foreground.
+            if actual_tool == "spawn_agent" and await_background is not None:
+                params.pop("run_in_background", None)
+
             # Validate the final, overridden spawn payload before any external
             # child workflow can be started. Alias coercion must never bypass the
             # canonical SpawnAgentTool cross-field constraints.
@@ -1259,7 +1477,17 @@ async def _execute_single_task(
                 SpawnAgentTool.model_validate({"tool": actual_tool, **params})
 
             # Execute tool (uses existing flow - posts result to context)
+            task.uninterruptible = _is_uninterruptible_dag_call(actual_tool, params)
             result = await execute_tool(actual_tool, params, tool_call_id)
+
+            # A planned spawn that started in the background: its "started"
+            # row is the call's result; the task completes with the child.
+            background_task_id = result.get("background_task_id") if isinstance(result, dict) else None
+            if isinstance(background_task_id, str) and background_task_id and await_background is not None:
+                task.background_task_id = background_task_id
+                result = await await_background(background_task_id)
+                if result is True or result is False:
+                    return result
 
             # A cooperative cutover is not task success. Returning True here
             # marks the node COMPLETED and starts dependents, which then raise
@@ -1271,9 +1499,7 @@ async def _execute_single_task(
                         "generation_handoff": True,
                         "handoff_task_queue": handoff_queue.strip(),
                     }
-                workflow.logger.warning(
-                    f"[DAG] Task {task.index} reported generation_handoff without a queue"
-                )
+                workflow.logger.warning(f"[DAG] Task {task.index} reported generation_handoff without a queue")
                 return False
 
             # Check for error status
@@ -1300,18 +1526,29 @@ async def _execute_single_task(
         # live forever in the UI as a phantom chip. Emit a terminal event for the
         # same tool_call_id, then re-raise so the gather-based cancellation drain
         # in execute_dag still completes.
+        if task.background_task_id is not None:
+            # Only the dependency wait ends: the background spawn keeps running
+            # and its "started" row is already the call's terminal result.
+            raise
+        cancel_message = (
+            "Interrupted: a new message arrived before this planned task finished; it did not complete."
+            if dag.interrupted_by_message
+            else "Canceled: a sibling task failed."
+        )
+        cancel_metadata = {"interrupted": True} if dag.interrupted_by_message else {}
         try:
             if early_tool_event_name is not None:
                 await handle_tool_event_fn(
                     ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title=task.tool_name,
-                        message="Canceled: a sibling task failed.",
+                        message=cancel_message,
                         status=MessageStatus.ERROR,
                         metadata={
                             "dagTaskIndex": task.index,
                             "plannedToolName": task.tool_name,
                             "canceled": True,
+                            **cancel_metadata,
                         },
                     ),
                     tool_call_id,
@@ -1322,7 +1559,7 @@ async def _execute_single_task(
                     ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title=DAG_REASONING_FINISHED_TITLE,
-                        message="Canceled: a sibling task failed.",
+                        message=cancel_message,
                         status=MessageStatus.ERROR,
                         metadata={
                             "dagTaskIndex": task.index,
@@ -1332,6 +1569,7 @@ async def _execute_single_task(
                             "startedAt": reasoning_started_at,
                             "canceled": True,
                             "error": True,
+                            **cancel_metadata,
                         },
                     ),
                     tool_call_id,
@@ -1348,9 +1586,7 @@ async def _execute_single_task(
             # Fast Mode read-only: this DAG node's populate is not in the
             # cache. Skip it without an ERROR chip so leftover post-for_each
             # GPs do not fail t10; execute_loop can still replay cached work.
-            workflow.logger.info(
-                f"[DAG] Task {task.index} skipped: Fast Mode has no cached populate for this node"
-            )
+            workflow.logger.info(f"[DAG] Task {task.index} skipped: Fast Mode has no cached populate for this node")
             skip_tool_name = early_tool_event_name or (
                 DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
             )

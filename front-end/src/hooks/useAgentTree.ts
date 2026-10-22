@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { listenToAgentTree, type TreeNode } from './agentTreeSubscription';
 
-export type { TreeNode } from './agentTreeSubscription';
+export type { TreeNode, TreeBackgroundTask } from './agentTreeSubscription';
 
 const EMPTY_TREE_SOURCE = new Map<string, TreeNode>();
 const EMPTY_TREE = new Proxy(EMPTY_TREE_SOURCE, {
@@ -38,22 +38,40 @@ export function useAgentTree(busId: string | null): ReadonlyMap<string, TreeNode
   return treeState.busId === busId ? treeState.nodes : EMPTY_TREE;
 }
 
-/** Filter tree nodes to the named spawn roots and all their descendants. */
+/**
+ * Group tree nodes by `parentAgentId` in one pass, keeping map order within
+ * each parent. Tree walks look children up here instead of rescanning every
+ * node per visit (O(nodes), not O(nodes²), for a 10k-agent tree).
+ */
+export function indexTreeChildren(nodes: Iterable<TreeNode>): Map<string, TreeNode[]> {
+  const index = new Map<string, TreeNode[]>();
+  for (const node of nodes) {
+    const parentId = node.parentAgentId;
+    if (!parentId) continue;
+    const siblings = index.get(parentId);
+    if (siblings) siblings.push(node);
+    else index.set(parentId, [node]);
+  }
+  return index;
+}
+
+/** Filter tree nodes to the named spawn roots and all their descendants (BFS order). */
 export function filterTreeBySpawn(
   allNodes: ReadonlyMap<string, TreeNode>,
   subAgentIds: string[],
 ): Map<string, TreeNode> {
   const relevant = new Map<string, TreeNode>();
-  const queue = [...subAgentIds];
+  const queue = subAgentIds.filter((id) => allNodes.has(id));
+  if (queue.length === 0) return relevant;
+  const children = indexTreeChildren(allNodes.values());
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  for (let head = 0; head < queue.length; head += 1) {
+    const id = queue[head];
     const node = allNodes.get(id);
-    if (node && !relevant.has(id)) {
-      relevant.set(id, node);
-      for (const [childId, child] of allNodes) {
-        if (child.parentAgentId === id && !relevant.has(childId)) queue.push(childId);
-      }
+    if (!node || relevant.has(id)) continue;
+    relevant.set(id, node);
+    for (const child of children.get(id) ?? []) {
+      if (!relevant.has(child.agentId)) queue.push(child.agentId);
     }
   }
 

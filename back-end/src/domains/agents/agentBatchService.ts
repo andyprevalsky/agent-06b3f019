@@ -1,4 +1,5 @@
 import { resolveBatchProjectIds } from './agentProject';
+import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
  * Agent batch-create service — POST /api/agents/batch.
@@ -280,12 +281,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     assertWorldModelModeAccess(body, userId);
   }
 
-  const defaultPriceLimitCents = DEFAULT_TASK_PRICE_LIMIT_CENTS;
-  for (const body of bodies) {
-    if (body.price_limit_cents === undefined) {
-      body.price_limit_cents = defaultPriceLimitCents;
-    }
-  }
+  for (const body of bodies) body.price_limit_cents ??= DEFAULT_TASK_PRICE_LIMIT_CENTS;
 
   // Idempotency: existing rows are returned untouched.
   const allAgentIds = bodies.map((b) => b.agent_id!);
@@ -320,6 +316,10 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     )
   );
 
+  const taskPaths = await resolveCreateTaskPaths(newBodies);
+  newItems.forEach((item, index) => {
+    item.taskPath = taskPaths[index];
+  });
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.
     await repo.createAgentBatchTransaction(newItems);

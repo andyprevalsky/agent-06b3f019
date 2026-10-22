@@ -61,6 +61,18 @@ model Agent {
   responseSchema                   Json?
   busId                            String?
   toolsInUse                       String[]                    @default([])
+  // In-flight background explore/browser/code tasks this agent owns, written by
+  // its workflow's tree-state PATCH: [{address, type, goal, status, started_at}].
+  // Listed by GET /:id/tree as child nodes `<agentId>/<address>`.
+  backgroundTasks                  Json?
+  // Codex-style address from the root: "/root" or "<parent path>/<task_name>".
+  // Unique among live rows of one tree (enforced on create; agentTaskPath.ts).
+  taskPath                         String?
+  // Agent-to-agent message guard (repoAgentMessageGuard.ts), Prime-style:
+  // {rateTatMs} = this agent's GCRA send-bucket theoretical arrival time (DB clock, ms);
+  // {readAt, taskReadAt: {<task address>: iso}} = newest agent message this agent /
+  // its explore-browser tasks consumed (returned by their own message reads).
+  agentMessaging                   Json?
   structuredResponse               Json?
   proxyCity                        String?
   proxyCountry                     String?
@@ -103,6 +115,7 @@ model Agent {
   @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
   @@index([projectId])
+  @@index([busId, taskPath])
 }
 
 model TemporalWorkflowCleanup {

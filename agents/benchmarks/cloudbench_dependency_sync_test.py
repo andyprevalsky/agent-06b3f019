@@ -1,3 +1,4 @@
+from benchmarks.cloudbench_campaign_workspace_test import copy_timeout_policy
 from benchmarks.fleet_aggregate_fixture import one_aggregate_tick
 import ast
 import base64
@@ -6770,8 +6771,19 @@ proxy="$(cat {shlex.quote(str(proxy_pid))})"
 [ -e {shlex.quote(str(proxy_terminated))} ] || exit 99
 """
 
+    # Detached test launchers may ignore HUP/INT before pytest starts. Bash
+    # cannot install traps for signals inherited as ignored, so reset only the
+    # fixture shell's dispositions before exercising the supervisor's traps.
     result = subprocess.run(
-        ["bash", "-c", script],
+        [
+            sys.executable,
+            "-c",
+            "import os, signal, sys; "
+            "signal.signal(signal.SIGHUP, signal.SIG_DFL); "
+            "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "os.execvp('bash', ['bash', '-c', sys.argv[1]])",
+            script,
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -7340,7 +7352,9 @@ exit 143
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
-        assert len(stops) == 3, stops
+        # Retries continue until the attempt cap or the shared deadline, whichever
+        # comes first; under host load the 6 s window can end after two requests.
+        assert len(stops) == 3 or elapsed >= 6, (stops, elapsed)
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
@@ -34607,7 +34621,12 @@ case "$CASE" in
  # Recover only after the waiter observed the pending generation and entered
  # its retry pause; a timed background writer can win before the first read.
  recovers) stale; sleep() { healthy; command sleep "$@"; } ;;
- exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+1)) ;;
+ # Controlled clock: SECONDS ticks on whole-second boundaries, so a
+ # SECONDS+1 deadline can expire milliseconds after assignment on a loaded
+ # host before the first retry is observed. The waiter's integer retry
+ # pause advances the same SECONDS clock instead of real time.
+ exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+3))
+  sleep() { case "$1" in *[!0-9]*|'') command sleep "$@" ;; *) SECONDS=$((SECONDS+$1)) ;; esac; } ;;
  expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS ;;
  foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
  dead) kill "$owned_publisher"; wait "$owned_publisher" 2>/dev/null || true ;;
@@ -35388,10 +35407,11 @@ def test_normal_cli_forwards_owned_pool_reuse_policy(tmp_path: Path, args: list[
         "cloudbench-shard-coordinator.py",
     ):
         shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+    copy_timeout_policy(root)
     shutil.copy2(ROOT / ".claude/shared/benchmark-report-format.txt", root / ".claude/shared/benchmark-report-format.txt")
     for name in ("tasks.json", "polar_tasks.json"):
         (root / "agents/benchmarks").mkdir(exist_ok=True)
-        (root / "agents/benchmarks" / name).write_text(json.dumps([{"name": "fixture-task", "status": "ready"}] if name == "tasks.json" else [{"name": "other-fixture-task", "status": "ready"}]))
+        (root / "agents/benchmarks" / name).write_text(json.dumps([{"name": "fixture-task", "status": "ready", "timeout_seconds": 600}] if name == "tasks.json" else [{"name": "other-fixture-task", "status": "ready", "timeout_seconds": 0}]))
     (root / "agents/venv/bin/python").symlink_to(sys.executable)
     output = tmp_path / "args.json"
     runner = tmp_path / "runner"

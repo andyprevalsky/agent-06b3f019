@@ -38,6 +38,13 @@ if not os.getenv("BACKEND_API_KEY"):
 from activities.param_populator import populate_tool_params_activity
 from browser_tools.secret_refs import redact_secret_log_values
 from config import load_config
+from domains.agent_messaging.service import (
+    kill_agent_activity,
+    list_agent_tree_activity,
+    resolve_agent_address_activity,
+    send_agent_message_activity,
+    send_agent_message_to_address_activity,
+)
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.gate.repo import (
@@ -91,7 +98,6 @@ from domains.spawn_sub_agents.service import (
 )
 from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
 from domains.display.repo import display_media_activity
-from domains.kill_agent.handler import kill_agent_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -755,6 +761,7 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         # old-gen pollers mid cooperative drain.
         if my_surface:
             machines = [m for m in machines if _machine_surface(m) == my_surface]
+
         # A retained generation can share this surface again after a rollback.
         # Its stopped pool entries need leased custody reuse before any start.
         def _owned_active_pool(machine: dict) -> bool:
@@ -798,8 +805,10 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
             current_build = os.getenv("TEMPORAL_WORKER_BUILD_ID")
             current_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
             stopped = [
-                m for m in stopped
-                if current_build and current_token
+                m
+                for m in stopped
+                if current_build
+                and current_token
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_BUILD_ID") == current_build
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == current_token
             ]
@@ -1558,6 +1567,11 @@ async def main():
     )
 
     registered_activities = [
+        list_agent_tree_activity,
+        resolve_agent_address_activity,
+        send_agent_message_activity,
+        send_agent_message_to_address_activity,
+        kill_agent_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,
@@ -1648,7 +1662,6 @@ async def main():
         notify_sms_event_activity,
         resolve_user_ui_inline_view_activity,
         display_media_activity,
-        kill_agent_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,

@@ -143,6 +143,17 @@ def read_epoch(path: Path) -> float | None:
         return None
 
 
+def local_cleanup_clean(path: Path, token: str) -> bool:
+    """Check that an owned local cleanup receipt matches its recorded token."""
+    if not token or path.is_symlink():
+        return False
+    try:
+        fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+        return fields.get("state") == "clean" and fields.get("token") == token
+    except (OSError, ValueError):
+        return False
+
+
 def reason_key(text) -> str:
     """Cluster label for a recorded failure reason: first clause, IDs folded."""
     if not isinstance(text, str) or not text.strip():
@@ -372,8 +383,28 @@ def load_fleet(run_dir: Path) -> dict:
     starts = [read_epoch(p) for p in run_dir.glob("*/bench-e2e.started-epoch")]
     starts = [s for s in starts if s]
     exp["triggered_at"] = min(starts) if starts else epoch_of(card.get("timestamp"))
+    if local and exp["triggered_at"] is None:
+        try:
+            exp["triggered_at"] = float(run_dir.name.split("-", 1)[0])
+        except ValueError:
+            pass
     exp["window_s"] = _window(card)
     lifecycle = read_json(batch / "lifecycle.json")
+    local_run = read_json(run_dir / "run.json") if local else None
+    local_tasks = {task.get("name"): task for task in (local_run or {}).get("tasks", [])
+                   if isinstance(task, dict) and task.get("name")}
+    local_cache_pct = ((local_run or {}).get("summary") or {}).get("cache_hit_pct")
+    stack_owner = read_json(run_dir / "local-stack-owner.json") if local else None
+    benchmark_owner = read_json(run_dir / "local-benchmark-owner.json") if local else None
+    stack_token = (stack_owner or {}).get("token")
+    benchmark_token = (benchmark_owner or {}).get("token")
+    local_stack_clean = bool(local and (stack_owner or {}).get("run_id") == run_dir.name and
+                             local_cleanup_clean(run_dir / "local-stack-cleanup.status", stack_token))
+    local_benchmark_clean = bool(local and (benchmark_owner or {}).get("run_id") == run_dir.name and
+                                 (benchmark_owner or {}).get("state") == "cleanup_verified" and
+                                 local_cleanup_clean(run_dir / f"benchmark-cleanup-{benchmark_token}.status",
+                                                     benchmark_token))
+    local_released = bool(local_stack_clean and local_benchmark_clean)
     rows = []
     stage_status = {"queued": "queued", "starting": "running", "ready": "running", "running": "running",
                     "evaluated": "running", "teardown": "running"}
@@ -381,17 +412,22 @@ def load_fleet(run_dir: Path) -> dict:
         if not isinstance(task, dict):
             continue
         name, status = task.get("name"), task.get("status")
+        local_task = local_tasks.get(name, {})
         task_dir = run_dir / str(name)
         finished = (task_dir / "bench-e2e.finished-epoch").exists() or task.get("lifecycle_stage") == "released"
         verdict = {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED"}.get(status)
+        if local and verdict:
+            finished = True  # Local CLI records terminal task status directly in report-card.json.
         rows.append({
             "job_id": name, "task": name,
             "status": ("passed" if verdict else "failed") if finished else stage_status.get(task.get("lifecycle_stage"), "queued"),
             "task_status": verdict, "infra_failure": False if verdict else None,
-            "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"), "agent_id": task.get("agent_id"),
-            "reason": reason_key(task.get("failure_reason")),
-            "released": True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None,
-            "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate"),
+            "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
+            "agent_id": task.get("agent_id") or local_task.get("agent_id"),
+            "reason": reason_key(task.get("failure_reason") or local_task.get("failure_reason")),
+            "released": (local_released if local else True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None),
+            "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate") if not local else (
+                local_cache_pct / 100 if isinstance(local_cache_pct, (int, float)) else None),
             "unmetered": sorted(k.replace("_usd", "") for k, v in (card.get("cost") or {}).items()
                                 if k.endswith("_usd") and k != "total_usd" and v is None),
             "wall_s": (read_epoch(task_dir / "bench-e2e.finished-epoch") or 0) - (read_epoch(task_dir / "bench-e2e.started-epoch") or 0)
@@ -413,9 +449,17 @@ def load_fleet(run_dir: Path) -> dict:
         lifecycle_item(exp, "ok" if lifecycle.get("controller_exit_code") in (0, 1) else "fail", "Controller exited",
                        f"exit {lifecycle.get('controller_exit_code')}")
     elif local:
-        lifecycle_item(exp, "warn", "Owned resources released", "local stack: no lifecycle receipt")
+        lifecycle_item(exp, "ok" if local_released else "warn", "Owned resources released",
+                       "local stack and benchmark cleanup clean" if local_released else "local cleanup receipt pending")
         if rows and all(r["status"] in TERMINAL_JOB for r in rows):
-            exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; no release receipt"
+            if local_run and local_released:
+                exp["state"] = "COMPLETE"
+                exp["ended_at"] = max((run_dir / "local-stack-cleanup.status").stat().st_mtime,
+                                      (run_dir / f"benchmark-cleanup-{benchmark_token}.status").stat().st_mtime,
+                                      (run_dir / "run.json").stat().st_mtime)
+                exp["end_evidence"] = "run.json and local cleanup receipts"
+            else:
+                exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; local cleanup pending"
     else:
         lifecycle_item(exp, "pending", "Owned resources released", "lifecycle.json pending")
     return finish_experiment(exp)

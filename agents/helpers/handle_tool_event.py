@@ -48,9 +48,17 @@ async def handle_tool_event(
     """
     # Handle AssistantEvent separately - posts as ASSISTANT role
     if isinstance(event, AssistantEvent):
+        # Output files from a child are transcript artifacts, not a new parent
+        # assistant turn. Keep their established role/file pointer for the UI,
+        # while giving realtime readers an explicit way to distinguish them.
+        artifact_metadata = (
+            {"artifactOnly": True, "sourceToolCallId": tool_call_id}
+            if event.file_pointer and not event.message
+            else None
+        )
         await execute_activity(
             post_agent_message,
-            args=[agent_id, event.message or "", "ASSISTANT", None, event.file_pointer],
+            args=[agent_id, event.message or "", "ASSISTANT", artifact_metadata, event.file_pointer],
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )

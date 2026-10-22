@@ -89,6 +89,10 @@ import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
+import {
+  blackboxTemporalSignals,
+  shouldUseBlackboxTemporalFake,
+} from './providers/temporalBlackboxFake';
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
 import { grep as userDataGrep } from './domains/data/service';
@@ -320,6 +324,18 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
       .catch(next);
   });
   app.use('/api/test/proactive-sms', proactiveSmsRouter);
+
+  // Signals the in-memory blackbox Temporal fake recorded for one workflow, so
+  // HTTP route contracts can assert which signal (if any) a route delivered.
+  if (shouldUseBlackboxTemporalFake()) {
+    app.get('/api/test/temporal-signals/:workflowId', (req, res, next) => {
+      getTemporalClient()
+        .then((client) =>
+          res.json({ signals: blackboxTemporalSignals(client, req.params.workflowId) })
+        )
+        .catch(next);
+    });
+  }
 
   log.info('Fetch capture + supervisor fixture override enabled for blackbox tests');
 }

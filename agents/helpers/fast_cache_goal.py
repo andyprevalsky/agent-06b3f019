@@ -54,9 +54,7 @@ async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[dict[str, 
 
     # resolve_agent_fast_mode returns
     # (enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode).
-    _enabled, goal, _write_enabled, _root_agent_id, root_goal, _pfm = await resolve_agent_fast_mode(
-        agent_id
-    )
+    _enabled, goal, _write_enabled, _root_agent_id, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
     logger.info(
         "fast_cache.goal_resolved",
         agent_id=agent_id,
@@ -78,8 +76,10 @@ async def resolve_fast_cache_context_activity(agent_id: str) -> dict[str, Any]:
     """
     from providers.fast_cache.client import resolve_agent_fast_mode
 
-    enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode = (
-        await resolve_agent_fast_mode(agent_id)
+    # One read per workflow run start: the agent row's goal can change between
+    # runs (wake / follow-up), so never reuse a previous run's process memo.
+    enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode = await resolve_agent_fast_mode(
+        agent_id, refresh=True
     )
     result = {
         "resolved": isinstance(root_agent_id, str),

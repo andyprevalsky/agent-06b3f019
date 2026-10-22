@@ -18,6 +18,11 @@
  * TAB REVEAL (Rose Desktop only): owned by `useToolbarReveal` (ToolbarNub.tsx)
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
+ * TOP ATTACHMENT (props.topAttachment, e.g. BackgroundAgentsBanner):
+ *   [NONE]     -> box has all corners rounded
+ *   [RENDERED] -> attachment sits flush above (same column/edges), box top
+ *                 corners square off via `data-query-input-attachment`
+ *
  * INPUT STATE:
  *   [EMPTY] -> (type) -> [HAS_TEXT] -> (submit/clear) -> [EMPTY]
  *
@@ -95,13 +100,17 @@ export default function QueryInput(props: QueryInputProps) {
       <div className="w-full md:px-0">
         <div
           data-testid="query-input-host"
-          className={cn('max-w-4xl mx-auto', roseDesktop && !browser && 'relative mt-[14px]')}
+          className={cn(
+            'group/query-input max-w-4xl mx-auto',
+            roseDesktop && !browser && 'relative mt-[14px]',
+          )}
         >
           {roseDesktop && !directChannel && !browser && (
             <NubTab reveal={reveal}>
               <NubToolbar {...topBarProps} />
             </NubTab>
           )}
+          {props.topAttachment}
           <QueryInputShell
             dripStyles={dripStyles}
             drippiness={drippiness}
@@ -277,6 +286,8 @@ function QueryInputShell({
       className={cn(
         'relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors',
         aboveTab && 'z-[1]',
+        // Attached banner above (topAttachment): join flush, square top corners.
+        'group-has-[[data-query-input-attachment]]/query-input:rounded-t-none',
         isDragOver ? 'border-primary border-2 bg-primary/5' : 'border-border',
       )}
       style={dripStyle}

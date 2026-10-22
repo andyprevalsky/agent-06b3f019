@@ -201,21 +201,70 @@ async function fenceLatestTerminal(
   });
 }
 
+/**
+ * A background spawn's tool call keeps ONE model-visible result: its
+ * `runInBackground` "started" row. Every later row under the same toolCallId
+ * (the executor's progress / result rows, written by the workflow or by an
+ * activity, and deployment finalizers) is UI-only, so it is stamped
+ * `excludeFromModel` here, under the call's lifecycle lock (the started row is
+ * always committed before the executor starts). See
+ * agents/workflows/background_agents.py.
+ */
+function withBackgroundExecutionStamp(
+  params: CreateMessageParams,
+  candidates: Message[]
+): CreateMessageParams {
+  const metadata = params.metadata;
+  if (metadata?.runInBackground === true) return params;
+  const backgroundSpawn = candidates.some(
+    (candidate) => messageMetadata(candidate)?.runInBackground === true
+  );
+  if (!backgroundSpawn) return params;
+  // A woken task's later run: its workflow rows carry `backgroundRun`; rows its
+  // activity writes under the same id join that run (FE chip/dock per run).
+  const run =
+    typeof metadata?.backgroundRun === 'number' ? undefined : latestBackgroundRun(candidates);
+  if (metadata?.excludeFromModel === true && run === undefined) return params;
+  return {
+    ...params,
+    metadata: {
+      ...metadata,
+      excludeFromModel: true,
+      ...(run !== undefined ? { backgroundRun: run } : {}),
+    },
+  };
+}
+
+function latestBackgroundRun(candidates: Message[]): number | undefined {
+  let run: number | undefined;
+  for (const candidate of candidates) {
+    const value = messageMetadata(candidate)?.backgroundRun;
+    if (typeof value === 'number' && value > 1 && (run === undefined || value > run)) run = value;
+  }
+  return run;
+}
+
 export async function persistLockedToolLifecycleMessage(
   tx: Prisma.TransactionClient,
-  params: CreateMessageParams,
+  incomingParams: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
 ): Promise<{ message: Message; created: boolean; accepted: boolean }> {
-  await lockAgentWorkflowGenerationShared(tx, params.agentId);
-  await lockToolCallLifecycle(tx, params.agentId, identity.workflowGeneration, identity.toolCallId);
+  await lockAgentWorkflowGenerationShared(tx, incomingParams.agentId);
+  await lockToolCallLifecycle(
+    tx,
+    incomingParams.agentId,
+    identity.workflowGeneration,
+    identity.toolCallId
+  );
   const allCandidates = await tx.message.findMany({
     where: {
-      agentId: params.agentId,
+      agentId: incomingParams.agentId,
       role: 'TOOL',
       metadata: { path: ['toolCallId'], equals: identity.toolCallId },
     },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
+  const params = withBackgroundExecutionStamp(incomingParams, allCandidates);
   const candidates = allCandidates.filter(
     (candidate) => messageWorkflowGeneration(candidate) === identity.workflowGeneration
   );

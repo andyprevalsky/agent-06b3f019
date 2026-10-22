@@ -27,13 +27,60 @@ export interface TreeNode {
   progress: number;
   progressEstimate?: Agent['progress_estimate'];
   taskId?: string | null;
-  updatedAt?: string;
   toolsInUse: string[];
   messageCount: number;
   costCents: number;
   outputSchema?: OutputSchema;
   structuredOutput?: Record<string, unknown>;
   failureContext?: FailureContext;
+  /** ISO creation time (REST snapshot only; realtime updates preserve it). */
+  createdAt?: string;
+  /** ISO last lifecycle update (REST snapshot, or the realtime event's own timestamp). */
+  updatedAt?: string;
+  /** In-activity background tasks (explore/browser/code) owned by this agent. */
+  backgroundTasks?: TreeBackgroundTask[];
+  /** Codex-style tree address, e.g. `/root/outreach/draft_a` (absent on older rows). */
+  taskPath?: string;
+}
+
+/** One background explore/browser/code task tracked on its owner agent. */
+export interface TreeBackgroundTask {
+  address: string;
+  /** Codex-style tree path (absent on older rows). */
+  path?: string;
+  type: string;
+  goal: string;
+  status: string;
+  startedAt?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** Tolerant parse of `backgroundTasks` / `background_tasks` (absent → undefined). */
+export function parseBackgroundTasks(raw: unknown): TreeBackgroundTask[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const tasks: TreeBackgroundTask[] = [];
+  for (const item of raw) {
+    if (!isRecord(item) || typeof item.address !== 'string' || !item.address) continue;
+    const startedAt = item.started_at ?? item.startedAt;
+    tasks.push({
+      address: item.address,
+      path: typeof item.path === 'string' && item.path ? item.path : undefined,
+      type: typeof item.type === 'string' ? item.type : 'agent',
+      goal: typeof item.goal === 'string' ? item.goal : '',
+      status: typeof item.status === 'string' ? item.status : 'running',
+      startedAt: typeof startedAt === 'string' ? startedAt : undefined,
+    });
+  }
+  return tasks;
+}
+
+function isoOrUndefined(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return value;
+  if (value instanceof Date) return value.toISOString();
+  return undefined;
 }
 
 interface BusSubscription {
@@ -71,17 +118,20 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
       node.task_id,
     ),
     taskId: node.task_id,
-    updatedAt: node.updated_at,
     toolsInUse: node.tools_in_use,
     messageCount: node.message_count,
     costCents: node.tree_cost_cents,
     outputSchema: node.output_schema,
     structuredOutput: node.structured_output,
     failureContext: node.failure_context,
+    createdAt: isoOrUndefined(node.created_at),
+    updatedAt: isoOrUndefined(node.updated_at),
+    backgroundTasks: parseBackgroundTasks(node.background_tasks),
+    taskPath: typeof node.task_path === 'string' && node.task_path ? node.task_path : undefined,
   };
 }
 
-function realtimeToTreeNode(data: AgentStateChangedPayload): TreeNode {
+function realtimeToTreeNode(data: AgentStateChangedPayload, previous?: TreeNode): TreeNode {
   return {
     agentId: data.agentId,
     parentAgentId: data.parentAgentId,
@@ -103,6 +153,10 @@ function realtimeToTreeNode(data: AgentStateChangedPayload): TreeNode {
     outputSchema: data.outputSchema,
     structuredOutput: data.structuredOutput,
     failureContext: data.failureContext,
+    createdAt: previous?.createdAt,
+    backgroundTasks: parseBackgroundTasks(data.backgroundTasks) ?? previous?.backgroundTasks,
+    taskPath:
+      typeof data.taskPath === 'string' && data.taskPath ? data.taskPath : previous?.taskPath,
   };
 }
 
@@ -202,8 +256,12 @@ function fetchInitialTree(
             Date.parse(node.updatedAt) <= Date.parse(snapshot.updatedAt))
         )
           return;
+        // Realtime values win, but only REST knows creation time / task path.
         nodes.set(agentId, {
           ...node,
+          createdAt: node.createdAt ?? snapshot?.createdAt,
+          taskPath: node.taskPath ?? snapshot?.taskPath,
+          backgroundTasks: node.backgroundTasks ?? snapshot?.backgroundTasks,
           progressEstimate: mergeProgressEstimate(
             snapshot?.progressEstimate,
             node.progressEstimate ?? undefined,
@@ -299,7 +357,7 @@ function createHandlers(busId: string, subscription: BusSubscription, generation
       // Prediction-only late events must not revive a terminal child.
       if (previous && isTerminalStatus(previous.status) && data.progressEstimate && !data.updatedAt)
         return;
-      const node = realtimeToTreeNode(data);
+      const node = realtimeToTreeNode(data, subscription.nodes.get(data.agentId));
       node.workflowGeneration = data.temporalWorkflowId ?? previous?.workflowGeneration;
       node.taskProgressEstimates =
         node.workflowGeneration === previous?.workflowGeneration

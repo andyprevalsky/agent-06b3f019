@@ -495,7 +495,10 @@ def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
     flagged = get_planner_tools_description(rose_desktop=True)
     assert flagged != stock
     assert tool_prompts_for(rose_desktop=True)["display"] == DISPLAY_PROMPT_ROSE_DESKTOP
-    assert 'placement "pinned"' in flagged and "inline_view" in flagged
+    assert "inline_view" in flagged
+    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is
+    # not one, so its pinned placement reaches the execute-phase prompt only.
+    assert 'placement "pinned"' not in flagged
 
 
 async def test_planner_tools_description_follows_the_workflow_account():
@@ -563,14 +566,19 @@ def test_planner_spawn_aliases_documented_in_prompt():
 
 
 def test_attempt_completion_base_schema_has_no_result_field():
-    """AttemptCompletionTool must not expose result in verified flows."""
+    """Verified attempt_completion takes only an OPTIONAL authored result.
+
+    The verifier reads it as the agent's own writing (a draft, message or
+    summary), never as proof (tree-feedback-routing b056f571: a drafter had no
+    other way to show its draft). It must never be required, so a verified
+    loop is never forced to restate tool evidence as a payload.
+    """
     from utils.tool_schemas import AttemptCompletionTool
 
-    fields = set(AttemptCompletionTool.model_fields.keys())
-    assert fields == {"tool"}, (
-        f"AttemptCompletionTool.model_fields = {fields}, expected {{'tool'}}. "
-        f"`result` must be injected only for skip_verification=true loops."
-    )
+    fields = AttemptCompletionTool.model_fields
+    assert set(fields) == {"tool", "result"}, f"AttemptCompletionTool.model_fields = {set(fields)}"
+    assert not fields["result"].is_required(), "verified attempt_completion.result must stay optional"
+    assert "own work" in (fields["result"].description or ""), fields["result"].description
 
 
 def test_attempt_completion_result_schema_is_skip_verification_variant():
@@ -1150,6 +1158,24 @@ def test_verifier_static_prompt_clears_anthropic_cache_threshold():
         f"safe threshold for Anthropic's 1024-token cache write minimum. "
         f"Add content or accept that every verifier call writes a fresh cache."
     )
+
+
+def test_verifier_credits_completed_sub_agent_results_as_evidence():
+    """A delegating agent's verifier treats a child's reported findings as evidence.
+
+    The execute verifier never receives a sub-agent's own tool rows (they are
+    scoped out of the parent's context), so the child's spawn_agent result /
+    FINAL_ANSWER notification is the only evidence a delegating agent can have.
+    Replay of the explore-agent-mid-run-message b1cff031 verifier call: with
+    the old "do not treat this as evidence for a positive fact" wording it
+    scored 0.0 twice out of three ("only the agent's summary"); with this rule
+    it scored 1.0 three out of three.
+    """
+    from utils.prompts import _VERIFIER_STATIC_PROMPT
+
+    assert "grounded evidence for positive facts" in _VERIFIER_STATIC_PROMPT
+    assert "sub-agent's own tool\n   calls are never shown to you" in _VERIFIER_STATIC_PROMPT
+    assert "Do not treat this as evidence for a positive fact" not in _VERIFIER_STATIC_PROMPT
 
 
 # ============================================================================
@@ -2305,6 +2331,11 @@ async def run_all_tests():
     r.record(
         "verifier_static_prompt_clears_anthropic_cache_threshold",
         test_verifier_static_prompt_clears_anthropic_cache_threshold,
+    )
+
+    r.record(
+        "verifier_credits_completed_sub_agent_results_as_evidence",
+        test_verifier_credits_completed_sub_agent_results_as_evidence,
     )
 
     # 9. TS-side static prompts have no dynamic dates (E1)

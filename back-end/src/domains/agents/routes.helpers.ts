@@ -6,6 +6,7 @@
  * own near-copy.
  */
 
+import { TaskPathConflictError } from './agentTaskPath';
 import { type Response } from 'express';
 import { z } from 'zod';
 import { createLogger } from '../../providers/logger';
@@ -39,6 +40,10 @@ export function handleRouteError(
   }
   if (error instanceof CodeSessionShareTargetNotFoundError) {
     res.status(404).json({ error: error.message, code: 'CODE_SESSION_SHARE_TARGET_NOT_FOUND' });
+    return;
+  }
+  if (error instanceof TaskPathConflictError) {
+    res.status(409).json({ error: error.message, task_path: error.taskPath });
     return;
   }
   if (error instanceof WorldModelModeAccessError) {

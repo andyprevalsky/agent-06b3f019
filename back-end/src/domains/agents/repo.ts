@@ -65,6 +65,7 @@ export async function findAgentsByBusId(busId: string) {
       responseSchema: true,
       structuredResponse: true,
       treeCostCents: true,
+      taskPath: true,
       createdAt: true,
       updatedAt: true,
     },

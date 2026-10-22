@@ -151,6 +151,7 @@ _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
 # only raise limits when the underlying latency is genuinely irreducible.
 SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "chat-mode": 120,
+    "background-agent-message-smoke": 180,
     # spawn-sub-agents + parallel-tool-calls: real-workload tasks that fan out
     # to multiple web-research agents and may do a final synthesis pass. Keep
     # bounded caps, but leave enough room for recent p95 * 1.5 so valid passing

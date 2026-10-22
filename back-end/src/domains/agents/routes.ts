@@ -23,6 +23,7 @@ import reportBugRoutes from './routes.reportBug';
 import phoneRoutes from './routes.phone';
 import codeAgentRoutes from './routes.codeAgents';
 import rootPreviewRoutes from './routes.rootPreview';
+import agentMessageRoutes from './routes.agentMessages';
 import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
 const router = Router();
@@ -105,6 +106,8 @@ router.get(
         since,
         browserToolCallId:
           typeof req.query.browserToolCallId === 'string' ? req.query.browserToolCallId : undefined,
+        // A worker's incremental poll is the agent's (or browser task's) own read.
+        consumesAgentMessages: req.isInternal === true && since !== undefined,
         allowBenchmarkArchive: canReadBenchmarkArchive(req),
         inspectionViewerUserId,
       });
@@ -328,5 +331,6 @@ router.post(
 // Mount message, attachment, signal, schema, and phone-recording routes
 router.use(messageRoutes);
 router.use(phoneRoutes);
+router.use(agentMessageRoutes);
 
 export default router;

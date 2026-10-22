@@ -51,6 +51,7 @@ from helpers.generation_handoff import (
     GenerationHandoffRequested,
 )
 from helpers.source_connect_gates import raise_source_connect_gates
+from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from helpers.wait_on_world_clock import hold_on_children, release_children
@@ -202,9 +203,7 @@ def _world_model_specialized_result_text(result: Dict[str, Any]) -> str:
     if isinstance(nested, str) and nested.strip():
         return _normalize_world_model_result_text(nested.strip())
     if nested is not None:
-        return _normalize_world_model_result_text(
-            json.dumps(nested, ensure_ascii=False, sort_keys=True, default=str)
-        )
+        return _normalize_world_model_result_text(json.dumps(nested, ensure_ascii=False, sort_keys=True, default=str))
     observation = result.get("world_model_observation")
     if observation is not None:
         return _normalize_world_model_result_text(
@@ -265,9 +264,7 @@ _EXPLORE_SYNTHESIS_CHECKPOINT = (
 
 
 def _source_linked_explore_text(text: str) -> bool:
-    return len(text.strip()) >= 200 and any(
-        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
-    )
+    return len(text.strip()) >= 200 and any(marker in text for marker in ("https://", "http://", "@ref:", "grep:"))
 
 
 def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
@@ -284,9 +281,8 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
         if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
             continue
         metadata = message.get("metadata") or {}
-        if (
-            metadata.get("toolName") == "spawn_agent"
-            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
+        if metadata.get("toolName") == "spawn_agent" and _EXPLORE_SYNTHESIS_CHECKPOINT in str(
+            message.get("text") or ""
         ):
             return False  # Persist the one-time choice through continue-as-new.
         if (
@@ -318,9 +314,7 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
     return False
 
 
-def _explore_result_after_activity_failure(
-    exc: BaseException, *, user_paused: bool
-) -> tuple[Dict[str, Any], bool]:
+def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: bool) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
@@ -642,6 +636,12 @@ def _oai_demo_first_level_gp_count(workflow_instance) -> int:
     return count
 
 
+def _inbox_address(workflow_instance: Any, tool_call_id: str) -> str:
+    """Inbox id of this spawn's current run (workflows/background_agents.py)."""
+    resolver = getattr(workflow_instance, "_background_inbox_address", None)
+    return resolver(tool_call_id) if callable(resolver) else tool_call_id
+
+
 class SpawnAgentManager(ToolManager):
     """Unified manager that dispatches to browser/code/general_purpose/explore based on type."""
 
@@ -913,6 +913,11 @@ class SpawnAgentManager(ToolManager):
                 world_model_mode,
                 local_data_summary,
                 oai_demo,
+                # Agent-to-agent inbox address: this spawning tool call's id
+                # (``<id>.run<n>`` for a woken background task's later run).
+                _inbox_address(workflow_instance, tool_call_id),
+                # list_agents names this task <owner path>/<task_name>.
+                tool_call.get("task_name"),
             ]
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
@@ -942,7 +947,7 @@ class SpawnAgentManager(ToolManager):
                 try:
                     # cutover-class: activity-bound
                     await workflow.wait_condition(
-                        lambda: activity_handle.done() or workflow_instance.is_paused,
+                        lambda: activity_handle.done() or tool_stop_requested(workflow_instance, tool_call_id),
                         timeout=parent_wait,
                     )
                 except TimeoutError:
@@ -964,8 +969,9 @@ class SpawnAgentManager(ToolManager):
                                 "Explore activity still running after cancel grace; wrapping up",
                                 goal=goal[:100],
                             )
-                if workflow_instance.is_paused and not activity_handle.done():
-                    logger.info("Cancelling explore agent due to pause", goal=goal[:100])
+                if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
+                    # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
+                    logger.info("Cancelling explore agent due to pause or interrupt", goal=goal[:100])
                     activity_handle.cancel()
                     was_cancelled = True
 
@@ -1092,9 +1098,7 @@ class SpawnAgentManager(ToolManager):
                 and not explore_failed
                 and _grounded_explore_text(explore_result, explore_tool_call_results)
                 and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
-                and _has_prior_grounded_explore_batch(
-                    getattr(workflow_instance, "context", None), tool_call_id
-                )
+                and _has_prior_grounded_explore_batch(getattr(workflow_instance, "context", None), tool_call_id)
             ):
                 # One advisory after a grounded follow-up round. It must not
                 # replace evidence or prevent another necessary targeted search.
@@ -1144,6 +1148,9 @@ class SpawnAgentManager(ToolManager):
             "start_url": tool_call.get("start_url"),
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
+            # Agent-to-agent inbox address: this spawning tool call's id
+            # (``<id>.run<n>`` for a woken background task's later run).
+            "inbox_address": _inbox_address(workflow_instance, tool_call_id),
         }
         if tool_call.get("attachments"):
             browser_tool_call["attachments"] = tool_call["attachments"]
@@ -1241,16 +1248,12 @@ class SpawnAgentManager(ToolManager):
         )
 
         simulated_args = {
-            key: value
-            for key, value in tool_call.items()
-            if key not in {"tool", "_phase", "_spawn_group_id"}
+            key: value for key, value in tool_call.items() if key not in {"tool", "_phase", "_spawn_group_id"}
         }
         simulated_args.setdefault(
             "root_goal",
             str(
-                getattr(workflow_instance, "fast_cache_root_goal", None)
-                or getattr(workflow_instance, "goal", "")
-                or ""
+                getattr(workflow_instance, "fast_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
             ),
         )
 
@@ -1334,6 +1337,8 @@ class SpawnAgentManager(ToolManager):
             "start_phase": start_phase,
             "attachments": tool_call.get("attachments"),
         }
+        if tool_call.get("task_name"):
+            sub_agent_config["task_name"] = tool_call["task_name"]
         group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))
         if group_id:
             sub_agent_config["_spawn_group_id"] = group_id
@@ -1411,13 +1416,17 @@ class SpawnAgentManager(ToolManager):
 
         # Build per-item agent_cfgs (shape used by spawn_sub_agent_activity).
         agent_cfgs: List[Dict[str, Any]] = []
-        for item in items:
+        task_name = tool_call.get("task_name")
+        for item_index, item in enumerate(items):
             cfg: Dict[str, Any] = {
                 "goal": build_for_each_goal(base_goal, item),
                 "output_schema": output_schema,
                 "attachments": attachments,
                 "start_phase": start_phase,
             }
+            if task_name:
+                # for_each children are addressed <spawner path>/<task_name>_<i>.
+                cfg["task_name"] = f"{task_name}_{item_index}"
             if context_gates:
                 cfg["context_gates"] = context_gates
             agent_cfgs.append(cfg)

@@ -23,6 +23,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
+import { readTaskInboxMessages } from './agentToAgentService';
 
 const log = createLogger('Agents');
 
@@ -70,6 +71,15 @@ export function buildUserMessageSignalValue(
     });
   }
   return messageText;
+}
+
+/** USER rows written by agents rather than people (metadata flags, never text). */
+function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
+  return (
+    metadata?.agentNotification === true ||
+    metadata?.agentMessage === true ||
+    metadata?.environmentContext === true
+  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -192,6 +202,21 @@ function staleWorkerRejection(): { error: string; status: number } {
   return { error: 'Workflow generation is no longer current', status: 409 };
 }
 
+/**
+ * Explore progress posts carry their task's inbox read (one bounded indexed
+ * query) instead of a separate per-step GET /:id/agent-inbox.
+ */
+async function withPiggybackedInbox<T extends object>(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  posted: T
+): Promise<T & { pending_inbox?: Awaited<ReturnType<typeof readTaskInboxMessages>> }> {
+  if (!isInternal || body.inbox === undefined) return posted;
+  const pending = await readTaskInboxMessages(agentId, body.inbox.task_id, body.inbox.since);
+  return { ...posted, pending_inbox: pending };
+}
+
 /** Post a message to an agent (user or internal). */
 export async function postMessage(
   agentId: string,
@@ -280,16 +305,19 @@ export async function postMessage(
     }
   }
 
-  if (role === 'USER') {
+  // Agent-authored USER rows (background-agent notifications, agent-to-agent
+  // messages) are polled by the owning workflow, which already woke itself;
+  // echoing them back as receive_user_response would read as user feedback.
+  if (role === 'USER' && !(isInternal && isAgentAuthoredRow(body.metadata))) {
     await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
   }
 
-  return {
+  return withPiggybackedInbox(agentId, body, isInternal, {
     message_id: message.id,
     timestamp: message.timestamp,
     text: message.text,
     role: message.role,
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

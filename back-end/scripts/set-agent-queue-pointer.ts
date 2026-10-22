@@ -12,6 +12,11 @@
  *
  * DATABASE_URL must point at the target (prod in CI). Exits non-zero on bad args
  * or DB failure — never silently.
+ *
+ * After a manual flip or rollback, wake idle workflows on the previous queue with
+ * `broadcast-generation-handoff.ts --from-queue <previous>` (the managed and
+ * existing-process deploy paths run it themselves). Without it they still hand
+ * off at their next turn or idle safety re-check (IDLE_HANDOFF_SAFETY_SECONDS).
  */
 import { config } from 'dotenv';
 import { readAgentQueuePointer, setCurrentAgentQueue } from '../src/providers/agentQueuePointer';

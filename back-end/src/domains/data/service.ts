@@ -21,6 +21,7 @@ import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
 import { searchTrajectorySource } from './trajectorySearchService';
+import { resolveTaskPathScope } from './taskPathScope';
 import { searchMessageSource } from './messageSearchService';
 import { searchNetworkSource } from './networkSearchService';
 import { googleSourceSummary, searchGoogleSource } from './googleSourceSearchService';
@@ -42,6 +43,7 @@ const log = createLogger('Data');
 // agentNetworkService) keep their `from './service'` imports.
 export {
   AgentNotFoundError,
+  AgentPathNotFoundError,
   InvalidGrepParamError,
   InvalidPatternError,
   MissingAgentIdError,
@@ -137,7 +139,7 @@ function resultMessage(
 // ---------------------------------------------------------------------------
 
 export async function grep(userId: string, params: GrepParams): Promise<GrepResult> {
-  const input = validateGrepInput(params);
+  const input = await resolveTaskPathScope(userId, validateGrepInput(params), params.agent_id);
   const sourceResults = await searchAllSources(userId, input, params.agent_id);
   const { soleTrajectory, oldestFirst, contextUnit } = displayOrder(input);
 

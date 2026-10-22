@@ -6,6 +6,7 @@ import { createLogicalBrowserInTransaction } from '../../providers/browser/logic
 import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
+import { assertTaskPathsFree } from './repoTaskPath';
 
 export {
   clearWorkflowForTerminalAgent,
@@ -48,6 +49,7 @@ function optionalAgentCreateFields(params: {
   githubRepoUrl?: string;
   originDeviceId?: string;
   projectId?: string | null;
+  taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
     ...(params.projectId !== undefined && params.projectId !== null
@@ -80,6 +82,9 @@ function optionalAgentCreateFields(params: {
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
     ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
     ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
+    ...(params.taskPath !== undefined && params.taskPath !== null
+      ? { taskPath: params.taskPath }
+      : {}),
   };
 }
 
@@ -137,6 +142,7 @@ export interface CreateAgentParams {
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
   projectId?: string | null;
+  taskPath?: string | null;
 }
 
 /** Create an agent with verifier and goal message in a transaction. */
@@ -149,6 +155,7 @@ export async function createAgentTransaction(params: CreateAgentParams) {
   // resilient to transient pool saturation.
   return runTransactionWithRetry(async (tx) => {
     await assertCurrentParentWorkflowGenerations(tx, [params]);
+    await assertTaskPathsFree(tx, [params]);
     const tracksDescendantStart =
       params.parentAgentId !== null &&
       params.parentWorkflowId !== null &&
@@ -235,6 +242,7 @@ export interface BatchCreateAgentParams {
   workflowContextGates?: Record<string, boolean>;
   workflowStartPhase?: string;
   workflowTaskQueue?: string;
+  taskPath?: string | null;
 }
 
 /** Create N agents (each with verifier + goal message) in a single transaction.
@@ -246,6 +254,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
   // the pool is most contended, so guard the interactive-transaction start.
   return runTransactionWithRetry(async (tx) => {
     await assertCurrentParentWorkflowGenerations(tx, items);
+    await assertTaskPathsFree(tx, items);
     const goalMessageTimestamp = new Date();
     await tx.agent.createMany({
       data: items.map((params) => ({

@@ -57,6 +57,9 @@ def private(path, value):
 
 PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
 MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
+# Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
+TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
+                          'polar_catalog', 'timeout_history')
 
 
 def polar_names(count=70):
@@ -3116,7 +3119,10 @@ class RunBenchShardedRouting(unittest.TestCase):
             (root/'agents/benchmarks').mkdir(parents=True)
             (root/'.claude/shared').mkdir(parents=True)
             subprocess.run(['cp', '-a', str(ROOT/'scripts'), str(root/'scripts')], check=True)
+            # run-bench's timeout policy imports the catalog's caps, floors and history
+            # readers from the agents benchmark package; no recorded history is copied.
             for member in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+                           *(f'agents/benchmarks/{module}.py' for module in TIMEOUT_POLICY_MODULES),
                            '.claude/shared/benchmark-report-format.txt'):
                 (root/member).write_bytes((ROOT/member).read_bytes())
             git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
@@ -3174,7 +3180,10 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual(check[0], str(fx.root.resolve()/'scripts/run-original600-controller.py'))
             self.assertEqual((self.option(check, '--source-ref'), self.option(check, '--task-ref')), (fx.head, fx.head))
             self.assertEqual(self.option(check, '--repetitions'), '1')
-            self.assertIsNone(self.option(check, '--task-timeout'))  # the operator's unchanged 1200 default
+            # Step-budgeted Polar tasks have no catalog wall clock; run-bench binds the
+            # operator's unchanged 1200s window explicitly and names that choice once.
+            self.assertEqual(self.option(check, '--task-timeout'), '1200')
+            self.assertEqual(result.stderr.count("the sharded operator's 1200s window still applies"), 1)
             for flag in ('--facts', '--snapshot-inventory', '--warm-deps'):
                 self.assertNotIn(flag, check)  # discovered from their normal producers
             self.assertEqual(json.loads(fx.manifest.read_text()), names)

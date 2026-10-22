@@ -186,3 +186,60 @@ export async function deliverUserMessageToWorkflow(
   const resumed = await resumePausedAgentForUserMessage(agentId, dependencies);
   return { signaled, resumed };
 }
+
+/**
+ * Best-effort `receive_agent_message` signal for an agent-to-agent message row.
+ * Deliberately distinct from `receive_user_response`: an agent message is not
+ * user feedback (no response-schema update) and never lifts a user pause. The
+ * payload names the durable row (plus its sender, for wait_for matching); the
+ * workflow reads it from the DB and must dedupe by `message_id` (idempotent
+ * retries re-signal the same row).
+ */
+export interface AgentMessageSignalPayload {
+  message_id: string;
+  /** Sender identity lets the target's wait_for(agents=[...]) match it. */
+  from_agent_id?: string;
+  from_agent_path?: string;
+  wake_task_id?: string;
+  message?: string;
+}
+
+export async function signalAgentMessage(
+  agentId: string,
+  workflowId: string,
+  messageId: string,
+  sender: {
+    from_agent_id?: string;
+    from_agent_path?: string | null;
+    /** A finished own background task to start the next run of, with the message text. */
+    wake_task_id?: string;
+    message?: string;
+  } = {},
+  send: (workflowId: string, payload: AgentMessageSignalPayload) => Promise<void> = async (
+    id,
+    payload
+  ) => {
+    const client = await getTemporalClient();
+    await client.workflow.getHandle(id).signal('receive_agent_message', payload);
+  }
+): Promise<boolean> {
+  try {
+    const payload: AgentMessageSignalPayload = { message_id: messageId };
+    if (sender.from_agent_id) payload.from_agent_id = sender.from_agent_id;
+    if (sender.from_agent_path) payload.from_agent_path = sender.from_agent_path;
+    if (sender.wake_task_id !== undefined && sender.message !== undefined) {
+      payload.wake_task_id = sender.wake_task_id;
+      payload.message = sender.message;
+    }
+    await send(workflowId, payload);
+    return true;
+  } catch (error) {
+    log.warn('Failed to signal agent message', {
+      agent_id: agentId,
+      workflow_id: workflowId,
+      message_id: messageId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}

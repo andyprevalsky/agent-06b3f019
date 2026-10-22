@@ -51,6 +51,7 @@ const DEPLOY_SCRIPT_MODULES = [
   'src/providers/workflowDeploymentMigration.ts',
   'src/providers/workflowDescendantCleanup.ts',
   'src/providers/staleWorkflowTools.ts',
+  'src/providers/generationHandoffBroadcast.ts',
 ];
 
 /** Credentials the cutover environment genuinely does not have. */

@@ -222,7 +222,6 @@ export interface OutputSchema {
 export interface AgentTreeNode {
   taskProgressEstimates?: Record<string, ProgressEstimate>;
   temporal_workflow_id?: string | null;
-  updated_at?: string;
   progress_estimate?: ProgressEstimate | null;
   task_progress_estimates?: Record<string, ProgressEstimate>;
   progressEstimate?: ProgressEstimate | null;
@@ -238,6 +237,12 @@ export interface AgentTreeNode {
   structured_output?: Record<string, unknown>;
   failure_context?: import('@/lib/realtime-types').FailureContext;
   tree_cost_cents: number;
+  created_at?: string;
+  updated_at?: string;
+  /** Background explore/browser/code tasks owned by this agent (optional). */
+  background_tasks?: unknown;
+  /** Codex-style tree address, e.g. `/root/outreach/draft_a` (optional). */
+  task_path?: string | null;
 }
 
 export interface AncestorNode {

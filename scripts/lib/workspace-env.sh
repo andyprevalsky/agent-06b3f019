@@ -173,6 +173,41 @@ normalize_conductor_workspace_env() {
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
 }
 
+# Usage: workspace_system_pg_db_name [root]
+# Prints the system-Postgres database a non-benchmark stack may reset and seed.
+# localhost:5432 is ONE server shared by every workspace on the host, so a
+# named workspace gets victoria_stack_<workspace> (distinct from the
+# victoria_<workspace> test-fixture database). The shared `victoria` is kept
+# only for an unset workspace, the single-tenant cloud identity recorded in
+# <root>/.cloud-env (same name AND port — the database cloud-init seeds), or an
+# explicit ROSE_SYSTEM_PG_DB_NAME. Another stack on a cloud VM inherits the
+# .cloud-env name, so its port keeps its database separate.
+workspace_system_pg_db_name() {
+  local root="${1:-.}" name="${CONDUCTOR_WORKSPACE_NAME:-}" suffix="" safe
+  if [ -n "${ROSE_SYSTEM_PG_DB_NAME:-}" ]; then
+    if ! [[ "$ROSE_SYSTEM_PG_DB_NAME" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+      echo "❌ ROSE_SYSTEM_PG_DB_NAME must match ^[a-z_][a-z0-9_]{0,62}\$; got '$ROSE_SYSTEM_PG_DB_NAME'." >&2
+      return 1
+    fi
+    printf '%s\n' "$ROSE_SYSTEM_PG_DB_NAME"
+    return 0
+  fi
+  if [ -z "$name" ]; then
+    printf 'victoria\n'
+    return 0
+  fi
+  if [ -f "$root/.cloud-env" ] && grep -qx '# rose-cloud-env' "$root/.cloud-env" 2>/dev/null \
+    && [ "$name" = "$(cloud_env_value "$root/.cloud-env" CONDUCTOR_WORKSPACE_NAME)" ]; then
+    if [ "${CONDUCTOR_PORT:-}" = "$(cloud_env_value "$root/.cloud-env" CONDUCTOR_PORT)" ]; then
+      printf 'victoria\n'
+      return 0
+    fi
+    suffix="_p$(printf '%s' "${CONDUCTOR_PORT:-}" | tr -cd '0-9')"
+  fi
+  safe="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | cut -c1-40)"
+  printf 'victoria_stack_%s%s\n' "$safe" "$suffix"
+}
+
 # Usage: ensure_cloud_workspace_env <root> [port] [boot_id_file]
 # Provisions <root>/.cloud-env for cloud-build.sh: an existing file is re-keyed
 # only when another instance minted it, and native Conductor workspaces are

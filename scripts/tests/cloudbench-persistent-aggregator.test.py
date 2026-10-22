@@ -41,6 +41,49 @@ def acknowledge_published(card,*,run_id,fleet_dir):
 
 
 class PersistentAggregator(unittest.TestCase):
+    def test_live_card_remains_readable_during_publish(self):
+        """A final reader must never observe a partially written live card."""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        batch = root / 'batch'
+        batch.mkdir()
+        (root / 'fleet/task-fixture/cloudbench-live').mkdir(parents=True)
+        (batch / 'benches.json').write_text(json.dumps([dict(name='task-fixture', mode='REAL')]))
+        (batch / 'code.txt').write_text('fixture-code')
+        (root / 'fleet/task-fixture/cloudbench-live/report-card.json').write_text(
+            json.dumps(dict(per_task=[dict(name='task-fixture', status='passed')]))
+        )
+        target = batch / 'report-card.json'
+        prior = {'timestamp': '2026-10-21T00:00:00+00:00', 'per_task': []}
+        target.write_text(json.dumps(prior))
+        source = SOURCE.read_text()
+        start = source.index('import json, os, sys', source.index('# ── ONE aggregated batch dashboard'))
+        end = source.index('\nwhile True:\n', start)
+        code = source[start:end] + '''
+original_dump = json.dump
+def paused_dump(value, stream, *args, **kwargs):
+    Path(os.environ['CASE']).joinpath('dump-paused').touch()
+    time.sleep(1)
+    return original_dump(value, stream, *args, **kwargs)
+json.dump = paused_dump
+aggregate_tick()
+'''
+        env = dict(os.environ, CASE=str(root), FLEET_DIR=str(root / 'fleet'),
+                   UNIFIED_DIR=str(batch), DASH_BASE='12345', ROOT_DIR=str(root),
+                   SELF_MANAGED_HUB_RUN='0', FLEET_CONTROLLER_STARTED_EPOCH='1700000000')
+        process = subprocess.Popen([sys.executable, '-c', code, str(target)], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        deadline = time.monotonic() + 3
+        while not (root / 'dump-paused').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue((root / 'dump-paused').exists(), 'writer never reached the paused dump')
+        self.assertEqual(json.loads(target.read_text()), prior)
+        _, stderr = process.communicate(timeout=3)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(json.loads(target.read_text())['per_task'][0]['status'], 'passed')
+
     def run_fixture(self,fail_import=False):
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);root=Path(temp.name)
         agents=root/'agents/benchmarks';agents.mkdir(parents=True)

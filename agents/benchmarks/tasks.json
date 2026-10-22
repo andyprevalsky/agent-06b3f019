@@ -682,7 +682,8 @@
     ],
     "mid_run_feedback": {
       "after_root_message_count": 2,
-      "message": "Please keep going. Keep the final prose concise and easy to scan."
+      "message": "Please keep going. Keep the final prose concise and easy to scan.",
+      "non_goal": true
     },
     "status": "ready",
     "runner": "agent",
@@ -721,6 +722,663 @@
       "regression:mid-run-response-schema-non-goal-feedback"
     ],
     "group": "daily"
+  },
+  {
+    "name": "tree-feedback-routing",
+    "title": "Mid-Run Feedback Routed Through The Agent Tree",
+    "prompt": "Prepare cold outreach emails to 3 seed-stage investors for Rose Labs (https://roselabs.ai), an AI agent platform. These are drafts only: do not contact any investor, and never send an email, SMS, call, or any other external message.\n\nOrganize the work as a team of general-purpose agents running in parallel:\n1. Use spawn_general_purpose_agent to start a market research agent. It gathers 3-5 short, sourced market facts about AI agent platforms that strengthen a seed pitch. It only researches; it does not write emails.\n2. Use spawn_general_purpose_agent to start an outreach agent. The outreach agent picks 3 real seed investors who back AI-agent or developer-tool startups, then uses spawn_general_purpose_agent to start one drafting agent per investor (3 drafting agents). Each drafting agent researches its investor and writes one short, personalized email draft.\n\nSign every email as \"Andy Prevalsky, Founder, Rose Labs\". Wait for every agent to finish, then return the 3 drafts and the market facts.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "outreach",
+      "regression"
+    ],
+    "price_limit_cents": 400,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_agent_count": 5,
+    "forbidden_tools": [
+      "message_person",
+      "call_phone_number",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "drafts",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "One unsent email draft per investor, exactly as written by the drafting agents",
+          "properties": [
+            {
+              "name": "investor_name",
+              "type": "str",
+              "required": true,
+              "description": "Investor the draft is addressed to"
+            },
+            {
+              "name": "investor_firm",
+              "type": "str",
+              "required": true,
+              "description": "Investor's firm or fund"
+            },
+            {
+              "name": "subject",
+              "type": "str",
+              "required": true,
+              "description": "Email subject line"
+            },
+            {
+              "name": "body",
+              "type": "str",
+              "required": true,
+              "description": "Full email body, including the sign-off and signature line"
+            }
+          ]
+        },
+        {
+          "name": "market_facts",
+          "type": "list[str]",
+          "required": true,
+          "description": "Sourced market facts from the market research agent"
+        }
+      ]
+    },
+    "mid_run_feedback": {
+      "when": {
+        "active_depth_at_least": 3
+      },
+      "message": "Correction for the outreach: sign every email as Andy Prevalskii, not Andy Prevalsky."
+    },
+    "enforce_declared_evaluators": true,
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Posts a signature correction to the root while three layers of background agents are active and requires the tree to route it (by task path, send_message_to_agent) to the outreach subtree only, with every final draft re-signed.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "public web"
+      ],
+      "context_notes": "The runner polls GET /api/agents/tree?busId=<root> each poll and posts the correction once root + child + grandchild are all STARTING_UP/ACTIVE (mid_run_feedback.when.active_depth_at_least=3). Nothing is sent externally; message_person and call_phone_number are forbidden. First-level subtrees are labeled outreach vs research by goal vocabulary with a structural tie-break (benchmarks/tree_feedback_routing.py)."
+    },
+    "evaluators": [
+      {
+        "id": "feedback_during_three_active_layers",
+        "method": "static_check",
+        "criteria": [
+          "The correction is posted to the root while at least 3 layers of agents (root, child, grandchild) are active",
+          "The correction row is present in the root transcript"
+        ],
+        "checks": [
+          {
+            "type": "mid_run_feedback_active_layers",
+            "min_layers": 3
+          }
+        ]
+      },
+      {
+        "id": "routed_to_outreach_subtree",
+        "method": "static_check",
+        "criteria": [
+          "A non-root agent in the outreach subtree receives an agent-to-agent message carrying the correction"
+        ],
+        "checks": [
+          {
+            "type": "agent_message_routed_to_subtree",
+            "subtree": "outreach",
+            "marker": "Prevalskii"
+          }
+        ]
+      },
+      {
+        "id": "not_routed_to_research_subtree",
+        "method": "static_check",
+        "criteria": [
+          "No agent in the market research subtree receives the correction"
+        ],
+        "checks": [
+          {
+            "type": "agent_message_not_routed_to_subtree",
+            "subtree": "research",
+            "marker": "Prevalskii"
+          }
+        ]
+      },
+      {
+        "id": "drafts_use_corrected_signature",
+        "method": "static_check",
+        "criteria": [
+          "All 3 final drafts are signed Andy Prevalskii and none still uses Andy Prevalsky"
+        ],
+        "checks": [
+          {
+            "type": "structured_output_signature",
+            "field": "drafts",
+            "required": "Prevalskii",
+            "forbidden": "Prevalsky",
+            "min_items": 3
+          }
+        ]
+      },
+      {
+        "id": "routing_and_drafts_semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Exactly 3 distinct, real seed investors each receive one personalized, unsent draft",
+          "Every draft is signed Andy Prevalskii, Founder, Rose Labs",
+          "The correction reached the outreach agent or its drafting agents through agent-to-agent messages, not only a root-level rewrite",
+          "The market research agent was not sent the correction",
+          "No email, SMS, call, or other external message was sent"
+        ],
+        "judge_prompt": "Judge from the final structured output and benchmark_state.tree_feedback_routing / mid_run_feedback evidence. Score 1.0 only if: (1) drafts contains exactly 3 distinct named seed investors with a personalized, plausible email each; (2) every draft is signed 'Andy Prevalskii' (no 'Andy Prevalsky' anywhere in the drafts); (3) marker_recipients shows the correction delivered as agentMessage rows to outreach-subtree agents (the outreach agent and/or its drafting agents) and to no research-subtree agent; (4) mid_run_feedback shows it was posted while at least 3 layers were active; (5) no evidence of any external send (message_person, email send, SMS, call). Score 0.0 if any condition fails. A root that only rewrites signatures itself after children finished, without routing the correction to the outreach subtree, fails condition 3."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/background-agents-a2a.md"
+    ],
+    "group": "daily",
+    "deploy_category": "harness",
+    "fast_cache": "off"
+  },
+  {
+    "name": "background-agent-message-smoke",
+    "title": "Root Forwards A Mid-Run Message To A Background Agent",
+    "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research, and wait for it to finish before you answer.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "research",
+      "smoke"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "message_person",
+      "call_phone_number",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "documents",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "RFC 9110 and RFC 9111 in numeric order",
+          "properties": [
+            {
+              "name": "rfc_number",
+              "type": "str",
+              "required": true,
+              "description": "RFC number"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "required": true,
+              "description": "Exact title on the official RFC Editor page"
+            },
+            {
+              "name": "published",
+              "type": "str",
+              "required": true,
+              "description": "Publication month and year"
+            },
+            {
+              "name": "source_url",
+              "type": "str",
+              "required": true,
+              "description": "Official RFC Editor URL"
+            },
+            {
+              "name": "note",
+              "type": "str",
+              "required": true,
+              "description": "Short note that can incorporate mid-run feedback without changing this schema"
+            }
+          ]
+        }
+      ]
+    },
+    "mid_run_feedback": {
+      "when": {
+        "background_task_active": "explore"
+      },
+      "message": "While that background research is still running, please forward this addition to it: every document note must contain the exact phrase \"Forwarded marker: HTTP core document\"."
+    },
+    "enforce_declared_evaluators": true,
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Fast deploy smoke proving that a root receives a follow-up while its background explore task is active, forwards it to the same task address, receives a continued or resumed response from that task, and incorporates the forwarded requirement.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.rfc-editor.org/rfc/rfc9110",
+        "https://www.rfc-editor.org/rfc/rfc9111"
+      ],
+      "context_notes": "The runner posts the follow-up only after the root owns a RUNNING background explore task. Passing requires a root send_message_to_agent addressed to that task, a matching inbox row, at least one later explore progress row, and the exact marker in both final records. If the first run completes while the root processes the follow-up, a verified send_message_to_agent wake, second-run completion notification, and progress before that second completion prove delivery to the same resumed task."
+    },
+    "evaluators": [
+      {
+        "id": "smoke_feedback_while_explore_running",
+        "method": "static_check",
+        "criteria": [
+          "The follow-up is posted while the root's background explore task is running",
+          "The follow-up row is present in the root transcript"
+        ],
+        "checks": [
+          {
+            "type": "mid_run_feedback_background_task_active",
+            "agent_type": "explore"
+          }
+        ]
+      },
+      {
+        "id": "smoke_follow_up_consumed_by_explore",
+        "method": "static_check",
+        "criteria": [
+          "The root forwards the follow-up to the same explore task address",
+          "The task takes at least one explore step after its inbox row; a completed-first race requires a verified second run"
+        ],
+        "checks": [
+          {
+            "type": "background_task_message_routed",
+            "agent_type": "explore",
+            "marker_any": [
+              "forwarded marker",
+              "http core document"
+            ],
+            "min_task_rows_after_message": 1,
+            "allow_resume_after_completion": true
+          }
+        ]
+      },
+      {
+        "id": "smoke_final_response_incorporates_forwarded_message",
+        "method": "static_check",
+        "criteria": [
+          "Both final document records contain the exact forwarded marker"
+        ],
+        "checks": [
+          {
+            "type": "structured_output_signature",
+            "field": "documents",
+            "required": "Forwarded marker: HTTP core document",
+            "min_items": 2
+          }
+        ]
+      },
+      {
+        "id": "smoke_rfc_semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The result contains exactly RFC 9110 (HTTP Semantics) and RFC 9111 (HTTP Caching)",
+          "Both use the official RFC Editor source and give June 2022 as publication month and year",
+          "The routing evidence proves the root forwarded the follow-up to the same explore task that was active when feedback arrived, and that task continued or resumed afterward",
+          "Both notes contain the exact forwarded marker, with no external communication"
+        ],
+        "judge_prompt": "Pass only if the final structured output contains exactly two records: RFC 9110 titled HTTP Semantics and RFC 9111 titled HTTP Caching, both published June 2022 with official rfc-editor.org URLs, and both notes contain the exact phrase 'Forwarded marker: HTTP core document'. Also require benchmark_state.background_task_routing and mid_run_feedback evidence showing the user follow-up arrived while the explore task was active, the root used send_message_to_agent to address that same task, its inbox received the message, and it produced at least one later progress row before completion. If the first run completed just before forwarding, require a verified wake and second completion notification for that same task. Fail if the root merely edits the final answer without delivering the message or if any external message is sent."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/background-agents-a2a.md"
+    ],
+    "group": "pre-deploy",
+    "deploy_category": "harness",
+    "fast_cache": "off"
+  },
+  {
+    "name": "explore-agent-mid-run-message",
+    "title": "Mid-Run Feedback Routed To A Running Explore Agent",
+    "prompt": "Compile a list of 8 venture funding rounds raised by AI-agent startups and announced in the last 12 months. For each round give the company, the amount raised, the announcement date, a one-sentence summary, and a source URL for the announcement.\n\nHave a single explore agent do all of the web research, and wait for it to finish before you answer.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "research",
+      "regression"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "message_person",
+      "call_phone_number",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "rounds",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 8,
+          "maxItems": 8,
+          "description": "One entry per funding round",
+          "properties": [
+            {
+              "name": "company",
+              "type": "str",
+              "required": true,
+              "description": "Startup that raised the round"
+            },
+            {
+              "name": "amount",
+              "type": "str",
+              "required": true,
+              "description": "Amount raised, with currency"
+            },
+            {
+              "name": "announced_on",
+              "type": "str",
+              "required": true,
+              "description": "Announcement date"
+            },
+            {
+              "name": "summary",
+              "type": "str",
+              "required": true,
+              "description": "One-sentence summary of the round"
+            },
+            {
+              "name": "source_url",
+              "type": "str",
+              "required": true,
+              "description": "URL of the announcement or coverage"
+            }
+          ]
+        }
+      ]
+    },
+    "mid_run_feedback": {
+      "when": {
+        "background_task_active": "explore"
+      },
+      "message": "One more thing for the funding list: in each round's summary, also say who led the round, written as \"Led by <investor>\"."
+    },
+    "enforce_declared_evaluators": true,
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Posts a new per-item requirement to the root while its background explore agent is still researching and requires the root to address that running explore task (the environment block lists it by task path; send_message_to_agent delivers to its task inbox) so the final rounds carry lead investors.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "public web"
+      ],
+      "context_notes": "The runner reads the root transcript on every poll and posts the follow-up once the root owns a RUNNING background explore task (mid_run_feedback.when.background_task_active=explore): a FINISHED runInBackground started row names backgroundTaskId=<its spawn tool-call id T> and backgroundAddress=<its task path> with backgroundAgentType=explore, an IN_PROGRESS row exists under toolCallId=T, and no agentNotification row for T exists yet. A message to the task is stored on the root (owner) as an agentMessage row with recipientTaskId=<the task's address> and read by the task's per-step inbox poll (benchmarks/tree_feedback_routing.py). Nothing is sent externally."
+    },
+    "evaluators": [
+      {
+        "id": "feedback_while_explore_running",
+        "method": "static_check",
+        "criteria": [
+          "The follow-up is posted to the root while its background explore task is running",
+          "The follow-up row is present in the root transcript"
+        ],
+        "checks": [
+          {
+            "type": "mid_run_feedback_background_task_active",
+            "agent_type": "explore"
+          }
+        ]
+      },
+      {
+        "id": "follow_up_routed_to_running_explore",
+        "method": "static_check",
+        "criteria": [
+          "After the follow-up, the root's send_message_to_agent addressed the explore task",
+          "The root (owner) stored an agentMessage row with recipientTaskId matching that explore task, mentioning who led the rounds, before the task's completion notification"
+        ],
+        "checks": [
+          {
+            "type": "background_task_message_routed",
+            "agent_type": "explore",
+            "marker_any": [
+              "led",
+              "lead"
+            ],
+            "min_task_rows_after_message": 0
+          }
+        ]
+      },
+      {
+        "id": "rounds_name_lead_investors",
+        "method": "static_check",
+        "criteria": [
+          "All 8 rounds state who led them as \"Led by <investor>\""
+        ],
+        "checks": [
+          {
+            "type": "structured_output_signature",
+            "field": "rounds",
+            "required_pattern": "Led by\\s+\\S",
+            "min_items": 8
+          }
+        ]
+      },
+      {
+        "id": "explore_routing_semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "8 distinct, plausible AI-agent startup funding rounds from the last 12 months, each with amount, date, summary and a source URL",
+          "Every summary names a plausible lead investor for that round as \"Led by <investor>\"",
+          "The follow-up reached the running explore agent through an agent-to-agent message rather than a second research pass started after it finished",
+          "No email, SMS, call, or other external message was sent"
+        ],
+        "judge_prompt": "Judge from the final structured output and benchmark_state.background_task_routing / mid_run_feedback evidence. Score 1.0 only if: (1) rounds lists 8 distinct AI-agent startup funding rounds that are plausible for the last 12 months, each with an amount, a date, a one-sentence summary and a source URL; (2) every summary contains 'Led by <investor>' naming a plausible lead investor for that round (not a placeholder such as 'unknown' or 'N/A' for most rounds); (3) background_task_routing shows a send_message_to_agent to the explore task and an inbox row addressed to it after the follow-up (the root did not merely start another explore agent after the first one finished); (4) mid_run_feedback shows it was posted while the explore task was running; (5) no evidence of any external send. Score 0.0 if any condition fails."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/background-agents-a2a.md"
+    ],
+    "group": "daily",
+    "deploy_category": "harness",
+    "fast_cache": "off"
+  },
+  {
+    "name": "browser-agent-mid-run-message",
+    "title": "Mid-Run Feedback Routed To A Running Browser Agent",
+    "prompt": "Go to the Hacker News front page (https://news.ycombinator.com/). For each of the top 8 stories, open its comments page and record the story's rank, its title, the number of comments, and the username of whoever wrote the first comment shown on the comments page.\n\nHave a single browser agent do all of the browsing, and wait for it to finish before you answer. Read only; do not sign in, vote, or post anything.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "regression"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "message_person",
+      "call_phone_number",
+      "spawn_claude_code_agent"
+    ],
+    "response_schema": {
+      "fields": [
+        {
+          "name": "stories",
+          "type": "list[object]",
+          "required": true,
+          "minItems": 8,
+          "maxItems": 8,
+          "description": "One entry per front-page story, in rank order",
+          "properties": [
+            {
+              "name": "rank",
+              "type": "int",
+              "required": true,
+              "description": "Front-page rank (1-8)"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "required": true,
+              "description": "Story title as shown on Hacker News"
+            },
+            {
+              "name": "comment_count",
+              "type": "str",
+              "required": true,
+              "description": "Number of comments shown for the story"
+            },
+            {
+              "name": "first_commenter",
+              "type": "str",
+              "required": true,
+              "description": "Username of the first comment on the comments page"
+            },
+            {
+              "name": "notes",
+              "type": "str",
+              "required": true,
+              "description": "Short notes about the story"
+            }
+          ]
+        }
+      ]
+    },
+    "mid_run_feedback": {
+      "when": {
+        "background_task_active": "browser"
+      },
+      "message": "Also, in each story's notes, add how many points it has, written like \"123 points\"."
+    },
+    "enforce_declared_evaluators": true,
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Posts a new per-item requirement to the root while its background browser agent is still browsing Hacker News and requires the root to address that running browser task (the environment block lists it by task path; send_message_to_agent delivers to its task inbox, read at the browser's next step) so the final stories carry points.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "browser_agent"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://news.ycombinator.com/"
+      ],
+      "context_notes": "The runner reads the root transcript on every poll and posts the follow-up once the root owns a RUNNING background browser task (mid_run_feedback.when.background_task_active=browser): a FINISHED runInBackground started row names backgroundTaskId=<its spawn tool-call id T> and backgroundAddress=<its task path> with backgroundAgentType=browser, an IN_PROGRESS row exists under toolCallId=T, and no agentNotification row for T exists yet. A message to the task is stored on the root (owner) as an agentMessage row with recipientTaskId=<the task's address> and read by the task's per-step inbox poll (benchmarks/tree_feedback_routing.py). Nothing is sent externally. The browser counts as having read the message when it posts >= 1 spawn_browser_agent progress row after the inbox row and before its completion notification (the inbox is polled once per browser step)."
+    },
+    "evaluators": [
+      {
+        "id": "feedback_while_browser_running",
+        "method": "static_check",
+        "criteria": [
+          "The follow-up is posted to the root while its background browser task is running",
+          "The follow-up row is present in the root transcript"
+        ],
+        "checks": [
+          {
+            "type": "mid_run_feedback_background_task_active",
+            "agent_type": "browser"
+          }
+        ]
+      },
+      {
+        "id": "follow_up_routed_to_running_browser",
+        "method": "static_check",
+        "criteria": [
+          "After the follow-up, the root's send_message_to_agent addressed the browser task",
+          "The root (owner) stored an agentMessage row with recipientTaskId matching that browser task, mentioning points, before the task's completion notification",
+          "The browser agent took at least one more step after the message was stored"
+        ],
+        "checks": [
+          {
+            "type": "background_task_message_routed",
+            "agent_type": "browser",
+            "marker_any": [
+              "point"
+            ],
+            "min_task_rows_after_message": 1
+          }
+        ]
+      },
+      {
+        "id": "stories_include_points",
+        "method": "static_check",
+        "criteria": [
+          "All 8 stories' notes state the points as \"<N> points\""
+        ],
+        "checks": [
+          {
+            "type": "structured_output_signature",
+            "field": "stories",
+            "required_pattern": "\\b\\d+\\s+points?\\b",
+            "min_items": 8
+          }
+        ]
+      },
+      {
+        "id": "browser_routing_semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "8 Hacker News front-page stories in rank order with title, comment count and first commenter",
+          "Every story's notes give a points count as \"<N> points\"",
+          "The follow-up reached the running browser agent through an agent-to-agent message rather than a second browser run started after it finished",
+          "Nothing was posted, voted on, or signed into, and no external message was sent"
+        ],
+        "judge_prompt": "Judge from the final structured output and benchmark_state.background_task_routing / mid_run_feedback evidence. Score 1.0 only if: (1) stories lists 8 distinct Hacker News front-page stories with ranks 1-8, plausible titles, comment counts and first-commenter usernames; (2) every notes value contains a points count like '123 points'; (3) background_task_routing shows a send_message_to_agent to the browser task and an inbox row addressed to it after the follow-up (the root did not merely start another browser agent after the first one finished); (4) mid_run_feedback shows it was posted while the browser task was running; (5) no sign-in, vote, post or external message. Score 0.0 if any condition fails."
+      }
+    ],
+    "source": [
+      "plan:docs/plans/active/background-agents-a2a.md"
+    ],
+    "group": "daily",
+    "deploy_category": "harness",
+    "fast_cache": "off"
   },
   {
     "name": "grep-explore-stress",

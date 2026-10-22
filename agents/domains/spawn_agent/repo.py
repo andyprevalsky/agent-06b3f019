@@ -64,8 +64,13 @@ async def save_explore_message(
     task_id: str,
     tool_call_id: Optional[str] = None,
     tool_name: Optional[str] = None,
-) -> None:
+    inbox: Optional[Dict[str, Any]] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Save explore agent message directly to DB.
+
+    ``inbox`` ({task_id, since}) piggybacks the explore task's agent-inbox read
+    on this post; the backend's ``pending_inbox`` rows are returned (None when
+    not requested or unavailable).
 
     When tool_call_id is provided, the message reuses that ID so the frontend
     deduplicator replaces the previous message with the same toolCallId.
@@ -98,18 +103,22 @@ async def save_explore_message(
         response = await get_http_client().post(
             f"{config.backend.api_url}/api/agents/{agent_id}/messages",
             headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
-                },
-            json={"message": message, "role": "TOOL", "metadata": metadata},
+                "x-api-key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
+            json={"message": message, "role": "TOOL", "metadata": metadata, **({"inbox": inbox} if inbox else {})},
             timeout=SAVE_MESSAGE_TIMEOUT,
         )
         raise_if_generation_sealed(response.status_code, "spawn_agent")
+        if inbox and response.status_code == 201:
+            pending = (response.json() or {}).get("pending_inbox")
+            return pending if isinstance(pending, list) else None
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save explore message", error=str(e))
+    return None
 
 
 @activity.defn

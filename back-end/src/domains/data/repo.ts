@@ -124,6 +124,34 @@ export async function findRootAgentId(agentId: string, userId: string): Promise<
   return lastVerifiedId;
 }
 
+/**
+ * Live agents of one tree at task path `path` or below it. Task paths are
+ * unique only among live agents, so an archived agent may share a path and is
+ * excluded. One read on the (busId, taskPath) index; the root row matches by id.
+ */
+export async function findTreeAgentsAtOrBelowPath(rootId: string, userId: string, path: string) {
+  return prisma.agent.findMany({
+    where: {
+      userId,
+      deletedAt: null,
+      OR: [{ id: rootId }, { busId: rootId }],
+      AND: [{ OR: [{ taskPath: path }, { taskPath: { startsWith: `${path}/` } }] }],
+    },
+    select: { id: true, taskPath: true },
+  });
+}
+
+/** The owner row at `path` in one tree (the root when `path` is `/root`), with its tasks. */
+export async function findTreeAgentAtPath(rootId: string, userId: string, path: string) {
+  return prisma.agent.findFirst({
+    where:
+      path === '/root'
+        ? { id: rootId, userId }
+        : { userId, OR: [{ id: rootId }, { busId: rootId }], taskPath: path, deletedAt: null },
+    select: { id: true, backgroundTasks: true },
+  });
+}
+
 /** BFS walk from root to collect all agent IDs in the tree. Scoped to userId. */
 export async function findAgentTreeIds(rootId: string, userId: string): Promise<string[]> {
   const treeIds: string[] = [];

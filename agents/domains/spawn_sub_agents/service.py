@@ -192,6 +192,9 @@ def build_spawn_payload(
         payload["attachments"] = resolved_attachments
     if agent_cfg.get("context_gates"):
         payload["context_gates"] = agent_cfg["context_gates"]
+    # Backend sets the child's path to <parent path>/<task_name> (409 on a live sibling).
+    if agent_cfg.get("task_name"):
+        payload["task_name"] = agent_cfg["task_name"]
 
     return payload
 
@@ -313,6 +316,7 @@ async def spawn_sub_agent_activity(
                                     "goal": data["goal"],
                                     "model": data["model"],
                                     "status": data["status"],
+                                    "task_path": data.get("task_path"),
                                 }
 
                             status_code = response.status_code

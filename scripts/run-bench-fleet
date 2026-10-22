@@ -1026,7 +1026,7 @@ BENCH_REF=""
 # never see its own runs). CONDUCTOR_PORT=3001 → 8765 (the historical default).
 DASH_BASE="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 KEEP_CLONES="0"
-RUN_TIMEOUT="7200"
+RUN_TIMEOUT="${RUN_BENCH_DEFAULT_TIMEOUT:-7200}"
 RUN_TIMEOUT_OPERATOR_SET="0"
 BACKSTOP_OPERATOR_SET="0"
 [ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS+x}" ] && BACKSTOP_OPERATOR_SET="1"
@@ -18832,7 +18832,15 @@ def aggregate_tick():
         "infra": None,
         "per_task": per_task,
     }
-    with open(out, "w") as f: json.dump(card, f); f.write("\n")
+    target = Path(out)
+    temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+    try:
+        with temporary.open("w") as f:
+            json.dump(card, f)
+            f.write("\n")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
     if os.environ.get("SELF_MANAGED_HUB_RUN") == "1":
         from benchmarks.hub_upload import publish_live_report_card
         from benchmarks.outcome_publication import acknowledge_published

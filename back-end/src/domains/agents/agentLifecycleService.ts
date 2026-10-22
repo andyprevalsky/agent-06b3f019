@@ -6,7 +6,6 @@ import { resolveAgentProjectId } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
-import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
@@ -19,6 +18,8 @@ import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
+import { resolveCreateTaskPaths } from './agentTaskPathCreate';
+import { createAgentResponse } from './agentCreateResponse';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
 import {
   applyFastModeDefault,
@@ -228,6 +229,7 @@ export async function createAgent(
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
+  const [taskPath] = await resolveCreateTaskPaths([body]);
   // Workflow ID === agent ID by convention (see providers/temporal.ts:88).
   // For sub-agents and direct (plan/execute) root agents, the workflow always
   // starts immediately after this transaction, so set the column up-front and
@@ -267,6 +269,7 @@ export async function createAgent(
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
+    taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);
@@ -275,25 +278,7 @@ export async function createAgent(
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
-  return {
-    agent_id: agent.agent.id,
-    progress: agent.agent.progress,
-    goal: agent.agent.goal,
-    title: agent.agent.title,
-    model: agent.agent.model,
-    source: body.source,
-    reasoning_max_tokens: body.reasoning_max_tokens,
-    status: isSubAgent ? agent.agent.status : 'ACTIVE',
-    status_message: agent.agent.statusMessage,
-    temporal_workflow_id: workflowId,
-    fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
-    memory_enabled: agent.agent.memoryEnabled,
-    world_model_mode: agent.agent.worldModelMode,
-    project_id: agent.agent.projectId,
-    created_at: agent.agent.createdAt,
-    updated_at: agent.agent.updatedAt,
-    available_endpoints: getX402Endpoints(agent.agent.id),
-  };
+  return createAgentResponse(agent, body, isSubAgent, workflowId);
 }
 
 /* c8 ignore start -- launchAgentWorkflow delegates to Temporal-dependent functions */

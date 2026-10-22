@@ -12,7 +12,10 @@
  *   - Claude Code chip   → ClaudeCodeBubble
  *   - Completion summary → CompletionBubble
  *   - User attention     → AttentionMessageWrapper
- *   - Generic tool data  → ToolMessage
+ *   - Inbound agent rows (agent message / completion, USER or ASSISTANT)
+ *                        → InboundAgentRow ("↓", left accent, robot icons)
+ *   - Generic tool data  → ToolMessage (incl. outbound agent tools:
+ *                          list_agents, send_message_to_agent, kill_agent — agentToolData.ts)
  *   - USER role          → UserBubble
  *   - ASSISTANT + file   → AssistantAttachmentBubble
  *   - Empty thought      → null

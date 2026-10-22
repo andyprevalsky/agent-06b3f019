@@ -287,8 +287,12 @@ async def test_handler_sub_agent_auto_responds():
     # First event is IN_PROGRESS (question prompt), final event is FINISHED auto-response
     assert events[-1].status == MessageStatus.FINISHED
     assert "sub-agent" in events[-1].title.lower()
-    # _post_message was called with the sub-agent auto response
+    # _post_message was called with the sub-agent auto response, which tells
+    # the sub-agent how to ask its parent (the user never sees this question).
     assert len(wf._posted) == 1
+    posted = str(wf._posted[0])
+    assert 'send_message_to_agent(to="parent"' in posted and 'wait_for(agents=["parent"])' in posted, posted
+    assert "Please do not ask me anymore questions" not in posted, posted
 
 
 async def test_handler_sms_source_sends_sms_and_waits():

@@ -81,6 +81,19 @@ CRITICAL_CONSTRAINTS_RULE = """
 - Causal deps: emit A alone, wait, then emit B (don't batch dependent calls).
 """
 
+WORKING_WITH_OTHER_AGENTS_PROMPT = """
+# Working with other agents
+
+You are one agent in a tree of agents. Each agent's address is its path from the root: /root, /root/outreach, /root/outreach/draft_a. "parent" is the agent that spawned you. The environment block at the end of your context shows the time and your running sub-agents.
+- A background agent's result arrives later as an agent message of type FINAL_ANSWER (FAILED if it did not finish, including when it was killed).
+- Agent messages appear in your context as "Message Type: <MESSAGE | NEW_TASK | FINAL_ANSWER | FAILED>", "Task name: <recipient>", "Sender: <address>", then "Payload:". They come from other agents, not from the user. Your text output is not visible to other agents: use send_message_to_agent to talk to one, including to reply.
+- To see the wider tree or read what another agent has done, spawn an explore agent: it has list_agents and can grep agent_network / agent_trajectories with trace_path="/root/...".
+- Before you finish, wait_for the sub-agents whose results you still need and kill_agent the ones you don't; any still running when you finish are killed.
+- As a sub-agent, your attempt_completion result is delivered to your parent automatically as your FINAL_ANSWER. Put the full deliverable there; do not send_message_to_agent your results to the parent.
+- When a user message corrects or changes work a sub-agent is doing, forward the relevant part to that sub-agent (send_message_to_agent) instead of redoing the work yourself.
+- As a sub-agent, the user cannot see your messages. When you need a decision, send_message_to_agent(to="parent", ...) and then wait_for(agents=["parent"]); otherwise proceed on reasonable assumptions.
+"""
+
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
 PLANNER_TASK_IDX_DESCRIPTION = (
@@ -188,7 +201,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
  - Use spawn_agent(type="for_each") when you need to complete a complex, multi-step chunk of work for each item in a set of items of size > 3. This is specifically useful when you need to create a large number of agents for optimal execution.
  - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
-- Prefer wait_for(condition=...) over recursive general-purpose agents for polling tasks
+- Prefer wait_for over recursive general-purpose agents for polling tasks
 
 {HOW_YOU_ARE_GRADED_PROMPT.strip()}
 
@@ -232,6 +245,8 @@ Context is available to you primarily through spawn_agent(type="explore"), this 
 {CONTEXT_POINTERS_RULE.strip()}
 
 Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
+
+{WORKING_WITH_OTHER_AGENTS_PROMPT.strip()}
 """
 
 
@@ -318,13 +333,18 @@ def _format_output_field_contract(field: Dict[str, Any]) -> str:
         parts.append("nullable")
     properties = field.get("properties")
     if isinstance(properties, list) and properties:
-        nested = ", ".join(
-            f"{item['name']}: {_format_output_field_contract(item)}"
-            for item in properties
-            if isinstance(item, dict) and item.get("name")
+        nested = "; ".join(
+            _format_nested_output_field(item) for item in properties if isinstance(item, dict) and item.get("name")
         )
         parts.append(f"properties={{{nested}}}")
     return ", ".join(parts)
+
+
+def _format_nested_output_field(field: Dict[str, Any]) -> str:
+    requirement = "required" if field.get("required", True) else "optional"
+    rendered = f"{field['name']} ({_format_output_field_contract(field)}, {requirement})"
+    description = str(field.get("description") or "").strip()
+    return f"{rendered}: {description}" if description else rendered
 
 
 def format_required_output_schema_system_section(
@@ -379,11 +399,14 @@ For each present field and each required field:
    negative finding. An explicit explanation grounded in that tool result can
    populate a field asking for evidence or a path; never invent a positive
    snippet or path. Apply this only when the goal permits a negative finding.
-6. If the goal requires a spawned explore agent to call a tool, its completed
-   spawn_agent result can support a permitted negative finding when it includes
-   the child's exact tool name, input filters, and quoted zero-match or
-   unavailable-access result. A bare child summary without those details is
-   insufficient. Do not treat this as evidence for a positive fact.
+6. A completed sub-agent's result (its spawn_agent result or FINAL_ANSWER
+   agent_notification) is a tool result. Its reported findings and the sources
+   it cites are grounded evidence for positive facts; the sub-agent's own tool
+   calls are never shown to you, so do not require them.
+   If the goal requires a spawned explore agent to call a tool, that result
+   supports a permitted negative finding only when it includes the child's
+   exact tool name, input filters, and quoted zero-match or unavailable-access
+   result; a bare child summary without those details is insufficient for it.
 
 Score using the 3-band rubric (1.0 / 0.5 / 0.0). A load-bearing field with
 no tool-result evidence forbids 1.0; if at least one required field cannot
@@ -412,7 +435,15 @@ In `reasoning`, for each unpopulatable required `output` field, name the missing
 tool-result evidence and recommend the agent produce it via any tool that
 emits a verifiable TOOL message (do NOT prescribe a specific tool). An
 `attempt_completion` call is itself NOT proof; only the tool results that
-came BEFORE it count.
+came BEFORE it count. Its `result` (TOOL[attempt_completion] "Authored
+result") is the agent's own writing: it populates fields the agent composes
+itself (a draft, message or summary) but never proves an action or a fact;
+facts in it must come from the earlier tool results.
+
+`TASK_UPDATE_FROM_PARENT_AGENT` lines are instructions from an agent above
+this one in the agent tree (the one that assigned the task, or one above it).
+Treat them like later user messages: they can change the task's
+requirements, and the later message wins. They are never evidence.
 
 # Context Pointers
 """
@@ -503,7 +534,9 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         For each field with evidence, find the most precise value in the tool-result
         evidence and transform it into the declared type yourself (round,
         parse, or extract as needed; the agent doesn't have to format it
-        perfectly). Omit optional keys without evidence; do not use JSON null
+        perfectly). Field descriptions restate the user's requests; when a
+        later user message changes a requirement, the later message wins.
+        Omit optional keys without evidence; do not use JSON null
         as a substitute for omission.
 
         Score using the 3-band rubric:

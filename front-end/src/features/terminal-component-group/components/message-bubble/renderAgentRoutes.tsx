@@ -1,6 +1,7 @@
 /**
- * Specialised routes for "agent-origin" tool events: general-purpose agent
- * spawns, spawn_agent (explore), wait_for, and request_user_signup.
+ * Specialised routes for "agent-origin" tool events: list_agents (structured
+ * tree), general-purpose agent spawns, spawn_agent (explore), wait_for, and
+ * request_user_signup.
  */
 import type { ReactElement } from 'react';
 import type { MessageBubbleProps } from './types';
@@ -9,6 +10,7 @@ import { SubAgentBubble } from './SubAgentBubble';
 import { ExploreBubble } from './ExploreBubble';
 import { WaitForBubble } from './WaitForBubble';
 import { SignupBubble } from './SignupBubble';
+import { ListAgentsChip } from '../agent-rows/ListAgentsChip';
 
 interface Args {
   props: MessageBubbleProps;
@@ -30,6 +32,10 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
     streamingMetricsBySubAgentId,
     hideSubAgentTreeHeader,
   } = props;
+
+  if (routing.isListAgents) {
+    return <ListAgentsChip message={message} onNavigateToAgent={onNavigateToAgent} />;
+  }
 
   if (routing.isSubAgentTool) {
     return (

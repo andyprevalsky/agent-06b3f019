@@ -421,6 +421,39 @@ class Scorecard(unittest.TestCase):
         self.assertEqual((data["experiment"]["scheduled_total"], data["experiment"]["state"]), (2, "RUNNING"))
         self.valid(data)
 
+    def test_local_terminal_tasks_use_local_cleanup_receipts(self):
+        run = self.tmp / "1792604578-local-1"
+        write(run / "report-card.json", {
+            "run_id": "local-1", "tasks": {"total": 2},
+            "per_task": [task("alpha", "passed", stage="released"),
+                         task("beta", "failed", reason="Timeout after 300s", stage="running")],
+        })
+        write(run / "run.json", {"run_id": "local-1", "summary": {"passed": 1, "failed": 1,
+                                                                  "cache_hit_pct": 93.8},
+                                "tasks": [{"name": "beta", "failure_reason": "Timeout after 300s"}]})
+        write(run / "local-stack-owner.json", {"run_id": run.name, "token": "stack-owned"})
+        write(run / "local-benchmark-owner.json", {"run_id": run.name, "token": "bench-owned",
+                                                    "state": "cleanup_verified"})
+        write(run / "local-stack-cleanup.status", "version=2\ntoken=stack-owned\nstate=clean\n")
+        write(run / "benchmark-cleanup-bench-owned.status", "version=1\ntoken=bench-owned\nstate=clean\n")
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        exp = data["experiment"]
+        self.assertEqual((exp["state"], exp["progress"]["completed"]), ("COMPLETE", 2))
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"]), (1, 1))
+        self.assertEqual(exp["cache"]["avg"], 0.938)
+        self.assertIn("Timeout after 300s", CARD["render_text"](data))
+        self.valid(data)
+        # The run ends when its last required cleanup receipt lands, including a
+        # benchmark cleanup that finishes after the stack cleanup and run.json.
+        for name, mtime in (("run.json", T0), ("local-stack-cleanup.status", T0 + 5),
+                            ("benchmark-cleanup-bench-owned.status", T0 + 30)):
+            os.utime(run / name, (mtime, mtime))
+        late = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(late["ended_at"], T0 + 30)
+        write(run / "local-stack-cleanup.status", "version=2\ntoken=wrong-owner\nstate=clean\n")
+        unverified = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(unverified["state"], "INCOMPLETE")
+
     def test_monitor_observation_time_respects_daylight_saving(self):
         monitor = runpy.run_path(str(ROOT / "scripts/cloudbench-monitor.py"), run_name="monitor")
         write(self.tmp / "_batch/report-card.json", {"per_task": []})

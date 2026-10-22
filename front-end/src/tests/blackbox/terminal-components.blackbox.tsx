@@ -214,6 +214,26 @@ describe('QueryInput (blackbox)', () => {
     expect(screen.queryByText('rose-labs/rose-fast')).toBeNull();
   });
 
+  it('renders topAttachment flush above the box in the same column and squares its top corners', () => {
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        placeholder="attached"
+        topAttachment={<div data-query-input-attachment="" data-testid="attached-banner" />}
+      />,
+    );
+    const banner = screen.getByTestId('attached-banner');
+    const column = banner.parentElement!;
+    expect(column.className).toContain('max-w-4xl');
+    // The shell is the banner's next sibling in the same column (same edges).
+    const shell = banner.nextElementSibling!;
+    expect(shell.className).toContain('rounded-xl');
+    expect(shell.className).toContain(
+      'group-has-[[data-query-input-attachment]]/query-input:rounded-t-none',
+    );
+    expect(column.className).toContain('group/query-input');
+  });
+
   it('typing updates value via onChange (controlled)', async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();

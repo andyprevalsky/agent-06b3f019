@@ -50,6 +50,7 @@ from domains.spawn_browser_agent_v3.browser_activity_queue import (
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
+from helpers.background_agents import is_agent_authored_user_metadata
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
     transform_schema_for_remote_session,
@@ -63,6 +64,7 @@ from helpers.generation_handoff import (
 from helpers.jev_progress import JEVSession, browser_prefix_events
 from helpers.messages import poll_new_messages, stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
+from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
 from helpers.wait_condition_or_handoff import (
@@ -78,6 +80,7 @@ from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
+from providers.rose.inter_agent_context import InterAgentText, inter_agent_message, is_inter_agent_message
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -297,19 +300,14 @@ async def prepare_optional_realm_credentials(
 ) -> Optional[Dict[str, Any]]:
     """Run one optional cross-realm preparation and quarantine every failure stage."""
     target_realm = auth_realm_from_url(target_url)
-    if (
-        not target_realm
-        or auth_realm_matches_url(current_auth_realm, target_url)
-    ):
+    if not target_realm or auth_realm_matches_url(current_auth_realm, target_url):
         return None
     if target_realm in failed_realms:
         return {"auth_realm": target_realm, "credential_preparation_error": failed_realms[target_realm]}
     try:
         return await prepare_credentials(target_url)
     except Exception as prep_error:
-        error_signature = (
-            f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
-        )
+        error_signature = f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
         failed_realms[target_realm] = error_signature
         logger.warning(
             "Optional realm credential preparation failed once; continuing without saved credentials",
@@ -363,11 +361,13 @@ async def _lookup_payment_purchase(
     activity_args = [user_id, fingerprint]
     scoped_receipt = bool(payment_payload.get("agentId"))
     if world_model_mode not in {None, "real"}:
-        activity_args.extend([
-            world_model_mode,
-            payment_payload if scoped_receipt else None,
-            payment_payload.get("agentId"),
-        ])
+        activity_args.extend(
+            [
+                world_model_mode,
+                payment_payload if scoped_receipt else None,
+                payment_payload.get("agentId"),
+            ]
+        )
     elif scoped_receipt:
         activity_args.extend([world_model_mode, payment_payload])
     result = await workflow.execute_activity(
@@ -494,10 +494,12 @@ async def _await_bounded_browser_cleanup(
 
     return False
 
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
-    *, observe_parked_page: Any = None,
+    *,
+    observe_parked_page: Any = None,
 ) -> Any:
     """Capture credential evidence before a terminal browser disconnect.
 
@@ -884,14 +886,21 @@ def _preserve_observed_interaction_for_verifier(
     if not succeeded:
         return awaiting_observation
     if action_name in {"screenshot", "read_browser_state"} and awaiting_observation:
-        checkpoint = _browser_ground_truth_checkpoint(
-            observed_state, current_url, kind="preserved_evidence"
-        )
+        checkpoint = _browser_ground_truth_checkpoint(observed_state, current_url, kind="preserved_evidence")
         if _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint):
             return False
     if action_name in {
-        "goto", "click", "click_coordinates", "evaluate", "input_text", "select_dropdown",
-        "drag", "press_keys", "press_key", "upload_file", "submit_form",
+        "goto",
+        "click",
+        "click_coordinates",
+        "evaluate",
+        "input_text",
+        "select_dropdown",
+        "drag",
+        "press_keys",
+        "press_key",
+        "upload_file",
+        "submit_form",
     }:
         return True
     return awaiting_observation
@@ -908,12 +917,23 @@ def _replace_resume_image_blocks(value: Any) -> Any:
     return value
 
 
-
 def _browser_turn_messages_for_resume(
     browser_turn_messages: Optional[List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     """Keep the provider-visible transcript exactly as it was before the pause."""
     return list(browser_turn_messages or [])
+
+
+def _restore_browser_turn_messages(resume_state: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resumed transcript with its assistant-role inter-agent messages re-marked."""
+    state = resume_state or {}
+    messages = [message for message in (state.get("browser_turn_messages") or []) if isinstance(message, dict)]
+    for index in state.get("inter_agent_turn_indexes") or []:
+        if isinstance(index, int) and 0 <= index < len(messages):
+            message = messages[index]
+            if message.get("role") == "assistant" and isinstance(message.get("content"), str):
+                messages[index] = inter_agent_message(message["content"])
+    return messages
 
 
 def _complete_pending_payment_card_result(
@@ -929,11 +949,11 @@ def _complete_pending_payment_card_result(
     entries = action_history.get_entries()
     pending_entry = next(
         (
-            entry for entry in reversed(entries)
+            entry
+            for entry in reversed(entries)
             if entry.get("action") == "request_payment_card"
-            and (entry.get("result") or {}).get("status") in {
-                "needs_payment_card_approval", "awaiting_payment_card_approval"
-            }
+            and (entry.get("result") or {}).get("status")
+            in {"needs_payment_card_approval", "awaiting_payment_card_approval"}
         ),
         None,
     )
@@ -967,11 +987,13 @@ def _complete_pending_payment_card_result(
                 )
                 for entry in entries
             ):
-                entries.append({
-                    "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
-                    "action": "request_payment_card",
-                    "result": dict(result),
-                })
+                entries.append(
+                    {
+                        "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
+                        "action": "request_payment_card",
+                        "result": dict(result),
+                    }
+                )
                 action_history.restore_entries(entries)
             return True
         if result.get("status") not in {
@@ -986,11 +1008,13 @@ def _complete_pending_payment_card_result(
         if pending_entry is None:
             # Older paused activities saved the real tool result in the browser
             # transcript but returned before recording its action-history entry.
-            entries.append({
-                "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
-                "action": "request_payment_card",
-                "result": dict(result),
-            })
+            entries.append(
+                {
+                    "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
+                    "action": "request_payment_card",
+                    "result": dict(result),
+                }
+            )
         else:
             pending_entry["result"] = dict(result)
         action_history.restore_entries(entries)
@@ -1010,14 +1034,20 @@ async def _load_browser_resume_user_instructions(
     cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00")) if floor_confirmed else None
     since = cursor_time if floor_confirmed and cursor_time is not None else epoch
     rows = await poll_new_messages(
-        agent_id, since - timedelta(microseconds=1),
-        **({"browser_tool_call_id": tool_call_id, "browser_task_id": resume_state.get("task_id")} if tool_call_id else {}),
+        agent_id,
+        since - timedelta(microseconds=1),
+        **(
+            {"browser_tool_call_id": tool_call_id, "browser_task_id": resume_state.get("task_id")}
+            if tool_call_id
+            else {}
+        ),
     )
     if not floor_confirmed:
         starts = [
             datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
             for row in rows
-            if row.get("timestamp") and tool_call_id
+            if row.get("timestamp")
+            and tool_call_id
             and (row.get("metadata") or {}).get("toolCallId") == tool_call_id
             and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
             and (row.get("metadata") or {}).get("action_type") == "session_starting"
@@ -1027,13 +1057,28 @@ async def _load_browser_resume_user_instructions(
         cursor_time = min(starts)
     messages = list(resume_state.get("user_instruction_messages") or [])
     seen_ids = set(resume_state.get("user_instruction_message_ids") or [])
-    for row in sorted(rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))):
-        if str(row.get("role") or "").upper() != "USER" or (row.get("metadata") or {}).get("hidden"):
+    # Task-addressed agent messages ride this same read (no separate inbox GET);
+    # the step loop keeps only its own address (AgentInbox.accept_rows).
+    agent_message_rows = []
+    for row in sorted(
+        rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))
+    ):
+        row_metadata = row.get("metadata") or {}
+        if str(row.get("role") or "").upper() != "USER" or row_metadata.get("hidden"):
+            continue
+        if is_agent_authored_user_metadata(row_metadata) or row_metadata.get("excludeFromModel"):
+            # Agent notifications / agent messages on the owner are never user input.
+            if row_metadata.get("agentMessage") is True and row_metadata.get("recipientTaskId"):
+                agent_message_rows.append(row)
             continue
         raw_timestamp = row.get("timestamp")
         if not raw_timestamp:
             continue
-        timestamp = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        timestamp = (
+            raw_timestamp
+            if isinstance(raw_timestamp, datetime)
+            else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        )
         if timestamp < cursor_time:
             continue
         message_id = row.get("id") or row.get("message_id")
@@ -1048,11 +1093,16 @@ async def _load_browser_resume_user_instructions(
         "user_instruction_message_ids": sorted(seen_ids),
         "user_message_cursor": cursor_time.isoformat(),
         "user_message_cursor_is_task_start": True,
+        "_agent_message_rows": agent_message_rows,
     }
 
 
 def _model_visible_browser_message(
-    message: Any, redact: Any, *, action_result_redact: Any = None, secret_values_used: bool = False,
+    message: Any,
+    redact: Any,
+    *,
+    action_result_redact: Any = None,
+    secret_values_used: bool = False,
 ) -> Any:
     """Project a native transcript envelope without exempting its page payloads."""
     if not isinstance(message, dict):
@@ -1068,9 +1118,13 @@ def _model_visible_browser_message(
         payload = redact(original)
         if tool_arguments:
             target_fields = {
-                "click": ("index",), "input_text": ("index",), "scroll": ("index",),
-                "dropdown_options": ("index",), "select_dropdown": ("index",),
-                "upload_file": ("index",), "click_coordinates": ("x", "y"),
+                "click": ("index",),
+                "input_text": ("index",),
+                "scroll": ("index",),
+                "dropdown_options": ("index",),
+                "select_dropdown": ("index",),
+                "upload_file": ("index",),
+                "click_coordinates": ("x", "y"),
                 "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
             }
             if isinstance(original, dict) and isinstance(payload, dict):
@@ -1096,11 +1150,17 @@ def _model_visible_browser_message(
         blocks = []
         for block in content:
             visible_block = redact(block)
-            if (isinstance(block, dict) and isinstance(block.get("type"), str)
-                    and block["type"] in {"image_url", "image", "input_image"}
-                    and (secret_values_used or visible_block != block)):
-                omitted = ("[image withheld after private credential entry]" if secret_values_used
-                           else "[image omitted from Temporal resume]")
+            if (
+                isinstance(block, dict)
+                and isinstance(block.get("type"), str)
+                and block["type"] in {"image_url", "image", "input_image"}
+                and (secret_values_used or visible_block != block)
+            ):
+                omitted = (
+                    "[image withheld after private credential entry]"
+                    if secret_values_used
+                    else "[image omitted from Temporal resume]"
+                )
                 visible_block = {"type": "text", "text": redact(omitted)}
             elif isinstance(block, dict) and block.get("type") == "text" and isinstance(visible_block, dict):
                 visible_block["type"] = "text"
@@ -1108,6 +1168,9 @@ def _model_visible_browser_message(
         safe["content"] = blocks
     elif content is not None:
         safe["content"] = visible_json(content, str(message.get("name") or "")) if role == "tool" else redact(content)
+        if is_inter_agent_message(message) and isinstance(safe["content"], str):
+            # Keep the inter-agent marker: RoseClient settles a trailing one to user role.
+            safe["content"] = InterAgentText(safe["content"])
     calls = message.get("tool_calls")
     if isinstance(calls, list):
         visible_calls = []
@@ -1127,7 +1190,9 @@ def _model_visible_browser_message(
                     visible_function["name"] = function["name"]
                 if "arguments" in function:
                     visible_function["arguments"] = visible_json(
-                        function["arguments"], str(function.get("name") or ""), tool_arguments=True,
+                        function["arguments"],
+                        str(function.get("name") or ""),
+                        tool_arguments=True,
                     )
                 visible_call["function"] = visible_function
             visible_calls.append(visible_call)
@@ -1136,24 +1201,39 @@ def _model_visible_browser_message(
 
 
 def _model_visible_browser_turn_messages(
-    messages: Any, redact: Any, *, secret_values_used: bool, action_result_redact: Any = None,
+    messages: Any,
+    redact: Any,
+    *,
+    secret_values_used: bool,
+    action_result_redact: Any = None,
 ) -> Any:
     """Preserve only screenshot-tool transport linked to its harness tool call."""
     # Message keys are protocol; nested content still belongs to the page.
-    visible = ([_model_visible_browser_message(message, redact, action_result_redact=action_result_redact,
-                                              secret_values_used=secret_values_used)
-                for message in messages] if isinstance(messages, list) else redact(messages))
+    visible = (
+        [
+            _model_visible_browser_message(
+                message, redact, action_result_redact=action_result_redact, secret_values_used=secret_values_used
+            )
+            for message in messages
+        ]
+        if isinstance(messages, list)
+        else redact(messages)
+    )
     if secret_values_used or not isinstance(messages, list) or not isinstance(visible, list):
         return visible
     for index in range(2, len(messages)):
-        assistant, tool, image = messages[index - 2:index + 1]
+        assistant, tool, image = messages[index - 2 : index + 1]
         if not all(isinstance(item, dict) for item in (assistant, tool, image)):
             continue
         if assistant.get("role") != "assistant" or tool.get("role") != "tool" or tool.get("name") != "screenshot":
             continue
-        if not any(isinstance(call, dict) and call.get("id") == tool.get("tool_call_id")
-                   and isinstance(call.get("function"), dict) and call["function"].get("name") == "screenshot"
-                   for call in assistant.get("tool_calls") or []):
+        if not any(
+            isinstance(call, dict)
+            and call.get("id") == tool.get("tool_call_id")
+            and isinstance(call.get("function"), dict)
+            and call["function"].get("name") == "screenshot"
+            for call in assistant.get("tool_calls") or []
+        ):
             continue
         try:
             result = json.loads(tool.get("content") or "")
@@ -1161,11 +1241,17 @@ def _model_visible_browser_turn_messages(
             continue
         content = image.get("content")
         screenshot_label = "Screenshot captured by the screenshot tool."
-        if (not isinstance(result, dict) or result.get("screenshot_attached") is not True
-                or image.get("role") != "user" or not isinstance(content, list) or len(content) != 2
-                or content[0] not in ({"type": "text", "text": screenshot_label},
-                                      {"type": "text", "text": redact(screenshot_label)})
-                or not isinstance(content[1], dict) or content[1].get("type") != "image_url"):
+        if (
+            not isinstance(result, dict)
+            or result.get("screenshot_attached") is not True
+            or image.get("role") != "user"
+            or not isinstance(content, list)
+            or len(content) != 2
+            or content[0]
+            not in ({"type": "text", "text": screenshot_label}, {"type": "text", "text": redact(screenshot_label)})
+            or not isinstance(content[1], dict)
+            or content[1].get("type") != "image_url"
+        ):
             continue
         payload = content[1].get("image_url")
         url = payload.get("url") if isinstance(payload, dict) else None
@@ -1187,10 +1273,18 @@ def _model_visible_browser_turn_messages(
 
 def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any]) -> Any:
     """Keep only the builder's final trusted raster intact before private entry."""
-    visible = ([_model_visible_browser_message(message, dom_service.model_visible_value,
-                                               secret_values_used=getattr(dom_service, "secret_values_used", False))
-                for message in context]
-               if isinstance(context, list) else dom_service.model_visible_value(context))
+    visible = (
+        [
+            _model_visible_browser_message(
+                message,
+                dom_service.model_visible_value,
+                secret_values_used=getattr(dom_service, "secret_values_used", False),
+            )
+            for message in context
+        ]
+        if isinstance(context, list)
+        else dom_service.model_visible_value(context)
+    )
     if isinstance(context, list) and isinstance(visible, list):
         for observation_index, (original, safe_message) in enumerate(zip(context, visible)):
             metadata = original.get("metadata") if isinstance(original, dict) else None
@@ -1198,34 +1292,65 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
                 continue
             step = metadata.get("browser_action_step")
             evidence = metadata.get("structured_response")
-            if (original.get("role") == "TOOL" and metadata.get("toolName") == "read_browser_state"
-                    and type(step) is int and isinstance(evidence, dict) and evidence.get("step") == step):
+            if (
+                original.get("role") == "TOOL"
+                and metadata.get("toolName") == "read_browser_state"
+                and type(step) is int
+                and isinstance(evidence, dict)
+                and evidence.get("step") == step
+            ):
                 visible[observation_index] = {
-                    "role": "TOOL", "text": "",
-                    "metadata": {"toolName": "read_browser_state", "toolStatus": "FINISHED", "browser_action_step": step,
-                                 "structured_response": {"step": step, "formatted_state": dom_service.model_visible_value(evidence.get("formatted_state"))}},
+                    "role": "TOOL",
+                    "text": "",
+                    "metadata": {
+                        "toolName": "read_browser_state",
+                        "toolStatus": "FINISHED",
+                        "browser_action_step": step,
+                        "structured_response": {
+                            "step": step,
+                            "formatted_state": dom_service.model_visible_value(evidence.get("formatted_state")),
+                        },
+                    },
                 }
     screenshot = browser_state.get("screenshot")
-    if (getattr(dom_service, "secret_values_used", False) or browser_state.get("screenshot_placeholder")
-            or not isinstance(screenshot, str) or not screenshot
-            or not isinstance(context, list) or not context or not isinstance(visible, list)):
+    if (
+        getattr(dom_service, "secret_values_used", False)
+        or browser_state.get("screenshot_placeholder")
+        or not isinstance(screenshot, str)
+        or not screenshot
+        or not isinstance(context, list)
+        or not context
+        or not isinstance(visible, list)
+    ):
         return visible
     # Final evidence precedes optional historical observations in admission.
-    final_index = next((index for index in range(len(context) - 1, -1, -1)
-                        if isinstance(context[index], dict)
-                        and (context[index].get("metadata") or {}).get("toolName") == "final_screenshot"), -1)
+    final_index = next(
+        (
+            index
+            for index in range(len(context) - 1, -1, -1)
+            if isinstance(context[index], dict)
+            and (context[index].get("metadata") or {}).get("toolName") == "final_screenshot"
+        ),
+        -1,
+    )
     if final_index < 0:
         return visible
     original = context[final_index]
     if not isinstance(original, dict) or original.get("role") != "TOOL":
         return visible
     metadata = original.get("metadata")
-    if (isinstance(metadata, dict) and metadata.get("toolName") == "final_screenshot"
-            and metadata.get("screenshot_b64") == screenshot and isinstance(visible[final_index], dict)):
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("toolName") == "final_screenshot"
+        and metadata.get("screenshot_b64") == screenshot
+        and isinstance(visible[final_index], dict)
+    ):
         visible[final_index]["role"] = "TOOL"
         visible[final_index]["metadata"] = {
             **dom_service.model_visible_value(metadata),
-            "toolName": "final_screenshot", "toolStatus": "FINISHED", "screenshot_b64": screenshot,
+            "toolName": "final_screenshot",
+            "toolStatus": "FINISHED",
+            "screenshot_b64": screenshot,
         }
     return visible
 
@@ -1233,22 +1358,42 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
 def _model_visible_browser_output_schema(schema: Any, redact: Any) -> Any:
     """Redact schema data while retaining declared contract mechanics."""
     field_types = {
-        "str", "string", "int", "integer", "float", "number", "bool", "boolean",
-        "list[str]", "list[int]", "object", "list[object]", "file_pointer",
-        "list[file_pointer]", "session_file_pointer", "list[session_file_pointer]",
+        "str",
+        "string",
+        "int",
+        "integer",
+        "float",
+        "number",
+        "bool",
+        "boolean",
+        "list[str]",
+        "list[int]",
+        "object",
+        "list[object]",
+        "file_pointer",
+        "list[file_pointer]",
+        "session_file_pointer",
+        "list[session_file_pointer]",
     }
     field_keys = {
-        "name", "type", "description", "required", "nullable", "properties",
-        "minLength", "maxLength", "minItems", "maxItems", "default", "enum",
+        "name",
+        "type",
+        "description",
+        "required",
+        "nullable",
+        "properties",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "default",
+        "enum",
     }
 
     def visible_field(field: Any) -> Any:
         if not isinstance(field, dict):
             return redact(field)
-        visible = {
-            key if key in field_keys else redact(key): redact(value)
-            for key, value in field.items()
-        }
+        visible = {key if key in field_keys else redact(key): redact(value) for key, value in field.items()}
         if isinstance(field.get("type"), str) and field["type"] in field_types:
             visible["type"] = field["type"]
         for key in ("minLength", "maxLength", "minItems", "maxItems"):
@@ -1259,8 +1404,11 @@ def _model_visible_browser_output_schema(schema: Any, redact: Any) -> Any:
             visible["properties"] = [visible_field(item) for item in properties]
         elif isinstance(properties, dict):
             visible["properties"] = {
-                redact(name): visible_field(spec) if isinstance(spec, dict)
-                else spec if isinstance(spec, str) and spec in field_types else redact(spec)
+                redact(name): visible_field(spec)
+                if isinstance(spec, dict)
+                else spec
+                if isinstance(spec, str) and spec in field_types
+                else redact(spec)
                 for name, spec in properties.items()
             }
         return visible
@@ -1290,29 +1438,40 @@ async def _refresh_browser_output_schema(
 
     usage: Dict[str, Any] = {}
     try:
+
         def visible(value: Any) -> Any:
             return mask_secret_values(redact_current_secret_values(value), state.get("secret_redaction_refs"))
 
         schema, _title, usage = await _generate_response_schema_with_rose(
-            "\n\n".join([
-                visible(goal),
-                "Current output schema (preserve fields unless later user feedback changes them):\n"
-                + json_dumps_compact(_model_visible_browser_output_schema(response_schema, visible)),
-                *[visible(message["content"]) for message in messages],
-            ]),
+            "\n\n".join(
+                [
+                    visible(goal),
+                    "Current output schema (preserve fields unless later user feedback changes them):\n"
+                    + json_dumps_compact(_model_visible_browser_output_schema(response_schema, visible)),
+                    *[visible(message["content"]) for message in messages],
+                ]
+            ),
             agent_id=agent_id,
             compute_auth=compute_auth,
         )
         if not isinstance(schema, dict) or not schema.get("fields"):
             raise ValueError("Browser schema refresh returned no fields")
-        if _build_verifier_response_model(schema).model_json_schema() == _build_verifier_response_model(response_schema).model_json_schema():
+        if (
+            _build_verifier_response_model(schema).model_json_schema()
+            == _build_verifier_response_model(response_schema).model_json_schema()
+        ):
             schema = response_schema
     except WorkflowGenerationSealed:
         raise
     except Exception as error:
-        if any(error_chain_has_type(error, kind) for kind in (
-            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-        )):
+        if any(
+            error_chain_has_type(error, kind)
+            for kind in (
+                "CancelledError",
+                "WorkflowGenerationSealed",
+                "GenerationHandoffRequested",
+            )
+        ):
             raise
         # Instruction delivery is independent of this optional model request.
         # Keep the accepted contract and leave this input revision retryable.
@@ -1343,22 +1502,32 @@ async def _sync_browser_user_instructions(
     state = instruction_state
     usages = []
     schema_attempts_left: Dict[int, int] = {}
-    retry_poll = (require_current_schema or require_confirmed_read) and state.get("_user_instruction_poll_confirmed") is not False
+    retry_poll = (require_current_schema or require_confirmed_read) and state.get(
+        "_user_instruction_poll_confirmed"
+    ) is not False
     while True:
         try:
             state = await _load_browser_resume_user_instructions(agent_id, state)
         except WorkflowGenerationSealed:
             raise
         except Exception as error:
-            if any(error_chain_has_type(error, kind) for kind in (
-                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
-            )):
+            if any(
+                error_chain_has_type(error, kind)
+                for kind in (
+                    "CancelledError",
+                    "WorkflowGenerationSealed",
+                    "GenerationHandoffRequested",
+                )
+            ):
                 raise
             if retry_poll:
                 retry_poll = False
                 continue
             state["_user_instruction_poll_confirmed"] = False
-            state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+            state["_user_instruction_poll_error"] = {
+                "type": type(error).__name__,
+                "message": extract_error_message(error),
+            }
             logger.warning("Browser instruction read failed", agent_id=agent_id, error=extract_error_message(error))
             break
         state["_user_instruction_poll_confirmed"] = True
@@ -1380,12 +1549,19 @@ async def _sync_browser_user_instructions(
         # survives suspension, so a fresh activity can retry without losing input.
         state["schema_attempted_user_instruction_count"] = count
         response_schema, usage = await _refresh_browser_output_schema(
-            goal=goal, agent_id=agent_id, response_schema=response_schema,
-            resume_state=state, compute_auth=compute_auth,
+            goal=goal,
+            agent_id=agent_id,
+            response_schema=response_schema,
+            resume_state=state,
+            compute_auth=compute_auth,
         )
         if usage:
             usages.append(usage)
-        if require_current_schema and schema_attempts_left[count] == 0 and count > int(state.get("schema_user_instruction_count") or 0):
+        if (
+            require_current_schema
+            and schema_attempts_left[count] == 0
+            and count > int(state.get("schema_user_instruction_count") or 0)
+        ):
             break
         # A correction can arrive while schema generation awaits its provider.
         # The same cursor and source-ID ledger admit it before publishing state.
@@ -1403,10 +1579,18 @@ class BrowserInstructionUnavailableError(RuntimeError):
 
 def _require_browser_instruction_state(state: Dict[str, Any], *, current_schema: bool) -> None:
     if state.get("_user_instruction_poll_confirmed") is not True:
-        failure = state.get("_user_instruction_poll_error") or {"type": "RuntimeError", "message": "Browser instruction read is unconfirmed"}
+        failure = state.get("_user_instruction_poll_error") or {
+            "type": "RuntimeError",
+            "message": "Browser instruction read is unconfirmed",
+        }
         raise BrowserInstructionUnavailableError(failure)
-    if current_schema and int(state.get("schema_user_instruction_count") or 0) < len(state.get("user_instruction_messages") or []):
-        failure = state.get("_schema_refresh_error") or {"type": "RuntimeError", "message": "Browser output schema revision is unaccepted"}
+    if current_schema and int(state.get("schema_user_instruction_count") or 0) < len(
+        state.get("user_instruction_messages") or []
+    ):
+        failure = state.get("_schema_refresh_error") or {
+            "type": "RuntimeError",
+            "message": "Browser output schema revision is unaccepted",
+        }
         raise BrowserInstructionUnavailableError(failure)
 
 
@@ -1449,6 +1633,10 @@ def _browser_resume_continuity_state(
         "visited_urls": list(visited_urls),
         "verifier_checkpoints": list(verifier_checkpoints),
         "browser_turn_messages": _browser_turn_messages_for_resume(browser_turn_messages),
+        # JSON drops the inter-agent str marker; these indexes restore it on resume.
+        "inter_agent_turn_indexes": [
+            index for index, message in enumerate(browser_turn_messages or []) if is_inter_agent_message(message)
+        ],
         "reasoning_messages": list(reasoning_messages or []),
         "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
@@ -1467,7 +1655,8 @@ def _browser_resume_continuity_state(
         if privacy_state:
             state = action_history.model_visible_value(state)
             state["browser_turn_messages"] = _model_visible_browser_turn_messages(
-                _browser_turn_messages_for_resume(browser_turn_messages), action_history.model_visible_value,
+                _browser_turn_messages_for_resume(browser_turn_messages),
+                action_history.model_visible_value,
                 secret_values_used=bool(privacy_state.get("secret_values_used")),
             )
             state["action_history"] = action_history.get_entries()
@@ -1476,13 +1665,15 @@ def _browser_resume_continuity_state(
                 response_schema, action_history.model_visible_value
             )
             # Cursor, deduplication IDs, and counts are trusted protocol state.
-            state.update({
-                "delivered_user_instruction_count": len(user_instruction_messages or []),
-                "user_message_cursor": user_message_cursor,
-                "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
-                "user_instruction_message_ids": list(user_instruction_message_ids or []),
-                "schema_user_instruction_count": schema_user_instruction_count,
-            })
+            state.update(
+                {
+                    "delivered_user_instruction_count": len(user_instruction_messages or []),
+                    "user_message_cursor": user_message_cursor,
+                    "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
+                    "user_instruction_message_ids": list(user_instruction_message_ids or []),
+                    "schema_user_instruction_count": schema_user_instruction_count,
+                }
+            )
             state.update(privacy_state)
             if privacy_state.get("secret_redaction_refs") and private_runtime_state:
                 # Only the encrypted archive may carry exact routing/grant data.
@@ -2751,8 +2942,7 @@ async def _wait_for_provider_captcha_solver(
         except Exception as exc:
             logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
             if page_still_challenged or (
-                last_provider == "browser-use"
-                and asyncio.get_running_loop().time() - started_at < 10
+                last_provider == "browser-use" and asyncio.get_running_loop().time() - started_at < 10
             ):
                 await asyncio.sleep(2)
                 continue
@@ -2942,10 +3132,7 @@ async def _append_new_otp_user_messages(
                 ttl_seconds=otp.ttl_seconds,
             )
             continue
-        if (
-            task_elapsed_seconds is not None
-            and otp.age_seconds > task_elapsed_seconds + OTP_TASK_START_SLACK_SECONDS
-        ):
+        if task_elapsed_seconds is not None and otp.age_seconds > task_elapsed_seconds + OTP_TASK_START_SLACK_SECONDS:
             # Remember the stale MESSAGE, not its code: a site may reissue the
             # same code for this sign-in, and that fresh mail must still arrive.
             stale_marker = f"stale-message:{otp.source_message_id or otp.code}"
@@ -3097,7 +3284,8 @@ async def _call_browser_use_with_rotation(
         browser_state=browser_state_for_llm,
         action_history=action_entries,
         available_actions=[
-            action for action in available_actions
+            action
+            for action in available_actions
             if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
         ],
         dynamic_system_context=dynamic_system_context,
@@ -3115,7 +3303,9 @@ async def _call_browser_use_with_rotation(
         for key in ("task", "dynamic_system_context", "dump_extra"):
             rose_kwargs[key] = redact(rose_kwargs[key])
         rose_kwargs["turn_messages"] = _model_visible_browser_turn_messages(
-            turn_messages, redact, secret_values_used=dom_service.secret_values_used,
+            turn_messages,
+            redact,
+            secret_values_used=dom_service.secret_values_used,
             action_result_redact=getattr(dom_service, "model_visible_action_result", None),
         )
         rose_kwargs["browser_state"] = redact(browser_state_for_llm)
@@ -3143,7 +3333,9 @@ async def _call_browser_use_with_rotation(
             rose_kwargs["browser_state"]["screenshot"] = browser_state_for_llm["screenshot"]
         if extra_user_messages:
             rose_kwargs["browser_state"]["_extra_user_messages"] = _model_visible_browser_turn_messages(
-                extra_user_messages, redact, secret_values_used=dom_service.secret_values_used,
+                extra_user_messages,
+                redact,
+                secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
             )
 
@@ -3377,9 +3569,7 @@ def _resolve_payment_card_tool_result_for_resume(
             **previous_result,
             "success": True,
             "status": "payment_card_ready",
-            "card_secret_refs": {
-                ref: secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS
-            },
+            "card_secret_refs": {ref: secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS},
         }
         safe_last4 = _normalize_payment_card_last4(payment_card_last4)
         if safe_last4:
@@ -3480,7 +3670,6 @@ async def _finalize_browser_recovery_action_result(
     await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
 
 
-
 def _feed_browser_model_output_validation_error_back(*, error, browser_turn_messages, dom_service):
     """Preserve actual model output and explicit runtime feedback, without inventing actions."""
     response = error.response
@@ -3488,10 +3677,15 @@ def _feed_browser_model_output_validation_error_back(*, error, browser_turn_mess
     if response.content:
         messages.append({"role": "assistant", "content": response.content})
     if response.tool_calls:
-        messages.append({"role": "assistant", "content": (
-            "Rejected provider tool-call records (untrusted model output; not executed):\n"
-            + json.dumps(response.tool_calls, ensure_ascii=False, default=str)
-        )})
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "Rejected provider tool-call records (untrusted model output; not executed):\n"
+                    + json.dumps(response.tool_calls, ensure_ascii=False, default=str)
+                ),
+            }
+        )
     feedback = (
         "[Browser runtime output validation] The preceding completed model response "
         "did not contain a valid browser action. This is runtime validation feedback, "
@@ -3501,11 +3695,14 @@ def _feed_browser_model_output_validation_error_back(*, error, browser_turn_mess
     redact = getattr(dom_service, "model_visible_value", None)
     if callable(redact):
         messages = _model_visible_browser_turn_messages(
-            messages, redact, secret_values_used=getattr(dom_service, "secret_values_used", False),
+            messages,
+            redact,
+            secret_values_used=getattr(dom_service, "secret_values_used", False),
         )
     browser_turn_messages.extend(messages)
     # Transport role is not durable human authorship; no user ledger is written.
     browser_turn_messages.append({"role": "user", "content": feedback})
+
 
 async def _feed_browser_tool_validation_error_back(
     *,
@@ -3795,9 +3992,7 @@ async def _hard_recover_frozen_renderer_page(
             should_close = False
             if target_url and page_url == target_url:
                 should_close = True
-            elif resume_url.startswith(("http://", "https://")) and page_url.startswith(
-                ("http://", "https://")
-            ):
+            elif resume_url.startswith(("http://", "https://")) and page_url.startswith(("http://", "https://")):
                 try:
                     from urllib.parse import urlparse
 
@@ -4063,8 +4258,7 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
                 "label": "Confirm return",
                 "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
                 "payload_summary": (
-                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
-                    "Return by Sep 19, 2026."
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. Return by Sep 19, 2026."
                 ),
             },
         },
@@ -4587,8 +4781,7 @@ async def _generate_write_lock_notification(
                 gpt_token_pool_id=gpt_token_pool_id,
                 browser_use_mode=browser_use_mode,
                 extra_user_messages=extra_user_messages,
-                call_site=f"write_lock_notification_fork_{iteration}"
-                + (f"_retry{attempt}" if attempt else ""),
+                call_site=f"write_lock_notification_fork_{iteration}" + (f"_retry{attempt}" if attempt else ""),
                 skip_cache_write=True,
                 pool=pool,
                 dom_service=dom_service,
@@ -4617,7 +4810,9 @@ async def _generate_write_lock_notification(
             if attempt >= _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS - 1:
                 raise
             _feed_browser_model_output_validation_error_back(
-                error=fork_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+                error=fork_error,
+                browser_turn_messages=browser_turn_messages,
+                dom_service=dom_service,
             )
         except (BrowserToolArgsValidationError, PurchaseApprovalContextError, ValueError) as fork_error:
             logger.info(
@@ -4653,14 +4848,18 @@ async def _generate_write_lock_notification(
         {"tool": "generate_write_lock_notification", **notification},
         context={"trusted_page_urls": [*trusted_page_urls, current_url]},
     )
-    return OperationalResult({
-        "notification": notification,
-        "question": question,
-        "usage": fork_result.get("usage") or {},
-        "actual_model": fork_result.get("actual_model"),
-        "request_id": fork_result.get("request_id"),
-        "mode": fork_result.get("mode"),
-    }, field="write_lock_notification", source=notification_source)
+    return OperationalResult(
+        {
+            "notification": notification,
+            "question": question,
+            "usage": fork_result.get("usage") or {},
+            "actual_model": fork_result.get("actual_model"),
+            "request_id": fork_result.get("request_id"),
+            "mode": fork_result.get("mode"),
+        },
+        field="write_lock_notification",
+        source=notification_source,
+    )
 
 
 # ========================================
@@ -5223,12 +5422,16 @@ def _schedule_browser_cleanup(
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
+
         async def dispose_local() -> None:
             nonlocal resolved_network_recorder
             # Cancel setup before collecting its registered instances.
             deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
-            owned_tasks = {task for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
-                           if isinstance(task, asyncio.Task)}
+            owned_tasks = {
+                task
+                for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
+                if isinstance(task, asyncio.Task)
+            }
             if cursor_streamer is not None:
                 cursor_streamer.closed = True
                 if isinstance(cursor_streamer.flush_task, asyncio.Task):
@@ -5258,9 +5461,13 @@ def _schedule_browser_cleanup(
                 with contextlib.suppress(Exception):
                     await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
             await _stop_playwright_resources(
-                playwright_browser, playwright_instance, agent_id,
-                close_browser=False, driver_pid=playwright_driver_pid,
+                playwright_browser,
+                playwright_instance,
+                agent_id,
+                close_browser=False,
+                driver_pid=playwright_driver_pid,
             )
+
         try:
             if local_only:
                 await dispose_local()
@@ -5417,7 +5624,8 @@ async def drain_background_browser_cleanups(
     # Keep them referenced, but do not spend the recording/provider drain on them
     # again. The worker event-loop owner closes these narrowly named I/O tasks.
     pending = [
-        task for task in _background_browser_cleanup_tasks
+        task
+        for task in _background_browser_cleanup_tasks
         if not task.done() and task.get_name() != _EXPIRED_OPTIONAL_CDP_TASK_NAME
     ]
     if not pending:
@@ -5466,6 +5674,7 @@ async def spawn_browser_agent_activity_v3(
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
+    inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
@@ -5529,6 +5738,7 @@ async def spawn_browser_agent_activity_v3(
         gpt_token_pool_id=gpt_token_pool_id,
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         browser_pool=browser_pool,
+        inbox_address=inbox_address,
         await_owner_cleanup=await_owner_cleanup,
     )
 
@@ -5956,6 +6166,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "visited_urls",
     "verifier_checkpoints",
     "browser_turn_messages",
+    "inter_agent_turn_indexes",
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
@@ -5970,6 +6181,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "user_instruction_message_ids",
     "schema_user_instruction_count",
     "browser_output_schema",
+    "agent_inbox_state",
 )
 
 
@@ -6142,9 +6354,7 @@ def _compact_browser_turn_message_for_resume(message: Dict[str, Any]) -> Dict[st
             except (TypeError, ValueError):
                 continue
             if isinstance(request, dict):
-                compact_call["function"]["arguments"] = json_dumps_compact(
-                    _summarize_payment_request_for_log(request)
-                )
+                compact_call["function"]["arguments"] = json_dumps_compact(_summarize_payment_request_for_log(request))
     return compact
 
 
@@ -6366,24 +6576,35 @@ async def _spawn_browser_agent_activity_v3_simulated(
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
     browser_stream: Optional[BrowserThinkingStream] = None
-    resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(instruction_state.get("delivered_user_instruction_count") or 0)
+    resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(
+        instruction_state.get("delivered_user_instruction_count") or 0
+    )
     _append_browser_user_instructions(instruction_state, turn_messages)
-    instruction_state["delivered_user_instruction_count"] = len(instruction_state.get("user_instruction_messages") or [])
+    instruction_state["delivered_user_instruction_count"] = len(
+        instruction_state.get("user_instruction_messages") or []
+    )
 
     async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
         nonlocal instruction_state, output_schema, dynamic_system_context
         nonlocal total_input_tokens, total_output_tokens
         previous_schema = output_schema
         instruction_state, output_schema, usages = await _sync_browser_user_instructions(
-            agent_id=agent_id, goal=goal, response_schema=output_schema,
-            instruction_state=instruction_state, turn_messages=turn_messages,
-            require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
+            agent_id=agent_id,
+            goal=goal,
+            response_schema=output_schema,
+            instruction_state=instruction_state,
+            turn_messages=turn_messages,
+            require_current_schema=require_current_schema,
+            require_confirmed_read=require_confirmed_read,
             compute_auth={
-                "type": "gpt" if gpt_token else "claude", "accessToken": gpt_token or token_state.access_token,
+                "type": "gpt" if gpt_token else "claude",
+                "accessToken": gpt_token or token_state.access_token,
                 "accountId": gpt_account_id if gpt_token else None,
                 "source": gpt_token_source if gpt_token else token_state.source,
                 "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
-                "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+                "userId": user_id,
+                "agentId": agent_id,
+                "rootAgentId": agent_id,
             },
         )
         if output_schema != previous_schema:
@@ -6399,7 +6620,10 @@ async def _spawn_browser_agent_activity_v3_simulated(
             total_input_tokens += input_tokens
             total_output_tokens += output_tokens
             accumulate_model_usage(
-                usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                usage_by_model,
+                usage.get("actual_model"),
+                input_tokens,
+                output_tokens,
                 cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                 cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
                 from_fast_cache=bool(usage.get("from_fast_cache")),
@@ -6411,10 +6635,18 @@ async def _spawn_browser_agent_activity_v3_simulated(
         return instruction_state.get("_user_instruction_poll_confirmed") is True
 
     def resume_payload() -> Dict[str, Any]:
-        return {key: instruction_state.get(key) for key in (
-            "user_instruction_messages", "user_instruction_message_ids", "user_message_cursor", "user_message_cursor_is_task_start",
-            "delivered_user_instruction_count", "schema_user_instruction_count", "browser_output_schema",
-        )} | _simulated_browser_resume_payload(
+        return {
+            key: instruction_state.get(key)
+            for key in (
+                "user_instruction_messages",
+                "user_instruction_message_ids",
+                "user_message_cursor",
+                "user_message_cursor_is_task_start",
+                "delivered_user_instruction_count",
+                "schema_user_instruction_count",
+                "browser_output_schema",
+            )
+        } | _simulated_browser_resume_payload(
             browser_state=browser_state,
             action_entries=action_entries,
             turn_messages=turn_messages,
@@ -6542,7 +6774,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
         initial_read_confirmed = await sync_user_instructions()
         if not initial_read_confirmed and isinstance(resume.get("pending_action"), dict):
             await sync_user_instructions(require_confirmed_read=True)
-        new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
+        new_user_input = resumed_unread_user_input or previous_instruction_count != len(
+            instruction_state.get("user_instruction_messages") or []
+        )
         pending_action = None if new_user_input else resume.get("pending_action")
         if isinstance(pending_action, dict):
             pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
@@ -6735,9 +6969,10 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     user_instruction_messages=instruction_state.get("user_instruction_messages"),
                 )
                 await sync_user_instructions(require_current_schema=True)
-                if (
-                    verification_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
-                    or int(instruction_state.get("schema_user_instruction_count") or 0) < len(instruction_state.get("user_instruction_messages") or [])
+                if verification_instruction_count != len(
+                    instruction_state.get("user_instruction_messages") or []
+                ) or int(instruction_state.get("schema_user_instruction_count") or 0) < len(
+                    instruction_state.get("user_instruction_messages") or []
                 ):
                     completion_entry["verifier_superseded_by_user_feedback"] = True
                     await browser_stream.finish_tools(status="ERROR")
@@ -6946,16 +7181,23 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "success": False,
             "error": True,
             "message": f"Simulated browser automation failed: {extract_error_message(exc)}",
-            **({
-                "usage_items": _simulated_browser_usage_items(
-                    total_input_tokens, total_output_tokens, model_pricing,
-                    usage_by_model, pricing_pool=browser_pool,
-                ),
-                "browser_error_type": exc.original_error_type,
-                "browser_error_message": extract_error_message(exc),
-                "browser_output_schema": output_schema,
-                "structured_response": None,
-            } if isinstance(exc, BrowserInstructionUnavailableError) else {}),
+            **(
+                {
+                    "usage_items": _simulated_browser_usage_items(
+                        total_input_tokens,
+                        total_output_tokens,
+                        model_pricing,
+                        usage_by_model,
+                        pricing_pool=browser_pool,
+                    ),
+                    "browser_error_type": exc.original_error_type,
+                    "browser_error_message": extract_error_message(exc),
+                    "browser_output_schema": output_schema,
+                    "structured_response": None,
+                }
+                if isinstance(exc, BrowserInstructionUnavailableError)
+                else {}
+            ),
             "task_id": task_id,
             "session_id": world_model_session_id or None,
             "world_model_simulated": True,
@@ -7023,9 +7265,7 @@ async def _init_browser_session_preserving_owner(
     preparation response. Keep that HTTP operation alive to recover the exact
     returned handle; never replay an ambiguously completed session creation.
     """
-    owned_init = asyncio.create_task(
-        init_browser_session(config, user_id, agent_id, start_url, task_id=task_id)
-    )
+    owned_init = asyncio.create_task(init_browser_session(config, user_id, agent_id, start_url, task_id=task_id))
     try:
         return await asyncio.shield(owned_init)
     except asyncio.CancelledError:
@@ -7072,6 +7312,7 @@ async def _spawn_browser_agent_activity_v3_real(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     browser_pool: str = BROWSER_USE_PRICING_POOL,
+    inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
@@ -7145,9 +7386,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
     private_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
-        hydrated_resume = dict(await hydrate_resume_context(
-            agent_id=agent_id, resume_state=write_lock_resume_state
-        ))
+        hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
         private_browser_runtime = hydrated_resume.pop("private_browser_runtime", {})
         if "browser_output_schema" in private_browser_runtime:
             hydrated_resume["browser_output_schema"] = private_browser_runtime["browser_output_schema"]
@@ -7164,9 +7403,17 @@ async def _spawn_browser_agent_activity_v3_real(
                 raise
             except Exception as error:
                 write_lock_resume_state["_user_instruction_poll_confirmed"] = False
-                write_lock_resume_state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
-                logger.warning("Browser resume instruction read failed", agent_id=agent_id,
-                               error=mask_secret_values(extract_error_message(error), write_lock_resume_state.get("secret_redaction_refs")))
+                write_lock_resume_state["_user_instruction_poll_error"] = {
+                    "type": type(error).__name__,
+                    "message": extract_error_message(error),
+                }
+                logger.warning(
+                    "Browser resume instruction read failed",
+                    agent_id=agent_id,
+                    error=mask_secret_values(
+                        extract_error_message(error), write_lock_resume_state.get("secret_redaction_refs")
+                    ),
+                )
 
     from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
@@ -7231,22 +7478,44 @@ async def _spawn_browser_agent_activity_v3_real(
                     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
                         coordinates[key] = value
         if "output_schema" in kwargs:
-            kwargs["output_schema"] = _model_visible_browser_output_schema(kwargs["output_schema"], _redact_activity_value)
+            kwargs["output_schema"] = _model_visible_browser_output_schema(
+                kwargs["output_schema"], _redact_activity_value
+            )
         return await save_browser_action_message(**kwargs)
 
+    # Agent-to-agent messages addressed to this browser task (the spawning tool
+    # call id). The cursor rides the resume state so a resumed task never
+    # re-delivers a message its restored turn history already contains.
+    from helpers.agent_inbox import AgentInbox, format_agent_message
+
+    agent_inbox = AgentInbox.create(agent_id, inbox_address, (write_lock_resume_state or {}).get("agent_inbox_state"))
+
     def _pause_continuity_state(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        grant_url = resolve_site_write_lock_grant_url({
-            **(approval_result or {}), "start_url": start_url,
-            "visited_urls": visited_urls, "current_url": current_url,
-        })
+        state = _pause_continuity_state_without_inbox(approval_result)
+        if agent_inbox is not None:
+            state["agent_inbox_state"] = agent_inbox.state()
+        return state
+
+    def _pause_continuity_state_without_inbox(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        grant_url = resolve_site_write_lock_grant_url(
+            {
+                **(approval_result or {}),
+                "start_url": start_url,
+                "visited_urls": visited_urls,
+                "current_url": current_url,
+            }
+        )
         if "{{secret:" in grant_url:
             # A model-visible product/notification URL may already be masked.
             # The exact browser destination is still private, observed state.
             grant_url = current_url
         return _browser_resume_continuity_state(
-            action_history=action_history, visited_urls=visited_urls,
-            verifier_checkpoints=verifier_checkpoints, browser_turn_messages=browser_turn_messages,
-            reasoning_messages=reasoning_messages, action_summary=action_summary,
+            action_history=action_history,
+            visited_urls=visited_urls,
+            verifier_checkpoints=verifier_checkpoints,
+            browser_turn_messages=browser_turn_messages,
+            reasoning_messages=reasoning_messages,
+            action_summary=action_summary,
             auth_runtime_state=auth_runtime_state,
             response_schema=response_schema,
             schema_user_instruction_count=schema_user_instruction_count,
@@ -7255,28 +7524,46 @@ async def _spawn_browser_agent_activity_v3_real(
             user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
             user_instruction_message_ids=user_instruction_message_ids,
             private_runtime_state={
-                "current_url": current_url, "auth_realm": auth_realm,
+                "current_url": current_url,
+                "auth_realm": auth_realm,
                 "browser_output_schema": response_schema,
-                "write_lock_approvals": dict(write_lock_approvals), "grant_url": grant_url,
-                **({"pending_action_target": approval_result["pending_action_target"]}
-                   if approval_result and approval_result.get("pending_action_target") else {}),
+                "write_lock_approvals": dict(write_lock_approvals),
+                "grant_url": grant_url,
+                **(
+                    {"pending_action_target": approval_result["pending_action_target"]}
+                    if approval_result and approval_result.get("pending_action_target")
+                    else {}
+                ),
             },
         )
 
     def _visible_activity_result(
-        result: Dict[str, Any], *, operational_sources: Optional[Dict[str, Any]] = None,
+        result: Dict[str, Any],
+        *,
+        operational_sources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
         payment_response = result.get("payment_request")
-        for key in ("current_url", "question", "write_lock_notification", "payment_request",
-                    "auth_assistance_request", "write_lock_approvals", "auth_realm", "base_site",
-                    "message", "structured_response", "best_effort_response",
-                    "browser_error_message"):
+        for key in (
+            "current_url",
+            "question",
+            "write_lock_notification",
+            "payment_request",
+            "auth_assistance_request",
+            "write_lock_approvals",
+            "auth_realm",
+            "base_site",
+            "message",
+            "structured_response",
+            "best_effort_response",
+            "browser_error_message",
+        ):
             if key in result:
                 source = (operational_sources or {}).get(key)
                 if source is not None:
                     from browser_tools.control_projection import project_operational_source
+
                     result[key] = project_operational_source(source, _redact_activity_value)
                 else:
                     result[key] = _redact_activity_value(result[key])
@@ -7284,7 +7571,8 @@ async def _spawn_browser_agent_activity_v3_real(
         if isinstance(observation, dict):
             # Routing/phase keys remain exact protocol; only location is page data.
             result["browser_page_observation"] = {
-                **observation, "origin": _redact_activity_value(observation.get("origin")),
+                **observation,
+                "origin": _redact_activity_value(observation.get("origin")),
                 "path": _redact_activity_value(observation.get("path")),
             }
         # Receipt image URLs are typed text, not raster attachments. Preserve
@@ -7312,14 +7600,27 @@ async def _spawn_browser_agent_activity_v3_real(
             if isinstance(target.get("index"), int) and not isinstance(target["index"], bool):
                 result["pending_action_target"]["index"] = target["index"]
         if isinstance(auth_response, dict):
-            request_ids = ("id", "requestId", "request_id", "attentionRequestId", "agentId", "userId",
-                           "browserSessionId", "steelSessionId", "mode", "target", "criticalReason")
+            request_ids = (
+                "id",
+                "requestId",
+                "request_id",
+                "attentionRequestId",
+                "agentId",
+                "userId",
+                "browserSessionId",
+                "steelSessionId",
+                "mode",
+                "target",
+                "criticalReason",
+            )
             visible_auth = result["auth_assistance_request"]
             for key in request_ids:
                 if key in auth_response:
                     visible_auth[key] = auth_response[key]
-            for key, protocol_keys in (("request", request_ids),
-                                       ("handoff", ("type", "steelSessionId", "liveViewUrl", "target", "criticalReason"))):
+            for key, protocol_keys in (
+                ("request", request_ids),
+                ("handoff", ("type", "steelSessionId", "liveViewUrl", "target", "criticalReason")),
+            ):
                 original = auth_response.get(key)
                 if isinstance(original, dict):
                     visible_auth[key] = _redact_activity_value(original)
@@ -7368,9 +7669,7 @@ async def _spawn_browser_agent_activity_v3_real(
         if isinstance(message, str)
     ]
     action_summary: List[str] = [
-        summary
-        for summary in ((write_lock_resume_state or {}).get("action_summary") or [])
-        if isinstance(summary, str)
+        summary for summary in ((write_lock_resume_state or {}).get("action_summary") or []) if isinstance(summary, str)
     ]
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
@@ -7398,14 +7697,20 @@ async def _spawn_browser_agent_activity_v3_real(
         # what to do after reading it, even when write permission remains valid.
         if not has_new_user_input:
             pending_write_lock_action = write_lock_resume_state.get("pending_action")
-            pending_write_lock_target = (private_browser_runtime.get("pending_action_target")
-                                         or write_lock_resume_state.get("pending_action_target"))
-        write_lock_approvals = dict(private_browser_runtime.get("write_lock_approvals")
-                                    or write_lock_resume_state.get("write_lock_approvals") or {})
+            pending_write_lock_target = private_browser_runtime.get(
+                "pending_action_target"
+            ) or write_lock_resume_state.get("pending_action_target")
+        write_lock_approvals = dict(
+            private_browser_runtime.get("write_lock_approvals")
+            or write_lock_resume_state.get("write_lock_approvals")
+            or {}
+        )
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
-        auth_realm = private_browser_runtime.get("auth_realm") or write_lock_resume_state.get("auth_realm") or auth_realm
+        auth_realm = (
+            private_browser_runtime.get("auth_realm") or write_lock_resume_state.get("auth_realm") or auth_realm
+        )
         current_url = str(private_browser_runtime.get("current_url") or "")
         approved_at = write_lock_resume_state.get("write_lock_approved_at")
         grant_url = private_browser_runtime.get("grant_url")
@@ -7414,8 +7719,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 write_lock_approvals = grant_site_write_lock_approvals(write_lock_approvals, grant_url, approved_at)
             elif write_lock_resume_state.get("pending_action"):
                 write_lock_approvals = apply_user_write_lock_grant(
-                    write_lock_approvals, write_lock_resume_state.get("approval_type", "unknown"),
-                    grant_url, approved_at,
+                    write_lock_approvals,
+                    write_lock_resume_state.get("approval_type", "unknown"),
+                    grant_url,
+                    approved_at,
                 )
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
         # Belt-and-suspenders: older resume payloads may still carry awaiting tool
@@ -7499,11 +7806,7 @@ async def _spawn_browser_agent_activity_v3_real(
     # A process-local thread pump heartbeats every registered activity context.
     _heartbeat_token = start_browser_activity_heartbeat()
     action_entries: List[Dict[str, Any]] = []
-    browser_turn_messages: List[Dict[str, Any]] = [
-        message
-        for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
-        if isinstance(message, dict)
-    ]
+    browser_turn_messages: List[Dict[str, Any]] = _restore_browser_turn_messages(write_lock_resume_state)
     if (write_lock_resume_state or {}).get("approval_type") == "payment":
         _resolve_payment_card_tool_result_for_resume(
             browser_turn_messages,
@@ -7638,6 +7941,7 @@ async def _spawn_browser_agent_activity_v3_real(
         except asyncio.CancelledError:
             cleanup_failure = BrowserSessionCloseError(exact_session_id, pause).receipt()
             raise
+
     state_prefetch = BrowserStatePrefetch()
     # Bind before browser/event-bus tasks start; their inherited policy is
     # updated in place as private bindings are hydrated or realms change.
@@ -7668,7 +7972,10 @@ async def _spawn_browser_agent_activity_v3_real(
         total_output_tokens += schema_output_tokens
         if schema_usage:
             accumulate_model_usage(
-                usage_by_model, schema_usage.get("actual_model"), schema_input_tokens, schema_output_tokens,
+                usage_by_model,
+                schema_usage.get("actual_model"),
+                schema_input_tokens,
+                schema_output_tokens,
                 cache_read_input_tokens=int(schema_usage.get("cache_read_input_tokens") or 0),
                 cache_creation_input_tokens=int(schema_usage.get("cache_creation_input_tokens") or 0),
                 from_fast_cache=bool(schema_usage.get("from_fast_cache")),
@@ -7696,20 +8003,22 @@ async def _spawn_browser_agent_activity_v3_real(
             if declined_session_id:
                 await _close_browser_with_cleanup_receipt(declined_session_id, pause=True)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
-            return _visible_activity_result({
-                "status": "completed",
-                "success": False,
-                "user_declined_auth": True,
-                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
-                "message": f"User declined to sign in to {auth_realm or 'the site'}.",
-                "browser_url": browser_url,
-                "task_id": task_id,
-                "usage_items": [],
-                "execution_time_ms": 0,
-                "session_id": declined_session_id,
-                "structured_response": None,
-                "output_files": [],
-            })
+            return _visible_activity_result(
+                {
+                    "status": "completed",
+                    "success": False,
+                    "user_declined_auth": True,
+                    **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+                    "message": f"User declined to sign in to {auth_realm or 'the site'}.",
+                    "browser_url": browser_url,
+                    "task_id": task_id,
+                    "usage_items": [],
+                    "execution_time_ms": 0,
+                    "session_id": declined_session_id,
+                    "structured_response": None,
+                    "output_files": [],
+                }
+            )
 
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
@@ -7984,9 +8293,7 @@ async def _spawn_browser_agent_activity_v3_real(
             connection_cdp_url = steel_cdp_connection_url(cdp_url)
             _dom_service = DOMService(
                 cdp_url=connection_cdp_url,
-                downloads_path=browser_downloads_path_for_provider(
-                    browser_session_metadata.get("provider")
-                ),
+                downloads_path=browser_downloads_path_for_provider(browser_session_metadata.get("provider")),
             )
             if hasattr(_dom_service, "restore_secret_redaction_state"):
                 _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
@@ -8409,7 +8716,8 @@ async def _spawn_browser_agent_activity_v3_real(
             # complete histories now, before persistence, logging or a model call.
             action_history.restore_entries(action_history.get_entries())
             browser_turn_messages[:] = _model_visible_browser_turn_messages(
-                browser_turn_messages, dom_service.model_visible_value,
+                browser_turn_messages,
+                dom_service.model_visible_value,
                 secret_values_used=dom_service.secret_values_used,
                 action_result_redact=getattr(dom_service, "model_visible_action_result", None),
             )
@@ -8426,9 +8734,7 @@ async def _spawn_browser_agent_activity_v3_real(
             and write_lock_resume_state.get("auth_realm") == auth_realm
             and write_lock_resume_state.get("approval_type") != "auth_assistance"
         ):
-            _restore_browser_auth_attempts(
-                auth_runtime_state, write_lock_resume_state.get("auth_attempts")
-            )
+            _restore_browser_auth_attempts(auth_runtime_state, write_lock_resume_state.get("auth_attempts"))
         passkey_ref_by_credential_id.update(initial_realm_credential_state.passkey_ref_by_credential_id)
         if initial_realm_credential_state.decrypted_passkeys:
             await sync_passkeys_onto_target(
@@ -8493,9 +8799,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 nonlocal start_url_nav_error
                 t = time.monotonic()
                 try:
-                    event = dom_service.session.event_bus.dispatch(
-                        NavigateToUrlEvent(url=nav_url, wait_until="commit")
-                    )
+                    event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url, wait_until="commit"))
                     await event
                     await event.event_result(raise_if_any=True, raise_if_none=False)
                     ready_state = await _wait_for_document_ready(dom_service)
@@ -8581,8 +8885,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     total_steps=MAX_ITERATIONS,
                 )
                 logger.warning(
-                    "Continuing browser agent after start URL navigate failure "
-                    "(budget=%ss): %s",
+                    "Continuing browser agent after start URL navigate failure (budget=%ss): %s",
                     NAVIGATE_TO_URL_TIMEOUT_SECONDS,
                     start_url_nav_error,
                 )
@@ -8645,9 +8948,7 @@ async def _spawn_browser_agent_activity_v3_real(
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
-        user_instruction_messages = _append_browser_user_instructions(
-            write_lock_resume_state, browser_turn_messages
-        )
+        user_instruction_messages = _append_browser_user_instructions(write_lock_resume_state, browser_turn_messages)
         user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor")
         user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
         otp_history_count = 0
@@ -8664,7 +8965,9 @@ async def _spawn_browser_agent_activity_v3_real(
             "user_instruction_messages": user_instruction_messages,
             "tool_call_id": tool_call_id,
             "user_message_cursor": user_message_cursor,
-            "user_message_cursor_is_task_start": bool((write_lock_resume_state or {}).get("user_message_cursor_is_task_start")),
+            "user_message_cursor_is_task_start": bool(
+                (write_lock_resume_state or {}).get("user_message_cursor_is_task_start")
+            ),
             "task_id": task_id,
             "user_instruction_message_ids": user_instruction_message_ids,
             "delivered_user_instruction_count": len(user_instruction_messages),
@@ -8680,16 +8983,22 @@ async def _spawn_browser_agent_activity_v3_real(
             previous_count = len(user_instruction_messages)
             previous_schema = response_schema
             instruction_state, response_schema, usages = await _sync_browser_user_instructions(
-                agent_id=agent_id, goal=goal, response_schema=response_schema,
-                instruction_state=instruction_state, turn_messages=browser_turn_messages,
-                require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
+                agent_id=agent_id,
+                goal=goal,
+                response_schema=response_schema,
+                instruction_state=instruction_state,
+                turn_messages=browser_turn_messages,
+                require_current_schema=require_current_schema,
+                require_confirmed_read=require_confirmed_read,
                 compute_auth={
                     "type": "gpt" if gpt_token else "claude",
                     "accessToken": gpt_token or token_state.access_token,
                     "accountId": gpt_account_id if gpt_token else None,
                     "source": gpt_token_source if gpt_token else token_state.source,
                     "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
-                    "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+                    "userId": user_id,
+                    "agentId": agent_id,
+                    "rootAgentId": agent_id,
                 },
             )
             user_instruction_messages = instruction_state["user_instruction_messages"]
@@ -8712,7 +9021,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 total_input_tokens += input_tokens
                 total_output_tokens += output_tokens
                 accumulate_model_usage(
-                    usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                    usage_by_model,
+                    usage.get("actual_model"),
+                    input_tokens,
+                    output_tokens,
                     cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                     cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
                     from_fast_cache=bool(usage.get("from_fast_cache")),
@@ -8811,7 +9123,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 if minted_option and minted_primary_label
                 else None
             )
-
 
         async def _prepare_credentials_for_url_unquarantined(
             target_url: str,
@@ -8969,8 +9280,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 if hasattr(dom_service, "model_visible_action_result"):
                     action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
                     from browser_tools.control_projection import retain_operational_source
+
                     result = retain_operational_source(
-                        result, dom_service.model_visible_action_result(action.get("action", ""), result),
+                        result,
+                        dom_service.model_visible_action_result(action.get("action", ""), result),
                     )
                 else:
                     for refs in redaction_refs:
@@ -9080,29 +9393,31 @@ async def _spawn_browser_agent_activity_v3_real(
                             dom_service = None
                         browser_task_paused_for_resume = True
                         step_timer.finish()
-                        return _visible_activity_result({
-                            "status": BROWSER_DRAIN_YIELD_STATUS,
-                            "yield_reason": drain_reason,
-                            "current_url": current_url,
-                            "write_lock_approvals": write_lock_approvals,
-                            "step_count": iteration,
-                            "session_id": session_id,
-                            "cdp_url": cdp_url,
-                            "task_id": task_id,
-                            "browser_url": browser_url,
-                            "auth_realm": auth_realm,
-                            "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                            "usage_items": build_usage_items(
-                                total_input_tokens,
-                                total_output_tokens,
-                                model_pricing,
-                                (safe_time() - start_time) * 1000,
-                                usage_by_model,
-                                pricing_pool=browser_pool,
-                                fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
-                            ),
-                            **drain_continuity,
-                        })
+                        return _visible_activity_result(
+                            {
+                                "status": BROWSER_DRAIN_YIELD_STATUS,
+                                "yield_reason": drain_reason,
+                                "current_url": current_url,
+                                "write_lock_approvals": write_lock_approvals,
+                                "step_count": iteration,
+                                "session_id": session_id,
+                                "cdp_url": cdp_url,
+                                "task_id": task_id,
+                                "browser_url": browser_url,
+                                "auth_realm": auth_realm,
+                                "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                                "usage_items": build_usage_items(
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    model_pricing,
+                                    (safe_time() - start_time) * 1000,
+                                    usage_by_model,
+                                    pricing_pool=browser_pool,
+                                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                                ),
+                                **drain_continuity,
+                            }
+                        )
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
@@ -9130,6 +9445,13 @@ async def _spawn_browser_agent_activity_v3_real(
 
             if not await sync_user_instructions():
                 await sync_user_instructions(require_confirmed_read=True)
+            agent_message_rows = instruction_state.pop("_agent_message_rows", None) or []
+            if agent_inbox is not None:
+                # Same read as the user instructions: rows addressed to this task only, once each.
+                # Assistant-role inter-agent message (Codex), appended at step start after the
+                # previous step's tool results; RoseClient sends it as user while it trails.
+                for agent_message in agent_inbox.accept_rows(agent_message_rows):
+                    browser_turn_messages.append(inter_agent_message(format_agent_message(agent_message)))
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -9297,18 +9619,18 @@ async def _spawn_browser_agent_activity_v3_real(
             # injected cookies and origin state participate in the first page
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
-            observed_realm_changed = (
-                observed_auth_realm != auth_realm and not auth_realm_matches_url(auth_realm, current_url)
+            observed_realm_changed = observed_auth_realm != auth_realm and not auth_realm_matches_url(
+                auth_realm, current_url
             )
             reload_prepared_realm = bool(
-                pending_credential_reload_realm
-                and auth_realm_matches_url(pending_credential_reload_realm, current_url)
+                pending_credential_reload_realm and auth_realm_matches_url(pending_credential_reload_realm, current_url)
             )
             pending_credential_reload_realm = None
             if _credential_binding() != active_credential_binding or observed_realm_changed:
                 prepared_realm = await _prepare_credentials_for_url(current_url)
                 reload_prepared_realm = bool(
-                    observed_realm_changed and prepared_realm is not None
+                    observed_realm_changed
+                    and prepared_realm is not None
                     and not prepared_realm.get("credential_preparation_error")
                 )
             if reload_prepared_realm:
@@ -9519,19 +9841,26 @@ async def _spawn_browser_agent_activity_v3_real(
                 total_input_tokens += step_input_tokens
                 total_output_tokens += step_output_tokens
                 accumulate_model_usage(
-                    usage_by_model, response.actual_model, step_input_tokens, step_output_tokens,
+                    usage_by_model,
+                    response.actual_model,
+                    step_input_tokens,
+                    step_output_tokens,
                     cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                     cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
                     from_fast_cache=bool(usage.get("from_fast_cache")),
                     cache_sequence_id=usage.get("cache_sequence_id"),
                 )
                 _feed_browser_model_output_validation_error_back(
-                    error=validation_error, browser_turn_messages=browser_turn_messages, dom_service=dom_service,
+                    error=validation_error,
+                    browser_turn_messages=browser_turn_messages,
+                    dom_service=dom_service,
                 )
                 consecutive_api_failures = 0
                 logger.warning(
                     "Completed browser response failed output validation",
-                    iteration=iteration, request_id=response.request_id, actual_model=response.actual_model,
+                    iteration=iteration,
+                    request_id=response.request_id,
+                    actual_model=response.actual_model,
                     consecutive_failures=consecutive_api_failures,
                 )
                 continue
@@ -9622,12 +9951,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 rejected_action = unified_action.get("action", "")
                 recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
                 rejection_reason = str(
-                    (provider_exit_rejection or {}).get("reason")
-                    or "The current provider IP was explicitly rejected."
+                    (provider_exit_rejection or {}).get("reason") or "The current provider IP was explicitly rejected."
                 )
-                blocked_resource_url = blocked_resource_url_for_recovery(
-                    provider_exit_rejection
-                )
+                blocked_resource_url = blocked_resource_url_for_recovery(provider_exit_rejection)
                 unified_action = {
                     "action": "recover_from_challenge",
                     "thinking": "",
@@ -9636,11 +9962,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         "provider_exit_rejected": True,
                         # Failure-driven re-verify for critical third-party blocks
                         # only (not same-origin API-challenge URLs).
-                        **(
-                            {"blocked_resource_url": blocked_resource_url}
-                            if blocked_resource_url
-                            else {}
-                        ),
+                        **({"blocked_resource_url": blocked_resource_url} if blocked_resource_url else {}),
                     },
                 }
                 llm_result = {
@@ -9666,14 +9988,12 @@ async def _spawn_browser_agent_activity_v3_real(
                 if len(otp_user_messages) > otp_history_count:
                     await browser_stream.finish_tools(status="ERROR")
                     state_prefetch.discard()
-                    iteration, consecutive_budget_free, consecutive_keystroke_free = (
-                        adjust_iteration_after_action(
-                            iteration=iteration,
-                            action_name=action_name,
-                            consecutive_budget_free=consecutive_budget_free,
-                            consecutive_keystroke_free=consecutive_keystroke_free,
-                            action_executed=False,
-                        )
+                    iteration, consecutive_budget_free, consecutive_keystroke_free = adjust_iteration_after_action(
+                        iteration=iteration,
+                        action_name=action_name,
+                        consecutive_budget_free=consecutive_budget_free,
+                        consecutive_keystroke_free=consecutive_keystroke_free,
+                        action_executed=False,
                     )
                     continue
 
@@ -9754,9 +10074,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         pending_fingerprint_injection = (
                             replacement.get("fingerprint_injection") or fingerprint_injection
                         )
-                        pending_session_credential_ref = replacement.get(
-                            "credential_ref"
-                        ) or replacement.get("auth_credential_ref")
+                        pending_session_credential_ref = replacement.get("credential_ref") or replacement.get(
+                            "auth_credential_ref"
+                        )
                         pending_auth_realm = replacement.get("auth_realm") or auth_realm
                         pending_browser_session_metadata = _updated_rotation_session_metadata(
                             browser_session_metadata,
@@ -9961,11 +10281,17 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
 
                 parked_page = await disconnect_browser_after_passkey_capture(
-                    dom_service, record_passkey_usage_once,
+                    dom_service,
+                    record_passkey_usage_once,
                     observe_parked_page=lambda: {
-                        **dom_service.get_parked_page_identity(), "phase": "park_time",
-                        "agent_id": agent_id, "user_id": user_id, "task_id": task_id,
-                        "session_id": session_id, "request_id": request_id, "tool_call_id": tool_call_id,
+                        **dom_service.get_parked_page_identity(),
+                        "phase": "park_time",
+                        "agent_id": agent_id,
+                        "user_id": user_id,
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "tool_call_id": tool_call_id,
                     },
                 )
                 dom_service = None
@@ -10006,13 +10332,23 @@ async def _spawn_browser_agent_activity_v3_real(
                 public_parked_page = None
                 if isinstance(parked_page, dict) and isinstance(parked_page.get("url"), str):
                     from urllib.parse import urlsplit
+
                     try:
                         page_parts = urlsplit(parked_page["url"])
                         public_parked_page = {
-                            **{key: parked_page.get(key) for key in (
-                                "target_id", "phase", "agent_id", "user_id", "task_id",
-                                "session_id", "request_id", "tool_call_id",
-                            )},
+                            **{
+                                key: parked_page.get(key)
+                                for key in (
+                                    "target_id",
+                                    "phase",
+                                    "agent_id",
+                                    "user_id",
+                                    "task_id",
+                                    "session_id",
+                                    "request_id",
+                                    "tool_call_id",
+                                )
+                            },
                             "origin": page_parts.scheme + "://" + page_parts.netloc.rsplit("@", 1)[-1],
                             "path": page_parts.path,
                         }
@@ -10034,12 +10370,14 @@ async def _spawn_browser_agent_activity_v3_real(
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     "execution_time_ms": execution_time_ms,
                     "usage_items": usage_items,
-                    **(await persist_resume_context(
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_pause_continuity_state(),
-                    )),
+                    **(
+                        await persist_resume_context(
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                            state=_pause_continuity_state(),
+                        )
+                    ),
                 }
                 browser_task_paused_for_resume = True
                 resume_result = _visible_activity_result(resume_result)
@@ -10051,9 +10389,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 # Default true: preserve authenticated cookies unless the model
                 # explicitly opts into a fresh-cookie machine search.
                 if "auth_cookies_are_preserved" in recovery_params:
-                    auth_cookies_are_preserved = bool(
-                        recovery_params.get("auth_cookies_are_preserved")
-                    )
+                    auth_cookies_are_preserved = bool(recovery_params.get("auth_cookies_are_preserved"))
                 else:
                     auth_cookies_are_preserved = True
                 allow_logged_out_cookie_commit = not auth_cookies_are_preserved
@@ -10200,12 +10536,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         emit_recovery_progress,
                     )
 
-                    provider_exit_rejected = bool(
-                        unified_action.get("params", {}).get("provider_exit_rejected")
-                    )
-                    escalate_after_cookie_false_stable = (
-                        not provider_exit_rejected and cookie_recovery_successes >= 1
-                    )
+                    provider_exit_rejected = bool(unified_action.get("params", {}).get("provider_exit_rejected"))
+                    escalate_after_cookie_false_stable = not provider_exit_rejected and cookie_recovery_successes >= 1
                     if escalate_after_cookie_false_stable:
                         logger.warning(
                             "Escalating repeated challenge recovery to browser config search",
@@ -10214,6 +10546,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             cookie_recovery_successes=cookie_recovery_successes,
                             reason=recovery_reason,
                         )
+
                     async def probe_cookie_variant_remote(candidate: Dict[str, Any]) -> bool:
                         # Ephemeral Kernel/Steel session — never new_context on live desktop.
                         user_agent = ""
@@ -10256,8 +10589,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        skip_cookie_probes=provider_exit_rejected
-                        or escalate_after_cookie_false_stable,
+                        skip_cookie_probes=provider_exit_rejected or escalate_after_cookie_false_stable,
                         allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
                     )
                     if recovery.recovery == "cookies_sanitized":
@@ -10285,8 +10617,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
                                 agent_id=agent_id,
-                                provider=promoted_metadata.get("provider")
-                                or config_result.get("provider"),
+                                provider=promoted_metadata.get("provider") or config_result.get("provider"),
                                 config=config,
                                 task_id=task_id,
                             )
@@ -10387,15 +10718,11 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
                             live_verify_dom_tree = None
                             with contextlib.suppress(Exception):
-                                live_verify_state = await dom_service.get_browser_state(
-                                    include_screenshot=False
-                                )
-                                live_verify_dom_tree = (
-                                    str(live_verify_state.get("dom_tree") or "") or None
-                                )
-                            live_verify_url = str(
-                                config_result.get("saved_url") or current_url or ""
-                            ).strip() or current_url
+                                live_verify_state = await dom_service.get_browser_state(include_screenshot=False)
+                                live_verify_dom_tree = str(live_verify_state.get("dom_tree") or "") or None
+                            live_verify_url = (
+                                str(config_result.get("saved_url") or current_url or "").strip() or current_url
+                            )
                             if not await verify_live_page_cleared_challenge(
                                 input_page,
                                 live_verify_url,
@@ -10416,9 +10743,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             ):
                                 provider = config_result.get("provider")
                                 proxy_tier = config_result.get("proxy_tier")
-                                config_key = (
-                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
-                                )
+                                config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
                                 raise RuntimeError(
                                     f"Promoted {config_key} passed candidate probes but the live tab "
                                     "is still challenged"
@@ -10433,9 +10758,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     current_url = _private_browser_runtime_url(dom_service, browser_state.get("url") or current_url)
                     if config_result is not None:
                         saved_resume = str(config_result.get("saved_url") or "").strip()
-                        if saved_resume.startswith(("http://", "https://")) and not str(
-                            current_url or ""
-                        ).startswith(("http://", "https://")):
+                        if saved_resume.startswith(("http://", "https://")) and not str(current_url or "").startswith(
+                            ("http://", "https://")
+                        ):
                             current_url = saved_resume
                         provider = config_result.get("provider")
                         proxy_tier = config_result.get("proxy_tier")
@@ -10455,11 +10780,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         )
                         recovery_message = (
                             f"Recovered by selecting {config_key}; {verified_phrase}"
-                            + (
-                                f"; blocked resource cleared ({blocked_resource_url})"
-                                if blocked_resource_url
-                                else ""
-                            )
+                            + (f"; blocked resource cleared ({blocked_resource_url})" if blocked_resource_url else "")
                             + f"; {auth_cookie_note}."
                         )
                     else:
@@ -10468,14 +10789,10 @@ async def _spawn_browser_agent_activity_v3_real(
                             if auth_cookies_are_preserved
                             else "fresh-cookie recovery was allowed (auth cookies not required)"
                         )
-                        recovery_message = (
-                            "Recovered by removing a proven non-auth cookie subset; "
-                            f"{auth_cookie_note}."
-                        )
+                        recovery_message = f"Recovered by removing a proven non-auth cookie subset; {auth_cookie_note}."
                     if current_url:
                         recovery_message = (
-                            f"{recovery_message} Current page URL: {current_url}. "
-                            "Continue the task on this page."
+                            f"{recovery_message} Current page URL: {current_url}. Continue the task on this page."
                         )
                     await _save_browser_action_message(
                         agent_id=agent_id,
@@ -10533,12 +10850,8 @@ async def _spawn_browser_agent_activity_v3_real(
                             classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
                             c_in,
                             c_out,
-                            cache_read_input_tokens=int(
-                                classifier_usage.get("cache_read_input_tokens") or 0
-                            ),
-                            cache_creation_input_tokens=int(
-                                classifier_usage.get("cache_creation_input_tokens") or 0
-                            ),
+                            cache_read_input_tokens=int(classifier_usage.get("cache_read_input_tokens") or 0),
+                            cache_creation_input_tokens=int(classifier_usage.get("cache_creation_input_tokens") or 0),
                             from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
                             cache_sequence_id=classifier_usage.get("cache_sequence_id"),
                         )
@@ -10602,7 +10915,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
 
                     if hasattr(dom_service, "model_visible_value"):
-                        verifier_context = _model_visible_browser_verifier_context(verifier_context, dom_service, verifier_browser_state)
+                        verifier_context = _model_visible_browser_verifier_context(
+                            verifier_context, dom_service, verifier_browser_state
+                        )
 
                     remote_session_schema = transform_schema_for_remote_session(
                         _model_visible_browser_output_schema(response_schema, _redact_activity_value)
@@ -10689,10 +11004,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         tool_call_id=verifier_call_id,
                     )
                     await sync_user_instructions(require_current_schema=True)
-                    if (
-                        verification_instruction_count != len(user_instruction_messages)
-                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
-                    ):
+                    if verification_instruction_count != len(user_instruction_messages) or int(
+                        instruction_state.get("schema_user_instruction_count") or 0
+                    ) < len(user_instruction_messages):
                         continue
 
                     if progress_result.get("structured_response") is not None:
@@ -10708,9 +11022,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         execution_time_ms = (safe_time() - start_time) * 1000
                         # A passing verifier call may omit the output it already
                         # produced on an earlier call; keep that cached response.
-                        structured_response = (
-                            progress_result.get("structured_response") or latest_structured_response
-                        )
+                        structured_response = progress_result.get("structured_response") or latest_structured_response
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(
@@ -10818,21 +11130,23 @@ async def _spawn_browser_agent_activity_v3_real(
                             message=context_message,
                         )
 
-                        return _visible_activity_result({
-                            "status": "completed",
-                            "success": True,
-                            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
-                            "message": context_message,
-                            "browser_url": browser_url,
-                            "task_id": task_id,
-                            "usage_items": usage_items,
-                            "execution_time_ms": execution_time_ms,
-                            "auth_assistance_resume_mode": auth_assistance_resume_mode,
-                            "session_id": session_id,
-                            "structured_response": structured_response,
-                            "browser_output_schema": response_schema,
-                            "output_files": output_files,
-                        })
+                        return _visible_activity_result(
+                            {
+                                "status": "completed",
+                                "success": True,
+                                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+                                "message": context_message,
+                                "browser_url": browser_url,
+                                "task_id": task_id,
+                                "usage_items": usage_items,
+                                "execution_time_ms": execution_time_ms,
+                                "auth_assistance_resume_mode": auth_assistance_resume_mode,
+                                "session_id": session_id,
+                                "structured_response": structured_response,
+                                "browser_output_schema": response_schema,
+                                "output_files": output_files,
+                            }
+                        )
 
                     verifier_feedback_thinking = f"""I just checked in with verifier for the task and it said:
 <verifier_response>
@@ -10881,9 +11195,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service,
                         include_screenshot=True,
                     )
-                    current_screenshot = (
-                        current_state.get("screenshot") if current_state else None
-                    )
+                    current_screenshot = current_state.get("screenshot") if current_state else None
 
                     rejection_result = {
                         "success": False,
@@ -11012,33 +11324,33 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.annotate(action=action_name)
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
             action_task = asyncio.create_task(
-                    _execute_action(
-                        dom_service,
-                        action_history,
-                        unified_action,
-                        available_file_paths,
-                        session_id=session_id,
-                        config=config,
-                        humanizer=humanizer,
-                        secret_refs=secret_refs,
-                        password_origins=password_origins,
-                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                        browser_task_id=task_id,
-                        tool_call_id_decision=str(llm_result.get("tool_call_id") or ""),
-                        phone_snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
-                        current_url=current_url,
-                        trusted_page_urls=visited_urls,
-                        write_lock_enabled=write_lock_enabled,
-                        write_lock_approvals=write_lock_approvals,
-                        system_name=system_name,
-                        browser_network_recorder=browser_network_recorder,
-                        current_auth_realm=auth_realm,
-                        prepare_credentials_for_url=_prepare_credentials_for_url,
-                        prefetched_browser_state=prefetched_browser_state,
-                        auth_context_for_url=_auth_context_for_url,
-                    )
+                _execute_action(
+                    dom_service,
+                    action_history,
+                    unified_action,
+                    available_file_paths,
+                    session_id=session_id,
+                    config=config,
+                    humanizer=humanizer,
+                    secret_refs=secret_refs,
+                    password_origins=password_origins,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    browser_task_id=task_id,
+                    tool_call_id_decision=str(llm_result.get("tool_call_id") or ""),
+                    phone_snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
+                    current_url=current_url,
+                    trusted_page_urls=visited_urls,
+                    write_lock_enabled=write_lock_enabled,
+                    write_lock_approvals=write_lock_approvals,
+                    system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
+                    current_auth_realm=auth_realm,
+                    prepare_credentials_for_url=_prepare_credentials_for_url,
+                    prefetched_browser_state=prefetched_browser_state,
+                    auth_context_for_url=_auth_context_for_url,
+                )
             )
             try:
                 if action_name == "phone":
@@ -11063,7 +11375,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 action_timeout_seconds = (
                     timeout_error.timeout_seconds
                     if isinstance(timeout_error, BrowserEvaluateDeadlineExceeded)
-                    else BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS if action_task.cancelled() else None
+                    else BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS
+                    if action_task.cancelled()
+                    else None
                 )
                 timeout_description = (
                     f"after {action_timeout_seconds:g}s"
@@ -11163,8 +11477,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "error": (
                         f"Browser action '{action_name}' timed out {timeout_description}; "
                         + (
-                            "hard renderer recovery ran after CDP classified "
-                            "renderer_main_thread_blocked."
+                            "hard renderer recovery ran after CDP classified renderer_main_thread_blocked."
                             if renderer_frozen
                             else "generic browser supervisor recovery ran."
                         )
@@ -11201,9 +11514,11 @@ Based on this feedback, I need to continue working on the task and address the i
                 }
             step_timer.mark("execute_action")
             # Retain only the validated producer source privately; history/forks use the safe view.
-            payment_operational_source = getattr(result, "operational_source", None) if (
-                getattr(result, "operational_field", None) == "payment_request"
-            ) else None
+            payment_operational_source = (
+                getattr(result, "operational_source", None)
+                if (getattr(result, "operational_field", None) == "payment_request")
+                else None
+            )
             # Nothing a tool read back from the page may carry a secret the tool typed.
             result = (
                 dom_service.model_visible_action_result(action_name, result)
@@ -11396,20 +11711,27 @@ Based on this feedback, I need to continue working on the task and address the i
                     "task_id": task_id,
                     "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                    **(await persist_resume_context(
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_pause_continuity_state({
-                            "write_lock_notification": write_lock_notification,
-                            "pending_action_target": llm_result.get("_fast_cache_browser_target"),
-                        }),
-                    )),
+                    **(
+                        await persist_resume_context(
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                            state=_pause_continuity_state(
+                                {
+                                    "write_lock_notification": write_lock_notification,
+                                    "pending_action_target": llm_result.get("_fast_cache_browser_target"),
+                                }
+                            ),
+                        )
+                    ),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result, operational_sources={
-                    "write_lock_notification": notification_operational_source,
-                })
+                resume_result = _visible_activity_result(
+                    resume_result,
+                    operational_sources={
+                        "write_lock_notification": notification_operational_source,
+                    },
+                )
                 return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -11491,7 +11813,9 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service=dom_service,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
-                    payment_notification_operational_source = getattr(payment_notification_result, "operational_source", None)
+                    payment_notification_operational_source = getattr(
+                        payment_notification_result, "operational_source", None
+                    )
                     payment_write_lock_notification_usage = {
                         "usage": payment_notification_result.get("usage", {}),
                         "actual_model": payment_notification_result.get("actual_model"),
@@ -11538,21 +11862,28 @@ Based on this feedback, I need to continue working on the task and address the i
                     "task_id": task_id,
                     "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                    **(await persist_resume_context(
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_pause_continuity_state({
-                            "payment_request": payment_request,
-                            "write_lock_notification": payment_write_lock_notification,
-                        }),
-                    )),
+                    **(
+                        await persist_resume_context(
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                            state=_pause_continuity_state(
+                                {
+                                    "payment_request": payment_request,
+                                    "write_lock_notification": payment_write_lock_notification,
+                                }
+                            ),
+                        )
+                    ),
                 }
                 browser_task_paused_for_resume = True
-                resume_result = _visible_activity_result(resume_result, operational_sources={
-                    "payment_request": payment_operational_source,
-                    "write_lock_notification": payment_notification_operational_source,
-                })
+                resume_result = _visible_activity_result(
+                    resume_result,
+                    operational_sources={
+                        "payment_request": payment_operational_source,
+                        "write_lock_notification": payment_notification_operational_source,
+                    },
+                )
                 return resume_result
 
             if result.get("success", True):
@@ -11658,21 +11989,18 @@ Based on this feedback, I need to continue working on the task and address the i
             # form fills miss Submit (065aee2c / browser-biometrics-webdecoy).
             # Cap consecutive refunds so a stuck model still terminates.
             prior_iteration = iteration
-            iteration, consecutive_budget_free, consecutive_keystroke_free = (
-                adjust_iteration_after_action(
-                    iteration=iteration,
-                    action_name=action_name,
-                    consecutive_budget_free=consecutive_budget_free,
-                    action_params=unified_action.get("params") or {},
-                    consecutive_keystroke_free=consecutive_keystroke_free,
-                )
+            iteration, consecutive_budget_free, consecutive_keystroke_free = adjust_iteration_after_action(
+                iteration=iteration,
+                action_name=action_name,
+                consecutive_budget_free=consecutive_budget_free,
+                action_params=unified_action.get("params") or {},
+                consecutive_keystroke_free=consecutive_keystroke_free,
             )
             if iteration != prior_iteration:
                 logger.info(
                     (
                         "Observation action did not consume step budget"
-                        if str(action_name or "").strip().lower()
-                        == "read_browser_state"
+                        if str(action_name or "").strip().lower() == "read_browser_state"
                         else "Keystroke continuation did not consume step budget"
                     ),
                     action=action_name,
@@ -11710,13 +12038,13 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service.get_browser_state(include_screenshot=True),
                         timeout=10,
                     )
-                    current_url = _private_browser_runtime_url(dom_service, final_browser_state.get("url") or current_url)
+                    current_url = _private_browser_runtime_url(
+                        dom_service, final_browser_state.get("url") or current_url
+                    )
                 except Exception:
                     # Last-known loop observation — prefer a stale-but-real page
                     # over skipping synthesis entirely when the refresh freezes.
-                    final_browser_state = (
-                        observe_page_state if isinstance(observe_page_state, dict) else {}
-                    )
+                    final_browser_state = observe_page_state if isinstance(observe_page_state, dict) else {}
                 if not final_browser_state:
                     raise RuntimeError("no browser_state available for final verifier pass")
                 final_verifier_context = await build_browser_verifier_context(
@@ -11730,7 +12058,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_checkpoints=verifier_checkpoints,
                 )
                 if hasattr(dom_service, "model_visible_value"):
-                    final_verifier_context = _model_visible_browser_verifier_context(final_verifier_context, dom_service, final_browser_state)
+                    final_verifier_context = _model_visible_browser_verifier_context(
+                        final_verifier_context, dom_service, final_browser_state
+                    )
                 final_remote_schema = transform_schema_for_remote_session(
                     _model_visible_browser_output_schema(response_schema, _redact_activity_value)
                 )
@@ -11790,7 +12120,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 await sync_user_instructions(require_current_schema=True)
                 if (
                     verification_instruction_count == len(user_instruction_messages)
-                    and int(instruction_state.get("schema_user_instruction_count") or 0) >= len(user_instruction_messages)
+                    and int(instruction_state.get("schema_user_instruction_count") or 0)
+                    >= len(user_instruction_messages)
                     and final_progress.get("structured_response") is not None
                 ):
                     latest_structured_response = final_progress["structured_response"]
@@ -11862,18 +12193,20 @@ Based on this feedback, I need to continue working on the task and address the i
             visited_urls=visited_urls,
         )
 
-        return _visible_activity_result({
-            "status": "max_iterations",
-            "success": False,
-            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
-            "message": context_message,
-            "browser_url": browser_url,
-            "usage_items": usage_items,
-            "execution_time_ms": execution_time_ms,
-            "structured_response": latest_structured_response,
-            "best_effort_response": best_effort_response,
-            "browser_output_schema": response_schema,
-        })
+        return _visible_activity_result(
+            {
+                "status": "max_iterations",
+                "success": False,
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+                "message": context_message,
+                "browser_url": browser_url,
+                "usage_items": usage_items,
+                "execution_time_ms": execution_time_ms,
+                "structured_response": latest_structured_response,
+                "best_effort_response": best_effort_response,
+                "browser_output_schema": response_schema,
+            }
+        )
 
     except asyncio.CancelledError as cancellation:
         logger.info("\U0001f534 Browser agent activity cancelled (paused)")
@@ -12000,7 +12333,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     output_schema=response_schema,
                     extra_metadata={
                         **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
-                        "browser_error_type": e.original_error_type if isinstance(e, BrowserInstructionUnavailableError) else type(e).__name__,
+                        "browser_error_type": e.original_error_type
+                        if isinstance(e, BrowserInstructionUnavailableError)
+                        else type(e).__name__,
                         "browser_error_message": extract_error_message(e),
                         "browser_error_context": error_context,
                         "browser_last_action": last_action,
@@ -12028,20 +12363,31 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if isinstance(e, BrowserInstructionUnavailableError):
             execution_time_ms = (safe_time() - start_time) * 1000
-            return _visible_activity_result({
-                "status": "failed", "success": False, "error": True,
-                "message": error_message, "task_id": task_id, "session_id": session_id,
-                "browser_error_type": e.original_error_type,
-                "browser_error_message": extract_error_message(e),
-                "browser_output_schema": response_schema, "structured_response": None,
-                "usage_items": build_usage_items(
-                    total_input_tokens, total_output_tokens, model_pricing,
-                    execution_time_ms, usage_by_model, pricing_pool=browser_pool,
-                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
-                    provider=browser_session_metadata.get("provider"),
-                ),
-                "execution_time_ms": execution_time_ms,
-            })
+            return _visible_activity_result(
+                {
+                    "status": "failed",
+                    "success": False,
+                    "error": True,
+                    "message": error_message,
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "browser_error_type": e.original_error_type,
+                    "browser_error_message": extract_error_message(e),
+                    "browser_output_schema": response_schema,
+                    "structured_response": None,
+                    "usage_items": build_usage_items(
+                        total_input_tokens,
+                        total_output_tokens,
+                        model_pricing,
+                        execution_time_ms,
+                        usage_by_model,
+                        pricing_pool=browser_pool,
+                        fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                        provider=browser_session_metadata.get("provider"),
+                    ),
+                    "execution_time_ms": execution_time_ms,
+                }
+            )
         safe_error = _redact_browser_activity_error(e, _redact_activity_value)
         if safe_error is e:
             raise
@@ -12220,8 +12566,7 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
 
 def _browser_resume_was_paused(workflow_instance: Any, pause_sequence: Optional[int] = None) -> bool:
     return workflow_instance.is_paused or (
-        pause_sequence is not None
-        and getattr(workflow_instance, "_pause_signal_sequence", 0) != pause_sequence
+        pause_sequence is not None and getattr(workflow_instance, "_pause_signal_sequence", 0) != pause_sequence
     )
 
 
@@ -12287,6 +12632,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")
         requested_attachments = tool_call.get("attachments")
+        # Agent-to-agent inbox address (set by spawn_agent; absent for direct calls).
+        inbox_address = tool_call.get("inbox_address") or None
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
@@ -12470,6 +12817,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
+                    if inbox_address or serialized:
+                        activity_args.append(inbox_address)
                     if serialized:
                         activity_args.append(True)
                     async with span(
@@ -12507,13 +12856,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
                         try:
                             await workflow.wait_condition(
-                                lambda handle=activity_handle: handle.done() or workflow_instance.is_paused
+                                lambda handle=activity_handle: (
+                                    handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                                )
                             )
                         except asyncio.CancelledError:
                             if serialized:
                                 await cancel_and_join_browser_activity(activity_handle)
                             raise
-                        if workflow_instance.is_paused and not activity_handle.done():
+                        # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
+                        if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
                             activity_handle.cancel()
                             was_cancelled = True
@@ -12631,15 +12983,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         # Prefer merchant checkout URL over Kernel live-view current_url
                         # so a write-lock approval after payment does not re-key the
                         # domain to *.kernel.sh / *.onkernel.com.
-                        grant_url = (
-                            resolve_site_write_lock_grant_url(
-                                {
-                                    **(result if isinstance(result, dict) else {}),
-                                    "start_url": current_start_url or start_url,
-                                }
-                            )
-                            or result.get("current_url", "")
-                        )
+                        grant_url = resolve_site_write_lock_grant_url(
+                            {
+                                **(result if isinstance(result, dict) else {}),
+                                "start_url": current_start_url or start_url,
+                            }
+                        ) or result.get("current_url", "")
                         # Purchase grants unlock the merchant for this activity
                         # (same helper as payment-card). Typed-only 120s expiry
                         # re-prompted Amazon Buy Now after auth/address friction
@@ -12802,9 +13151,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "toolApproval": True,
                             "writePermission": True,
                             "browserTaskId": result.get("task_id") or known_task_id,
-                            "url": result.get("current_url", "")
-                            or current_start_url
-                            or start_url,
+                            "url": result.get("current_url", "") or current_start_url or start_url,
                             "requestPaymentCard": payment_payload,
                             "writeLockNotification": result.get("write_lock_notification"),
                             "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
@@ -12858,9 +13205,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 task_id=result.get("task_id"),
                                 retry_seconds=retry_seconds,
                             )
-                            await sleep_or_generation_handoff(
-                                workflow_instance, retry_seconds, workflow_mod=workflow
-                            )
+                            await sleep_or_generation_handoff(workflow_instance, retry_seconds, workflow_mod=workflow)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -12954,9 +13299,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
                                 "attention_request_id"
                             ),
-                            "previousPaymentApprovalAttentionRequestId": approval_response.get(
-                                "attention_request_id"
-                            ),
+                            "previousPaymentApprovalAttentionRequestId": approval_response.get("attention_request_id"),
                         }
                         if waited_for_agentcard_setup:
                             setup_metadata.update(
@@ -12987,9 +13330,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             if agentcard_status_result.get("connected"):
                                 break
-                            await sleep_or_generation_handoff(
-                                workflow_instance, 5, workflow_mod=workflow
-                            )
+                            await sleep_or_generation_handoff(workflow_instance, 5, workflow_mod=workflow)
 
                         if not agentcard_status_result.get("connected"):
                             logger.info(
@@ -13059,10 +13400,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             limit_text = f" of ${dollars:.2f} ({limit} cents)"
                         else:
                             limit_text = ""
-                        message = str(
-                            card.get("error")
-                            or f"Purchase is above max limit{limit_text}."
-                        )
+                        message = str(card.get("error") or f"Purchase is above max limit{limit_text}.")
                         # action_type must be a FE-terminal browser action
                         # (task_complete / session_paused / write_lock_rejected)
                         # or the live browser chip stays open after we return.
@@ -13235,9 +13573,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         agent_id=workflow_instance.agent_id,
                         task_id=result.get("task_id"),
                         grant_url=grant_url,
-                        unlock_domain=(current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}).get(
-                            "domain"
-                        ),
+                        unlock_domain=(current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}).get("domain"),
                         current_url=result.get("current_url"),
                     )
 
@@ -13463,9 +13799,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             # A user declining sign-in help is a clean end, not a tool error: the
             # parent reports it instead of respawning the browser.
             user_declined_auth = bool(result.get("user_declined_auth"))
-            final_status = (
-                MessageStatus.FINISHED if verified_completion or user_declined_auth else MessageStatus.ERROR
-            )
+            final_status = MessageStatus.FINISHED if verified_completion or user_declined_auth else MessageStatus.ERROR
             # Declare terminality explicitly. The front-end must never have to
             # infer "this browser task is over" from a missing action_type — a
             # workflow-scope progress event would look identical.

@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -16,6 +16,7 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
+    EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
@@ -36,6 +37,7 @@ from domains.spawn_agent.repo import (
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
+from helpers.agent_addressing import task_name_error
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -143,7 +145,7 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
                 details["url"] = value["url"]
             detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
-    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code"}:
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code", "list_agents"}:
         return value
     return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
 
@@ -230,11 +232,7 @@ def compile_explore_wrap_up(
 
 def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
     """Keep bounded, original grep results beside an explore agent's summary."""
-    grep_results = [
-        str(item).strip()
-        for item in tool_call_results
-        if str(item).lstrip().startswith("[grep]")
-    ]
+    grep_results = [str(item).strip() for item in tool_call_results if str(item).lstrip().startswith("[grep]")]
     return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
 
 
@@ -247,6 +245,12 @@ _SOURCE_GOAL_TERMS = {
     "transactions": ("transaction", "transactions", "plaid", "bank"),
     "documents": ("document", "documents", "file", "files", "notes"),
 }
+
+
+# Tree navigation, not research: a successful listing never satisfies the
+# completion guard, whose rejection names the evidence tools. The listing still
+# stays a readable trace in tool_call_results (wait_for's judge reads them).
+_NON_EVIDENCE_EXPLORE_TOOLS = frozenset({"list_agents"})
 
 
 def _has_usable_tool_evidence(value: Any) -> bool:
@@ -368,6 +372,14 @@ def validate_spawn_params(tool_call: dict) -> None:
             "Explore agents return free-form research summaries."
         )
 
+    # task_name is required of the model by the SpawnAgentTool schema (validated
+    # before dispatch); internal callers (DAG, for_each items) fill it. Here a
+    # supplied name must be a valid slug.
+    if tool_call.get("task_name") is not None:
+        task_name_problem = task_name_error(tool_call.get("task_name"))
+        if task_name_problem:
+            raise ValueError(task_name_problem)
+
 
 def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
     """Resolve public start_phase names to internal phase names."""
@@ -448,15 +460,31 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
     insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
     any later replay that re-materializes items from cached JSON.
     """
-    item_text = (
-        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
-    )
+    item_text = json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 
 # =============================================================================
 # EXPLORE AGENT ACTIVITY
 # =============================================================================
+
+
+# A message can only target an explore task after its spawn posted the address,
+# which precedes the activity's schedule time; the margin absorbs clock skew.
+EXPLORE_INBOX_SINCE_MARGIN_SECONDS = 60
+
+
+def _explore_inbox_since_floor() -> Optional[str]:
+    """Initial inbox cursor: the activity's schedule time minus a margin (None outside an activity)."""
+    try:
+        scheduled = activity.info().scheduled_time
+    except Exception:
+        return None
+    if not isinstance(scheduled, datetime):
+        return None
+    if scheduled.tzinfo is None:
+        scheduled = scheduled.replace(tzinfo=timezone.utc)
+    return (scheduled - timedelta(seconds=EXPLORE_INBOX_SINCE_MARGIN_SECONDS)).isoformat()
 
 
 @activity.defn
@@ -480,23 +508,29 @@ async def spawn_explore_agent_activity(
     world_model_mode: str = "real",
     local_data_summary: str = "",
     oai_demo: Optional[bool] = None,
+    inbox_address: Optional[str] = None,
+    task_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
     Uses run_agent with is_inside_temporal_activity=True and read-only tools
-    (web_search, web_fetch, grep, attempt_completion_with_result).
+    (web_search, web_fetch, grep, list_agents, attempt_completion_with_result).
+    ``task_name`` names this explore task under its owner (``<owner path>/<task_name>``,
+    the list_agents YOU ARE HERE node).
 
     Returns:
         Dict with status, accumulated_usage, tokens_in, tokens_out
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
+    from helpers.agent_inbox import AgentInbox, agent_message_metadata
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
     from providers.fast_cache.client import resolve_agent_fast_mode
     from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
     from tools.inspect_code import InspectCodeManager
+    from tools.list_agents import explore_list_agents
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
     from tools.web_search import WebSearchManager
@@ -722,6 +756,30 @@ async def spawn_explore_agent_activity(
     async def explore_system_prompt():
         return system_prompt
 
+    # Agent-to-agent messages addressed to this explore task (the spawning tool
+    # call id). The parent owns the inbox rows; explore shares its agent_id.
+    # Read piggybacks on the per-step progress post (helpers/agent_inbox.py);
+    # the cursor starts at the activity's schedule time so the backend read
+    # stays a bounded (agentId, timestamp > since) range.
+    agent_inbox = AgentInbox.create(agent_id, inbox_address, {"since": _explore_inbox_since_floor()})
+
+    async def explore_poll_inbox() -> List[Dict[str, Any]]:
+        if agent_inbox is None:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for message in await agent_inbox.next_step_messages():
+            # Stored like a backend agent-message row: raw payload + metadata;
+            # build_llm_messages renders it as an inter-agent (assistant) message.
+            rows.append(
+                {
+                    "role": "USER",
+                    "text": str(message.get("text") or ""),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "metadata": {**agent_message_metadata(message), "inboxAddress": inbox_address},
+                }
+            )
+        return rows
+
     async def explore_verifier_prompt():
         return "Verify the research is complete and the summary addresses the original goal."
 
@@ -798,12 +856,8 @@ async def spawn_explore_agent_activity(
                     if (
                         source
                         and normalized
-                        and _unavailable_source_is_required(
-                            source, goal, tool_args.get("require_source_access")
-                        )
-                        and not any(
-                            u.get("source") == source for u in unavailable_sources_collected
-                        )
+                        and _unavailable_source_is_required(source, goal, tool_args.get("require_source_access"))
+                        and not any(u.get("source") == source for u in unavailable_sources_collected)
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "inspect_code":
@@ -816,6 +870,19 @@ async def spawn_explore_agent_activity(
             )
             if result.get("error"):
                 return {"error": True, "message": str(result["error"])}
+        elif tool_name == "list_agents":
+            result = await explore_list_agents(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                owner_agent_id=agent_id,
+                user_id=user_id,
+                explore_task_id=inbox_address or task_id,
+                explore_task_name=task_name,
+                explore_goal=goal,
+            )
+            if result.get("error"):
+                return result
         elif tool_name == "api_request":
             from utils.kill_switches import api_request_disabled
 
@@ -844,9 +911,7 @@ async def spawn_explore_agent_activity(
 
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():
-                    evidence_tools = (
-                        "web_search, people_search, web_fetch, grep, or api_request"
-                    )
+                    evidence_tools = "web_search, people_search, web_fetch, grep, or api_request"
                 return {
                     "error": True,
                     "message": (
@@ -854,6 +919,8 @@ async def spawn_explore_agent_activity(
                         f"Call {evidence_tools} successfully before completing."
                     ),
                 }
+            if agent_inbox is not None and await agent_inbox.unread_before_finish():
+                return {"error": True, "message": EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE}
             return {"success": True, "message": "Completion accepted"}
         else:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
@@ -869,7 +936,7 @@ async def spawn_explore_agent_activity(
         if failure:
             return {"error": True, "message": failure}
 
-        if _has_usable_tool_evidence(actual_result):
+        if tool_name not in _NON_EVIDENCE_EXPLORE_TOOLS and _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
         result_str = _render_explore_tool_result(tool_name, actual_result)
 
@@ -901,20 +968,23 @@ async def spawn_explore_agent_activity(
         ):
             # Same chain as the tool managers' posts: both writers can target one
             # toolCallId, so both must respect that chip's ordering invariant.
-            _dispatch_fe_post(
-                tool_call_id,
-                lambda: (
-                    save_explore_message(
-                        agent_id=agent_id,
-                        title=title,
-                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                        status=message_status,
-                        task_id=task_id,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                    )
-                ),
-            )
+            async def _post_and_stash_inbox() -> None:
+                # Fire-and-forget like every FE post; its piggybacked inbox read
+                # is delivered at the next step.
+                pending = await save_explore_message(
+                    agent_id=agent_id,
+                    title=title,
+                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                    status=message_status,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                )
+                if agent_inbox is not None:
+                    agent_inbox.stash(pending)
+
+            _dispatch_fe_post(tool_call_id, _post_and_stash_inbox)
         await _maybe_drain_pending_fe_posts()
 
     # Build initial context with goal + any resolved attachment content.
@@ -943,13 +1013,11 @@ async def spawn_explore_agent_activity(
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
         initial_user_text = (
-            initial_user_text
-            + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
+            initial_user_text + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
             "use these directly and use grep only for missing message-level details). "
             "A thread label is a valid contact identifier. If it contains only a phone number, "
             "report that identifier exactly; do not guess or use unrelated web, email, or document "
-            "searches to invent a person's identity. Search only sources relevant to the goal:\n"
-            + local_data_summary
+            "searches to invent a person's identity. Search only sources relevant to the goal:\n" + local_data_summary
         )
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
@@ -974,6 +1042,7 @@ async def spawn_explore_agent_activity(
                 is_inside_temporal_activity=True,
                 execute_tool=explore_execute_tool,
                 post_message=explore_post_message,
+                poll_inbox=explore_poll_inbox if agent_inbox is not None else None,
                 max_iterations=resolved_max_iterations,
                 winddown_window=EXPLORE_WINDDOWN_WINDOW,
                 max_context_tokens=max_context_tokens,
@@ -1003,8 +1072,7 @@ async def spawn_explore_agent_activity(
                     # The parent waits this depth's whole activity timeout
                     # (quick/medium 600s, deep 1800s); wrap up just inside it.
                     async with asyncio.timeout(
-                        explore_limits_for_depth(effective_depth)[1].total_seconds()
-                        - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                        explore_limits_for_depth(effective_depth)[1].total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
                     ) as deadline:
                         result = await run_agent_coro
                 except asyncio.TimeoutError:
@@ -1028,9 +1096,7 @@ async def spawn_explore_agent_activity(
         # shielded posts must finish before a final drain or activity return.
         drain_error: BaseException | None = None
         if _inflight_fe_drains:
-            results = await asyncio.shield(
-                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
-            )
+            results = await asyncio.shield(asyncio.gather(*_inflight_fe_drains, return_exceptions=True))
             drain_error = next((item for item in results if isinstance(item, BaseException)), None)
         # Flush posts queued after the last threshold drain as well.
         try:

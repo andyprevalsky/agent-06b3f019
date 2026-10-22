@@ -202,7 +202,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         self.commands = []
         self.pointer = {"taskQueue": "navi-agent-tasks@old", "surfaceHash": "old"}
 
-    def command(self, script, *args):
+    def command(self, script, *args, timeout=60):
         self.commands.append((script, args))
         if "--read" in args:
             return json.dumps(self.pointer)
@@ -544,7 +544,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
 
         original_command = self.command
 
-        def command(script, *args):
+        def command(script, *args, **_kwargs):
             if script == "retire-agent-queue.ts" and "--retire" in args:
                 raise cutover.subprocess.CalledProcessError(1, [script, *args])
             return original_command(script, *args)
@@ -760,7 +760,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         ledger, native = Ledger(), Native()
         flipped = False
 
-        def command(script, *args):
+        def command(script, *args, **_kwargs):
             nonlocal flipped
             if script == "set-agent-queue-pointer.ts" and "--expected-current-queue" in args:
                 self.pointer = {
@@ -782,6 +782,41 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         self.assertEqual(result["stage"], "SUCCEEDED")
         self.assertEqual(native.prepared, prepared)
         self.assertEqual(self.pointer["taskQueue"], cutover.deployment_queue(ledger.job["identity"], ledger.job_id))
+
+    def test_draining_broadcasts_generation_handoff_from_the_prior_queue_once_per_stage_entry(self):
+        ledger, native = Ledger(), Native(managed=True)
+        result = self.run_job(ledger, native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        live = cutover.deployment_queue(ledger.job["identity"], ledger.job_id)
+        broadcasts = [args for name, args in self.commands if name == "broadcast-generation-handoff.ts"]
+        self.assertEqual(
+            broadcasts,
+            [("--from-queue", "navi-agent-tasks@old", "--live-queue", live, "--deadline-ms", "120000")],
+        )
+        names = [name for name, _ in self.commands]
+        flip = next(
+            i for i, (name, args) in enumerate(self.commands)
+            if name == "set-agent-queue-pointer.ts" and "--expected-current-queue" in args
+        )
+        self.assertLess(flip, names.index("broadcast-generation-handoff.ts"), "broadcast must follow the flip")
+        self.assertLess(names.index("broadcast-generation-handoff.ts"), names.index("retire-agent-queue.ts"))
+
+    def test_failed_generation_handoff_broadcast_never_blocks_the_deploy(self):
+        ledger, native = Ledger(), Native(managed=True)
+
+        def command(script, *args, timeout=60):
+            if script == "broadcast-generation-handoff.ts":
+                self.commands.append((script, args))
+                raise cutover.subprocess.CalledProcessError(1, script)
+            return self.command(script, *args)
+
+        with (
+            patch.object(cutover, "backend_command", command),
+            patch.object(cutover.subprocess, "run", side_effect=AssertionError("Unexpected unmocked subprocess")),
+        ):
+            result = cutover.run(ledger, lambda identity, owner: native)
+        self.assertEqual(result["stage"], "SUCCEEDED")
+        self.assertEqual(native.retired, [f"{99:014x}"])
 
     def test_managed_old_bank_is_certified_before_any_stop_or_release(self):
         ledger, native = Ledger(), Native(managed=True)
@@ -924,7 +959,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
                 },
             )
 
-            def command(script, *args):
+            def command(script, *args, **_kwargs):
                 if failure == "pointer" and "--read" in args:
                     return json.dumps({"taskQueue": "foreign", "surfaceHash": "foreign"})
                 if failure == "certificate" and "--retire" in args:

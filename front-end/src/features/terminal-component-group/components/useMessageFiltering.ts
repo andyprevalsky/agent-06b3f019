@@ -27,6 +27,8 @@ import {
 } from '../hooks';
 import type { ExploreStep, WaitForCheck } from '../types';
 
+import { isAgentNotificationMetadata } from '@/lib/realtime-types';
+import { isEnvironmentContextRow } from './environmentContext';
 import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 import { normalizeWMHCodeMessage } from './wmhCodeMessage';
 import { isCodeAgentUserFacingRow } from '../hooks/codeAgentContract';
@@ -101,7 +103,14 @@ export function useFilteredMessages(
     );
     const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
     const withoutHidden = withoutSystem
-      .filter((m) => !m.metadata?.hidden)
+      .filter(
+        (m) =>
+          !m.metadata?.hidden &&
+          !isEnvironmentContextRow(m) &&
+          // Child completions stay in model context and feed the dock, but the
+          // spawn UI already shows each child's final state: no transcript row.
+          !isAgentNotificationMetadata(m.metadata),
+      )
       .map(sanitizeTrajectoryMessage);
     const [filteredMessagesRaw, exploreStepMap, waitForCheckMap] =
       deduplicateToolMessages(withoutHidden);

@@ -128,6 +128,17 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
+from benchmarks.tree_feedback_routing import (
+    TREE_ROUTING_CHECK_TYPES,
+    background_routing_trace,
+    background_trigger_ready,
+    check_tree_feedback_routing,
+    routing_trace,
+    tree_snapshot,
+    tree_trigger_ready,
+    trigger_uses_background_task,
+    trigger_uses_tree,
+)
 from benchmarks.world_model_harness import (
     archive_artifact_paths,
     evaluate_archive_with_world_model,
@@ -3221,6 +3232,7 @@ async def _get_settled_tool_usage(
     base_url: str,
     agent_id: str,
     *,
+    minimum_cost_cents: float = 0.0,
     max_attempts: int = 10,
     retry_delay_seconds: float = 2,
     fetch_usage: Callable[[str, str], Awaitable[dict]] = get_tool_usage,
@@ -3234,13 +3246,17 @@ async def _get_settled_tool_usage(
     ``_get_initial_payment_lifecycle_with_retry`` — until the LLM call count stops growing
     and covers every agent in the tree (each agent makes at least one LLM call, and
     ``agent_count`` is derived from the busId tree rather than from the usage rows, so it is
-    an independent completeness signal).
+    an independent completeness signal). A cost-limited root can still have enough
+    early zero-cost calls to pass that count; require the terminal agent's known cost
+    floor as well, and wait for both call count and cost to stabilize.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     best: Optional[dict] = None
     best_calls = -1
+    best_cost = -1.0
     previous_calls: Optional[int] = None
+    previous_cost: Optional[float] = None
     last_error: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         if attempt > 1:
@@ -3252,17 +3268,23 @@ async def _get_settled_tool_usage(
             print(f"    ⚠ Transient tree tool-usage read failed ({attempt}/{max_attempts}): {error}")
             continue
         calls = _as_nonnegative_int(usage.get("llm_call_count"))
-        if calls > best_calls:
-            best, best_calls = usage, calls
+        try:
+            cost = max(0.0, float(usage.get("total_cost_cents") or 0))
+        except (TypeError, ValueError):
+            cost = 0.0
+        if calls > best_calls or (calls == best_calls and cost > best_cost):
+            best, best_calls, best_cost = usage, calls, cost
         tree_covered = best_calls >= max(_as_nonnegative_int(usage.get("agent_count")), 1)
-        if previous_calls == calls and tree_covered:
+        if previous_calls == calls and previous_cost == cost and tree_covered and cost >= minimum_cost_cents:
             return best if best is not None else usage
         previous_calls = calls
+        previous_cost = cost
     if best is None:
         raise RuntimeError(f"Tree tool usage remained unavailable after {max_attempts} reads: {last_error}")
     print(
         f"    ⚠ Tree tool usage never settled after {max_attempts} reads "
-        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))})"
+        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))}, "
+        f"cost_cents={best_cost}, minimum_cost_cents={minimum_cost_cents})"
     )
     return best
 
@@ -4649,7 +4671,7 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     Scan Fly.io streaming logs for infrastructure-level errors across all agents.
     Returns list of error descriptions.
     """
-    from benchmarks.logs import _fly_collector
+    from benchmarks.logs import _fly_collector, _is_remote_worker_log_placeholder
 
     if not _fly_collector:
         return []
@@ -4658,6 +4680,10 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     for aid in agent_ids:
         logs = _fly_collector.get_logs_for_agent(aid)
         for log_line in logs:
+            # Collector placeholders ("[fly.io] 0 logs ... (N total captured)")
+            # are not log content; their captured-line count can contain "429".
+            if _is_remote_worker_log_placeholder(log_line):
+                continue
             ll = log_line.lower()
             if any(
                 kw in ll
@@ -4829,6 +4855,7 @@ async def _poll_agent(
     payment_card_action_completed = False
     task._mid_run_feedback_posted = False
     task._mid_run_feedback_initial_schema = None
+    task._mid_run_feedback_evidence = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
@@ -5064,13 +5091,35 @@ async def _poll_agent(
         # Regression tasks can inject genuine USER feedback after the run has
         # produced durable work. Capture the already-generated schema first so
         # evaluation can prove non-goal feedback did not revise it.
+        # Three triggers (validated by tree_feedback_routing.validate_mid_run_feedback):
+        # a root-message boundary, `when.active_depth_at_least` = N active
+        # layers (root + descendants, every agent on the chain STARTING_UP/ACTIVE)
+        # read from the per-root tree endpoint on this poll's cadence until fired,
+        # or `when.background_task_active` = a running root explore/browser task
+        # derived from this poll's root rows (no extra request).
         feedback_config = task.mid_run_feedback or {}
         if feedback_config and not task._mid_run_feedback_posted and status not in TERMINAL_STATUSES:
-            after_message_count = int(feedback_config.get("after_root_message_count", 1))
             feedback_message = feedback_config.get("message")
             initial_schema = agent.get("response_schema")
+            trigger_ready = False
+            trigger_chain: list[dict] = []
+            trigger_tree: list[dict] = []
+            trigger_task: Optional[dict] = None
+            if trigger_uses_background_task(feedback_config):
+                trigger_ready, trigger_task = background_trigger_ready(feedback_config, messages)
+            elif trigger_uses_tree(feedback_config):
+                try:
+                    trigger_agents = await get_agent_tree(base_url, agent_id)
+                except httpx.HTTPError as tree_error:
+                    print(f"    ⚠ Mid-run feedback tree poll failed; will retry: {tree_error}")
+                    trigger_agents = []
+                trigger_ready, trigger_chain = tree_trigger_ready(feedback_config, trigger_agents, agent_id)
+                if trigger_ready:
+                    trigger_tree = tree_snapshot(trigger_agents, agent_id)
+            else:
+                trigger_ready = root_msg_count >= int(feedback_config.get("after_root_message_count", 1))
             if (
-                root_msg_count >= after_message_count
+                trigger_ready
                 and isinstance(feedback_message, str)
                 and feedback_message.strip()
                 and isinstance(initial_schema, dict)
@@ -5079,9 +5128,26 @@ async def _poll_agent(
                 if await post_message(base_url, agent_id, feedback_message):
                     task._mid_run_feedback_initial_schema = json.loads(json.dumps(initial_schema))
                     task._mid_run_feedback_posted = True
+                    task._mid_run_feedback_evidence = {
+                        "posted": True,
+                        "message": feedback_message,
+                        "trigger": {k: v for k, v in feedback_config.items() if k != "message"},
+                        "posted_after_seconds": round(time.time() - start, 1),
+                        "root_message_count": root_msg_count,
+                        "active_layers": len(trigger_chain),
+                        "active_chain": trigger_chain,
+                        "tree_at_trigger": trigger_tree,
+                        "background_task": trigger_task,
+                    }
+                    trigger_detail = (
+                        f"running {trigger_task['agent_type']} task {trigger_task['background_task_id']}"
+                        if trigger_task
+                        else f"{len(trigger_chain)} active layers"
+                    )
                     print(
                         "    💬 Injected mid-run feedback after "
-                        f"{root_msg_count} root messages; captured {len(initial_schema['fields'])} schema field(s)"
+                        f"{root_msg_count} root messages ({trigger_detail}); "
+                        f"captured {len(initial_schema['fields'])} schema field(s)"
                     )
                 else:
                     print("    ⚠ Failed to inject configured mid-run feedback; will retry")
@@ -5697,8 +5763,12 @@ async def _poll_agent(
 
 
 def _validate_mid_run_feedback_schema(task: BenchmarkTask, data: dict) -> Optional[str]:
-    """Require non-goal mid-run feedback to leave the response schema untouched."""
-    if not task.mid_run_feedback:
+    """Require non-goal mid-run feedback to leave the response schema untouched.
+
+    Only feedback declared ``non_goal: true`` pins the schema; goal-changing
+    feedback may legitimately refresh it.
+    """
+    if not task.mid_run_feedback or not task.mid_run_feedback.get("non_goal"):
         return None
     if not getattr(task, "_mid_run_feedback_posted", False):
         return "Configured mid-run feedback was never posted"
@@ -13673,6 +13743,11 @@ def _run_declared_static_check(
             if evidence.get("ok") is not True:
                 return False, f"Kill subtree lifecycle not verified: {evidence}"
             continue
+        if check_type in TREE_ROUTING_CHECK_TYPES:
+            ok, reason = check_tree_feedback_routing(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "process_trace":
             from benchmarks.process_bench import check_process_trace, spec_hash
 
@@ -14225,6 +14300,34 @@ async def _run_declared_evaluators(
     )
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
+
+    # Judge-visible routing trace (compact state keeps every `_benchmark` key).
+    routing_markers = sorted(
+        {
+            str(check.get("marker"))
+            for evaluator in task.evaluators
+            if evaluator.get("method") == "static_check"
+            for check in evaluator.get("checks", [])
+            if check.get("type") in TREE_ROUTING_CHECK_TYPES and check.get("marker")
+        }
+    )
+    if routing_markers:
+        data.setdefault("_benchmark", {})["tree_feedback_routing"] = [
+            routing_trace(data, marker) for marker in routing_markers
+        ]
+    background_types = sorted(
+        {
+            str(check.get("agent_type"))
+            for evaluator in task.evaluators
+            if evaluator.get("method") == "static_check"
+            for check in evaluator.get("checks", [])
+            if check.get("type") == "background_task_message_routed" and check.get("agent_type")
+        }
+    )
+    if background_types:
+        data.setdefault("_benchmark", {})["background_task_routing"] = [
+            background_routing_trace(data, agent_type) for agent_type in background_types
+        ]
 
     results: list[dict] = []
     for evaluator in task.evaluators:
@@ -14789,6 +14892,11 @@ async def _run_single_task_as_run_user(
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
         if kill_evidence is not None:
             data["kill_agent_benchmark"] = kill_evidence
+        if task.mid_run_feedback:
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "mid_run_feedback": getattr(task, "_mid_run_feedback_evidence", None) or {"posted": False},
+            }
         early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()
@@ -14824,8 +14932,20 @@ async def _run_single_task_as_run_user(
         tokens_in = 0
         tokens_out = 0
         try:
-            usage = await _get_settled_tool_usage(base_url, agent_id)
-            cost_cents = usage.get("total_cost_cents", 0)
+            agent_cost_cents = max(
+                0.0,
+                float(agent.get("tree_cost_cents") or agent.get("tool_cost_cents") or 0),
+            )
+        except (TypeError, ValueError):
+            agent_cost_cents = 0.0
+        minimum_cost_cents = agent_cost_cents
+        if agent.get("status") == "COST_LIMIT_REACHED":
+            minimum_cost_cents = max(minimum_cost_cents, float(task.price_limit_cents or 0))
+        try:
+            usage = await _get_settled_tool_usage(
+                base_url, agent_id, minimum_cost_cents=minimum_cost_cents
+            )
+            cost_cents = max(float(usage.get("total_cost_cents") or 0), agent_cost_cents)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
             llm_call_count = int(usage.get("llm_call_count") or 0)
@@ -14839,7 +14959,7 @@ async def _run_single_task_as_run_user(
                 tool_tokens_in = int(cache_read_input_tokens or 0) + int(cache_creation_input_tokens or 0)
         except Exception:
             # Fallback to agent-level cost fields
-            cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
+            cost_cents = agent_cost_cents
 
         if task.expected_payment_lifecycle:
             try:

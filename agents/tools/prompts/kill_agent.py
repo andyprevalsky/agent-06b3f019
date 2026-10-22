@@ -1,2 +1,5 @@
-"""Usage notes for parent-owned agent cancellation."""
-PROMPT = """Stop a descendant's work when it is no longer needed or the user requests it. Use the exact descendant agent ID from the current tree. This archives the descendant and its subtree, including their sessions. Do not use it on yourself, an ancestor, a sibling, or unrelated work. Only report success when the tool confirms stopped; an unconfirmed cleanup is not a successful stop."""
+"""Prompt for kill_agent tool."""
+
+PROMPT = """Kills an agent below you and everything it spawned, or one of your own background tasks. A killed agent fails with the reason "Killed by <your address>".
+
+Use it when a branch of work is no longer needed or is going the wrong way and should not be redirected. It only works on your descendants: you cannot kill yourself, your parent or other branches (ask their owner with send_message_to_agent instead)."""

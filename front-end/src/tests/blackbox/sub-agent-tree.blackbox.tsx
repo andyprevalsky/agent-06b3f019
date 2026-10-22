@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
-import { makeAgentTreeNode as makeNode } from './terminal-component-chips.fixtures';
+import {
+  countParentReads,
+  makeAgentTreeNode as makeNode,
+} from './terminal-component-chips.fixtures';
 
 // Agent tree — drive SubAgentTree node map deterministically.
 const treeRef: { current: Map<string, unknown> } = { current: new Map() };
@@ -208,6 +211,34 @@ describe('SubAgentTree', () => {
     );
     expect(screen.queryByText('Delegating tasks')).not.toBeInTheDocument();
     expect(screen.getByText('Hello')).toBeInTheDocument();
+  });
+
+  it('derives and renders a wide multi-level tree with a linear number of node scans', () => {
+    const roots = Array.from({ length: 10 }, (_, r) => `r-${r}`);
+    for (const root of roots) {
+      treeRef.current.set(root, makeNode({ agentId: root, goal: 'root goal' }));
+      for (let m = 0; m < 10; m += 1) {
+        const mid = `${root}-m${m}`;
+        treeRef.current.set(mid, makeNode({ agentId: mid, parentAgentId: root, goal: 'mid goal' }));
+        for (let l = 0; l < 2; l += 1) {
+          treeRef.current.set(
+            `${mid}-l${l}`,
+            makeNode({ agentId: `${mid}-l${l}`, parentAgentId: mid, goal: 'leaf goal' }),
+          );
+        }
+      }
+    }
+    for (let u = 0; u < 90; u += 1) {
+      treeRef.current.set(`u-${u}`, makeNode({ agentId: `u-${u}`, parentAgentId: 'elsewhere' }));
+    }
+    const counter = countParentReads(treeRef.current.values() as Iterable<object>);
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={roots} onNavigate={vi.fn()} />);
+    expect(screen.getAllByText('root goal')).toHaveLength(10);
+    expect(screen.getAllByText('mid goal')).toHaveLength(100);
+    expect(screen.getAllByText('leaf goal')).toHaveLength(200);
+    expect(screen.queryByText('Some goal')).toBeNull();
+    // Two passes per derivation (spawn filter + subtree child index); rows only look up.
+    expect(counter.reads).toBeLessThanOrEqual(2 * treeRef.current.size);
   });
 
   it('renders partial data indicator for failed agent with output schema', () => {

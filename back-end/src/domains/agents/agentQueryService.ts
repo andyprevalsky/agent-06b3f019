@@ -6,6 +6,7 @@ import * as repo from './repo';
 import { hydrateProgressEstimates } from '../../providers/agentProgressEstimates';
 import { listGraphCodeSessions } from './repoGraph';
 import { codeAgentProvider } from './agentCodeAgentsService';
+import { noteAgentMessagesConsumed } from './agentMessageGuardService';
 import {
   findAgentAcrossRuns,
   findAncestorsAcrossRuns,
@@ -109,6 +110,8 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
       agent_id: agent.id,
       parent_agent_id: agent.parentAgentId,
       temporal_workflow_id: agent.temporalWorkflowId,
+      // Codex-style address ("/root/venue_capacities_0"); null for pre-path agents.
+      task_path: agent.taskPath,
       goal: agent.goal,
       status: agent.status,
       progress: agent.progress,
@@ -192,6 +195,8 @@ interface AgentDetailOptions {
   userId?: string;
   since?: Date;
   browserToolCallId?: string;
+  /** Internal incremental poll: advance the reader's agent-message read mark. */
+  consumesAgentMessages?: boolean;
   allowBenchmarkArchive?: boolean;
   inspectionViewerUserId?: string;
 }
@@ -228,6 +233,16 @@ function detailFailureContext(agent: { status: string; structuredResponse: unkno
     : null;
 }
 
+/** A worker's incremental poll delivered these rows: advance the agent-message read mark. */
+async function noteWorkerPollConsumption(
+  agentId: string,
+  messages: Awaited<ReturnType<typeof repo.findMessages>>,
+  options: AgentDetailOptions
+): Promise<void> {
+  if (options.consumesAgentMessages !== true) return;
+  await noteAgentMessagesConsumed(agentId, messages, options.browserToolCallId ?? null);
+}
+
 export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
   const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
   const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
@@ -242,6 +257,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
     repo.findToolUsages(agentId),
     getInspectionContext(agent.userId, options.inspectionViewerUserId),
   ]);
+  await noteWorkerPollConsumption(agentId, messages, options);
   const { toolTokensIn, toolTokensOut, totalCostCents } = computeToolTokens(toolUsages);
 
   return {

@@ -3,6 +3,14 @@
  */
 
 import { z } from 'zod';
+import {
+  BACKGROUND_TASKS_MAX,
+  agentAddressSchema,
+  backgroundTaskEntrySchema,
+} from './typesAgentTree';
+
+export * from './typesAgentTree';
+export * from './typesAgentControl';
 export type { Prisma } from '@prisma/client';
 
 // FilePointer schema for validation - all files stored in Supabase Storage
@@ -127,6 +135,12 @@ const createAgentBaseSchema = z.object({
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
+  // Sub-agents: slug unique among the parent's live children; the child's
+  // address becomes `<parent path>/<task_name>` (409 on a sibling collision).
+  task_name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,59}$/, 'task_name must be a lowercase slug (a-z, 0-9, _)')
+    .optional(),
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
   depth: z.number().int().min(0).max(4).optional().default(0), // Nesting depth (max 4)
   pause_state: z.boolean().optional().default(false), // Optional: inherit parent's pause state
@@ -203,6 +217,14 @@ export const postMessageSchema = z.object({
   metadata: z.record(z.any()).optional(), // JSON metadata about the tool call (toolCallId, toolName, status, etc)
   attachments: z.array(filePointerSchema).optional(), // File attachments (array, creates separate messages)
   file_pointer: filePointerSchema.optional(), // Single file pointer for this message (OAI-style)
+  // Internal callers only: piggyback one task-inbox read (explore progress posts);
+  // the response carries `pending_inbox` rows addressed to `task_id` after `since`.
+  inbox: z
+    .object({
+      task_id: z.string().min(1).max(200),
+      since: z.coerce.date().optional(),
+    })
+    .optional(),
 });
 
 export const progressEstimateSchema = z.object({
@@ -252,6 +274,8 @@ export const updateAgentSchema = z.object({
   reasoning_max_tokens: z.number().int().min(0).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
   tools_in_use: z.array(z.string()).optional(), // For tree state updates
+  // In-flight background explore/browser/code tasks (tree state; list_agents).
+  background_tasks: z.array(backgroundTaskEntrySchema).max(BACKGROUND_TASKS_MAX).optional(),
   progress: z.number().min(0).max(1).optional(), // For tree state updates
   message_count: z.number().int().min(0).optional(), // For tree state updates
   response_schema: ResponseSchemaSchema.optional(), // For storing generated schema during set_plan
@@ -320,3 +344,34 @@ export type BatchCreateAgentsBody = z.infer<typeof batchCreateAgentsSchema>;
 export type PostMessageBody = z.infer<typeof postMessageSchema>;
 export type UpdateStatusBody = z.infer<typeof updateStatusSchema>;
 export type UpdateAgentBody = z.infer<typeof updateAgentSchema>;
+
+// ---------------------------------------------------------------------------
+// Agent-to-agent messages (same agent tree only)
+// ---------------------------------------------------------------------------
+
+export const AGENT_MESSAGE_MAX_CHARS = 20_000;
+export const agentMessageSchema = z.object({
+  from_agent_id: z.string().uuid(),
+  message: z
+    .string()
+    .max(AGENT_MESSAGE_MAX_CHARS)
+    .refine((text) => text.trim().length > 0, 'message must not be blank'),
+  idempotency_key: z.string().min(1).max(200),
+  recipient_task_id: z.string().min(1).max(200).optional(),
+});
+export const agentInboxQuerySchema = z.object({
+  task_id: z.string().min(1).max(200),
+  since: z.coerce.date().optional(),
+});
+// POST /:sender/send-agent-message: like agentMessageSchema, addressed by `to`.
+export const agentAddressMessageSchema = z.object({
+  to: agentAddressSchema,
+  message: z
+    .string()
+    .max(AGENT_MESSAGE_MAX_CHARS)
+    .refine((text) => text.trim().length > 0, 'message must not be blank'),
+  idempotency_key: z.string().min(1).max(200),
+});
+export type AgentAddressMessageBody = z.infer<typeof agentAddressMessageSchema>;
+export type AgentMessageBody = z.infer<typeof agentMessageSchema>;
+export type AgentInboxQuery = z.infer<typeof agentInboxQuerySchema>;

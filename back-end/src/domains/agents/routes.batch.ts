@@ -8,6 +8,7 @@
  * agentBatchService.createAgentsBatch for the full design.
  */
 
+import { TaskPathConflictError } from './agentTaskPath';
 import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
@@ -32,6 +33,10 @@ function handleRouteError(res: Response, error: unknown, msg: string): void {
   }
   if (error instanceof StaleParentWorkflowGenerationError) {
     res.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof TaskPathConflictError) {
+    res.status(409).json({ error: error.message, task_path: error.taskPath });
     return;
   }
   if (error instanceof WorldModelModeAccessError) {
