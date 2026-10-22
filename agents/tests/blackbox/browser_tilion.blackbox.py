@@ -1682,6 +1682,91 @@ async def test_multiplexer_holds_new_targets_until_emulation_lands():
                 await multiplexer.close()
 
 
+async def test_tilion_download_paths_are_absolute_and_route_by_ledger_membership():
+    """The verifier requires file_pointer paths to be absolute remote-session paths
+    (lane F tinypng, agent af52d121: 'tilion-download://rs.jpeg' was rejected). Ledger
+    entries live under /tilion-downloads/<digest>/<name>; listing, extraction and reads
+    route by ledger membership; legacy tilion-download:// pause entries stay readable."""
+    from domains.spawn_browser_agent_v3 import service as browser_service
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.download_persist import persist_bytes_to_session_downloads
+
+    provider_reads: List[str] = []
+
+    async def provider_read(_config, _session_id, path):
+        provider_reads.append(path)
+        return None
+
+    uploaded: List[bytes] = []
+
+    async def fake_upload(*, user_id, file_content, filename, mime_type, idempotency_key=None):
+        uploaded.append(file_content)
+        return {"storage_path": f"{user_id}/{filename}", "original_filename": filename}
+
+    session = "tilion-absolute-paths"
+    tilion_worker.register_download_session(session)
+    try:
+        recorded = await persist_bytes_to_session_downloads(
+            object(), session, filename="rs.jpeg", content=DOWNLOAD_BYTES, mime_type="image/jpeg", provider="tilion"
+        )
+        path = recorded["path"]
+        assert path.startswith("/tilion-downloads/") and path.endswith("/rs.jpeg"), path
+        listed = await browser_service._session_files_for_listing(object(), session)
+        assert [item["path"] for item in listed] == [path], listed
+        assert tilion_worker.has_download(session, path)
+        assert not tilion_worker.has_download(session, "/tmp/downloads/rs.jpeg")
+        with (
+            patch.object(browser_service, "download_session_file", provider_read),
+            patch("helpers.attachments.upload_to_storage", fake_upload),
+        ):
+            pointers = await browser_service.extract_session_files(session, "user-1", object())
+        assert provider_reads == [], "a ledger path must not go to the provider file API"
+        assert uploaded == [DOWNLOAD_BYTES] and [p["original_filename"] for p in pointers] == ["rs.jpeg"]
+        assert tilion_worker.read_download(session, path)["content"] == DOWNLOAD_BYTES
+        # A newer download with the same name replaces the entry, under its own absolute path.
+        newer = await persist_bytes_to_session_downloads(
+            object(),
+            session,
+            filename="rs.jpeg",
+            content=DOWNLOAD_BYTES + b"!",
+            mime_type="image/jpeg",
+            provider="tilion",
+        )
+        assert newer["path"] != path and newer["path"].startswith("/")
+        assert [item["path"] for item in tilion_worker.list_downloads(session)] == [newer["path"]]
+    finally:
+        tilion_worker.release_session(session)
+
+    # Pause/resume: a legacy entry from an older pause context restores under an absolute path
+    # and both paths resolve; a current entry round-trips under the same absolute path.
+    resumed = "tilion-absolute-resumed"
+    legacy = {
+        "path": "tilion-download://receipt.pdf",
+        "size": 12,
+        "filename": "receipt.pdf",
+        "mime_type": "application/pdf",
+        "file_pointer": {"storage_path": "user-1/receipt.pdf", "original_filename": "receipt.pdf"},
+    }
+    tilion_worker.register_download_session(resumed)
+    try:
+        assert tilion_worker.restore_downloads(resumed, [legacy]) == 1
+        [entry] = tilion_worker.list_downloads(resumed)
+        assert entry["path"].startswith("/tilion-downloads/") and entry["path"].endswith("/receipt.pdf"), entry
+        assert tilion_worker.download_file_pointer(resumed, "tilion-download://receipt.pdf") == legacy["file_pointer"]
+        assert tilion_worker.download_file_pointer(resumed, entry["path"]) == legacy["file_pointer"]
+        durable = tilion_worker.durable_downloads(resumed)
+        tilion_worker.release_session(resumed)
+        tilion_worker.register_download_session(resumed)
+        assert tilion_worker.restore_downloads(resumed, json.loads(json.dumps(durable))) == 1
+        assert [item["path"] for item in tilion_worker.list_downloads(resumed)] == [entry["path"]]
+        with patch.object(browser_service, "download_session_file", provider_read):
+            restored_pointers = await browser_service.extract_session_files(resumed, "user-1", object())
+        assert restored_pointers == [legacy["file_pointer"]], "the durable pointer is reused after resume"
+        assert provider_reads == []
+    finally:
+        tilion_worker.release_session(resumed)
+
+
 async def test_tilion_downloads_survive_provider_switch_and_pause():
     """Lane B review: (1) after Tilion -> Kernel both the ledger and the new
     provider's files are listed and read by path prefix; (2) each Tilion
@@ -1751,7 +1836,7 @@ async def test_tilion_downloads_survive_provider_switch_and_pause():
         assert [f["path"] for f in listed] == [recorded["path"], "/tmp/downloads/b.pdf"], listed
         pointers = await browser_service.extract_session_files(kernel_id, "user-1", object())
     assert [p["original_filename"] for p in pointers] == ["a.pdf", "b.pdf"], pointers
-    assert reads == ["/tmp/downloads/b.pdf"], "tilion-download:// paths never go to the provider file API"
+    assert reads == ["/tmp/downloads/b.pdf"], "ledger paths never go to the provider file API"
     assert uploaded == ["b.pdf"], "the durable Tilion pointer is reused, not re-uploaded"
 
     # (2) Pause -> resume (worker memory gone): pointers come back from the resume context.
@@ -2324,6 +2409,7 @@ async def run_all_tests():
         ("multiplexer_hides_browser_ui_targets", test_multiplexer_hides_and_releases_browser_ui_targets),
         ("multiplexer_holds_new_targets_for_emulation", test_multiplexer_holds_new_targets_until_emulation_lands),
         ("tilion_downloads_survive_switch_and_pause", test_tilion_downloads_survive_provider_switch_and_pause),
+        ("tilion_download_paths_absolute", test_tilion_download_paths_are_absolute_and_route_by_ledger_membership),
         ("tilion_staged_uploads_bounded", test_tilion_staged_uploads_are_bounded_per_session),
         ("click_path_cdp_awaits_bounded", test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld),
         ("tilion_upload_input_reset_on_change", test_tilion_upload_verified_when_page_resets_input_on_change),
