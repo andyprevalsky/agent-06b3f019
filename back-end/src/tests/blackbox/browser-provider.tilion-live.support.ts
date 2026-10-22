@@ -22,6 +22,7 @@ import {
   releaseTilionRemoteSession,
 } from '../../providers/browser/tilion';
 import { retryWithBackoff } from '../../providers/retry';
+import { deleteKernelProfile } from './browser-provider-rotation.support';
 import {
   assert,
   type BrowserApiResponse,
@@ -209,6 +210,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
   const agentId = randomUUID();
   const allocated = new Set<string>();
   let liveSessionId: string | undefined;
+  let kernelProfileId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
   const post = async (path: string, body?: unknown): Promise<BrowserApiResponse> => {
     const response = await retryBackendFetch(`${baseUrl}/api/browser-session${path}`, {
@@ -306,7 +308,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     );
     assert(
       rotated.recovery_action === 'ip_rotated' &&
-        rotated.next_recovery === 'rotate_tilion_mobile_ip' &&
+        rotated.next_recovery === 'switch_provider_to_kernel' &&
         rotated.rotations_used === 1,
       `rotation 1 metadata: ${JSON.stringify({
         action: rotated.recovery_action,
@@ -448,7 +450,8 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     });
 
     // Rotation 2 (last: it replaces the live session and needs the worker's carried
-    // state): a Tilion mobile exit, then the ladder leaves for Kernel.
+    // state). Tilion serves no mobile exits on our account (probe --only mobile-exit),
+    // so the ladder is Tilion residential in place -> Kernel mobile -> Steel.
     const ipBeforeMobile = await readExitIpWithRetry(String(recreated.ws_url));
     // The worker would capture this over its own socket; a live Tilion row must not be
     // replaced without it (TilionUncarriedStateError).
@@ -458,26 +461,27 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       return browser.contexts()[0]!.storageState();
     });
     const mobile = await post('/rotate-proxy', { task_id: taskId, storage_state: carriedState });
+    kernelProfileId = mobile.browser_session_metadata?.profile_id ?? undefined;
     assert(
-      mobile.provider === 'tilion' &&
+      mobile.provider === 'kernel' &&
         mobile.proxy_tier === 'mobile' &&
+        mobile.recovery_action === 'provider_switched' &&
         mobile.rotations_used === 2 &&
-        mobile.next_recovery === 'switch_provider_to_kernel',
-      `rotation 2 expected Tilion mobile then Kernel: ${JSON.stringify({
+        mobile.next_recovery === 'switch_provider_to_steel',
+      `rotation 2 expected Kernel mobile (provider_switched) then Steel: ${JSON.stringify({
         provider: mobile.provider,
         tier: mobile.proxy_tier,
+        action: mobile.recovery_action,
         used: mobile.rotations_used,
         next: mobile.next_recovery,
       })}`
     );
-    if (String(mobile.session_id) !== liveSessionId) {
-      const superseded = await tilionApi('GET', `/v1/session/${liveSessionId}/status`);
-      const state = (superseded.body as { state?: string } | null)?.state;
-      assert(
-        state === 'closed' || state === 'expired',
-        `superseded Tilion session ${liveSessionId} is still ${String(state)} (paid leak)`
-      );
-    }
+    const superseded = await tilionApi('GET', `/v1/session/${liveSessionId}/status`);
+    const supersededState = (superseded.body as { state?: string } | null)?.state;
+    assert(
+      supersededState === 'closed' || supersededState === 'expired',
+      `superseded Tilion session ${liveSessionId} is still ${String(supersededState)} (paid leak)`
+    );
     liveSessionId = String(mobile.session_id);
     const mobileWsUrl = String(mobile.ws_url);
     const mobileIp = await readExitIpWithRetry(mobileWsUrl, ipBeforeMobile);
@@ -485,9 +489,9 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       await navigateKernelPage(page, 'https://example.com');
       return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
     });
-    assert(carriedAfterMobile === 'carried', 'mobile replacement lost the carried localStorage');
+    assert(carriedAfterMobile === 'carried', 'Kernel switch lost the carried Tilion localStorage');
     console.log(
-      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> mobile ${mobileIp}`
+      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> kernel mobile ${mobileIp}`
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
@@ -500,8 +504,11 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       await post('/close', { session_id: liveSessionId, pause: false }).catch(() => undefined);
     }
     for (const sessionId of allocated) {
-      await releaseTilionRemoteSession(sessionId).catch(() => undefined);
+      if (sessionId.startsWith('sess_')) {
+        await releaseTilionRemoteSession(sessionId).catch(() => undefined);
+      }
     }
+    if (kernelProfileId) await deleteKernelProfile(kernelProfileId).catch(() => undefined);
     const live = new Set(await listLiveTilionSessionIds());
     const leaked = [...allocated].filter((sessionId) => live.has(sessionId));
     await prisma.browserSession.deleteMany({ where: { agentId } });
