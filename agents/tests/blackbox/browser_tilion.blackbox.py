@@ -221,12 +221,16 @@ async def test_tilion_worker_attach_uses_one_upstream_socket():
                     assert gateway.rejected_4409 == 0, "a second CDP socket reached Tilion"
                     assert gateway.max_concurrent == 1
                     assert multiplexer.upstream_connections_opened == 1
+                    # The cost row's CDP egress: every byte Tilion relayed, PNG included.
+                    assert multiplexer.upstream_bytes_received > len(png)
+                    assert service.cdp_bytes_received == multiplexer.upstream_bytes_received
                 finally:
                     if pw_browser is not None:
                         await pw_browser.close()
                     await _stop_dom_service(service)
                 await asyncio.sleep(0.2)
                 assert gateway.active == 0, "worker teardown must release Tilion's single client slot"
+                assert service.cdp_bytes_received >= len(png), "the byte count outlives the disconnect"
                 assert gateway.rejected_4409 == 0
 
 
@@ -658,8 +662,40 @@ async def test_tilion_cost_row_is_12_cents_per_hour_plus_create():
     handler_source = (Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text()
     # Every provider-priced cost row passes the activity's Tilion create count,
     # counted at the initial create, a replacement resume and both rotation paths.
-    assert handler_source.count('session_creates=tilion_creates["count"]') == 5
+    assert handler_source.count("**_tilion_usage_kwargs(),") == 5
     assert handler_source.count('tilion_creates["count"] += 1') == 4
+    # Bytes dominate Tilion spend (A2's /v1/usage fit): 1 credit/MB direct,
+    # 3 credits/MB premium (residential/ISP/mobile: CDP bytes and page proxy bytes).
+    megabyte = 1_048_576
+    with_bytes = build_usage_items(
+        1000,
+        100,
+        pricing,
+        3_600_000,
+        provider="tilion",
+        session_creates=1,
+        tilion_premium_bytes=10 * megabyte,
+        tilion_direct_bytes=5 * megabyte,
+        tilion_page_proxy_bytes=2 * megabyte,
+        tilion_actions=3,
+        tilion_captcha_solves=1,
+    )
+    expected_credits = 2 + 5 * 1 + (10 + 2) * 3 + 3 * 1 + 20
+    assert abs(
+        next(i for i in with_bytes if i["type"] == "service")["cost_cents"] - (12.0 + expected_credits * 0.2)
+    ) < 1e-6
+    # Kernel/Steel rows ignore Tilion inputs.
+    kernel = build_usage_items(1000, 100, pricing, 3_600_000, provider="kernel", tilion_premium_bytes=10 * megabyte)
+    assert kernel == build_usage_items(1000, 100, pricing, 3_600_000, provider="kernel")
+
+    from domains.spawn_browser_agent_v3.handler import _tilion_egress_class
+
+    assert _tilion_egress_class({"proxy_source": "tilion_residential_country"}) == "premium"
+    assert _tilion_egress_class({"proxy_source": "tilion_isp_country"}) == "premium"
+    assert _tilion_egress_class({"proxy_source": "tilion_mobile_city"}) == "premium"
+    assert _tilion_egress_class({"proxy_source": "tilion_direct"}) == "direct"
+    assert _tilion_egress_class({}) == "premium", "unknown errs toward the higher rate"
+    assert handler_source.count("_tilion_leave_session()\n") == 2
     fast = build_usage_items(1000, 100, pricing, 3_600_000, provider="tilion", fast_mode_cache_enabled=True)
     assert next(i for i in fast if i["type"] == "service")["cost_cents"] == 0.0
 

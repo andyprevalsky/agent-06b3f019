@@ -22,8 +22,12 @@ from domains.spawn_browser_agent_v3.config import (
     BROWSER_USE_PRICING_POOL,
     KERNEL_COST_CENTS_PER_MS,
     STEEL_COST_CENTS_PER_MS,
+    TILION_ACTION_CREDITS,
+    TILION_CAPTCHA_CREDITS,
+    TILION_CENTS_PER_CREDIT,
     TILION_COST_CENTS_PER_MS,
-    TILION_CREATE_COST_CENTS,
+    TILION_DIRECT_CREDITS_PER_MB,
+    TILION_PREMIUM_CREDITS_PER_MB,
 )
 from domains.spawn_browser_agent_v3.repo import (
     download_session_file,
@@ -953,6 +957,11 @@ def build_usage_items(
     provider: Optional[str] = None,
     pricing_pool: str = BROWSER_USE_PRICING_POOL,
     session_creates: int = 1,
+    tilion_premium_bytes: int = 0,
+    tilion_direct_bytes: int = 0,
+    tilion_page_proxy_bytes: Optional[int] = None,
+    tilion_actions: int = 0,
+    tilion_captcha_solves: int = 0,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -970,7 +979,11 @@ def build_usage_items(
     alone (verify19 ~4.5¢ Kernel on child d24898d1).
 
     Tilion also bills a fixed 2 credits per session create; ``session_creates``
-    counts the creates this browser activity is charged for.
+    counts the creates this browser activity is charged for. Its bytes dominate
+    spend: CDP bytes relayed to the worker bill per MB at the direct or premium
+    (residential/ISP/mobile) rate, and premium sessions also bill the pages' own
+    proxy traffic (``tilion_page_proxy_bytes``; None while unobserved, so the
+    row is then a floor).
     """
     browser_provider = (provider or os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
     if browser_provider == "kernel":
@@ -995,7 +1008,19 @@ def build_usage_items(
     # demos otherwise pick up residual wall-clock cents.
     has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
     zero_service = bool(fast_mode_cache_enabled) or not has_live_llm
-    fixed_cost = TILION_CREATE_COST_CENTS * max(session_creates, 0) if browser_provider == "tilion" else 0.0
+    fixed_cost = 0.0
+    if browser_provider == "tilion":
+        megabyte = 1_048_576
+        credits = (
+            2 * max(session_creates, 0)
+            + TILION_DIRECT_CREDITS_PER_MB * max(tilion_direct_bytes, 0) / megabyte
+            + TILION_PREMIUM_CREDITS_PER_MB
+            * (max(tilion_premium_bytes, 0) + max(tilion_page_proxy_bytes or 0, 0))
+            / megabyte
+            + TILION_ACTION_CREDITS * max(tilion_actions, 0)
+            + TILION_CAPTCHA_CREDITS * max(tilion_captcha_solves, 0)
+        )
+        fixed_cost = credits * TILION_CENTS_PER_CREDIT
     service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms + fixed_cost, 4)
     return [
         *llm_items,
