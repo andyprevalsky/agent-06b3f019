@@ -505,7 +505,7 @@ when doing research. Never print or commit their contents. Verify that
 `BACKEND_API_KEY` is present and agrees between agents and backend without
 printing it. The `.env.example` files are safe references, not complete
 substitutes for the authoritative files. For credential reconciliation, follow
-**Production Env Vars** below, including the Codex-cloud `rose` environment.
+**Production Env Vars** below.
 Exact cloud cancellation must also read the browser provider credentials from
 these env files. Its credential loader accepts a symlink to a regular
 authoritative env file; cleanup evidence and receipts remain symlink-free. If
@@ -1324,13 +1324,12 @@ Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typic
 
 ## Production Env Vars
 
-**You (Claude) own env-key management:** when you mint or rotate a credential, store it in every correct location — the relevant local `.env`, the matching prod surface(s) below, AND the Codex-cloud `rose` environment — never leave a key only in chat.
+**You (Claude) own env-key management:** when you mint or rotate a credential, store it in every correct location — the relevant local `.env` and the matching prod surface(s) below — never leave a key only in chat.
 
 - **Render backend:** read `cd back-end && npx tsx scripts/render-env.ts` (all keys, masked), `npx tsx scripts/render-env.ts KEY [KEY...]` (exact values), or `--json`. **Do NOT hand-roll `curl .../env-vars?limit=100`** — Render caps a page at 100 rows and returns a cursor on the last row, so a raw `limit=100` silently drops everything past the first page. The service is already at 117 vars; on 2026-08-05 that made `AGENTCARD_ORG_WALLET_DEPOSIT_ADDRESS` read as unset when it was present. A missing var and a truncated page are indistinguishable, so the script paginates and refuses to report a partial list as complete. Set: `cd back-end && source .env && curl -s -X PUT -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" "https://api.render.com/v1/services/$RENDER_SERVICE_ID/env-vars/KEY" -d '{"value":"VALUE"}'`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Fly agents:** read `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets list -a navi-whisper-lux`; set `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets set KEY=VALUE -a navi-whisper-lux`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; MANDATORY: User Approval Needed to Write Env Vars.
-- **Codex-cloud `rose` environment:** the cloud sandbox env that mirrors backend secrets. Every key set on Render must also be mirrored here (and vice-versa). Set via the Codex cloud environment settings UI. MANDATORY: User Approval Needed to Write Env Vars.
 - **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
 
 ## Autonomous Agent Testing

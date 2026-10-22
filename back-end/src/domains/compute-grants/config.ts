@@ -8,7 +8,7 @@
  * There is a single key. The public half of the credential keypair is DERIVED
  * from the private key (see `credentialPublicKeyPem`) rather than configured
  * separately -- a second variable would be one more thing to drift out of sync
- * across Render, Fly, Vercel and the Codex cloud environment.
+ * across Render, Fly and Vercel.
  */
 
 import { createPrivateKey, createPublicKey } from 'node:crypto';

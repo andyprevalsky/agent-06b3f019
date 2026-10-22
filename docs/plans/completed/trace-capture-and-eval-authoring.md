@@ -284,7 +284,7 @@ A structural test asserts the picker's source == catalog (no drift).
    pointers stay in Postgres for queryability; binaries live in R2. New env:
    `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
    `R2_BUCKET_TRACE_ARCHIVE`, `R2_BUCKET_WORLD_MODEL` — mirror to all prod
-   surfaces + Codex-cloud `rose` env per CLAUDE.md env policy.
+   surfaces per CLAUDE.md env policy.
 2. **Prod capture: ON by default.** `TRACE_ARCHIVE=1` and always-on provider
    capture ship enabled in prod (no allowlist gate). Recording downloads run
    async post-run so agent latency is unaffected.
