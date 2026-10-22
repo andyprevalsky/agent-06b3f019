@@ -1,6 +1,11 @@
 /** Shared fixtures for the Tilion browser-challenge-recovery case files. */
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import type { Browser } from 'playwright';
+import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import type { BrowserProxyRotationResult } from '../../providers/browser';
+import type { RotationStep } from '../../providers/browser/rotation';
+import type { BrowserSessionResumeDependencies } from '../../providers/browserSessionResume';
 
 export function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -68,4 +73,89 @@ export async function seedRun(provider: string, proxyTier: string | null = null)
     await prisma.user.delete({ where: { userId: owner.userId } }).catch(() => undefined);
   };
   return { owner, agent, context, session, cleanup };
+}
+
+/** Fake provider operations that write the row the way the real providers do. */
+export function fakeProviderOperations() {
+  const steps: RotationStep[] = [];
+  const injected: Array<{ sessionId: string; userId: string; url: string }> = [];
+  const resumedFrom: string[] = [];
+  const replacements: string[] = [];
+  const carriedStates: unknown[] = [];
+  const closedValidation: string[] = [];
+  let sequence = 0;
+  const replace = async (taskId: string, provider: string, proxyTier: string | null) => {
+    sequence += 1;
+    const sessionId = `${provider}-replacement-${sequence}-${randomUUID()}`;
+    const row = await prisma.browserSession.update({
+      where: { id: taskId },
+      data: {
+        sessionId,
+        provider,
+        proxyTier,
+        wsUrl: `wss://${provider}.invalid/${sequence}`,
+        debugUrl: `https://${provider}.invalid/${sequence}`,
+        status: 'ACTIVE',
+        closedAt: null,
+      },
+    });
+    replacements.push(sessionId);
+    return {
+      // Tilion accepts one CDP client: this create-time client must be closed
+      // before the route answers, or the worker's attach is refused with 4409.
+      validationBrowser: {
+        close: async () => {
+          closedValidation.push(sessionId);
+        },
+      } as unknown as Browser,
+      provider: provider as 'kernel' | 'steel' | 'tilion',
+      sessionId,
+      debugUrl: row.debugUrl ?? '',
+      wsUrl: row.wsUrl ?? '',
+      savedUrl: row.currentUrl ?? row.startUrl ?? undefined,
+      proxySource: `${provider}_${proxyTier ?? 'resume'}`,
+      proxyLocation: DEFAULT_GEOLOCATION,
+      profileId: null,
+      profileSource: 'test',
+    };
+  };
+  const dependencies: BrowserSessionResumeDependencies = {
+    rotateProxy: async (taskId, step, options): Promise<BrowserProxyRotationResult> => {
+      steps.push(step);
+      carriedStates.push((options as { carriedState?: unknown } | undefined)?.carriedState);
+      const before = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+      const session = await replace(taskId, step.provider, step.proxyType);
+      return {
+        ...session,
+        previousProvider: before.provider as BrowserProxyRotationResult['previousProvider'],
+        recoveryAction: step.recoveryAction,
+        proxyType: step.proxyType,
+      };
+    },
+    // Resume dispatches on the persisted provider (index.ts providerForTask).
+    resumeSession: async (taskId, options) => {
+      carriedStates.push((options as { carriedState?: unknown } | undefined)?.carriedState);
+      const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+      resumedFrom.push(row.provider);
+      return replace(taskId, row.provider, row.proxyTier);
+    },
+    injectUserData: async (sessionId, userId, url) => {
+      injected.push({ sessionId, userId, url });
+      return {
+        cookies: { injected: true, cookieCount: 3, authSource: 'none', credentialRef: null },
+        fingerprint: { injected: false },
+      } as unknown as Awaited<ReturnType<BrowserSessionResumeDependencies['injectUserData']>>;
+    },
+    closeSession: async () => undefined,
+    getBrowserCaptchaTelemetry: async () => null as never,
+  };
+  return {
+    dependencies,
+    steps,
+    injected,
+    resumedFrom,
+    replacements,
+    closedValidation,
+    carriedStates,
+  };
 }

@@ -325,9 +325,12 @@ async function applyCarriedStateToReplacement(
     const restore = dependencies.restoreCarriedState ?? restoreTilionBrowserState;
     const restored = await restore(browser, carriedState);
     const savedUrl = result.savedUrl;
-    const page = browser.contexts()[0]?.pages()[0];
-    if (restored.origins > 0 && page !== undefined && savedUrl !== undefined && savedUrl !== '') {
-      await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+    // Restoring origins navigated the tab through them; put it back where the agent was.
+    if (restored.origins > 0 && savedUrl !== undefined && savedUrl !== '') {
+      await browser
+        .contexts()[0]
+        ?.pages()[0]
+        ?.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
     }
     log.info('Carried browser state restored into the replacement', {
       taskId,
