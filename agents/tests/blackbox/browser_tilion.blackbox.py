@@ -416,6 +416,19 @@ async def _fixture_site():
         )
 
     app.router.add_get("/cdn-srcset", cdn_srcset)
+
+    async def rerendering_checkbox(_request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>captcha</title><p>Checkbox mode</p>"
+                '<div id="widget"><div role="checkbox" aria-checked="false" tabindex="0"'
+                " onclick=\"this.setAttribute('aria-checked','true')\""
+                ' style="width:40px;height:40px;background:#ddd;margin:20px">&#10003;</div></div>'
+            ),
+        )
+
+    app.router.add_get("/rerendering-checkbox", rerendering_checkbox)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -3034,6 +3047,55 @@ async def test_recovery_storage_capture_carries_cookies_from_a_cpu_starved_provi
         await runner.cleanup()
 
 
+async def test_click_coordinates_follow_an_element_the_page_re_rendered():
+    """Webdecoy 3d714847: the FCaptcha checkbox re-rendered between the agent's
+    snapshot and its click, so every lookup by the indexed backend node failed
+    ('No node with given id found') and the click never went out ('no
+    coordinates'). A stale index is re-resolved against a fresh snapshot by the
+    node's xpath/stable hash, and the click point lands on the replacement."""
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+        page = pw_browser.contexts[0].pages[0]
+        await page.goto(base + "/rerendering-checkbox")
+        await service.get_browser_state(include_screenshot=False)
+        checkbox_indexes = [
+            index
+            for index, node in service._selector_map.items()
+            if (getattr(node, "attributes", {}) or {}).get("role") == "checkbox"
+        ]
+        assert len(checkbox_indexes) == 1, checkbox_indexes
+        stale_index = checkbox_indexes[0]
+        async def rerender(collect_garbage):
+            await page.evaluate("() => { const w = document.querySelector('#widget'); w.innerHTML = w.innerHTML; }")
+            if collect_garbage:
+                # Drop the detached node entirely, as on Tilion: lookups then fail
+                # with 'No node with given id found'.
+                cdp_session = await service.session.get_or_create_cdp_session(focus=False)
+                with contextlib.suppress(Exception):
+                    await cdp_session.cdp_client.send.HeapProfiler.collectGarbage(session_id=cdp_session.session_id)
+
+        for collect_garbage in (False, True):
+            await service.get_browser_state(include_screenshot=False)
+            stale_index = next(
+                i for i, n in service._selector_map.items() if (getattr(n, "attributes", {}) or {}).get("role") == "checkbox"
+            )
+            await rerender(collect_garbage)
+            coords = await service.get_click_coordinates(stale_index)
+            assert coords is not None, ("a re-rendered element must not end as 'no coordinates'", collect_garbage)
+            role = await page.evaluate(
+                "([x, y]) => document.elementFromPoint(x, y)?.closest('[role=checkbox]') ? 'checkbox' : null",
+                list(coords),
+            )
+            assert role == "checkbox", (coords, role)
+            assert stale_index not in service._selector_map, "the selector map was refreshed"
+
+        # Gone for good (no replacement): still a clean 'no coordinates'.
+        await service.get_browser_state(include_screenshot=False)
+        current = [i for i, n in service._selector_map.items() if (n.attributes or {}).get("role") == "checkbox"]
+        await page.evaluate("() => document.querySelector('#widget').remove()")
+        assert await service.get_click_coordinates(current[0]) is None
+        assert gateway.rejected_4409 == 0
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
@@ -3043,6 +3105,7 @@ async def run_all_tests():
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
         ("worker_logs_never_carry_raw_browser_urls", test_worker_logs_never_carry_raw_browser_urls),
+        ("click_coordinates_follow_re_rendered_element", test_click_coordinates_follow_an_element_the_page_re_rendered),
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),
         ("tilion_upload_sets_worker_bytes_on_file_input", test_tilion_upload_sets_worker_bytes_on_file_input),
         ("tilion_worker_apply_contract", test_tilion_worker_apply_contract_sets_cookies_and_local_storage),

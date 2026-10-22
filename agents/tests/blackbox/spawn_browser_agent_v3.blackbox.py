@@ -8417,6 +8417,71 @@ async def test_promoted_session_reattach_retries_once_then_fails_typed():
     assert "raise BrowserStackUnavailableError(" in source[loop_guard:overlays]
 
 
+async def test_click_rect_relocates_when_cdp_reports_no_node_with_given_id():
+    """Webdecoy 3d714847 on Tilion: CDP answered resolveNode/scrollIntoViewIfNeeded
+    for the indexed checkbox with 'No node with given id found' (the widget had
+    re-rendered). The rect lookup re-resolves the element by xpath in a fresh
+    snapshot and retries once on the replacement node."""
+    from browser_tools.dom_service import DOMService
+
+    stale = SimpleNamespace(backend_node_id=6900, xpath="html/body/div[2]/div", attributes={"role": "checkbox"})
+    stale.compute_stable_hash = lambda: 42
+    fresh = SimpleNamespace(backend_node_id=7311, xpath="html/body/div[2]/div", attributes={"role": "checkbox"})
+    fresh.compute_stable_hash = lambda: 42
+    other = SimpleNamespace(backend_node_id=7312, xpath="html/body/p", attributes={})
+    other.compute_stable_hash = lambda: 7
+    resolved_ids = []
+
+    class _DOM:
+        async def scrollIntoViewIfNeeded(self, params=None, session_id=None):
+            if params["backendNodeId"] == 6900:
+                raise RuntimeError("{'code': -32000, 'message': 'No node found for given backend id'}")
+            return {}
+
+        async def resolveNode(self, params=None, session_id=None):
+            resolved_ids.append(params["backendNodeId"])
+            if params["backendNodeId"] == 6900:
+                raise RuntimeError("{'code': -32000, 'message': 'No node with given id found'}")
+            return {"object": {"objectId": f"obj-{params['backendNodeId']}"}}
+
+    class _Runtime:
+        async def callFunctionOn(self, params=None, session_id=None):
+            return {"result": {"value": {"visible": True, "x": 100, "y": 200, "width": 40, "height": 40,
+                                          "viewportWidth": 1280, "viewportHeight": 800}}}
+
+    cdp_session = SimpleNamespace(session_id="s", cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=_DOM(), Runtime=_Runtime())))
+
+    class _Session:
+        agent_focus_target_id = "target"
+
+        async def get_or_create_cdp_session(self, target_id=None, focus=False):
+            return cdp_session
+
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return SimpleNamespace(dom_state=SimpleNamespace(selector_map={7311: fresh, 7312: other}))
+
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service._session = _Session()
+    service._selector_map = {6900: stale}
+    rect = await service.get_element_rect(6900)
+    assert rect == {"x": 100, "y": 200, "width": 40, "height": 40}, rect
+    assert resolved_ids == [6900, 7311], resolved_ids
+
+    # No unique replacement (ambiguous xpath and hash): a clean None, no retry loop.
+    twin = SimpleNamespace(backend_node_id=7313, xpath="html/body/div[2]/div", attributes={})
+    twin.compute_stable_hash = lambda: 42
+
+    class _AmbiguousSession(_Session):
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return SimpleNamespace(dom_state=SimpleNamespace(selector_map={7311: fresh, 7313: twin}))
+
+    resolved_ids.clear()
+    service._session = _AmbiguousSession()
+    service._selector_map = {6900: stale}
+    assert await service.get_element_rect(6900) is None
+    assert resolved_ids == [6900]
+
+
 async def test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes():
     """Anti-bot experiment knobs (default OFF): BROWSER_CHALLENGE_PATIENCE_SECONDS lets
     the provider's own CAPTCHA auto-solve (Tilion cdp_observe) run before
@@ -30479,6 +30544,10 @@ async def run_all_tests():
     await r.record_async(
         "challenge_patience_waits_and_logs_episodes",
         test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes,
+    )
+    await r.record_async(
+        "click_rect_relocates_on_no_node_with_given_id",
+        test_click_rect_relocates_when_cdp_reports_no_node_with_given_id,
     )
     await r.record_async(
         "challenge_patience_deadline_holds_when_page_silent",

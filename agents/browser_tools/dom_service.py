@@ -2710,11 +2710,45 @@ class DOMService:
 
         return None
 
+    async def _relocate_replaced_element(self, element: Any) -> Optional[Any]:
+        """Find the node that replaced ``element`` after the page re-rendered it.
+
+        A widget that re-renders itself (FCaptcha's checkbox, webdecoy 3d714847)
+        drops the indexed backend node, so every CDP lookup by that id fails with
+        'No node with given id found'. A fresh snapshot is matched by the old node's
+        xpath, then by browser-use's stable hash; only a unique match is used.
+        """
+        if element is None:
+            return None
+        old_id = getattr(element, "backend_node_id", None)
+        xpath = getattr(element, "xpath", None)
+        stable_hash = None
+        with contextlib.suppress(Exception):
+            stable_hash = element.compute_stable_hash()
+        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        selector_map = getattr(getattr(state, "dom_state", None), "selector_map", None) or {}
+        if selector_map:
+            self._selector_map = selector_map
+        nodes = [node for node in selector_map.values() if getattr(node, "backend_node_id", None) != old_id]
+        for matches_old in (
+            (lambda node: bool(xpath) and getattr(node, "xpath", None) == xpath),
+            (lambda node: stable_hash is not None and node.compute_stable_hash() == stable_hash),
+        ):
+            candidates = []
+            for node in nodes:
+                with contextlib.suppress(Exception):
+                    if matches_old(node):
+                        candidates.append(node)
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+
     async def get_element_rect(
         self,
         index: int,
         *,
         use_associated_label: bool = False,
+        _relocated: bool = False,
     ) -> Optional[Dict[str, int]]:
         """Get the visible viewport rect for an element.
 
@@ -2730,6 +2764,7 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
+        element = None
         try:
             element = await self.get_element_by_index(index)
             backend_node_id = getattr(element, "backend_node_id", index) if element else index
@@ -2819,6 +2854,10 @@ class DOMService:
                             });
                         };
 
+                        if (!this.isConnected) {
+                            // Re-rendered away: a detached node has no layout to click.
+                            return { detached: true };
+                        }
                         const ownRect = visibleViewportRect(this);
                         const inputType = String(this.type || "").toLowerCase();
                         const isCheckableInput = this.tagName === "INPUT"
@@ -2866,6 +2905,8 @@ class DOMService:
             if not rect_data:
                 logger.warning(f"Could not read viewport rect for index {index}")
                 return None
+            if rect_data.get("detached"):
+                raise LookupError("No node with given id found: the indexed node was detached by a re-render")
 
             if not rect_data.get("visible"):
                 logger.warning(
@@ -2889,6 +2930,21 @@ class DOMService:
             }
 
         except Exception as e:
+            stale = "no node with given id" in str(e).lower() or "no node found for given backend id" in str(e).lower()
+            if stale and not _relocated:
+                replacement = None
+                with contextlib.suppress(Exception):
+                    replacement = await self._relocate_replaced_element(element)
+                if replacement is not None:
+                    logger.info(
+                        f"Element index {index} was replaced by a re-render; "
+                        f"relocated to index {replacement.backend_node_id} by its xpath/stable hash"
+                    )
+                    return await self.get_element_rect(
+                        replacement.backend_node_id,
+                        use_associated_label=use_associated_label,
+                        _relocated=True,
+                    )
             logger.warning(f"Failed to get rect for index {index}: {e}")
 
         return None
