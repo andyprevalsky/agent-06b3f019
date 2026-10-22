@@ -1,0 +1,161 @@
+#!/usr/bin/env tsx
+/**
+ * T107: challenge-recovery candidate sessions leaked. A search still probing at
+ * backend SIGTERM left its two tilion_direct candidates live (nothing owns them
+ * but the search), and a search kept allocating candidates after its agent's
+ * cleanup. Every candidate is released on shutdown (including one whose create
+ * lands meanwhile) and when its agent stops; a promoted winner is the task's own.
+ */
+import assert from 'node:assert';
+import type { Browser } from 'playwright';
+import {
+  abortRecoverySearchesFor,
+  liveRecoveryProbeSessionCount,
+  releaseAllRecoveryProbeSessions,
+  runLaneConfigSearch,
+  type ConfigSearchDependencies,
+} from '../../providers/browser/challengeRecoveryLaneSearch';
+import type { BrowserRecoveryConfig } from '../../providers/browser/challengeRecovery';
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const CONFIGS: BrowserRecoveryConfig[] = ['tilion_direct', 'tilion_residential'].map((key) => ({
+  key,
+  provider: 'tilion',
+  proxyMode: key === 'tilion_direct' ? 'direct' : 'residential_country',
+  tilionProxyType: key === 'tilion_direct' ? 'direct' : 'residential',
+}));
+const LANES = [
+  { key: 'auth_kept', storageState: {} },
+  { key: 'stripped', storageState: {} },
+];
+
+/** Fake Tilion: every candidate stays challenged unless `winnerKey` matches. */
+function fakeProvider(options: { createMs: number; probeMs: number; winnerKey?: string }) {
+  const created: string[] = [];
+  const released: string[] = [];
+  const promoted: string[] = [];
+  let next = 0;
+  const dependencies: ConfigSearchDependencies = {
+    create: async (config) => {
+      await sleep(options.createMs);
+      const sessionId = `${config.key}-${(next += 1)}`;
+      created.push(sessionId);
+      return {
+        provider: config.provider,
+        sessionId,
+        debugUrl: 'https://debug.invalid',
+        wsUrl: 'wss://cdp.invalid',
+        proxySource: config.proxyMode,
+        proxyLocation: { country: 'US' },
+        profileId: null,
+        profileSource: 'test',
+        validationBrowser: {} as Browser,
+      };
+    },
+    probe: async (config) => {
+      await sleep(options.probeMs);
+      const clean = config.key === options.winnerKey;
+      return {
+        stablePasses: clean ? 1 : 0,
+        attempts: 1,
+        latencyMs: options.probeMs,
+        paymentCdnOk: true,
+      };
+    },
+    promote: async (winner) => {
+      promoted.push(winner.session.sessionId);
+    },
+    release: async (_config, session) => {
+      await sleep(5);
+      released.push(session.sessionId);
+    },
+  };
+  const live = () => created.filter((id) => !released.includes(id) && !promoted.includes(id));
+  return { dependencies, created, released, promoted, live };
+}
+
+async function testShutdownReleasesProbingCandidates(): Promise<void> {
+  const fake = fakeProvider({ createMs: 10, probeMs: 400 });
+  const search = runLaneConfigSearch(CONFIGS, LANES, fake.dependencies).catch(() => null);
+  await sleep(100); // both lanes now hold a candidate mid-probe
+  assert.strictEqual(fake.live().length, 2, 'both lanes hold a live candidate');
+  const released = await releaseAllRecoveryProbeSessions(2_000);
+  assert.strictEqual(released, 2);
+  assert.deepStrictEqual(fake.live(), [], `left live after shutdown: ${fake.live().join(',')}`);
+  await search;
+  await sleep(500);
+  assert.strictEqual(fake.created.length, 2, 'an aborted search allocated another candidate');
+  assert.strictEqual(
+    new Set(fake.released).size,
+    fake.released.length,
+    'a candidate was released twice'
+  );
+  assert.strictEqual(liveRecoveryProbeSessionCount(), 0);
+}
+
+async function testShutdownReleasesCandidateCreatedMeanwhile(): Promise<void> {
+  const fake = fakeProvider({ createMs: 300, probeMs: 400 });
+  const search = runLaneConfigSearch(CONFIGS, LANES, fake.dependencies).catch(() => null);
+  await sleep(50); // creates are in flight
+  assert.strictEqual(fake.created.length, 0);
+  await releaseAllRecoveryProbeSessions(2_000);
+  await search;
+  await sleep(100);
+  assert.ok(fake.created.length > 0, 'the in-flight creates landed');
+  assert.deepStrictEqual(
+    fake.live(),
+    [],
+    `late-created candidates leaked: ${fake.live().join(',')}`
+  );
+}
+
+async function testAgentCleanupAbortsOnlyItsSearch(): Promise<void> {
+  const mine = fakeProvider({ createMs: 10, probeMs: 300 });
+  const other = fakeProvider({ createMs: 10, probeMs: 300 });
+  const mySearch = runLaneConfigSearch(CONFIGS, LANES, mine.dependencies, {
+    ownerKey: 'agent-a',
+  }).catch(() => null);
+  const otherSearch = runLaneConfigSearch(CONFIGS, LANES, other.dependencies, {
+    ownerKey: 'agent-b',
+  }).catch(() => null);
+  await sleep(100);
+  assert.strictEqual(abortRecoverySearchesFor('agent-a'), 1);
+  await mySearch;
+  await sleep(700); // agent-b's lanes would have moved on to their next candidate by now
+  assert.deepStrictEqual(mine.live(), [], 'the stopped agent kept candidates');
+  assert.strictEqual(mine.created.length, 2, 'the stopped agent allocated another candidate');
+  assert.ok(other.created.length > 2, "the other agent's search was stopped too");
+  await releaseAllRecoveryProbeSessions(2_000);
+  await otherSearch;
+  assert.deepStrictEqual(other.live(), []);
+}
+
+async function testPromotedWinnerSurvivesShutdown(): Promise<void> {
+  const fake = fakeProvider({ createMs: 10, probeMs: 30, winnerKey: 'tilion_direct' });
+  const winner = await runLaneConfigSearch(CONFIGS, LANES, fake.dependencies);
+  await sleep(100);
+  await releaseAllRecoveryProbeSessions(2_000);
+  assert.deepStrictEqual(fake.promoted, [winner.session.sessionId]);
+  assert.ok(
+    !fake.released.includes(winner.session.sessionId),
+    'shutdown released the promoted browser'
+  );
+  assert.deepStrictEqual(fake.live(), []);
+}
+
+async function main(): Promise<void> {
+  await testShutdownReleasesProbingCandidates();
+  await testShutdownReleasesCandidateCreatedMeanwhile();
+  await testAgentCleanupAbortsOnlyItsSearch();
+  await testPromotedWinnerSurvivesShutdown();
+  process.stdout.write(
+    'PASS recovery probe release: shutdown and agent stop release every candidate\n'
+  );
+}
+
+void main().catch((error: unknown) => {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
+  process.exitCode = 1;
+});

@@ -309,6 +309,7 @@ export async function searchAndPromoteBrowserConfig(
       withProviderProbeLimits(searchDependencies),
       {
         avoidConfigKey: sessionAvoidConfigKey,
+        ownerKey: current.agentId,
         blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
         // Two transport-dead provider candidates get 90s each. The full search
         // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
