@@ -5453,6 +5453,71 @@ async def test_explore_timeout_during_threshold_drain_preserves_fe_posts():
     assert len(delivered) == 64
 
 
+async def test_explore_hung_fe_post_cannot_pin_activity():
+    # Either bound alone must release the activity: the per-post timeout, and
+    # the overall drain deadline as a backstop for long per-chip chains.
+    for post_timeout_s, drain_timeout_s in ((0.5, 120.0), (120.0, 0.5)):
+        await _assert_hung_fe_post_cannot_pin_activity(post_timeout_s, drain_timeout_s)
+
+
+async def _assert_hung_fe_post_cannot_pin_activity(post_timeout_s: float, drain_timeout_s: float):
+    """One FE post that never returns must not pin the explore activity (RCA P9).
+
+    The final drain runs after the heartbeat stops, so neither cancellation nor
+    the activity timeout can interrupt it. A save_explore_message POST stuck on
+    a leaked httpcore connection lock kept the activity, its parent's
+    explore_activity_wait and the worker's 2100s shutdown drain alive.
+    """
+    from datetime import timedelta
+
+    from domains.spawn_agent import service
+
+    delivered: list[str] = []
+    # The production hang was a POST waiting on a connection lock nobody would
+    # ever release; hold one for the whole test.
+    leaked_lock = asyncio.Lock()
+    await leaked_lock.acquire()
+
+    async def save_or_hang(**kwargs):
+        if kwargs["tool_call_id"] == "chip-hung":
+            async with leaked_lock:
+                pass
+        delivered.append(kwargs["tool_call_id"])
+
+    async def fake_run_agent(**kwargs):
+        post_message = kwargs["post_message"]
+        for tool_call_id in ("chip-ok-1", "chip-hung", "chip-ok-2"):
+            await post_message(
+                "Evidence",
+                "TOOL",
+                {"toolCallId": tool_call_id, "toolName": "grep", "toolStatus": "FINISHED"},
+            )
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.save_explore_message", new=save_or_hang),
+        patch.object(service, "explore_limits_for_depth", return_value=(5, timedelta(seconds=30))),
+        patch.object(service, "EXPLORE_FE_POST_TIMEOUT_S", post_timeout_s),
+        patch.object(service, "EXPLORE_FE_DRAIN_TIMEOUT_S", drain_timeout_s),
+    ):
+        try:
+            await asyncio.wait_for(
+                service.spawn_explore_agent_activity(
+                    agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+                ),
+                timeout=5,
+            )
+        except asyncio.TimeoutError:
+            raise AssertionError(
+                f"a hung FE post pinned spawn_explore_agent_activity past 5s "
+                f"(post_timeout={post_timeout_s}s, drain_timeout={drain_timeout_s}s)"
+            ) from None
+
+    assert sorted(delivered) == ["chip-ok-1", "chip-ok-2"]
+
+
 def test_three_sibling_explores_get_stable_isolated_cache_sequences():
     """Each explore task owns one stable lane even under a shared parent agent."""
     from loop.run_agent import _resolve_cache_sequence_id
@@ -6320,6 +6385,7 @@ async def run_all_tests():
         "explore_tool_error_keeps_tool_name", test_explore_tool_error_persists_under_the_failing_tools_name
     )
     await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
+    await r.record_async("explore_hung_fe_post_cannot_pin_activity", test_explore_hung_fe_post_cannot_pin_activity)
     await r.record_async(
         "explore_timeout_preserves_inflight_fe_posts",
         test_explore_timeout_during_threshold_drain_preserves_fe_posts,

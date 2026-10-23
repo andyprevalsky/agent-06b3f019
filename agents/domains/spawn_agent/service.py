@@ -51,6 +51,12 @@ logger = structlog.get_logger()
 # Return gathered tool evidence just before the depth's activity timeout.
 # Leave room to drain pending FE posts and persist the final explore chip.
 LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
+# One background FE progress post may not outlive these bounds (RCA P9). The
+# whole post is bounded, including httpx pool/connection-lock acquisition, which
+# httpx's own timeouts do not cover; a leaked lock otherwise pinned the explore
+# activity after its heartbeat stopped, and with it the worker shutdown drain.
+EXPLORE_FE_POST_TIMEOUT_S = 60.0
+EXPLORE_FE_DRAIN_TIMEOUT_S = 120.0
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -673,7 +679,7 @@ async def spawn_explore_agent_activity(
             if previous is not None:
                 # Order only; a failed predecessor must not cancel its successor.
                 await asyncio.gather(previous, return_exceptions=True)
-            return await coro_factory()
+            return await asyncio.wait_for(coro_factory(), timeout=EXPLORE_FE_POST_TIMEOUT_S)
 
         task = asyncio.create_task(_ordered())
         if chain_key:
@@ -720,6 +726,17 @@ async def spawn_explore_agent_activity(
                 task_id=task_id,
                 pending_count=len(pending),
             ):
+                _, overdue = await asyncio.wait(pending, timeout=EXPLORE_FE_DRAIN_TIMEOUT_S)
+                if overdue:
+                    logger.warning(
+                        "Explore FE posts dropped after drain deadline",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        dropped=len(overdue),
+                        deadline_s=EXPLORE_FE_DRAIN_TIMEOUT_S,
+                    )
+                    for task in overdue:
+                        task.cancel()
                 results = await asyncio.gather(*pending, return_exceptions=True)
             # Only NOW drop the chain tails, and only those still pointing at a
             # task we just drained. Clearing them before the gather would publish
