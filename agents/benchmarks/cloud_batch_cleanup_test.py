@@ -2284,7 +2284,9 @@ async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
             for target in targets:stack.enter_context(target)
             row=await bench.run_single_task("http://localhost:1",task,on_agent_created=lambda name,aid:owned.append(aid))
         assert row.agent_id==(CHILD if mode=="both" else "") and row.passed is (mode=="both")
-        assert row.benchmark_status==("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "ERROR")
+        # K7 (355783b87): a first-run agent that does not complete is a graded FAILED, not a runner ERROR.
+        expected_status=("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "FAILED" if mode=="early" else "ERROR")
+        assert row.benchmark_status==expected_status
         assert row.owned_roots[0]["root_agent_id"]==ROOT and row.owned_roots[0]["role"]=="fixture_first_run"
         assert row.graded_root_creation_outcome==("allocated" if mode=="both" else "unknown" if mode=="graded_unknown" else "not_started")
         exported=asdict(row)
@@ -2318,7 +2320,7 @@ async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
         for aid in ([ROOT,CHILD] if mode=="both" else [ROOT]):
             assert calls.count(("delete",aid))==1 and calls.count(("provider",aid))==1
         assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["root_agent_id"]==ROOT
-        assert row.benchmark_status==("PASSED" if mode=="both" else "CANCELLED" if mode=="cancel" else "ERROR")
+        assert row.benchmark_status==expected_status
 
 @async_case
 async def test_owned_cleanup_diagnostic_pipe_failure_preserves_provider_evidence():
