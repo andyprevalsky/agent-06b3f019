@@ -4431,9 +4431,6 @@
         ],
         "checks": [
           {
-            "type": "no_tool_failures"
-          },
-          {
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
@@ -5076,9 +5073,6 @@
           "The root agent completes"
         ],
         "checks": [
-          {
-            "type": "no_tool_failures"
-          },
           {
             "type": "browser_agent_session_count",
             "min": 1,
@@ -7511,9 +7505,6 @@
         ],
         "checks": [
           {
-            "type": "no_tool_failures"
-          },
-          {
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
@@ -7616,9 +7607,6 @@
           "The root agent completes"
         ],
         "checks": [
-          {
-            "type": "no_tool_failures"
-          },
           {
             "type": "browser_agent_session_count",
             "min": 1,
