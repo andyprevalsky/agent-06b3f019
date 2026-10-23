@@ -116,6 +116,39 @@ live model. Two items remain open:
 - **Cache-coverage check.** Declared evaluators run before worker logs are
   collected, and clone logs are not visible to the guest evaluator.
 
+### 2026-10-23: drifted schema row refreshed (Andy-approved additive write)
+
+With Andy's approval, relayed by the descend parent, one row was added to the
+shared Fast Mode cache. It was written through the supported client
+(`providers.fast_cache.client.cache_set` with `FAST_MODE_CACHE_RECORD_DEMO=1`)
+against the production backend `/api/fast-cache/set`.
+
+- **Source key:** `fastmode:v42:llm:4ae3193053ac1d8f:response_schema:c:01e3b830e521586d6836a39b5dc32dc3`.
+  The value was read through `/api/fast-cache/get`: sha256 of its canonical
+  JSON is `2c98c2971235d76553e086a2dc38bd427e79652e7b7d4bd7096592427b52a320`
+  (956 bytes).
+- **Destination key:** `fastmode:v42:llm:4ae3193053ac1d8f:response_schema:c:a330aeeed936ac6b24f3865901a8f966`.
+  It was absent before the write (`hit: false`).
+- **Write and read-back:** `stored: true`. The read-back hit has the same
+  sha256 and byte count and is equal to the source value. A read-only query of
+  `FastModeCacheEntry` shows the new row with the same `md5(value)` as the
+  source, `be6ca9c35dcef6d551b677baa6b1d05f`.
+- **Scope:** no other rows were changed or deleted.
+
+Miss inventory: worker logs from the local pass and from all four cloud copies
+were checked, including the autoscaled worker captures, which made no cache
+lookups. The only LLM cache miss, and the only live model call, was this one
+`response_schema` key. On a hit, the schema replays with the July field names
+and the title "Creator Brand Strategy".
+
+Open follow-up: there is still no cache-coverage evaluator that fails on any
+miss. Declared evaluators run before worker logs are collected
+(`run_benchmark.py` `_run_declared_evaluators` comes before log collection),
+and autoscaled worker logs are not visible to the guest evaluator. The parent
+deferred this check on 2026-10-23. The key will drift again whenever the
+schema-generation request changes, and only strict read-only replay makes
+that loud.
+
 ## Human feedback
 
 Andy, relayed by the descend parent on 2026-10-23: test-mass-agent-run-0 must
