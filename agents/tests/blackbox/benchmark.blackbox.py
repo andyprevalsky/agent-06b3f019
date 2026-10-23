@@ -22554,7 +22554,10 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         task = by_name[f"anti-bot-{probe['name']}"]
         assert task.prompt == probe["goal"]
         assert task.anti_bot == "yes" and task.bench == "rose-bench" and task.requires_browser_agent
-        assert task.status == ("incomplete" if probe.get("hold") else "ready")
+        # Reservation probes stay held until the write lock is proven to stop booking submits
+        # (2026-10-23: a Kernel run made a real Foreign Cinema reservation).
+        held = probe.get("hold") or probe.get("ends_at_write_lock")
+        assert task.status == ("incomplete" if held else "ready")
         assert probe["post_wall_evidence"] in task.evaluators[0]["criteria"]
         assert task.evaluators[0]["method"] == "single_turn_llm_judge"
         assert task.enforce_declared_evaluators is True
