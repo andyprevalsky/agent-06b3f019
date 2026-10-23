@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
@@ -4669,3 +4670,127 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     assert child.should_write is True
     assert asyncio.run(client.cache_set("demo-key", "llm", demo_hash, {"schema": {}})) is True
     assert posts == ["ordinary-key", "demo-key"]
+
+
+class _KeyMemoAction(BaseModel):
+    response: str
+    step: int = 0
+
+
+_KEY_MEMO_REQUEST = dict(
+    pool="rose-1-flash",
+    messages=[
+        {"role": "system", "content": "You are an explore agent."},
+        {"role": "user", "content": "Find the founders of Acme Robotics."},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "function": {"name": "web_search"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Acme Robotics was founded in 2019 by Ada Byron."},
+        {"role": "user", "content": "Also include their LinkedIn profiles."},
+    ],
+    temperature=1.0,
+    max_tokens=8192,
+    provider_fast_mode=True,
+    response_model=_KeyMemoAction,
+)
+_KEY_MEMO_GOAL = "mass agent key memo goal"
+# Key bytes recorded on 7ea74b219, before key derivation was memoized. Every
+# recorded DEMO / Fast Mode row is addressed by these exact strings; a change
+# here means every existing cache entry misses.
+_KEY_MEMO_POSITION_KEYS = [
+    "fastmode:v42:llm:6795a428179d2d50:explore_agent:p:7:c:3ac426698ee643278691fec7dbbb2910",
+    "fastmode:v42:llm:6795a428179d2d50:explore_agent:p:7:c:698cdeb19b401130c1a811f2cb7b9212",
+    "fastmode:v43:llm:6795a428179d2d50:explore_agent:p:7:c:698cdeb19b401130c1a811f2cb7b9212",
+    "fastmode:v43:llm:6795a428179d2d50:explore_agent:p:7:c:3ac426698ee643278691fec7dbbb2910",
+]
+_KEY_MEMO_CONTENT_KEY = "fastmode:v42:llm:6795a428179d2d50:explore_agent:c:fc5984449fd30ee23c876e686d6c4eae"
+
+
+def _count_canonicalizations(monkeypatch) -> Dict[str, int]:
+    counts = {"canonical_messages": 0, "model_json_schema": 0}
+    real_canonical = normalize.canonical_messages
+    real_schema = _KeyMemoAction.model_json_schema
+
+    def counting_canonical(messages):
+        counts["canonical_messages"] += 1
+        return real_canonical(messages)
+
+    def counting_schema(*args, **kwargs):
+        counts["model_json_schema"] += 1
+        return real_schema(*args, **kwargs)
+
+    monkeypatch.setattr(normalize, "canonical_messages", counting_canonical)
+    monkeypatch.setattr(_KeyMemoAction, "model_json_schema", counting_schema)
+    monkeypatch.setattr(rose_cache, "_RESPONSE_SCHEMAS", weakref.WeakKeyDictionary(), raising=False)
+    return counts
+
+
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+@pytest.mark.parametrize("base_step", [7, None])
+def test_replayed_call_derives_cache_keys_once_with_unchanged_bytes(mem, monkeypatch, entrypoint, base_step):
+    """A replayed LLM call canonicalizes its request once per key and keeps every key byte.
+
+    P10 (descend-full69): a saturated mass-agent worker spent its CPU deriving
+    the same position key twice per call (write key + lookup keys) and
+    regenerating the response model's JSON schema for each key material.
+    """
+    from providers.rose.client import RoseClient
+
+    counts = _count_canonicalizations(monkeypatch)
+    looked_up: List[List[str]] = []
+    real_get_first = rose_cache.cache_client.cache_get_first
+
+    async def recording_get_first(keys):
+        looked_up.append(list(keys))
+        return await real_get_first(keys)
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_first", recording_get_first)
+    expected_lookup = _KEY_MEMO_POSITION_KEYS if base_step is not None else [_KEY_MEMO_CONTENT_KEY]
+    stored = rose_cache.empty_response()
+    for chunk in _full_stream():
+        rose_cache.accumulate_chunk(stored, chunk)
+    mem.data[expected_lookup[0]] = stored
+
+    async def body():
+        set_context(
+            DemoCacheContext(enabled=True, goal=_KEY_MEMO_GOAL, base_step=base_step, write_enabled=False)
+        )
+        client = RoseClient(openrouter_key="must-not-call-live")
+
+        async def forbid_live(**_kwargs):
+            raise AssertionError("a replay must never call a live provider")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(client, "_complete_impl", forbid_live)
+        expected = await _drain(rose_cache.replay(stored))
+        for _ in range(2):
+            stream = (
+                client.complete(call_site="explore_agent", dump_context=False, **_KEY_MEMO_REQUEST)
+                if entrypoint == "central"
+                else rose_cache.cached_complete(
+                    client, call_site="explore_agent", dump_context=False, **_KEY_MEMO_REQUEST
+                )
+            )
+            assert await _drain(stream) == expected
+
+    asyncio.run(body())
+    assert looked_up == [expected_lookup, expected_lookup]
+    # Position replay: one current fingerprint + one July-demo fingerprint.
+    # Content replay: one content fingerprint.
+    per_call = 2 if base_step is not None else 1
+    assert counts["canonical_messages"] == 2 * per_call
+    # The response schema is generated once per model class, not per call.
+    assert counts["model_json_schema"] == 1
+
+
+def test_llm_keys_match_separately_derived_keys():
+    material = rose_cache.request_key_material(dict(_KEY_MEMO_REQUEST))
+    for base_step in (7, None):
+        ctx = DemoCacheContext(enabled=True, goal=_KEY_MEMO_GOAL, base_step=base_step)
+        key, lookup = ctx.llm_keys("explore_agent", material)
+        assert key == ctx.llm_key("explore_agent", material)
+        assert lookup == ctx.llm_lookup_keys("explore_agent", material)
+    assert DemoCacheContext(enabled=True, goal=_KEY_MEMO_GOAL, base_step=7).llm_keys("explore_agent", material)[
+        1
+    ] == _KEY_MEMO_POSITION_KEYS
+    assert DemoCacheContext(enabled=True, goal=_KEY_MEMO_GOAL).llm_key("explore_agent", material) == (
+        _KEY_MEMO_CONTENT_KEY
+    )

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import weakref
 from contextlib import aclosing
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
@@ -298,7 +299,7 @@ async def replay_with_context(
                         if name in complete_kwargs
                     },
                     "response_model": response_model.__name__ if response_model else None,
-                    "response_schema": response_model.model_json_schema() if response_model else None,
+                    "response_schema": response_model_json_schema(response_model) if response_model else None,
                 },
                 extra={
                     **(complete_kwargs.get("dump_extra") or {}),
@@ -362,6 +363,28 @@ replay = _replay
 accumulate_chunk = _accumulate
 
 
+# Per-process memo of each response model's JSON schema. Pydantic regenerates
+# the schema on every model_json_schema() call; a model class is immutable once
+# built, so its schema is computed once per class. Weak keys release per-run
+# dynamic AgentAction classes with their agent loop.
+_RESPONSE_SCHEMAS: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
+
+
+def response_model_json_schema(response_model: Any) -> Any:
+    """``response_model.model_json_schema()``, computed once per model class.
+
+    Callers must treat the returned schema as read-only.
+    """
+    try:
+        return _RESPONSE_SCHEMAS[response_model]
+    except KeyError:
+        schema = response_model.model_json_schema()
+        _RESPONSE_SCHEMAS[response_model] = schema
+        return schema
+    except TypeError:
+        return response_model.model_json_schema()
+
+
 def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Stable, behavior-shaping request material for LLM cache keys."""
     pool_name = complete_kwargs.get("pool")
@@ -377,7 +400,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     response_schema: Any = None
     if response_model is not None:
         try:
-            response_schema = response_model.model_json_schema()
+            response_schema = response_model_json_schema(response_model)
         except Exception:
             response_schema = getattr(response_model, "__name__", str(response_model))
     material = {
@@ -914,16 +937,19 @@ async def lookup_llm_cache(
     ctx: Any,
     call_site: str,
     key_material: Any,
+    lookup_keys: list[str] | None = None,
 ) -> tuple[Any, Any]:
     """Exact-key + July position lookup. Raises DemoCacheLookupError on transport fault.
 
     Transient get/get-position failures are retried. A remaining failure is
     never returned as ``(None, None)`` — callers must not treat it as a miss.
+    ``lookup_keys`` are the caller's ``ctx.llm_keys`` result for ``key_material``.
     """
     last_exc: Exception | None = None
     for attempt in range(_LOOKUP_RETRY_ATTEMPTS):
         try:
-            lookup_keys = ctx.llm_lookup_keys(call_site, key_material)
+            if lookup_keys is None:
+                lookup_keys = ctx.llm_lookup_keys(call_site, key_material)
             stored, hit_key = await cache_client.cache_get_first(lookup_keys)
             if stored is None:
                 stored, hit_key = await cache_client.cache_get_position_fallback(
@@ -984,7 +1010,8 @@ async def cached_complete(
     if "provider_fast_mode" not in complete_kwargs:
         complete_kwargs = {**complete_kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
 
-    key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
+    key_material = request_key_material(complete_kwargs)
+    key, lookup_keys = ctx.llm_keys(call_site, key_material)
     seed_google_oauth_demo = False
     if ctx.should_write and (
         ctx.goal.startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX)
@@ -997,7 +1024,7 @@ async def cached_complete(
     if ctx.read_enabled:
         lookup_failed = False
         try:
-            stored, hit_key = await lookup_llm_cache(ctx, call_site, request_key_material(complete_kwargs))
+            stored, hit_key = await lookup_llm_cache(ctx, call_site, key_material, lookup_keys)
         except DemoCacheLookupError as exc:
             logger.warning("demo_cache.get_error", key=key, error=f"{type(exc).__name__}: {exc}"[:300])
             if ctx.soft_complete_allowed:

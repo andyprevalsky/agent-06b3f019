@@ -1247,16 +1247,21 @@ def position_key(goal: str, call_site: str, step: int, request: Any) -> str:
     return build_key("llm", goal, detail)
 
 
-def position_lookup_keys(goal: str, call_site: str, step: int, request: Any) -> list[str]:
+def position_lookup_keys(
+    goal: str, call_site: str, step: int, request: Any, *, current_key: str | None = None
+) -> list[str]:
     """Ordered exact keys to try for position replay (current + OAi-demo aliases).
 
     Later keying changes (exclude_anthropic_family, user_messages in the
     fingerprint, CACHE_KEY_VERSION) would otherwise 100% miss the Jul 2026 warm
     cache that powered the OAi mass-agent demo. Try current first, then the
     demo-era fingerprint under both v42 and v43.
+
+    ``current_key`` is the caller's already-derived ``position_key`` for this
+    same request; passing it skips a second canonicalization of the request.
     """
     site = normalize_call_site(call_site)
-    current = position_key(goal, call_site, step, request)
+    current = current_key if current_key is not None else position_key(goal, call_site, step, request)
     legacy_detail = f"{site}:p:{step}:c:{oai_demo_position_request_fingerprint(request)}"
     keys = [current]
     for version in _OAI_DEMO_CACHE_KEY_VERSIONS:

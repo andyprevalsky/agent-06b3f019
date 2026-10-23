@@ -93,6 +93,22 @@ class DemoCacheContext:
             return normalize.position_lookup_keys(self.goal, call_site, self.base_step, messages)
         return [self.llm_key(call_site, messages)]
 
+    def llm_keys(self, call_site: str, messages: object = None) -> tuple[str, list[str]]:
+        """``(llm_key, llm_lookup_keys)`` for one request, canonicalizing it once.
+
+        Both values are byte-identical to calling the two methods separately;
+        a replayed call previously derived the current position key twice.
+        """
+        if self.base_step is None:
+            key = self.llm_key(call_site, messages)
+            return key, [key]
+        current = normalize.position_key(self.goal, call_site, self.base_step, messages)
+        # A subclass that rekeys llm_key keeps its own write key; the lookup
+        # order stays the base position keys, exactly as llm_lookup_keys.
+        key = current if type(self).llm_key is DemoCacheContext.llm_key else self.llm_key(call_site, messages)
+        lookup = normalize.position_lookup_keys(self.goal, call_site, self.base_step, messages, current_key=current)
+        return key, lookup
+
 
 _CTX: contextvars.ContextVar[Optional[DemoCacheContext]] = contextvars.ContextVar(
     "demo_cache_context", default=None

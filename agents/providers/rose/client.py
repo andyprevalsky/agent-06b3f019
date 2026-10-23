@@ -711,7 +711,8 @@ class RoseClient:
                     yield chunk
             return
 
-        key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
+        key_material = _fc_request_key_material(kwargs)
+        key, lookup_keys = ctx.llm_keys(call_site, key_material)
         if ctx.read_enabled:
             lookup_failed = False
             stored: Any = None
@@ -719,7 +720,7 @@ class RoseClient:
             try:
                 from providers.demo_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, key_material, lookup_keys)
             except DemoCacheLookupError as exc:
                 logger.warning(
                     "demo_cache.get_error",
