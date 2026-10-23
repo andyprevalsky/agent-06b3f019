@@ -242,12 +242,6 @@ def task_worker_environment(
         for task in selected
     ):
         env["ROSE_CODE_AGENT_PROVIDER"] = "claude"
-    # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
-    # verifier cannot see sandbox files and false-fails complete runs. Re-enable
-    # by unsetting ROSE_DISABLE_CODE_AGENT_VERIFIER once we have an in-sandbox
-    # agentic verifier. Override with ROSE_DISABLE_CODE_AGENT_VERIFIER=0.
-    if environ.get("ROSE_DISABLE_CODE_AGENT_VERIFIER", "1").strip().lower() not in _OFF_VALUES:
-        env["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
     # TEMPORARY: strip api_request from explore tool injection + prompt context
     # so coding-agent GitHub ranking benches are not steered onto that route.
     # Override with ROSE_DISABLE_API_REQUEST=0.

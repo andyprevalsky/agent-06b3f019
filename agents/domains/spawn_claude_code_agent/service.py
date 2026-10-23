@@ -38,7 +38,7 @@ from domains.spawn_claude_code_agent.config import (
     SDK_POST_RESULT_EXIT_GRACE_S,
     SILENCE_TIMEOUT_S,
     TRANSCRIPT_FLUSH_INTERVAL_S,
-    code_agent_verifier_disabled,
+    code_agent_verifier_enabled,
 )
 from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
@@ -2146,9 +2146,10 @@ async def _run_verifier(
 
     Returns (score, reasoning, structured_response, input_tokens, output_tokens).
 
-    When ``ROSE_DISABLE_CODE_AGENT_VERIFIER`` is set, skip the dual-agent LLM
-    verifier entirely (Claude Code and Codex). The session result is returned
-    as-is so the parent tool call finishes when the code agent ends.
+    The dual-agent LLM verifier is off by default (Claude Code and Codex); it
+    runs only when ``ROSE_ENABLE_CODE_AGENT_VERIFIER`` opts in. Otherwise the
+    session result is returned as-is so the parent tool call finishes when the
+    code agent ends.
     """
     from helpers.llm import check_progress
     from loop.activity_helper import call_temporal_activity_from_activity
@@ -2169,7 +2170,7 @@ async def _run_verifier(
         output_schema, evidence_structured
     )
 
-    if code_agent_verifier_disabled():
+    if not code_agent_verifier_enabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
         # both extracted /home/user/output artifacts and a process/completion
         # success signal. A crashed process can leave stale partial files
@@ -2201,7 +2202,7 @@ async def _run_verifier(
             ),
         }[outcome]
         v_reasoning = (
-            "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
+            "Code-agent verifier off. "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
             f", artifacts={len(extracted_output_files)})." + outcome_note
         )
@@ -2215,7 +2216,7 @@ async def _run_verifier(
         if event_context:
             v_reasoning = f"{v_reasoning}\n\nCode-agent SDK event JSON:\n\n{event_context}"
         logger.info(
-            "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
+            "[ClaudeCode] Verifier skipped (off by default)",
             agent_id=agent_id,
             task_id=task_id,
             code_provider=code_provider,
@@ -3498,7 +3499,7 @@ async def spawn_claude_code_activity(
         total_input_tokens += v_input
         total_output_tokens += v_output
         # Judged before file-pointer resolution rewrites the response below.
-        verified = not code_agent_verifier_disabled() or (
+        verified = code_agent_verifier_enabled() or (
             _disabled_verifier_outcome(
                 output_schema,
                 structured_response,

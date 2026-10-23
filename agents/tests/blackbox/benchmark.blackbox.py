@@ -16212,7 +16212,7 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     original_tasks = benchmark_tasks._cached_tasks
     # configure_task_environment exports several process-wide flags (e.g.
-    # ROSE_DISABLE_CODE_AGENT_VERIFIER); restore all of them so later suites in
+    # ROSE_DISABLE_API_REQUEST); restore all of them so later suites in
     # the same runner process see the real environment.
     try:
         with patch.dict(os.environ, {}, clear=False):
@@ -16309,6 +16309,11 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
     configure_task_environment always derives from the selected tasks. Compare
     the whole catalog: every key local sets must reach the cloud guest with
     the same value, through the real cloudbench-run.sh task-env path.
+
+    W2: the code-agent verifier is off by default in code, so neither local
+    nor cloud may set ROSE_DISABLE_CODE_AGENT_VERIFIER or the
+    ROSE_ENABLE_CODE_AGENT_VERIFIER opt-in for any task; benches and prod
+    take the same verifier path.
     """
     import importlib.util
     import subprocess
@@ -16336,10 +16341,12 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
         "NON_PURCHASE_GATES_ENABLED",
         "ROSE_CODE_AGENT_PROVIDER",
         "ROSE_DISABLE_CODE_AGENT_VERIFIER",
+        "ROSE_ENABLE_CODE_AGENT_VERIFIER",
         "ROSE_DISABLE_API_REQUEST",
         "ROSE_DISABLE_GENERAL_PURPOSE_AGENT",
         "BROWSER_MAX_ITERATIONS",
     }
+    verifier_keys = {"ROSE_DISABLE_CODE_AGENT_VERIFIER", "ROSE_ENABLE_CODE_AGENT_VERIFIER"}
     clean_env = {
         key: value
         for key, value in os.environ.items()
@@ -16382,6 +16389,8 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
     local_by_task = {task.name: local_env(task.name) for task in benchmark_tasks.all_tasks()}
     assert local_by_task["claude-code-agent"].get("ROSE_CODE_AGENT_PROVIDER") == "claude"
     assert local_by_task["google-oauth"].get("ROSE_DISABLE_API_REQUEST") == "0"
+    verifier_overrides = {name: sorted(verifier_keys & set(env)) for name, env in local_by_task.items()}
+    assert not {name: keys for name, keys in verifier_overrides.items() if keys}, verifier_overrides
     assert set().union(*local_by_task.values()) <= worker_keys, sorted(
         set().union(*local_by_task.values()) - worker_keys
     )
@@ -16392,6 +16401,7 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
         representatives.setdefault(tuple(sorted(env.items())), name)
     for signature, name in representatives.items():
         cloud = cloud_env(name)
+        assert not verifier_keys & set(cloud), {"task": name, "cloud": cloud}
         assert cloud == dict(signature), {"task": name, "local": dict(signature), "cloud": cloud}
 
     # The guest's catalog helper resolves every task identically to local.
@@ -22344,7 +22354,7 @@ def test_browser_min_steps_ignores_init_timeout_retry_before_session():
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
     """Non-orchestration code-agent evidence chips must produce step_count > 0.
 
-    When ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier, spawn chips
+    With the code-agent LLM verifier off (the default), spawn chips
     alone leave every code agent at 0 steps and declared judges fail. Persisted
     `code_agent_sdk_events` / `claude_code_history` chips (agentType=code) are
     the grounded trajectory the harness expects.

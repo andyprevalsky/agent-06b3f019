@@ -6,16 +6,17 @@ import os
 from datetime import timedelta
 from typing import Final
 
-# Temporary kill-switch for the post-run code-agent completion verifier
-# (Claude Code + Codex share this path). When set, the sandbox session's
-# natural end is the result — no dual-agent verifier LLM pass.
-# Values: 1 / true / yes / on
-ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV: Final[str] = "ROSE_DISABLE_CODE_AGENT_VERIFIER"
+# The post-run code-agent completion verifier (Claude Code + Codex share this
+# path) is off by default in prod, local and cloud benchmarks alike: the
+# sandbox session's natural end is the result, labelled complete / incomplete /
+# unverified / failed from mechanical evidence, with no verifier LLM pass.
+# Explicit opt-in only. Values: 1 / true / yes / on
+ROSE_ENABLE_CODE_AGENT_VERIFIER_ENV: Final[str] = "ROSE_ENABLE_CODE_AGENT_VERIFIER"
 
 
-def code_agent_verifier_disabled() -> bool:
-    """Return True when the post-run code-agent verifier should be skipped."""
-    raw = os.getenv(ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV, "").strip().lower()
+def code_agent_verifier_enabled() -> bool:
+    """Return True only when the post-run code-agent LLM verifier is opted in."""
+    raw = os.getenv(ROSE_ENABLE_CODE_AGENT_VERIFIER_ENV, "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 

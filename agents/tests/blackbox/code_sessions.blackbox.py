@@ -1275,5 +1275,7 @@ async def _run_all_tests():
 
 
 async def run_all_tests():
-    with patch.dict(os.environ, {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "0"}):
+    # Production default: the code-agent verifier is off unless opted in.
+    with patch.dict(os.environ, {}):
+        os.environ.pop("ROSE_ENABLE_CODE_AGENT_VERIFIER", None)
         return await _run_all_tests()

@@ -1403,8 +1403,13 @@ async def test_run_verifier_happy_path():
     assert seen_args["args"][-3:] == [True, "fast goal", 3]
 
 
-async def test_run_verifier_disabled_by_env_flag():
-    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex.
+async def test_run_verifier_off_by_default():
+    """With no opt-in env, the LLM verifier never runs for claude or codex.
+
+    W2 (descend-full69-20261023, Andy): the verifier is off globally, so prod,
+    local and cloud benchmarks share this path; only
+    ROSE_ENABLE_CODE_AGENT_VERIFIER opts back in. A legacy
+    ROSE_DISABLE_CODE_AGENT_VERIFIER=0 does not re-enable it.
 
     Also persists non-orchestration SDK/history evidence chips so harness
     `_agent_class_step_counts` records grounded code-agent steps for judges.
@@ -1422,7 +1427,8 @@ async def test_run_verifier_disabled_by_env_flag():
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     with (
-        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        # A legacy opt-out value must not turn the verifier back on.
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "0"}),
         patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
         patch("temporalio.activity.heartbeat"),
     ):
@@ -1444,7 +1450,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 code_events=[{"type": "tool_use", "name": "Bash"}],
             )
             assert score == 0.5, provider
-            assert "verifier disabled" in reasoning.lower(), reasoning
+            assert "verifier off" in reasoning.lower(), reasoning
             assert "not verified: summary." in reasoning, reasoning
             assert "incomplete" not in reasoning.lower(), reasoning
             assert struct is None
@@ -1469,7 +1475,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 ],
             )
             assert score_ok == 1.0, provider
-            assert "verifier disabled" in reasoning_ok.lower(), reasoning_ok
+            assert "verifier off" in reasoning_ok.lower(), reasoning_ok
             assert struct_ok is None
             assert itok_ok == 0 and otok_ok == 0
 
@@ -1526,7 +1532,6 @@ async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     with (
-        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
         patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
         patch("temporalio.activity.heartbeat"),
         patch.object(
@@ -1589,7 +1594,6 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     with (
-        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
         patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
         patch("temporalio.activity.heartbeat"),
     ):
@@ -1628,7 +1632,7 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
 
     assert called["check_progress"] == 0
     assert score == 1.0
-    assert "verifier disabled" in reasoning.lower(), reasoning
+    assert "verifier off" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning
     assert struct == {
@@ -1686,7 +1690,6 @@ async def test_disabled_verifier_reports_successful_session_truthfully():
         collector = AsyncMock()
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
         with (
-            patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
             patch.object(service, "SandboxLogCollector", lambda *a, **kw: collector),
             patch.object(
                 service,
@@ -3827,8 +3830,8 @@ async def _run_all_tests():
     await r.record_async("handle_reconnect_dead", test_handle_reconnect_exhausted_dead_sandbox)
     await r.record_async("handle_reconnect_health_none", test_handle_reconnect_exhausted_health_none)
     # _run_verifier
-    await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
-    await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
+    await r.record_async("run_verifier_happy", _with_verifier_opt_in(test_run_verifier_happy_path))
+    await r.record_async("run_verifier_off_by_default", test_run_verifier_off_by_default)
     await r.record_async(
         "run_verifier_disabled_schema_incomplete",
         test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
@@ -3841,23 +3844,31 @@ async def _run_all_tests():
         "disabled_verifier_truthful_session_outcome",
         test_disabled_verifier_reports_successful_session_truthfully,
     )
-    await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
+    await r.record_async("run_verifier_exception", _with_verifier_opt_in(test_run_verifier_exception_fallback))
     await r.record_async(
         "run_verifier_partial_verdict_missing_required_field",
-        test_run_verifier_partial_verdict_missing_required_field_reaches_parent,
+        _with_verifier_opt_in(test_run_verifier_partial_verdict_missing_required_field_reaches_parent),
     )
     await r.record_async(
         "run_verifier_codex_event_json",
-        test_run_verifier_uses_code_event_json_for_codex_context,
+        _with_verifier_opt_in(test_run_verifier_uses_code_event_json_for_codex_context),
     )
     await r.record_async(
-        "run_verifier_truncation_preserves_rejection", test_run_verifier_truncation_preserves_rejection
+        "run_verifier_truncation_preserves_rejection",
+        _with_verifier_opt_in(test_run_verifier_truncation_preserves_rejection),
     )
-    await r.record_async("run_verifier_no_override_no_trunc", test_run_verifier_no_override_when_no_truncation)
     await r.record_async(
-        "run_verifier_no_override_no_attempt", test_run_verifier_no_override_when_attempt_completion_false
+        "run_verifier_no_override_no_trunc",
+        _with_verifier_opt_in(test_run_verifier_no_override_when_no_truncation),
     )
-    await r.record_async("run_verifier_no_override_already_pass", test_run_verifier_no_override_when_already_passing)
+    await r.record_async(
+        "run_verifier_no_override_no_attempt",
+        _with_verifier_opt_in(test_run_verifier_no_override_when_attempt_completion_false),
+    )
+    await r.record_async(
+        "run_verifier_no_override_already_pass",
+        _with_verifier_opt_in(test_run_verifier_no_override_when_already_passing),
+    )
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
@@ -4056,10 +4067,22 @@ async def _run_all_tests():
     return r.all_passed
 
 
+def _with_verifier_opt_in(test):
+    """Run an LLM-verifier-path test with the explicit opt-in set."""
+
+    async def wrapped():
+        with patch.dict(os.environ, {"ROSE_ENABLE_CODE_AGENT_VERIFIER": "1"}):
+            await test()
+
+    return wrapped
+
+
 async def run_all_tests():
-    # Suite fixtures must control this gate even when agents/.env disables the
-    # production verifier. Individual disabled-path tests override it to "1".
-    with patch.dict(os.environ, {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "0"}):
+    # The suite runs on the production default (verifier off) regardless of
+    # the caller's environment; LLM-verifier tests opt in individually.
+    with patch.dict(os.environ, {}):
+        os.environ.pop("ROSE_ENABLE_CODE_AGENT_VERIFIER", None)
+        os.environ.pop("ROSE_DISABLE_CODE_AGENT_VERIFIER", None)
         return await _run_all_tests()
 
 
