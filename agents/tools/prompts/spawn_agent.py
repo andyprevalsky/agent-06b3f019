@@ -13,7 +13,8 @@ CODE_LINE = (
 )
 CODE_LINE_ROSE_DESKTOP = (
     "- code: A Claude Code or Codex CLI agent in a persistent sandbox holding the user's Rose app UI; give it "
-    "all code writing. For something new the user asked to look at or play (a game, app, chart or visual), "
+    "all code writing except one HTML page you can write yourself, such as a chart or scorecard, which you "
+    "show with display html. For something new the user asked to look at or play (a game, app or visual), "
     "have it show it in Agent Display using rose display and return the display receipt. "
     "A final file path alone does not display the result. Keep the task tightly "
     "scoped and self-sufficient."

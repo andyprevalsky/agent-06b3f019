@@ -1077,9 +1077,10 @@ _SPAWN_TYPE_CODE_STOCK = (
 )
 _SPAWN_TYPE_CODE_ROSE_DESKTOP = (
     "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
-    "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
+    "available credentials and configuration. Delegate all code writing to it except one HTML page you "
+    "can write yourself, such as a chart or scorecard, which you show with display html. Its sandbox holds the "
     "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
-    "the user. For a game, app, chart or visual the user asks to see, have it publish the result "
+    "the user. For a game, app or visual the user asks to see, have it publish the result "
     "in Agent Display using rose display and return the display receipt; a file path alone does not show it. "
 )
 _SPAWN_TYPE_REST = (

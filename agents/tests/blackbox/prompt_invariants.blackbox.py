@@ -420,6 +420,7 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
     type_desc = " ".join((SpawnAgentTool.model_fields["type"].description or "").split())
     for phrase in (
         "Delegate all code writing to it",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
         "user's Rose app UI (rose_user_ui)",
         "how Rose looks or behaves for the user",
         "in Agent Display",
@@ -430,6 +431,7 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
     code_line = next(line for line in PROMPT.splitlines() if line.startswith("- code:"))
     for phrase in (
         "give it all code writing",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
         "user's Rose app UI",
         "show it in Agent Display using rose display",
         "return the display receipt",
