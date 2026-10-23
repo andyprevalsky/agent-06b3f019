@@ -6,6 +6,7 @@ import {
   MAX_FILE_SIZE,
   MAX_TOTAL_SIZE,
   processUploadedFile,
+  putStorageObject,
   validateTotalSize,
   type FilePointer,
 } from '../../providers/storage';
@@ -96,6 +97,43 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('putStorageObject treats an existing write-once object as stored', async () => {
+    // Supabase answers a duplicate upload with HTTP 400 and statusCode "409" in the body
+    // (a re-displayed page with the same content hash: display dedupe, not a failure).
+    const oldUrl = process.env.SUPABASE_URL;
+    const oldKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const oldFetch = globalThis.fetch;
+    let calls = 0;
+    try {
+      process.env.SUPABASE_URL = 'https://example.supabase.co';
+      process.env.SUPABASE_SERVICE_ROLE_KEY = 'dummy';
+      globalThis.fetch = (async () => {
+        calls += 1;
+        const duplicate = calls === 1;
+        return new Response(
+          JSON.stringify({
+            statusCode: duplicate ? '409' : '403',
+            error: duplicate ? 'Duplicate' : 'Unauthorized',
+            message: duplicate ? 'The resource already exists' : 'new row violates policy',
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        );
+      }) as typeof fetch;
+
+      await putStorageObject('user-1/display/abc.html', Buffer.from('<p>x</p>'), 'text/html');
+      await assert.rejects(
+        putStorageObject('user-1/display/def.html', Buffer.from('<p>y</p>'), 'text/html'),
+        /violates policy/
+      );
+    } finally {
+      if (oldUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = oldUrl;
+      if (oldKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = oldKey;
+      globalThis.fetch = oldFetch;
+    }
+  });
+
   await test('validateTotalSize accepts boundary and rejects oversized totals', () => {
     const atLimit: FilePointer[] = [
       {
@@ -121,5 +159,5 @@ void main().then(() => {
     process.exit(1);
   }
 
-  console.log(`\n${passed}/4 storage boundary tests passed`);
+  console.log(`\n${passed}/5 storage boundary tests passed`);
 });
