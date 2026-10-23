@@ -46,7 +46,8 @@ if [ -n "${REF:-}" ]; then
         log "FATAL: missing controller-owned executable cloudbench-fetch-ref helper"
         exit 1
     fi
-    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+    if ! CLOUDBENCH_APP_USER="$APP_USER" CLOUDBENCH_SOURCE_SCOPE=worker-runtime \
+        bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not verify requested ref $REF"
         exit 1
     fi

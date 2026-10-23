@@ -12,6 +12,16 @@ fetch_lock_kind=""
 fetch_lock_fd=""
 fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
+# An autoscaled worker executes runtime source only. The primary's benchmark
+# runner owns the append-only history ledgers, which the workspace patch also
+# excludes; a fresh worker volume does not inflate or write them.
+source_scope="${CLOUDBENCH_SOURCE_SCOPE:-complete}"
+case "$source_scope" in complete|worker-runtime) ;; *)
+    echo "[cloudbench] FATAL: unknown CLOUDBENCH_SOURCE_SCOPE '$source_scope'" >&2
+    exit 1 ;;
+esac
+worker_runtime_omitted='agents/benchmarks/history/*.jsonl'
+
 # Retained physical Volumes may bootstrap only inside the authenticated, private
 # fresh-generation mount. This is not a fresh-physical-volume declaration.
 fresh_checkout_admitted="${CLOUDBENCH_FRESH_VOLUME:-0}"
@@ -217,6 +227,12 @@ elif [ "$fresh_checkout_admitted" = 1 ]; then
     # A fresh REAL volume needs the complete requested source, not historical
     # benchmark checkouts. Retained volumes keep their existing history above.
     fetch_args+=(--depth=1)
+    if [ "$source_scope" = worker-runtime ]; then
+        # Blobs outside the sparse definition are never transferred; checkout
+        # fetches the rest once, under this request-scoped credential.
+        git_cmd sparse-checkout set --no-cone '/*' "!/$worker_runtime_omitted"
+        fetch_args+=(--filter=blob:none)
+    fi
 else
     echo "[cloudbench] FATAL: retained checkout has no verified HEAD" >&2
     exit 1
@@ -243,5 +259,14 @@ actual="$(git_cmd rev-parse HEAD)"
 if [ "$actual" != "$fetched" ]; then
     echo "[cloudbench] FATAL: checkout verification failed ($actual != $fetched)" >&2
     exit 1
+fi
+if [ "$(git_cmd config --get core.sparseCheckout || true)" = true ]; then
+    # Only the declared worker-runtime omission may be absent from the worktree.
+    if git_cmd ls-files -t | grep '^S ' | cut -c3- \
+        | grep -Ev '^agents/benchmarks/history/[^/]+\.jsonl$' | grep -q .; then
+        echo "[cloudbench] FATAL: sparse worker checkout omitted runtime source" >&2
+        exit 1
+    fi
+    echo "[cloudbench] worker-runtime checkout omits $worker_runtime_omitted"
 fi
 echo "[cloudbench] verified checkout $actual"
