@@ -29,6 +29,8 @@ export const createSessionSchema = z.object({
   user_id: z.string().uuid().optional(), // Required for GitHub repo access check
   // Persistent code session to resume; omitted → the root's latest for this repo.
   code_session_id: z.string().uuid().optional(),
+  // Resume this session's sandbox and files in a new CLI conversation (paused-task resume).
+  fresh_conversation: z.boolean().optional(),
   // Stable per tool call so Temporal retries of one spawn keep their lease.
   lease_owner: z.string().min(1).max(200).optional(),
   // Project default branch a new root session's branch is cut from (default: the repo's).
@@ -65,6 +67,7 @@ export interface CreateSessionParams {
   github_repo_url?: string;
   user_id?: string;
   code_session_id?: string;
+  fresh_conversation?: boolean;
   lease_owner?: string;
   base_branch?: string;
   /** Explicit Project; defaults to the agent's (or its root's) project. */

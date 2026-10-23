@@ -320,6 +320,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(requested_code_session_id, str) and requested_code_session_id
             else None
         )
+        if tool_call.get("_fresh_conversation") is True:
+            # continue_conversation=false resume: same session and sandbox, new CLI conversation.
+            code_session_request = {**(code_session_request or {}), "fresh_conversation": True}
         requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id

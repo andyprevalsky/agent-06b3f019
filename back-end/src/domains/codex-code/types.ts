@@ -12,6 +12,8 @@ export const createSessionSchema = z.object({
   harness_mode: z.enum(['code', 'rose']).optional(),
   rose_api_base_url: z.string().url().optional(),
   code_session_id: z.string().uuid().optional(),
+  // Resume this session's sandbox and files in a new CLI conversation (paused-task resume).
+  fresh_conversation: z.boolean().optional(),
   lease_owner: z.string().min(1).max(200).optional(),
   base_branch: z.string().min(1).max(255).optional(),
   // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
@@ -38,6 +40,7 @@ export interface CreateSessionParams {
   harness_mode?: 'code' | 'rose';
   rose_api_base_url?: string;
   code_session_id?: string;
+  fresh_conversation?: boolean;
   lease_owner?: string;
   base_branch?: string;
 }

@@ -197,6 +197,40 @@ def agent_notification_metadata(
     return metadata
 
 
+# Browser/code tasks keep live state (browser profile, code sandbox). A finished
+# (completed/failed) one cannot be messaged; one whose run a user pause ended is
+# "paused", and a message resumes it with an explicit continue_conversation.
+RESUMABLE_TASK_TYPES = frozenset({"browser", "code"})
+FINISHED_TASK_STATUSES = frozenset({"completed", "failed"})
+PAUSED_TASK_STATUS = "paused"
+# Internal spawn args a resume sets (never model-supplied): see workflows/background_agents.py.
+RESUME_CONVERSATION_KEYS = frozenset({"_resume_paused_conversation", "_fresh_conversation"})
+
+
+def background_message_refusal(record: Dict[str, Any], continue_conversation: Optional[bool]) -> Optional[str]:
+    """Why send_message_to_agent cannot deliver to this own background task (None when it can).
+
+    Reads the task's structured type and status only. Running tasks and explore
+    tasks are always deliverable.
+    """
+    agent_type = record.get("agent_type")
+    status = record.get("status")
+    if agent_type not in RESUMABLE_TASK_TYPES:
+        return None
+    address = record.get("path") or record.get("address") or "that agent"
+    if status in FINISHED_TASK_STATUSES:
+        return (
+            f"{address} is a {status} {agent_type} agent; completed browser and code agents cannot be "
+            f"messaged. Spawn a new {agent_type} agent for new work."
+        )
+    if status == PAUSED_TASK_STATUS and continue_conversation is None:
+        return (
+            f"{address} is a paused {agent_type} agent; set continue_conversation to true to resume "
+            "its exact prior conversation or false to start a fresh one."
+        )
+    return None
+
+
 # A woken explore/browser/code task gets its previous result (head + tail) as context.
 WAKE_PREVIOUS_RESULT_MAX_TOKENS = 2000
 
@@ -225,6 +259,11 @@ def build_background_wake_goal(*, message: str, base_goal: str, previous_status:
 
 __all__ = [
     "AGENT_MESSAGE_TYPES",
+    "FINISHED_TASK_STATUSES",
+    "PAUSED_TASK_STATUS",
+    "RESUMABLE_TASK_TYPES",
+    "RESUME_CONVERSATION_KEYS",
+    "background_message_refusal",
     "AGENT_NOTIFICATION_TOOL_NAME",
     "CHILD_WORKFLOW_AGENT_TYPES",
     "ERROR_PAYLOAD_MAX_TOKENS",

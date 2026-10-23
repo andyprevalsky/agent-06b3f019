@@ -258,6 +258,7 @@ async def create_e2b_session(
     lease_owner: Optional[str] = None,
     target: str = "cloud",
     local_device_id: Optional[str] = None,
+    fresh_conversation: bool = False,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -294,6 +295,9 @@ async def create_e2b_session(
             create_payload["code_session_id"] = code_session_id
         if lease_owner:
             create_payload["lease_owner"] = lease_owner[:200]
+        if fresh_conversation:
+            # Keep the session's sandbox and files; start a new CLI conversation.
+            create_payload["fresh_conversation"] = True
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(

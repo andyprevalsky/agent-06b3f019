@@ -33,6 +33,7 @@ import { type ResolvedAddress, resolveTreeAddress } from './agentAddressResolver
 import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { WAKEABLE_TERMINAL_STATUSES, wakeFinishedAgent } from './agentWakeService';
 import { guardAgentMessage, noteAgentMessagesConsumed } from './agentMessageGuardService';
+import { taskMessageRefusal } from './agentTaskMessageRefusal';
 
 const log = createLogger('AgentMessages');
 
@@ -110,6 +111,7 @@ function deliveryShape(target: TreeAgent, sender: TreeAgent, body: AgentMessageB
   const messageType = wakesFinishedAgent || wakesFinishedTask ? 'NEW_TASK' : 'MESSAGE';
   const toAgentPath = addressedToTask ? (recipientTask?.path ?? null) : agentTaskPath(target);
   return {
+    recipientTask,
     addressedToTask,
     taskRunning,
     wakesFinishedAgent,
@@ -137,10 +139,40 @@ async function wakeFinishedTaskOwner(
     from_agent_path: agentTaskPath(sender),
     wake_task_id: body.recipient_task_id,
     message: body.message,
+    ...(body.continue_conversation !== undefined
+      ? { continue_conversation: body.continue_conversation }
+      : {}),
   });
   return signalled
     ? { woke: true }
     : { woke: false, reason: 'its owner agent could not be reached' };
+}
+
+/**
+ * Why a message is refused before anything is stored, or null. Reads only the
+ * already-loaded target row (its persisted task list): no extra query.
+ */
+async function refusalBeforeStore(
+  target: TreeAgent,
+  sender: TreeAgent,
+  body: AgentMessageBody,
+  options: AgentMessageOptions,
+  { recipientTask, toAgentPath }: ReturnType<typeof deliveryShape>
+): Promise<ServiceError | null> {
+  const taskRefusal = taskMessageRefusal(
+    recipientTask,
+    options.displayAddress ?? toAgentPath ?? body.recipient_task_id ?? target.id,
+    body.continue_conversation
+  );
+  if (taskRefusal !== null) return taskRefusal;
+  // Prime-style guard: per-sender rate + per-recipient unread cap (retries are free).
+  return guardAgentMessage(
+    target,
+    sender.id,
+    body.recipient_task_id ?? null,
+    body.idempotency_key,
+    options.displayAddress ?? toAgentPath ?? agentTaskPath(target) ?? target.id
+  );
 }
 
 /** Persist one agent message on the target and wake the target's workflow. */
@@ -153,6 +185,7 @@ export async function sendAgentMessage(
   const resolved = await resolveSameTree(targetId, body.from_agent_id, userId);
   if ('error' in resolved) return resolved;
   const { target, sender } = resolved;
+  const shape = deliveryShape(target, sender, body);
   const {
     addressedToTask,
     taskRunning,
@@ -160,15 +193,8 @@ export async function sendAgentMessage(
     wakesFinishedTask,
     messageType,
     toAgentPath,
-  } = deliveryShape(target, sender, body);
-  // Prime-style guard: per-sender rate + per-recipient unread cap (retries are free).
-  const refused = await guardAgentMessage(
-    target,
-    sender.id,
-    body.recipient_task_id ?? null,
-    body.idempotency_key,
-    options.displayAddress ?? toAgentPath ?? agentTaskPath(target) ?? target.id
-  );
+  } = shape;
+  const refused = await refusalBeforeStore(target, sender, body, options, shape);
   if (refused !== null) return refused;
 
   const message = await createMessage({
@@ -259,6 +285,9 @@ export async function sendAgentMessageByAddress(
       message: body.message,
       idempotency_key: body.idempotency_key,
       ...(to.recipient_task_id !== null ? { recipient_task_id: to.recipient_task_id } : {}),
+      ...(body.continue_conversation !== undefined
+        ? { continue_conversation: body.continue_conversation }
+        : {}),
     },
     userId,
     { displayAddress: body.to }

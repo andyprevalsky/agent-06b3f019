@@ -4028,6 +4028,10 @@ async def _run_all_tests():
         test_cc_manager_reattaches_after_worker_drain_on_same_queue,
     )
     await r.record_async(
+        "cc_fresh_conversation_resume_keeps_session_drops_cli_resume",
+        test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume,
+    )
+    await r.record_async(
         "cc_manager_parks_code_session_for_generation_handoff",
         test_cc_manager_parks_code_session_for_generation_handoff,
     )
@@ -5168,6 +5172,43 @@ class _HandoffCCWorkflowInstance(_FakeCCWorkflowInstance):
 def _cc_titles(events) -> list:
     return [getattr(event, "title", None) for event in events]
 
+
+async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume():
+    """W3: continue_conversation=false resumes a paused code agent in a new CLI conversation.
+
+    The workflow's internal ``_fresh_conversation`` flag reaches the session
+    create request; the code session (sandbox, files) is still resumed, only
+    the backend's CLI ``--resume`` is skipped. Without the flag the request is
+    unchanged (continue=true keeps the CLI conversation).
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from domains.spawn_claude_code_agent.repo import create_e2b_session
+
+    for tool_call, expected in (
+        ({"goal": "g", "_fresh_conversation": True}, {"fresh_conversation": True}),
+        ({"goal": "g"}, None),
+    ):
+        fake = _SequencedCCWorkflow(_CC_COMPLETED)
+        restore = _patch_cc_workflow(fake)
+        try:
+            await _collect_cc_events(
+                SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), tool_call, "tc-fresh")
+            )
+        finally:
+            restore()
+        assert fake.started[0][16] == expected, fake.started[0][16]
+
+    _setup()
+    await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", fresh_conversation=True)
+    body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
+    assert body["fresh_conversation"] is True, body
+    from helpers.httpx_capture import clear_captures
+
+    clear_captures()
+    _setup()
+    await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1")
+    body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
+    assert "fresh_conversation" not in body, body
 
 async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     """A drained activity restarts against the same sandbox, not a new session."""

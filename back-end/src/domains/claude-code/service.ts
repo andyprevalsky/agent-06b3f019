@@ -190,7 +190,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
         normalizedRepoUrl,
         effectiveUserId,
         fastModeCacheEnabled,
-        { projectWorkspace, codeSession }
+        { projectWorkspace, codeSession, freshConversation: params.fresh_conversation === true }
       )
   );
 

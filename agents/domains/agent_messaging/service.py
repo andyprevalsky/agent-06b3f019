@@ -259,6 +259,7 @@ async def send_agent_message_activity(
     idempotency_key: str,
     recipient_task_id: Optional[str],
     user_id: Optional[str],
+    continue_conversation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Deliver one message by agent id. The backend dedupes on ``idempotency_key`` (retry-safe).
 
@@ -275,16 +276,25 @@ async def send_agent_message_activity(
     }
     if recipient_task_id:
         payload["recipient_task_id"] = recipient_task_id
+    if continue_conversation is not None:
+        payload["continue_conversation"] = continue_conversation
     return await post_agent_message(target_agent_id, payload, user_id)
 
 
 @activity.defn
 async def send_agent_message_to_address_activity(
-    from_agent_id: str, to: str, message: str, idempotency_key: str, user_id: Optional[str]
+    from_agent_id: str,
+    to: str,
+    message: str,
+    idempotency_key: str,
+    user_id: Optional[str],
+    continue_conversation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Deliver one message to a tree address; the backend resolves it (retry-safe by key)."""
     activity.heartbeat(f"Sending agent message to {to}")
-    payload = {"to": to, "message": message, "idempotency_key": idempotency_key}
+    payload: Dict[str, Any] = {"to": to, "message": message, "idempotency_key": idempotency_key}
+    if continue_conversation is not None:
+        payload["continue_conversation"] = continue_conversation
     return await post_agent_message_to_address(from_agent_id, payload, user_id)
 
 

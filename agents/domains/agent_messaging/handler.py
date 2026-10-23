@@ -29,6 +29,7 @@ from domains.agent_messaging.service import (
     send_agent_message_to_address_activity,
 )
 from helpers.agent_addressing import ROOT_TASK_PATH
+from helpers.background_agents import PAUSED_TASK_STATUS, background_message_refusal
 from tools.base import EventType, MessageStatus, ToolEvent
 
 
@@ -57,7 +58,9 @@ async def resolve_own_task_path(workflow_instance: Any) -> Optional[str]:
     return path
 
 
-def resolve_message_target(workflow_instance: Any, to: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def resolve_message_target(
+    workflow_instance: Any, to: str, continue_conversation: Optional[bool] = None
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Locally resolvable targets: (target_agent_id, recipient_task_id, error).
 
     Returns (None, None, None) when the backend resolver must resolve ``to``.
@@ -80,6 +83,9 @@ def resolve_message_target(workflow_instance: Any, to: str) -> Tuple[Optional[st
             None,
             "A for_each address has no inbox; message its child agents by their addresses (see your environment block).",
         )
+    refusal = background_message_refusal(own_task, continue_conversation) if own_task is not None else None
+    if refusal is not None:
+        return None, None, refusal
     if own_task is not None and not own_task.get("child_workflow"):
         # In-activity agents read a parent-owned inbox addressed by the current
         # run's inbox id. A finished task's row is stored on that run's inbox
@@ -117,7 +123,9 @@ async def send_message_to_agent(
     """Deliver one message to an address in this tree (path, "parent", agent id or own task)."""
     to = str(tool_call.get("to") or "").strip()
     message = str(tool_call.get("message") or "")
-    target, recipient_task_id, error = resolve_message_target(workflow_instance, to)
+    raw_continue = tool_call.get("continue_conversation")
+    continue_conversation = raw_continue if isinstance(raw_continue, bool) else None
+    target, recipient_task_id, error = resolve_message_target(workflow_instance, to, continue_conversation)
     result: Dict[str, Any] = {}
     if error is None and not message.strip():
         error = "`message` must not be empty."
@@ -134,6 +142,7 @@ async def send_message_to_agent(
                         idempotency_key,
                         recipient_task_id,
                         workflow_instance.user_id,
+                        continue_conversation,
                     ],
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -141,7 +150,14 @@ async def send_message_to_agent(
             else:
                 result = await workflow.execute_activity(
                     send_agent_message_to_address_activity,
-                    args=[workflow_instance.agent_id, to, message, idempotency_key, workflow_instance.user_id],
+                    args=[
+                        workflow_instance.agent_id,
+                        to,
+                        message,
+                        idempotency_key,
+                        workflow_instance.user_id,
+                        continue_conversation,
+                    ],
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
@@ -171,14 +187,27 @@ async def send_message_to_agent(
             message,
             message_id=message_id or idempotency_key,
             sender=await resolve_own_task_path(workflow_instance),
+            continue_conversation=continue_conversation,
         )
         result = {**result, "woke": bool(wake.get("woke"))}
+        if own_task.get("status") == PAUSED_TASK_STATUS:
+            result["resumed"] = "continued" if continue_conversation else "fresh"
         if not wake.get("woke"):
             result["wake_error"] = wake.get("reason")
     text = f"Message sent to {to}."
     if result.get("task_running") is False:
         text += " Note: that background task is no longer running, so it will not read this message."
-    if result.get("woke") is True:
+    if result.get("woke") is True and result.get("resumed"):
+        conversation = (
+            "its prior conversation continues with this message"
+            if result["resumed"] == "continued"
+            else "it starts a fresh conversation with this message"
+        )
+        text = (
+            f"{to} was paused; this message resumed it and {conversation}. "
+            "You will get a new agent message when it finishes again."
+        )
+    elif result.get("woke") is True:
         text = (
             f"{to} had finished; this message started its next run. "
             "You will get a new FINAL_ANSWER agent message when it finishes again."

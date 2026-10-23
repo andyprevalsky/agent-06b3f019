@@ -117,6 +117,7 @@ router.post(
         harness_mode,
         rose_api_base_url,
         code_session_id,
+        fresh_conversation,
         lease_owner,
         base_branch,
         target,
@@ -145,6 +146,7 @@ router.post(
               harness_mode,
               rose_api_base_url,
               code_session_id,
+              fresh_conversation,
               lease_owner,
               base_branch,
             });

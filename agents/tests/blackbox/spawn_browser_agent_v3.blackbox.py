@@ -30589,6 +30589,109 @@ async def test_browser_resume_store_preserves_inline_and_external_snapshots():
         assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
 
 
+async def test_paused_browser_continue_conversation_restores_exact_transcript():
+    """W3 (Andy 2026-10-23): continue_conversation=true resumes a user-paused browser's exact conversation.
+
+    The pause snapshot is archived (always encrypted) under the paused run's
+    inbox address; the resumed activity restores it byte-for-byte before
+    session init. A run with no snapshot fails truthfully, naming the fresh
+    alternative, without opening a browser.
+    """
+    from tempfile import TemporaryDirectory
+
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3 import resume_store
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    transcript = [
+        {"role": "user", "content": "Find the member number."},
+        {"role": "assistant", "content": "Opened https://shop.example.com/login and tried the saved login."},
+        {"role": "user", "content": "[step 7] Login page shows a CAPTCHA."},
+    ]
+    paused_state = {
+        "browser_turn_messages": transcript,
+        "action_summary": ["navigate", "type email"],
+        "visited_urls": ["https://shop.example.com/login"],
+        "user_message_cursor": "2026-10-23T10:00:00+00:00",
+        "user_message_cursor_is_task_start": True,
+        "session_id": "kernel-session-1",
+    }
+    with (
+        TemporaryDirectory() as archive_root,
+        patch.dict(
+            os.environ,
+            {
+                "TRACE_ARCHIVE_LOCAL_ROOT": archive_root,
+                "TRACE_ARCHIVE_BACKEND": "local",
+                "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"0" * 32).decode(),
+            },
+        ),
+    ):
+        await resume_store.persist_paused_conversation(
+            agent_id="agent-1", task_id="task-1", inbox_address="toolu_b", state=paused_state
+        )
+        restored = await resume_store.load_paused_conversation(agent_id="agent-1", inbox_address="toolu_b")
+        restored.pop("browser_resume_context_ref")
+        assert restored == paused_state, "the paused conversation must come back exactly"
+
+        # The resumed activity restores that transcript before anything else runs.
+        seen = {}
+
+        async def _capture(agent_id, resume_state):
+            seen.update(resume_state)
+            raise WorkflowGenerationSealed("stop after restore")
+
+        with (
+            patch.object(h, "_load_browser_resume_user_instructions", _capture),
+            patch.object(h, "init_browser_session", AsyncMock(side_effect=AssertionError("no new browser"))),
+        ):
+            with pytest.raises(WorkflowGenerationSealed):
+                await h._spawn_browser_agent_activity_v3_real(
+                    user_id="user-1",
+                    agent_id="agent-1",
+                    goal="Find the member number.",
+                    tool_call_id="toolu_b",
+                    task_id="task-1",
+                    start_url="https://shop.example.com/",
+                    write_lock_resume_state={"_resume_paused_conversation": {"inbox_address": "toolu_b"}},
+                    inbox_address="toolu_b",
+                )
+        assert seen["browser_turn_messages"] == transcript, seen
+        assert seen["session_id"] == "kernel-session-1" and seen["tool_call_id"] == "toolu_b"
+        assert "_resume_paused_conversation" not in seen
+
+        # No snapshot for that run (paused before its first step): a truthful failure, no browser.
+        with patch.object(h, "init_browser_session", AsyncMock(side_effect=AssertionError("no new browser"))):
+            out = await h._spawn_browser_agent_activity_v3_real(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Find the member number.",
+                tool_call_id="toolu_x",
+                task_id="task-1",
+                start_url="https://shop.example.com/",
+                write_lock_resume_state={"_resume_paused_conversation": {"inbox_address": "toolu_x.run2"}},
+                inbox_address="toolu_x.run2",
+            )
+        assert out["status"] == "failed" and out["success"] is False, out
+        assert "continue_conversation=false" in out["message"], out
+
+
+def test_browser_user_pause_archives_its_conversation_for_continue():
+    """Source guard: the real activity's pause (CancelledError) branch archives the run's conversation
+    under its inbox address, after the provider pause close."""
+    import re
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text(encoding="utf-8")
+    match = re.search(r"except asyncio\.CancelledError as cancellation:.*?return \{", source, flags=re.DOTALL)
+    assert match is not None
+    branch = match.group(0)
+    close = branch.index("_close_browser_with_cleanup_receipt(session_id, pause=True")
+    archive = branch.index("await persist_paused_conversation(")
+    assert close < archive, "archive after the provider pause"
+    assert "inbox_address=inbox_address or tool_call_id" in branch[archive:]
+    assert "state={**_pause_continuity_state()" in branch[archive:]
+
 async def test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry():
     """A parked browser task rides continue_as_new beside the conversation (2MB cap).
 
@@ -34704,6 +34807,11 @@ async def run_all_tests():
         "browser_resume_store_preserves_inline_and_external_snapshots",
         test_browser_resume_store_preserves_inline_and_external_snapshots,
     )
+    await r.record_async(
+        "paused_browser_continue_restores_exact_transcript",
+        test_paused_browser_continue_conversation_restores_exact_transcript,
+    )
+    r.record("browser_user_pause_archives_conversation", test_browser_user_pause_archives_its_conversation_for_continue)
     await r.record_async(
         "browser_resume_store_keeps_parked_snapshots_small",
         test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry,

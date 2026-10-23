@@ -174,7 +174,13 @@ from .repo import (
     upload_file_to_session,
     world_state_receipt_summary,
 )
-from .resume_store import hydrate_resume_context, persist_resume_context
+from .resume_store import (
+    BrowserResumeStoreError,
+    hydrate_resume_context,
+    load_paused_conversation,
+    persist_paused_conversation,
+    persist_resume_context,
+)
 from .service import (
     AuthRuntimeState,
     accumulate_model_usage,
@@ -7384,6 +7390,31 @@ async def _spawn_browser_agent_activity_v3_real(
             "output_files": [],
         }
 
+    paused_conversation = (write_lock_resume_state or {}).get("_resume_paused_conversation")
+    if isinstance(paused_conversation, dict):
+        # send_message_to_agent(continue_conversation=true) to a user-paused
+        # browser: restore that run's exact conversation; the message itself
+        # arrives through the same inbox address at the first step.
+        try:
+            restored = await load_paused_conversation(
+                agent_id=agent_id,
+                inbox_address=str(paused_conversation.get("inbox_address") or inbox_address or tool_call_id),
+            )
+        except BrowserResumeStoreError as error:
+            return {
+                "status": "failed",
+                "success": False,
+                "error": True,
+                "message": str(error),
+                "task_id": task_id,
+                "session_id": None,
+                "structured_response": None,
+                "usage_items": [],
+            }
+        restored.pop("browser_resume_context_ref", None)
+        write_lock_resume_state = restored
+        is_resume = True
+
     private_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
         hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
@@ -12246,6 +12277,24 @@ Based on this feedback, I need to continue working on the task and address the i
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
+        if task_id and browser_turn_messages:
+            # A user pause: keep this run's exact conversation so a later
+            # continue_conversation=true resume restores it (resume_store.py).
+            try:
+                await persist_paused_conversation(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    inbox_address=inbox_address or tool_call_id,
+                    state={**_pause_continuity_state(), "session_id": session_id},
+                )
+            except Exception as snapshot_error:
+                logger.warning(
+                    "Paused browser conversation was not saved",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(snapshot_error),
+                )
+
         if task_id:
             with _suppress_browser_cleanup_errors():
                 await _save_browser_action_message(
@@ -12752,6 +12801,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 current_start_url = resume_hint.get("current_start_url") or start_url
                 parked_result = resume_hint.get("parked_result")
                 parked_approval = resume_hint.get("approval")
+            elif isinstance(tool_call.get("_resume_paused_conversation"), dict):
+                # continue_conversation=true resume of a user-paused run: the
+                # activity restores that run's archived conversation.
+                write_lock_resume_state = {
+                    "_resume_paused_conversation": dict(tool_call["_resume_paused_conversation"])
+                }
 
             def park_browser_task(phase: str, resume_state: Optional[Dict[str, Any]], **parked: Any) -> bool:
                 return park_pending_tool(

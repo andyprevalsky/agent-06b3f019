@@ -3020,6 +3020,7 @@ async def spawn_claude_code_activity(
                 lease_owner=lease_owner,
                 target=target,
                 local_device_id=local_device_id,
+                fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)

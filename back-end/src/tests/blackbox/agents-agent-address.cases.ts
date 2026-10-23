@@ -223,6 +223,78 @@ test("POST /:id/send-agent-message — path delivery to an agent and to another 
   }
 });
 
+test('POST /:sender/send-agent-message — completed browser/code tasks refuse; paused ones need continue_conversation', async () => {
+  const fx = await createFixture('addr-resumable');
+  const { ids } = fx;
+  const task = (task_name: string, type: string, status: string) => ({
+    ...SCAN_TASK,
+    address: `bg_${task_name}`,
+    type,
+    status,
+    task_name,
+    path: `/root/outreach/${task_name}`,
+  });
+  try {
+    await prisma.agent.update({
+      where: { id: ids.outreach },
+      data: {
+        backgroundTasks: [
+          task('booker', 'browser', 'completed'),
+          task('coder', 'code', 'failed'),
+          task('paused_booker', 'browser', 'paused'),
+        ],
+      },
+    });
+    const stored = () => prisma.message.count({ where: { agentId: ids.outreach } });
+    const before = await stored();
+    for (const [path, kind, status] of [
+      ['/root/outreach/booker', 'browser', 'completed'],
+      ['/root/outreach/coder', 'code', 'failed'],
+    ] as const) {
+      const res = await sendTo(fx.userId, ids.draftA, path, 'One more thing.');
+      assertStatus(res.status, 409, res.data);
+      const error = (res.data as { error: string }).error;
+      assert(
+        error ===
+          `${path} is a ${status} ${kind} agent; completed browser and code agents cannot be ` +
+            `messaged. Spawn a new ${kind} agent for new work.`,
+        `refusal names the reason: ${error}`
+      );
+    }
+    const missing = await sendTo(fx.userId, ids.draftA, '/root/outreach/paused_booker', 'Go on.');
+    assertStatus(missing.status, 400, missing.data);
+    assert(
+      String((missing.data as { error: string }).error).includes('set continue_conversation'),
+      `paused task asks for the flag: ${JSON.stringify(missing.data)}`
+    );
+    assert((await stored()) === before, 'refused sends store nothing');
+
+    const resumed = await request(`${BASE_URL}/api/agents/${ids.draftA}/send-agent-message`, {
+      method: 'POST',
+      headers: apiKeyHeaders(fx.userId),
+      body: JSON.stringify({
+        to: '/root/outreach/paused_booker',
+        message: 'Use the second login.',
+        idempotency_key: `addr-${randomUUID()}`,
+        continue_conversation: true,
+      }),
+    });
+    assertStatus(resumed.status, 201, resumed.data);
+    const body = resumed.data as { message_id: string; woke: boolean; wake_error: string };
+    assert(
+      body.woke === false && body.wake_error === 'its owner agent is not running',
+      `paused task resume is a wake request: ${JSON.stringify(body)}`
+    );
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: body.message_id } });
+    assert(
+      (row.metadata as Record<string, unknown>).recipientTaskId === 'bg_paused_booker',
+      'resume message stored on the paused run inbox'
+    );
+  } finally {
+    await deleteFixture(fx);
+  }
+});
+
 test('GET /:id/tree — paths, path nodes and background tasks (running and finished) of listed agents', async () => {
   const fx = await withScanTask('addr-tree');
   const { ids } = fx;

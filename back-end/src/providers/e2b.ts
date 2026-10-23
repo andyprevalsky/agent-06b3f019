@@ -121,6 +121,8 @@ export interface ClaudeCodeSessionOptions {
   projectWorkspace?: ProjectWorkspace | null;
   /** Persistent code session to resume or start (C1, C13). */
   codeSession?: CodeSessionRow | null;
+  /** Keep the session's sandbox and files but start a new CLI conversation. */
+  freshConversation?: boolean;
 }
 
 export async function createClaudeCodeSession(
@@ -391,7 +393,8 @@ async function createClaudeCodeSessionUnlocked(
     throw err;
   }
   const { sandbox, resumedFrom, cliSessionId } = acquired;
-  if (cliSessionId !== null) envs.CLAUDE_CODE_RESUME_SESSION_ID = cliSessionId;
+  if (cliSessionId !== null && options.freshConversation !== true)
+    envs.CLAUDE_CODE_RESUME_SESSION_ID = cliSessionId;
 
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
@@ -485,6 +488,7 @@ export async function createCodexCodeSession(
     harnessMode?: 'code' | 'rose';
     roseApiBaseUrl?: string;
     memoryEnabled?: boolean;
+    freshConversation?: boolean;
   },
   codeSession: CodeSessionRow | null = null
 ): Promise<CodeAgentSessionResult> {
@@ -630,7 +634,8 @@ export async function createCodexCodeSession(
     agentId,
   });
   const { sandbox, resumedFrom, cliSessionId } = acquired;
-  if (cliSessionId !== null) envs.CODEX_RESUME_SESSION_ID = cliSessionId;
+  if (cliSessionId !== null && harnessOptions?.freshConversation !== true)
+    envs.CODEX_RESUME_SESSION_ID = cliSessionId;
 
   log.info(`Using Codex sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayCodexCodeWsServer(sandbox);

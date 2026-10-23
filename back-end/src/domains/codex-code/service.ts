@@ -122,6 +122,7 @@ export async function createSession(params: CreateSessionParams) {
           harnessMode: params.harness_mode,
           roseApiBaseUrl: params.rose_api_base_url,
           memoryEnabled: params.memory_enabled,
+          freshConversation: params.fresh_conversation === true,
         },
         codeSession
       )

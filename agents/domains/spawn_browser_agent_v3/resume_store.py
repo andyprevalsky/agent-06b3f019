@@ -134,3 +134,37 @@ async def hydrate_resume_context(*, agent_id: str, resume_state: Dict[str, Any])
     if not isinstance(restored, dict):
         raise BrowserResumeStoreError("Browser resume context is not an object")
     return {**resume_state, **restored}
+
+
+def _paused_conversation_pointer_path(inbox_address: str) -> str:
+    return f"browser-pause/{hashlib.sha256(inbox_address.encode('utf-8')).hexdigest()}.json"
+
+
+async def persist_paused_conversation(*, agent_id: str, task_id: str, inbox_address: str, state: Dict[str, Any]) -> None:
+    """Archive a user-paused run's exact conversation, keyed by that run's inbox address.
+
+    A later ``send_message_to_agent(continue_conversation=true)`` resumes the
+    same inbox address and restores this snapshot. Always encrypted (the state
+    can carry credential bindings); the pointer is overwritten by a later pause
+    of the same run.
+    """
+    ref = await _store_snapshot(agent_id, task_id, _encoded_snapshot(state))
+    await asyncio.to_thread(
+        _store_part, agent_id, _paused_conversation_pointer_path(inbox_address), _encoded_snapshot(ref)
+    )
+
+
+async def load_paused_conversation(*, agent_id: str, inbox_address: str) -> Dict[str, Any]:
+    """The snapshot ``persist_paused_conversation`` stored, or BrowserResumeStoreError."""
+    try:
+        pointer = json.loads(
+            await asyncio.to_thread(_load_part, agent_id, _paused_conversation_pointer_path(inbox_address))
+        )
+    except BrowserResumeStoreError:
+        raise BrowserResumeStoreError(
+            "The paused browser agent's prior conversation was not saved; resume it with "
+            "continue_conversation=false to start a fresh conversation"
+        ) from None
+    if not isinstance(pointer, dict):
+        raise BrowserResumeStoreError("Paused browser conversation pointer is malformed")
+    return await hydrate_resume_context(agent_id=agent_id, resume_state=pointer)

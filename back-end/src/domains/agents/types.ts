@@ -3,13 +3,10 @@
  */
 
 import { z } from 'zod';
-import {
-  BACKGROUND_TASKS_MAX,
-  agentAddressSchema,
-  backgroundTaskEntrySchema,
-} from './typesAgentTree';
+import { BACKGROUND_TASKS_MAX, backgroundTaskEntrySchema } from './typesAgentTree';
 
 export * from './typesAgentTree';
+export * from './typesAgentMessages';
 export * from './typesAgentControl';
 export type { Prisma } from '@prisma/client';
 
@@ -344,34 +341,3 @@ export type BatchCreateAgentsBody = z.infer<typeof batchCreateAgentsSchema>;
 export type PostMessageBody = z.infer<typeof postMessageSchema>;
 export type UpdateStatusBody = z.infer<typeof updateStatusSchema>;
 export type UpdateAgentBody = z.infer<typeof updateAgentSchema>;
-
-// ---------------------------------------------------------------------------
-// Agent-to-agent messages (same agent tree only)
-// ---------------------------------------------------------------------------
-
-export const AGENT_MESSAGE_MAX_CHARS = 20_000;
-export const agentMessageSchema = z.object({
-  from_agent_id: z.string().uuid(),
-  message: z
-    .string()
-    .max(AGENT_MESSAGE_MAX_CHARS)
-    .refine((text) => text.trim().length > 0, 'message must not be blank'),
-  idempotency_key: z.string().min(1).max(200),
-  recipient_task_id: z.string().min(1).max(200).optional(),
-});
-export const agentInboxQuerySchema = z.object({
-  task_id: z.string().min(1).max(200),
-  since: z.coerce.date().optional(),
-});
-// POST /:sender/send-agent-message: like agentMessageSchema, addressed by `to`.
-export const agentAddressMessageSchema = z.object({
-  to: agentAddressSchema,
-  message: z
-    .string()
-    .max(AGENT_MESSAGE_MAX_CHARS)
-    .refine((text) => text.trim().length > 0, 'message must not be blank'),
-  idempotency_key: z.string().min(1).max(200),
-});
-export type AgentAddressMessageBody = z.infer<typeof agentAddressMessageSchema>;
-export type AgentMessageBody = z.infer<typeof agentMessageSchema>;
-export type AgentInboxQuery = z.infer<typeof agentInboxQuerySchema>;

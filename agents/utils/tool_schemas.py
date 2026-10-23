@@ -1472,11 +1472,20 @@ _AGENT_ADDRESS_DESCRIPTION = (
 
 
 class SendMessageToAgentTool(BaseModel):
-    """Ask another agent in your tree for new work or give it new information, a redirect or a handoff (to learn what it already did, spawn an explore agent to grep the agent tree); a finished agent wakes with it as its next task."""
+    """Ask another agent in your tree for new work or give it new information, a redirect or a handoff (to learn what it already did, spawn an explore agent to grep the agent tree); a finished agent wakes with it as its next task, except completed or failed browser and code agents, which cannot be messaged."""
 
     tool: Literal["send_message_to_agent"]
     to: str = Field(description=_AGENT_ADDRESS_DESCRIPTION)
     message: str = Field(description="The message. Self-contained: the recipient has not seen your conversation.")
+    continue_conversation: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Required when the recipient is a paused browser or code agent; omit it otherwise. "
+            "true resumes its exact prior conversation with this message; false starts it in a fresh "
+            "conversation with this message, its original goal and its last result. Either way it keeps "
+            "its browser state (cookies, tabs, profile, proxy) or code sandbox (files, session)."
+        ),
+    )
 
 
 class KillAgentTool(BaseModel):
