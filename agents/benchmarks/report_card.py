@@ -183,7 +183,22 @@ def _is_queued(status: str) -> bool:
 
 
 def _is_completed(status: str) -> bool:
-    return status in {"passed", "failed", "transient", "skipped", "error"}
+    return status in {"passed", "failed", "transient", "skipped", "error", "cancelled"}
+
+
+def card_status(benchmark_status: Optional[str], passed: bool) -> str:
+    """Per-task card status from the harness verdict.
+
+    A task the run interrupted (benchmark_status CANCELLED: never started, or stopped
+    mid-flight by a run stop) has no task verdict; it is ``cancelled``, never an agent
+    ``failed``.
+    """
+    verdict = str(benchmark_status or "").upper()
+    if verdict == "SKIPPED":
+        return "skipped"
+    if verdict == "CANCELLED" and not passed:
+        return "cancelled"
+    return "passed" if passed else "failed"
 
 
 def build_report_card(state: RunState) -> dict:
@@ -221,6 +236,7 @@ def build_report_card(state: RunState) -> dict:
     passed = sum(1 for t in per_task if t.status == "passed")
     failed = sum(1 for t in per_task if t.status == "failed" or t.status == "error")
     transient = sum(1 for t in per_task if t.status == "transient")
+    cancelled = sum(1 for t in per_task if t.status == "cancelled")
     decided = passed + failed
     success_rate = round(passed / decided, 3) if decided > 0 else 0.0
 
@@ -294,6 +310,7 @@ def build_report_card(state: RunState) -> dict:
             "passed": passed,
             "failed": failed,
             "transient": transient,
+            "cancelled": cancelled,
             "success_rate": success_rate,
         },
         "cost": cost,

@@ -516,6 +516,26 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(data["experiment"]["state"], "INCOMPLETE")
         self.assertIn("cleanup receipt not clean: A2/stack-a2", CARD["render_text"](data))
 
+    def test_local_interrupted_tasks_are_cancelled_not_agent_failures(self):
+        # A run stopped mid-way (Tilion 402 premium_egress_exhausted, 2026-10-22): tasks that
+        # never started or were cut off have benchmark_status CANCELLED and no verdict.
+        run = self.tmp / "1792712097-local-cancel"
+        write(run / "report-card.json", {
+            "run_id": "local-cancel", "tasks": {"total": 4},
+            "per_task": [{"name": "alpha", "status": "passed"}, {"name": "beta", "status": "failed"},
+                         {"name": "gamma", "status": "failed"}, {"name": "delta", "status": "cancelled"}],
+        })
+        write(run / "run.json", {"run_id": "local-cancel", "tasks": [
+            {"name": "alpha", "status": "COMPLETED", "benchmark_status": "PASSED", "passed": True},
+            {"name": "beta", "status": "COMPLETED", "benchmark_status": "FAILED", "passed": False,
+             "failure_reason": "Expected isolated browser session metadata was not observed"},
+            {"name": "gamma", "status": "ACTIVE", "benchmark_status": "CANCELLED", "passed": False,
+             "failure_reason": "Benchmark interrupted; prod logs were collected before shutdown"},
+            {"name": "delta", "status": "CANCELLED", "benchmark_status": "CANCELLED", "passed": False}]})
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["CANCELLED"]), (1, 1, 2))
+        self.assertEqual(exp["progress"]["completed"], 4)
+
     def test_local_card_reads_recorded_source_and_clock(self):
         run = self.tmp / "local-run-without-epoch-name"
         sha = "a873eae49" + "0" * 31
