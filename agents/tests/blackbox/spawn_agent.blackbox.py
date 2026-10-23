@@ -4617,6 +4617,97 @@ async def test_spawn_explore_agent_activity_error_status_returned():
     assert result["structured_response"] == {"topic": "partial"}
 
 
+async def test_explore_grep_result_over_cap_never_silently_drops_a_match():
+    """An oversized grep result shows whole matches and pages to the rest.
+
+    Run descend-full69 (agent f5f8e933): a 22-match grep rendered to 76,652
+    chars and the 50k activity cap cut it mid-match. Match 19, the only one
+    carrying ``tool_status: FAILED``, never reached the explore model, which
+    then answered "success" from an embedded result record.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS, hard_cap_tool_result_text
+
+    def _match(index: int) -> dict:
+        path = f"agent_trajectories/c4531f8e/TOOL/match-{index:02d}"
+        status = "❌ FAILED" if index == 19 else "✅ SUCCESS"
+        body = "\n".join(f"{line}: context line {line} for record {index}" for line in range(1, 90))
+        return {
+            "source": "agent_trajectories",
+            "path": path,
+            "role": "TOOL",
+            "content": f"trace_path: {path}\ntool_status: {status}\n{body}",
+        }
+
+    matches = [_match(index) for index in range(1, 23)]
+    grep_data = {
+        "matches": matches,
+        "total_matches": 22,
+        "truncated": False,
+        "pattern": "(?i)collatz",
+        "sources": ["agent_trajectories", "agent_network"],
+        "applied_limit": 50,
+        "applied_offset": 0,
+        "returned": 22,
+        "has_more": False,
+        "next_offset": None,
+    }
+    assert len(json.dumps(grep_data)) > TOOL_RESULT_HARD_CAP_CHARS
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(return_value={"result": grep_data, "usage": {"llm": [], "service": []}})
+    visible: list[str] = []
+
+    async def fake_run_agent(**kwargs):
+        result = await kwargs["execute_tool"]("grep", {"pattern": "(?i)collatz", "context": 3}, "tc1")
+        # run_agent applies this cap to every activity-mode TOOL result.
+        visible.append(hard_cap_tool_result_text(result["message"]))
+        return {"status": "completed", "result": "done", "tokens_in": 1, "tokens_out": 1}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="did the tool fail?", model="m")
+
+    text = visible[0]
+    try:
+        shown = json.loads(text)
+    except ValueError:
+        shown = {}
+    next_offset = shown.get("next_offset") if shown.get("has_more") else None
+    lost = [
+        index
+        for index, match in enumerate(matches)
+        if json.dumps(match) not in text and (next_offset is None or index < next_offset)
+    ]
+    assert not lost, (
+        f"matches {[index + 1 for index in lost]} were cut from the {len(text)}-char explore result "
+        "without a continuation offset; the model cannot see or request them"
+    )
+
+
+def test_fit_grep_result_resumes_keyset_page_after_last_shown_match():
+    """A trajectory keyset page resumes after the last match it actually shows."""
+    from domains.grep.service import fit_grep_result_to_budget
+
+    matches = [{"path": f"agent_trajectories/r/TOOL/m{index}", "content": "x" * 3_000} for index in range(10)]
+    page = {"matches": matches, "has_more": True, "next_offset": None, "next_page_after": matches[-1]["path"]}
+
+    fitted = fit_grep_result_to_budget(page, 10_000, json.dumps)
+
+    shown = fitted["matches"]
+    assert 1 <= len(shown) < len(matches) and shown == matches[: len(shown)]
+    assert len(json.dumps(fitted)) <= 10_000
+    assert fitted["has_more"] is True and fitted["next_offset"] is None
+    assert fitted["next_page_after"] == shown[-1]["path"]
+    assert f"page_after={shown[-1]['path']}" in fitted["size_notice"]
+    assert fit_grep_result_to_budget({"matches": matches[:1]}, 10, json.dumps) == {"matches": matches[:1]}
+
+
 async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
     """A blocked live explore returns grounded evidence before the parent's wait."""
     from datetime import timedelta
@@ -6164,6 +6255,14 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
+    await r.record_async(
+        "explore_grep_result_over_cap_never_silently_drops_a_match",
+        test_explore_grep_result_over_cap_never_silently_drops_a_match,
+    )
+    r.record(
+        "fit_grep_result_resumes_keyset_page_after_last_shown_match",
+        test_fit_grep_result_resumes_keyset_page_after_last_shown_match,
+    )
     await r.record_async(
         "explore_self_wrap_returns_collected_tool_evidence",
         test_spawn_explore_self_wrap_returns_collected_tool_evidence,

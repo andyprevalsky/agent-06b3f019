@@ -15,6 +15,7 @@ import structlog
 import structlog.contextvars
 from temporalio import activity
 
+from domains.grep.service import fit_grep_result_to_budget
 from domains.spawn_agent.config import (
     EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
@@ -38,6 +39,7 @@ from domains.spawn_agent.repo import (
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.agent_addressing import task_name_error
+from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -147,7 +149,13 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
     if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code", "list_agents"}:
         return value
-    return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    def render(item: Any) -> str:
+        return json.dumps(item, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    if tool_name == "grep" and isinstance(value, dict):
+        value = fit_grep_result_to_budget(value, TOOL_RESULT_HARD_CAP_CHARS, render)
+    return render(value)
 
 
 def _fallback_trace_text(item: Any) -> str:
