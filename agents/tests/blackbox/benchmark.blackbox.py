@@ -1817,7 +1817,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
                 await coordinator
         namespace["_tick_report_once"]()
         assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}, cards[-1]["tasks"]
-        assert cards[-1]["results"]["failed"] == 3
+        # Cancelled occurrences have no task verdict: counted as cancelled, never as failures.
+        assert (cards[-1]["results"]["failed"], cards[-1]["results"]["cancelled"]) == (0, 3)
         assert all(result.status == "CANCELLED" for result in namespace["run"].task_results)
 
 
