@@ -7111,8 +7111,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     evidence["errors"].append(f"provider: {detail}")
                     failures.append(f"{aid}: {detail}")
                     if result is not None:
-                        # Cleanup runs after the verdict: it fails the run, not the task.
-                        result.cleanup_failure = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                        _record_owned_cleanup_failure(result, evidence, error)
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
@@ -7139,7 +7138,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         evidence["errors"].append(f"payment: {detail}")
                         failures.append(f"{aid}: {detail}")
                         if result is not None:
-                            result.cleanup_failure = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                            _record_owned_cleanup_failure(result, evidence, error)
                 if result is not None:
                     if evidence["errors"] or evidence["warnings"]:
                         try:
@@ -7170,6 +7169,30 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         raise interrupted
     if failures:
         raise RuntimeError("owned cloud evidence finalization failed: " + "; ".join(failures))
+
+
+def _owned_stack_stopped(error: BaseException | None) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, cloud_batch_cleanup.OwnedStackStoppedError):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _record_owned_cleanup_failure(result: Any, evidence: dict, error: BaseException) -> None:
+    """A genuine provider/payment cleanup failure fails the task (an unreleased
+    resource is part of its outcome). When the verifier could not run because the
+    owned stack had already stopped (T114: backend killed mid-finalization), the
+    graded verdict stands and the unverified cleanup fails the run and CI instead."""
+    reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+    if _owned_stack_stopped(error):
+        result.cleanup_failure = reason
+        return
+    result.passed = False
+    result.benchmark_status = "ERROR"
+    result.failure_reason = reason
 
 
 async def _finalize_owned_batch_and_save_run(
