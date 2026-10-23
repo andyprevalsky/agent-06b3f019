@@ -69,3 +69,12 @@ def test_unrecorded_costs_and_mixed_sources_stay_unclaimed(tmp_path):
     card = json.loads((tmp_path / "out/report-card.json").read_text())
     assert card["cost"]["agents_llm_usd"] is None
     assert card["source_sha"] is None
+
+
+def test_run_record_stands_in_for_a_missing_run_json(tmp_path):
+    run = _run(tmp_path, "run-a", [_row("beta", "failed", "b1")], tokens="t1", cost=0.1, start=1.0, end=2.0,
+               reasons={"beta": "no payment-card request raised"})
+    (run / "run.json").rename(run / "result-20261023_012554_0f7bef99_beta.json")
+    merge_run_contexts(tmp_path / "out", [run])
+    tasks = json.loads((tmp_path / "out/run.json").read_text())["tasks"]
+    assert tasks[0]["failure_reason"] == "no payment-card request raised"

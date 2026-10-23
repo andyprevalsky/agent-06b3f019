@@ -56,7 +56,13 @@ def merge_run_contexts(out_dir: Path, run_dirs: List[Path], *, label: str = "") 
         card = _read(run_dir / "report-card.json")
         if not card.get("per_task"):
             raise ValueError(f"{run_dir}: no report-card.json with per_task rows")
-        cards.append((run_dir, card, _read(run_dir / "run.json")))
+        run = _read(run_dir / "run.json")
+        if not run.get("tasks"):
+            # A run whose final upload failed may not write run.json; its run record
+            # (result-<stamp>_<id>_<task>.json, same schema) still holds every task row.
+            records = sorted(run_dir.glob("result-*.json"))
+            run = _read(records[-1]) if len(records) == 1 else run
+        cards.append((run_dir, card, run))
 
     kept: Dict[str, Dict[str, Any]] = {}
     kept_run: Dict[str, Dict[str, Any]] = {}
