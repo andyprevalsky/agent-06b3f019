@@ -12,8 +12,6 @@ symptoms:
   - "The typed tree shows completion_outputs_count: 1"
   - "Strict read-only benchmark cache miss for response_schema; live fallback is disabled"
   - "fastmode:v42:llm:4ae3193053ac1d8f:response_schema:c:a330aeeed936ac6b24f3865901a8f966 llm.cache.miss"
-  - "Generated response schema fields creator_analysis_file positioning_statement content_calendar_file hook_openings engagement_creators"
-  - test-mass-agent-run-0 passes locally but fails T7 schema in the cloud
 tags:
   - fast-cache
   - demo
@@ -22,9 +20,10 @@ tags:
   - mass-agent
   - response-schema
 sources:
-  - descend run descend-full69-20261023 proof p3-proof-1 (feat/rose-user-ui 8597c31af)
-  - fleet runs 20261023-184218-338707, -338710, -338719, -338732 (root bcf9a7eb-9aa9-4f17-bb48-bb15409cedbf)
-  - local pass run 22feab24-04f6-45bd-9754-3a38d3bf4f6b (root ed20d4d7-25fc-4e9d-bdd1-e2a5d894017e)
+  - task test-mass-agent-run-0
+  - fleet run 20261023-184218-338710 (descend-full69-20261023 p3-proof-1 on 8597c31af; also -338707, -338719, -338732)
+  - agent bcf9a7eb-9aa9-4f17-bb48-bb15409cedbf
+  - benchmark run 22feab24-04f6-45bd-9754-3a38d3bf4f6b (local pass, root ed20d4d7-25fc-4e9d-bdd1-e2a5d894017e)
   - commit 70742aa3f (rca/P4-mass-agent-t7-schema)
 repro: agents/tests/blackbox/benchmark.blackbox.py::test_cloudbench_fast_cache_on_guest_is_read_only_like_local
 status: mitigated
