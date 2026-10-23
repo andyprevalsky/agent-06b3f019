@@ -1,7 +1,7 @@
 import type { BrowserSession } from '@prisma/client';
 import { browserUseEnabled } from './config';
 import type { ProxyGeoLocation } from '../geoip';
-import { browserResumeScope } from '../steel/lifecycleClaim';
+import { browserResumeScope, resumeNativeCreate } from '../steel/lifecycleClaim';
 /** Read-only native lookup by the locator durably recorded before POST. */
 import { randomUUID } from 'node:crypto';
 import { kernelClient } from './kernelClient';
@@ -84,26 +84,28 @@ export async function allocateBrowserUseSession(
   const intent = await resumeScope?.beforeCreate('browser-use');
   const session = intent?.recoveredId
     ? await request<BrowserUseSession>(`/browsers/${encodeURIComponent(intent.recoveredId)}`)
-    : await request<BrowserUseSession>('/browsers', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...(profileId ? { profileId } : {}),
-          ...(intent
-            ? {
-                metadata: {
-                  rose_session_request: intent.marker,
-                  rose_lifecycle_owner: intent.ownershipIdentity,
-                },
-              }
-            : {}),
-          proxyCountryCode: browserUseProxyCountry(location),
-          timeout: 240,
-          browserScreenWidth: 1280,
-          browserScreenHeight: 800,
-          solveCaptchas: true,
-          enableRecording: true,
-        }),
-      });
+    : await resumeNativeCreate(() =>
+        request<BrowserUseSession>('/browsers', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...(profileId ? { profileId } : {}),
+            ...(intent
+              ? {
+                  metadata: {
+                    rose_session_request: intent.marker,
+                    rose_lifecycle_owner: intent.ownershipIdentity,
+                  },
+                }
+              : {}),
+            proxyCountryCode: browserUseProxyCountry(location),
+            timeout: 240,
+            browserScreenWidth: 1280,
+            browserScreenHeight: 800,
+            solveCaptchas: true,
+            enableRecording: true,
+          }),
+        })
+      );
   return session;
 }
 

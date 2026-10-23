@@ -1,6 +1,6 @@
 import { KernelSessionValidationError, resetKernelSessionTabs } from './kernelTabs';
 export { resetKernelSessionTabs } from './kernelTabs';
-import { browserResumeScope } from '../steel/lifecycleClaim';
+import { browserResumeScope, resumeNativeCreate } from '../steel/lifecycleClaim';
 import { kernelResumeTags, replacementBinding } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
@@ -205,25 +205,27 @@ async function createRemoteSession(
         const intent = await browserResumeScope()?.beforeCreate('kernel');
         const session = intent?.recoveredId
           ? await client.browsers.retrieve(intent.recoveredId, {}, KERNEL_CREATE_REQUEST_OPTIONS)
-          : await client.browsers.create(
-              {
-                headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
-                stealth,
-                telemetry: kernelCaptchaTelemetryConfig(),
-                gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
-                // Do not let Chromium reopen the profile's previous window. The new-tab
-                // page created by this policy is replaced below along with any unexpected
-                // restored pages, leaving one clean bootstrap tab.
-                chrome_policy: { RestoreOnStartup: 5 },
-                timeout_seconds: kernelTimeoutSeconds(),
-                viewport: { width: 1280, height: 800, refresh_rate: 60 },
-                ...(profile.profileId !== null
-                  ? { profile: { id: profile.profileId, save_changes: true } }
-                  : {}),
-                ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
-                tags: kernelResumeTags(agentId, intent),
-              },
-              KERNEL_CREATE_REQUEST_OPTIONS
+          : await resumeNativeCreate(() =>
+              client.browsers.create(
+                {
+                  headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
+                  stealth,
+                  telemetry: kernelCaptchaTelemetryConfig(),
+                  gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+                  // Do not let Chromium reopen the profile's previous window. The new-tab
+                  // page created by this policy is replaced below along with any unexpected
+                  // restored pages, leaving one clean bootstrap tab.
+                  chrome_policy: { RestoreOnStartup: 5 },
+                  timeout_seconds: kernelTimeoutSeconds(),
+                  viewport: { width: 1280, height: 800, refresh_rate: 60 },
+                  ...(profile.profileId !== null
+                    ? { profile: { id: profile.profileId, save_changes: true } }
+                    : {}),
+                  ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
+                  tags: kernelResumeTags(agentId, intent),
+                },
+                KERNEL_CREATE_REQUEST_OPTIONS
+              )
             );
         log.info('Kernel browser creation completed', {
           agentId,

@@ -29,7 +29,8 @@ const browser = {
 };
 async function request(endpoint, init = {}) {
   const res = await fetch(api + endpoint, init);
-  if (!res.ok) throw new Error('fixture native failure');
+  // Mirror the provider SDKs: an HTTP rejection carries its status.
+  if (!res.ok) throw Object.assign(new Error('fixture native failure'), { status: res.status });
   return res.json();
 }
 const kernel = {

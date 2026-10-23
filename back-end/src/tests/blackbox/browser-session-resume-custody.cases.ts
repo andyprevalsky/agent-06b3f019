@@ -33,6 +33,7 @@ export async function runBrowserResumeCustodyCases() {
       'fresh-concurrent',
       'logical-empty',
       'logical-pause',
+      'create-rejected',
     ]) {
       const owner = `custody-${randomUUID()}`;
       const children = new Set<ChildProcess>();
@@ -77,6 +78,13 @@ export async function runBrowserResumeCustodyCases() {
           metadata = input.metadata ?? input.tags;
           if (['lost-ack', 'zero-match', 'foreign-owner'].includes(scenario)) {
             req.socket.destroy();
+            return;
+          }
+          if (scenario === 'create-rejected' && creates === 1) {
+            // The provider answered the create with a definite rejection (the
+            // Kernel 400 proxy health-check failure), so nothing was allocated.
+            res.statusCode = 400;
+            res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
           setTimeout(
@@ -242,6 +250,16 @@ export async function runBrowserResumeCustodyCases() {
             results.push(await run());
           } else if (scenario === 'stale-binding') {
             assert(!results[0]!.ok);
+          } else if (scenario === 'create-rejected') {
+            assert(!results[0]!.ok);
+            // Retry immediately, without expiring the ledger: a rejected create
+            // must release resume custody instead of holding it until expiry.
+            const startedAt = Date.now();
+            results.push(await run());
+            assert(
+              Date.now() - startedAt < 10_000,
+              'a retry after a rejected create must not wait on stale custody'
+            );
           } else {
             assert(!results[0]!.ok);
             await expire(scenario === 'foreign-owner');
@@ -285,6 +303,10 @@ export async function runBrowserResumeCustodyCases() {
         } else if (scenario === 'stale-binding') {
           assert.equal(creates, 1);
           assert.equal(hydrations, 0);
+        } else if (scenario === 'create-rejected') {
+          assert(results[1]!.ok, JSON.stringify({ provider, scenario, results }));
+          assert.equal(creates, 2);
+          assert.equal(hydrations, 1);
         } else if (['hydration-unknown', 'foreign-owner'].includes(scenario)) {
           assert(!results[1]!.ok);
           assert.equal(creates, 1);

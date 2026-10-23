@@ -29,6 +29,17 @@ export type SteelNativeCustodyResolver = (
   release: () => Promise<void>
 ) => Promise<boolean>;
 
+/**
+ * A provider's HTTP 4xx answer (other than 408) to a native request proves the
+ * request allocated nothing; timeouts, transport errors and 5xx stay uncertain.
+ */
+function nativeRequestRejected(error: unknown): boolean {
+  const status =
+    (error as { status?: number; statusCode?: number })?.status ??
+    (error as { statusCode?: number })?.statusCode;
+  return status !== undefined && status >= 400 && status < 500 && status !== 408;
+}
+
 /** An expired native request remains custody until its exact resource is terminal. */
 async function recoverOutstandingNative(operationKey: string): Promise<void> {
   const row = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
@@ -253,9 +264,6 @@ export async function withSteelLifecycleClaim<T>(
       settled = true;
       return result;
     } catch (error) {
-      const status =
-        (error as { status?: number; statusCode?: number })?.status ??
-        (error as { statusCode?: number })?.statusCode;
       // A timed-out or ambiguous create may still allocate after this promise
       // rejects. Durable custody must survive for exact native reconciliation.
       settled =
@@ -263,7 +271,7 @@ export async function withSteelLifecycleClaim<T>(
         (error as { steelNativeRequestNotIssued?: boolean })?.steelNativeRequestNotIssued ===
           true ||
         effect !== 'create' ||
-        (status !== undefined && status >= 400 && status < 500 && status !== 408);
+        nativeRequestRejected(error);
       if (!invoked && error instanceof Error) {
         Object.assign(error, { steelNativeRequestNotIssued: true });
       }
@@ -373,11 +381,15 @@ type Scope = {
   ): Promise<{ marker: string; ownershipIdentity: string; recoveredId?: string }>;
   assertOwned(): Promise<void>;
   beforeHydration(expectedSessionId: string): Promise<void>;
+  nativeCreate<T>(create: () => Promise<T>): Promise<T>;
   recovering(): boolean;
   sourceEnded(): boolean;
 };
 const scope = new AsyncLocalStorage<Scope>();
 export const browserResumeScope = () => scope.getStore();
+/** Issue a provider create, recording a definite rejection for resume custody. */
+export const resumeNativeCreate = <T>(create: () => Promise<T>): Promise<T> =>
+  scope.getStore()?.nativeCreate(create) ?? create();
 
 export interface ResumeLifecycleDependencies<T> {
   readBinding(): Promise<{ sessionId: string | null; status: string }>;
@@ -515,6 +527,7 @@ export async function withBrowserResumeLifecycle<T>(
     }
   };
   let createEntered = false;
+  let createRejected = false;
   return scope.run(
     {
       assertOwned,
@@ -548,9 +561,33 @@ export async function withBrowserResumeLifecycle<T>(
           throw new Error('Browser resume lifecycle ownership lost before create');
         return { marker: request.requestId, ownershipIdentity: identity, recoveredId };
       },
+      nativeCreate: async (create) => {
+        try {
+          return await create();
+        } catch (error) {
+          createRejected = nativeRequestRejected(error);
+          throw error;
+        }
+      },
     },
     async () => {
-      const result = await deps.resume();
+      let result: T;
+      try {
+        result = await deps.resume();
+      } catch (error) {
+        // A definitely rejected create allocated nothing, so no outcome remains
+        // to reconcile: release custody so the next resume can create at once.
+        if (createRejected && request.phase === 'creating') {
+          await prisma.toolSideEffect.updateMany({
+            where: { operationKey, externalId: owner, status: 'STARTED' },
+            data: {
+              status: 'RELEASED',
+              response: { phase: 'rejected', source: request.source },
+            },
+          });
+        }
+        throw error;
+      }
       await assertOwned();
       const current = await deps.readBinding();
       if (current.status !== 'ACTIVE' || current.sessionId !== request.nativeId) {

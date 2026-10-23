@@ -24,10 +24,17 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
+      // Carry the status so callers can tell a definite rejection from an
+      // uncertain outcome, like the Kernel and Steel SDK errors do.
       if (response.status === 429) {
-        throw new BrowserProviderRateLimitError('browser-use', `Browser Use HTTP 429: ${detail}`);
+        throw Object.assign(
+          new BrowserProviderRateLimitError('browser-use', `Browser Use HTTP 429: ${detail}`),
+          { status: response.status }
+        );
       }
-      throw new Error(`Browser Use HTTP ${response.status}: ${detail}`);
+      throw Object.assign(new Error(`Browser Use HTTP ${response.status}: ${detail}`), {
+        status: response.status,
+      });
     }
     return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
   } finally {
