@@ -41,6 +41,10 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
     ports = manifest.get("ports") or {}
     name = database.get("name")
     port = database.get("port") or (5432 if database.get("use_system_postgres") else ports.get("local_db"))
+    if manifest.get("status") in {"failed", "stopped"}:
+        # The owned stack itself went down (e.g. its backend was killed) before cleanup
+        # finished: its database can no longer serve as release evidence.
+        raise RuntimeError(f"owned local stack is {manifest.get('status')} before provider verification")
     if (
         Path(manifest.get("worktree", "")).resolve() != REPO_ROOT
         or manifest.get("benchmark_mode") is not True

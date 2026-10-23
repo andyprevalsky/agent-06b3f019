@@ -1816,6 +1816,11 @@ def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None)
     """CI fails on failed tasks and on skipped tasks unless explicitly permitted."""
     if summary.get("failed", 0) > 0:
         return True
+    # Unverified owned-resource cleanup fails CI without rewriting any task verdict.
+    if summary.get("cleanup_failures", 0) > 0 or any(
+        getattr(result, "cleanup_failure", None) for result in (task_results or [])
+    ):
+        return True
     skipped = summary.get("skipped", 0)
     if skipped <= 0:
         return False
@@ -7106,9 +7111,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     evidence["errors"].append(f"provider: {detail}")
                     failures.append(f"{aid}: {detail}")
                     if result is not None:
-                        result.passed = False
-                        result.benchmark_status = "ERROR"
-                        result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                        # Cleanup runs after the verdict: it fails the run, not the task.
+                        result.cleanup_failure = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
@@ -7135,9 +7139,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         evidence["errors"].append(f"payment: {detail}")
                         failures.append(f"{aid}: {detail}")
                         if result is not None:
-                            result.passed = False
-                            result.benchmark_status = "ERROR"
-                            result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                            result.cleanup_failure = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
                 if result is not None:
                     if evidence["errors"] or evidence["warnings"]:
                         try:

@@ -83,6 +83,10 @@ class TaskResult:
     # Agent lifecycle status is a snapshot (for example PAUSED after a passed
     # abandonment check), not the evaluator or harness outcome.
     benchmark_status: Optional[str] = None
+    # Post-verdict owned-resource cleanup that could not be verified (provider
+    # sessions, payments). A harness/cleanup failure of the run: it fails CI and the
+    # owned batch, but never rewrites the evaluator's verdict above.
+    cleanup_failure: Optional[str] = None
 
 
 @dataclass
@@ -119,6 +123,7 @@ class BenchmarkRun:
             "total": total,
             "passed": passed,
             "failed": failed,
+            "cleanup_failures": sum(1 for r in self.task_results if getattr(r, "cleanup_failure", None)),
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
             "pass_rate": round(passed / eligible, 2) if eligible > 0 else 0.0,

@@ -950,7 +950,8 @@ async def _owned_payment_cleanup_case(*, refund_fails):
         if refund_fails:
             with pytest.raises(RuntimeError, match="refund unavailable"):
                 await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
-            assert row.benchmark_status == "ERROR"
+            # T114: an unverified refund fails the batch and CI, not the evaluated task.
+            assert row.cleanup_failure and "refund unavailable" in row.cleanup_failure
             assert row.logs["cloud_cleanup_evidence"]["errors"]
         else:
             await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
@@ -1223,8 +1224,14 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
                 with pytest.raises(RuntimeError, match="incomplete"):
                     cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
             payload["root_user_id"] = ROOT
-            with pytest.raises(RuntimeError, match="owned local stack"):
+            with pytest.raises(RuntimeError, match="not the owned local stack"):
                 cleanup.exact_root_sessions("https://production.example", ROOT)
+            # T114: a stack that went down mid-finalization says so, not "foreign database".
+            for stopped in ("stopped", "failed"):
+                (context / "services.json").write_text(json.dumps({**manifest, "status": stopped}))
+                with pytest.raises(RuntimeError, match=f"owned local stack is {stopped} before provider verification"):
+                    cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+            (context / "services.json").write_text(json.dumps(manifest))
             payload["purchase_cleanup"] = None
             # Broken payment evidence must fail its own retirement contract
             # without hiding independently valid browser release authority.
@@ -1335,7 +1342,8 @@ async def test_failed_batch_retains_ownership_and_each_failure_cause():
     assert evidence["before"] == before
     assert evidence["warnings"] == ["archive: TimeoutError"]
     assert evidence["errors"] == ["provider: HTTP 403"]
-    assert "HTTP 403" in row.failure_reason
+    # T114: the cleanup failure is recorded beside the evaluator's verdict, never over it.
+    assert row.failure_reason == "test timeout" and "HTTP 403" in row.cleanup_failure
     assert "cloud_provider_cleanup" not in row.logs
 
 
@@ -2054,7 +2062,8 @@ async def test_interrupt_during_archive_wait_keeps_run_record_and_exact_cleanup(
             # Unverified provider release stays fail-closed.
             assert "state=failed" in state
             assert child_evidence["errors"] == ["provider: provider session still live"]
-            assert (rows[1].passed, rows[1].benchmark_status) == (False, "ERROR")
+            assert rows[1].cleanup_failure == "Cloud cleanup failed: provider: provider session still live"
+            assert (rows[1].passed, rows[1].benchmark_status, rows[1].failure_reason) == verdicts[1]
             assert (rows[0].passed, rows[0].benchmark_status, rows[0].failure_reason) == verdicts[0]
         else:
             assert "state=clean" in state, state
@@ -2106,7 +2115,7 @@ async def test_fixture_root_custody_refuses_unknown_foreign_and_duplicate_bindin
         ):
             with pytest.raises(RuntimeError):await bench._finalize_owned_cloud_batch("http://localhost:1",[row],{row.name:[ROOT]})
             if corruption in {"missing_provider","missing_seal"}:
-                assert row.benchmark_status=="ERROR"
+                assert row.cleanup_failure and row.benchmark_status!="ERROR"
                 assert row.owned_roots[0]["logs"]["cloud_cleanup_evidence"]["errors"]
 
 @async_case
@@ -2242,7 +2251,9 @@ async def _diagnostic_pipe_case(phase):
         else:
             await bench._finalize_owned_cloud_batch('http://localhost:1', rows, {})
     if phase in {'provider', 'payment', 'unrelated'}:
-        assert rows[0].passed is False and rows[0].benchmark_status == 'ERROR'
+        # T114: verdicts survive; every root's unverified cleanup is recorded and fails the batch.
+        assert rows[0].passed is True and rows[0].benchmark_status == 'PASSED'
+        assert all(row.cleanup_failure for row in rows)
         assert all(row.logs['cloud_cleanup_evidence']['errors'] for row in rows)
         assert events.count(('payment', ROOT)) == events.count(('payment', CHILD)) == 1
         return
@@ -2380,3 +2391,46 @@ async def test_nonadmission_proof_rejects_copies_and_forged_metadata():
         forged=copy.deepcopy(row);forged.stop_metadata[key]=value
         with pytest.raises(RuntimeError):
             await bench._finalize_owned_cloud_batch('http://offline.invalid',[forged],{},never_admitted_results=[forged])
+
+
+@async_case
+async def test_post_verdict_cleanup_failure_never_rewrites_graded_verdicts():
+    """T114 (Kernel antibot Run A): the memory watchdog killed the owned backend during batch
+    finalization; every root still awaiting cleanup failed verification and the run record rewrote
+    5 graded PASS verdicts as ERROR (report card 26 vs record 21). Cleanup is a separate outcome:
+    the evaluator's verdict stays, the cleanup failure is recorded, the batch raises and CI fails."""
+    rows = [result(ROOT), result(CHILD)]
+    rows[0].passed, rows[0].status, rows[0].benchmark_status, rows[0].failure_reason = True, "COMPLETED", "PASSED", None
+    rows[1].passed, rows[1].status, rows[1].benchmark_status, rows[1].failure_reason = False, "FAILED", "FAILED", "judge: no results"
+    graded = [(row.passed, row.status, row.benchmark_status, row.failure_reason) for row in rows]
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"provider": "kernel", "session_id": "nnksma2uo5sa548v"}]}
+    stopped = RuntimeError("owned local stack is stopped before provider verification")
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(cleanup, "close_exact_root_sessions", side_effect=stopped),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(side_effect=ConnectionError("All connection attempts failed"))),
+        patch.object(bench, "_finalize_owned_root_payments", AsyncMock(side_effect=stopped)),
+        patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+    ):
+        with pytest.raises(RuntimeError, match="owned cloud evidence finalization failed"):
+            await bench._finalize_owned_cloud_batch("http://localhost:1", rows, {})
+    assert [(row.passed, row.status, row.benchmark_status, row.failure_reason) for row in rows] == graded
+    for row in rows:
+        assert row.cleanup_failure == (
+            "Cloud cleanup failed: provider: owned local stack is stopped before provider verification; "
+            "payment: owned local stack is stopped before provider verification"
+        )
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    recorded = [
+        TaskResult(
+            name=row.name, passed=row.passed, agent_id=row.agent_id, status=row.status, progress_score=1,
+            duration_seconds=1, cost_cents=0, message_count=0, cleanup_failure=row.cleanup_failure,
+        )
+        for row in rows
+    ]
+    summary = BenchmarkRun(task_results=recorded).summary
+    assert (summary["passed"], summary["failed"], summary["cleanup_failures"]) == (1, 1, 2)
+    assert bench._ci_should_fail({"failed": 0, "cleanup_failures": 2}, rows) is True
