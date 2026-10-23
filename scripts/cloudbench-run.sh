@@ -511,6 +511,22 @@ resolve_task_gate() {
             return "$task_gate_status"
             ;;
     esac
+    # Same pin as local.py configure_task_environment: a Claude Code task must
+    # not inherit Codex from the root's GPT compute lease.
+    "$task_gate_python" "$CATALOG_SCRIPT" requires-claude-code \
+        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
+    task_gate_status=$?
+    case "$task_gate_status" in
+        0)
+            TASK_WORKER_ENV+=("ROSE_CODE_AGENT_PROVIDER=claude")
+            ;;
+        10)
+            ;;
+        *)
+            echo "[cloudbench] FATAL: code-agent provider resolution failed (exit $task_gate_status)" >&2
+            return "$task_gate_status"
+            ;;
+    esac
 }
 # Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
 # cache through the production pooler; every other guest keeps the cache in its

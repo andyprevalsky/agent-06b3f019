@@ -190,6 +190,41 @@ def selected_tasks_need_shared_fast_cache(
     return any(by_name[name].get("fast_cache") == "on" for name in names)
 
 
+def selected_tasks_require_claude_code_provider(
+    catalog_path: Path, task_names: Iterable[str]
+) -> bool:
+    """Return whether a selected task must run its code agent on Claude Code.
+
+    Mirrors ``agents/benchmarks/local.py:configure_task_environment``: a task
+    that declares ``requires_claude_code`` or expects
+    ``spawn_claude_code_agent`` pins ``ROSE_CODE_AGENT_PROVIDER=claude``. Cloud
+    guests start the stack directly, so they must derive the same pin here or
+    the code tool follows the root's compute lease and silently runs Codex.
+    """
+    names = list(task_names)
+    by_name = index_unified_catalog(catalog_path)
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise CatalogError(f"unknown benchmark task(s): {', '.join(missing)}")
+
+    def requires(task: dict[str, Any]) -> bool:
+        expected_tools = task.get("expected_tools")
+        min_tool_counts = task.get("min_tool_counts")
+        return (
+            task.get("requires_claude_code") is True
+            or (
+                isinstance(expected_tools, list)
+                and "spawn_claude_code_agent" in expected_tools
+            )
+            or (
+                isinstance(min_tool_counts, dict)
+                and (min_tool_counts.get("spawn_claude_code_agent") or 0) > 0
+            )
+        )
+
+    return any(requires(by_name[name]) for name in names)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -210,6 +245,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     shared_cache.add_argument("catalog", type=Path)
     shared_cache.add_argument("tasks", nargs="+")
+    claude_code = subparsers.add_parser(
+        "requires-claude-code",
+        help="exit 0 when any requested task must run its code agent on Claude Code",
+    )
+    claude_code.add_argument("catalog", type=Path)
+    claude_code.add_argument("tasks", nargs="+")
     resolve = subparsers.add_parser(
         "resolve", help="print exact task names for task and named-slice selectors"
     )
@@ -231,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
             ) else 10
         if args.command == "needs-shared-fast-cache":
             return 0 if selected_tasks_need_shared_fast_cache(
+                args.catalog, args.tasks
+            ) else 10
+        if args.command == "requires-claude-code":
+            return 0 if selected_tasks_require_claude_code_provider(
                 args.catalog, args.tasks
             ) else 10
         if args.command == "resolve":

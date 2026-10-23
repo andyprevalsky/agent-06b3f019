@@ -2778,7 +2778,8 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     write_executable(controls / "prepare-patch.sh", "#!/usr/bin/env bash\nexit 0\n")
     write_executable(
         controls / "catalog.py",
-        "#!/usr/bin/env python3\nimport sys\nsys.exit(10 if sys.argv[1] == 'requires-gate' else 0)\n",
+        "#!/usr/bin/env python3\nimport sys\n"
+        "sys.exit(10 if sys.argv[1] in ('requires-gate', 'requires-claude-code') else 0)\n",
     )
     write_executable(
         controls / "target.py",

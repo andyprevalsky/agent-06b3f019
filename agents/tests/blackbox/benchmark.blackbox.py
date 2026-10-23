@@ -16279,6 +16279,73 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
 
 
+def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
+    """Cloud guests pin Claude Code for code tasks exactly as local runs do.
+
+    claude-code-agent failed both cloud copies of descend-full69-20261023: the
+    guest exported no ROSE_CODE_AGENT_PROVIDER, so the code tool followed the
+    root's GPT lease, ran Codex, and the sub-agent verifier rejected the
+    "Claude Code (not Codex)" goal. Local configure_task_environment sets the
+    pin, so the same task always ran on Claude Code locally.
+    """
+    import importlib.util
+    import subprocess
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    base_env = {
+        **os.environ,
+        "CLOUDBENCH_REPO_DIR": str(repo_root),
+        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+        "CLOUDBENCH_PRINT_TASK_ENV": "1",
+        "BENCH_TASKS_B64": "",
+    }
+    base_env.pop("CLOUDBENCH_INFRA_PROBE", None)
+
+    def print_env(tasks: str) -> list[str]:
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={**base_env, "BENCH_TASKS": tasks},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.splitlines()
+
+    code_task = print_env("claude-code-agent")
+    assert "stack:ROSE_CODE_AGENT_PROVIDER=claude" in code_task, code_task
+    assert "benchmark:export ROSE_CODE_AGENT_PROVIDER=claude" in code_task, code_task
+    assert not any("ROSE_CODE_AGENT_PROVIDER" in line for line in print_env("chat-mode"))
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_catalog_parity", repo_root / "scripts" / "cloudbench_catalog.py"
+    )
+    assert spec is not None and spec.loader is not None
+    catalog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(catalog)
+    tasks_json = repo_root / "agents" / "benchmarks" / "tasks.json"
+
+    local_pinned: set[str] = set()
+    cloud_pinned: set[str] = set()
+    for task in benchmark_tasks.all_tasks():
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ROSE_CODE_AGENT_PROVIDER", None)
+            local_bench.configure_task_environment([task.name])
+            if os.environ.get("ROSE_CODE_AGENT_PROVIDER") == "claude":
+                local_pinned.add(task.name)
+        if catalog.selected_tasks_require_claude_code_provider(tasks_json, [task.name]):
+            cloud_pinned.add(task.name)
+    assert "claude-code-agent" in local_pinned
+    assert cloud_pinned == local_pinned, {
+        "cloud_only": sorted(cloud_pinned - local_pinned),
+        "local_only": sorted(local_pinned - cloud_pinned),
+    }
+
+
 def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     """Only fast_cache:on DEMO replays may hold production pooler slots.
 
@@ -16340,7 +16407,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
         fake_python.write_text(
-            '#!/bin/sh\ncase "$2" in requires-gate) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+            '#!/bin/sh\ncase "$2" in requires-gate|requires-claude-code) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
         )
         fake_python.chmod(0o755)
         broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
@@ -25376,6 +25443,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_source_connect_gate_benchmark_non_purchase_env",
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
+    r.record(
+        "cloudbench_code_agent_tasks_pin_claude_code_like_local",
+        test_cloudbench_code_agent_tasks_pin_claude_code_like_local,
     )
     r.record(
         "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
