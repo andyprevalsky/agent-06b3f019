@@ -6,6 +6,11 @@ TOOL_NAME = "display"
 DISPLAY_MAX_ITEMS = 20
 DISPLAY_MAX_OPTIONS = 9
 PLACEMENTS = ("inline", "pinned")
+# Inline `html` travels in the activity payload (Temporal caps payloads at
+# 2 MB), so it is capped well below the backend's 20 MB per-file limit.
+DISPLAY_MAX_HTML_BYTES = 1_000_000
+# Name the backend stores an inline page under (its .html declares the type).
+DISPLAY_HTML_FILENAME = "display.html"
 # Pinned questions need the Rose Desktop UI (utils.rose_desktop). The stock
 # display schema has none of these arguments; the handler drops them for every
 # other account, exactly as the stock schema's parse would.

@@ -4,10 +4,13 @@ Pure functions (no Temporal, no I/O) so the handler stays thin; the backend
 activity is re-exported from repo for the handler.
 """
 
+import base64
 import re
 from typing import Any, Dict, List, Optional
 
 from domains.display.config import (
+    DISPLAY_HTML_FILENAME,
+    DISPLAY_MAX_HTML_BYTES,
     DISPLAY_MAX_ITEMS,
     DISPLAY_MAX_OPTIONS,
     PINNED_ONLY_ARGUMENTS,
@@ -86,6 +89,16 @@ def validate_tool_call(
     bad_urls = [u for u in urls if not _URL_RE.match(u)]
     if bad_urls:
         return {"ok": False, "error": f"`urls` must be http(s) URLs (got {bad_urls[0][:200]}). Use `paths` for files."}
+    html = tool_call.get("html")
+    if html is not None and not isinstance(html, str):
+        return {"ok": False, "error": "`html` must be a string (one complete HTML page)."}
+    html = (html or "").strip()
+    html_bytes = len(html.encode("utf-8"))
+    if html_bytes > DISPLAY_MAX_HTML_BYTES:
+        return {
+            "ok": False,
+            "error": f"`html` is {html_bytes} bytes (max {DISPLAY_MAX_HTML_BYTES}). Use `paths` for larger pages.",
+        }
     placement = tool_call.get("placement") or "inline"
     if placement not in PLACEMENTS:
         return {"ok": False, "error": '`placement` must be "inline" or "pinned".'}
@@ -99,12 +112,12 @@ def validate_tool_call(
     allow_other = tool_call.get("allow_other")
     if allow_other is not None and not isinstance(allow_other, bool):
         return {"ok": False, "error": "`allow_other` must be a boolean."}
-    count = len(paths) + len(urls)
+    count = len(paths) + len(urls) + (1 if html else 0)
     if count > DISPLAY_MAX_ITEMS:
         return {"ok": False, "error": f"At most {DISPLAY_MAX_ITEMS} items per call (got {count})."}
     if placement == "inline":
         if count == 0:
-            return {"ok": False, "error": "display needs at least one entry in `paths` or `urls`."}
+            return {"ok": False, "error": "display needs `html` or at least one entry in `paths` or `urls`."}
         if options or allow_other is not None:
             return {"ok": False, "error": '`options` and `allow_other` need placement "pinned".'}
     else:
@@ -113,6 +126,9 @@ def validate_tool_call(
         if not options and allow_other is False:
             return {"ok": False, "error": "A pinned question needs `options` or allow_other."}
     items = [{"file": p} for p in paths] + [{"url": u} for u in urls]
+    if html:
+        encoded = base64.b64encode(html.encode("utf-8")).decode("ascii")
+        items.append({"content_base64": encoded, "filename": DISPLAY_HTML_FILENAME})
     return {
         "ok": True,
         "payload": {

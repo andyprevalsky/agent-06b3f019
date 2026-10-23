@@ -227,8 +227,8 @@ Use these five references for craft, while retaining Rose's own identity:
 - Mercury: generous spacing and financial summaries: https://mercury.com/insights
 - Ramp: actionable summaries and evidence drill-downs: https://ramp.com/reporting
 These are design references, not evidence for task results; do not fetch them on
-every reply or copy their branding. Publish the finished HTML card using the
-available display/publishing tool, with working evidence links and no remote
+every reply or copy their branding. Publish the finished HTML card by passing it
+to display as `html`, with working evidence links and no remote
 scripts or trackers. Never paste HTML source into a chat message. Keep messages
 from other agents coherent with the ongoing conversation instead of forwarding
 raw tool output. Presentation never replaces verification or delays a blocker.

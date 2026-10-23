@@ -195,6 +195,41 @@ export function displayRendererCases(): BlackboxTest[] {
       },
     },
     {
+      name: "renderer: a root's inline html (display `html`) is one deduped page; over 20 MB is rejected",
+      fn: async () => {
+        // The exact item the agents' display tool and `rose display --html` send.
+        const page = `<!doctype html><html><body><h1>Scorecard ${RUN}</h1></body></html>`;
+        const item = b64(Buffer.from(page), 'display.html');
+        const before = (await displayMessages(otherA)).length;
+        const first = await display(otherA, { items: [item] }, { apiKeyUser: userA });
+        expectStatus(first, 201, 'inline html');
+        const [shown] = items(first);
+        assert(shown.status === 'posted' && shown.kind === 'page', `posted page: ${shown.status}`);
+        const got = await served(
+          shown.file_pointer.usercontent_url ?? '',
+          'inline html',
+          'text/html'
+        );
+        assert((await got.text()) === page, 'exact inline html bytes');
+        const again = await display(otherA, { items: [item] }, { apiKeyUser: userA });
+        expectStatus(again, 200, 'same inline html');
+        assert(items(again)[0].status === 'duplicate', 'same html twice is a duplicate');
+        assert((await displayMessages(otherA)).length === before + 1, 'one row for the same html');
+        const huge = `<!doctype html><p>${'x'.repeat(20 * 1024 * 1024)}</p>`;
+        const tooBig = await display(
+          otherA,
+          { items: [b64(Buffer.from(huge), 'display.html')] },
+          { apiKeyUser: userA }
+        );
+        expectStatus(tooBig, 400, 'inline html over 20 MB');
+        assert(JSON.stringify(tooBig.data).includes('20 MB'), 'size cap detail');
+        assert(
+          (await displayMessages(otherA)).length === before + 1,
+          'nothing posted over the cap'
+        );
+      },
+    },
+    {
       name: 'renderer: a multi-file site bundle resolves relative assets under one prefix',
       fn: async () => {
         const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);

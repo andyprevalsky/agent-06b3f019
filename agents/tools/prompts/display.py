@@ -8,7 +8,7 @@ only the Rose Desktop UI shows above the query box.
 _INTRO_AND_USAGE = """Use this tool to show the user images, videos or HTML pages (screenshots, recordings, charts, previews) inline in this conversation.
 
 Usage:
-- `paths` are files already in this agent's tree; `urls` are public links. Showing the same file again does nothing."""
+- `paths` are files already in this agent's tree; `urls` are public links; `html` is a page you write yourself, such as a chart or scorecard. Showing the same content again does nothing."""
 
 PROMPT = _INTRO_AND_USAGE
 

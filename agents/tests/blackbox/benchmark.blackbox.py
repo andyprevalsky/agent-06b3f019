@@ -25147,6 +25147,7 @@ async def run_all_tests():
         "test_display_raster_chart_is_read_through_a_vision_transcript",
         "test_display_bundle_data_file_and_subagent_tree_rows",
         "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
+        "test_display_root_inline_html_page_is_read",
     ):
         r.record(name, getattr(display_check_tests, name))
     r.record(

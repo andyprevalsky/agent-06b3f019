@@ -903,6 +903,10 @@ class DisplayTool(BaseModel):
         description="Files already in this agent's tree (attachments or outputs), by file name.",
     )
     urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    html: Optional[str] = Field(
+        default=None,
+        description="A complete HTML page you write yourself (a chart or scorecard), shown without creating a file.",
+    )
     caption: Optional[str] = Field(
         default=None,
         description=user_facing_text_description("Caption shown with the media."),

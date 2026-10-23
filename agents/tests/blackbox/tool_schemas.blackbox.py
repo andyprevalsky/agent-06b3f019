@@ -1134,7 +1134,7 @@ def test_stock_tool_schemas_have_no_rose_desktop_surfaces():
     plan = _native_tools(False, "plan")
     assert list(execute["send_message_to_user_execute_phase"]["input_schema"]["properties"]) == ["message"]
     assert list(plan["send_message_to_user"]["input_schema"]["properties"]) == ["message", "is_question"]
-    assert list(execute["display"]["input_schema"]["properties"]) == ["paths", "urls", "caption"]
+    assert list(execute["display"]["input_schema"]["properties"]) == ["paths", "urls", "html", "caption"]
     assert execute["display"]["description"] == "Show images, videos or HTML to the user inline."
     type_description = execute["spawn_agent"]["input_schema"]["properties"]["type"]["description"]
     assert (
@@ -1167,7 +1167,7 @@ def test_rose_desktop_tool_schemas_add_only_new_ui_surfaces():
         assert flagged_tool["description"] == tools_stock[name]["description"]
 
     display = flagged["display"]["input_schema"]["properties"]
-    assert list(display) == ["paths", "urls", "caption", "placement", "options", "allow_other"]
+    assert list(display) == ["paths", "urls", "html", "caption", "placement", "options", "allow_other"]
     assert display["placement"]["anyOf"][0]["enum"] == ["inline", "pinned"]
     assert "pin a question" in flagged["display"]["description"]
 

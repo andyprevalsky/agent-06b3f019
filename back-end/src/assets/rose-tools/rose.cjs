@@ -2,7 +2,7 @@
 // rose — Rose agent tools for code agents (CLI + MCP stdio server).
 // Installed by Rose at ~/.rose/bin/rose in every code session; do not edit.
 //
-//   rose display <file|folder|url>... [--caption T] [--pinned --option "Label | description"... --recommended N --allow-other]
+//   rose display <file|folder|url>... [--html PAGE] [--caption T] [--pinned --option "Label | description"... --recommended N --allow-other]
 //   rose message <text> [--inline-view NAME] [--props JSON]
 //   rose approve <question>
 //   rose wait <request-id>
@@ -329,10 +329,22 @@ function fileItem(ref) {
   };
 }
 
-function buildItems(paths = [], urls = []) {
+/** One HTML page written by the caller, displayed without a file. */
+function htmlItem(html) {
+  if (typeof html !== 'string') throw new ToolError('html must be a string (one HTML page)');
+  const bytes = Buffer.from(html.trim(), 'utf8');
+  if (bytes.length > MAX_FILE_BYTES) throw new ToolError('html: larger than 20 MB');
+  return {
+    body: { content_base64: bytes.toString('base64'), filename: 'display.html' },
+    key: `html:${sha256(bytes)}`,
+  };
+}
+
+function buildItems(paths = [], urls = [], html) {
   const items = [
     ...paths.map((ref) => fileItem(ref)),
     ...urls.map((ref) => ({ body: { url: ref }, key: `url:${ref}` })),
+    ...(html !== undefined && html !== null && String(html).trim() ? [htmlItem(html)] : []),
   ];
   if (items.length > MAX_ITEMS)
     throw new ToolError(`at most ${MAX_ITEMS} items per call (got ${items.length})`);
@@ -405,11 +417,11 @@ function describeAnswer(state) {
 async function displayTool(rawArgs, onBeat) {
   const args = stockArgs(rawArgs, ['placement', 'options', 'allow_other']);
   const placement = args.placement === 'pinned' ? 'pinned' : 'inline';
-  const items = buildItems(args.paths, args.urls);
+  const items = buildItems(args.paths, args.urls, args.html);
   const caption = typeof args.caption === 'string' ? args.caption.trim() : '';
   const options = normalizeOptions(args.options);
   if (placement === 'inline' && items.length === 0)
-    throw new ToolError('display needs at least one path or url');
+    throw new ToolError('display needs html or at least one path or url');
   if (placement === 'pinned' && !caption)
     throw new ToolError('a pinned question needs a caption (the question text)');
   const body = {
@@ -855,6 +867,10 @@ const STOCK_MCP_TOOLS = [
           items: { type: 'string' },
           description: 'Public http(s) URLs, fetched by Rose.',
         },
+        html: {
+          type: 'string',
+          description: 'A complete HTML page you write yourself, shown without creating a file.',
+        },
         caption: { type: 'string', description: 'Caption shown with the media.' },
       },
     },
@@ -890,6 +906,10 @@ const ROSE_DESKTOP_MCP_TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description: 'Public http(s) URLs (image, video, page, model or PDF), fetched by Rose.',
+        },
+        html: {
+          type: 'string',
+          description: 'A complete HTML page you write yourself, shown without creating a file.',
         },
         caption: { type: 'string', description: 'Caption; for placement "pinned", the question.' },
         placement: { type: 'string', enum: ['inline', 'pinned'] },
@@ -1001,7 +1021,7 @@ function serveMcp() {
 // ── CLI ──
 
 const STOCK_USAGE = `usage:
-  rose display <file|url>... [--caption TEXT]
+  rose display <file|url>... [--html PAGE] [--caption TEXT]
   rose message <text>
   rose approve <question>
   rose wait <request-id>
@@ -1010,7 +1030,7 @@ const STOCK_USAGE = `usage:
   rose mcp`;
 
 const ROSE_DESKTOP_USAGE = `usage:
-  rose display <file|folder|url>... [--caption TEXT]
+  rose display <file|folder|url>... [--html PAGE] [--caption TEXT]
       images, videos, .html pages (+ the files they reference), site folders,
       3D models (.glb .gltf .obj .stl .usdz) and PDFs
   rose display [<file|url>...] --pinned --caption QUESTION --option "Label | one-line description"... [--recommended N] [--no-other]
@@ -1060,7 +1080,10 @@ async function main(argv) {
   }
   let result;
   if (command === 'display') {
-    const { positional, flags } = parseFlags(rest, new Set(['caption', 'option', 'recommended']));
+    const { positional, flags } = parseFlags(
+      rest,
+      new Set(['caption', 'option', 'recommended', 'html'])
+    );
     const recommended = Number((flags.recommended || [])[0] || 0);
     const options = (flags.option || []).map((raw, index) => {
       const [label, ...description] = raw.split(' | ');
@@ -1073,6 +1096,7 @@ async function main(argv) {
     result = await displayTool({
       paths: positional.filter((ref) => !/^https?:\/\//i.test(ref)),
       urls: positional.filter((ref) => /^https?:\/\//i.test(ref)),
+      html: (flags.html || [])[0],
       caption: (flags.caption || [])[0],
       placement: flags.pinned ? 'pinned' : 'inline',
       options,
