@@ -907,6 +907,14 @@ FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:
 # A --sim-on guest serves the native WMH itself: measured 2026-10-19 on the
 # 318k-observation model, serving holds ~30 GB steady (42 GB peak) and loads in
 # ~620 s on 8 vCPUs, beside the isolated stack.
+# A task that declares a wide agent tree (catalog min_agent_count >= 20) runs
+# backend + Postgres + the primary worker beside every agent's request loop on
+# ONE guest. descend-full69 P3: on shared-cpu-2x that guest was throttled (every
+# process starved, loop lag 5-10 s, Agent.findUnique 640 ms vs 14 ms for the same
+# tree on dedicated cores). Dedicated vCPUs (performance) are not throttled.
+FLEET_FANOUT_MIN_AGENT_COUNT=20
+FLEET_FANOUT_VM_SIZE="${CLOUDBENCH_FLEET_FANOUT_VM_SIZE:-performance-2x}"
+FLEET_FANOUT_VM_MEMORY="${CLOUDBENCH_FLEET_FANOUT_VM_MEMORY:-4096}"
 FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"
 FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
@@ -972,9 +980,20 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
     return 1
 }
 
+bench_declares_fanout() {  # bench_declares_fanout <task>; catalog min_agent_count
+    [ "${INFRA_PROBE:-0}" = "1" ] && return 1
+    local fanout_task
+    for fanout_task in "${CATALOG_FANOUT_TASKS[@]:-}"; do
+        [ "$fanout_task" = "$1" ] && return 0
+    done
+    return 1
+}
+
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
     if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_SIZE"
+    elif bench_declares_fanout "$1"; then
+        printf '%s\n' "$FLEET_FANOUT_VM_SIZE"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     else
@@ -985,6 +1004,8 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
     if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_MEMORY"
+    elif bench_declares_fanout "$1"; then
+        printf '%s\n' "$FLEET_FANOUT_VM_MEMORY"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
     else
@@ -1474,6 +1495,7 @@ fi
 _catalog_modes_for_batch() {
     CATALOG_PATH="$ROOT_DIR/agents/benchmarks/tasks.json" \
     CATALOG_MODULE_DIR="$CLOUDBENCH_SCRIPT_SNAPSHOT" \
+    FANOUT_MIN_AGENT_COUNT="$FLEET_FANOUT_MIN_AGENT_COUNT" \
     python3 - "$@" <<'PY'
 import os
 import sys
@@ -1498,6 +1520,11 @@ for row in rows:
     if browser_required is not None and not isinstance(browser_required, bool):
         print(f"invalid browser requirement for {row['name']}", file=sys.stderr)
         raise SystemExit(1)
+    agent_count = row.get("min_agent_count")
+    if agent_count is not None and (not isinstance(agent_count, int) or isinstance(agent_count, bool) or agent_count < 0):
+        print(f"invalid min_agent_count for {row['name']}", file=sys.stderr)
+        raise SystemExit(1)
+    fanout = agent_count is not None and agent_count >= int(os.environ["FANOUT_MIN_AGENT_COUNT"])
     timeout_seconds = row.get("timeout_seconds")
     if timeout_seconds is None:
         timeout_seconds = 0
@@ -1510,7 +1537,8 @@ for row in rows:
         raise SystemExit(1)
     print(("simulate" if world_model_mode == "simulate" else "real")
           + "\t" + ("browser" if browser_required else "plain")
-          + "\t" + str(timeout_seconds))
+          + "\t" + str(timeout_seconds)
+          + "\t" + ("fanout" if fanout else "flat"))
 PY
 }
 
@@ -1540,6 +1568,7 @@ bench_execution_budget() {  # <catalog-timeout-seconds> <budget-seconds> <operat
 CATALOG_MODES=()
 CATALOG_TIMEOUTS=()
 CATALOG_BROWSER_REQUIRED_TASKS=()
+CATALOG_FANOUT_TASKS=()
 if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
         echo "❌ benchmark catalog preflight failed before Fly provisioning" >&2
@@ -1549,7 +1578,7 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
         echo "❌ cold primary bootstrap requires REAL tasks" >&2; exit 2
     fi
     catalog_index=0
-    while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout; do
+    while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout catalog_fanout; do
         [ -n "$catalog_mode" ] || continue
         if [ "$QUALIFY_WORKER" = 1 ] && [ "$catalog_mode" != real ]; then
             echo "❌ --qualify-worker requires a REAL task" >&2; exit 2
@@ -1562,6 +1591,11 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
             browser) CATALOG_BROWSER_REQUIRED_TASKS+=("${BENCHES[$catalog_index]}") ;;
             plain) ;;
             *) echo "❌ benchmark catalog returned invalid browser requirement: $browser_requirement" >&2; exit 1 ;;
+        esac
+        case "$catalog_fanout" in
+            fanout) CATALOG_FANOUT_TASKS+=("${BENCHES[$catalog_index]}") ;;
+            flat) ;;
+            *) echo "❌ benchmark catalog returned invalid fan-out declaration: $catalog_fanout" >&2; exit 1 ;;
         esac
         case "$catalog_timeout" in
             ''|*[!0-9]*) echo "❌ benchmark catalog returned invalid timeout: $catalog_timeout" >&2; exit 1 ;;

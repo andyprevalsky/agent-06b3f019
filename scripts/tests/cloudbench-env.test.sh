@@ -2098,7 +2098,7 @@ rows = get_task_metadata(
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
 PY_BROWSER_METADATA
-for function_name in is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
+for function_name in is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
   function_source="$(awk -v name="$function_name" '
     $0 ~ ("^" name "\\(\\)") { capture = 1 }
@@ -2158,9 +2158,55 @@ INFRA_PROBE=0
 SIM_ON_CSV=""
 [ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
   fail "a REAL run of a SIM-capable task must keep the default primary shape"
-unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY
+# A catalog-declared wide tree (min_agent_count >= FLEET_FANOUT_MIN_AGENT_COUNT)
+# gets dedicated vCPUs: shared-cpu-2x was throttled under the 51-agent tree
+# (descend-full69 P3). Other tasks keep exactly their previous shape.
+FLEET_FANOUT_MIN_AGENT_COUNT=20
+FLEET_FANOUT_VM_SIZE="performance-2x"
+FLEET_FANOUT_VM_MEMORY="4096"
+CATALOG_FANOUT_TASKS=(test-mass-agent-run-0)
+CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)/$(primary_vm_memory_for_bench test-mass-agent-run-0)" = "performance-2x/4096" ] ||
+  fail "a catalog fan-out task must request dedicated vCPUs"
+[ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
+  fail "tasks without a fan-out declaration must keep the default primary shape"
+[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+  fail "browser tasks must keep the large shared primary shape beside a fan-out task"
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "a fan-out task must not claim a default shared-cpu pool Machine"
+fi
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "dynamic pool resize opt-in must not turn a fan-out task into a shared-cpu claim"
+fi
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "task-free infra probes must never request the fan-out shape"
+INFRA_PROBE=0
+FLEET_SIM_VM_SIZE="performance-8x"; FLEET_SIM_VM_MEMORY="65536"; SIM_ON_CSV="test-mass-agent-run-0"
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "performance-8x" ] ||
+  fail "--sim-on serving shape must outrank the fan-out shape"
+python3 - "$ROOT_DIR" <<'PY_FANOUT_METADATA' || fail "catalog must declare the fan-out task through min_agent_count"
+import sys
+from pathlib import Path
+
+sys.path.insert(0, f"{sys.argv[1]}/scripts")
+from cloudbench_catalog import get_task_metadata
+
+rows = {
+    row["name"]: row
+    for row in get_task_metadata(
+        Path(sys.argv[1]) / "agents/benchmarks/tasks.json",
+        ["test-mass-agent-run-0", "parallel-tool-calls"],
+    )
+}
+assert rows["test-mass-agent-run-0"]["min_agent_count"] >= 20, rows["test-mass-agent-run-0"]
+assert (rows["parallel-tool-calls"]["min_agent_count"] or 0) < 20, rows["parallel-tool-calls"]
+PY_FANOUT_METADATA
+unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY CATALOG_FANOUT_TASKS FLEET_FANOUT_VM_SIZE FLEET_FANOUT_VM_MEMORY FLEET_FANOUT_MIN_AGENT_COUNT
 unset CATALOG_BROWSER_REQUIRED_TASKS
-unset -f is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
+unset -f is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape
 
 machine_states="$TMP_ROOT/machine-states"

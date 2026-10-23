@@ -503,21 +503,26 @@ def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, pe
     assignments = []
     for key in ("FLEET_PRIMARY_VM_SIZE", "FLEET_PRIMARY_VM_MEMORY",
                 "FLEET_BUNDLED_FRONTEND_VM_SIZE", "FLEET_BUNDLED_FRONTEND_VM_MEMORY",
-                "FLEET_SIM_VM_SIZE", "FLEET_SIM_VM_MEMORY"):
+                "FLEET_SIM_VM_SIZE", "FLEET_SIM_VM_MEMORY",
+                "FLEET_FANOUT_MIN_AGENT_COUNT", "FLEET_FANOUT_VM_SIZE", "FLEET_FANOUT_VM_MEMORY"):
         matches = [line for line in source.splitlines() if line.startswith(key + "=")]
         if len(matches) != 1:
             raise ValueError("ambiguous actual VM profile")
         assignments.extend(matches)
     functions = [next(line for line in source.splitlines() if line.startswith("is_sim_on() {"))]
-    for name in ("bench_simulates", "bench_needs_large_primary", "primary_vm_size_for_bench",
+    for name in ("bench_simulates", "bench_needs_large_primary", "bench_declares_fanout", "primary_vm_size_for_bench",
                  "primary_vm_memory_for_bench"):
         start = source.index(name + "() {")
         functions.append(source[start:source.index("\n}\n", start) + 3])
     browser_names = [row["name"] for row in rows if row.get("requires_browser_agent")]
+    fanout_threshold = int(next(a for a in assignments if a.startswith("FLEET_FANOUT_MIN_AGENT_COUNT=")).split("=", 1)[1])
+    fanout_names = [row["name"] for row in rows
+                    if type(row.get("min_agent_count")) is int and row["min_agent_count"] >= fanout_threshold]
     # A catalog simulate task serves the native WMH on a large guest; plan it so.
     modes = ["simulate" if str(row.get("world_model_mode") or "").lower() == "simulate" else "real" for row in rows]
     script = "set -euo pipefail\nINFRA_PROBE=0\nSIM_ON_CSV=\n" + "\n".join(assignments + functions)
     script += "\nCATALOG_BROWSER_REQUIRED_TASKS=(" + " ".join(shlex.quote(name) for name in browser_names) + ")\n"
+    script += "CATALOG_FANOUT_TASKS=(" + " ".join(shlex.quote(name) for name in fanout_names) + ")\n"
     script += "BENCHES=(" + " ".join(shlex.quote(name) for name in names) + ")\n"
     script += "CATALOG_MODES=(" + " ".join(modes) + ")\n"
     for name in names:

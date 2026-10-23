@@ -72,6 +72,7 @@ _METADATA_FIELDS = (
     "group",
     "tags",
     "requires_browser_agent",
+    "min_agent_count",
 )
 
 CATALOG_GROUPS = (
