@@ -437,6 +437,9 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
         "return the display receipt",
     ):
         assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
+    # A chart or scorecard is the caller's own display html: no clause routes it to the code agent.
+    for text in (type_desc, code_line):
+        assert text.count("chart") == 1 and "visual" not in text, text
     from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_prompt
 
     assert "tool is named display" in display_prompt
