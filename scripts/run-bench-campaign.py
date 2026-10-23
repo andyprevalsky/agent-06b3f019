@@ -797,9 +797,50 @@ def archive_shared_relay(directory: Path, archive: Path) -> None:
     shutil.copytree(directory, archive, dirs_exist_ok=True, ignore=non_records)
 
 
+def claim_home_wireguard_peer(campaign_dir: Path) -> int:
+    """Claim this HOME's single Fly WireGuard peer for one campaign agent.
+
+    Every flyctl agent started in one HOME loads the same wire_guard_state peer.
+    A second campaign's private agent opens another session on that peer and
+    stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
+    retained Machines). The claim is an open file lock, so a dead holder releases
+    it; the caller hands it to the agent's bootstrap so it ends with that agent.
+    """
+    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / 'rose-campaign-wireguard-peer.lock'
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
+        os.close(descriptor)
+        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
+                         'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
+                         'campaign, wait for it to finish, or use a sharded campaign') from None
+    except BaseException:
+        os.close(descriptor)
+        raise
+    os.ftruncate(descriptor, 0)
+    os.pwrite(descriptor, f'pid={os.getpid()} campaign={campaign_dir}\n'.encode(), 0)
+    return descriptor
+
+
 def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                        inventory: Path, deadline: float | None) -> dict:
     """Own one canonical Fly bootstrap and one relay until all children join."""
+    peer_claim = claim_home_wireguard_peer(campaign_dir)
+    try:
+        value = _start_shared_relay(root, campaign_dir, workspace, inventory, deadline, peer_claim)
+    except BaseException:
+        os.close(peer_claim)
+        raise
+    value['peer_claim'] = peer_claim
+    return value
+
+
+def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
+                        inventory: Path, deadline: float | None, peer_claim: int) -> dict:
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
     for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
@@ -861,7 +902,8 @@ def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         value['bootstrap'] = subprocess.Popen(['flyctl', 'proxy', '0:1', '::1', '-a', app,
                                                '--bind-addr', '127.0.0.1', '-q'],
                                               cwd=workspace, env=environment, stdout=bootstrap_log,
-                                              stderr=subprocess.STDOUT, start_new_session=True)
+                                              stderr=subprocess.STDOUT, start_new_session=True,
+                                              pass_fds=(peer_claim,))
         write_json_atomic(directory / 'bootstrap-owner.json', {'pid': value['bootstrap'].pid, 'birth': identity.birth(value['bootstrap'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
         bootstrap_deadline = min(deadline or math.inf, time.monotonic() + 180)
         while True:
@@ -941,6 +983,7 @@ def stop_shared_relay(value: dict) -> bool:
         except FileNotFoundError: break
         if state in ('Z', 'X'): break
         time.sleep(.1)
+    os.close(value['peer_claim'])
     value['log'].close(); value['bootstrap_log'].close()
     archive_shared_relay(value['directory'], value['archive'])
     return acknowledged and process.returncode == 0
@@ -1703,12 +1746,12 @@ def main() -> int:
                 }
             # Startup reads (flyctl status, git show, owner records) can also
             # raise these before any controller starts; fail the campaign normally.
-            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as startup_error:
                 first_failure = 1
                 barrier_failure = True
                 state["shared_inventory_failed"] = True
                 print(
-                    "Campaign inventory did not initialize; see private publisher log"
+                    f"Campaign inventory did not initialize; see private publisher log ({type(startup_error).__name__}: {startup_error})"
                 )
             write_json_atomic(summary_path, state)
         while pending or active:

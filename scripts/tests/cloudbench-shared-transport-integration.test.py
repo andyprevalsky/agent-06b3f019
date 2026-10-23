@@ -529,8 +529,10 @@ finally:
 """)
         fake.chmod(0o700)
         campaign=f.root/'campaign';campaign.mkdir()
+        # A private HOME: the relay claims that HOME's single WireGuard peer.
+        home=f.root/'home';home.mkdir(mode=0o700)
         module=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
-        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
+        environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
         value=None
         try:
             with patch.dict(os.environ,environment,clear=True):
@@ -566,18 +568,9 @@ finally:
                     if not value[name].closed:value[name].close()
 
 
-    def test_campaign_child_wireguard_flyctl_reuses_the_relay_agent(self):
-        """Children's ssh/sftp must share the campaign agent, never start another.
-
-        flyctl v0.4.115 clients use FLY_AGENT_SOCKET_PATH, else ~/.fly/fly-agent.sock,
-        and start a background agent where no agent answers PING (FLY_AGENT_ISOLATED
-        starts a private one). Every agent in HOME loads the same single
-        wire_guard_state peer. In the 100-copy sharded diagnostic, autoscaler worker
-        staging started a default agent on each controller, and its tunnel traffic on
-        that peer made relay CONNECTs retransmit until guest collection timed out.
-        """
+    def campaign_relay_fixture(self):
+        """Real start_shared_relay against a fake flyctl that models v0.4.115 agent resolution."""
         import runpy,shutil
-        from unittest.mock import patch
         f=RelayFixture(self,start_broker=False)
         repo=f.root/'controller';(repo/'scripts/lib').mkdir(parents=True)
         for relative,source in [('scripts/cloudbench-shared-relay.py',BROKER),('scripts/cloudbench-cleanup-tickets.py',ROOT/'scripts/cloudbench-cleanup-tickets.py'),('scripts/lib/cloudbench-inventory.sh',ROOT/'scripts/lib/cloudbench-inventory.sh'),('scripts/run-bench-cloud',ROOT/'scripts/run-bench-cloud'),('scripts/run-bench-fleet',ROOT/'scripts/run-bench-fleet')]:
@@ -598,6 +591,7 @@ if args==['status','-a','fixture','--json']:
 if args[:1]==['proxy']:
  assert args==['proxy','0:1','::1','-a','fixture','--bind-addr','127.0.0.1','-q'],args
  assert os.environ['FLY_AGENT_ISOLATED']=='1'
+ with (root/'proxy-calls').open('a')as stream:stream.write(os.environ['FLY_AGENT_SOCKET_PATH']+'\\n')
  agent=subprocess.Popen([sys.executable,'-u','-c',agent_code,os.environ['FLY_AGENT_SOCKET_PATH'],'bootstrap'],stdin=subprocess.PIPE)
  signal.signal(signal.SIGTERM,lambda *args:sys.exit(0))
  try:
@@ -648,16 +642,30 @@ with (root/'wireguard-calls').open('a')as stream:
         module=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
         environment=dict(os.environ,PATH=str(bin_path)+os.pathsep+os.environ['PATH'],HOME=str(home),FLY_BENCH_API_TOKEN='fixture-bench-token-over-twenty-characters',PARENT_RELAY_CASE=str(f.root),PARENT_RELAY_TEST=str(Path(__file__).resolve()))
         for key in ('FLY_AGENT_SOCKET_PATH','FLY_AGENT_ISOLATED'):environment.pop(key,None)
-        value=None
         def retire_started_agents():
             # Fixture-owned exact PIDs only; never a pattern or process group.
             for line in ((f.root/'started-agent.pids').read_text().split()if(f.root/'started-agent.pids').exists()else[]):
                 try:os.kill(int(line),signal.SIGKILL)
                 except ProcessLookupError:pass
         self.addCleanup(retire_started_agents)
+        return f,repo,home,module,environment
+
+    def test_campaign_child_wireguard_flyctl_reuses_the_relay_agent(self):
+        """Children's ssh/sftp must share the campaign agent, never start another.
+
+        flyctl v0.4.115 clients use FLY_AGENT_SOCKET_PATH, else ~/.fly/fly-agent.sock,
+        and start a background agent where no agent answers PING (FLY_AGENT_ISOLATED
+        starts a private one). Every agent in HOME loads the same single
+        wire_guard_state peer. In the 100-copy sharded diagnostic, autoscaler worker
+        staging started a default agent on each controller, and its tunnel traffic on
+        that peer made relay CONNECTs retransmit until guest collection timed out.
+        """
+        from unittest.mock import patch
+        f,repo,home,module,environment=self.campaign_relay_fixture()
+        value=None
         try:
             with patch.dict(os.environ,environment,clear=True):
-                value=module['start_shared_relay'](repo,campaign,repo,f.feed,time.monotonic()+15)
+                value=module['start_shared_relay'](repo,f.root/'campaign',repo,f.feed,time.monotonic()+15)
                 relay_socket=json.loads(Path(value['authority']).read_text())['agent_socket']
                 # A campaign child inherits the parent environment through its one binding.
                 child=dict(os.environ)
@@ -702,6 +710,44 @@ with (root/'wireguard-calls').open('a')as stream:
                     if process.poll()is None:process.terminate();process.wait(timeout=4)
                 for name in ('log','bootstrap_log'):
                     if not value[name].closed:value[name].close()
+
+    def test_second_campaign_in_one_home_refuses_a_second_agent_on_the_wireguard_peer(self):
+        """One HOME has one wire_guard_state peer, so at most one campaign agent.
+
+        descend-full69-20261023: two local campaigns and K5's proof campaign each
+        started a private isolated agent in the same HOME on peer
+        interactive-boxes-...-01M5JRRKX43EPAJ0RXSRA99882. From the second agents'
+        start (06:20:47) 60-90% of the first relay's CONNECTs stalled, guest
+        /shutdown replies were lost (HTTP 000) and passed browser copies retained
+        their Machines. A second campaign must refuse before starting any agent,
+        and the claim must end with the first campaign's agent.
+        """
+        from unittest.mock import patch
+        f,repo,home,module,environment=self.campaign_relay_fixture()
+        values=[]
+        def stop(value):
+            for name in ('process','bootstrap'):
+                process=value[name]
+                if process is not None and process.poll()is None:process.terminate();process.wait(timeout=4)
+            for name in ('log','bootstrap_log'):
+                if not value[name].closed:value[name].close()
+        self.addCleanup(lambda:[stop(value)for value in values])
+        proxies=lambda:(f.root/'proxy-calls').read_text().splitlines()if(f.root/'proxy-calls').exists()else[]
+        with patch.dict(os.environ,environment,clear=True):
+            first_dir=f.root/'campaign-a';first_dir.mkdir()
+            values.append(module['start_shared_relay'](repo,first_dir,repo,f.feed,time.monotonic()+15))
+            self.assertEqual(len(proxies()),1)
+            second_dir=f.root/'campaign-b';second_dir.mkdir()
+            with self.assertRaisesRegex(ValueError,'WireGuard peer'):
+                values.append(module['start_shared_relay'](repo,second_dir,repo,f.feed,time.monotonic()+15))
+            self.assertEqual(len(proxies()),1,'a second campaign started another Fly agent on the HOME peer: %r'%proxies())
+            self.assertFalse((home/'.fly/fly-agent.sock').exists(),'default HOME agent socket was created')
+            # The claim belongs to the first campaign's agent and ends with it.
+            self.assertTrue(module['stop_shared_relay'](values.pop()))
+            third_dir=f.root/'campaign-c';third_dir.mkdir()
+            values.append(module['start_shared_relay'](repo,third_dir,repo,f.feed,time.monotonic()+15))
+            self.assertEqual(len(proxies()),2)
+            self.assertTrue(module['stop_shared_relay'](values.pop()))
 
 
 if __name__=='__main__':unittest.main()

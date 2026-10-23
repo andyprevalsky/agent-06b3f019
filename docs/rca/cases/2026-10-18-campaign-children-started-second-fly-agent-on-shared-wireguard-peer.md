@@ -12,7 +12,7 @@ symptoms:
   - "❌ guest cleanup request failed (HTTP 000)"
   - "err context deadline exceeded"
   - "failed writing: write unix /tmp/cb-relay-*/fly-agent.sock->@: write: broken pipe"
-  - orphaned default `flyctl agent run` daemon and repeated status-proxy lease rotation
+  - "❌ guest cleanup was not acknowledged; machine ownership must be retained (HTTP 000)"
 tags:
   - cloudbench
   - shared-relay
@@ -23,6 +23,7 @@ tags:
 sources:
   - fleet run original600-1792308435478660056 (100-copy sharded diagnostic, source 373585f80c006fc53412c8f9ccc0c7335e32f32a)
   - commit caf73e6de28e36e97cd226662dcff974f7648871 (reverted)
+  - fleet run 20261023-060858-2779218 (descend-full69-20261023 recurrence on 8ada0056f; also 20261023-060858-2779216/-2779217, 20261023-060710-2729411/-2729441, K5 canary 20261023-063527-3731387)
 repro: python3 scripts/tests/cloudbench-shared-transport-integration.test.py CallerIntegration.test_campaign_child_wireguard_flyctl_reuses_the_relay_agent
 status: open
 ---
@@ -75,10 +76,26 @@ Pre-fix, the command in `repro` fails with the assertion above. Post-fix, the id
 
 Limits: the gateway's handling of two concurrent sessions on one peer was inferred from native agent logs (same peer, onset to the second on 4/4 controllers, idle recovery). It cannot be reproduced offline; the local test proves the owned boundary only. Outcome proof is pending a sharded cloud rerun showing a single agent per controller, one status lease per copy and zero collection failures. Separately, the single-attempt 3 s `/shutdown` request and the `fly_with_timeout` SIGKILL escalation remain unchanged. The adversarial sub-agent review (Step 7) was not run because the RCA agent had no sub-agent tool; it is delegated to the parent.
 
+## Recurrence 2026-10-23 (descend-full69-20261023, K10)
+
+Other symptom strings: `BILLING_STOP_REFUSED`, the orphaned default `flyctl agent run` daemon with repeated status-proxy lease rotation, and passed browser-auth copies retaining their Machines while several local campaigns ran at once.
+
+Members: browser-auth-minted-email-otp (INFRA_ERROR "complete terminal runtime evidence could not be verified"), browser-auth-email-otp, browser-auth-passkey-preferred (Machine d8d0799f321508 left draining and retained), browser-auth-created-account-reused (x2), and K5's canary browser-auth-saved-password-retry and browser-doordash-food-plan-grocery-cart-reauth. Every task itself passed or was cut off; each lost its guest /shutdown or /runtime-evidence reply through the relay.
+
+Evidence. The live guest d8d0799f321508 was inspected read-only. Its status server answered locally in 1 ms. The cleanup ack had existed since 06:30:53, and the controller's `/shutdown` request had landed (`cloudbench-shutdown-*.request` 06:33:48). The reply was lost on the controller side. The 060858 relay agent log (`~/.fly/agent-logs/2969209047.log`) shows that cleanup's CONNECTs to `[fdaa:...:846:712c:a8da:2]:8011` ending in `err context deadline exceeded` and `broken pipe`. Six agents were live in one HOME. Two were campaign relays started at 06:07:08 and 06:08:56. Two more relay agents started at 06:20:47 and 06:20:49, from K5's proof work. The default `~/.fly` agent, alive since 21:37, carried 43–59 connects/min from 06:21 to 06:33. Every establish reply names the same peer, `interactive-boxes-ed05f94c-…-01M5JRRKX43EPAJ0RXSRA99882`. In the 060710 relay, CONNECTs taking at least 0.9 s were a steady 24/min of about 235 (guest-boot polling) through 06:19. They rose to 61/161 at 06:20, then 60–90% of all CONNECTs (for example 289/346 at 06:21) until 06:38. Browser copies finished their drivers at 06:30–06:34 and all lost cleanup. The claude-code-agent copy finished at 06:35:55, after the default agent went idle (3 connects at 06:34, none 06:35–06:40), and cleaned up. Being a browser task is not the cause. Run 1 on cbbf3dd0c was clean because its shards ran on separate remote controllers, each with its own peer. The 8ada0056f code delta (T112/T114/K4/K7) is not involved.
+
+Why the earlier fix did not hold: it guaranteed one agent per campaign, but the invariant that matters is one agent per HOME's `wire_guard_state` peer. Each local campaign still starts its own `FLY_AGENT_ISOLATED` agent. Two campaigns in one HOME (here, the descend parent's proofs alongside K5's) therefore recreate the same two-session conflict.
+
+Repro (red on 8ada0056f, green on the fix): `python3 scripts/tests/cloudbench-shared-transport-integration.test.py CallerIntegration.test_second_campaign_in_one_home_refuses_a_second_agent_on_the_wireguard_peer`. It runs real `start_shared_relay` twice in one HOME against the v0.4.115-model fake flyctl. Pre-fix failure: `AssertionError: ValueError not raised` at `with self.assertRaisesRegex(ValueError,'WireGuard peer')`; the second campaign started a second agent.
+
+Fix: `start_shared_relay` first takes `claim_home_wireguard_peer`, a non-blocking exclusive `flock` on `$HOME/.fly/rose-campaign-wireguard-peer.lock` that records its holder. A second campaign in the same HOME now refuses before it starts any agent or Machine. The refusal names the holder and points to a single or sharded campaign, and the campaign's startup failure line prints the reason. The lock descriptor is passed to the agent's bootstrap, so the claim ends with that agent, and a dead holder releases it. Fixture tests that start relays now use a private HOME. This is the guard rung: a per-campaign peer would require creating and deleting a Fly WireGuard peer per campaign. Moving all campaigns onto the default agent would change token and lifecycle ownership. Neither is verifiable offline.
+
+Still open: (1) an ad-hoc `flyctl ssh`, or a concurrency-1 local run that uses the HOME default agent while a relay campaign runs, still opens a second session on the peer. Operational rule until fixed: run no other flyctl tunnel traffic in that HOME during a relay campaign. Prefer sharded campaigns, whose controllers each have their own peer. (2) For a natively stopped guest whose provider manifest was never sealed, `--recover-stale-owner` prints `stopped exact Machine has no sealed provider-state proof` instead of pointing at the documented original-volume capture procedure. Outcome proof is pending the parent's cloud rerun.
+
 ## Human feedback
 
 The coordinator assigned the binding edit to this RCA and asked for an evidence-based decision on caf73e6de. It also asked that the change stay scoped to the relay binding and its env export. No user feedback recorded.
 
 ## Reusable lesson
 
-When one shared Fly agent owns a campaign's tunnel, hand its socket to every child, because any flyctl ssh/sftp call that resolves a different agent starts a second WireGuard session on the same peer and silently degrades the shared tunnel.
+One HOME has one Fly WireGuard peer: allow exactly one live agent on it, which means children reuse the campaign's agent and a second campaign in the same HOME must refuse, because any second agent session silently degrades every tunnel on that peer.
