@@ -158,11 +158,20 @@ def test_spawn_agent_schemas_declare_target_default_cloud():
         sentences = [s for s in re.split(r"(?<=\.)\s+", field.description.strip()) if s]
         assert len(sentences) == 1, field.description
         parsed = model.model_validate(
-            {"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA, "target": "local"}
+            {
+                "tool": "spawn_agent",
+                "type": "code",
+                "task_name": "t",
+                "goal": "g",
+                "output_schema": SCHEMA,
+                "target": "local",
+            }
         )
         assert parsed.target == "local"
         assert (
-            model.model_validate({"tool": "spawn_agent", "type": "code", "goal": "g", "output_schema": SCHEMA}).target
+            model.model_validate(
+                {"tool": "spawn_agent", "type": "code", "task_name": "t", "goal": "g", "output_schema": SCHEMA}
+            ).target
             == "cloud"
         )
 
