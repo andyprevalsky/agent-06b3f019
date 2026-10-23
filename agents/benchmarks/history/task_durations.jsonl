@@ -7313,4 +7313,3 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 190.2, "cost_cents": 0.0, "timestamp": "2026-10-22T19:08:29.959219+00:00", "agent_id": "ce7592e4-2f1a-4951-93b9-e09ec84adb4a"}
 {"task": "agent-payment-test-shop", "duration_seconds": 818.5, "cost_cents": 0.0, "timestamp": "2026-10-22T19:08:29.959219+00:00", "agent_id": "01d3e860-0f3b-4a9e-b4e3-45a9d987f459"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 384.9, "cost_cents": 2.0, "timestamp": "2026-10-22T19:08:29.959219+00:00", "agent_id": "ae8dc856-4c34-408c-9cce-02cdabc569a6"}
-{"task": "agent-display-revenue-chart", "duration_seconds": 218.2, "cost_cents": 0.0, "timestamp": "2026-10-23T22:49:06.635816+00:00", "agent_id": "ff57e57d-8f39-4c0e-9a19-aed91bb1f040"}
