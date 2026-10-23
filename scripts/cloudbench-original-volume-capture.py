@@ -618,6 +618,7 @@ UNDELIVERED_RECOVERY_OUTPUTS = (
     "guest-cleanup.provider-manifest.json",
     "guest-cleanup.recovery-receipt.json",
     "guest-cleanup.machine-stopped.json",
+    "guest-cleanup.undelivered-capture.json",
 )
 
 
@@ -1127,7 +1128,8 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
     journal("published", archive_sha256=provenance["archive_sha256"])
     if ident.get("undelivered_native_stop"):
         try:
-            manifest = publish_undelivered_recovery_inputs(ident, originals)
+            manifest = publish_undelivered_recovery_inputs(ident, originals, capture_dir,
+                                                           provenance["archive_sha256"])
         except (CaptureFailure, Refusal, OSError, ValueError) as error:
             journal("recovery-inputs-failed", error=str(error)[:300])
             print(f"❌ capture published, but its recovery inputs were refused: {str(error)[:300]}", file=sys.stderr)
@@ -1139,7 +1141,8 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
     return 0
 
 
-def publish_undelivered_recovery_inputs(ident: dict, originals: dict[str, bytes]) -> dict:
+def publish_undelivered_recovery_inputs(ident: dict, originals: dict[str, bytes],
+                                        capture_dir: Path | None = None, archive_sha: str | None = None) -> dict:
     """Hand exact-owner recovery the stopped guest's original backend log and manifest.
 
     These are the same two files recovery fetches from a started guest before
@@ -1148,14 +1151,30 @@ def publish_undelivered_recovery_inputs(ident: dict, originals: dict[str, bytes]
     guest. Nothing here confirms cleanup or changes a latch.
     """
     backend = originals.get(LOG_DIR + "backend.log")
-    if backend is None:
-        raise CaptureFailure("original backend.log is absent; provider-session identity is unrecoverable")
     out = ident["out"]
     if any(lexists(out / name) for name in UNDELIVERED_RECOVERY_OUTPUTS):
         raise CaptureFailure("recovery evidence appeared during capture")
-    target = out / "guest-cleanup.backend.log"
-    publish_bytes(target, backend)
     helper = sibling("cloudbench-exact-session-cleanup.py")
+    target = out / "guest-cleanup.backend.log"
+    if backend is None:
+        # No backend ever ran. Recovery may still prove zero provider sessions,
+        # but only from this exact capture; the session helper re-verifies it.
+        if capture_dir is None or archive_sha is None:
+            raise CaptureFailure("original backend.log is absent; provider-session identity is unrecoverable")
+        pointer = out / helper["UNDELIVERED_CAPTURE_POINTER"]
+        publish_bytes(pointer, canonical(
+            {"version": 1, "capture_dir": str(capture_dir), "archive_sha256": archive_sha}) + b"\n")
+        try:
+            helper["undelivered_prestack_zero_manifest"](argparse.Namespace(
+                owner=ident["owner"], fleet_run_id=ident["run_id"], bench=ident["bench"],
+                machine_id=ident["machine_id"], output_dir=str(out), guest_run_token=ident["token"]))
+        except helper["CleanupEvidenceError"] as error:
+            # Retract only the pointer this call just published.
+            pointer.unlink()
+            fsync_directory(out)
+            raise CaptureFailure(f"capture does not prove zero provider sessions: {error}") from None
+    else:
+        publish_bytes(target, backend)
     namespace = argparse.Namespace(
         owner=ident["owner"], fleet_run_id=ident["run_id"], bench=ident["bench"],
         machine_id=ident["machine_id"], output_dir=str(out), guest_run_token=ident["token"],
@@ -1165,7 +1184,36 @@ def publish_undelivered_recovery_inputs(ident: dict, originals: dict[str, bytes]
     try:
         return helper["publish_active_manifest"](namespace)
     except helper["CleanupEvidenceError"] as error:
-        raise CaptureFailure(f"active provider manifest refused: {error}") from None
+        raise CaptureFailure(f"provider manifest refused: {error}") from None
+
+
+def publish_existing_capture_inputs(args: argparse.Namespace) -> int:
+    """Hand recovery an already published undelivered capture; no provider call."""
+    args.undelivered_native_stop = True
+    ident = local_identity(args)
+    capture_dir = private_capture_dir(args.capture_dir, create=False)
+    machine_id = ident["machine_id"]
+    archive = regular_bytes(capture_dir / f"{machine_id}.tar.gz", MAX_TOTAL_BYTES)
+    provenance = json_file(capture_dir / f"{machine_id}.provenance.json")
+    if (
+        not isinstance(provenance, dict) or provenance.get("admission") != "undelivered-native-stop"
+        or provenance.get("guest_native_stop_sha256") != ident["undelivered_native_stop"]["sha256"]
+        or provenance.get("archive_sha256") != sha(archive) or provenance.get("machine_id") != machine_id
+        or provenance.get("volume_id") != ident["volume_id"] or provenance.get("guest_run_token") != ident["token"]
+    ):
+        raise Refusal("existing capture is not this exact undelivered native-stop capture")
+    inventory = {"version": 1, "run_token": ident["token"], "files": provenance.get("files"),
+                 "missing": provenance.get("missing"), "archive_bytes": len(archive), "archive_sha256": sha(archive)}
+    local = capture_dir / f"{machine_id}.tar.gz"
+    try:
+        originals = verify_capture(local, inventory, ident)
+        manifest = publish_undelivered_recovery_inputs(ident, originals, capture_dir, sha(archive))
+    except CaptureFailure as error:
+        print(f"❌ recovery inputs refused: {error}", file=sys.stderr)
+        return EXIT_FAILED
+    print(json.dumps({"recovery_inputs": True, "manifest_kind": manifest.get("kind"),
+                      "machine_id": machine_id, "proof_credit": 0}, sort_keys=True))
+    return 0
 
 
 def next_step(args: argparse.Namespace) -> int:
@@ -1864,6 +1912,8 @@ def main(argv: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--restore-original-config", action="store_true")
+    mode.add_argument("--publish-recovery-inputs", action="store_true",
+                      help="no provider call: hand recovery an existing undelivered native-stop capture")
     mode.add_argument("--next-step", action="store_true",
                       help="read-only: print the supported capture command for an undelivered native stop")
     parser.add_argument("--undelivered-native-stop", action="store_true",
@@ -1878,6 +1928,8 @@ def main(argv: list[str]) -> int:
             return next_step(args)
         if args.capture_dir is None:
             parser.error("--capture-dir is required")
+        if args.publish_recovery_inputs:
+            return publish_existing_capture_inputs(args)
         return restore_only(args) if args.restore_original_config else capture(args)
     except Refusal as error:
         print(f"❌ refused: {error}", file=sys.stderr)

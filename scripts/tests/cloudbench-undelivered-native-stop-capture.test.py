@@ -177,6 +177,9 @@ class UndeliveredNativeStopCapture(unittest.TestCase):
             }
             if state.get("omit_backend"):
                 files.pop("repo/.context/cloudbench/logs/backend.log")
+            if "prestack" in state:
+                # The guest died during bootstrap checkout: only the driver files exist.
+                files = dict(state["prestack"])
             buffer = io.BytesIO()
             with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
                 for name, content in sorted(files.items()):
@@ -187,7 +190,8 @@ class UndeliveredNativeStopCapture(unittest.TestCase):
             local = capture_dir / f".{ident['machine_id']}.download"
             local.write_bytes(data)
             return local, {
-                "version": 1, "run_token": ident["token"], "missing": [],
+                "version": 1, "run_token": ident["token"],
+                "missing": sorted(helper["expected_names"](ident["token"]) - set(files)),
                 "files": {n: {"bytes": len(c), "sha256": hashlib.sha256(c).hexdigest()} for n, c in files.items()},
                 "archive_bytes": len(data), "archive_sha256": hashlib.sha256(data).hexdigest(),
                 "inert_sleepers": 1,
@@ -318,13 +322,151 @@ class UndeliveredNativeStopCapture(unittest.TestCase):
         self.assert_refused("requires the guest-cleanup-unconfirmed latch")
 
     def test_absent_backend_log_publishes_no_recovery_inputs(self) -> None:
+        # A backend-less capture that is not a pre-stack boot proves nothing.
         self.state["omit_backend"] = True
         status, _, stderr = self.capture()
         self.assertEqual(status, self.helper["EXIT_FAILED"], stderr)
-        self.assertIn("provider-session identity is unrecoverable", stderr)
+        self.assertIn("capture does not prove zero provider sessions", stderr)
+        self.assertFalse((self.out / "guest-cleanup.undelivered-capture.json").exists())
         machine = self.state["machines"][MACHINE]
         self.assertEqual((machine["state"], machine["config"]), ("stopped", self.original_config))
         self.assertFalse((self.out / "guest-cleanup.provider-manifest.json").exists())
+
+
+PRESTACK_FILES = {
+    "bench.log": (f"RUNSTAMP-{TOKEN}\n[boot 06:37:04] bootstrap-checkout 172e555bd1c4\n"
+                  "[cloudbench] git-maintenance 0s\nTerminated\n").encode(),
+    "cloudbench-driver.state": b"booting\n",
+}
+
+
+class UndeliveredPrestackZeroProvider(UndeliveredNativeStopCapture):
+    """The stopped guest never started its stack: zero provider sessions, proven by the capture."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.state["prestack"] = dict(PRESTACK_FILES)
+
+    def session(self, command: str, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run([
+            sys.executable, str(SESSION), command,
+            "--owner", OWNER, "--fleet-run-id", RUN_ID, "--bench", BENCH, "--machine-id", MACHINE,
+            "--output-dir", str(self.out), "--guest-run-token", TOKEN,
+            "--backend-log", str(self.out / "guest-cleanup.backend.log"),
+            "--manifest", str(self.out / "guest-cleanup.provider-manifest.json"),
+            "--clone-name", CLONE, "--machine-status", str(self.out / "guest-cleanup.machine-status.txt"),
+            "--stopped-proof", str(self.out / "guest-cleanup.machine-stopped.json"), *extra,
+        ], capture_output=True, text=True)
+
+    def recover_stopped_guest(self) -> list[subprocess.CompletedProcess]:
+        """Recovery's stopped-guest branch, in its order, with the real helper."""
+        write(self.out / "guest-cleanup.machine-status.txt",
+              f"Machine ID: {MACHINE}\nState: stopped\n\nVM\n  ID    = {MACHINE}\n"
+              f"  Name  = {CLONE}\n  State = stopped\n\nEvent Logs\n")
+        env = ["--agents-env", str(self.tmp / "absent-agents.env"), "--backend-env", str(self.tmp / "absent.env")]
+        steps = [self.session("publish-stopped-machine-proof")]
+        if steps[-1].returncode == 0:
+            steps.append(self.session("cleanup-sealed-provider-sessions",
+                                      "--receipt", str(self.out / "guest-cleanup.recovery-receipt.json"), *env))
+        if steps[-1].returncode == 0:
+            steps.append(subprocess.run([
+                sys.executable, str(SESSION), "validate-recovery-receipt",
+                "--owner", OWNER, "--fleet-run-id", RUN_ID, "--bench", BENCH, "--machine-id", MACHINE,
+                "--output-dir", str(self.out), "--guest-run-token", TOKEN,
+                "--backend-log", str(self.out / "guest-cleanup.backend.log"),
+                "--manifest", str(self.out / "guest-cleanup.provider-manifest.json"),
+                "--clone-name", CLONE, "--machine-status", str(self.out / "guest-cleanup.machine-status.txt"),
+                "--stopped-proof", str(self.out / "guest-cleanup.machine-stopped.json"),
+                "--receipt", str(self.out / "guest-cleanup.recovery-receipt.json"),
+            ], capture_output=True, text=True))
+        return steps
+
+    def test_exact_undelivered_native_stop_is_captured_and_handed_to_recovery(self) -> None:
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        machine = self.state["machines"][MACHINE]
+        self.assertEqual((machine["state"], machine["config"]), ("stopped", self.original_config))
+        manifest = json.loads((self.out / "guest-cleanup.provider-manifest.json").read_text())
+        self.assertEqual(manifest["kind"], "provider-undelivered-prestack-zero-manifest")
+        self.assertEqual(manifest["sessions"], {"kernel": [], "steel": []})
+        self.assertFalse((self.out / "guest-cleanup.backend.log").exists())
+        steps = self.recover_stopped_guest()
+        self.assertEqual([step.returncode for step in steps], [0, 0, 0], [step.stderr for step in steps])
+        receipt = json.loads((self.out / "guest-cleanup.recovery-receipt.json").read_text())
+        self.assertEqual((receipt["kind"], receipt["results"]), ("provider-exact-cleanup", []))
+        self.assertTrue((self.registry / "guest-cleanup-unconfirmed").is_file())
+
+    def test_existing_capture_hands_inputs_to_recovery_without_provider_calls(self) -> None:
+        # The real run captured first and published nothing; replay from that capture.
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        manifest = (self.out / "guest-cleanup.provider-manifest.json").read_bytes()
+        for name in ("guest-cleanup.provider-manifest.json", "guest-cleanup.undelivered-capture.json"):
+            (self.out / name).unlink()
+        self.state["mutations"].clear()
+        status, stdout, stderr = self.main("--capture-dir", str(self.capture_dir), "--publish-recovery-inputs")
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(self.state["mutations"], [])
+        self.assertEqual((self.out / "guest-cleanup.provider-manifest.json").read_bytes(), manifest)
+        self.assertEqual([step.returncode for step in self.recover_stopped_guest()], [0, 0, 0])
+
+    def assert_zero_proof_refused(self) -> None:
+        status, _, stderr = self.capture()
+        self.assertEqual(status, self.helper["EXIT_FAILED"], stderr)
+        self.assertIn("does not prove zero provider sessions", stderr)
+        self.assertFalse((self.out / "guest-cleanup.provider-manifest.json").exists())
+        self.assertFalse((self.out / "guest-cleanup.undelivered-capture.json").exists())
+        machine = self.state["machines"][MACHINE]
+        self.assertEqual((machine["state"], machine["config"]), ("stopped", self.original_config))
+
+    def test_services_manifest_present_is_refused(self) -> None:
+        self.state["prestack"]["repo/.context/cloudbench/services.json"] = b'{"status":"stopped"}'
+        self.assert_zero_proof_refused()
+
+    def test_stack_log_present_is_refused(self) -> None:
+        self.state["prestack"]["repo/.context/cloudbench/stack.log"] = b"launching\n"
+        self.assert_zero_proof_refused()
+
+    def test_driver_state_past_booting_is_refused(self) -> None:
+        for driver in (b"running\n", b"exited\n", b"booting"):
+            with self.subTest(driver=driver):
+                self.state["prestack"]["cloudbench-driver.state"] = driver
+                self.assert_zero_proof_refused()
+                subprocess.run(["rm", "-rf", str(self.capture_dir)], check=True)
+
+    def test_stack_launch_in_bench_log_is_refused(self) -> None:
+        self.state["prestack"]["bench.log"] += b"launching stack (run.sh --benchmark)\n"
+        self.assert_zero_proof_refused()
+
+    def test_backend_log_present_never_yields_a_zero_manifest(self) -> None:
+        self.state["prestack"]["repo/.context/cloudbench/logs/backend.log"] = b"[Server] Server started\n"
+        status, _, stderr = self.capture()
+        self.assertEqual(status, self.helper["EXIT_FAILED"], stderr)
+        self.assertFalse((self.out / "guest-cleanup.provider-manifest.json").exists())
+
+    def test_capture_digest_mismatch_is_refused_at_recovery(self) -> None:
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        archive = self.capture_dir / f"{MACHINE}.tar.gz"
+        archive.chmod(0o600)
+        archive.write_bytes(archive.read_bytes() + b"\0")
+        steps = self.recover_stopped_guest()
+        self.assertNotEqual(steps[0].returncode, 0)
+        self.assertFalse((self.out / "guest-cleanup.recovery-receipt.json").exists())
+
+    def test_delivered_receipt_after_capture_is_refused_at_recovery(self) -> None:
+        status, _, stderr = self.capture()
+        self.assertEqual(status, 0, stderr)
+        self.write_native_stop(dict(self.native_stop, delivery_receipt="http-202"))
+        steps = self.recover_stopped_guest()
+        self.assertNotEqual(steps[0].returncode, 0)
+        self.assertIn("not an exact verified undelivered stop", steps[0].stderr)
+
+    def test_absent_backend_log_publishes_no_recovery_inputs(self) -> None:
+        self.skipTest("covered by the parent class; pre-stack files are this class's fixture")
+
+    def test_next_step_names_the_exact_capture(self) -> None:
+        self.skipTest("parent class covers next-step")
 
 
 if __name__ == "__main__":
