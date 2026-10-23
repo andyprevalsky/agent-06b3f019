@@ -16,7 +16,9 @@ from domains.param_populator.config import (
     TEMPERATURE,
 )
 from domains.param_populator.repo import fetch_agent_context
+from helpers.attachment_context import attachment_request_overhead
 from helpers.llm import build_llm_messages, call_llm_structured_streaming
+from helpers.model_info import get_model_context_window
 from utils.prompts import (
     CONTEXT_POINTERS_RULE,
     EPHEMERAL_SESSION_RULE,
@@ -127,7 +129,11 @@ async def populate_tool_params(
         heartbeat("Fetching context from DB")
     context = await fetch_agent_context(agent_id)
 
-    messages = await build_llm_messages(context, system_prompt)
+    messages = await build_llm_messages(
+        context, system_prompt,
+        max_context_tokens=await get_model_context_window(model),
+        request_overhead=attachment_request_overhead(agent_action, f"Execute the task: {goal}"),
+    )
     messages.append({"role": "user", "content": f"Execute the task: {goal}"})
 
     if heartbeat:

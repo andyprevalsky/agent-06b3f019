@@ -38,6 +38,9 @@ from domains.spawn_agent.repo import (
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.agent_addressing import task_name_error
+from helpers.attachment_context import AttachmentContextLimitError
+from helpers.attachments import FilePointer
+from helpers.model_info import get_model_context_window
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -510,6 +513,7 @@ async def spawn_explore_agent_activity(
     oai_demo: Optional[bool] = None,
     inbox_address: Optional[str] = None,
     task_name: Optional[str] = None,
+    attachment_pointers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -558,6 +562,18 @@ async def spawn_explore_agent_activity(
     # timeout using workflow_instance.fast_mode_cache_enabled. Re-resolving here
     # from resolve_agent_fast_mode can bump iterations to deep while the caller
     # still holds the quick timeout.
+
+    # Reject unreadable required sources before any background work starts:
+    # nothing below this point may leak if the activity fails here.
+    text_attachment_pointers: List[Dict[str, Any]] = []
+    for pointer in attachment_pointers or []:
+        fp = FilePointer.from_dict(pointer)
+        if fp.is_text():
+            text_attachment_pointers.append(pointer)
+        else:
+            raise AttachmentContextLimitError(
+                f"Explore cannot access required nontext attachment: {fp.original_filename}"
+            )
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
     _heartbeat_stop = asyncio.Event()
@@ -889,7 +905,7 @@ async def spawn_explore_agent_activity(
                 user_id=user_id,
             )
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
-            if not attachment_texts and not has_usable_tool_evidence:
+            if not (attachment_texts or attachment_pointers) and not has_usable_tool_evidence:
                 completion_no_evidence_rejects += 1
                 # Fast Mode cold stubs replay attempt_completion_with_result
                 # forever. One reject is enough signal; accepting the next
@@ -1008,8 +1024,15 @@ async def spawn_explore_agent_activity(
             "report that identifier exactly; do not guess or use unrelated web, email, or document "
             "searches to invent a person's identity. Search only sources relevant to the goal:\n" + local_data_summary
         )
-    if attachment_texts:
-        initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
+    # Legacy activity payloads already contain resolved strings. New payloads
+    # keep text sources as pointers until admission against the complete request.
+    # Explore remains text-only; image/PDF/binary files retain metadata labels.
+    metadata_texts = list(attachment_texts or [])
+    if metadata_texts:
+        initial_user_text += "\n\n" + "\n\n".join(metadata_texts)
+    initial_user_message: Dict[str, Any] = {"role": "USER", "text": initial_user_text}
+    if text_attachment_pointers:
+        initial_user_message["metadata"] = {"attachments": text_attachment_pointers}
 
     # Run the agent loop. Wrap in try/finally so backgrounded FE posts are always
     # drained — if run_agent raises, the already-scheduled _pending_fe_posts tasks
@@ -1019,6 +1042,7 @@ async def spawn_explore_agent_activity(
     result: Dict[str, Any] = {}
     try:
         with heartbeat_resume_details(resume_details):
+            selected_context_window = await get_model_context_window(model)
             run_agent_coro = run_agent(
                 agent_id=agent_id,
                 user_id=user_id,
@@ -1026,7 +1050,7 @@ async def spawn_explore_agent_activity(
                 verifier_prompt_generator=explore_verifier_prompt,
                 model=model,
                 tools=get_explore_agent_tools(),
-                initial_context=[{"role": "USER", "text": initial_user_text}],
+                initial_context=[initial_user_message],
                 task_id=task_id,
                 is_inside_temporal_activity=True,
                 execute_tool=explore_execute_tool,
@@ -1034,7 +1058,8 @@ async def spawn_explore_agent_activity(
                 poll_inbox=explore_poll_inbox if agent_inbox is not None else None,
                 max_iterations=resolved_max_iterations,
                 winddown_window=EXPLORE_WINDDOWN_WINDOW,
-                max_context_tokens=max_context_tokens,
+                max_context_tokens=min(max_context_tokens, selected_context_window),
+                require_inline_attachments=True,
                 skip_verification=True,
                 skip_blueprint_query=True,
                 skip_status_updates=True,
@@ -1127,7 +1152,7 @@ async def spawn_explore_agent_activity(
     completed_without_tool_evidence = (
         result.get("status") == "completed"
         and not has_usable_tool_evidence
-        and not attachment_texts
+        and not (attachment_texts or attachment_pointers)
         and not local_data_summary
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence

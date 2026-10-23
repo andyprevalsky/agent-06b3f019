@@ -24,6 +24,12 @@ from temporalio.exceptions import ApplicationError
 from config import load_config
 from helpers.activity_heartbeat import safe_heartbeat
 from helpers.agent_addressing import planned_task_name
+from helpers.attachment_context import (
+    AttachmentContextLimitError,
+    PreparedTextAttachment,
+    admit_text_attachments,
+    attachment_request_overhead,
+)
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
@@ -34,6 +40,7 @@ from helpers.attachments import (
 )
 from helpers.background_agents import model_agent_row_text
 from helpers.context_compaction import is_excluded_from_model
+from helpers.context_limits import MAX_LLM_ESCALATION_TOKENS
 from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_messages
 from helpers.context_scope import is_internal_subagent_message
 from helpers.environment_context import is_environment_context_row
@@ -44,6 +51,7 @@ from helpers.messages import (
     stream_plan_event,
     stream_tool_event,
 )
+from helpers.model_info import _DEFAULT_CONTEXT_WINDOW
 from helpers.tracing import backend_api_headers, current_request_id, span, traced
 from helpers.workflow_generation import workflow_generation_headers
 from providers.fast_cache import client as fast_cache_client
@@ -2061,6 +2069,31 @@ async def build_llm_messages(
     pre_resolved_ids: Optional[set] = None,
     llm_only_user_preamble: str = "",
     user_id: Optional[str] = None,
+    *,
+    max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
+    request_overhead: Any = None,
+    require_inline_attachments: bool = False,
+) -> List[Dict]:
+    async def render(render_text):
+        return await _render_llm_messages(
+            context, system_prompt, pre_resolved_ids,
+            llm_only_user_preamble, user_id, render_text, require_inline_attachments,
+        )
+
+    return await admit_text_attachments(
+        render, max_context_tokens=max_context_tokens, request_overhead=request_overhead,
+        require_inline=require_inline_attachments
+    )
+
+
+async def _render_llm_messages(
+    context: List[Dict],
+    system_prompt: str,
+    pre_resolved_ids: Optional[set] = None,
+    llm_only_user_preamble: str = "",
+    user_id: Optional[str] = None,
+    render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
+    require_inline_attachments: bool = False,
 ) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
@@ -2073,9 +2106,9 @@ async def build_llm_messages(
     - Filters TOOL messages: skips IN_PROGRESS, keeps only latest FINISHED per toolCallId
 
     For attachments:
-    - Small files (<20MB) are downloaded from storage and resolved to multimodal content
-    - Large files (>=20MB) are shown as metadata only (LLM can't process large files anyway)
-    - Binary files are shown as metadata only
+    - Eligible files (<20MB) are resolved from storage/cache.
+    - Whole text bodies are admitted only within the complete request's budget.
+    - Oversized text and unsupported binaries retain accessible file metadata.
 
     Downloads are cached within the module to avoid re-downloading the same file.
 
@@ -2152,6 +2185,11 @@ async def build_llm_messages(
         if file_pointer and isinstance(file_pointer, dict):
             attachments_data = [file_pointer] + list(attachments_data)
 
+        # Empty attachment-only assistant rows are hidden by the converter.
+        # Skip before downloads and admission so they consume no file budget.
+        if role == "ASSISTANT" and not text.strip() and not metadata.get("tool_calls") and attachments_data:
+            continue
+
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
         content = []  # multimodal content blocks (images, PDFs)
         metadata_texts = []  # text-based content (inline text files, metadata fallbacks)
@@ -2163,6 +2201,8 @@ async def build_llm_messages(
 
             # Large files or binary files -> metadata only
             if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+                if require_inline_attachments:
+                    raise AttachmentContextLimitError(f"Required text attachment cannot be inlined: {fp.original_filename}")
                 metadata_texts.append(build_attachment_metadata_text(fp))
                 continue
 
@@ -2181,6 +2221,8 @@ async def build_llm_messages(
                 logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
 
             if file_content is None:
+                if require_inline_attachments:
+                    raise AttachmentContextLimitError(f"Required text attachment could not be read: {fp.original_filename}")
                 metadata_texts.append(build_attachment_metadata_text(fp))
                 continue
 
@@ -2207,10 +2249,16 @@ async def build_llm_messages(
                 elif fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
-                        metadata_texts.append(build_attachment_text_content(fp, text_content))
+                        metadata_texts.append(render_text(PreparedTextAttachment(
+                            build_attachment_text_content(fp, text_content), build_attachment_metadata_text(fp), fp.original_filename
+                        )))
                     except UnicodeDecodeError:
+                        if require_inline_attachments:
+                            raise AttachmentContextLimitError(f"Required text attachment is not UTF-8: {fp.original_filename}")
                         metadata_texts.append(build_attachment_metadata_text(fp))
             except Exception as e:
+                if require_inline_attachments:
+                    raise AttachmentContextLimitError(f"Required text attachment could not be decoded: {fp.original_filename}") from e
                 logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
                 metadata_texts.append(build_attachment_metadata_text(fp))
 
@@ -2250,23 +2298,6 @@ async def build_llm_messages(
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
 
             raw_tool_calls = metadata.get("tool_calls")
-
-            # File-output ASSISTANT rows: empty text, no tool_calls, only an
-            # attachment (e.g. browser screenshots posted as AssistantEvent
-            # between two TOOL FINISHED rows in spawn_browser_agent_v3 /
-            # spawn_claude_code_agent / spawn_sub_agents). The LLM API
-            # discards image blocks on assistant role anyway, so the row
-            # contributes nothing semantically — but emitting it splits an
-            # otherwise contiguous tool_result run, which means the
-            # FOLLOWING tool_result no longer "immediately follows" the
-            # tool_use that declared it. Anthropic rejects that with
-            # "tool_use ids ... have no matching tool_result in the next
-            # message" (see context_validator._check_tool_result_pairing).
-            # Skip these rows entirely so the tool_use/tool_result chain
-            # stays intact.
-            has_attachment = bool(file_pointer) or bool(metadata.get("attachments"))
-            if not text.strip() and not raw_tool_calls and has_attachment:
-                continue
 
             if content:
                 # LLM APIs reject multimodal blocks in assistant messages.
@@ -3377,7 +3408,7 @@ async def call_llm_structured_streaming(
         # Escalate max_tokens on truncation (finish_reason=length) — retry once with 32768
         # Guard: skip escalation if not enough time remains for another streaming call (need 120s headroom)
         elapsed = _safe_time() - request_start_time if request_start_time else 0
-        if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed < 180:
+        if final_finish_reason == "length" and max_tokens < MAX_LLM_ESCALATION_TOKENS and not _is_escalation and elapsed < 180:
             logger.warning(
                 f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)"
             )
@@ -3393,7 +3424,7 @@ async def call_llm_structured_streaming(
                 messages=messages,
                 model=model,
                 temperature=temperature,
-                max_tokens=32768,
+                max_tokens=MAX_LLM_ESCALATION_TOKENS,
                 response_model=response_model,
                 on_chunk=on_chunk,
                 reasoning_max_tokens=reasoning_max_tokens,
@@ -3427,7 +3458,7 @@ async def call_llm_structured_streaming(
                 _parse_failed_count=_parse_failed_count,
                 _skip_models=_skip_models,
             )
-        elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
+        elif final_finish_reason == "length" and max_tokens < MAX_LLM_ESCALATION_TOKENS and not _is_escalation and elapsed >= 180:
             logger.warning(
                 f"⚠️ [{call_site}] Response truncated but skipping escalation — not enough time "
                 f"(elapsed={elapsed:.1f}s, need <180s). Returning truncated result."
@@ -4266,13 +4297,13 @@ async def call_llm(
             # this, message_person drafts truncated mid-sentence and shipped to
             # SMS approval (incident eab955b6 / "Please share the"). Escalate
             # before caching so we never persist a truncated draft.
-            if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
+            if result.get("finish_reason") == "length" and max_tokens < MAX_LLM_ESCALATION_TOKENS and not _is_escalation:
                 logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768")
                 return await call_llm(
                     messages=messages,
                     model=model,
                     temperature=temperature,
-                    max_tokens=32768,
+                    max_tokens=MAX_LLM_ESCALATION_TOKENS,
                     response_format=response_format,
                     response_model=response_model,
                     claude_token=claude_token,
@@ -4392,7 +4423,7 @@ async def call_llm(
             finish_reason=result["finish_reason"],
         )
 
-        if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
+        if result.get("finish_reason") == "length" and max_tokens < MAX_LLM_ESCALATION_TOKENS and not _is_escalation:
             logger.warning(
                 f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, retrying with 32768"
             )
@@ -4400,7 +4431,7 @@ async def call_llm(
                 messages=messages,
                 model=model,
                 temperature=temperature,
-                max_tokens=32768,
+                max_tokens=MAX_LLM_ESCALATION_TOKENS,
                 response_format=response_format,
                 response_model=response_model,
                 claude_token=claude_token,
@@ -6381,6 +6412,8 @@ async def call_llm_activity(
     exclude_anthropic_family: bool = False,
     pending_context_token: Optional[str] = None,
     environment_tail: Optional[Dict[str, Any]] = None,
+    max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
+    require_inline_attachments: bool = False,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6455,6 +6488,9 @@ async def call_llm_activity(
     try:
         _safe_heartbeat("Calling LLM for structured output")
 
+        AgentActionModel = create_agent_action_model(tool_names)
+        attachment_overhead = attachment_request_overhead(AgentActionModel, extra_user_message)
+
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
         if isinstance(messages_or_agent_id, str):
@@ -6477,6 +6513,9 @@ async def call_llm_activity(
                     pre_resolved_ids=pre_resolved_ids,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=pending_user_id or user_id,
+                    max_context_tokens=max_context_tokens,
+                    request_overhead=attachment_overhead,
+                    require_inline_attachments=require_inline_attachments,
                 )
             elif system_prompt:
                 # Cross-machine fallback: activity landed on a different worker.
@@ -6496,6 +6535,9 @@ async def call_llm_activity(
                     pre_resolved_ids=None,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
+                    max_context_tokens=max_context_tokens,
+                    request_overhead=attachment_overhead,
+                    require_inline_attachments=require_inline_attachments,
                 )
                 if not force_backend_context:
                     # Same-process Temporal retries of this call reuse the fetched context.
@@ -6525,9 +6567,6 @@ async def call_llm_activity(
 
         if extra_user_message:
             messages.append({"role": "user", "content": extra_user_message})
-
-        # Create dynamic action model
-        AgentActionModel = create_agent_action_model(tool_names)
 
         # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it

@@ -131,7 +131,7 @@ async def _resolve_explore_attachments_activity(
     Runs as a Temporal activity because file downloads require I/O.
     """
     pointers = [FilePointer.from_dict(d) for d in attachment_dicts]
-    content_blocks, metadata_texts = await resolve_attachments_for_llm(pointers)
+    content_blocks, metadata_texts = await resolve_attachments_for_llm(pointers, require_inline=True)
     # Explore agents are text-only (no multimodal), so we only return metadata_texts.
     # Images get a metadata placeholder; text/CSV files get inlined content.
     return content_blocks, metadata_texts

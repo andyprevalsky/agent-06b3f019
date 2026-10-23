@@ -638,7 +638,11 @@ run_system_setup_db() { # run_system_setup_db <repo> <port> <workspace> [env...]
   : > "$SYS_EVENTS"
   (
     cd "$repo"
-    env PATH="$SYS/bin:$PATH" CONDUCTOR_PORT="$port" CONDUCTOR_WORKSPACE_NAME="$ws" \
+    # An isolated deploy worktree exports its own identity and name trust;
+    # inheriting them would let the passed name beat the repo's .cloud-env.
+    env -u ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME -u ROSE_DEPLOY_WORKTREE \
+      -u ROSE_DEPLOY_WORKTREE_PATH -u ROSE_DEPLOY_SOURCE_WORKSPACE \
+      PATH="$SYS/bin:$PATH" CONDUCTOR_PORT="$port" CONDUCTOR_WORKSPACE_NAME="$ws" \
       CONDUCTOR_WORKSPACE_PATH="$repo" ROSE_USE_SYSTEM_PG=true \
       ROSE_WORKSPACE_DB_LOCK_DIR="$SYS/locks" "$@" \
       bash "$repo/scripts/setup-db.sh"
