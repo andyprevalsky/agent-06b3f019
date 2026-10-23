@@ -1,6 +1,8 @@
 import { initLegacySession } from './service.init-legacy';
 import { resumeOwnedBrowserSession } from './service.control';
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
+import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
+import { BrowserSessionReclaimConflictError } from '../../providers/browser/sessionPersist';
 /**
  * Browser-session domain service — business logic, no req/res.
  */
@@ -109,6 +111,22 @@ export function buildBrowserSessionMetadata(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * A logical browser holds private state only once it has its own checkpoint or
+ * a non-empty Home baseline. Until then it is a new browser and follows the
+ * normal init contract: provider profile, saved realm credentials, full metadata.
+ */
+function logicalHasPrivateState(session: {
+  logicalOwnerKey: string | null;
+  checkpointRef: string | null;
+  baselineCheckpointRef: string | null;
+}): boolean {
+  return (
+    session.logicalOwnerKey !== null &&
+    (session.checkpointRef !== null || session.baselineCheckpointRef !== EMPTY_BROWSER_BASELINE)
+  );
+}
+
 export async function prepareSessionCredentials(
   sessionId: string,
   userId: string,
@@ -141,7 +159,7 @@ export async function prepareSessionCredentials(
     storedPasswords,
     passkeys
   );
-  if (session.logicalOwnerKey !== null) {
+  if (logicalHasPrivateState(session)) {
     return {
       ...credentialPayload,
       auth_credential_ref: null,
@@ -191,6 +209,19 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     logical.startUrl ?? startUrl,
     logical.currentUrl ?? startUrl
   );
+  if (logical.sessionId === null && !logicalHasPrivateState(logical)) {
+    // First materialization of an empty logical browser: initialize it bound to
+    // its logical row. A concurrent first init that loses the row's binding race
+    // follows the winner through the resume path instead of failing.
+    try {
+      return await initLegacySession(userId, agentId, startUrl, logical.id, {
+        prepare: prepareSessionCredentials,
+        metadata: buildBrowserSessionMetadata,
+      });
+    } catch (error) {
+      if (!(error instanceof BrowserSessionReclaimConflictError)) throw error;
+    }
+  }
   return resumeOwnedBrowserSession(logical.id, userId);
 }
 

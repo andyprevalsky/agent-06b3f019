@@ -7,6 +7,8 @@ import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { prisma } from '../../providers/database';
 import { ensureLogicalBrowser, logicalBrowserTaskId } from '../../providers/browser/logicalSession';
 import {
@@ -155,6 +157,19 @@ export async function runLogicalBrowserCases() {
       0
     );
     console.log('PASS logical browser identity/baseline (8 invariants, no provider allocation)');
+    // Provider IO is module-mocked, so the first-init contract runs in its own process.
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [
+        '--experimental-test-module-mocks',
+        '--import',
+        'tsx',
+        'src/tests/blackbox/browser-session-logical-first-init.fixture.ts',
+      ],
+      { env: process.env, maxBuffer: 2_000_000 }
+    );
+    assert.match(stdout, /PASS logical first init/);
+    console.log(stdout.split('\n').find((line) => line.startsWith('PASS logical first init')));
   } finally {
     await prisma.browserContext.deleteMany({
       where: { userId: { in: [userId, otherUser, createdUser] } },
