@@ -27,7 +27,7 @@ sources:
   - agent b9ecdf7f-4c77-4b15-b440-84bd42d4d3b6
   - agent a9321ffb-9442-4d5b-ad38-da928a3f4a1b
   - commit 55c90637b
-repro: none yet — open observability gap (no guest DB pool / CPU / pg_stat_activity capture)
+repro: scripts/tests/cloudbench-runtime-evidence-collector.test.py guest-diagnostics transition (capture only; cause repro still open)
 status: open
 ---
 
@@ -93,7 +93,19 @@ Split members, whose own evidence shows different boundaries:
 
 ## Solution
 
-None yet. Next step: capture the guest backend's Prisma pool wait time, process
+Capture landed (commit 9644894a4, not yet exercised by a cloud run):
+`scripts/cloudbench-guest-diagnostics.py` is started by cloudbench-run.sh once
+the stack is healthy. Every 15 s (at most 2880 samples) it records CPU busy %,
+load, MemAvailable, the backend's Prisma connection_limit (30, LOCAL_POOL_SIZE)
+and an aggregate pg_stat_activity summary. The result is exported as optional
+runtime evidence `guest-diagnostics.jsonl`. How to read it:
+
+- database_clients at the limit with few wait events and a short longest query
+  → pool queueing.
+- High cpu_busy_pct / load → CPU saturation.
+- Lock/IO waits or a long longest_active_s → Postgres contention.
+
+The cause fix is still pending that evidence. Next step after the next run: capture the guest backend's Prisma pool wait time, process
 CPU, and `pg_stat_activity` / lock waits during the tree. Then reproduce
 locally with a single-stack 51-agent spawn and observe the same floor before
 changing anything. Do not raise worker or benchmark timeouts (rule 25).
