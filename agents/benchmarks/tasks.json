@@ -7729,6 +7729,112 @@
     "deploy_category": "harness"
   },
   {
+    "name": "agent-display-revenue-chart",
+    "title": "Agent Display: Revenue Chart from Orders CSV",
+    "prompt": "I've attached our orders export. Show me revenue for each of the last 3 days in the data as a chart in Agent Display, with each day's total labeled on the chart. Revenue is the sum of amount_usd for completed orders only (leave out refunded and cancelled orders). Also tell me the three daily totals.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "display"
+    ],
+    "tags": [
+      "display",
+      "attachment",
+      "claude-code"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": "orders-export-10d.csv",
+    "approval_handling": null,
+    "start_phase": "plan",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Agent Display end to end: the agent reads an attached 312-order CSV (2026-09-14..2026-09-23; completed/refunded/cancelled), computes completed-only revenue for the last 3 days, and publishes a labeled chart the user sees in Agent Display. Passes only when a displayed HTML/SVG artifact in the agent tree carries the exact daily totals (2026-09-21 $2,342.78; 2026-09-22 $3,203.32; 2026-09-23 $4,033.28) and the final answer states them. Including refunded/cancelled orders gives $3,206.75 / $3,773.63 / $4,682.17 and fails.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Static attachment front-end/public/test-assets/orders-export-10d.csv (columns order_id, customer_name, customer_email, created_at 'YYYY-MM-DD HH:MM' without timezone, status, amount_usd). Dates are fixed in 2026-09, so the answer never depends on today's date. The display static checks read each displayed item's bytes back from the local backend's /usercontent route (page/bundle) or storage (SVG)."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "display-shown",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "The display tool posted at least one HTML page/bundle or image item to Agent Display in this agent tree"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "display_media_shown",
+            "media_kinds": [
+              "page",
+              "bundle",
+              "image"
+            ],
+            "min_items": 1
+          }
+        ]
+      },
+      {
+        "id": "displayed-daily-revenue",
+        "method": "static_check",
+        "criteria": [
+          "One displayed HTML/SVG artifact contains the completed-only revenue for 2026-09-21, 2026-09-22 and 2026-09-23 (2342.78, 3203.32, 4033.28, within half a cent)"
+        ],
+        "checks": [
+          {
+            "type": "display_artifact_figures",
+            "expected_values": [
+              "2342.78",
+              "3203.32",
+              "4033.28"
+            ],
+            "tolerance": "0.005"
+          }
+        ]
+      },
+      {
+        "id": "final-answer-daily-revenue",
+        "method": "static_check",
+        "criteria": [
+          "The root's final answer states the three daily totals 2342.78, 3203.32 and 4033.28"
+        ],
+        "checks": [
+          {
+            "type": "final_answer_figures",
+            "expected_values": [
+              "2342.78",
+              "3203.32",
+              "4033.28"
+            ],
+            "tolerance": "0.005"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "user-request:andy-2026-10-23-agent-display-bench",
+      "descend:descend-full69-20261023:W4"
+    ],
+    "group": "daily",
+    "deploy_category": "display",
+    "deploy_canary": true
+  },
+  {
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",

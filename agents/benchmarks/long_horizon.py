@@ -99,6 +99,10 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "no_tool_failures",
     "phone_call_parked_on_hold",
     "claude_code_session_output",
+    # Agent Display — implemented in benchmarks/display_check.py.
+    "display_media_shown",
+    "display_artifact_figures",
+    "final_answer_figures",
     # code-bench fixtures: run hidden tests on the returned repo (benchmarks/code_bench.py).
     "code_bench_hidden_tests",
     "explore_research_not_reject_loop",

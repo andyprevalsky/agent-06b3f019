@@ -59,7 +59,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup
+from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup, display_check
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -12017,6 +12017,41 @@ async def _hydrate_semantic_evaluator_tree(data: dict, base_url: str) -> None:
         data.setdefault("_benchmark", {})["_semantic_evaluator_tree_error"] = str(exc)[:300]
 
 
+async def _hydrate_display_artifacts(data: dict, base_url: str) -> None:
+    """Attach the Agent Display items shown anywhere in this agent tree (benchmarks/display_check.py)."""
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+
+    async def tree_messages() -> list[dict]:
+        rows: list[dict] = []
+        for member in await get_agent_tree(base_url, root_id) if root_id else []:
+            member_id = str(member.get("id") or member.get("agent_id") or "")
+            if not member_id or member_id == root_id:
+                continue
+            detail = await get_agent(base_url, member_id)
+            rows.extend(dict(m, _agent_id=member_id) for m in detail.get("messages") or [] if isinstance(m, dict))
+        return rows
+
+    async def fetch_usercontent(path: str) -> Optional[bytes]:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{base_url.rstrip('/')}{path}")
+        if response.status_code != 200:
+            raise RuntimeError(f"GET {path[:120]} returned HTTP {response.status_code}")
+        return response.content
+
+    async def fetch_storage(storage_path: str) -> Optional[bytes]:
+        from helpers.attachments import download_from_storage
+
+        return await download_from_storage(storage_path)
+
+    await display_check.hydrate_display_artifacts(
+        data,
+        tree_messages=tree_messages,
+        fetch_usercontent=fetch_usercontent,
+        fetch_storage=fetch_storage,
+    )
+
+
 def _build_agentic_judge_goal(task: BenchmarkTask, evaluator: dict) -> str:
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
     return f"""You are a strict benchmark judge for a live agent trajectory.
@@ -14292,6 +14327,16 @@ def _run_declared_static_check(
             if not ok:
                 return False, reason
             continue
+        if check_type in display_check.DISPLAY_CHECK_TYPES:
+            if check_type == "display_media_shown":
+                ok, reason = display_check.check_display_media_shown(data, check)
+            elif check_type == "display_artifact_figures":
+                ok, reason = display_check.check_display_artifact_figures(data, check)
+            else:
+                ok, reason = display_check.check_final_answer_figures(_root_final_answer_blob(data), check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "claude_code_session_output":
             sessions = benchmark_state.get("claude_code_sessions") or []
             min_sessions = int(check.get("min_sessions", 1))
@@ -14370,6 +14415,12 @@ async def _run_declared_evaluators(
     )
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
+
+    if base_url and any(
+        _task_declares_static_check(task, check_type)
+        for check_type in ("display_media_shown", "display_artifact_figures")
+    ):
+        await _hydrate_display_artifacts(data, base_url)
 
     # Judge-visible routing trace (compact state keeps every `_benchmark` key).
     routing_markers = sorted(
