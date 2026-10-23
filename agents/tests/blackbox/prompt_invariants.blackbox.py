@@ -498,9 +498,9 @@ def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
     assert flagged != stock
     assert tool_prompts_for(rose_desktop=True)["display"] == DISPLAY_PROMPT_ROSE_DESKTOP
     assert "inline_view" in flagged
-    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is
-    # not one, so its pinned placement reaches the execute-phase prompt only.
-    assert 'placement "pinned"' not in flagged
+    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is one,
+    # so the flagged planner text carries its Rose Desktop prompt and the stock one does not.
+    assert 'placement "pinned"' in flagged and 'placement "pinned"' not in stock
 
 
 async def test_planner_tools_description_follows_the_workflow_account():

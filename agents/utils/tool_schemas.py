@@ -103,6 +103,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "call_phone_number",
     "message_person",
     "send_message_to_user_execute_phase",
+    "display",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
 
@@ -138,6 +139,7 @@ class PlanToolName(str, Enum):
     call_phone_number = "call_phone_number"
     message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
+    display = "display"
     reasoning = "reasoning"
 
 

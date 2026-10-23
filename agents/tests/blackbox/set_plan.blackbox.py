@@ -388,7 +388,17 @@ def test_planner_tools_description_lists_only_assignable_tools():
         "call_phone_number",
         "message_person",
         "send_message_to_user_execute_phase",
+        "display",
     }, headers
+    # A plan task can show the root's own page (display html) without a code agent.
+    display_section = desc.split("### display\n", 1)[1].split("\n### ", 1)[0]
+    assert '"html"' in display_section and "`html` is a page you write yourself" in display_section, display_section
+    from utils.tool_schemas import get_planner_response_model
+
+    plan = get_planner_response_model().model_validate(
+        {"title": "Chart", "join": "all", "tasks": [{"task_idx": "0", "goal": "Show the chart page", "tool_name": "display"}]}
+    )
+    assert plan.tasks[0].tool_name == "display", plan
     assert all(TOOL_ALIASES.get(name, name) in headers or name == "reasoning" for name in PLANNER_ASSIGNABLE_TOOLS)
     for hidden in ("kill_agent", "send_message_to_agent", "attempt_completion"):
         assert hidden not in desc, hidden
