@@ -132,7 +132,6 @@ async def populate_tool_params(
     messages = await build_llm_messages(
         context, system_prompt,
         max_context_tokens=await get_model_context_window(model),
-        require_inline_attachments=True,
         request_overhead=attachment_request_overhead(agent_action, f"Execute the task: {goal}"),
     )
     messages.append({"role": "user", "content": f"Execute the task: {goal}"})

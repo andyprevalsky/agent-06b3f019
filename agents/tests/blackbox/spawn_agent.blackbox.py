@@ -5643,6 +5643,12 @@ async def test_explore_pointer_sources_preserve_text_only_messages():
                 assert pointer["original_filename"] in str(error)
             else:
                 raise AssertionError("Explore accepted an inaccessible required nontext source")
+        # A rejected source must not leave the explore heartbeat running.
+        leaked = [
+            task for task in asyncio.all_tasks()
+            if not task.done() and "_heartbeat_loop" in repr(task.get_coro())
+        ]
+        assert not leaked, f"rejected nontext pointer leaked {leaked}"
     captured = {}
 
     async def fake_run_agent(**kwargs):

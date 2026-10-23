@@ -819,21 +819,26 @@ async def test_oversized_baseline_keeps_attachment_bodies_out():
                 _clear_cache()
 
 
-async def test_reasoning_preserves_old_required_file_after_materialization():
+async def test_reasoning_keeps_metadata_for_unadmitted_attachments():
+    """Reasoning has no tools: unadmitted uploads keep their label instead of failing the call."""
     from domains.reasoning.service import build_reasoning_messages
-    from domains.reasoning.config import MAX_CONTEXT_MESSAGES
     from helpers.attachments import _file_cache
-    pointer = {"id": "old-source", "storage_path": "fixture/old.csv", "original_filename": "old.csv", "mime_type": "text/csv", "size_bytes": 23}
-    context = [{"role": "USER", "text": "Required source", "file_pointer": pointer}]
-    context += [{"role": "USER", "text": f"later message {index}"} for index in range(MAX_CONTEXT_MESSAGES + 20)]
+
+    zip_pointer = {"id": "unrelated-zip", "storage_path": "fixture/archive.zip", "original_filename": "archive.zip", "mime_type": "application/zip", "size_bytes": 2048}
+    big_pointer = {"id": "unrelated-big", "storage_path": "fixture/big.csv", "original_filename": "big.csv", "mime_type": "text/csv", "size_bytes": 400000}
+    context = [
+        {"role": "USER", "text": "earlier upload", "file_pointer": zip_pointer},
+        {"role": "USER", "text": "another upload", "file_pointer": big_pointer},
+        {"role": "USER", "text": "summarize the plan"},
+    ]
     _clear_cache()
-    _file_cache[pointer["id"]] = (b"heading\nunique source row", {})
+    _file_cache[big_pointer["id"]] = (b"row," * 100000, {})
     try:
-        with patch("helpers.llm.activity.in_activity", return_value=True), patch("helpers.llm.get_file_from_pointer", return_value=(b"heading\nunique source row", {})):
+        with patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
             messages = await build_reasoning_messages(context, "system", "compare")
-        rendered = "\n".join(message["content"] for message in messages)
-        assert "unique source row" in rendered
-        assert "old.csv" in rendered
+        rendered = "\n".join(str(message["content"]) for message in messages)
+        assert "archive.zip" in rendered and "big.csv" in rendered
+        assert "row,row,row," not in rendered
     finally:
         _clear_cache()
 
@@ -1016,7 +1021,7 @@ async def test_attachment_admission_on_pending_and_backend_activity_paths():
 async def run_all_tests():
     print("attachments blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("reasoning_preserves_old_required_file_after_materialization", test_reasoning_preserves_old_required_file_after_materialization)
+    await r.record_async("reasoning_keeps_metadata_for_unadmitted_attachments", test_reasoning_keeps_metadata_for_unadmitted_attachments)
     await r.record_async("oversized_baseline_keeps_attachment_bodies_out", test_oversized_baseline_keeps_attachment_bodies_out)
     await r.record_async("bounds_materialized_text_attachments", test_build_llm_messages_bounds_materialized_text_attachments)
     await r.record_async("legacy_prebuilt_request_without_attachments_reaches_provider", test_legacy_prebuilt_request_without_attachments_reaches_provider)

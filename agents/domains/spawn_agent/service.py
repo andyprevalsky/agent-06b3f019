@@ -563,6 +563,18 @@ async def spawn_explore_agent_activity(
     # from resolve_agent_fast_mode can bump iterations to deep while the caller
     # still holds the quick timeout.
 
+    # Reject unreadable required sources before any background work starts:
+    # nothing below this point may leak if the activity fails here.
+    text_attachment_pointers: List[Dict[str, Any]] = []
+    for pointer in attachment_pointers or []:
+        fp = FilePointer.from_dict(pointer)
+        if fp.is_text():
+            text_attachment_pointers.append(pointer)
+        else:
+            raise AttachmentContextLimitError(
+                f"Explore cannot access required nontext attachment: {fp.original_filename}"
+            )
+
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
     _heartbeat_stop = asyncio.Event()
 
@@ -1016,15 +1028,6 @@ async def spawn_explore_agent_activity(
     # keep text sources as pointers until admission against the complete request.
     # Explore remains text-only; image/PDF/binary files retain metadata labels.
     metadata_texts = list(attachment_texts or [])
-    text_attachment_pointers: List[Dict[str, Any]] = []
-    for pointer in attachment_pointers or []:
-        fp = FilePointer.from_dict(pointer)
-        if fp.is_text():
-            text_attachment_pointers.append(pointer)
-        else:
-            raise AttachmentContextLimitError(
-                f"Explore cannot access required nontext attachment: {fp.original_filename}"
-            )
     if metadata_texts:
         initial_user_text += "\n\n" + "\n\n".join(metadata_texts)
     initial_user_message: Dict[str, Any] = {"role": "USER", "text": initial_user_text}

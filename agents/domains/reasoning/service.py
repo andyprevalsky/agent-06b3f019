@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from domains.reasoning.config import (
+    MAX_CONTEXT_MESSAGES,
     REASONING_MAX_TOKENS,
     REASONING_SYSTEM_PROMPT_TEMPLATE,
     REASONING_TEMPERATURE,
@@ -51,13 +52,21 @@ async def build_reasoning_messages(
     goal: str,
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
 ) -> list[dict[str, Any]]:
-    """Preserve required sources and admit the complete reasoning request."""
+    """Build and trim the message list for a reasoning LLM call.
+
+    Attachment bodies are admitted against the complete request budget (bodies
+    that do not fit keep their metadata label), then the list is trimmed to
+    MAX_CONTEXT_MESSAGES (preserving the system prompt at index 0) and the final
+    user instruction is appended.
+    """
     messages = await build_llm_messages(
         context, system_prompt,
         max_context_tokens=max_context_tokens,
-        require_inline_attachments=True,
         request_overhead=attachment_request_overhead(ReasoningResponse, f"Please complete this reasoning task: {goal}"),
     )
+
+    if len(messages) > MAX_CONTEXT_MESSAGES + 1:
+        messages = [messages[0], *messages[-(MAX_CONTEXT_MESSAGES):]]
 
     messages.append({"role": "user", "content": f"Please complete this reasoning task: {goal}"})
 

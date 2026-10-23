@@ -372,6 +372,24 @@ Requests without attachments pass through exactly as on main. Regressions:
 `legacy_prebuilt_request_without_attachments_reaches_provider` fail on the
 gated source and pass after the fix.
 
+### October 23 review corrections
+
+- Reasoning and DAG parameter population no longer force required-inline
+  attachments: an unrelated `.zip`, `.docx` or oversized upload anywhere in the
+  conversation failed those tool-less calls closed. They keep the budgeted
+  admission and fall back to the metadata label, as main did; reasoning keeps
+  main's `MAX_CONTEXT_MESSAGES` trimming, which the removed whole-request gate
+  had been meant to replace. Explicitly requested explore sources still fail
+  closed. Regressions: `reasoning_keeps_metadata_for_unadmitted_attachments`,
+  `populate_keeps_metadata_for_unadmitted_attachments`.
+- A rejected non-text explore pointer is now refused before the explore
+  heartbeat task starts (it previously leaked that task); pinned in
+  `explore_text_only_sources`.
+- Open: explore admission uses the byte bound while compaction uses the token
+  estimate, so a large required source can fail closed mid-run before
+  compaction would fire. Aligning compaction with admission is a separate
+  harness change.
+
 ## Human feedback
 
 On October 18, 2026, the user rejected displaying implementation code in
