@@ -6,7 +6,7 @@ surface: infra
 component: cloudbench-guest-backend
 classification: unresolved
 problem_class: concurrency-inefficiency
-first_bad_boundary: cloud guest back-end (Express/Prisma against the guest's Postgres) under the test-mass-agent-run-0 tree — trivial Agent.findUnique p50 240-320 ms, HTTP GET /api/agents/:id p50 1.1-2.5 s, p99 9-29 s, in every heavy copy of run 1 (cbbf3dd0c) and run 2 (8b69d3760); exact cause (pool queueing vs guest CPU vs PG contention) not yet isolated
+first_bad_boundary: cloud guest back-end (Express/Prisma against the guest's Postgres) under the test-mass-agent-run-0 tree — trivial Agent.findUnique p50 240-320 ms, HTTP GET /api/agents/:id p50 1.1-2.5 s, p99 9-29 s, in every heavy copy of run 1 (cbbf3dd0c) and run 2 (8b69d3760); P3 evidence: guest diagnostics exclude pool queueing and PG contention and show the shared-cpu-2x primary saturated (>=90% busy, loop lag 5-10 s, worker 1-17% CPU) while the same tree on dedicated cores runs the same queries 40x faster; steal vs user/system not yet recorded
 symptoms:
   - "Timeout after 926s (task timeout=900s)"
   - "Activity timeout (attempt 1/3)" func=post_agent_message timeout=30.0
@@ -27,6 +27,10 @@ sources:
   - agent b9ecdf7f-4c77-4b15-b440-84bd42d4d3b6
   - agent a9321ffb-9442-4d5b-ad38-da928a3f4a1b
   - commit 55c90637b
+  - commit 5cb262f325bd7e5e0ba7173a524372c0c4fe7e12
+  - commit ca1ab151a40a41bba35de98300646a493622d9d8
+  - fleet run 20261023-083600-1732760
+  - fleet run 20261023-083600-1732761
 repro: scripts/tests/cloudbench-runtime-evidence-collector.test.py guest-diagnostics transition (capture only; cause repro still open)
 status: open
 ---
@@ -114,6 +118,50 @@ changing anything. Do not raise worker or benchmark timeouts (rule 25).
 polling, per-message POSTs, progress-estimate reads) already saturate one
 backend at 51 agents. The real fix must reduce per-agent request volume or the
 per-request DB cost, not add timeouts.
+
+## P3 update (2026-10-23, descend-full69 diag run 1)
+
+Guest diagnostics (71 and 67 samples) settled the first question: Postgres had
+about 78 client connections, almost all idle, no wait events, longest active
+query about 1 s, backend pool limit 30, so this is neither pool queueing nor PG
+contention. The 2-vCPU guest ran `cpu_busy_pct` >= 90% in 47/71 samples with
+load 4-8. Run `run.json` records `primary_vm_size: shared-cpu-2x`.
+
+Contrast on the same unchanged task and revision (b9e549449), pinned to 2 CPUs
+on this performance devbox: PASS. Backend Prisma latency there was
+`Agent.findUnique` 14 ms avg over 14k calls versus 640 ms over 3.1k calls in the
+cloud guest; `Message.findMany` 15 ms vs 640 ms; `$queryRaw` 5 ms vs 509 ms.
+Per-process CPU over the local run (share of one core): worker.py 64%, backend
+(tsx) 40%, postgres 12%, run_benchmark 11%; about 1.3 cores in total. The cloud
+primary worker logged only 1-17% `cpu_pct` while its event loop lagged 5-10 s
+(`loop.lag`), i.e. processes were starved rather than burning CPU. The backend
+served only about 17 Prisma queries/s and 4 k POSTs in 20 min, so no
+O(agents) hot path is visible in the request mix. `cpu_busy_pct` counts
+hypervisor steal as busy, so Fly shared-cpu throttling is strongly indicated but
+NOT yet proven: steal was not recorded.
+
+Capture (5cb262f32): every sample now carries `cpu_mode_pct`
+{user, system, iowait, steal} and `top_processes` (top 8 by CPU: pid, comm,
+cpu%; argv never recorded). Regression:
+`scripts/tests/cloudbench-runtime-evidence-collector.test.py guest-diagnostics`
+(red: KeyError `top_processes` / `cpu_mode_pct`; green x5), now selected by the
+`benchmark-live-results` deploy gate, whose `-k` filter previously skipped it.
+
+Candidate fix (ca1ab151a, HOLD until a diagnostic run shows steal dominating):
+a catalog-declared `min_agent_count >= 20` task gets `performance-2x/4096`
+instead of `shared-cpu-2x/4096` through `primary_vm_size_for_bench`. Task,
+timeout and concurrency are unchanged. It changes what the load test measures:
+the harness stops measuring a throttled shared CPU and measures the 51-agent
+tree on dedicated vCPUs, which is closer to prod's performance-1x backend and
+removes a benchmark artifact rather than a product limit. Per copy-hour (Fly
+list price, iad; shared figure derived as $13.39 + 2 GB x $6.00): about
+$25.39/month vs $66.00/month, roughly $0.035 vs $0.092 per hour, +$0.056 per
+copy-hour. Regression: `scripts/tests/cloudbench-env.test.sh` (red: missing
+selector `bench_declares_fanout`; green).
+
+10k-agent note: unchanged; the per-agent request volume (GET /api/agents/:id,
+per-message POSTs) remains the product-side scaling risk and is not addressed
+here.
 
 ## Human feedback
 
