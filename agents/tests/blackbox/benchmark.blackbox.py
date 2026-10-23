@@ -25141,6 +25141,9 @@ async def run_all_tests():
     for name in (
         "test_display_fixture_expected_totals_match_csv",
         "test_display_task_is_registered_in_catalog_and_selector",
+    ):
+        r.record(name, getattr(display_check_tests, name))
+    for name in (
         "test_display_correct_chart_and_answer_pass",
         "test_display_not_called_fails_display_checks",
         "test_display_unfiltered_revenue_fails_figure_checks",
@@ -25148,7 +25151,7 @@ async def run_all_tests():
         "test_display_bundle_data_file_and_subagent_tree_rows",
         "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
     ):
-        r.record(name, getattr(display_check_tests, name))
+        await r.record_async(name, getattr(display_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,

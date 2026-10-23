@@ -5,7 +5,6 @@ Registered in the deploy path through tests/blackbox/benchmark.blackbox.py.
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import json
 from collections import defaultdict
@@ -97,7 +96,7 @@ def _record(messages: list[dict]) -> dict:
     return {"agent": {"agent_id": "root-1", "status": "COMPLETED"}, "messages": messages}
 
 
-def _hydrate(
+async def _hydrate(
     data: dict,
     *,
     pages: dict[str, bytes],
@@ -123,14 +122,12 @@ def _hydrate(
         assert not any(value in request for value in EXPECTED + UNFILTERED)
         return str(transcript)
 
-    asyncio.run(
-        display_check.hydrate_display_artifacts(
-            data,
-            tree_messages=tree_messages,
-            fetch_usercontent=fetch_usercontent,
-            fetch_storage=fetch_storage,
-            transcribe_image=transcribe_image if transcript is not None else None,
-        )
+    await display_check.hydrate_display_artifacts(
+        data,
+        tree_messages=tree_messages,
+        fetch_usercontent=fetch_usercontent,
+        fetch_storage=fetch_storage,
+        transcribe_image=transcribe_image if transcript is not None else None,
     )
     data["_fetched"] = fetched
     return data
@@ -186,23 +183,23 @@ def test_display_task_is_registered_in_catalog_and_selector():
         assert "display" in categories_triggered_by_paths([path]), path
 
 
-def test_display_correct_chart_and_answer_pass():
+async def test_display_correct_chart_and_answer_pass():
     data = _record(
         [
             _display_row("m-1"),
             _completion("Daily revenue: Sep 21 $2,342.78, Sep 22 $3,203.32, Sep 23 $4,033.28."),
         ]
     )
-    _hydrate(data, pages={f"/usercontent/display/root-1/{'a' * 64}.html": CHART_HTML.encode()})
+    await _hydrate(data, pages={f"/usercontent/display/root-1/{'a' * 64}.html": CHART_HTML.encode()})
     # The local backend is asked for the usercontent path, not the configured public host.
     assert data["_fetched"] == [f"/usercontent/display/root-1/{'a' * 64}.html"]
     results = _evaluate(data)
     assert all(ok for ok, _ in results.values()), results
 
 
-def test_display_not_called_fails_display_checks():
+async def test_display_not_called_fails_display_checks():
     """Right answer in chat but nothing shown in Agent Display: red for the display reason."""
-    data = _hydrate(
+    data = await _hydrate(
         _record([_completion("Daily revenue: 2,342.78 / 3,203.32 / 4,033.28 (chart saved to chart.html).")]),
         pages={},
     )
@@ -214,9 +211,9 @@ def test_display_not_called_fails_display_checks():
     assert results["final-answer-daily-revenue"][0]
 
 
-def test_display_unfiltered_revenue_fails_figure_checks():
+async def test_display_unfiltered_revenue_fails_figure_checks():
     wrong_html = _chart_html(UNFILTERED)
-    data = _hydrate(
+    data = await _hydrate(
         _record([_display_row("m-1"), _completion("Totals: $3,206.75, $3,773.63, $4,682.17")]),
         pages={f"/usercontent/display/root-1/{'a' * 64}.html": wrong_html.encode()},
     )
@@ -228,30 +225,32 @@ def test_display_unfiltered_revenue_fails_figure_checks():
     assert not ok and "2342.78" in reason, reason
 
 
-def test_display_raster_chart_is_read_through_a_vision_transcript():
+async def test_display_raster_chart_is_read_through_a_vision_transcript():
     """A matplotlib PNG is a valid chart: its labels are transcribed, then matched as numbers."""
     png = _display_row("m-1", media_kind="image", mime="image/png", sha="b" * 64)
     png_path = png["file_pointer"]["storage_path"]
     labels = "Completed-order revenue\n2026-09-21\n$2,342.78\n2026-09-22\n$3,203.32\n2026-09-23\n$4,033.28"
-    data = _hydrate(_record([png, _completion("2342.78 3203.32 4033.28")]), pages={png_path: b"PNG"}, transcript=labels)
+    data = await _hydrate(
+        _record([png, _completion("2342.78 3203.32 4033.28")]), pages={png_path: b"PNG"}, transcript=labels
+    )
     assert data["_benchmark"]["display_artifacts"][0]["text_source"] == "vision_transcript"
     results = _evaluate(data)
     assert all(ok for ok, _ in results.values()), results
 
     wrong = labels.replace("2,342.78", "3,206.75").replace("3,203.32", "3,773.63").replace("4,033.28", "4,682.17")
-    data = _hydrate(_record([png]), pages={png_path: b"PNG"}, transcript=wrong)
+    data = await _hydrate(_record([png]), pages={png_path: b"PNG"}, transcript=wrong)
     ok, reason = _evaluate(data)["displayed-daily-revenue"]
     assert not ok and "missing" in reason, reason
 
     # Without a transcriber the raster chart is shown but its figures are an evidence gap, never a pass.
-    data = _hydrate(_record([png]), pages={png_path: b"PNG"})
+    data = await _hydrate(_record([png]), pages={png_path: b"PNG"})
     results = _evaluate(data)
     assert results["display-shown"][0]
     ok, reason = results["displayed-daily-revenue"]
     assert not ok and "vision transcriber" in reason, reason
 
 
-def test_display_bundle_data_file_and_subagent_tree_rows():
+async def test_display_bundle_data_file_and_subagent_tree_rows():
     """Chart data in a bundle's data.js, displayed by a sub-agent and mirrored once per canonical id."""
     sha = "c" * 64
     row = _display_row("m-sub", media_kind="bundle", sha=sha)
@@ -261,7 +260,9 @@ def test_display_bundle_data_file_and_subagent_tree_rows():
         entry_path: b'<html><script src="./data.js"></script><script src="https://cdn.example/x.js"></script></html>',
         f"/usercontent/display/sub-1/{sha}/data.js": b"window.DATA=[2342.78,3203.32,4033.28];",
     }
-    data = _hydrate(_record([_completion("2342.78 3203.32 4033.28")]), pages=pages, tree=[row, dict(row, id="dup")])
+    data = await _hydrate(
+        _record([_completion("2342.78 3203.32 4033.28")]), pages=pages, tree=[row, dict(row, id="dup")]
+    )
     artifacts = data["_benchmark"]["display_artifacts"]
     assert len(artifacts) == 1 and artifacts[0]["media_kind"] == "bundle"
     assert "https://cdn.example/x.js" not in "".join(data["_fetched"])
@@ -269,8 +270,8 @@ def test_display_bundle_data_file_and_subagent_tree_rows():
     assert all(ok for ok, _ in results.values()), results
 
 
-def test_display_fetch_failure_is_an_evidence_gap_not_a_pass():
-    data = _hydrate(_record([_display_row("m-1"), _completion("2342.78 3203.32 4033.28")]), pages={})
+async def test_display_fetch_failure_is_an_evidence_gap_not_a_pass():
+    data = await _hydrate(_record([_display_row("m-1"), _completion("2342.78 3203.32 4033.28")]), pages={})
     assert "HTTP 404" in data["_benchmark"]["display_artifacts"][0]["fetch_error"]
     results = _evaluate(data)
     assert results["display-shown"][0]
