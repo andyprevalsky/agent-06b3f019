@@ -601,3 +601,16 @@ def test_clean_source_sha_only_for_clean_git_head(tmp_path):
     assert clean_source_sha(tmp_path) == head
     (tmp_path / "f.txt").write_text("b")
     assert clean_source_sha(tmp_path) is None  # dirty tracked file: HEAD is not what ran
+
+
+def test_card_status_keeps_interrupted_tasks_out_of_failures():
+    from benchmarks.report_card import card_status
+
+    assert card_status("PASSED", True) == "passed"
+    assert card_status("FAILED", False) == "failed"
+    assert card_status("CANCELLED", False) == "cancelled"
+    assert card_status("SKIPPED", False) == "skipped"
+    assert card_status(None, False) == "failed"
+    card = build_report_card(RunState(run_id="r", elapsed_s=1.0, total_tasks=2, per_task=[
+        TaskCard(name="a", status="failed"), TaskCard(name="b", status="cancelled")]))
+    assert (card["results"]["failed"], card["results"]["cancelled"], card["tasks"]["completed"]) == (1, 1, 2)

@@ -441,11 +441,18 @@ def load_fleet(run_dir: Path) -> dict:
         task_dir = run_dir / str(name)
         finished = (task_dir / "bench-e2e.finished-epoch").exists() or task.get("lifecycle_stage") == "released"
         verdict = {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED"}.get(status)
-        if local and verdict:
+        # A task the run interrupted has no task verdict: the local producer records it as
+        # cancelled (benchmark_status CANCELLED in run.json; older cards flattened it to failed).
+        cancelled = local and status != "passed" and (
+            status == "cancelled" or str(local_task.get("benchmark_status") or "").upper() == "CANCELLED")
+        if cancelled:
+            verdict = None
+        if local and (verdict or cancelled):
             finished = True  # Local CLI records terminal task status directly in report-card.json.
         rows.append({
             "job_id": name, "task": name,
-            "status": ("passed" if verdict else "failed") if finished else stage_status.get(task.get("lifecycle_stage"), "queued"),
+            "status": ("cancelled" if cancelled else ("passed" if verdict else "failed")) if finished
+            else stage_status.get(task.get("lifecycle_stage"), "queued"),
             "task_status": verdict, "infra_failure": False if verdict else None,
             "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
             "agent_id": task.get("agent_id") or local_task.get("agent_id") or agent_id_of(task.get("agent_url")),

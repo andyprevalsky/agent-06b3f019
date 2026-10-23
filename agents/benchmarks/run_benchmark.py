@@ -16793,7 +16793,7 @@ async def main_async(args):
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —
     # every emit is wrapped so it can never break a benchmark run.
-    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard, clean_source_sha
+    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard, card_status, clean_source_sha
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
@@ -16827,7 +16827,7 @@ async def main_async(args):
         per_task: list[TaskCard] = []
         evaluated_results = list(_evaluated_task_results.values())
         for r in [*run.task_results, *evaluated_results]:
-            status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            status = card_status(r.benchmark_status or ("SKIPPED" if r.status == "SKIPPED" else None), r.passed)
             per_task.append(
                 TaskCard(
                     name=r.name,
