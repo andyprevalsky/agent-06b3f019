@@ -6,7 +6,9 @@ Registered in the deploy path through tests/blackbox/benchmark.blackbox.py.
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
+import hashlib
 import json
 from collections import defaultdict
 from decimal import Decimal
@@ -17,6 +19,7 @@ from benchmarks.long_horizon import validate_catalog
 from benchmarks.benchmark_tasks import BenchmarkTask, all_tasks
 from benchmarks.run_benchmark import _run_declared_static_check
 from benchmarks.select_predeploy_benches import KNOWN_DEPLOY_CATEGORIES, categories_triggered_by_paths
+from domains.display.service import validate_tool_call
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK_NAME = "agent-display-revenue-chart"
@@ -275,3 +278,28 @@ def test_display_fetch_failure_is_an_evidence_gap_not_a_pass():
     results = _evaluate(data)
     assert results["display-shown"][0]
     assert not results["displayed-daily-revenue"][0]
+
+
+def test_display_root_inline_html_page_is_read():
+    """A root's display(html=...) is one display.html page: the check reads it back by its content hash."""
+    validation = validate_tool_call(
+        {"tool": "display", "html": CHART_HTML},
+        agent_id="root-1",
+        user_id="user-1",
+        workflow_id="wf-root-1",
+        tool_call_id="call-1",
+    )
+    assert validation["ok"], validation
+    [item] = validation["payload"]["items"]
+    assert item["filename"] == "display.html", item
+    page = base64.b64decode(item["content_base64"])
+    sha = hashlib.sha256(page).hexdigest()
+    row = _display_row("m-root", sha=sha)
+    row["file_pointer"]["original_filename"] = "display.html"
+    data = _hydrate(
+        _record([row, _completion("2342.78 3203.32 4033.28")]),
+        pages={f"/usercontent/display/root-1/{sha}.html": page},
+    )
+    assert data["_fetched"] == [f"/usercontent/display/root-1/{sha}.html"]
+    results = _evaluate(data)
+    assert all(ok for ok, _ in results.values()), results

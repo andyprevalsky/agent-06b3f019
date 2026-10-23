@@ -42,6 +42,7 @@ TOKEN = "rtt.test-token"
 # A long-lived agent-graph token (exp far ahead → no refresh call).
 AGENTS_TOKEN = "rag." + base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=") + ".sig"
 PNG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + b"pixels"
+CARD_HTML = "<!doctype html><html><body><h1>Revenue</h1><p>$2,342.78</p></body></html>"
 
 # ── 1. display tool (root / sub-agents) ──
 
@@ -194,6 +195,9 @@ async def test_validation_errors_never_reach_the_backend():
         "options on inline": {"paths": ["a.png"], "options": [{"label": "A"}]},
         "no way to answer": {"placement": "pinned", "caption": "Q?", "allow_other": False},
         "bad placement": {"paths": ["a.png"], "placement": "sideways"},
+        "html not a string": {"html": ["<p>x</p>"]},
+        "html over the cap": {"html": "<!doctype html><p>" + "x" * 1_000_000 + "</p>"},
+        "html counts as an item": {"html": CARD_HTML, "paths": [f"f{i}.png" for i in range(20)]},
     }
     for label, call in cases.items():
         agent = _FakeAgent()
@@ -274,6 +278,35 @@ async def test_inline_display_sends_items_and_reports_duplicates():
     [event] = agent.events
     assert event["status"] == "FINISHED", event
     assert "Displayed 1 item(s)" in event["message"] and "1 already shown" in event["message"], event
+
+
+async def test_root_inline_html_is_displayed_as_one_page():
+    """A root writes the page itself: `html` becomes one .html item, deduped by the backend's content hash."""
+    backend = _Backend(
+        [
+            httpx.Response(
+                201,
+                json={"placement": "inline", "posted_count": 1, "items": [{"status": "posted", "mime_type": "text/html"}]},
+            ),
+            httpx.Response(
+                200,
+                json={"placement": "inline", "duplicate_count": 1, "items": [{"status": "duplicate", "mime_type": "text/html"}]},
+            ),
+        ]
+    )
+    setup_mock_fn(backend.handler)
+    root = _FakeAgent("agent-root", depth=0)
+    await _run_tool(root, {"tool": "display", "html": f"  {CARD_HTML}\n", "caption": "Revenue"})
+    await _run_tool(root, {"tool": "display", "html": CARD_HTML}, tool_call_id="call-2")
+    page = {"content_base64": base64.b64encode(CARD_HTML.encode()).decode(), "filename": "display.html"}
+    assert backend.bodies == [
+        {"items": [page], "placement": "inline", "caption": "Revenue"},
+        {"items": [page], "placement": "inline"},
+    ], backend.bodies
+    assert backend.urls[0].endswith("/api/agent-tools/agent-root/display")
+    assert [e["status"] for e in root.events] == ["FINISHED", "FINISHED"], root.events
+    assert "Displayed 1 item(s)" in root.events[0]["message"] and "text/html" in root.events[0]["message"]
+    assert "1 already shown" in root.events[1]["message"], root.events
 
 
 async def test_backend_type_errors_surface_as_tool_errors():
@@ -752,6 +785,31 @@ async def test_cli_display_dedupes_by_content_hash():
         assert len(fake.seen_hashes) == 1
 
 
+async def test_cli_and_mcp_display_inline_html():
+    """`rose display --html` and the MCP `html` argument post one display.html page, deduped by content hash."""
+    with FakeAgentTools() as fake, _home() as home:
+        code, out, err = await _cli(fake, home, "display", "--html", CARD_HTML, "--caption", "Card")
+        assert code == 0 and "displayed" in out and "already" not in out, (code, out, err)
+        async with _mcp_server(fake, home) as mcp:
+            result = await mcp.response(
+                await mcp.send("tools/call", {"name": "display", "arguments": {"html": CARD_HTML}})
+            )
+            assert result["result"]["isError"] is False, result
+            assert "already displayed" in result["result"]["content"][0]["text"], result
+            too_big = await mcp.response(
+                await mcp.send("tools/call", {"name": "display", "arguments": {"html": "x" * (20 * 1024 * 1024 + 1)}})
+            )
+            assert too_big["result"]["isError"] is True, too_big
+            assert "html: larger than 20 MB" in too_big["result"]["content"][0]["text"], too_big
+        posts = [c["body"] for c in fake.calls if c["path"].endswith("/display")]
+        page = {"content_base64": base64.b64encode(CARD_HTML.encode()).decode(), "filename": "display.html"}
+        assert posts == [
+            {"items": [page], "caption": "Card", "placement": "inline"},
+            {"items": [page], "placement": "inline"},
+        ], posts
+        assert len(fake.seen_hashes) == 1, "the cap fails locally; the same page twice is one hash"
+
+
 async def test_cli_type_and_limit_errors():
     """> 20 items and missing files fail locally (no request); a backend type error shows its details."""
     with FakeAgentTools() as fake, _home() as home:
@@ -813,7 +871,7 @@ async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
             tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
             assert sorted(tools) == ["change_environment_size", "display", "request_user_approval", "send_message_to_user"], tools
             assert set(tools["change_environment_size"]["inputSchema"]["properties"]) == {"cpu", "memory_gb", "reason"}
-            assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "caption"]
+            assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "html", "caption"]
             assert list(tools["send_message_to_user"]["inputSchema"]["properties"]) == ["message"]
             blob = json.dumps(listed)
             assert "pinned" not in blob and "inline_view" not in blob, blob
@@ -844,6 +902,7 @@ async def run_all_tests():
         await r.record_async(
             "inline_display_sends_items_and_reports_duplicates", test_inline_display_sends_items_and_reports_duplicates
         )
+        await r.record_async("root_inline_html_is_displayed_as_one_page", test_root_inline_html_is_displayed_as_one_page)
         await r.record_async("backend_type_errors_surface_as_tool_errors", test_backend_type_errors_surface_as_tool_errors)
         await r.record_async(
             "pinned_question_from_root_spawned_caller_goes_to_user_and_resumes",
@@ -867,6 +926,7 @@ async def run_all_tests():
             test_mcp_pinned_question_from_non_root_spawn_asks_spawning_agent,
         )
         await r.record_async("cli_display_dedupes_by_content_hash", test_cli_display_dedupes_by_content_hash)
+        await r.record_async("cli_and_mcp_display_inline_html", test_cli_and_mcp_display_inline_html)
         await r.record_async("cli_type_and_limit_errors", test_cli_type_and_limit_errors)
         await r.record_async(
             "cli_approve_resumes_same_request_after_interrupt", test_cli_approve_resumes_same_request_after_interrupt

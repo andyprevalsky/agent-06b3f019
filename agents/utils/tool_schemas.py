@@ -103,6 +103,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "call_phone_number",
     "message_person",
     "send_message_to_user_execute_phase",
+    "display",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
 
@@ -138,6 +139,7 @@ class PlanToolName(str, Enum):
     call_phone_number = "call_phone_number"
     message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
+    display = "display"
     reasoning = "reasoning"
 
 
@@ -903,6 +905,10 @@ class DisplayTool(BaseModel):
         description="Files already in this agent's tree (attachments or outputs), by file name.",
     )
     urls: Optional[List[str]] = Field(default=None, description="Public http(s) URLs of images, videos or HTML pages.")
+    html: Optional[str] = Field(
+        default=None,
+        description="A complete HTML page you write yourself (a chart or scorecard), shown without creating a file.",
+    )
     caption: Optional[str] = Field(
         default=None,
         description=user_facing_text_description("Caption shown with the media."),
@@ -1073,9 +1079,10 @@ _SPAWN_TYPE_CODE_STOCK = (
 )
 _SPAWN_TYPE_CODE_ROSE_DESKTOP = (
     "'code' starts a coding agent using Claude Code or Codex CLI in a persistent sandbox, selected by "
-    "available credentials and configuration. Delegate all code writing to it. Its sandbox holds the "
+    "available credentials and configuration. Delegate all code writing to it except one HTML page you "
+    "can write yourself, such as a chart or scorecard, which you show with display html. Its sandbox holds the "
     "user's Rose app UI (rose_user_ui): it edits and publishes changes to how Rose looks or behaves for "
-    "the user. For a game, app, chart or visual the user asks to see, have it publish the result "
+    "the user. For a game or app the user asks to play or use, have it publish the result "
     "in Agent Display using rose display and return the display receipt; a file path alone does not show it. "
 )
 _SPAWN_TYPE_REST = (

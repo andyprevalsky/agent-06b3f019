@@ -75,8 +75,12 @@ function isRetryableStorageError(error: unknown): boolean {
 }
 
 function isAlreadyUploadedStorageError(error: unknown): boolean {
-  const status = storageErrorStatus(error);
-  if (status !== undefined && status !== 409) return false;
+  // Supabase answers a duplicate with HTTP status 400 and statusCode "409" in the body.
+  const codes = [
+    storageErrorStatus(error),
+    storageErrorStatus({ status: (error as { statusCode?: unknown } | null)?.statusCode }),
+  ].filter((code) => code !== undefined);
+  if (codes.length > 0 && !codes.includes(409)) return false;
 
   const message = storageErrorMessage(error).toLowerCase();
   return message.includes('already exists') || message.includes('resource already exists');

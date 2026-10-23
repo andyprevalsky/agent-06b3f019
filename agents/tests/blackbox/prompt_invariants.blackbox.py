@@ -420,6 +420,7 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
     type_desc = " ".join((SpawnAgentTool.model_fields["type"].description or "").split())
     for phrase in (
         "Delegate all code writing to it",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
         "user's Rose app UI (rose_user_ui)",
         "how Rose looks or behaves for the user",
         "in Agent Display",
@@ -430,11 +431,15 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
     code_line = next(line for line in PROMPT.splitlines() if line.startswith("- code:"))
     for phrase in (
         "give it all code writing",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
         "user's Rose app UI",
         "show it in Agent Display using rose display",
         "return the display receipt",
     ):
         assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
+    # A chart or scorecard is the caller's own display html: no clause routes it to the code agent.
+    for text in (type_desc, code_line):
+        assert text.count("chart") == 1 and "visual" not in text, text
     from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_prompt
 
     assert "tool is named display" in display_prompt
@@ -496,9 +501,9 @@ def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
     assert flagged != stock
     assert tool_prompts_for(rose_desktop=True)["display"] == DISPLAY_PROMPT_ROSE_DESKTOP
     assert "inline_view" in flagged
-    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is
-    # not one, so its pinned placement reaches the execute-phase prompt only.
-    assert 'placement "pinned"' not in flagged
+    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is one,
+    # so the flagged planner text carries its Rose Desktop prompt and the stock one does not.
+    assert 'placement "pinned"' in flagged and 'placement "pinned"' not in stock
 
 
 async def test_planner_tools_description_follows_the_workflow_account():
