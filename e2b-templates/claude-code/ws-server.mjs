@@ -1052,15 +1052,21 @@ function endNativeTurn(outcome) {
   });
   activeTurn = null;
 }
-function cliControl(request) {
+// The CLI answers initialize only after its own startup, which exceeded 5s on
+// cold E2B sandboxes. That request waits for the answer or the CLI's exit
+// (the close handler rejects it); runtime settings changes stay bounded.
+function cliControl(request, confirmWithinMs = 5000) {
   if (!cliChild || !cliStdinOpen)
     return Promise.reject(new Error("session_ended"));
   const request_id = randomUUID();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      controlRequests.delete(request_id);
-      reject(new Error("settings_unconfirmed"));
-    }, 5000);
+    const timer =
+      confirmWithinMs === null
+        ? null
+        : setTimeout(() => {
+            controlRequests.delete(request_id);
+            reject(new Error("settings_unconfirmed"));
+          }, confirmWithinMs);
     controlRequests.set(request_id, { resolve, reject, timer });
     cliChild.stdin.write(
       JSON.stringify({ type: "control_request", request_id, request }) + "\n",
@@ -1114,7 +1120,7 @@ function nativeDefaultSettings(models, model, env) {
   return { ...(effort ? { effort } : {}), speed };
 }
 async function initializeNativeSettings() {
-  const response = await cliControl({ subtype: "initialize" });
+  const response = await cliControl({ subtype: "initialize" }, null);
   modelCatalog = Array.isArray(response.models) ? response.models : [];
   const defaults = nativeDefaultSettings(
     modelCatalog,

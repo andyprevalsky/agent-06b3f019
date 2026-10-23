@@ -29,6 +29,8 @@ createInterface({input:process.stdin}).on('line',line=>{
 const msg=JSON.parse(line);
 if(msg.type==='control_request') {
  let response={};let subtype='success';
+ // A cold CLI answers initialize only after its own startup finishes.
+ if(msg.request.subtype==='initialize'&&process.env.INIT_DELAY_MS){setTimeout(()=>send({type:'control_response',response:{request_id:msg.request_id,subtype,response:{models:[{value:'test-model',displayName:'Native test model',supportedEffortLevels:['low','medium','high'],supportsFastMode:true}]}}}),Number(process.env.INIT_DELAY_MS));return;}
  if(msg.request.subtype==='initialize') response={models:[{value:'test-model',displayName:'Native test model',supportedEffortLevels:['low','medium','high'],supportsFastMode:true}]};
  else if(msg.request.subtype==='apply_flag_settings') Object.assign(settings,msg.request.settings);
  else if(msg.request.subtype==='set_model') settings.model=msg.request.model;
@@ -358,4 +360,91 @@ test("Claude defaults use only advertised effort/speed and preserve explicit env
     ).effort,
     undefined,
   );
+});
+
+test("Claude cold start: the first turn waits for a slow CLI initialize instead of failing settings_unconfirmed", async () => {
+  // Cloud E2B cold starts answered initialize after more than 5.5s
+  // (descend-full69-20261023 r002-j0010, agent 4f97f72e).
+  const dir = mkdtempSync(join(tmpdir(), "rose-claude-cold-init-"));
+  mkdirSync(join(dir, "bin"));
+  mkdirSync(join(dir, "home"));
+  writeFileSync(join(dir, "fake.cjs"), fake);
+  writeFileSync(
+    join(dir, "bin", "claude"),
+    `#!/bin/sh\nexec '${process.execPath}' '${join(dir, "fake.cjs")}'\n`,
+    { mode: 0o755 },
+  );
+  writeFileSync(join(dir, "release"), "");
+  const child = spawn(process.execPath, [serverPath], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: join(dir, "bin") + ":" + process.env.PATH,
+      HOME: join(dir, "home"),
+      PORT: "0",
+      CLAUDE_CODE_GOAL: "initial",
+      CLAUDE_CODE_MODEL: "test-model",
+      ANTHROPIC_API_KEY: "fake",
+      CODE_SESSION_TURN_TOKEN: "test-token",
+      RELEASE_FILE: join(dir, "release"),
+      SETTINGS_FILE: join(dir, "startup-settings.json"),
+      INIT_DELAY_MS: "6500",
+      CLAUDE_CODE_FAST_MODE: "",
+      CLAUDE_CODE_EFFORT: "",
+      CLAUDE_CODE_SPEED: "",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  child.stdout.on("data", (b) => {
+    log += b;
+  });
+  child.stderr.on("data", (b) => {
+    log += b;
+  });
+  let viewer;
+  try {
+    await until(() => log.includes("Server listening"));
+    const line = log
+      .split("\n")
+      .map((s) => {
+        try {
+          return JSON.parse(s);
+        } catch {
+          return {};
+        }
+      })
+      .find((m) => m.message === "Server listening");
+    viewer = await connect("ws://127.0.0.1:" + line.port);
+    const events = [];
+    viewer.on("message", (raw) => {
+      const m = JSON.parse(raw);
+      if (m.type === "code_agent_events") events.push(...m.data);
+      if (m.type === "code_agent_event") events.push(m.data);
+    });
+    const deadline = Date.now() + 15000;
+    while (
+      !events.some((e) => e.type === "result" || e.type === "final") &&
+      Date.now() < deadline
+    )
+      await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(
+      events.filter((e) => e.type === "error").map((e) => e.message),
+      [],
+      log,
+    );
+    assert.ok(
+      events.some((e) => e.type === "result"),
+      "the delayed CLI must still receive and finish the first turn",
+    );
+    const startup = JSON.parse(
+      readFileSync(join(dir, "startup-settings.json"), "utf8"),
+    );
+    assert.equal(startup.effortLevel, "medium");
+  } finally {
+    viewer?.close();
+    child.kill("SIGTERM");
+    await new Promise((r) => child.once("exit", r));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
