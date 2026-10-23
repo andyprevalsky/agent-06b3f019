@@ -317,6 +317,13 @@ CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + record
 CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
 
 
+# agent_id -> number of poll_new_messages calls that succeed before every later
+# call fails (a worker-saturation activity timeout, RCA P9).
+POLL_FAILURE_AFTER: Dict[str, int] = {}
+# agent_id -> every status passed to update_agent_status, in order.
+WORKFLOW_ENV_STATUSES: Dict[str, List[str]] = {}
+
+
 def _record_workflow_env_activity(agent_id: Optional[str], activity_name: str) -> None:
     if not agent_id:
         return
@@ -344,6 +351,7 @@ async def mock_update_agent_status(
     iteration_offset: Optional[int] = None,
 ) -> None:
     _record_workflow_env_activity(agent_id, "update_agent_status")
+    WORKFLOW_ENV_STATUSES.setdefault(agent_id, []).append(status)
     return None
 
 
@@ -479,6 +487,11 @@ async def mock_poll_new_messages(
     include_internal_subagent: bool = False,
 ) -> List[Dict[str, Any]]:
     _record_workflow_env_activity(agent_id, "poll_new_messages")
+    if agent_id in POLL_FAILURE_AFTER:
+        if WORKFLOW_ENV_ACTIVITY_COUNTS[agent_id]["poll_new_messages"] > POLL_FAILURE_AFTER[agent_id]:
+            from temporalio.exceptions import ApplicationError
+
+            raise ApplicationError("Activity task timed out (simulated)", non_retryable=True)
     if agent_id in CUTOVER_MESSAGES:
         # Time-skipping moves workflow time ahead of wall time, so return every
         # durable row; run_agent dedupes by message id exactly as in prod.
@@ -1184,6 +1197,71 @@ async def _cancel_workflow(handle) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _test_failed_execute_poll_ends_agent_terminal(env) -> None:
+    # Poll 2 is the EXECUTE-entry durable read; poll 3 is run_agent's first loop
+    # poll, the call that timed out in the reproduced mass-agent stall.
+    for successful_polls in (1, 2):
+        await _assert_failed_poll_ends_agent_terminal(env, successful_polls)
+
+
+async def _assert_failed_poll_ends_agent_terminal(env, successful_polls: int) -> None:
+    """A failed EXECUTE poll must end the agent terminal, never ACTIVE (RCA P9).
+
+    Mass-agent cloud copies stalled with a leaf ACTIVE and silent for 510s.
+    Under single-worker saturation the leaf's poll_new_messages timed out; the
+    ActivityError escaped AgentWorkflow.run, failing the Temporal execution
+    without a terminal status, so the row stayed ACTIVE and the parent waited
+    for it indefinitely.
+    """
+    from temporalio.client import WorkflowFailureError
+
+    poll_fail_id = f"agent-poll-fail-p9-{successful_polls}"
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(poll_fail_id, None)
+    WORKFLOW_ENV_STATUSES.pop(poll_fail_id, None)
+    POLL_FAILURE_AFTER[poll_fail_id] = successful_polls
+    handle = None
+    try:
+        handle = await env.client.start_workflow(
+            AgentWorkflow.run,
+            args=[
+                poll_fail_id,
+                "user-test-1",
+                "Research one creator",
+                "rose-labs/rose-1-flash",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                None,  # context
+                "parent-wf-poll-fail",  # parent_workflow_id
+                "parent-agent-poll-fail",  # parent_agent_id
+                1,  # depth
+                None,  # bus_id
+                "execute",  # start_phase
+            ],
+            id=_next_wf_id("poll-fail-terminal"),
+            task_queue=TASK_QUEUE,
+        )
+        workflow_error: Optional[BaseException] = None
+        try:
+            await asyncio.wait_for(handle.result(), timeout=60)
+        except WorkflowFailureError as exc:
+            workflow_error = exc
+        polls = WORKFLOW_ENV_ACTIVITY_COUNTS.get(poll_fail_id, {}).get("poll_new_messages", 0)
+        statuses = WORKFLOW_ENV_STATUSES.get(poll_fail_id, [])
+        assert polls > POLL_FAILURE_AFTER[poll_fail_id], f"the injected poll failure never ran (polls={polls})"
+        assert workflow_error is None, (
+            f"a failed poll must not escape AgentWorkflow.run: {workflow_error!r} (statuses={statuses})"
+        )
+        assert statuses and statuses[-1] == "FAILED", (
+            f"agent row left non-terminal after a failed poll: statuses={statuses}"
+        )
+    except BaseException:
+        if handle is not None:
+            await _cancel_workflow(handle)
+        raise
+    finally:
+        POLL_FAILURE_AFTER.pop(poll_fail_id, None)
+
+
 async def _run_all_workflow_tests() -> List[tuple]:
     """Run all workflow tests inside one WorkflowEnvironment.
 
@@ -1276,6 +1354,14 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 for handle in cold_handles:
                     await _cancel_workflow(handle)
+                results.append((name, e))
+
+            # --- test: a failed EXECUTE poll ends the agent terminal (RCA P9) ---
+            name = "wf_failed_execute_poll_ends_agent_terminal"
+            try:
+                await _test_failed_execute_poll_ends_agent_terminal(env)
+                results.append((name, None))
+            except Exception as e:
                 results.append((name, e))
 
             # --- test: pause/resume ---

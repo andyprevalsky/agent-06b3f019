@@ -1977,6 +1977,65 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
         memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
     ) -> Dict:
+        """Execute agent task; an escaping activity failure ends the agent FAILED."""
+        try:
+            return await self._run_phases(
+                agent_id,
+                user_id,
+                goal,
+                model,
+                reasoning_max_tokens,
+                verifier,
+                context,
+                parent_workflow_id,
+                parent_agent_id,
+                depth,
+                bus_id,
+                start_phase,
+                max_iterations,
+                price_limit_cents,
+                context_gates,
+                fast_mode_cache_enabled,
+                resume_state,
+                world_model_mode,
+                memory_enabled,
+            )
+        except Exception as e:
+            if self._is_finished or any(
+                error_chain_has_type(e, kind)
+                for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+            ):
+                raise
+            # An activity failure that escapes the phases (e.g. poll_new_messages
+            # timing out on a saturated worker) would otherwise fail the Temporal
+            # execution with the agent row still ACTIVE, and the parent would wait
+            # on it indefinitely. End the agent FAILED with the real error.
+            message = f"Execution stopped by an unrecoverable error: {extract_error_message(e)}"
+            await self._mark_failed(context=self.context, reason="workflow_error", message=message)
+            return {"status": "failed", "reason": "workflow_error", "goal": goal}
+
+    async def _run_phases(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+        model: str,
+        reasoning_max_tokens: int,
+        verifier: Dict,
+        context: Optional[List[Dict]] = None,
+        parent_workflow_id: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        depth: int = 0,
+        bus_id: Optional[str] = None,
+        start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
+        max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
+        price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
+        context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
+        fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
+        resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
+        world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
+    ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
