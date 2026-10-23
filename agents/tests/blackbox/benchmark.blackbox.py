@@ -61,6 +61,10 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
     "attachment"; on the cloud the runner joined that list as one path and the
     task errored after 39 s ("join() argument must be ... not 'list'")."""
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.code_bench import ATTACHMENT_PREFIX, resolve_attachment
     from benchmarks.run_benchmark import TEST_ASSETS_DIR
 
     for task in all_tasks():
@@ -68,6 +72,16 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
         files = task.attachments or ([task.attachment] if task.attachment else [])
         for name in files:
             assert isinstance(name, str), (task.name, name)
+            if name.startswith(ATTACHMENT_PREFIX):
+                # Built at run time by code_bench.resolve_attachment from its
+                # checked-in fixture; never a static asset file. Build it and
+                # require exactly one uploadable regular file.
+                with tempfile.TemporaryDirectory(prefix="code-bench-attachment-") as tmp:
+                    built = resolve_attachment(name, Path(tmp))
+                    assert built is not None and built.is_file() and not built.is_symlink(), (task.name, name)
+                    assert built.stat().st_size > 0, (task.name, name)
+                    assert [p.name for p in Path(tmp).iterdir()] == [built.name], (task.name, name)
+                continue
             assert os.path.exists(os.path.join(TEST_ASSETS_DIR, name)), (task.name, name)
     fundraiser = get_task_by_name("raise-5m-rose-labs-brex")
     assert len(fundraiser.attachments) == 5 and fundraiser.attachment is None
