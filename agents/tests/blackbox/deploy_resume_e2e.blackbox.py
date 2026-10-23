@@ -26,6 +26,7 @@ import contextlib
 import copy
 import contextvars
 import importlib.util
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -210,7 +211,8 @@ async def _deploy_environment(backend: _Backend):
     reset_live_queue_cache()
     setup_mock_fn(backend.handle)
     try:
-        with _replay_stable_workflow_clock():
+        # Browser activities schedule JEV estimates in-process; without a key they stay offline.
+        with _replay_stable_workflow_clock(), patch.dict(os.environ, {"TYPESAFE_API_KEY": ""}):
             async with await WorkflowEnvironment.start_time_skipping() as env:
                 yield env
     finally:
@@ -549,8 +551,9 @@ def _assert_browser_task_resumed(agent_id: str, browser: _BrowserServices, old: 
         f"{new} must reattach to the same live browser; got {browser.cdp_connections}"
     )
     session_id = _BrowserServices.SESSION["session_id"]
-    assert browser.session_closes == [(new, session_id, False)], (
-        f"the Steel session must close once, when the task finishes; got {browser.session_closes}"
+    # A finished browser sub-agent pauses its session; teardown waits for the root's completion.
+    assert browser.session_closes == [(new, session_id, True)], (
+        f"the Steel session must pause once, when the task finishes; got {browser.session_closes}"
     )
 
     billed_prompt_tokens = [

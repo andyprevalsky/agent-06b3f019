@@ -994,6 +994,16 @@ async def mock_resolve_code_agent_provider_activity(default_provider: str) -> st
     return default_provider
 
 
+@activity.defn(name="resolve_user_tools_activity")
+async def mock_resolve_user_tools_activity(agent_id: str, user_id: str) -> dict:
+    return {"version_id": None, "base_url": None, "tools": [], "skipped": [], "disabled_reason": "workflow blackbox"}
+
+
+@activity.defn(name="predict_jev_progress")
+async def mock_predict_jev_progress(snapshot: dict) -> None:
+    return None
+
+
 CUTOVER_CODE_SESSION = {
     "task_id": "cc-task-1",
     "sandbox_id": "sb-1",
@@ -1114,6 +1124,8 @@ MOCK_ACTIVITIES = [
     mock_spawn_browser_agent_activity_v3,
     mock_resolve_code_agent_provider_activity,
     mock_spawn_claude_code_activity,
+    mock_resolve_user_tools_activity,
+    mock_predict_jev_progress,
 ]
 
 
