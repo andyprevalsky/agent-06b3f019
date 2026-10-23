@@ -300,24 +300,25 @@ def tree_stall_exceeded(*, tree_idle: float, cost_idle: float, world_model_idle:
     return min(tree_idle, cost_idle, world_model_idle) > limit
 
 
+# Claude Code sessions update a single in-place progress chip without
+# incrementing ``message_count``. The code agent itself no longer has a runtime
+# cap (C11, ddb5d7228), so the benchmark owns this silence budget: 30 minutes of
+# one progress chip plus a small buffer.
+CLAUDE_CODE_PROGRESS_SILENCE_SECONDS = 1800 + 120
+
+
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
 
-    Claude Code sessions update a single in-place progress chip for up to
-    ``MAX_RUNTIME_S`` (30m) without incrementing ``message_count``. The default
-    stall budget (~510s) therefore false-fails healthy code-agent ranking
-    benches mid-session. Raise the limit to cover one full CC runtime plus a
-    small buffer when the task expects / requires Claude Code.
+    The default stall budget (~510s) false-fails healthy code-agent ranking
+    benches mid-session, so tasks that expect / require Claude Code get
+    ``CLAUDE_CODE_PROGRESS_SILENCE_SECONDS``.
     """
     limit = int(AGENT_STALL_SECONDS)
     expects_cc = "spawn_claude_code_agent" in (getattr(task, "expected_tools", None) or [])
     requires_cc = bool(getattr(task, "requires_claude_code", False))
     if expects_cc or requires_cc:
-        try:
-            from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
-        except Exception:  # pragma: no cover - import guard for non-agents layouts
-            MAX_RUNTIME_S = 1800
-        limit = max(limit, int(MAX_RUNTIME_S) + 120)
+        limit = max(limit, CLAUDE_CODE_PROGRESS_SILENCE_SECONDS)
     return limit
 
 

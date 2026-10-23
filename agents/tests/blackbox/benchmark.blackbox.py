@@ -9292,12 +9292,15 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     Local repro (k=3 r7, 2026-09-02): agent 193b753e failed at ~872s with
     ``tree stalled … silent for 518s (threshold=510s)`` while Claude Code was
     still mid-session updating a progress chip (message_count frozen). Stall
-    budget for CC tasks must cover MAX_RUNTIME_S + buffer; cost idle is also
-    required so a truly dead tree still fails fast.
+    budget for CC tasks must cover a 30-minute progress chip + buffer; cost idle
+    is also required so a truly dead tree still fails fast.
     """
-    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds
+    from benchmarks.run_benchmark import (
+        AGENT_STALL_SECONDS,
+        CLAUDE_CODE_PROGRESS_SILENCE_SECONDS,
+        agent_stall_limit_seconds,
+    )
 
     cuda = get_task_by_name("cuda-kernel-github-top100-code-agent")
     chat = get_task_by_name("chat-mode")
@@ -9306,7 +9309,7 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
 
     assert cuda.requires_claude_code is True
     assert "spawn_claude_code_agent" in cuda.expected_tools
-    assert cuda_limit == max(AGENT_STALL_SECONDS, int(MAX_RUNTIME_S) + 120)
+    assert cuda_limit == max(AGENT_STALL_SECONDS, CLAUDE_CODE_PROGRESS_SILENCE_SECONDS)
     assert cuda_limit >= 1920
     assert chat_limit == AGENT_STALL_SECONDS
     assert chat_limit < cuda_limit
@@ -25141,6 +25144,9 @@ async def run_all_tests():
     for name in (
         "test_display_fixture_expected_totals_match_csv",
         "test_display_task_is_registered_in_catalog_and_selector",
+    ):
+        r.record(name, getattr(display_check_tests, name))
+    for name in (
         "test_display_correct_chart_and_answer_pass",
         "test_display_not_called_fails_display_checks",
         "test_display_unfiltered_revenue_fails_figure_checks",
@@ -25149,7 +25155,7 @@ async def run_all_tests():
         "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
         "test_display_root_inline_html_page_is_read",
     ):
-        r.record(name, getattr(display_check_tests, name))
+        await r.record_async(name, getattr(display_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,

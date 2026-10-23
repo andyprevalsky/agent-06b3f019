@@ -24753,7 +24753,8 @@ CLOUDBENCH_TERMINAL_LOG_MAX_CHUNKS=999999 refresh_bench_log_to_eof
     assert result.returncode == 0, result.stderr
     poll_loop = cloud[cloud.index('poll_start="$(date +%s)"') : cloud.index("# Preserve the complete remote driver")]
     assert '[ "$BENCH_LOG_CHUNKS_PER_POLL" -le 4 ]' in poll_loop
-    assert '[ "$BENCH_LOG_BACKLOG_MAX_CHUNKS" -le 128 ]' in poll_loop
+    # 327f78ab3 bounds the terminal backlog by bytes; hostile overrides still cannot raise the ceiling.
+    assert '[ "$BENCH_LOG_BACKLOG_MAX_BYTES" -le 536870912 ]' in poll_loop
     assert '[ "$BENCH_LOG_BACKLOG_MAX_FAILURES" -le 5 ]' in poll_loop
     assert '[ "$BENCH_LOG_READ_MAX_FAILURES" -le 5 ]' in poll_loop
     assert '[ "$BENCH_LOG_TERMINAL_MAX_FAILURES" -le 5 ]' in poll_loop
@@ -31891,8 +31892,21 @@ def test_autoscaler_runtime_handoff_capacity_observation_pending(
         if inventory
         else ""
     )
+    # provision_worker reads the shared-cache policy through the real catalog
+    # script under ROOT_DIR; give it a one-task fixture catalog.
+    fixture_root = tmp_path / "root"
+    (fixture_root / "scripts").mkdir(parents=True)
+    (fixture_root / "agents" / "benchmarks").mkdir(parents=True)
+    (fixture_root / "scripts" / "cloudbench_catalog.py").symlink_to(ROOT / "scripts" / "cloudbench_catalog.py")
+    (fixture_root / "agents" / "benchmarks" / "tasks.json").write_text(
+        json.dumps([{"name": "fixture-task", "demo_cache": "off"}])
+    )
+    (fixture_root / "agents" / "benchmarks" / "polar_tasks.json").symlink_to(
+        ROOT / "agents" / "benchmarks" / "polar_tasks.json"
+    )
     script = f"""set -uo pipefail
 CASE={shlex.quote(str(tmp_path))}
+ROOT_DIR={shlex.quote(str(fixture_root))}
 APP=fixture-app
 RUN_ID=fixture-run
 FLEET_OWNER_TOKEN={"a" * 32}

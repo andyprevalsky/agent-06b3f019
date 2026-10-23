@@ -53,11 +53,9 @@ import testPaymentRouter from './domains/test-payment/routes';
 import authTestSiteRouter from './domains/auth-test-site/routes';
 import { AUTH_TEST_SITE_BASE_PATH } from './domains/auth-test-site/config';
 import {
-  setSupervisorFixtureOverride,
-  clearSupervisorFixtureOverride,
-  runProactiveSmsOutreachJob,
-  runProactiveSmsOutreachJobWithLease,
-} from './providers/smsSupervisor';
+  createProactiveSmsTestRouter,
+  createSupervisorFixtureTestRouter,
+} from './providers/smsSupervisor/testRoutes';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
@@ -250,80 +248,8 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
   const captureRouter = installFetchCapture();
   app.use('/api/test/captures', captureRouter);
 
-  // Per-user SMS supervisor LLM-response fixture. Lets blackbox tests swap the
-  // fixture between cases without rebooting the backend. POST { userId,
-  // fixture } registers; DELETE ?userId clears.
-  const fixtureRouter = express.Router();
-  fixtureRouter.post('/', express.json(), (req, res) => {
-    const { userId, fixture } = req.body as { userId?: unknown; fixture?: unknown };
-    if (typeof userId !== 'string' || typeof fixture !== 'string') {
-      res.status(400).json({ error: 'userId and fixture must be strings' });
-      return;
-    }
-    setSupervisorFixtureOverride(userId, fixture);
-    res.json({ ok: true });
-  });
-  fixtureRouter.delete('/', (req, res) => {
-    const userId = req.query.userId;
-    if (typeof userId !== 'string') {
-      res.status(400).json({ error: 'userId query param required' });
-      return;
-    }
-    clearSupervisorFixtureOverride(userId);
-    res.json({ ok: true });
-  });
-  app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
-
-  const proactiveSmsRouter = express.Router();
-  const parseProactiveSmsJobOptions = (body: unknown) => {
-    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-      return null;
-    }
-    const { now: nowValue, userIds: userIdsValue } = body as {
-      now?: unknown;
-      userIds?: unknown;
-    };
-    const now =
-      nowValue === undefined
-        ? new Date()
-        : typeof nowValue === 'string'
-          ? new Date(nowValue)
-          : null;
-    const userIds =
-      userIdsValue === undefined
-        ? undefined
-        : Array.isArray(userIdsValue) &&
-            userIdsValue.every((value): value is string => typeof value === 'string')
-          ? userIdsValue
-          : null;
-    return now === null || Number.isNaN(now.getTime()) || userIds === null
-      ? null
-      : { now, candidateUserIds: userIds };
-  };
-  const rejectInvalidProactiveSmsOptions = (res: express.Response): void => {
-    res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
-  };
-  proactiveSmsRouter.post('/run', (req, res, next) => {
-    const options = parseProactiveSmsJobOptions(req.body);
-    if (options === null) {
-      rejectInvalidProactiveSmsOptions(res);
-      return;
-    }
-    runProactiveSmsOutreachJob(options)
-      .then((summary) => res.json(summary))
-      .catch(next);
-  });
-  proactiveSmsRouter.post('/run-leased', (req, res, next) => {
-    const options = parseProactiveSmsJobOptions(req.body);
-    if (options === null) {
-      rejectInvalidProactiveSmsOptions(res);
-      return;
-    }
-    runProactiveSmsOutreachJobWithLease(options)
-      .then((result) => res.json(result))
-      .catch(next);
-  });
-  app.use('/api/test/proactive-sms', proactiveSmsRouter);
+  app.use('/api/test/sms-supervisor-fixture', createSupervisorFixtureTestRouter());
+  app.use('/api/test/proactive-sms', createProactiveSmsTestRouter());
 
   // Signals the in-memory blackbox Temporal fake recorded for one workflow, so
   // HTTP route contracts can assert which signal (if any) a route delivered.
