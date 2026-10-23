@@ -686,7 +686,7 @@ if ROSE_SYSTEM_PG_DB_NAME='victoria; DROP DATABASE postgres' \
 fi
 # run.sh's non-benchmark system-Postgres stack must resolve the same database
 # setup-db.sh seeded, not the shared `victoria`.
-awk '/System Postgres fallback \(no Docker\)/,/Fast Mode cache is intentionally shared/' \
+awk '/System Postgres fallback \(no Docker\)/,/DEMO cache is intentionally shared/' \
     "$ROOT_DIR/scripts/run.sh" | grep -q 'LOCAL_DB_NAME="$(workspace_system_pg_db_name ' \
   || fail "case 12: run.sh's system-Postgres stack does not use workspace_system_pg_db_name"
 echo "PASS: system-Postgres setup-db.sh resets only the workspace's own database"

@@ -17769,13 +17769,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     # Autoscaled workers replay the shared cache under the guest's write policy.
     local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()
     IFS=, read -r -a shared_cache_tasks <<< "$bench"
-    python3 -B "$ROOT_DIR/scripts/cloudbench_catalog.py" shared-fast-cache-read-only \
+    python3 -B "$ROOT_DIR/scripts/cloudbench_catalog.py" shared-demo-cache-read-only \
         "$ROOT_DIR/agents/benchmarks/tasks.json" "${shared_cache_tasks[@]}" >/dev/null || shared_cache_status=$?
     case "$shared_cache_status" in
         0) shared_cache_read_only=1 ;;
         10) ;;
         *)
-            printf 'Fast Mode cache write policy failed (exit %s)\n' "$shared_cache_status" > "$out/autoscaler.failed"
+            printf 'DEMO cache write policy failed (exit %s)\n' "$shared_cache_status" > "$out/autoscaler.failed"
             return 1
             ;;
     esac
@@ -17967,7 +17967,7 @@ PY
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         # Simulated tool boundaries on autoscaled workers name the served model.
         echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
-        # ...and its execution policy, which partitions the fast cache like the primary's.
+        # ...and its execution policy, which partitions the DEMO cache like the primary's.
         echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"

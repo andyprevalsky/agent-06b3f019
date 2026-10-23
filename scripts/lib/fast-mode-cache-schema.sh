@@ -22,7 +22,7 @@ ensure_fast_mode_cache_schema() {
             rc=$?
         fi
         if [ "$attempt" -lt "$max_attempts" ]; then
-            echo "   ⚠️ Fast Mode cache schema attempt ${attempt}/${max_attempts} failed (rc=${rc}) — shared pooler contention? retrying..." >&2
+            echo "   ⚠️ DEMO cache schema attempt ${attempt}/${max_attempts} failed (rc=${rc}) — shared pooler contention? retrying..." >&2
             [ "$retry_base_seconds" = 0 ] || sleep $(( attempt * retry_base_seconds ))
         fi
     done
@@ -39,7 +39,7 @@ ensure_fast_mode_cache_schema() {
     fi
     if [ -n "$host" ] && [ -n "$port" ] && command -v nc >/dev/null 2>&1; then
         if ! nc -z -G 6 "$host" "$port" >/dev/null 2>&1; then
-            echo "❌ Fast Mode cache schema ensure failed: cannot reach ${host}:${port} from this machine." >&2
+            echo "❌ DEMO cache schema ensure failed: cannot reach ${host}:${port} from this machine." >&2
             echo "   This is NETWORK reachability, not pooler load — retrying will not help." >&2
             echo "   Check whether the current network blocks Postgres ports (guest/hotspot Wi-Fi commonly does);" >&2
             echo "   ${host}:443 being reachable while ${port} is not confirms it." >&2
@@ -47,22 +47,22 @@ ensure_fast_mode_cache_schema() {
         fi
     fi
 
-    echo "❌ Fast Mode cache schema ensure failed after ${max_attempts} attempts (shared prod pooler saturated)" >&2
+    echo "❌ DEMO cache schema ensure failed after ${max_attempts} attempts (shared prod pooler saturated)" >&2
     return "$rc"
 }
 
 # Every run.sh stack sits outside production's pooler budget: database.ts gives
 # the production backend about 480 of the shared pooler's 1,000 clients, and all
-# developer and benchmark stacks share the rest. A Fast Mode cache Prisma pool
+# developer and benchmark stacks share the rest. A DEMO cache Prisma pool
 # otherwise inherits production's 75-client default, so a fleet plus idle dev
 # stacks exhausted the pooler (EMAXCONN) on 2026-10-11. Every stack now defaults
 # to 20, sized for the 50-child DEMO replay that both the predeploy smoke and
 # `scripts/test.sh --port=3001` run (at 3, 7,709 shared reads queued at p50 8.5s
 # and the replay hit its 900s limit; at 20 it passed in 263s). An explicit
 # FAST_CACHE_DB_POOL still wins.
-FAST_CACHE_DB_POOL_DEFAULT=20
-apply_fast_cache_pool_default() {
+DEMO_CACHE_DB_POOL_DEFAULT=20
+apply_demo_cache_pool_default() {
     [ -z "${FAST_CACHE_DB_POOL:-}" ] || return 0
-    export FAST_CACHE_DB_POOL="$FAST_CACHE_DB_POOL_DEFAULT"
-    echo "🧠 Fast Mode cache pool limited to ${FAST_CACHE_DB_POOL} connections"
+    export FAST_CACHE_DB_POOL="$DEMO_CACHE_DB_POOL_DEFAULT"
+    echo "🧠 DEMO cache pool limited to ${FAST_CACHE_DB_POOL} connections"
 }

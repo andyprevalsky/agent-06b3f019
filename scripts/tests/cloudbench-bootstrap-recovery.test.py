@@ -565,7 +565,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
                     self.verify()
 
     def test_public_tunnel_start_is_past_the_index_source_boundary(self):
-        # Restore path with healthy dependencies and no local Fast Mode cache:
+        # Restore path with healthy dependencies and no local DEMO cache:
         # the next stack.log lines after the index step are the DDL hook and
         # then the public tunnel, the first provider allocation.
         index_tail = self.original["repo/.context/cloudbench/stack.log"] + (

@@ -1194,7 +1194,7 @@ def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None, e
     """None when every name is ready, Linux/cloud-root (and, for LIVE, live-query) eligible at the task ref."""
     import tempfile
     members = ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
-               'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
+               'agents/providers/demo_cache/normalize.py', 'agents/utils/__init__.py',
                'agents/utils/oai_demo.py', 'agents/utils/oai_demo_july.py')
     with tempfile.TemporaryDirectory(prefix='manifest-catalog-') as scratch:
         for member in members:

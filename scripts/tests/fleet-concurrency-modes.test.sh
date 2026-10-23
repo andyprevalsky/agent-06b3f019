@@ -70,7 +70,7 @@ for name in wanted:
     assert "DEMO" in tags, name
     assert "smoke" not in tags, name
     assert "fleet-concurrency" in tags, name
-    assert t.get("fast_cache") == "on", name
+    assert t.get("demo_cache") == "on", name
     assert int(t.get("min_agent_count") or 0) < 50, name
     assert t.get("enforce_declared_evaluators") is True, name
     assert t.get("is_chat_mode") is False, f"{name} must be agent mode (COMPLETED)"
