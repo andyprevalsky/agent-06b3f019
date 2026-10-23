@@ -25144,7 +25144,7 @@ async def run_all_tests():
         "test_display_correct_chart_and_answer_pass",
         "test_display_not_called_fails_display_checks",
         "test_display_unfiltered_revenue_fails_figure_checks",
-        "test_display_raster_image_counts_as_shown_but_not_as_figures",
+        "test_display_raster_chart_is_read_through_a_vision_transcript",
         "test_display_bundle_data_file_and_subagent_tree_rows",
         "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
     ):

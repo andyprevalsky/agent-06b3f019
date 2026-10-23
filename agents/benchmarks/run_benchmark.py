@@ -12017,6 +12017,9 @@ async def _hydrate_semantic_evaluator_tree(data: dict, base_url: str) -> None:
         data.setdefault("_benchmark", {})["_semantic_evaluator_tree_error"] = str(exc)[:300]
 
 
+DISPLAY_TRANSCRIBE_MODEL = "rose-labs/rose-1-ultra"
+
+
 async def _hydrate_display_artifacts(data: dict, base_url: str) -> None:
     """Attach the Agent Display items shown anywhere in this agent tree (benchmarks/display_check.py)."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -12044,11 +12047,25 @@ async def _hydrate_display_artifacts(data: dict, base_url: str) -> None:
 
         return await download_from_storage(storage_path)
 
+    async def transcribe_image(raw: bytes, mime: str) -> str:
+        from helpers.llm import call_llm
+
+        result = await call_llm(
+            messages=display_check.transcription_messages(raw, mime),
+            model=DISPLAY_TRANSCRIBE_MODEL,
+            temperature=0.0,
+            max_tokens=1200,
+            call_site="benchmark_display_transcribe",
+        )
+        content = result.get("content") if isinstance(result, dict) else None
+        return content if isinstance(content, str) else str(content or "")
+
     await display_check.hydrate_display_artifacts(
         data,
         tree_messages=tree_messages,
         fetch_usercontent=fetch_usercontent,
         fetch_storage=fetch_storage,
+        transcribe_image=transcribe_image,
     )
 
 

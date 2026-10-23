@@ -4,6 +4,7 @@
                   root + tree messages ─► display rows (metadata.source == "display")
                   page/bundle ─► GET <usercontent path> (entry + same-bundle text files)
                   image/svg+xml ─► storage bytes
+                  raster image ─► storage bytes ─► vision transcript of the visible text
                   ─► data["_benchmark"]["display_artifacts"]
                static checks (pure, run on the captured record):
                   display_media_shown       ≥ N displayed items of the allowed kinds
@@ -12,12 +13,14 @@
 
 Figures are matched as numbers, not strings: "$2,342.78", "2342.78" and a
 float sum such as 2342.7799999999997 in a chart's data array all match
-2342.78 within the declared tolerance. Raster images (PNG/JPEG) carry no
-text, so they satisfy display_media_shown but never display_artifact_figures.
+2342.78 within the declared tolerance. A raster chart (PNG/JPEG/WebP) is
+read by a vision model that transcribes every visible label without being
+told the expected values; the same numeric match then runs on that transcript.
 """
 
 from __future__ import annotations
 
+import base64
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable, Iterable, Optional
@@ -33,6 +36,13 @@ DEFAULT_TOLERANCE = Decimal("0.005")
 
 _NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
 _BUNDLE_REF_RE = re.compile(r"""(?:src|href)\s*=\s*["']([^"'#?]+)["']""", re.IGNORECASE)
+RASTER_MIME_PREFIXES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+TRANSCRIBE_SYSTEM = """You transcribe an image shown to a user.
+
+List every piece of visible text in the image exactly as written, one item per line:
+titles, axis labels, tick labels, legend entries and every value label, including
+currency symbols and thousands separators. Do not compute, round, infer or add
+values that are not printed in the image. If no text is visible, reply NO TEXT."""
 _TEXT_SUFFIXES = (".js", ".mjs", ".json", ".csv", ".css", ".svg", ".html", ".htm", ".txt")
 
 
@@ -109,12 +119,15 @@ def check_display_artifact_figures(data: dict, check: dict) -> tuple[bool, str]:
     tolerance = Decimal(str(check.get("tolerance", DEFAULT_TOLERANCE)))
     texts = [a for a in _artifacts(data) if isinstance(a.get("text"), str) and a["text"].strip()]
     if not texts:
-        return False, f"No displayed HTML/SVG artifact content to check{_hydration_error(data)}"
+        errors = sorted({str(a["fetch_error"]) for a in _artifacts(data) if a.get("fetch_error")})
+        detail = f"; fetch errors: {errors}" if errors else ""
+        return False, f"No displayed artifact content to check{_hydration_error(data)}{detail}"
     best: Optional[list[str]] = None
     for artifact in texts:
         missing = missing_figures(artifact["text"], expected, tolerance)
         if not missing:
-            return True, f"Displayed {artifact.get('media_kind')} artifact shows all {len(expected)} figures"
+            source = artifact.get("text_source") or "content"
+            return True, f"Displayed {artifact.get('media_kind')} artifact ({source}) shows all {len(expected)} figures"
         if best is None or len(missing) < len(best):
             best = missing
     return False, f"No displayed artifact shows every expected figure; closest is missing {best}"
@@ -133,6 +146,22 @@ def check_final_answer_figures(final_answer: str, check: dict) -> tuple[bool, st
 
 
 FetchText = Callable[[str], Awaitable[Optional[bytes]]]
+TranscribeImage = Callable[[bytes, str], Awaitable[str]]
+
+
+def transcription_messages(raw: bytes, mime: str) -> list[dict]:
+    """Vision request for transcribe_image; never carries the expected figures."""
+    encoded = base64.b64encode(raw).decode("ascii")
+    return [
+        {"role": "system", "content": TRANSCRIBE_SYSTEM},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe all visible text in this image."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}", "detail": "high"}},
+            ],
+        },
+    ]
 
 
 def _decode(raw: Optional[bytes]) -> Optional[str]:
@@ -163,6 +192,7 @@ async def artifact_for_row(
     *,
     fetch_usercontent: FetchText,
     fetch_storage: FetchText,
+    transcribe_image: Optional[TranscribeImage] = None,
 ) -> dict:
     display = row["metadata"]["display"]
     pointer = row.get("file_pointer") or row.get("filePointer") or {}
@@ -186,6 +216,14 @@ async def artifact_for_row(
             artifact["text"] = entry
         elif kind == "image" and "svg" in mime and isinstance(pointer.get("storage_path"), str):
             artifact["text"] = _decode(await fetch_storage(pointer["storage_path"]))
+        elif kind == "image" and mime.startswith(RASTER_MIME_PREFIXES) and isinstance(pointer.get("storage_path"), str):
+            if transcribe_image is None:
+                artifact["fetch_error"] = "raster image needs a vision transcriber"
+            else:
+                raw = await fetch_storage(pointer["storage_path"])
+                if raw:
+                    artifact["text"] = await transcribe_image(raw[:MAX_ARTIFACT_BYTES * 5], mime)
+                    artifact["text_source"] = "vision_transcript"
     except Exception as exc:  # evidence gap, reported by the figures check
         artifact["fetch_error"] = str(exc)[:300]
     return artifact
@@ -197,6 +235,7 @@ async def hydrate_display_artifacts(
     tree_messages: Callable[[], Awaitable[list[dict]]],
     fetch_usercontent: FetchText,
     fetch_storage: FetchText,
+    transcribe_image: Optional[TranscribeImage] = None,
 ) -> None:
     """Record every distinct displayed item in the agent tree with its text content."""
     state = data.setdefault("_benchmark", {})
@@ -216,6 +255,11 @@ async def hydrate_display_artifacts(
             continue
         seen.add(identity)
         artifacts.append(
-            await artifact_for_row(row, fetch_usercontent=fetch_usercontent, fetch_storage=fetch_storage)
+            await artifact_for_row(
+                row,
+                fetch_usercontent=fetch_usercontent,
+                fetch_storage=fetch_storage,
+                transcribe_image=transcribe_image,
+            )
         )
     state["display_artifacts"] = artifacts
