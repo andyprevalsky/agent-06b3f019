@@ -9,14 +9,10 @@ problem_class: concurrency-inefficiency
 first_bad_boundary: cloud guest back-end (Express/Prisma against the guest's Postgres) under the test-mass-agent-run-0 tree — trivial Agent.findUnique p50 240-320 ms, HTTP GET /api/agents/:id p50 1.1-2.5 s, p99 9-29 s, in every heavy copy of run 1 (cbbf3dd0c) and run 2 (8b69d3760); exact cause (pool queueing vs guest CPU vs PG contention) not yet isolated
 symptoms:
   - "Timeout after 926s (task timeout=900s)"
-  - "Timeout after 918s (task timeout=900s)"
-  - "Activity timeout (attempt 1/3)" func=post_agent_message timeout=30.0 on autoscaled worker clones
+  - "Activity timeout (attempt 1/3)" func=post_agent_message timeout=30.0
   - "Child terminal reconciliation failed" error="Activity task timed out"
-  - "Failed to save explore message" error=""
-  - "[AgentInbox] poll failed; continuing without new agent messages"
-  - "Tool spawn_agent failed: activity StartToClose timeout"
-  - "ERROR - ReadTimeout:" benchmark runner status ERROR for test-mass-agent-run-0
-  - fast_cache.get_many.http duration_ms=15028 status=error
+  - "Failed to save explore message"
+  - "ERROR - ReadTimeout:"
 tags:
   - test-mass-agent-run-0
   - mass-agent
@@ -25,11 +21,12 @@ tags:
   - backend-latency
   - descend-full69-20261023
 sources:
-  - descend-full69-20261023 run 2 .context/sharded-runs/original600-1792738962466034914 (r001-j0003, r002-j0012, r003-j0021, r004-j0030, r005-j0039)
-  - run 1 .context/sharded-runs/original600-1792722242636117810 (r001-j0004 af641b45, r002-j0039 9b9ff5df)
-  - agents 23de63bf-4f55-49c5-9220-c000cfbddcc1, b9ecdf7f-4c77-4b15-b440-84bd42d4d3b6, a9321ffb-9442-4d5b-ad38-da928a3f4a1b
-  - related 2026-10-06-fresh-source-fetch-downloaded-unneeded-history (K5 commit 55c90637b)
-  - related 2026-10-23-runner-error-status-split-campaign-and-hub-retry-contracts (K7)
+  - fleet run original600-1792738962466034914
+  - fleet run original600-1792722242636117810
+  - agent 23de63bf-4f55-49c5-9220-c000cfbddcc1
+  - agent b9ecdf7f-4c77-4b15-b440-84bd42d4d3b6
+  - agent a9321ffb-9442-4d5b-ad38-da928a3f4a1b
+  - commit 55c90637b
 repro: none yet — open observability gap (no guest DB pool / CPU / pg_stat_activity capture)
 status: open
 ---

@@ -14,12 +14,15 @@ symptoms:
 tags:
   - spawn-sub-agents
   - evaluator
-  - min_tool_counts
+  - min-tool-counts
   - descend-full69-20261023
 sources:
-  - descend-full69-20261023 run 2 r001-j0007 30434b44-597c-4413-81e6-dcc986cd04af, r002-j0016 b7fde12e-2311-4083-9c30-2fdf47962e3a, r004-j0034 b515f914-2b68-4e58-bc8f-35a886ec91e8
-  - run 1 r001-j0006 2a77030f, r002-j0041 d373168f (passed)
-  - commits b55ccd828, 83ffadb60, 9c2be652a
+  - fleet run original600-1792738962466034914
+  - agent 30434b44-597c-4413-81e6-dcc986cd04af
+  - agent b7fde12e-2311-4083-9c30-2fdf47962e3a
+  - agent b515f914-2b68-4e58-bc8f-35a886ec91e8
+  - commit b55ccd828
+  - commit 9c2be652a
 repro: none — approval-gated contract decision; evidence is the cross-run trajectory table below
 status: open
 ---
