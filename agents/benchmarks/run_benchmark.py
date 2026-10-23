@@ -52,7 +52,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -8133,6 +8133,38 @@ def _run_seed_subprocess(
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+# Compute-token types this run's fixture withholds after every refresh. A run
+# whose selected tasks all declare requires_claude_code holds no leasable GPT
+# (Codex) credential, so its root cannot lease type=gpt and run Codex.
+_withheld_compute_token_types: set[str] = set()
+
+
+def _claude_code_only_run(tasks: Sequence["BenchmarkTask"]) -> bool:
+    """True when every selected task declares requires_claude_code."""
+    return bool(tasks) and all(getattr(task, "requires_claude_code", False) for task in tasks)
+
+
+def _withhold_compute_credentials(database_url: str, token_type: str) -> bool:
+    """Disconnect one compute-token type in the isolated benchmark DB."""
+    name = {"gpt": "gpt_code", "claude": "claude_code"}[token_type]
+    sql = f"UPDATE \"Integration\" SET status = 'NOT_CONNECTED' WHERE name = '{name}' AND status = 'CONNECTED'"
+    try:
+        result = subprocess.run(
+            ["psql", database_url, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        print(f"    ⚠ Could not withhold {name} credentials: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Could not withhold {name} credentials: {result.stderr.strip()[:200]}")
+        return False
+    print(f"    🔒 Withheld {name} credentials: every selected task requires Claude Code")
+    return True
+
+
 def _sync_compute_tokens(
     *,
     tolerate_gpt_code_unavailable: bool = False,
@@ -8213,6 +8245,9 @@ def _sync_compute_tokens(
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     if explicit_codex_auth and not _refresh_local_gpt_token_from_codex_auth(database_url):
         raise RuntimeError("Benchmark sync could not refresh GPT credentials from explicit Codex auth")
+    for token_type in sorted(_withheld_compute_token_types - set(required_token_types or ())):
+        if not _withhold_compute_credentials(database_url, token_type):
+            return False
     return True
 
 
@@ -8895,6 +8930,7 @@ async def _refresh_local_compute_tokens_for_run(
     base_url: str,
     *,
     require_claude_code: bool = False,
+    tasks: Sequence["BenchmarkTask"] = (),
 ) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
@@ -8911,8 +8947,16 @@ async def _refresh_local_compute_tokens_for_run(
     """
     if not _is_local_base_url(base_url):
         return
+    claude_code_only = _claude_code_only_run(tasks)
+    require_claude_code = require_claude_code or claude_code_only
+    _withheld_compute_token_types.clear()
+    if claude_code_only:
+        _withheld_compute_token_types.add("gpt")
     if _is_simulate_mode():
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
+        database_url = _local_victoria_database_url()
+        if claude_code_only and not (database_url and _withhold_compute_credentials(database_url, "gpt")):
+            raise RuntimeError("Benchmark run could not withhold GPT credentials for Claude Code tasks")
         return
     if _anthropic_family_excluded():
         if require_claude_code:
@@ -8961,7 +9005,8 @@ async def _refresh_local_compute_tokens_for_run(
     tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
     if require_claude_code and not has_anthropic_key_fallback:
-        required_token_types = ("any",)
+        # A Claude-only run cannot fall back to Codex: its GPT credentials are withheld.
+        required_token_types = ("claude",) if claude_code_only else ("any",)
         tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
@@ -16785,6 +16830,7 @@ async def main_async(args):
         await _refresh_local_compute_tokens_for_run(
             base_url,
             require_claude_code=bool(claude_code_tasks_for_refresh) and not allow_claude_code_credential_skip,
+            tasks=tasks,
         )
         # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
         # that must send email (message_person) needs a fresh credential overlay

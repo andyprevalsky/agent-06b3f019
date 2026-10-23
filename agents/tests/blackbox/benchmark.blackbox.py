@@ -17914,6 +17914,80 @@ def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
 
 
+def test_claude_code_only_run_withholds_gpt_compute_credentials():
+    """A run of requires_claude_code tasks leases only Claude credentials.
+
+    claude-code-agent (descend-full69 K4/K8) leased type=gpt, so every code
+    spawn ran Codex. Local stacks and cloud guests share this run-level
+    compute-token refresh, so the isolated DB must hold no leasable gpt_code row
+    for a Claude-only run, while every other run keeps both credential types.
+    """
+    import asyncio
+    import uuid
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    db_name = f"bench_k8_{uuid.uuid4().hex[:10]}"
+    db_url = admin.rsplit("/", 1)[0] + "/" + db_name
+
+    def psql(url: str, sql: str) -> str:
+        result = subprocess.run(["psql", url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                                capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def fake_seed(command, **_kwargs):
+        psql(db_url, (
+            'DELETE FROM "Integration"; '
+            'INSERT INTO "Integration" (id, name, status, "userId", "poolingEnabled") VALUES '
+            "('c1','claude_code','CONNECTED','u',false),('g1','gpt_code','CONNECTED','u',false),"
+            "('g2','gpt_code','CONNECTED',NULL,true)"
+        ))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def leasable(kind: str) -> int:
+        return int(psql(db_url, f"SELECT count(*) FROM \"Integration\" WHERE name='{kind}' AND status='CONNECTED'"))
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    claude_task = by_name["claude-code-agent"]
+    assert claude_task.requires_claude_code
+    other_task = by_name["spawn-sub-agents"]
+    assert not other_task.requires_claude_code
+
+    psql(admin, f'CREATE DATABASE "{db_name}"')
+    try:
+        psql(db_url, (
+            'CREATE TABLE "Integration" (id text primary key, name text, status text, "userId" text, '
+            '"poolingEnabled" boolean, config jsonb, "rateLimitedUntil" timestamptz)'
+        ))
+        observed = {}
+        for label, tasks in {"claude-only": [claude_task], "other": [other_task], "mixed": [claude_task, other_task]}.items():
+            with (
+                patch.object(bench, "_local_victoria_database_url", return_value=db_url),
+                patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/db", "source")),
+                patch.object(bench, "_run_seed_subprocess", side_effect=fake_seed),
+                patch.object(bench, "_is_local_base_url", return_value=True),
+                patch.object(bench, "_is_simulate_mode", return_value=False),
+                patch.object(bench, "_anthropic_family_excluded", return_value=False),
+                patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=True)),
+                patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+                patch.object(bench, "_assert_require_compute_tokens_satisfied", return_value=None),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                os.environ.pop("CODEX_AUTH_PATH", None)
+                asyncio.run(bench._refresh_local_compute_tokens_for_run("http://localhost:3001", tasks=tasks))
+                # A later per-task overlay sync must not hand the GPT credential back.
+                assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True)
+            observed[label] = (leasable("claude_code"), leasable("gpt_code"))
+        assert observed == {"claude-only": (1, 0), "other": (1, 2), "mixed": (1, 2)}, observed
+    finally:
+        getattr(bench, "_withheld_compute_token_types", set()).clear()
+        psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
 def test_cloudbench_fast_cache_on_guest_is_read_only_like_local():
     """A cloud guest replays the shared July cache under the same write policy as local.
 

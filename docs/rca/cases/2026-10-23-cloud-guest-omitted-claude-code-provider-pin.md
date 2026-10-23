@@ -173,9 +173,42 @@ ROSE_DISABLE_API_REQUEST BROWSER_MAX_ITERATIONS"; "works locally fails in
 cloud benchmark guest missing env flag verifier api_request browser step
 budget". Verdict: recurrence of this case.
 
+### 2026-10-23: Claude-only runs withhold GPT compute credentials (fixture)
+
+Andy asked that a task explicitly testing Claude should have the Codex tokens
+removed from its fixture, so that its root cannot lease type=gpt at all. The
+fix lives in the benchmark fixture, not in product code.
+
+- **Shared path.** `_refresh_local_compute_tokens_for_run` now receives the
+  selected tasks. Local isolated stacks and cloud guests both run this
+  refresh; the guest driver logs `Refreshed compute tokens from prod`.
+- **Claude-only runs.** When every selected task declares
+  `requires_claude_code`, `gpt_code` integrations in the isolated DB are set
+  to `NOT_CONNECTED` after every compute-token sync. This includes later
+  per-task overlay syncs and the restored seed in simulate mode.
+- **Fail closed.** If the withhold step fails, the run stops. Without the
+  funded Anthropic-key fallback, a Claude-only run requires a usable
+  `claude_code` row instead of `any`.
+- **Unchanged runs.** Mixed and other runs keep both credential types.
+  An explicit `required_token_types=("gpt",)` sync, such as the agentic
+  judge's, still receives GPT.
+
+Regression:
+`agents/tests/blackbox/benchmark.blackbox.py::test_claude_code_only_run_withholds_gpt_compute_credentials`
+runs real SQL against a private system-Postgres database, with the seed
+subprocess stubbed to insert both credential types.
+
+- **Red on 17ca2b8b0:** `TypeError: _refresh_local_compute_tokens_for_run()
+  got an unexpected keyword argument 'tasks'`.
+- **Assertion-level red (mutation):** removing only the withhold step gives
+  `AssertionError: {'claude-only': (1, 2), 'other': (1, 2), 'mixed': (1, 2)}`.
+- **Green:** `(1, 0)` for Claude-only and `(1, 2)` otherwise, 5/5
+  consecutive runs. 22 neighbouring compute-refresh and fixture blackbox
+  tests pass.
+
 ## Human feedback
 
-None recorded.
+Andy, 2026-10-23 (via descend parent): "the task should rm codex tokens from the fixture somehow if it's explicitly testing CLAUDE"; do it in the fixture, not product code.
 
 ## Reusable lesson
 
