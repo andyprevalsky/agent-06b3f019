@@ -9878,6 +9878,17 @@ PY
                         --stopped-proof "$stopped_proof"; then
                     rm -f "$machine_status_temporary"
                     echo "❌ [$bench] stopped exact Machine has no sealed provider-state proof" >&2
+                    if [ ! -e "$manifest" ] && [ -f "$output/guest-native-stop.json" ]; then
+                        # The controller natively stopped this guest before its
+                        # shutdown was delivered, so its provider-session log
+                        # exists only on the stopped volume. Name the exact
+                        # supported capture, or the reason it is refused.
+                        stopped_volume_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("volume_id", ""))' \
+                            "$output/guest-native-stop.json" 2>/dev/null)"
+                        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" \
+                            --next-step --registry "$registry" --bench "$bench" \
+                            --machine-id "$machine_id" --volume-id "${stopped_volume_id:-unknown}" >&2 || true
+                    fi
                     failed=1
                     continue
                 fi

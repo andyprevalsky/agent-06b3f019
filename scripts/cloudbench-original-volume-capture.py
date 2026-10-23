@@ -503,7 +503,19 @@ def local_identity(args: argparse.Namespace) -> dict:
     meta = fields(registry / "meta")
     if meta.get("version") != "2" or meta.get("fleet_owner_token") != owner:
         raise Refusal("registry belongs to a foreign owner")
-    if meta.get("cleanup_policy") != "reap":
+    undelivered = getattr(args, "undelivered_native_stop", False)
+    if undelivered:
+        # A guest the controller natively stopped because its authenticated
+        # shutdown was never delivered: the owner is quarantined (retain plus
+        # guest-cleanup-unconfirmed) and its provider-session identity exists
+        # only on this stopped volume. Admission is bound below to the exact
+        # verified guest-native-stop.json for this Machine and volume.
+        if meta.get("cleanup_policy") != "retain":
+            raise Refusal("undelivered native-stop capture requires the retained quarantine policy")
+        sentinel = registry / "guest-cleanup-unconfirmed"
+        if not sentinel.is_file() or sentinel.is_symlink():
+            raise Refusal("undelivered native-stop capture requires the guest-cleanup-unconfirmed latch")
+    elif meta.get("cleanup_policy") != "reap":
         raise Refusal("owner cleanup policy is not reap")
     if meta.get("host") != socket.gethostname():
         raise Refusal("owner belongs to another host")
@@ -511,11 +523,12 @@ def local_identity(args: argparse.Namespace) -> dict:
         raise Refusal("owner process identity is invalid")
     if pid_birth_state(meta["pid"], meta["pid_start"]) != "absent":
         raise Refusal("original owner controller is not proven dead")
-    if lexists(registry / "guest-cleanup-unconfirmed"):
-        raise Refusal("guest cleanup is unconfirmed; run exact-owner recovery first")
-    latch = registry / "runtime-evidence-unconfirmed"
-    if not latch.is_file() or latch.is_symlink():
-        raise Refusal("runtime evidence latch is not retained; no capture is required")
+    if not undelivered:
+        if lexists(registry / "guest-cleanup-unconfirmed"):
+            raise Refusal("guest cleanup is unconfirmed; run exact-owner recovery first")
+        latch = registry / "runtime-evidence-unconfirmed"
+        if not latch.is_file() or latch.is_symlink():
+            raise Refusal("runtime evidence latch is not retained; no capture is required")
     run_id = meta.get("run_id", "")
     if not SAFE_TOKEN.fullmatch(run_id):
         raise Refusal("unsafe run id")
@@ -549,13 +562,17 @@ def local_identity(args: argparse.Namespace) -> dict:
     kind, machine = cid
     if machine != args.machine_id:
         raise Refusal("requested Machine is not the task's exact Machine")
-    record = {"version": 1, "machine_id": machine, "run_token": token}
-    if json_file(out / "runtime-evidence.owner.json") != record or json_file(out / "runtime-evidence.pending") != record:
-        raise Refusal("runtime evidence ownership is not exactly this guest")
     if regular_bytes(out / "post-config-start.accepted", 256) != (machine + "\n").encode():
         raise Refusal("guest was never admitted with its boot config; not a post-start capture")
-    if regular_bytes(out / "guest-shutdown.confirmed", 256) != (run_id + "\n").encode():
-        raise Refusal("guest shutdown is not confirmed for this run")
+    if undelivered:
+        native_stop = undelivered_native_stop_record(out, owner, run_id, args.bench, machine, args.volume_id)
+    else:
+        native_stop = None
+        record = {"version": 1, "machine_id": machine, "run_token": token}
+        if json_file(out / "runtime-evidence.owner.json") != record or json_file(out / "runtime-evidence.pending") != record:
+            raise Refusal("runtime evidence ownership is not exactly this guest")
+        if regular_bytes(out / "guest-shutdown.confirmed", 256) != (run_id + "\n").encode():
+            raise Refusal("guest shutdown is not confirmed for this run")
     if lexists(out / "remote-logs/runtime-evidence/manifest.json"):
         raise Refusal("sealed runtime evidence exists; original-volume capture is not required")
     if lexists(run / "_forensic"):
@@ -588,7 +605,47 @@ def local_identity(args: argparse.Namespace) -> dict:
         "ordinal": ordinal, "token": token, "kind": kind, "machine_id": machine,
         "volume_id": volume, "clone_name": clone,
         "isolate_services": getattr(args, "isolate_services", False),
+        "undelivered_native_stop": native_stop,
     }
+
+
+# Recovery evidence the capture publishes for an undelivered native stop. Their
+# absence is part of admission: an existing manifest, receipt or confirmation
+# means recovery already holds guest evidence and must not be fed a second copy.
+UNDELIVERED_RECOVERY_OUTPUTS = (
+    "guest-shutdown.confirmed",
+    "guest-cleanup.backend.log",
+    "guest-cleanup.provider-manifest.json",
+    "guest-cleanup.recovery-receipt.json",
+    "guest-cleanup.machine-stopped.json",
+)
+
+
+def undelivered_native_stop_record(out: Path, owner: str, run_id: str, bench: str, machine: str,
+                                   volume: str) -> dict:
+    """The controller's exact verified native stop of a never-delivered guest."""
+    path = out / "guest-native-stop.json"
+    if not lexists(path):
+        raise Refusal("no guest-native-stop.json: this guest was not natively stopped as undelivered")
+    data = regular_bytes(path, 65536)
+    record = json.loads(data)
+    expected = {
+        "version": 1, "kind": "guest-native-stop", "fleet_owner_token": owner, "run_id": run_id,
+        "bench": bench, "machine_id": machine, "volume_id": volume, "ownership": "fresh",
+        "delivery_receipt": "absent", "stop_requested": True, "verified": True,
+        "verified_state": "stopped", "destroyed": False,
+    }
+    try:
+        record = json.loads(data)
+    except ValueError:
+        raise Refusal("guest-native-stop.json is malformed") from None
+    if not isinstance(record, dict) or any(record.get(k) != v or type(record.get(k)) is not type(v)
+                                           for k, v in expected.items()):
+        raise Refusal("guest-native-stop.json is not an exact verified undelivered stop of this Machine and volume")
+    for name in UNDELIVERED_RECOVERY_OUTPUTS:
+        if lexists(out / name):
+            raise Refusal(f"{name} already exists; run exact-owner recovery instead")
+    return {"sha256": sha(data)}
 
 
 def native_preflight(fly: Fly, ident: dict) -> tuple[dict, dict]:
@@ -977,7 +1034,8 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         raise Refusal(f"could not save the original config privately: {error}") from None
     inert = inert_variant(original)
     stage, mutated, local = "inert-config", False, None
-    restore_hint = "--restore-original-config" + (" --isolate-services" if ident.get("isolate_services") else "")
+    restore_hint = ("--restore-original-config" + (" --isolate-services" if ident.get("isolate_services") else "")
+                    + (" --undelivered-native-stop" if ident.get("undelivered_native_stop") else ""))
     mutations: list[str] = []
 
     def interrupted(signum, _frame):
@@ -1057,6 +1115,9 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         "inert_command": INERT_CMD, "guest_inert_sleepers": inventory.get("inert_sleepers"),
         "services_isolated": bool(ident.get("isolate_services") and original.get("services")),
         "provider_mutations": mutations, "receipt_cross_checks": checks,
+        **({"admission": "undelivered-native-stop",
+            "guest_native_stop_sha256": ident["undelivered_native_stop"]["sha256"]}
+           if ident.get("undelivered_native_stop") else {}),
         "capture_helper_sha256": sha(Path(__file__).resolve().read_bytes()),
         "captured_at": int(time.time()),
     }
@@ -1064,9 +1125,63 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
     rename_noreplace(local, artifacts["tar.gz"])
     fsync_directory(capture_dir)
     journal("published", archive_sha256=provenance["archive_sha256"])
+    if ident.get("undelivered_native_stop"):
+        try:
+            manifest = publish_undelivered_recovery_inputs(ident, originals)
+        except (CaptureFailure, Refusal, OSError, ValueError) as error:
+            journal("recovery-inputs-failed", error=str(error)[:300])
+            print(f"❌ capture published, but its recovery inputs were refused: {str(error)[:300]}", file=sys.stderr)
+            return EXIT_FAILED
+        journal("recovery-inputs-published", manifest_kind=manifest.get("kind"))
     print(json.dumps({"captured": True, "machine_id": machine_id, "archive": str(artifacts["tar.gz"]),
                       "files": len(inventory["files"]), "missing": inventory["missing"],
                       "native_final_state": final_machine.get("state"), "proof_credit": 0}, sort_keys=True))
+    return 0
+
+
+def publish_undelivered_recovery_inputs(ident: dict, originals: dict[str, bytes]) -> dict:
+    """Hand exact-owner recovery the stopped guest's original backend log and manifest.
+
+    These are the same two files recovery fetches from a started guest before
+    it stops it. Recovery then proves the Machine stopped, releases every
+    logged provider session and validates the receipt as for any stopped
+    guest. Nothing here confirms cleanup or changes a latch.
+    """
+    backend = originals.get(LOG_DIR + "backend.log")
+    if backend is None:
+        raise CaptureFailure("original backend.log is absent; provider-session identity is unrecoverable")
+    out = ident["out"]
+    if any(lexists(out / name) for name in UNDELIVERED_RECOVERY_OUTPUTS):
+        raise CaptureFailure("recovery evidence appeared during capture")
+    target = out / "guest-cleanup.backend.log"
+    publish_bytes(target, backend)
+    helper = sibling("cloudbench-exact-session-cleanup.py")
+    namespace = argparse.Namespace(
+        owner=ident["owner"], fleet_run_id=ident["run_id"], bench=ident["bench"],
+        machine_id=ident["machine_id"], output_dir=str(out), guest_run_token=ident["token"],
+        backend_log=str(target), manifest=str(out / "guest-cleanup.provider-manifest.json"),
+        state_receipt=None,
+    )
+    try:
+        return helper["publish_active_manifest"](namespace)
+    except helper["CleanupEvidenceError"] as error:
+        raise CaptureFailure(f"active provider manifest refused: {error}") from None
+
+
+def next_step(args: argparse.Namespace) -> int:
+    """Print the supported next command for a refused stopped undelivered guest (read-only)."""
+    args.undelivered_native_stop = True
+    try:
+        ident = local_identity(args)
+    except Refusal as error:
+        print(f"❌ undelivered native-stop capture is not admissible: {error}", file=sys.stderr)
+        return EXIT_REFUSED
+    print("🧭 next supported step: capture the stopped guest's original volume, then repeat exact-owner recovery:")
+    print("   python3 scripts/cloudbench-original-volume-capture.py --registry " + shlex.quote(str(ident["registry"]))
+          + " --bench " + shlex.quote(ident["bench"]) + " --machine-id " + ident["machine_id"]
+          + " --volume-id " + ident["volume_id"] + " --capture-dir <new-private-0700-dir>"
+          + " --undelivered-native-stop [--isolate-services]")
+    print("   scripts/run-bench --recover-stale-owner " + ident["owner"])
     return 0
 
 
@@ -1743,17 +1858,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--bench", required=True)
     parser.add_argument("--machine-id", required=True)
     parser.add_argument("--volume-id", required=True)
-    parser.add_argument("--capture-dir", type=Path, required=True)
+    parser.add_argument("--capture-dir", type=Path)
     parser.add_argument("--isolate-services", action="store_true",
                         help="explicitly remove network services during inert capture and restore them exactly")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--restore-original-config", action="store_true")
+    mode.add_argument("--next-step", action="store_true",
+                      help="read-only: print the supported capture command for an undelivered native stop")
+    parser.add_argument("--undelivered-native-stop", action="store_true",
+                        help="admit only a quarantined guest with an exact verified guest-native-stop.json "
+                             "(delivery_receipt=absent); publish its backend log and provider manifest for recovery")
     parser.add_argument("--wait-seconds", type=int, default=300)
     parser.add_argument("--ssh-seconds", type=int, default=300)
     parser.add_argument("--attempts", type=int, default=5)
     args = parser.parse_args(argv)
     try:
+        if args.next_step:
+            return next_step(args)
+        if args.capture_dir is None:
+            parser.error("--capture-dir is required")
         return restore_only(args) if args.restore_original_config else capture(args)
     except Refusal as error:
         print(f"❌ refused: {error}", file=sys.stderr)

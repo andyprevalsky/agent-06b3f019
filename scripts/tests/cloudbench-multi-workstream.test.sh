@@ -41,6 +41,9 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
 python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
+# A quarantined owner whose natively stopped guest never received its shutdown
+# is recoverable only through the exact undelivered native-stop capture (K12).
+python3 "$ROOT_DIR/scripts/tests/cloudbench-undelivered-native-stop-capture.test.py" || exit 1
 
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
