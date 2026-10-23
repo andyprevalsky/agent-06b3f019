@@ -192,6 +192,19 @@ def selected_tasks_need_shared_fast_cache(
     return any(by_name[name].get("fast_cache") == "on" for name in names)
 
 
+def selected_tasks_read_shared_fast_cache_only(
+    catalog_path: Path, task_names: Iterable[str]
+) -> bool:
+    """Return whether the shared Fast Mode cache must be strict read-only.
+
+    Mirrors ``agents/benchmarks/local.py`` isolated stacks: a shared-cache replay
+    never writes through, so a miss fails loudly instead of calling a live model.
+    The google-oauth DEMO alone keeps its deliberate live seed run.
+    """
+    names = list(task_names)
+    return selected_tasks_need_shared_fast_cache(catalog_path, names) and set(names) != {"google-oauth"}
+
+
 _OFF_VALUES = {"0", "false", "no", "off"}
 _GENERAL_PURPOSE_SPAWN_TOOLS = {
     "spawn_general_purpose_agent",
@@ -310,6 +323,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     shared_cache.add_argument("catalog", type=Path)
     shared_cache.add_argument("tasks", nargs="+")
+    shared_read_only = subparsers.add_parser(
+        "shared-fast-cache-read-only",
+        help="exit 0 when the requested tasks must replay the shared cache strictly read-only",
+    )
+    shared_read_only.add_argument("catalog", type=Path)
+    shared_read_only.add_argument("tasks", nargs="+")
     task_env = subparsers.add_parser(
         "task-env",
         help="print the requested tasks' worker environment as KEY=VALUE lines (empty value = unset)",
@@ -337,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
             ) else 10
         if args.command == "needs-shared-fast-cache":
             return 0 if selected_tasks_need_shared_fast_cache(
+                args.catalog, args.tasks
+            ) else 10
+        if args.command == "shared-fast-cache-read-only":
+            return 0 if selected_tasks_read_shared_fast_cache_only(
                 args.catalog, args.tasks
             ) else 10
         if args.command == "task-env":

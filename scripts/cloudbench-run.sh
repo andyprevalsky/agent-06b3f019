@@ -548,6 +548,19 @@ resolve_fast_cache_route() {
             # ~12 ms round trip serves the replay's ~40 reads/s through 4. Clear
             # an inherited local route so run.sh keeps the shared cache.
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=0" "FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
+            # Same write policy as local isolated stacks: a shared-cache miss
+            # fails loudly instead of calling a live model.
+            "$cache_python" "$CATALOG_SCRIPT" shared-fast-cache-read-only \
+                "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
+            cache_status=$?
+            case "$cache_status" in
+                0) STACK_CACHE_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1") ;;
+                10) ;;
+                *)
+                    echo "[cloudbench] FATAL: Fast Mode cache write policy failed (exit $cache_status)" >&2
+                    return "$cache_status"
+                    ;;
+            esac
             ;;
         10)
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")

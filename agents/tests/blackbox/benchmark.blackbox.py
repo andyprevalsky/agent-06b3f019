@@ -16450,7 +16450,11 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert live.returncode == 0, live.stderr
     assert route(live) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
-    shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
+    shared_route = [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=4",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
     # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
@@ -16467,7 +16471,11 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert route(mixed) == shared_route
 
     tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
-    assert route(tuned) == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
+    assert route(tuned) == [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=6",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr
@@ -17904,6 +17912,100 @@ def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+def test_cloudbench_fast_cache_on_guest_is_read_only_like_local():
+    """A cloud guest replays the shared July cache under the same write policy as local.
+
+    Local isolated stacks make every shared-cache (fast_cache:on) run strict
+    read-only, so a cache miss fails loudly instead of calling a live model. The
+    cloud guest route used the shared cache without that flag: the
+    test-mass-agent-run-0 root's response_schema miss went to a live model,
+    produced field names the recorded July assemble does not use, and failed the
+    T7 schema evaluator (descend-full69 p3-proof-1). google-oauth keeps its one
+    deliberate local exception on both surfaces.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    read_only = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
+
+    def local_policy(task: str) -> str | None:
+        captured: dict = {}
+
+        def fake_popen(command, **kwargs):
+            captured["env"] = kwargs["env"]
+            return object()
+
+        with (
+            patch.dict(os.environ, {"FAST_MODE_CACHE_DATABASE_URL": "postgresql://july.example.test:6543/postgres"}),
+            patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "_record_stack_cleanup_owner", new=lambda *_args: None),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            os.environ.pop(read_only, None)
+            context_dir = Path(tmp) / "parity-run"
+            stack = local_bench.ServiceStack(
+                run_id="parity-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-parity-run",
+                base_port=55160,
+            )
+            local_bench.start_services(stack, clean_first=False, tasks=[task])
+        return captured["env"].get(read_only)
+
+    def cloud_policy(task: str) -> str | None:
+        env = {key: value for key, value in os.environ.items() if key not in {read_only, "CLOUDBENCH_INFRA_PROBE"}}
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in result.stdout.splitlines() if line.startswith("stack:"))
+        return stack.get(read_only)
+
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    start = fleet.index("    local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()")
+    policy = fleet[start : fleet.index("    local wid=\"\" borrowed_worker=0", start)]
+
+    def clone_policy(task: str) -> str | None:
+        with tempfile.TemporaryDirectory() as out:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "clone() {\n" + policy + '    [ "$shared_cache_read_only" = 0 ] || echo 1\n}\nclone',
+                ],
+                env={**os.environ, "ROOT_DIR": str(repo_root), "bench": task, "out": out},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip() or None
+
+    assert local_policy("test-mass-agent-run-0") == "1"
+    for task in ("test-mass-agent-run-0", "google-oauth"):
+        assert cloud_policy(task) == local_policy(task), task
+        assert clone_policy(task) == local_policy(task), task
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.

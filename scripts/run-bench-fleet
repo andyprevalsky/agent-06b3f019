@@ -17766,6 +17766,19 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local runtime_run_token="$7"
     [ ! -e "$out/benchmark-child.finished" ] \
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
+    # Autoscaled workers replay the shared cache under the guest's write policy.
+    local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()
+    IFS=, read -r -a shared_cache_tasks <<< "$bench"
+    python3 -B "$ROOT_DIR/scripts/cloudbench_catalog.py" shared-fast-cache-read-only \
+        "$ROOT_DIR/agents/benchmarks/tasks.json" "${shared_cache_tasks[@]}" >/dev/null || shared_cache_status=$?
+    case "$shared_cache_status" in
+        0) shared_cache_read_only=1 ;;
+        10) ;;
+        *)
+            printf 'Fast Mode cache write policy failed (exit %s)\n' "$shared_cache_status" > "$out/autoscaler.failed"
+            return 1
+            ;;
+    esac
     local wid="" borrowed_worker=0
     if [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] && declare -F claim_reusable_worker >/dev/null; then
         wid="$(claim_reusable_worker "$out" "$primary_id" "$ws" "$runtime_run_token" "$pip")" || {
@@ -17963,6 +17976,7 @@ PY
             echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
             echo "export BENCHMARK_ISOLATED_RUN=true"
         fi
+        [ "$shared_cache_read_only" = 0 ] || echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
         echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
         echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
