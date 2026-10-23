@@ -339,6 +339,51 @@ def guest_diagnostics_sampler_and_inventory():
         manifest = status["runtime_evidence_context_manifest"](context, token, "abcdef12345678")
         assert manifest["files"]["guest-diagnostics.jsonl"]["bytes"] == output.stat().st_size
 
+        # CPU mode split: hypervisor steal (a throttled shared-cpu guest) must be
+        # told apart from the guest's own user/system work. Exact arithmetic on
+        # synthetic /proc/stat counters, then the live fields on every sample.
+        sampler = runpy.run_path(str(ROOT / "scripts/cloudbench-guest-diagnostics.py"))
+        before = [100, 0, 50, 700, 50, 0, 0, 0]
+        after = [160, 0, 90, 740, 60, 0, 10, 40]
+        # total delta 200 = user 60, system 40 + softirq 10, idle 40, iowait 10, steal 40.
+        assert sampler["cpu_mode_pct"](before, after) == {
+            "user": 30.0, "system": 25.0, "iowait": 5.0, "steal": 20.0,
+        }, sampler["cpu_mode_pct"](before, after)
+        assert sampler["cpu_mode_pct"](before, before) is None
+        for sample in samples:
+            assert set(sample["cpu_mode_pct"]) == {"user", "system", "iowait", "steal"}, sample
+            assert sum(sample["cpu_mode_pct"].values()) <= 100.5, sample
+
+        # Per-process attribution: a saturated guest must name the processes
+        # that burned the interval's CPU (descend-full69 P3: 99% busy guest,
+        # starved worker, no way to tell backend from Postgres from others).
+        burner = subprocess.Popen(
+            [sys.executable, "-c", "import sys\nwhile True: pass", "--password=secret-arg"],
+        )
+        try:
+            attributed = Path(directory) / "attributed.jsonl"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/cloudbench-guest-diagnostics.py"), str(attributed),
+                 "postgresql://postgres:postgres@localhost:5432/victoria", "30", "0.5", "2"],
+                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        finally:
+            burner.kill()
+            burner.wait()
+        assert result.returncode == 0, result.stderr
+        samples = [json.loads(line) for line in attributed.read_text().splitlines()]
+        assert len(samples) == 2, samples
+        for sample in samples:
+            top = sample["top_processes"]
+            assert 0 < len(top) <= 8, top
+            assert [row["cpu_pct"] for row in top] == sorted((row["cpu_pct"] for row in top), reverse=True)
+            assert all(set(row) == {"pid", "comm", "cpu_pct"} for row in top), top
+            assert "secret-arg" not in json.dumps(sample)
+        burned = [row for sample in samples for row in sample["top_processes"] if row["pid"] == burner.pid]
+        assert burned and max(row["cpu_pct"] for row in burned) >= 50, samples
+        assert burned[0]["comm"].startswith("python"), burned
+
 
 def exercise_read_transition(case: str):
     if case == "guest-diagnostics":
