@@ -25,7 +25,11 @@
 import { TERMINAL_STATUSES } from './statusBroadcastWorkflowId';
 import { ROOT_TASK_PATH, agentTaskPath, rootOf } from './agentTaskPath';
 import { resolveTreeAddress } from './agentAddressResolver';
-import { backgroundTaskNodes, type BackgroundTaskNode } from './agentTreeBackgroundTasks';
+import {
+  backgroundTaskNodes,
+  listedBackgroundTasks,
+  type BackgroundTaskNode,
+} from './agentTreeBackgroundTasks';
 import type { AgentTreeQuery } from './types';
 import * as repo from './repoAgentTree';
 
@@ -141,20 +145,51 @@ function byDepthThenAge(a: Row, b: Row): number {
   );
 }
 
-/** `node` is any address (path, "parent", "/root", agent id) in the caller's tree. */
-async function resolveNode(caller: Row, address: string | undefined): Promise<Row | ServiceError> {
-  if (address === undefined || address === caller.id) return caller;
+interface ResolvedNode {
+  row: Row;
+  /** Set when the address names one of `row`'s background tasks (a leaf). */
+  taskId: string | null;
+}
+
+/** `node` is any address (path, "parent", "/root", agent id, task) in the caller's tree. */
+async function resolveNode(
+  caller: Row,
+  address: string | undefined
+): Promise<ResolvedNode | ServiceError> {
+  if (address === undefined || address === caller.id) return { row: caller, taskId: null };
   const resolved = await resolveTreeAddress(caller, address);
   if ('error' in resolved) return resolved;
-  if (resolved.recipient_task_id !== null) {
-    return {
-      error: `${address} is a background task (no children); message it with send_message_to_agent`,
-      status: 400,
-    };
-  }
-  if (resolved.agent_id === caller.id) return caller;
-  const [node] = await repo.findTreeNodesByIds([resolved.agent_id]);
-  return node ?? { error: `No agent at ${address}`, status: 404 };
+  const taskId = resolved.recipient_task_id;
+  if (resolved.agent_id === caller.id) return { row: caller, taskId };
+  const [row] = await repo.findTreeNodesByIds([resolved.agent_id]);
+  return row === undefined ? { error: `No agent at ${address}`, status: 404 } : { row, taskId };
+}
+
+/** A background task's view: breadcrumbs through its owner and the task alone (no children). */
+function taskView(
+  base: Pick<AgentTreeView, 'root_agent_id' | 'caller_path' | 'node_path'>,
+  owner: Row,
+  taskId: string,
+  address: string
+): AgentTreeView | ServiceError {
+  const entries = listedBackgroundTasks(owner).filter((entry) => entry.address === taskId);
+  const [task] = backgroundTaskNodes([{ ...owner, backgroundTasks: entries }]);
+  if (task === undefined)
+    return { error: `No agent or background task at ${address}`, status: 404 };
+  const crumb: TreePathEntry = {
+    agent_id: task.agent_id,
+    path: task.path,
+    goal: task.goal,
+    status: task.status,
+    depth: task.depth,
+  };
+  return {
+    ...base,
+    node_path: [...base.node_path, crumb],
+    nodes: [task],
+    next_cursor: null,
+    sibling_next_cursor: null,
+  };
 }
 
 async function searchMatches(
@@ -255,8 +290,9 @@ export async function getAgentTreeView(
   if (userId !== undefined && caller.userId !== userId) {
     return { error: 'Agent not found', status: 404 };
   }
-  const node = await resolveNode(caller, query.node);
-  if ('error' in node) return node;
+  const resolved = await resolveNode(caller, query.node);
+  if ('error' in resolved) return resolved;
+  const node = resolved.row;
   const after = query.cursor !== undefined ? decodeCursor(query.cursor) : undefined;
   if (after === null) return { error: 'Invalid cursor', status: 400 };
 
@@ -272,6 +308,9 @@ export async function getAgentTreeView(
   if (query.q !== undefined || query.path_prefix !== undefined) {
     const matches = await searchMatches(rootAgentId, caller.userId, query, known);
     return { ...base, nodes: [], next_cursor: null, sibling_next_cursor: null, matches };
+  }
+  if (resolved.taskId !== null) {
+    return taskView(base, node, resolved.taskId, query.node ?? node.id);
   }
 
   const listed = new Map<string, Row>();

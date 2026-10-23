@@ -25,7 +25,6 @@ import {
   type Fixture,
   createFixture,
   deleteFixture,
-  getTree,
   getView,
   idsOf,
   same,
@@ -326,8 +325,15 @@ test('GET /:id/tree — paths, path nodes and background tasks (running and fini
     const byPath = await getView(fx.userId, ids.aKid, { node: '/root/outreach', depth: '2' });
     assert(byPath.node_path.at(-1)?.agent_id === ids.outreach, 'node accepts a path');
     assert(idsOf(byPath.nodes).includes(ids.aKid), 'path node expands');
-    const taskNode = await getTree(fx.userId, ids.aKid, { node: '/root/outreach/scan' });
-    assertStatus(taskNode.status, 400, taskNode.data);
+    // A task address lists the task itself (a running leaf), not an error.
+    const taskNode = await getView(fx.userId, ids.aKid, { node: '/root/outreach/scan' });
+    assert(
+      same(
+        taskNode.nodes.map((node) => [node.agent_id, node.status, node.parent_agent_id]),
+        [['/root/outreach/scan', 'running', ids.outreach]]
+      ) && taskNode.node_path.at(-1)?.agent_id === '/root/outreach/scan',
+      `task node view, got ${JSON.stringify(taskNode)}`
+    );
 
     const prefix = await getView(fx.userId, ids.root, { path_prefix: '/root/outreach' });
     assert(
