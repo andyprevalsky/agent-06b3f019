@@ -6573,7 +6573,7 @@ async def test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone():
 
 
 def test_cut_off_recovery_limits_model_keys_and_cache_restart():
-    from providers.fast_cache.rose_cache import accumulate_chunk, empty_response
+    from providers.demo_cache.rose_cache import accumulate_chunk, empty_response
     from providers.rose.truncation import escalated_max_tokens, model_key, needs_result
 
     assert escalated_max_tokens(2048) == 16000

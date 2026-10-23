@@ -96,7 +96,7 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const { agentFastMode } = await import('../../providers/fastCacheStore');
+  const { agentFastMode } = await import('../../providers/demoCacheStore');
   const fastMode = await agentFastMode(agent_id);
   // Codex proxy is DEMO cache replay — independent of the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;

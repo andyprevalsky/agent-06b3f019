@@ -44,7 +44,7 @@ export BENCHMARK_FAST_MODE_CACHE=false
 # received an agent ID. Force run.sh's idempotent schema preflight onto the
 # workspace Postgres instead, and clear any inherited remote override so the
 # isolation contract cannot be bypassed accidentally.
-unset FAST_MODE_CACHE_DATABASE_URL
+unset FAST_MODE_CACHE_DATABASE_URL DEMO_CACHE_DATABASE_URL
 export FAST_MODE_CACHE_USE_LOCAL=1
 # Hosted AgentCard onboarding requires an allowlisted HTTPS callback. The local
 # lifecycle benchmark never follows this URL—it completes the sandbox fixture

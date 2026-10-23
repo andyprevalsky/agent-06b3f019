@@ -772,7 +772,7 @@ def build_browser_task_prompt(goal: str) -> str:
 # Internal-only suffix that splits a model's Fast-Mode replays from its paid
 # calls in the usage ledger. It contains NUL so it can never collide with a real
 # model name, and it must NEVER escape into an emitted usage row.
-_FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+_DEMO_CACHE_LEDGER_MARKER = "\x00fast_cache"
 _CACHE_SEQUENCE_LEDGER_MARKER = "\x00cache_sequence:"
 
 
@@ -812,7 +812,7 @@ def accumulate_model_usage(
     model = str(actual_model or "")
     # NUL can never occur in a model name, so this cannot collide with a real
     # model whose name happens to end in the marker text.
-    key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
+    key = f"{model}{_DEMO_CACHE_LEDGER_MARKER}" if from_fast_cache else model
     sequence_id = str(cache_sequence_id or "").strip()
     if sequence_id:
         key = (
@@ -882,7 +882,7 @@ def build_browser_llm_usage_items(
             # Strip internal markers defensively so they can never reach a
             # usage row, even when a test or legacy caller constructs the
             # ledger without going through `accumulate_model_usage`.
-            model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+            model = str(ledger_key).split(_DEMO_CACHE_LEDGER_MARKER, 1)[0]
             model = model.split(_CACHE_SEQUENCE_LEDGER_MARKER, 1)[0]
         else:
             model = str(raw_model)
@@ -991,7 +991,7 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
                     "provider": item.get("provider", ""),
                     "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
-                    # Propagate fast-cache replay so replayed browser
+                    # Propagate demo-cache replay so replayed browser
                     # steps bill $0 instead of their replayed tokens.
                     "from_fast_cache": item.get("from_fast_cache", False),
                     **(

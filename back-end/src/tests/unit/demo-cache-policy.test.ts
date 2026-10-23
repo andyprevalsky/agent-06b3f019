@@ -18,7 +18,7 @@ import {
 import {
   OAI_DEMO_CHILD_GOAL_PREFIX,
   OAI_DEMO_ROOT_GOAL_PREFIX,
-} from '../../providers/fastCacheNormalizeOaiDemo';
+} from '../../providers/demoCacheNormalizeOaiDemo';
 
 let passed = 0;
 const failures: string[] = [];
@@ -69,7 +69,7 @@ test('demoCacheAllowed is true for DEMO root / bound child without a button flag
 });
 
 test('agentFastMode source uses demoCacheAllowed not the button column', () => {
-  const store = readFileSync(join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'), 'utf8');
+  const store = readFileSync(join(process.cwd(), 'src', 'providers', 'demoCacheStore.ts'), 'utf8');
   assert.ok(
     store.includes('demoCacheAllowed'),
     'agentFastMode must gate enabled via demoCacheAllowed'

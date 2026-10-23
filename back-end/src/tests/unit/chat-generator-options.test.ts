@@ -4,7 +4,7 @@ import assert from 'node:assert';
 import { buildGeneratorCompletionOptions } from '../../providers/chat/generatorLlm';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import { createStreamingCompletion } from '../../providers/rose';
-import { contentKey } from '../../providers/fastCacheNormalizeKeys';
+import { contentKey } from '../../providers/demoCacheNormalizeKeys';
 
 async function run(): Promise<void> {
   const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');

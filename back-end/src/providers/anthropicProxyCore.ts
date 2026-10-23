@@ -1,5 +1,5 @@
-import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './demoCacheNormalizeConstants';
+import { stripSecrets } from './demoCacheNormalizeCore';
 
 /** Headers we forward upstream (auth + anthropic protocol headers). */
 export const FORWARD_REQUEST_HEADERS = [

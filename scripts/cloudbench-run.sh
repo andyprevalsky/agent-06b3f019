@@ -519,14 +519,14 @@ resolve_task_gate() {
     done <<< "$task_env_output"
     return 0
 }
-# Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
+# DEMO cache route. Only demo_cache:on tasks replay the frozen shared
 # cache through the production pooler; every other guest keeps the cache in its
 # isolated local DB (as local isolated stacks already do), so a LIVE fleet holds
 # no production pooler client slots for the cache. Infra probes never run their
 # sampled task and always stay local. The local route also blanks any inherited
 # FAST_MODE_CACHE_DATABASE_URL, which run.sh would otherwise prefer.
 STACK_CACHE_ENV=()
-resolve_fast_cache_route() {
+resolve_demo_cache_route() {
     local cache_python cache_status
     STACK_CACHE_ENV=()
     if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
@@ -535,10 +535,10 @@ resolve_fast_cache_route() {
     fi
     cache_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
     if [ -z "$cache_python" ]; then
-        echo "[cloudbench] FATAL: no Python interpreter is available for Fast Mode cache routing" >&2
+        echo "[cloudbench] FATAL: no Python interpreter is available for DEMO cache routing" >&2
         return 1
     fi
-    "$cache_python" "$CATALOG_SCRIPT" needs-shared-fast-cache \
+    "$cache_python" "$CATALOG_SCRIPT" needs-shared-demo-cache \
         "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
     cache_status=$?
     case "$cache_status" in
@@ -550,14 +550,14 @@ resolve_fast_cache_route() {
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=0" "FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
             # Same write policy as local isolated stacks: a shared-cache miss
             # fails loudly instead of calling a live model.
-            "$cache_python" "$CATALOG_SCRIPT" shared-fast-cache-read-only \
+            "$cache_python" "$CATALOG_SCRIPT" shared-demo-cache-read-only \
                 "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
             cache_status=$?
             case "$cache_status" in
                 0) STACK_CACHE_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1") ;;
                 10) ;;
                 *)
-                    echo "[cloudbench] FATAL: Fast Mode cache write policy failed (exit $cache_status)" >&2
+                    echo "[cloudbench] FATAL: DEMO cache write policy failed (exit $cache_status)" >&2
                     return "$cache_status"
                     ;;
             esac
@@ -566,7 +566,7 @@ resolve_fast_cache_route() {
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
             ;;
         *)
-            echo "[cloudbench] FATAL: Fast Mode cache routing failed (exit $cache_status)" >&2
+            echo "[cloudbench] FATAL: DEMO cache routing failed (exit $cache_status)" >&2
             return "$cache_status"
             ;;
     esac
@@ -625,7 +625,7 @@ TASK_WORKER_EXPORTS=""
 
 if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
     resolve_task_gate || exit $?
-    resolve_fast_cache_route || exit $?
+    resolve_demo_cache_route || exit $?
     TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
     if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
         for entry in "${TASK_WORKER_ENV[@]}"; do
@@ -864,10 +864,10 @@ task_gate_status=$?
 if [ "$task_gate_status" -ne 0 ]; then
     finish "$task_gate_status"
 fi
-resolve_fast_cache_route
-fast_cache_route_status=$?
-if [ "$fast_cache_route_status" -ne 0 ]; then
-    finish "$fast_cache_route_status"
+resolve_demo_cache_route
+demo_cache_route_status=$?
+if [ "$demo_cache_route_status" -ne 0 ]; then
+    finish "$demo_cache_route_status"
 fi
 TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
 
@@ -1571,6 +1571,7 @@ if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
     # evaluation path, including real provider calls when its cache misses.
     BENCH_HARNESS_ENV+=(
         -u FAST_MODE_CACHE_DISABLE_WRITE_THROUGH
+        -u DEMO_CACHE_DISABLE_WRITE_THROUGH
         -u BENCHMARK_DEMO_CACHE_READ_ONLY
         -u CLOUDBENCH_FAST_CACHE_READ_ONLY
     )

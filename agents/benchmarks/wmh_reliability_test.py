@@ -22,7 +22,7 @@ def _grounded_retry_control(
     import json
 
     from benchmarks import wmh_rose_provider as wmh
-    from providers.fast_cache import client as cache
+    from providers.demo_cache import client as cache
     from providers.rose import errors
 
     calls, captures, sleeps, chunks = [], [], [], []
@@ -399,7 +399,7 @@ def test_actual_rose_failure_retains_foundry_retry_floor_on_terminal_waterfall(m
 
     from benchmarks import wmh_completion_retry as policy
     from benchmarks import wmh_rose_provider as wmh
-    from providers.fast_cache import client as cache
+    from providers.demo_cache import client as cache
     from providers.rose import client as rose
     from providers.rose import foundry
     from providers.rose.errors import RoseAllFailed, RoseError, RoseServerError, RoseStepError
@@ -555,7 +555,7 @@ def test_runtime_identity_changes_without_rewriting_base_policy():
 
 
 def test_opt_in_route_cache_keys_are_distinct_and_default_material_is_unchanged():
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.rose_cache import request_key_material
 
     request = {"pool": "rose-1-flash", "messages": [{"role": "user", "content": "offline"}]}
     base = request_key_material(request)
@@ -620,7 +620,7 @@ def test_actual_message_scheduling_keeps_real_deadlines_and_removes_wmh_attempt_
 )
 def test_flash_routes_and_discards_abandoned_partial_reply(monkeypatch, prefer_azure, fail_azure, recover, expected):
     import providers.rose.client as module
-    from providers.fast_cache import client as cache
+    from providers.demo_cache import client as cache
 
     attempts = []
     monkeypatch.setattr(cache, "ensure_context", AsyncMock(return_value=None))
@@ -758,7 +758,7 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests/blackbox"))
     from _test_utils import set_mock_handler, teardown_mock
 
-    from providers.fast_cache import client as cache
+    from providers.demo_cache import client as cache
 
     body = []
 
@@ -798,8 +798,8 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
 @pytest.mark.parametrize("accepted", [False, True])
 def test_store_event_matches_actual_cache_write_result(monkeypatch, accepted):
     import providers.rose.client as module
-    from providers.fast_cache import client as cache
-    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+    from providers.demo_cache import client as cache
+    from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
 
     events = []
     monkeypatch.setattr(module.logger, "info", lambda event, **kw: events.append(event))
@@ -815,7 +815,7 @@ def test_store_event_matches_actual_cache_write_result(monkeypatch, accepted):
     monkeypatch.setattr(client, "_complete_impl", stream)
 
     async def run():
-        token = set_context(FastCacheContext(enabled=False, goal="offline", write_enabled=True))
+        token = set_context(DemoCacheContext(enabled=False, goal="offline", write_enabled=True))
         try:
             await client.collect(pool="rose-1-flash", messages=[])
         finally:
@@ -827,7 +827,7 @@ def test_store_event_matches_actual_cache_write_result(monkeypatch, accepted):
 
 
 def test_json_mode_is_bound_in_execution_and_cache_identity():
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.rose_cache import request_key_material
 
     config = {
         "inference_pool": "rose-1-flash",

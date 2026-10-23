@@ -436,7 +436,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
      `CHANGED_BACKEND` is empty)
    - Step 4b: front-end blackbox + structural tests under coverage (skip if
      `CHANGED_FRONTEND` is empty)
-   - Step 4g: agents blackbox + fast-cache + unit tests under coverage (skip if
+   - Step 4g: agents blackbox + DEMO cache + unit tests under coverage (skip if
      `CHANGED_AGENTS` is empty)
    - Step 4m-coverage: mac-app blackbox tests under coverage (skip if
      `CHANGED_MAC_APP` is empty)
@@ -761,7 +761,7 @@ cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-p
       bash scripts/run-coverage.sh
 ```
 
-This one command runs every agents blackbox plus fast-cache and unit tests under
+This one command runs every agents blackbox plus DEMO cache and unit tests under
 coverage. Every test must pass and coverage must meet `agents/pyproject.toml`.
 Never loosen the threshold or rerun the blackbox suite separately.
 

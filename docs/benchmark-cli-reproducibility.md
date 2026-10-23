@@ -32,7 +32,7 @@ Preserve the complete authoritative backend `.env` as a credential READ source.
 Use `scripts/prepare-deploy-worktree.sh` to hydrate its selected source-workspace
 links. Never overwrite that file with local coverage or benchmark database URLs.
 Set local runtime database URLs in the child environment, covering all of
-DATABASE_URL, DIRECT_URL, DIRECT_DATABASE_URL, FAST_MODE_CACHE_DATABASE_URL and
+DATABASE_URL, DIRECT_URL, DIRECT_DATABASE_URL, DEMO_CACHE_DATABASE_URL (legacy FAST_MODE_CACHE_DATABASE_URL) and
 BLACKBOX_TEST_DATABASE_URL as required by the canonical isolated stack.
 
 `seed-local.ts` and `sync-andy-claude-tokens-from-prod.ts` share the READ-source

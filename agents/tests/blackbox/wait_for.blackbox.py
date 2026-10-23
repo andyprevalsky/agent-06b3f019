@@ -298,7 +298,7 @@ class _WFInstance:
         self._cost_limit_reached = cost_limit_reached
         self.fast_mode_cache_enabled = fast_mode_cache_enabled
         self.goal = goal
-        self.fast_cache_goal = None
+        self.demo_cache_goal = None
         self.root_goal = root_goal
         self.context = list(context or [])
         self.handled = []

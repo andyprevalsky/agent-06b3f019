@@ -234,7 +234,7 @@ birth before any exact-owner signal. Audit retention is separate from liveness.
 These are 50 independent one-task controllers, each retaining the task's 50
 first-level general-purpose children: 2,500, with existing explore allowances unchanged.
 They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
-admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
+admitted by runtime replay policy with `demo_cache:on`; task agents stay read-only
 and refuse live fallback on misses or unresolved context. The separate harness
 keeps genuine evaluation, including declared LLM judges that may call providers.
 Do not claim a recorded hit for existing cold-terminal passthrough, total zero

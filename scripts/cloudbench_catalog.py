@@ -176,12 +176,12 @@ def selected_tasks_require_gate_type(
     )
 
 
-def selected_tasks_need_shared_fast_cache(
+def selected_tasks_need_shared_demo_cache(
     catalog_path: Path, task_names: Iterable[str]
 ) -> bool:
-    """Return whether a selected task replays the shared frozen Fast Mode cache.
+    """Return whether a selected task replays the shared frozen DEMO cache.
 
-    Only ``fast_cache: on`` tasks read the shared (production pooler) cache;
+    Only ``demo_cache: on`` tasks read the shared (production pooler) cache;
     every other cloud guest keeps its cache in the isolated local database.
     """
     names = list(task_names)
@@ -189,20 +189,20 @@ def selected_tasks_need_shared_fast_cache(
     missing = [name for name in names if name not in by_name]
     if missing:
         raise CatalogError(f"unknown benchmark task(s): {', '.join(missing)}")
-    return any(by_name[name].get("fast_cache") == "on" for name in names)
+    return any(by_name[name].get("demo_cache", by_name[name].get("fast_cache")) == "on" for name in names)
 
 
-def selected_tasks_read_shared_fast_cache_only(
+def selected_tasks_read_shared_demo_cache_only(
     catalog_path: Path, task_names: Iterable[str]
 ) -> bool:
-    """Return whether the shared Fast Mode cache must be strict read-only.
+    """Return whether the shared DEMO cache must be strict read-only.
 
     Mirrors ``agents/benchmarks/local.py`` isolated stacks: a shared-cache replay
     never writes through, so a miss fails loudly instead of calling a live model.
     The google-oauth DEMO alone keeps its deliberate live seed run.
     """
     names = list(task_names)
-    return selected_tasks_need_shared_fast_cache(catalog_path, names) and set(names) != {"google-oauth"}
+    return selected_tasks_need_shared_demo_cache(catalog_path, names) and set(names) != {"google-oauth"}
 
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -312,13 +312,13 @@ def _build_parser() -> argparse.ArgumentParser:
     requires_gate.add_argument("gate_type")
     requires_gate.add_argument("tasks", nargs="+")
     shared_cache = subparsers.add_parser(
-        "needs-shared-fast-cache",
-        help="exit 0 when any requested task declares fast_cache: on",
+        "needs-shared-demo-cache",
+        help="exit 0 when any requested task declares demo_cache: on",
     )
     shared_cache.add_argument("catalog", type=Path)
     shared_cache.add_argument("tasks", nargs="+")
     shared_read_only = subparsers.add_parser(
-        "shared-fast-cache-read-only",
+        "shared-demo-cache-read-only",
         help="exit 0 when the requested tasks must replay the shared cache strictly read-only",
     )
     shared_read_only.add_argument("catalog", type=Path)
@@ -348,12 +348,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if selected_tasks_require_gate_type(
                 args.catalog, args.tasks, args.gate_type
             ) else 10
-        if args.command == "needs-shared-fast-cache":
-            return 0 if selected_tasks_need_shared_fast_cache(
+        if args.command == "needs-shared-demo-cache":
+            return 0 if selected_tasks_need_shared_demo_cache(
                 args.catalog, args.tasks
             ) else 10
-        if args.command == "shared-fast-cache-read-only":
-            return 0 if selected_tasks_read_shared_fast_cache_only(
+        if args.command == "shared-demo-cache-read-only":
+            return 0 if selected_tasks_read_shared_demo_cache_only(
                 args.catalog, args.tasks
             ) else 10
         if args.command == "task-env":

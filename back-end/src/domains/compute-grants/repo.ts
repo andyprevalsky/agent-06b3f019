@@ -336,7 +336,7 @@ export { chromeSameSiteToString as chromeSameSiteToCdp } from '../../providers/b
  * queries `Integration` exclusively. Rather than teach that path about new
  * tables -- and own a dual-source selection race forever -- a minted grant is
  * written back in the BYTE-IDENTICAL envelope the existing reader already
- * consumes. Pooling, `rateLimitedUntil`, lineage leases and fast-cache affinity
+ * consumes. Pooling, `rateLimitedUntil`, lineage leases and demo-cache affinity
  * therefore keep working with zero changes.
  *
  * Multi-account is possible because `Integration` is now keyed by

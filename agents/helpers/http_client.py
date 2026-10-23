@@ -10,7 +10,7 @@ parsed once per worker process instead of once per request. Callers pass
 ``timeout=`` / ``follow_redirects=`` per-request (httpx supports both on the
 request call), so behaviour is unchanged — only the client/SSL setup is shared.
 
-This mirrors the already-shared clients in ``providers/fast_cache/client.py``
+This mirrors the already-shared clients in ``providers/demo_cache/client.py``
 (``_shared_client``) and ``helpers/messages.py`` (``_broadcast_client``); this
 module generalises the pattern for the tool/domain repos.
 """

@@ -98,8 +98,8 @@ for name in wanted:
     if "fleet-concurrency" not in tags:
         print(f"❌ {name} must be tagged fleet-concurrency", file=sys.stderr)
         sys.exit(2)
-    if str(t.get("fast_cache") or "").lower() != "on":
-        print(f"❌ {name} must set fast_cache:on", file=sys.stderr)
+    if str(t.get("demo_cache", t.get("fast_cache")) or "").lower() != "on":
+        print(f"❌ {name} must set demo_cache:on", file=sys.stderr)
         sys.exit(2)
     if int(t.get("min_agent_count") or 0) >= 50:
         print(f"❌ {name} is too heavy for concurrency e2e", file=sys.stderr)

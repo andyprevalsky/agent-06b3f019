@@ -67,7 +67,7 @@ import dataRouter from './domains/data/routes';
 import externalHttpRouter from './domains/external-http/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
-import fastCacheRouter from './domains/fast-cache/routes';
+import demoCacheRouter from './domains/demo-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
@@ -81,7 +81,7 @@ import { installGrantRecovery } from './domains/compute-grants/service';
 import { releaseAllConnectSessions } from './domains/compute-grants/connectSession.shutdown';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
-import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
+import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
@@ -590,7 +590,7 @@ app.use('/api/purchases', purchasesRouter);
 app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use(AUTH_TEST_SITE_BASE_PATH, authTestSiteRouter); // Dev-only hosted sign-in site for auth benchmarks
-app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
+app.use('/api/fast-cache', demoCacheRouter); // DEMO cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)

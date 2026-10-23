@@ -68,7 +68,7 @@ function liveLeaseCutoff(now: Date): Date {
   return new Date(now.getTime() - LINEAGE_LEASE_TTL_MS);
 }
 
-function normalizeFastCacheAffinityKey(key: string | undefined): string | null {
+function normalizeDemoCacheAffinityKey(key: string | undefined): string | null {
   const trimmed = key?.trim() ?? '';
   return trimmed === '' ? null : trimmed;
 }
@@ -351,7 +351,7 @@ async function selectFirstUsableWithLineage(
   return null;
 }
 
-async function readFastCacheAffinity(
+async function readDemoCacheAffinity(
   affinityKey: string | null
 ): Promise<ComputeCodeCredentialType | null> {
   if (affinityKey === null) return null;
@@ -360,7 +360,7 @@ async function readFastCacheAffinity(
   return null;
 }
 
-async function persistOrReadFastCacheAffinity(
+async function persistOrReadDemoCacheAffinity(
   affinityKey: string | null,
   userId: string,
   tokenType: ComputeCodeCredentialType
@@ -372,9 +372,9 @@ async function persistOrReadFastCacheAffinity(
       skipDuplicates: true,
     });
   } catch (error) {
-    log.error('Unexpected error persisting fast-cache affinity', { affinityKey, error });
+    log.error('Unexpected error persisting demo-cache affinity', { affinityKey, error });
   }
-  const existing = await readFastCacheAffinity(affinityKey);
+  const existing = await readDemoCacheAffinity(affinityKey);
   return existing ?? tokenType;
 }
 
@@ -423,9 +423,9 @@ export async function fetchComputeTokenForUser(
   userId: string,
   options?: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions
 ): Promise<ComputeCodeCredentialResult | null> {
-  const fastCacheAffinityKey = normalizeFastCacheAffinityKey(options?.fastCacheAffinityKey);
+  const fastCacheAffinityKey = normalizeDemoCacheAffinityKey(options?.fastCacheAffinityKey);
   const requestedTokenType = options?.tokenType ?? null;
-  const pinnedTokenType = requestedTokenType ?? (await readFastCacheAffinity(fastCacheAffinityKey));
+  const pinnedTokenType = requestedTokenType ?? (await readDemoCacheAffinity(fastCacheAffinityKey));
   const lineage =
     options?.lineageKey && options.lineageKey.trim() !== ''
       ? {
@@ -465,7 +465,7 @@ export async function fetchComputeTokenForUser(
       );
       if (userToken) {
         if (requestedTokenType !== null) return userToken;
-        const affinityType = await persistOrReadFastCacheAffinity(
+        const affinityType = await persistOrReadDemoCacheAffinity(
           fastCacheAffinityKey,
           userId,
           userToken.type
@@ -500,7 +500,7 @@ export async function fetchComputeTokenForUser(
     );
     if (!poolToken) return null;
     if (requestedTokenType !== null) return poolToken;
-    const affinityType = await persistOrReadFastCacheAffinity(
+    const affinityType = await persistOrReadDemoCacheAffinity(
       fastCacheAffinityKey,
       userId,
       poolToken.type

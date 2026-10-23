@@ -56,7 +56,7 @@
     "src/domains/compute-grants/connectSession.types.ts",
     "src/domains/credential-propagation/types.ts",
     "src/domains/download-telemetry/types.ts",
-    "src/domains/fast-cache/types.ts",
+    "src/domains/demo-cache/types.ts",
     "src/domains/slack-auto-rca/types.ts",
     "src/domains/whatsapp-webhook/types.ts",
     "src/domains/world-models/types.ts",

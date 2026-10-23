@@ -93,7 +93,7 @@ echo "PASS 4 — pg_restore surfaces stderr (partial-restore failures are visibl
 # Same class as cases 1-3: the fast-restore path must be equivalent to a clean
 # seed. pg_restore gets that from `--clean --if-exists`, but a plain-SQL dump
 # replays bare CREATEs, so any object the caller already made collides and
-# ON_ERROR_STOP=1 fails the whole restore. run.sh ensures the Fast Mode cache
+# ON_ERROR_STOP=1 fails the whole restore. run.sh ensures the DEMO cache
 # table BEFORE the restore, which made a canonical base die with
 # `relation "FastModeCacheEntry" already exists` and refuse to boot.
 grep -q 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;' "$RESTORE_HELPER" \
@@ -114,7 +114,7 @@ echo "PASS 5 — plain-SQL base image restores into a reset schema, still fail-c
 # The reset in case 5 drops whatever the dump does not carry, so a dump
 # published before a table existed would otherwise leave it missing at runtime.
 grep -q 'ensure-fast-mode-cache-schema.ts' <<<"$RESTORE_BRANCH" \
-  || fail "fast-restore branch must re-ensure the Fast Mode cache schema after a reset restore"
-echo "PASS 6 — fast-restore re-ensures pre-restore schema (Fast Mode cache)"
+  || fail "fast-restore branch must re-ensure the DEMO cache schema after a reset restore"
+echo "PASS 6 — fast-restore re-ensures pre-restore schema (DEMO cache)"
 
 echo "ALL PASS: cloudbench restore readiness"

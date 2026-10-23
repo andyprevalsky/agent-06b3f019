@@ -1,6 +1,6 @@
-import { maybeDumpFastCacheRequest } from './fastCacheRequestDump';
-import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { maybeDumpDemoCacheRequest } from './demoCacheRequestDump';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './demoCacheNormalizeConstants';
+import { stripSecrets } from './demoCacheNormalizeCore';
 
 const CACHEABLE_CODEX_RESPONSE_PATH = '/backend-api/codex/responses';
 const traceOrdinalCounters = new Map<string, number>();
@@ -361,7 +361,7 @@ export async function resolveCodex(
       : null;
   const ordinal = cacheable ? (traceContext.ordinal ?? ordinalReservation?.ordinal ?? null) : null;
   const key = ordinal !== null ? codeAgentSlotKey('codex', traceHash, ordinal) : null;
-  maybeDumpFastCacheRequest(traceHash, key, upstreamBody);
+  maybeDumpDemoCacheRequest(traceHash, key, upstreamBody);
   let consumedReservedOrdinal = false;
 
   try {

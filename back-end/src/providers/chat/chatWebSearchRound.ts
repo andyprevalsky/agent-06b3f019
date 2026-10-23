@@ -16,7 +16,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { createMessage } from '../messages';
-import { agentFastMode } from '../fastCacheStore';
+import { agentFastMode } from '../demoCacheStore';
 import { mapWithConcurrency } from '../concurrency';
 import { createLogger } from '../logger';
 import { executeWebSearch, webSearchErrorResult } from './chatTools';

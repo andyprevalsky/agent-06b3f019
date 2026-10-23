@@ -594,9 +594,9 @@ def _grade_live_x_hello_world_post(
 
 def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
     """Resolve Fast Mode without overriding a task's side-effect safety contract."""
-    if task.fast_cache == "off":
+    if task.demo_cache == "off":
         return False
-    if task.fast_cache == "on":
+    if task.demo_cache == "on":
         return True
     return _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
 
@@ -3048,7 +3048,7 @@ async def create_agent(
     model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
     # Fast Mode trees (mass-agent) were recorded against Ultra. Retargeting
     # them to a speed pool invalidates the July cache (missing title / tools).
-    if model_override and task.fast_cache != "on":
+    if model_override and task.demo_cache != "on":
         body["model"] = model_override
     elif task.model:
         body["model"] = task.model

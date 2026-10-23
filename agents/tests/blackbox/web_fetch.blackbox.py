@@ -703,7 +703,7 @@ async def test_download_and_attach_skips_failed_downloads():
     assert "bad.pdf" not in names
 
 
-async def test_download_and_attach_fast_cache_hit_skips_external_download():
+async def test_download_and_attach_demo_cache_hit_skips_external_download():
     """Fast Mode reuses cached file bytes instead of hitting the original file URL."""
     uploaded: list[dict] = []
 
@@ -720,10 +720,10 @@ async def test_download_and_attach_fast_cache_hit_skips_external_download():
     with (
         patch("temporalio.activity.heartbeat"),
         patch(
-            "providers.fast_cache.client.cache_get_record",
+            "providers.demo_cache.client.cache_get_record",
             new=AsyncMock(return_value={"hit": True, "value": {"size_bytes": 12}, "blobPath": "cache/file"}),
         ) as get_record,
-        patch("providers.fast_cache.blob_store.download_blob", new=AsyncMock(return_value=b"CACHED-BYTES")),
+        patch("providers.demo_cache.blob_store.download_blob", new=AsyncMock(return_value=b"CACHED-BYTES")),
         patch(
             "domains.web_fetch.service.download_files_batch",
             new=AsyncMock(side_effect=AssertionError("external download should be skipped")),
@@ -745,7 +745,7 @@ async def test_download_and_attach_fast_cache_hit_skips_external_download():
     get_record.assert_awaited_once()
 
 
-async def test_download_and_attach_fast_cache_miss_stores_downloaded_bytes():
+async def test_download_and_attach_demo_cache_miss_stores_downloaded_bytes():
     """Fast Mode stores downloaded file bytes in blob storage and writes a file cache row."""
 
     async def fake_download(urls):
@@ -764,11 +764,11 @@ async def test_download_and_attach_fast_cache_miss_stores_downloaded_bytes():
     with (
         patch("temporalio.activity.heartbeat"),
         patch(
-            "providers.fast_cache.client.cache_get_record",
+            "providers.demo_cache.client.cache_get_record",
             new=AsyncMock(return_value={"hit": False, "value": None, "blobPath": None}),
         ),
-        patch("providers.fast_cache.client.cache_set", new=cache_set),
-        patch("providers.fast_cache.blob_store.upload_blob", new=AsyncMock(return_value=True)) as upload_blob,
+        patch("providers.demo_cache.client.cache_set", new=cache_set),
+        patch("providers.demo_cache.blob_store.upload_blob", new=AsyncMock(return_value=True)) as upload_blob,
         patch("domains.web_fetch.service.download_files_batch", new=AsyncMock(side_effect=fake_download)),
         patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
     ):
@@ -996,9 +996,9 @@ async def test_handler_reports_parallel_provider_when_fallback_succeeds():
     assert out["usage"]["service"][0]["provider"] == "Parallel Extract"
 
 
-async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
+async def test_handler_demo_cache_scrape_hit_has_no_service_cost():
     """Fast Mode scrape cache hits should not be billed as live scrape/extract calls."""
-    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, WebFetchManager
+    from domains.web_fetch.handler import DEMO_CACHE_HIT_FIELD, WebFetchManager
 
     calls = []
 
@@ -1010,7 +1010,7 @@ async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
                 "markdown": "cached page text",
                 "links": [],
                 "metadata": {"provider": "Firecrawl scrape"},
-                FAST_CACHE_HIT_FIELD: True,
+                DEMO_CACHE_HIT_FIELD: True,
             }
         if name == "summarize_and_filter_links":
             return {"summary": "Cached summary.", "files_to_download": [], "usage": {}, "summarized": True}
@@ -1028,12 +1028,12 @@ async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
     assert out["usage"]["service"] == []
     finished = [call for call in calls if call["activity"] == "post_agent_message"][-1]
     assert "**Cost:** $0.0000" in finished["args"][1]
-    assert FAST_CACHE_HIT_FIELD not in finished["args"][1]
+    assert DEMO_CACHE_HIT_FIELD not in finished["args"][1]
 
 
-async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled():
+async def test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled():
     """Benchmark fallback mode treats unavailable WMH scrape observations as cache misses."""
-    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, web_fetch_activity
+    from domains.web_fetch.handler import DEMO_CACHE_HIT_FIELD, web_fetch_activity
 
     cached = {
         "markdown": '{"result_unavailable": true}',
@@ -1053,8 +1053,8 @@ async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_e
         },
         clear=False,
     ):
-        with patch("providers.fast_cache.client.cache_get", new=AsyncMock(return_value=cached)):
-            with patch("providers.fast_cache.client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
+        with patch("providers.demo_cache.client.cache_get", new=AsyncMock(return_value=cached)):
+            with patch("providers.demo_cache.client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
                 with patch("domains.web_fetch.handler.scrape_url", new=AsyncMock(return_value=live)) as scrape:
                     result = await web_fetch_activity(
                         url="https://example.com/a",
@@ -1064,7 +1064,7 @@ async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_e
 
     scrape.assert_awaited_once_with("https://example.com/a")
     assert result == live
-    assert FAST_CACHE_HIT_FIELD not in result
+    assert DEMO_CACHE_HIT_FIELD not in result
     assert set_cache.await_count == 1
 
 
@@ -1231,9 +1231,9 @@ async def run_all_tests() -> bool:
     await r.record_async("download_no_user_returns_empty", test_download_and_attach_no_user_id_returns_empty)
     await r.record_async("download_happy_path", test_download_and_attach_happy_path)
     await r.record_async("download_skips_failed", test_download_and_attach_skips_failed_downloads)
-    await r.record_async("download_fast_cache_hit", test_download_and_attach_fast_cache_hit_skips_external_download)
+    await r.record_async("download_fast_cache_hit", test_download_and_attach_demo_cache_hit_skips_external_download)
     await r.record_async(
-        "download_fast_cache_miss_stores", test_download_and_attach_fast_cache_miss_stores_downloaded_bytes
+        "download_demo_cache_miss_stores", test_download_and_attach_demo_cache_miss_stores_downloaded_bytes
     )
 
     # Handler
@@ -1248,10 +1248,10 @@ async def run_all_tests() -> bool:
     await r.record_async(
         "handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds
     )
-    await r.record_async("handler_fast_cache_scrape_no_cost", test_handler_fast_cache_scrape_hit_has_no_service_cost)
+    await r.record_async("handler_demo_cache_scrape_no_cost", test_handler_demo_cache_scrape_hit_has_no_service_cost)
     await r.record_async(
-        "activity_fast_cache_ignores_unavailable",
-        test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
+        "activity_demo_cache_ignores_unavailable",
+        test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled,
     )
     await r.record_async(
         "handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files

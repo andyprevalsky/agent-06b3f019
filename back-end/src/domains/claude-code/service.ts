@@ -161,7 +161,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     log.info(`GitHub access granted for ${normalizedRepoUrl}`);
   }
 
-  const { agentFastMode } = await import('../../providers/fastCacheStore');
+  const { agentFastMode } = await import('../../providers/demoCacheStore');
   const fastMode = await agentFastMode(agent_id);
   // Code-agent Anthropic/Codex proxy is DEMO cache replay — not the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;

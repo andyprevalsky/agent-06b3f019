@@ -1124,7 +1124,7 @@ def render_html(card: dict) -> str:
         timing.append(("💲 Cost", f'{e(money(cost["metered_usd"]))} agent LLM metered · {cost["n"]}/{cost["of"]} runs{unmetered}'))
     else:
         timing.append(("💲 Cost", _span("warn", "UNMETERED")))
-    timing.append(("Cache", f'agent fast-cache hit avg {cache["avg"] * 100:.0f}% · {cache["n"]}/{cache["of"]} runs'
+    timing.append(("Cache", f'agent demo-cache hit avg {cache["avg"] * 100:.0f}% · {cache["n"]}/{cache["of"]} runs'
                    if cache else _span("warn", "UNMEASURED")))
     timing.append(("LLM latency", _span("warn", "UNMEASURED")))
     out.append('<section data-section="timing"><h2>Timing · Cost</h2><dl>'
@@ -1274,7 +1274,7 @@ def render_text(card: dict) -> str:
     lines.append("Cost " + (f'{money(cost["metered_usd"])} metered ({cost["n"]}/{cost["of"]})' if cost.get("metered_usd") is not None else "UNMETERED")
                  + (" · " + "/".join(cost["unmetered"]) + " UNMETERED" if cost.get("unmetered") else ""))
     cache = exp.get("cache")
-    lines.append("Cache " + (f'agent fast-cache avg {cache["avg"] * 100:.0f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
+    lines.append("Cache " + (f'agent demo-cache avg {cache["avg"] * 100:.0f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
                  + " · LLM latency UNMEASURED")
     lines.append("Lifecycle")
     lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]

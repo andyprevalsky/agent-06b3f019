@@ -249,7 +249,7 @@ export interface StartAgentWorkflowParams {
     custom_system_prompt?: boolean;
     shared_files?: boolean;
   };
-  fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
+  fastModeCacheEnabled?: boolean; // Optional: DEMO cache (own flag, not a gate)
   memoryEnabled?: boolean; // Optional: planner memory (get_memories fork); arg #19, only sent when true
   worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   workflowId?: string; // Optional preclaimed generation-specific workflow ID

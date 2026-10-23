@@ -592,7 +592,7 @@ async def compress_context(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
 ) -> Dict:
     """Head/tail-protected context compaction.
 
@@ -646,7 +646,7 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
             compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             skip_cache_write=True,
             call_site="context_compression",
             agent_id=agent_id,
@@ -1003,7 +1003,7 @@ async def generate_completion_summary(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -1029,21 +1029,21 @@ async def generate_completion_summary(
     """
     # The Fast Cache context is task-scoped state: restore it on every exit so
     # a summary never leaks its cache identity into later work on this task.
-    fast_cache_token = None
+    demo_cache_token = None
     try:
         activity.heartbeat("Generating completion summary")
 
         # Import here to avoid circular dependency
         from helpers.llm import call_llm, convert_context_to_messages
-        from providers.fast_cache.context import (
-            FastCacheContext,
+        from providers.demo_cache.context import (
+            DemoCacheContext,
             write_through_enabled_for_user,
         )
-        from providers.fast_cache.context import (
-            reset_context as reset_fast_cache_context,
+        from providers.demo_cache.context import (
+            reset_context as reset_demo_cache_context,
         )
-        from providers.fast_cache.context import (
-            set_context as set_fast_cache_context,
+        from providers.demo_cache.context import (
+            set_context as set_demo_cache_context,
         )
         from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
 
@@ -1085,11 +1085,11 @@ Just write plain text describing what was done."""
         cache_user_id = claude_token_user_id or gpt_token_user_id
         write_through_enabled = write_through_enabled_for_user(cache_user_id)
         if goal and (fast_mode_cache_enabled or write_through_enabled):
-            from providers.fast_cache.client import resolve_soft_complete_root_goal
+            from providers.demo_cache.client import resolve_soft_complete_root_goal
 
             root_goal = await resolve_soft_complete_root_goal(agent_id, goal)
-            fast_cache_token = set_fast_cache_context(
-                FastCacheContext(
+            demo_cache_token = set_demo_cache_context(
+                DemoCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=goal,
                     base_step=fast_mode_step,
@@ -1120,7 +1120,7 @@ Just write plain text describing what was done."""
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 skip_cache_write=True,  # One-shot call — no cache reuse
                 call_site="completion_summary",
                 agent_id=agent_id,
@@ -1188,5 +1188,5 @@ Just write plain text describing what was done."""
             "tool_counts": {},
         }
     finally:
-        if fast_cache_token is not None:
-            reset_fast_cache_context(fast_cache_token)
+        if demo_cache_token is not None:
+            reset_demo_cache_context(demo_cache_token)

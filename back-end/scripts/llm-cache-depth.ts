@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 
-const url = process.env.FAST_MODE_CACHE_DATABASE_URL!;
+const url = (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL)!;
 const p = new PrismaClient({ datasources: { db: { url } } });
 
 async function main() {

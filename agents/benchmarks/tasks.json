@@ -36,7 +36,7 @@
     "runner": "agent",
     "bench": "rose-bench",
     "group": "pre-deploy",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "enforce_declared_evaluators": true,
     "description": "July OAi mass-agent Fast Mode recreation. T1–T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1–R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
     "environment": {
@@ -369,7 +369,7 @@
     "runner": "agent",
     "bench": "pipeline-e2e",
     "group": "daily",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "enforce_declared_evaluators": true,
     "deploy_category": "harness",
     "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
@@ -436,7 +436,7 @@
     "runner": "agent",
     "bench": "pipeline-e2e",
     "group": "daily",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "enforce_declared_evaluators": true,
     "deploy_category": "harness",
     "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
@@ -503,7 +503,7 @@
     "runner": "agent",
     "bench": "pipeline-e2e",
     "group": "daily",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "enforce_declared_evaluators": true,
     "deploy_category": "harness",
     "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
@@ -620,7 +620,7 @@
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
     "deploy_category": "harness",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "parallel-tool-calls",
@@ -894,7 +894,7 @@
     ],
     "group": "daily",
     "deploy_category": "harness",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "background-agent-message-smoke",
@@ -1057,7 +1057,7 @@
     ],
     "group": "pre-deploy",
     "deploy_category": "harness",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "explore-agent-mid-run-message",
@@ -1218,7 +1218,7 @@
     ],
     "group": "daily",
     "deploy_category": "harness",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "browser-agent-mid-run-message",
@@ -1378,7 +1378,7 @@
     ],
     "group": "daily",
     "deploy_category": "harness",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "grep-explore-stress",
@@ -1770,7 +1770,7 @@
     ],
     "bench": "pipeline-e2e",
     "group": "daily",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "message-person-agent-sms",
@@ -1837,7 +1837,7 @@
     ],
     "bench": "pipeline-e2e",
     "group": "daily",
-    "fast_cache": "off"
+    "demo_cache": "off"
   },
   {
     "name": "gate-subscription-free-credit",
@@ -3060,7 +3060,7 @@
       "split:cart-reauth-vs-write-lock"
     ],
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "on"
   },
   {
@@ -3172,7 +3172,7 @@
       "rca:2026-08-22-write-lock-rejected-never-closed-browser-status-chip"
     ],
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "on"
   },
   {
@@ -8302,7 +8302,7 @@
     "world_model_mode": "real",
     "deploy_category": "payment",
     "deploy_canary": true,
-    "fast_cache": "off",
+    "demo_cache": "off",
     "min_steps": {
       "browser": 3
     }
@@ -9508,7 +9508,7 @@
     "bench": "pipeline-e2e",
     "group": "daily",
     "world_model_mode": "real",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "enforce_declared_evaluators": true,
     "environment": {
       "mode": "live",
@@ -9657,7 +9657,7 @@
     "bench": "pipeline-e2e",
     "group": "daily",
     "world_model_mode": "real",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "enforce_declared_evaluators": true,
     "environment": {
       "mode": "live",
@@ -9811,7 +9811,7 @@
     "bench": "pipeline-e2e",
     "group": "daily",
     "world_model_mode": "real",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "enforce_declared_evaluators": true,
     "environment": {
       "mode": "live",
@@ -10119,7 +10119,7 @@
     "group": "daily",
     "human_time": "10min",
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Root completes; calls the controlled callee exactly once; collects full name and complete mailing address; final answer reports the exact collected facts.",
     "label_notes": "Phone harness, approval, and Vapi callee drift check.",
@@ -10236,7 +10236,7 @@
     "group": "daily",
     "human_time": "15min",
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Root completes; calls controlled merchant exactly once; orders dozen red roses; provides test card details; payment tool succeeds; final answer reports ROSE-4471 and $34.20.",
     "label_notes": "Phone and payment-tool harness drift check.",
@@ -10336,7 +10336,7 @@
     "group": "daily",
     "human_time": "10min",
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Root completes; calls controlled IVR exactly once; navigates menu with DTMF; enters tracking number via keypad; final answer reports DELIV-9012 and delivery status.",
     "label_notes": "Phone IVR/DTMF harness drift check. Source agent 308c7437-b205-45ca-aa47-0a9c6a5c5f0a.",
@@ -10476,7 +10476,7 @@
     "group": "daily",
     "human_time": "2.5h",
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Root completes; calls the Air Canada hold line exactly once; stays connected through the real 2.5-hour recorded queue, parked by wait_for_human for at least 90% of it; final answer reports ACFC-2458, $428.60, and October 2, 2027.",
     "label_notes": "Phone hold-queue harness. The wait is a real 9000s live call on recorded Air Canada queue audio, not a compressed simulation. The representative picks up only after the full hold.",
@@ -10718,7 +10718,7 @@
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "yes",
     "label_eval": "Single unresolved payment-card request for one 16oz iced vanilla bean shakerato with almond or oat milk; guest checkout; no order placed.",
     "source": [
@@ -11228,7 +11228,7 @@
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "yes",
     "label_eval": "Single unresolved Eventim US payment-card request for one upcoming 1015 Folsom ticket; no purchase completed.",
     "label_notes": "Artist/date intentionally flexible so the bench survives after a specific show date passes. Provenance: prod cost-cap agent wrecked on antibot after Eventim/AXS.",
@@ -11943,7 +11943,7 @@
       "scratchpad": "Every data source, integration, app, website, and browser workspace is connected and authenticated by default in this simulated world, including services not listed in structured state. This includes Gmail, SMS, Slack, iMessage, WhatsApp, Google Drive and Docs, Brex, and investor application portals. Do not infer a disconnected source, missing login, or unavailable workspace from an absent per-service entry; only an explicit state change can disconnect one. Use the stated account identities for actions that require a sender: Gmail is tamara@roselabs.ai and SMS is +12028803603. Connectivity does not itself establish prior correspondence, an application, investor interest, a commitment, or deposited funds."
     },
     "human_time": "3mo",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; the Brex account for Rose Labs shows at least $5,000,000 received, traceable to grounded investor commitments.",
     "label_notes": "Long-horizon capability bench. The initial timeout is 10 minutes; only raise it in explicit 10-minute increments approved by the user. Never edit the prompt or judge to manufacture a pass.",
@@ -12132,7 +12132,7 @@
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Memory OFF baseline. Same prompt as browser-blue-bottle-challenge-recovery, planner phase only. Expected plan: explore (find the ordering page) -> browser (order, guest checkout, stop at payment). This arm proves the task-skip is caused by memory, not by the prompt.",
     "source": [
@@ -12220,7 +12220,7 @@
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "anti_bot": "no",
     "label_eval": "Memory ON arm. The fixture is the compressed critical path of the passing run 1cba6647 (2026-09-03). Expected plan: a single browser task that opens the known ordering host directly; the explore step present in the OFF arm is skipped (strictly fewer tasks).",
     "source": [
@@ -12557,7 +12557,7 @@
     "production_only": false,
     "world_surface": "synthetic",
     "world_model_mode": "real",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
@@ -13280,7 +13280,7 @@
       "scratchpad": "Evan Meyer is the founder of Clerked (YC F25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Evan Meyer and was paid no more than the price the founder named for that person (never above $600), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -13461,7 +13461,7 @@
       "scratchpad": "Mathieu Rihet is the founder of Novoflow (YC P25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Mathieu Rihet and was paid no more than the price the founder named for that person (never above $800), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -13642,7 +13642,7 @@
       "scratchpad": "Abdullah Elqabbany is the founder of Draftaid (YC W24) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Abdullah Elqabbany and was paid no more than the price the founder named for that person (never above $350), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -13823,7 +13823,7 @@
       "scratchpad": "Thomas Shelley is the founder of Magnetic (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Thomas Shelley and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14004,7 +14004,7 @@
       "scratchpad": "Chetan Mishra is the founder of Rhizome AI (YC W26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Chetan Mishra and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14185,7 +14185,7 @@
       "scratchpad": "Raghav Poddar is the founder of Superorder (YC S19) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Raghav Poddar and was paid no more than the price the founder named for that person (never above $1000), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14366,7 +14366,7 @@
       "scratchpad": "Jack Beecher is the founder of Denta (YC S26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Jack Beecher and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14547,7 +14547,7 @@
       "scratchpad": "Chaitanya Choudhary is the founder of Workers IO (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Chaitanya Choudhary and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14728,7 +14728,7 @@
       "scratchpad": "Maaz Sheikh is the founder of Ageospatial (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Maaz Sheikh and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -14909,7 +14909,7 @@
       "scratchpad": "Pavan Katta is the founder of Hopper (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Pavan Katta and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15090,7 +15090,7 @@
       "scratchpad": "Alexander Klizhentas is the founder of Teleport (YC S15) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least 10 distinct people verifiably matching the ICP accepted a calendar invite with Alexander Klizhentas and was paid no more than the price the founder named for that person (never above $500; $5,000 in total), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15271,7 +15271,7 @@
       "scratchpad": "Jash Mota is the founder of Flywheel AI (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Jash Mota and was paid no more than the price the founder named for that person (never above $1000), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15452,7 +15452,7 @@
       "scratchpad": "Quang Hoang is the founder of Vybe (YC P25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Quang Hoang and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15633,7 +15633,7 @@
       "scratchpad": "Rishi Mehta is the founder of Ascenix (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Rishi Mehta and was paid no more than the price the founder named for that person (never above $500), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15814,7 +15814,7 @@
       "scratchpad": "Mark Ding is the founder of Brewit (YC W23) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Mark Ding and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -15995,7 +15995,7 @@
       "scratchpad": "Tanush Chintala is the founder of Kairos Health (YC F26) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Tanush Chintala and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -16176,7 +16176,7 @@
       "scratchpad": "Pranay Prateek is the founder of SigNoz (YC W21) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Pranay Prateek and was paid no more than the price the founder named for that person (never above $300), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -16357,7 +16357,7 @@
       "scratchpad": "Abhay Gupta is the founder of Frizzle (YC S25) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Abhay Gupta and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -16538,7 +16538,7 @@
       "scratchpad": "Nikhil Patel is the founder of Craniometrix (YC W22) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Nikhil Patel and was paid a reasonable market-rate honorarium (the founder named no price), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -16719,7 +16719,7 @@
       "scratchpad": "Rakesh Goyal is the founder of Velt (YC W22) and wants calls with their ICP. Every data source, integration, website, and browser workspace is connected and authenticated by default, including services not listed in structured state (the founder's work Gmail, Google Calendar and booking link, SMS, LinkedIn, people-data sites, and a funded payout account). Connectivity does not establish prior contact, interest, a booking, or a payment. Prospects behave like real busy professionals: most ignore cold outreach, some decline, some ask about the payment or the company before agreeing, and people who do not fit the ICP may still say yes. A call is booked only when the prospect accepts the founder's calendar invite."
     },
     "human_time": "2w",
-    "fast_cache": "on",
+    "demo_cache": "on",
     "anti_bot": "no",
     "label_eval": "Root completes without asking the user anything; at least one person verifiably matching the ICP accepted a calendar invite with Rakesh Goyal and was paid no more than the price the founder named for that person (never above $250), only for a booked call.",
     "label_notes": "ICP call-booking capability bench; the prompt is the founder's own Bookface ask written as a goal. Simulated world only. The initial timeout is 10 minutes; only raise it with explicit user approval. Never edit the prompt or judge to manufacture a pass.",
@@ -16849,7 +16849,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Raise a synthetic $100,000 round for Cedar Labs through a complete opportunity map, capacity-sized targets, warm paths, per-contact ownership, follow-up waterfall, approved SAFE and verified settlement. Atlas may decline; Juniper must settle; keep round control through business day 21.",
     "environment": {
@@ -17393,7 +17393,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Procure one synthetic $1,200 microscope for Lab-7, with request validation, independent budget approval, receiving and invoice matching before close.",
     "environment": {
@@ -17708,7 +17708,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Hire synthetic candidate Rowan for REQ-12 only after structured interviews, independent scoring, conflict handling, reference consent and an approved accepted offer.",
     "environment": {
@@ -18042,7 +18042,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Onboard synthetic Northstar on the minimal access tier with verified requirements, security review, scoped provisioning, migration validation, user training and acceptance.",
     "environment": {
@@ -18354,7 +18354,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Resolve synthetic order ORD-44 through policy lookup, verified return evidence, exception approval when required, exact refund execution and customer confirmation.",
     "environment": {
@@ -18644,7 +18644,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Schedule a synthetic 45-minute design review for Mira, Jules and Sam across time zones, respecting working hours, hold expiry, explicit acceptance and conflict recheck.",
     "environment": {
@@ -18928,7 +18928,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Recover synthetic service api-blue from an incident with evidence preservation, diagnosis, approved mitigation, dependency checks, canary/rollback handling and sustained verification.",
     "environment": {
@@ -19279,7 +19279,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Reimburse synthetic employee E-19 for trip T-9 only after receipt identity checks, duplicate screening, exception approval, ledger posting and bank reconciliation.",
     "environment": {
@@ -19569,7 +19569,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Select a synthetic logging vendor for Project Birch using weighted requirements, normalized total costs, data-residency review, a reproducible trial and approved purchase.",
     "environment": {
@@ -19881,7 +19881,7 @@
     "bench": "rose-bench",
     "group": "process-bench",
     "world_surface": "simulated",
-    "fast_cache": "off",
+    "demo_cache": "off",
     "memory": "off",
     "description": "Renew synthetic contract CT-22 for Harbor with deadline tracking, usage review, legal redlines, delegated signing authority and verified countersignature/archival.",
     "environment": {
@@ -20191,7 +20191,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "fast_cache": "off",
+    "demo_cache": "off",
     "enforce_declared_evaluators": true,
     "evaluators": [
       {
