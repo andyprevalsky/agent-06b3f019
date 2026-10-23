@@ -18,7 +18,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
@@ -2000,16 +2000,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 world_model_mode,
                 memory_enabled,
             )
-        except Exception as e:
+        except FailureError as e:
+            # Only Temporal failures (ActivityError, ApplicationError, ...) end the
+            # execution; other exceptions fail just the workflow task, which
+            # Temporal retries without a terminal status. An escaping activity
+            # failure (e.g. poll_new_messages timing out on a saturated worker)
+            # would otherwise close the execution with the agent row still ACTIVE,
+            # and the parent would wait on it indefinitely. End it FAILED instead.
             if self._is_finished or any(
                 error_chain_has_type(e, kind)
                 for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
             ):
                 raise
-            # An activity failure that escapes the phases (e.g. poll_new_messages
-            # timing out on a saturated worker) would otherwise fail the Temporal
-            # execution with the agent row still ACTIVE, and the parent would wait
-            # on it indefinitely. End the agent FAILED with the real error.
             message = f"Execution stopped by an unrecoverable error: {extract_error_message(e)}"
             await self._mark_failed(context=self.context, reason="workflow_error", message=message)
             return {"status": "failed", "reason": "workflow_error", "goal": goal}
