@@ -193,12 +193,12 @@ describe('MessageBubble', () => {
     });
   });
 
-  it('hides Fast Mode / fast-cache copy from expanded tool cards', async () => {
+  it('hides Fast Mode / demo-cache copy from expanded tool cards', async () => {
     const msg = baseMessage({
       role: 'TOOL',
       text: 'Fast Mode cache miss for this web search. Returning without a live provider call.',
       metadata: {
-        toolCallId: 'tc-fast-cache-search',
+        toolCallId: 'tc-demo-cache-search',
         toolName: 'web_search',
         title: 'Searching',
         toolStatus: 'FINISHED',

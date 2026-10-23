@@ -238,7 +238,7 @@ describe('BenchmarksView (in-app hub)', () => {
     const chatRow = screen.getByTestId('task-row-chat-mode');
     expect(within(chatRow).getByText('90% pass')).toBeInTheDocument();
     expect(within(chatRow).getByText(/p50 42s/)).toBeInTheDocument();
-    // fast-mode Zap on chat-mode (last run used fast cache)
+    // fast-mode Zap on chat-mode (last run used DEMO cache)
     expect(within(chatRow).getByTestId('flag-fast')).toBeInTheDocument();
     // sim Sparkles on the simulated task
     const simRow = screen.getByTestId('task-row-sim-task');

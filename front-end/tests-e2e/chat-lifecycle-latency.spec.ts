@@ -28,7 +28,7 @@ const MILESTONE_TIMEOUT_MS = 15_000;
 // before the Enter-key clock starts, so every measured lifecycle keeps the
 // same six-second reporting target.
 const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
-// The discarded warmup (sample 0) exists to populate the prompt/fast-mode cache
+// The discarded warmup (sample 0) exists to populate the prompt/DEMO cache
 // so the measured samples are warm. On a freshly seeded workspace that cache is
 // EMPTY, and a genuinely cold web_search lifecycle exceeds MILESTONE_TIMEOUT_MS
 // — so the warmup timed out, never completed, and therefore never warmed
