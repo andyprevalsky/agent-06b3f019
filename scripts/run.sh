@@ -2625,6 +2625,7 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
 else
     start_public_tunnel
 fi
+export_sandbox_backend_base_url
 # Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls
 # through the local proxy for cache capture. Locally this pins those calls to a
 # priority tier that can have 0 credits (e.g. Opus 4.8), which fails the

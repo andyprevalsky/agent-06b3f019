@@ -157,6 +157,11 @@ def test_display_task_is_registered_in_catalog_and_selector():
     assert entry["deploy_category"] == "display" and "display" in KNOWN_DEPLOY_CATEGORIES
     assert "today" not in entry["prompt"].lower()
     validate_catalog()
+    from benchmarks import local
+
+    # The code agent's E2B sandbox needs the public tunnel to publish to Agent Display.
+    assert local.needs_public_tunnel([TASK_NAME]) is True
+    assert local.needs_public_tunnel(["claude-code-agent"]) is False
     for path in (
         "agents/domains/display/handler.py",
         "agents/tools/prompts/display.py",

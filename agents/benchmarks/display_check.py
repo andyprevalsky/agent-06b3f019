@@ -24,6 +24,8 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
 DISPLAY_CHECK_TYPES = frozenset({"display_media_shown", "display_artifact_figures", "final_answer_figures"})
+# Checks that need a displayed item, so the local stack must let sandboxes reach the backend.
+SANDBOX_DISPLAY_CHECK_TYPES = frozenset({"display_media_shown", "display_artifact_figures"})
 TEXT_MEDIA_KINDS = frozenset({"page", "bundle"})
 MAX_ARTIFACT_BYTES = 2_000_000
 MAX_BUNDLE_FILES = 16

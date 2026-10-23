@@ -130,6 +130,7 @@ def _dotenv_fast_mode_cache_database_url() -> str:
 
 
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.display_check import SANDBOX_DISPLAY_CHECK_TYPES
 from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
@@ -1219,6 +1220,15 @@ def sms_web_search_fixture_path(stack: "ServiceStack") -> str:
     return str((stack.context_dir / "sms-web-search-fixture.json").resolve())
 
 
+def _declares_display_check(task) -> bool:
+    return any(
+        check.get("type") in SANDBOX_DISPLAY_CHECK_TYPES
+        for evaluator in task.evaluators or []
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
+
+
 def needs_public_tunnel(tasks: Sequence[str]) -> bool:
     """True when some selected task actually needs a publicly reachable frontend.
 
@@ -1244,6 +1254,10 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
         if "{frontend_url}" in task.prompt:
             return True
         if isinstance(task.phone_persona, dict) and task.phone_persona.get("hold_line"):
+            return True
+        # A code agent publishes to Agent Display from its E2B sandbox, which
+        # reaches the backend only through the tunnel (export_sandbox_backend_base_url).
+        if _declares_display_check(task):
             return True
     return False
 
