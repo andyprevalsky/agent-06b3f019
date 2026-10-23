@@ -4922,6 +4922,97 @@ signal.alarm(0)
 PY
 }
 
+# Diagnostic-only capture of a guest whose stack teardown failed. The driver
+# then refuses its clean ACK, so the sealed /runtime-evidence never opens and
+# the disposable teardown deletes the only copy of the worker/stack logs that
+# explain the failure (descend-full69-20261023 P8: a worker drain that ran the
+# whole 2100 s grace). This never creates remote-logs/runtime-evidence, never
+# clears runtime-evidence.pending and never changes the run's classification.
+cloudbench_collect_failed_runtime_evidence() {
+    local destination="$1" port="$2" run_token="$3" machine="$4" deadline="$5"
+    python3 - "$destination" "$port" "$run_token" "$machine" "$deadline" <<'PY'
+import hashlib
+import json
+import os
+import re
+import signal
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+destination, port, run_token, machine, deadline = sys.argv[1:]
+os.umask(0o077)
+assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+signal.alarm(int(deadline))
+maximum = 512 * 1024 * 1024
+parent = Path(destination)
+final = parent / "failed-runtime-evidence"
+assert not final.exists() and not final.is_symlink()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
+           "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
+url = f"http://127.0.0.1:{port}/failed-runtime-evidence"
+
+
+def request(suffix=""):
+    return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=30)
+
+
+def manifest():
+    with request() as response:
+        data = response.read(1048577)
+        assert len(data) <= 1048576 and response.status == 200
+        return json.loads(data)
+
+
+expected = manifest()
+assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
+assert expected.get("stack_cleanup_state") == "failed"
+files = expected["files"]
+assert isinstance(files, dict) and "logs/worker.log" in files and len(files) <= 1030
+total = 0
+for name, metadata in files.items():
+    assert re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?", name) and ".." not in name
+    assert set(metadata) == {"bytes", "sha256"} and type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+    total += metadata["bytes"]
+assert total <= maximum
+pending = Path(tempfile.mkdtemp(prefix=".failed-runtime-evidence-", dir=parent))
+for name, metadata in files.items():
+    target = pending / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    remaining = metadata["bytes"]
+    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+        while remaining:
+            chunk = response.read(min(65536, remaining))
+            assert chunk, "failed runtime evidence response ended early"
+            output.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        assert not response.read(1), "failed runtime evidence response exceeded manifest"
+    assert digest.hexdigest() == metadata["sha256"], "failed runtime evidence hash mismatch"
+assert manifest() == expected, "failed runtime evidence changed across collection"
+with (pending / "manifest.json").open("x") as output:
+    json.dump({**expected, "diagnostic_only": True, "proof_credit": 0}, output, sort_keys=True)
+    output.write("\n")
+pending.rename(final)
+signal.alarm(0)
+print(f"📦 failed-cleanup runtime evidence captured for diagnosis: {final} ({len(files)} files)", file=sys.stderr)
+PY
+}
+
 stop_on_exit() {
     local ec=$?
     local retirement_deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} - 2))
@@ -6842,6 +6933,12 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
         "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}}"
     then
         echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
+        # Keep the worker/stack logs of a failed stack teardown before the
+        # EXIT trap retires the guest. Diagnostic only: the failure stands.
+        cloudbench_collect_failed_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
+            "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" \
+            "${CLOUDBENCH_FAILED_RUNTIME_EVIDENCE_SECONDS:-300}" \
+            || echo "⚠️  failed-cleanup runtime evidence is unavailable (stack did not record a failed teardown)" >&2
         exit 70
     fi
 fi

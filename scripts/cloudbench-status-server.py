@@ -43,17 +43,26 @@ def read_runtime_metadata(path: Path, maximum: int) -> bytes:
         return data
 
 
-def runtime_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
+def runtime_evidence_paths(root: Path, run_token: str, cleanup_state: str = "clean") -> dict[str, Path]:
     """Enumerate the complete stopped stack, never a capped agent-filtered view."""
-    return runtime_evidence_context_paths(root / "repo/.context/cloudbench", run_token)
+    return runtime_evidence_context_paths(root / "repo/.context/cloudbench", run_token, cleanup_state)
 
 
-def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, Path]:
-    """Apply the same stopped-stack contract to original or collected contexts."""
+def runtime_evidence_context_paths(context: Path, run_token: str, cleanup_state: str = "clean") -> dict[str, Path]:
+    """Apply the same stopped-stack contract to original or collected contexts.
+
+    ``cleanup_state="failed"`` is the diagnostic-only view of a stack whose
+    own teardown failed (for example a worker drain that outlived its grace).
+    run.sh then records services as stopped or failed; the files are still the
+    only copy of the worker/stack logs that explain the failure.
+    """
+    if cleanup_state not in ("clean", "failed"):
+        raise ValueError("unsupported cleanup state")
     service_path = context / "services.json"
     services = json.loads(read_runtime_metadata(service_path, MAX_RECOVERY_STATE_BYTES))
     count = services["env"]["worker_processes"]
-    if services["status"] != "stopped" or type(count) is not int or not 1 <= count <= 1024:
+    allowed = ("stopped",) if cleanup_state == "clean" else ("stopped", "failed")
+    if services["status"] not in allowed or type(count) is not int or not 1 <= count <= 1024:
         raise ValueError("stack is not stopped or worker inventory is invalid")
     names = {"worker.log", *(f"worker.{i}.log" for i in range(1, count))}
     if {p.name for p in (context / "logs").glob("worker*.log")} != names:
@@ -76,17 +85,19 @@ def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, P
     if total > MAX_RECOVERY_RUN_BYTES:
         raise ValueError("runtime evidence exceeds recovery byte ceiling")
     cleanup = dict(line.split("=", 1) for line in read_runtime_metadata(paths[cleanup_name], MAX_RECOVERY_RECEIPT_BYTES).decode().splitlines())
-    if cleanup.get("state") != "clean" or cleanup.get("token") != run_token:
-        raise ValueError("stack cleanup is not acknowledged")
+    if cleanup.get("state") != cleanup_state or cleanup.get("token") != run_token:
+        raise ValueError("stack cleanup is not acknowledged" if cleanup_state == "clean"
+                         else "stack cleanup did not record failure")
     return paths
 
 
-def runtime_evidence_manifest(root: Path, run_token: str, machine: str) -> dict:
-    return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine)
+def runtime_evidence_manifest(root: Path, run_token: str, machine: str, cleanup_state: str = "clean") -> dict:
+    return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine, cleanup_state)
 
 
-def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str) -> dict:
-    paths = runtime_evidence_context_paths(context, run_token)
+def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str,
+                                      cleanup_state: str = "clean") -> dict:
+    paths = runtime_evidence_context_paths(context, run_token, cleanup_state)
     files = {}
     for name, path in paths.items():
         before = path.stat()
@@ -107,9 +118,12 @@ def runtime_evidence_context_manifest(context: Path, run_token: str, machine: st
             if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                 raise ValueError("runtime evidence changed during read")
         files[name] = {"bytes": opened.st_size, "sha256": digest.hexdigest()}
-    if runtime_evidence_context_paths(context, run_token) != paths:
+    if runtime_evidence_context_paths(context, run_token, cleanup_state) != paths:
         raise ValueError("runtime inventory changed")
-    return {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
+    manifest = {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
+    if cleanup_state != "clean":
+        manifest["stack_cleanup_state"] = cleanup_state
+    return manifest
 
 
 def parse_args() -> argparse.Namespace:
@@ -314,16 +328,22 @@ def main() -> int:
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
-            if parsed.path == "/runtime-evidence":
+            if parsed.path in ("/runtime-evidence", "/failed-runtime-evidence"):
                 supplied = self.headers.get("Authorization", "")
                 if not token or not hmac.compare_digest(supplied, f"Bearer {token}"):
                     self.send_error(403)
                     return
                 machine = os.environ.get("FLY_MACHINE_ID", "")
+                # The sealed view requires the driver's clean acknowledgement.
+                # The failed view is diagnostic only: the driver exited and
+                # refused that acknowledgement because the stack teardown
+                # failed. It never makes /runtime-evidence or the ACK appear.
+                cleanup_state = "clean" if parsed.path == "/runtime-evidence" else "failed"
                 if (not run_token or not machine
                     or self.headers.get("X-Cloudbench-Run-Token") != run_token
                     or self.headers.get("X-Cloudbench-Machine-Id") != machine
-                    or not cleanup_acknowledged() or read_driver_state() != "exited"):
+                    or cleanup_acknowledged() != (cleanup_state == "clean")
+                    or read_driver_state() != "exited"):
                     self.send_error(409, "exact runtime is not sealed")
                     return
                 try:
@@ -331,11 +351,12 @@ def main() -> int:
                     if parameters:
                         if set(parameters) != {"file"} or len(parameters["file"]) != 1:
                             raise ValueError("invalid runtime evidence request")
-                        paths = runtime_evidence_paths(root, run_token)
+                        paths = runtime_evidence_paths(root, run_token, cleanup_state)
                         target = paths[parameters["file"][0]]
                         self._serve_recovery_evidence(target, MAX_RECOVERY_RUN_BYTES)
                     else:
-                        data = json.dumps(runtime_evidence_manifest(root, run_token, machine), sort_keys=True).encode()
+                        data = json.dumps(runtime_evidence_manifest(root, run_token, machine, cleanup_state),
+                                          sort_keys=True).encode()
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(data)))

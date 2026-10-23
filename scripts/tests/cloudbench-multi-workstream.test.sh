@@ -44,6 +44,9 @@ python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exi
 # A quarantined owner whose natively stopped guest never received its shutdown
 # is recoverable only through the exact undelivered native-stop capture (K12).
 python3 "$ROOT_DIR/scripts/tests/cloudbench-undelivered-native-stop-capture.test.py" || exit 1
+python3 "$ROOT_DIR/scripts/tests/cloudbench-runtime-evidence-collector.test.py" || exit 1
+# A failed stack teardown keeps its worker/stack logs as diagnostic-only evidence (P8).
+python3 "$ROOT_DIR/scripts/tests/cloudbench-failed-runtime-evidence.test.py" || exit 1
 
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
