@@ -1816,6 +1816,11 @@ def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None)
     """CI fails on failed tasks and on skipped tasks unless explicitly permitted."""
     if summary.get("failed", 0) > 0:
         return True
+    # Unverified owned-resource cleanup fails CI without rewriting any task verdict.
+    if summary.get("cleanup_failures", 0) > 0 or any(
+        getattr(result, "cleanup_failure", None) for result in (task_results or [])
+    ):
+        return True
     skipped = summary.get("skipped", 0)
     if skipped <= 0:
         return False
@@ -7125,9 +7130,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     evidence["errors"].append(f"provider: {detail}")
                     failures.append(f"{aid}: {detail}")
                     if result is not None:
-                        result.passed = False
-                        result.benchmark_status = "ERROR"
-                        result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                        _record_owned_cleanup_failure(result, evidence, error)
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
@@ -7154,9 +7157,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         evidence["errors"].append(f"payment: {detail}")
                         failures.append(f"{aid}: {detail}")
                         if result is not None:
-                            result.passed = False
-                            result.benchmark_status = "ERROR"
-                            result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                            _record_owned_cleanup_failure(result, evidence, error)
                 if result is not None:
                     if evidence["errors"] or evidence["warnings"]:
                         try:
@@ -7187,6 +7188,30 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         raise interrupted
     if failures:
         raise RuntimeError("owned cloud evidence finalization failed: " + "; ".join(failures))
+
+
+def _owned_stack_stopped(error: BaseException | None) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, cloud_batch_cleanup.OwnedStackStoppedError):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _record_owned_cleanup_failure(result: Any, evidence: dict, error: BaseException) -> None:
+    """A genuine provider/payment cleanup failure fails the task (an unreleased
+    resource is part of its outcome). When the verifier could not run because the
+    owned stack had already stopped (T114: backend killed mid-finalization), the
+    graded verdict stands and the unverified cleanup fails the run and CI instead."""
+    reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+    if _owned_stack_stopped(error):
+        result.cleanup_failure = reason
+        return
+    result.passed = False
+    result.benchmark_status = "ERROR"
+    result.failure_reason = reason
 
 
 async def _finalize_owned_batch_and_save_run(
@@ -16874,10 +16899,13 @@ async def main_async(args):
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —
     # every emit is wrapped so it can never break a benchmark run.
-    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard
+    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard, card_status, clean_source_sha
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
+    _report_started_at = time.time()
+    _report_source_sha = clean_source_sha(Path(__file__).resolve().parents[2])
+    _report_finished_at: list[float] = []
     _wmh_evidence = _WMHEvidenceSnapshot()
     # name -> FIFO of live agent ids so k-repeats of the same task name each keep
     # their own deep link instead of overwriting one shared slot.
@@ -16905,7 +16933,7 @@ async def main_async(args):
         per_task: list[TaskCard] = []
         evaluated_results = list(_evaluated_task_results.values())
         for r in [*run.task_results, *evaluated_results]:
-            status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            status = card_status(r.benchmark_status or ("SKIPPED" if r.status == "SKIPPED" else None), r.passed)
             per_task.append(
                 TaskCard(
                     name=r.name,
@@ -16913,6 +16941,7 @@ async def main_async(args):
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
                     agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
+                    agent_id=r.agent_id or None,
                     outcome_sha256=_outcome_signatures.get(r.agent_id),
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
@@ -16934,16 +16963,24 @@ async def main_async(args):
                     name=task.name,
                     status="running",
                     agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
+                    agent_id=live_agent_id or None,
                     world_model_mode=task_world_model_modes.get(task.name),
                 )
             )
         elapsed = time.monotonic() - _report_start
+        total_tasks = len(tasks) + len(skipped_claude_tasks)
+        if not _report_finished_at and len(per_task) >= total_tasks \
+                and all(t.status in ("passed", "failed", "skipped") for t in per_task):
+            _report_finished_at.append(time.time())  # first snapshot with every verdict recorded
         wmh_usage = _wmh_evidence.refresh()
         return RunState(
             run_id=run.run_id,
             elapsed_s=elapsed,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
-            total_tasks=len(tasks) + len(skipped_claude_tasks),
+            total_tasks=total_tasks,
+            source_sha=_report_source_sha,
+            started_at=_report_started_at,
+            finished_at=_report_finished_at[0] if _report_finished_at else None,
             task_names=[t.name for t in tasks] + [t.name for t in skipped_claude_tasks],
             per_task=per_task,
             # WMH grounding cost + tokens are only known when a WMH is served

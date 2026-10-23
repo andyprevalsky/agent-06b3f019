@@ -1,12 +1,12 @@
 import { createLogger } from '../../providers/logger';
 import {
-  GITHUB_REPO,
   githubApiTokenCandidates,
   LINEAR_ANDY_NAMES,
   LINEAR_API_KEY,
   LINEAR_GRAPHQL_URL,
   LINEAR_TAMARA_NAMES,
 } from './config';
+import { type DatedValue, fetchGithubItems } from './githubCommits';
 import { findPeriodIndex } from './time';
 import type {
   AdminHealthPeriod,
@@ -17,11 +17,6 @@ import type {
 
 const log = createLogger('AdminHealth');
 
-interface DatedValue {
-  date: Date;
-  value: number;
-}
-
 interface MetricSeries {
   values: Array<number | null>;
   metric: AdminHealthVelocityMetric;
@@ -31,10 +26,6 @@ interface PageInfo {
   hasNextPage: boolean;
   endCursor?: string | null;
 }
-
-const GITHUB_MAX_COMMIT_PAGES = 500;
-const GITHUB_FETCH_BUDGET_MS = 60_000;
-const GITHUB_AUTH_FAILURE = /^GitHub (401|403)$/;
 
 function unavailableSeries(label: string, detail: string, count: number): MetricSeries {
   return {
@@ -135,79 +126,6 @@ async function fetchLinearItems(
     after = data.issues.pageInfo.hasNextPage ? (data.issues.pageInfo.endCursor ?? null) : null;
   } while (after !== null);
   return items;
-}
-
-async function fetchGithubItemsWithToken(
-  token: string,
-  owner: string,
-  repoName: string,
-  start: Date,
-  end: Date,
-  signal: AbortSignal
-): Promise<DatedValue[]> {
-  const items: DatedValue[] = [];
-  for (let page = 1; page <= GITHUB_MAX_COMMIT_PAGES; page += 1) {
-    const url = new URL(`https://api.github.com/repos/${owner}/${repoName}/commits`);
-    url.searchParams.set('since', start.toISOString());
-    url.searchParams.set('until', end.toISOString());
-    url.searchParams.set('per_page', '100');
-    url.searchParams.set('page', String(page));
-    const response = await fetch(url, {
-      signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    });
-    if (!response.ok) throw new Error(`GitHub ${response.status}`);
-    const commits = (await response.json()) as Array<{
-      commit: { committer?: { date?: string | null }; author?: { date?: string | null } };
-    }>;
-    for (const commit of commits) {
-      const date = commit.commit.committer?.date ?? commit.commit.author?.date;
-      if (date !== undefined && date !== null && date !== '') {
-        items.push({ date: new Date(date), value: 1 });
-      }
-    }
-    if (commits.length < 100) return items;
-    if (page === GITHUB_MAX_COMMIT_PAGES) {
-      log.warn('GitHub commit pagination reached its safety limit', {
-        owner,
-        repo: repoName,
-        maxPages: GITHUB_MAX_COMMIT_PAGES,
-      });
-    }
-  }
-  return items;
-}
-
-async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
-  const [owner, repoName] = GITHUB_REPO.split('/');
-  if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
-  const candidates = githubApiTokenCandidates();
-  if (candidates.length === 0) {
-    throw new Error('GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.');
-  }
-  let lastAuthError: Error | null = null;
-  const signal = AbortSignal.timeout(GITHUB_FETCH_BUDGET_MS);
-  for (let index = 0; index < candidates.length; index += 1) {
-    const token = candidates[index];
-    try {
-      return await fetchGithubItemsWithToken(token, owner, repoName, start, end, signal);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!GITHUB_AUTH_FAILURE.test(message)) throw error;
-      lastAuthError = error instanceof Error ? error : new Error(message);
-      const hasFallback = index < candidates.length - 1;
-      log.warn('GitHub token rejected for commits fetch', {
-        status: message,
-        attemptingFallback: hasFallback,
-      });
-      if (!hasFallback) break;
-    }
-  }
-  throw lastAuthError ?? new Error('GitHub auth failed');
 }
 
 function bucketItems(periods: AdminHealthPeriod[], items: DatedValue[]): number[] {

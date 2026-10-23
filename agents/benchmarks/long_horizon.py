@@ -55,6 +55,7 @@ EVALUATION_METHODS = {
 RUNTIME_EVALUATION_METHODS = set(EVALUATION_METHODS)
 RUNTIME_STATIC_CHECK_TYPES = {
     "process_trace",
+    "kill_agent_subtree",
     "lantern_people_trace",
     "agent_status",
     "approval_request_count",

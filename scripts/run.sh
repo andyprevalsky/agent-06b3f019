@@ -2528,6 +2528,7 @@ remove_isolated_frontend_build() {
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
+    run_ignore_repeated_teardown_signals
     local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     if ! run_publish_stack_cleanup_status pending; then
@@ -2585,6 +2586,7 @@ cleanup() {
     run_publish_stack_cleanup_status clean
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
+run_install_teardown_signal_traps
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)

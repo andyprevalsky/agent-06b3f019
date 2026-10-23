@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
+import { createIsolatedDatabase, ISOLATED_DATABASE_FILES } from './unit-test-database-isolation';
 
 type UnitResult = {
   durationMs: number;
@@ -214,10 +215,18 @@ async function main(): Promise<void> {
   async function runTest(file: string): Promise<UnitResult> {
     const startedAt = performance.now();
     const chunks: Buffer[] = [];
+    // Files that drive the database-wide advisory lock get a private database.
+    const privateDatabase =
+      localDatabaseEnv !== undefined && ISOLATED_DATABASE_FILES.has(basename(file))
+        ? createIsolatedDatabase(localDatabaseEnv.DATABASE_URL)
+        : undefined;
     // Preserve one isolated process per file without npm/tsx wrapper processes.
     const childEnv = {
       ...process.env,
       ...localDatabaseEnv,
+      ...(privateDatabase === undefined
+        ? {}
+        : { DATABASE_URL: privateDatabase.url, DIRECT_URL: privateDatabase.url }),
     };
     if (SERIAL_FIRST_FILES.has(basename(file))) {
       delete childEnv.NODE_V8_COVERAGE;
@@ -247,6 +256,7 @@ async function main(): Promise<void> {
       });
     });
     activeChildren.delete(child);
+    privateDatabase?.drop();
 
     const result = {
       durationMs: Math.round(performance.now() - startedAt),

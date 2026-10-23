@@ -1837,7 +1837,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
                 await coordinator
         namespace["_tick_report_once"]()
         assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}, cards[-1]["tasks"]
-        assert cards[-1]["results"]["failed"] == 3
+        # Cancelled occurrences have no task verdict: counted as cancelled, never as failures.
+        assert (cards[-1]["results"]["failed"], cards[-1]["results"]["cancelled"]) == (0, 3)
         assert all(result.status == "CANCELLED" for result in namespace["run"].task_results)
 
 
@@ -22576,11 +22577,16 @@ def test_tag_slices_still_resolve():
 
 
 def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
-    """The curated anti-bot slice uses one canonical tag spelling."""
+    """The anti-bot slice uses one canonical tag spelling ("antibot"): the curated commerce
+    benches plus one probe per site on the production CAPTCHA list (captcha_probe_sites.json)."""
+    import json
+    from pathlib import Path
+
     from benchmarks.benchmark_tasks import all_tasks, get_tasks_by_tag
 
     tasks = get_tasks_by_tag("antibot")
     by_name = {task.name: task for task in tasks}
+    probes = json.loads((Path(__file__).resolve().parents[2] / "benchmarks/captcha_probe_sites.json").read_text())["probes"]
     assert set(by_name) == {
         "browser-indeed-account-create",
         "browser-google-search-single-result",
@@ -22590,13 +22596,37 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-agent-amazon-cookie-payment",
         "browser-blue-bottle-challenge-recovery",
         "browser-1015-eventim-request-card",
-    }
+    } | {f"anti-bot-{probe['name']}" for probe in probes}
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
     assert "ecommerce" in by_name["browser-blue-bottle-challenge-recovery"].tags
     assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
     assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
+    # Every probe is a catalog task with the probe's exact goal and an LLM judge on its
+    # post-wall evidence; probes held for a missing account stay incomplete.
+    for probe in probes:
+        task = by_name[f"anti-bot-{probe['name']}"]
+        assert task.prompt == probe["goal"]
+        assert task.anti_bot == "yes" and task.bench == "rose-bench" and task.requires_browser_agent
+        assert task.status == ("incomplete" if probe.get("hold") else "ready")
+        assert probe["post_wall_evidence"] in task.evaluators[0]["criteria"]
+        assert task.evaluators[0]["method"] == "single_turn_llm_judge"
+        assert task.enforce_declared_evaluators is True
+        # A plan-phase spawn_agent(type=browser) is recorded as the spawn_browser_agent tool row.
+        assert task.expected_tools == ["spawn_browser_agent"]
+        # Full use of the service: purchase flows end at one pending payment-card request,
+        # bookings at one pending write lock at the final confirm (approvals left unresolved).
+        if probe.get("ends_at_payment_approval"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "payment_approval", "ignore", 1)
+            assert task.success_on_payment_card_request is True
+            assert "request_payment_card" in task.prompt
+        if probe.get("ends_at_write_lock"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "write_lock", "ignore", 1)
+    assert sum(bool(p.get("ends_at_payment_approval")) for p in probes) == 11
+    assert sum(bool(p.get("ends_at_write_lock")) for p in probes) == 3
 
 
 def test_eventim_1015_request_card_benchmark_contract():
