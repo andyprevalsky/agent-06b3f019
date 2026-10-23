@@ -1883,3 +1883,152 @@ test("a released runner ERROR attempt is the infrastructure attempt its campaign
   assert.equal(detail.tasks[0].child_run_id, retry.run_id);
   assert.equal(detail.tasks[0].group_attempt, 2);
 });
+
+// A pre-allocation INFRA refusal is a confirmed infrastructure job. The
+// campaign itself freezes the scheduled total and stops at 20*infra >= total
+// (1 of 10 here) through its normal owned TERM path, with a durable receipt.
+const INFRA_STOP_CHILD = `import json, os, signal, sys, time
+from pathlib import Path
+root, work = Path(sys.argv[1]), Path(os.environ["GROUP_CONTROL_WORK"])
+job, task = os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"], os.environ["RUN_BENCH_CAMPAIGN_TASK"]
+fleet = root / ".context/fleet/runs" / job
+(fleet / "_batch").mkdir(parents=True)
+print("    %s monitor %s" % (root / "scripts/run-bench", fleet), flush=True)
+def stop(*_):
+    (work / ("terminated-" + job)).write_text("TERM")
+    sys.exit(143)
+signal.signal(signal.SIGTERM, stop)
+(work / ("started-" + job)).write_text("")
+if job == os.environ["INFRA_JOB"]:
+    while len(list(work.glob("started-*"))) < int(os.environ["INFRA_TOTAL"]):
+        time.sleep(0.02)
+    (fleet / "_batch/run.json").write_text(json.dumps({"run_id": job, "tasks": [{
+        "name": task, "status": "INFRA_ERROR", "passed": False, "lifecycle_stage": "released",
+        "failure_reason": "no current run artifact produced"}]}))
+    print("cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers", flush=True)
+    print("❌ infra canary preflight FAILED (exit=1) — refusing capability fleet (INFRA)", flush=True)
+    sys.exit(1)
+deadline = time.monotonic() + 45
+while time.monotonic() < deadline:
+    time.sleep(0.05)
+(fleet / "_batch/run.json").write_text(json.dumps({"run_id": job, "tasks": [{
+    "name": task, "status": "PASSED", "passed": True, "lifecycle_stage": "released"}]}))
+`;
+
+test(
+  "one pre-allocation INFRA refusal in a 10-job campaign stops it with a breach receipt",
+  { timeout: 120_000 },
+  async () => {
+    const fixture = fixtureRoot("infra-stop");
+    const receipts = path.join(workRoot, "infra-stop-observations");
+    mkdirSync(receipts, { mode: 0o700 });
+    const child = path.join(fixture.root, "infra-child.py");
+    writeFileSync(child, INFRA_STOP_CHILD);
+    writeFileSync(
+      fixture.fleet,
+      `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${fixture.root}'\n`,
+    );
+    const campaigns = path.join(fixture.root, "campaigns");
+    const started = Date.now();
+    const run = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+        "--root",
+        fixture.root,
+        "--runs",
+        "5",
+        "--concurrency",
+        "10",
+        "--task",
+        "demo-fleet-alpha",
+        "--task",
+        "demo-fleet-beta",
+      ],
+      {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          BENCHMARK_HUB_PARENT_RUN_ID: "infra-stop-parent",
+          RUN_BENCH_CAMPAIGN_ID: "infra-stop",
+          RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
+          CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
+          CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "",
+          GROUP_CONTROL_WORK: receipts,
+          INFRA_JOB: "r004-j0007",
+          INFRA_TOTAL: "10",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stderr = "";
+    let stdout = "";
+    run.stdout!.on("data", (chunk) => (stdout += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
+    await once(run, "close");
+    const elapsed = (Date.now() - started) / 1000;
+    const summary = JSON.parse(
+      readFileSync(path.join(campaigns, "infra-stop/summary.json"), "utf8"),
+    );
+    assert.notEqual(run.exitCode, 0, stdout + stderr);
+    assert.ok(elapsed < 40, `campaign kept running ${elapsed}s after the breach`);
+    const receipt = summary.infra_stop;
+    assert.ok(receipt, "summary.json must carry the infra stop breach receipt");
+    assert.equal(receipt.job_id, "r004-j0007");
+    assert.equal(receipt.task_status, "INFRA_ERROR");
+    assert.equal(receipt.infra_jobs, 1);
+    assert.equal(receipt.scheduled_total, 10);
+    assert.deepEqual(receipt.infra_job_ids, ["r004-j0007"]);
+    assert.ok(receipt.observed_at && receipt.breached_at_epoch > 0);
+    assert.match(stderr, /INFRA STOP: 1\/10 scheduled jobs/);
+    for (const job of summary.jobs) {
+      if (job.job_id === "r004-j0007") {
+        assert.equal(job.status, "failed");
+        assert.equal(job.infra_failure, true);
+        continue;
+      }
+      assert.equal(job.status, "cancelled", job.job_id);
+      assert.ok(
+        existsSync(path.join(receipts, `terminated-${job.job_id}`)),
+        `${job.job_id} was not cancelled through its owned TERM path`,
+      );
+    }
+    assert.equal(summary.status, "failed");
+  },
+);
+
+test("the campaign infra stop counts scheduled jobs once against the frozen total", () => {
+  const probe = spawn(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      "-c",
+      `import json, runpy, sys
+campaign = runpy.run_path(sys.argv[1])
+def jobs(infra, extra=()):
+    rows = [{"job_id": "r%03d-j%04d" % (i // 200 + 1, i + 1), "task": "t", "status": "passed",
+             "infra_failure": False, "attempts": []} for i in range(600)]
+    for row in rows[:infra]:
+        row.update(status="failed", infra_failure=True, task_status="INFRA_ERROR")
+    for index, patch in extra:
+        rows[index].update(patch)
+    return rows
+receipt = campaign["infra_stop_receipt"]
+# Unknown, cancelled-without-infra and a retried job's second attempt never add a job.
+noise = [(100, {"status": "failed", "infra_failure": None}),
+         (101, {"status": "cancelled", "infra_failure": None}),
+         (0, {"attempts": [{"attempt": 1, "status": "failed", "infra_failure": True},
+                           {"attempt": 2, "status": "failed", "infra_failure": True}]})]
+print(json.dumps([receipt(jobs(29, noise), 600, "enabled"), (receipt(jobs(30, noise), 600, "enabled") or {}).get("infra_jobs"),
+                  receipt(jobs(30), 600, "disabled"), receipt(jobs(1), 0, "enabled")]))`,
+      path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  let output = "";
+  probe.stdout!.on("data", (chunk) => (output += chunk));
+  return once(probe, "close").then(() => {
+    assert.equal(probe.exitCode, 0);
+    assert.deepEqual(JSON.parse(output), [null, 30, null, null]);
+  });
+});

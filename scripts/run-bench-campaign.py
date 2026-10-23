@@ -658,28 +658,57 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def terminal_task(root: Path, job: dict[str, object]) -> tuple[Path, dict, dict] | None:
+    """The job's physical fleet handle, run record and its one task row, without regrading."""
+    fleet = None
+    with Path(str(job["log"])).open(errors="replace") as stream:
+        for line in stream:
+            if "/scripts/run-bench monitor " not in line:
+                continue
+            fields = shlex.split(line.strip())
+            if len(fields) >= 3 and fields[0] == str(root / "scripts/run-bench") and fields[1] == "monitor":
+                fleet = Path(fields[2]).resolve()
+                break
+    if fleet is None or not fleet.is_relative_to(root / ".context"):
+        return None
+    record = json.loads((fleet / "_batch/run.json").read_text())
+    tasks = record.get("tasks") or []
+    if len(tasks) != 1 or tasks[0].get("name") != job["task"]:
+        raise ValueError("terminal task binding changed")
+    return fleet, record, tasks[0]
+
+
+def task_verdict(task: dict) -> dict[str, object]:
+    """The recorded task status and whether it is a confirmed infrastructure failure."""
+    status = str(task.get("benchmark_status") or task.get("status") or "").upper()
+    return {"task_status": status,
+            "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
+            "terminal_task": isinstance(task.get("passed"), bool) and status in {
+                "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"}}
+
+
+def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
+    """The exited attempt's recorded verdict; empty (unknown) when no run record exists."""
+    try:
+        found = terminal_task(root, job)
+        return {} if found is None else task_verdict(found[2])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
     """Read the existing physical result and full-release seal, without regrading."""
     try:
-        fleet = None
-        with Path(str(job["log"])).open(errors="replace") as stream:
-            for line in stream:
-                if "/scripts/run-bench monitor " not in line:
-                    continue
-                fields = shlex.split(line.strip())
-                if len(fields) >= 3 and fields[0] == str(root / "scripts/run-bench") and fields[1] == "monitor":
-                    fleet = Path(fields[2]).resolve()
-                    break
-        if fleet is None or not fleet.is_relative_to(root / ".context"):
+        found = terminal_task(root, job)
+        if found is None:
             return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
-        record = json.loads((fleet / "_batch/run.json").read_text())
-        lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
-        tasks = record.get("tasks") or []
-        if len(tasks) != 1 or tasks[0].get("name") != job["task"]:
-            raise ValueError("terminal task binding changed")
-        task = tasks[0]
-        status = str(task.get("benchmark_status") or task.get("status") or "").upper()
+        fleet, record, task = found
+        verdict = task_verdict(task)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+    try:
         run_id = fleet.name
+        lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
         owner = lifecycle["fleet_owner_token"]
         audit = Path((fleet / "teardown-ownership.path").read_text().strip()).resolve()
         meta_bytes = (audit / "meta").read_bytes()
@@ -704,14 +733,48 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
         # The fleet's lifecycle verdict also covers execution completion, the
         # mandatory autoscaler and the controller exit; release alone does not.
         return {"run_id": run_id, "fleet_dir": str(fleet), "fleet_owner_token": owner,
-                "task_status": status, "resources_released": closed,
+                **verdict, "resources_released": closed,
                 "lifecycle_verified": closed and lifecycle.get("status") == "verified",
-                "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
-                "terminal_task": isinstance(task.get("passed"), bool) and status in {
-                    "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"},
                 "released_at_epoch": float(epoch_bytes) if closed else None}
     except (OSError, ValueError, KeyError, TypeError):
-        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+        # The recorded verdict stands; only release remains unverified.
+        return {**verdict, "resources_released": False,
+                "retry_blocked": "terminal result or release remains unverified"}
+
+
+def infra_stop_policy() -> str:
+    """The explicit infrastructure-stop policy (operator override); enabled by default."""
+    policy = os.environ.get("CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP") or "enabled"
+    if policy not in ("enabled", "disabled"):
+        raise ValueError("invalid infrastructure early-stop policy")
+    return policy
+
+
+def infra_stop_predicate() -> Callable[[int, int], bool]:
+    """The one fixed-total infra stop predicate, shared with the sharded operator."""
+    coordinator = runpy.run_path(str(Path(__file__).with_name("cloudbench-shard-coordinator.py")))
+    return coordinator["infra_stop_reached"]
+
+
+def infra_stop_receipt(jobs: list[dict[str, object]], scheduled_total: int, policy: str,
+                       reached: Callable[[int, int], bool] | None = None) -> dict[str, object] | None:
+    """The fixed-total infra stop breach, or None.
+
+    Each scheduled job counts once when one of its own terminal, non-cancelled
+    attempts is a confirmed infrastructure failure. Unknown verdicts and
+    cancellations never count, and the denominator is the frozen schedule.
+    """
+    if policy == "disabled":
+        return None
+    infra = sorted(
+        str(job["job_id"]) for job in jobs
+        if any(attempt.get("infra_failure") is True and attempt.get("status") != "cancelled"
+               for attempt in (job.get("attempts") or [job]))
+    )
+    if not (reached or infra_stop_predicate())(len(infra), scheduled_total):
+        return None
+    return {"policy": policy, "infra_jobs": len(infra), "scheduled_total": scheduled_total,
+            "infra_job_ids": infra}
 
 
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
@@ -1461,6 +1524,13 @@ def main() -> int:
     holdout_margin_seconds = float(raw_margin)
     first_failure = 0
     barrier_failure = False
+    # The infra stop denominator is frozen from the schedule (the shared group
+    # for a shard), never from finished attempts.
+    infra_scheduled_total = int(shard["group_total"] or len(jobs))
+    infra_policy = infra_stop_policy()
+    # Resolved before any controller launches, so a missing predicate cannot
+    # interrupt a running campaign.
+    infra_reached = infra_stop_predicate()
     current_cohort: dict[str, object] | None = None
 
     def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
@@ -2245,6 +2315,27 @@ def main() -> int:
                         first_failure = first_failure or exit_code or 1
                 elif exit_code and not first_failure:
                     first_failure = exit_code
+                if not args.retry_infra:
+                    job.update(attempt_verdict(workspace, job))
+                if "infra_stop" not in state and not stop_signal:
+                    breach = infra_stop_receipt(jobs, infra_scheduled_total, infra_policy, infra_reached)
+                    if breach is not None:
+                        state["infra_stop"] = {
+                            "job_id": job["job_id"], "task": job["task"], "attempt": job.get("attempt", 1),
+                            "task_status": job.get("task_status"), **breach,
+                            "observed_at": utc_now(), "breached_at_epoch": time.time(),
+                        }
+                        print(
+                            f"🛑 INFRA STOP: {breach['infra_jobs']}/{infra_scheduled_total} scheduled jobs are "
+                            f"confirmed infrastructure failures (>= 5%); breach at {job['job_id']} "
+                            f"({job.get('task_status')}). Cancelling the remaining jobs through their owned teardown.",
+                            file=sys.stderr, flush=True,
+                        )
+                        first_failure = first_failure or exit_code or 1
+                        barrier_failure = True
+                        if current_cohort:
+                            abort_startup_cohort(current_cohort, "infrastructure stop threshold reached")
+                        terminate_owned_children(active)
                 print(
                     f"{'✅' if exit_code == 0 else '❌'} {job['job_id']} "
                     f"task={job['task']} exit={exit_code} "

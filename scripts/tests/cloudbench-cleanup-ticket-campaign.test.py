@@ -40,6 +40,8 @@ class CampaignTickets(unittest.TestCase):
             for name in (
                 "run-bench-campaign.py",
                 "cloudbench-cleanup-tickets.py",
+                # The campaign's fixed-total infra stop predicate.
+                "cloudbench-shard-coordinator.py",
                 "cloudbench-infra-canary-preflight.py",
                 "cloudbench-provider-capacity.py",
                 "cloudbench-provider-limits.json",

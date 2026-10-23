@@ -153,6 +153,11 @@ def runner_terminal_status(out):
     return value.get('status') if isinstance(value, dict) else None
 
 
+def infra_stop_reached(infra_jobs, scheduled_total):
+    """The fixed-total infra stop: confirmed infra jobs reach 5% of the original schedule (30 of 600)."""
+    return scheduled_total > 0 and 20 * infra_jobs >= scheduled_total
+
+
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
                stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS):
@@ -239,7 +244,7 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     target = Path(shard['out'])
                     if target.is_dir() and not (target / decision[0]).exists():
                         write_once(target / decision[0], decision[1])
-            threshold = infra_early_stop == 'enabled' and 20 * infra >= scheduled_total
+            threshold = infra_early_stop == 'enabled' and infra_stop_reached(infra, scheduled_total)
             if record['terminated_at'] is None and (stop[0] or threshold):
                 record.update(terminated_at=clock(), terminate_reason=(
                     'operator ' + stop[0] if stop[0] else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
