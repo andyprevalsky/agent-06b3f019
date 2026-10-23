@@ -48,7 +48,10 @@ import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
-import { runBrowserTerminalPauseCases } from './browser-session-terminal-pause.cases';
+import {
+  runBrowserRootTeardownSavesStateCases,
+  runBrowserTerminalPauseCases,
+} from './browser-session-terminal-pause.cases';
 import { runBrowserResumeCustodyCases } from './browser-session-resume-custody.cases';
 import { runLogicalBrowserCases } from './browser-session-logical.cases';
 config();
@@ -594,8 +597,9 @@ async function runAll() {
   if (process.argv.includes('--pause-checkpoint-only')) {
     await runBrowserPauseCheckpointCases();
     await runBrowserTerminalPauseCases();
+    await runBrowserRootTeardownSavesStateCases();
     console.log(
-      'PASS browser-session pause checkpoint/terminal release (7 cases; fixture provider)'
+      'PASS browser-session pause checkpoint/terminal release (8 cases; fixture provider)'
     );
     return;
   }
@@ -603,6 +607,7 @@ async function runAll() {
   if (process.argv.includes('--init-disconnect-only')) return;
   await runBrowserPauseCheckpointCases();
   await runBrowserTerminalPauseCases();
+  await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();
   console.log('Browser Session Black-box Tests\n');

@@ -141,7 +141,17 @@ function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencie
       `);
       return agents.map((agent) => agent.agentId);
     },
-    releaseBrowserSessions: releaseAgentBrowserSessions,
+    // Retry with the same policy as the terminal transition: a root's
+    // completion tears its sessions down, a child's only pauses them.
+    releaseBrowserSessions: async (agentId, overrides) => {
+      const agent = await prisma.agent.findUnique({
+        where: { id: agentId },
+        select: { parentAgentId: true },
+      });
+      return releaseAgentBrowserSessions(agentId, overrides, {
+        retire: agent !== null && agent.parentAgentId === null,
+      });
+    },
   };
 }
 
@@ -287,7 +297,8 @@ export async function runTerminalAgentBrowserReleaseReconcileWithLease(
 export async function releaseAgentBrowserSessions(
   agentId: string,
   overrides: Partial<BrowserSessionReleaseDependencies> = {},
-  // Deleting an agent explicitly retires its profiles; ordinary shutdown pauses.
+  // Deleting an agent or completing a root retires its sessions (closeSession
+  // saves signed-in state first); a child's shutdown only pauses them.
   options: { retire?: boolean } = {}
 ): Promise<number> {
   const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };

@@ -171,3 +171,80 @@ export async function runBrowserTerminalPauseCases(): Promise<void> {
     if (previous) require.cache[path] = previous;
   }
 }
+
+/** A root's teardown saves signed-in state and world state before the provider close. */
+export async function runBrowserRootTeardownSavesStateCases(): Promise<void> {
+  const require = createRequire(import.meta.url);
+  const cleanupPath = new URL('../../providers/agentCleanup.ts', import.meta.url).pathname;
+  const browserPath = new URL('../../providers/browser/index.ts', import.meta.url).pathname;
+  const loader = Module as unknown as {
+    _load: (id: string, parent: { filename?: string } | undefined, isMain: boolean) => unknown;
+  };
+  const originalLoad = loader._load;
+  const previous = [require.cache[cleanupPath], require.cache[browserPath]];
+  const events: string[] = [];
+  const database = {
+    browserSession: {
+      findMany: async () => [{ id: 'root-task', sessionId: 'root-native' }],
+      findUnique: async () => ({ id: 'root-task', logicalOwnerKey: null, provider: 'steel' }),
+    },
+  };
+  loader._load = function (id, parent, isMain) {
+    if (parent?.filename === cleanupPath) {
+      if (id === './database') return { prisma: database };
+      if (id === './logger') return { createLogger: () => ({ info() {}, warn() {} }) };
+      if (
+        [
+          './purchaseCleanup',
+          './claudeCodeLocalSession',
+          './localDevices/hub',
+          './localDevices/session',
+        ].includes(id)
+      )
+        return {};
+    }
+    if (parent?.filename === browserPath) {
+      if (id === '../database') return { prisma: database };
+      if (id === './sessionAuthPersist')
+        return {
+          persistSignedInBrowserState: async (sessionId: string) => {
+            events.push(`save:${sessionId}`);
+            return { persisted: true };
+          },
+        };
+      if (id === './worldState')
+        return {
+          mergeSessionWorldState: async (sessionId: string) => {
+            events.push(`merge:${sessionId}`);
+            return null;
+          },
+        };
+      if (id === '../steel/session')
+        return {
+          closeSession: async (sessionId: string, pause: boolean) => {
+            events.push(`close:${sessionId}:pause=${String(pause)}`);
+          },
+        };
+    }
+    return originalLoad.call(this, id, parent, isMain);
+  };
+  try {
+    delete require.cache[cleanupPath];
+    delete require.cache[browserPath];
+    const { releaseAgentBrowserSessions } = require(
+      cleanupPath
+    ) as typeof import('../../providers/agentCleanup');
+    assert.equal(await releaseAgentBrowserSessions('root', {}, { retire: true }), 1);
+    assert.deepEqual(
+      events,
+      ['save:root-native', 'merge:root-native', 'close:root-native:pause=false'],
+      'root completion must save browser state before tearing the session down'
+    );
+  } finally {
+    loader._load = originalLoad;
+    delete require.cache[cleanupPath];
+    delete require.cache[browserPath];
+    if (previous[0]) require.cache[cleanupPath] = previous[0];
+    if (previous[1]) require.cache[browserPath] = previous[1];
+  }
+}

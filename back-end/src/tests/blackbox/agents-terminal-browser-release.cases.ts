@@ -245,16 +245,14 @@ for (const status of ['COMPLETED', 'COST_LIMIT_REACHED'] as const) {
     });
     assertStatus(res.status, 200, res.data);
 
-    // Ordinary terminal shutdown pauses (releases provider compute, keeps the
-    // profile); only explicit agent deletion retires the session.
     const released = await prisma.browserSession.findUnique({ where: { id: browserSessionId } });
     assert(
-      released !== null && released.status === 'PAUSED',
-      `Terminal ${status} left the browser session running (status=${String(released?.status)})`
+      released !== null && released.status === 'CLOSED',
+      `Terminal ${status} left the browser session open (status=${String(released?.status)})`
     );
     assert(
-      released.closedAt === null,
-      `Terminal ${status} retired a browser session that ordinary shutdown must only pause`
+      released.closedAt !== null,
+      `Terminal ${status} left closedAt null on a released browser session`
     );
   });
 }
@@ -304,6 +302,8 @@ test("a child agent's first terminal transition releases its browser sessions", 
   assertStatus(res.status, 200, res.data);
 
   const released = await prisma.browserSession.findUnique({ where: { id: browserSessionId } });
+  // A child's terminal transition pauses (releases provider compute, keeps the
+  // profile for the root); only the root's completion tears sessions down.
   assert(
     released?.status === 'PAUSED' && released.closedAt === null,
     `Terminal child left its browser rental running (status=${String(released?.status)})`
