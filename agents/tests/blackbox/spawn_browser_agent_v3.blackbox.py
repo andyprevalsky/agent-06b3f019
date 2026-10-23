@@ -19785,6 +19785,124 @@ async def test_execute_goto_auto_adds_https():
     assert out["success"] is True
 
 
+# Response header bag captured verbatim from browser-smoke r002-j0037 (Kernel
+# session wgn8hi7g18qtr916omp6y3td, 2026-10-23T02:55:58Z): Kernel's residential
+# proxy answered a failed upstream connect with its own 502 page.
+_KERNEL_PROXY_ERROR_HEADERS = {
+    "cache-control": "no-store",
+    "content-length": "9332",
+    "content-type": "text/html; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    "x-kernel-proxy-error": "upstream_connect_failed",
+}
+
+
+def _goto_document_recorder():
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=MagicMock(),
+        agent_id="agent",
+        task_id="task",
+        session_id="session",
+        output_dir=Path("/tmp/browser-goto-proxy-test"),
+    )
+    recorder._network_generation = 1
+    return recorder
+
+
+def _deliver_document(recorder, request_id, url, *, status, headers):
+    recorder._on_request_will_be_sent(
+        {"requestId": request_id, "type": "Document", "documentURL": url, "request": {"url": url, "method": "GET"}},
+        None,
+        1,
+    )
+    recorder._on_response_received(
+        {
+            "requestId": request_id,
+            "type": "Document",
+            "response": {"url": url, "status": status, "statusText": "Bad Gateway", "headers": headers},
+        },
+        None,
+        1,
+    )
+
+
+async def _goto_with_document(recorder, *, request_id=None, status=502, headers=None, url="www.roselabs.ai"):
+    """Run the model's goto action while the main-frame Document response arrives."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    def dispatch(_event):
+        if request_id is not None:
+            _deliver_document(recorder, request_id, "https://www.roselabs.ai/", status=status, headers=headers)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=dispatch)
+    dom.selector_map = {}
+    ah = _mocked_action_history()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "goto", "params": {"url": url}},
+        browser_network_recorder=recorder,
+    )
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    return out
+
+
+async def test_execute_goto_reports_kernel_proxy_error_document():
+    """Kernel's own 502 page is a failed navigation; an origin 502 stays a normal load."""
+    recorder = _goto_document_recorder()
+
+    out = await _goto_with_document(recorder, request_id="proxy-1", status=502, headers=_KERNEL_PROXY_ERROR_HEADERS)
+    assert out["success"] is False, out
+    assert out["error"] == (
+        "Navigation failed: Kernel's browser proxy could not reach www.roselabs.ai "
+        "(upstream_connect_failed) and served its own HTTP 502 page. "
+        "The browser's network exit failed, not the site."
+    )
+    assert out["current_url"] == "https://www.roselabs.ai"
+
+    # The origin's own 502 (no proxy header) is a page the model reads as usual.
+    out = await _goto_with_document(
+        recorder, request_id="origin-502", status=502, headers={"content-type": "text/html"}
+    )
+    assert out == {"success": True, "message": "", "current_url": "https://www.roselabs.ai"}
+
+    # A proxy page from an earlier navigation never fails a later goto that
+    # produced no new document response (for example a same-document hash change).
+    stale = _goto_document_recorder()
+    _deliver_document(stale, "old", "https://www.roselabs.ai/", status=502, headers=_KERNEL_PROXY_ERROR_HEADERS)
+    out = await _goto_with_document(stale, url="https://www.roselabs.ai/")
+    assert out["success"] is True
+
+
+async def test_live_tab_recovery_keeps_kernel_proxy_error_document():
+    """Model-called recovery is not skipped as a clean page on Kernel's proxy-error page."""
+    from domains.spawn_browser_agent_v3.challenge_recovery import live_tab_looks_challenged
+
+    class _Page:
+        url = "https://www.roselabs.ai/"
+
+    classifier = AsyncMock(return_value={"clean": True})
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        classifier,
+    ):
+        recorder = _goto_document_recorder()
+        _deliver_document(recorder, "proxy", _Page.url, status=502, headers=_KERNEL_PROXY_ERROR_HEADERS)
+        assert await live_tab_looks_challenged(_Page(), network_recorder=recorder) is True
+        classifier.assert_not_awaited()
+
+        # A later real load of the same page supersedes the proxy page.
+        _deliver_document(recorder, "origin", _Page.url, status=200, headers={"content-type": "text/html"})
+        assert await live_tab_looks_challenged(_Page(), network_recorder=recorder) is False
+        classifier.assert_awaited_once()
+
+
 async def test_execute_goto_err_aborted_persists_attachment_download():
     """goto net::ERR_ABORTED on a download URL must persist bytes under /tmp/downloads."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -33605,6 +33723,14 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async(
+        "execute_goto_kernel_proxy_error_document",
+        test_execute_goto_reports_kernel_proxy_error_document,
+    )
+    await r.record_async(
+        "live_tab_recovery_kernel_proxy_error",
+        test_live_tab_recovery_keeps_kernel_proxy_error_document,
+    )
     await r.record_async(
         "execute_goto_err_aborted_persists_download",
         test_execute_goto_err_aborted_persists_attachment_download,

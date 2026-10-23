@@ -491,7 +491,10 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Relatively expensive staged recovery to force-open a blocked page or service."""
+    """Relatively expensive staged recovery to force-open a blocked page or service.
+
+    It can move the browser to a different browser/IP configuration (network exit).
+    """
 
     tool: Literal["recover_from_challenge"]
     reason: str = Field(

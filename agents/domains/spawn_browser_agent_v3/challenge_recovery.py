@@ -658,6 +658,10 @@ async def live_tab_looks_challenged(
     page_url = str(getattr(page, "url", "") or "")
     if cited_first_party_transport_failure(page_url, network_recorder, recovery_reason):
         return True
+    # The provider proxy served this document itself: the exit, not the site, failed.
+    proxy_lookup = getattr(network_recorder, "provider_proxy_error_document", None)
+    if page_url and callable(proxy_lookup) and proxy_lookup(page_url):
+        return True
 
     try:
         result = await classify_page_after_settle(

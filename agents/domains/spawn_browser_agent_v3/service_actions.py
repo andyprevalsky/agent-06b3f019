@@ -1316,6 +1316,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             config=context.config,
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
+            browser_network_recorder=context.browser_network_recorder,
         )
     if context.action_name == "navback":
         guard = _navigation_guard_error(context, action="navback")
@@ -3996,6 +3997,7 @@ async def _execute_goto(
     current_auth_realm: str = "",
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
+    browser_network_recorder: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
@@ -4039,6 +4041,8 @@ async def _execute_goto(
                 if key in prepared
             }
 
+    network_clock = getattr(browser_network_recorder, "network_clock_ms", None)
+    navigation_started_ms = network_clock() if callable(network_clock) else None
     try:
         event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
         await event
@@ -4092,7 +4096,23 @@ async def _execute_goto(
                 return result
         raise
 
-    result = {"success": True, "message": "", "current_url": url}
+    proxy_lookup = getattr(browser_network_recorder, "provider_proxy_error_document", None)
+    proxy_page = proxy_lookup(url, since_ms=navigation_started_ms) if callable(proxy_lookup) else None
+    if proxy_page:
+        # Kernel's proxy answers a failed upstream connect with its own error
+        # page; the browser "loads" it, but the site was never reached.
+        host = urlparse(proxy_page["url"] or url).hostname or url
+        result = {
+            "success": False,
+            "error": (
+                f"Navigation failed: Kernel's browser proxy could not reach {host} "
+                f"({proxy_page['proxy_error']}) and served its own HTTP {proxy_page['status']} page. "
+                "The browser's network exit failed, not the site."
+            ),
+            "current_url": url,
+        }
+    else:
+        result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
         # The preparation callback consumes encrypted credential material
         # internally. Only its deliberately non-sensitive summary may enter
