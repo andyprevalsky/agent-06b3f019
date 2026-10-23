@@ -16500,7 +16500,7 @@ def test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler():
         broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
     assert broken.returncode == 31
     assert "route-broken" in broken.stderr
-    assert "Fast Mode cache routing failed (exit 31)" in broken.stderr
+    assert "DEMO cache routing failed (exit 31)" in broken.stderr
     assert "FAST_MODE_CACHE_USE_LOCAL" not in broken.stdout
 
     unknown = subprocess.run(
@@ -16549,7 +16549,7 @@ def test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler():
     run_sh = (repo_root / "scripts" / "run.sh").read_text()
     pool_call = run_sh.index("apply_demo_cache_pool_default\n")
     assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
-    assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
+    assert pool_call < run_sh.index('echo "🧠 Ensuring DEMO cache schema..."')
 
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
@@ -21665,7 +21665,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert any(criterion.startswith("T8:") for criterion in criteria)
     assert any(criterion.startswith("T9:") for criterion in criteria)
     assert any(criterion.startswith("T10:") for criterion in criteria)
-    assert any("0 tokens streamed from non-demo-cache" in criterion for criterion in criteria)
+    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in criteria)
     assert any("$0 spent" in criterion for criterion in criteria)
     assert any("assemble-final" in criterion for criterion in criteria)
     assert any(evaluator.get("method") == "static_check" for evaluator in mass["evaluators"])
