@@ -192,6 +192,7 @@ HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
 STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
+GUEST_DIAGNOSTICS_PID=""
 
 publish_cleanup_ack() {
     local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth cleanup_stack_native_identity cleanup_native_count cleanup_identity_matches=0 cleanup_version cleanup_version_count token_matches=0
@@ -281,6 +282,12 @@ cleanup_stack() {
     trap '' HUP INT TERM
     [ -z "$HEARTBEAT_SLEEP_PID" ] || kill "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
     [ -z "$TAIL_PID" ] || kill "$TAIL_PID" 2>/dev/null || true
+    # Stop the sampler before the stack so its evidence file is final when the
+    # stopped stack is sealed into the runtime evidence manifest.
+    if [ -n "$GUEST_DIAGNOSTICS_PID" ]; then
+        kill -TERM "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+        wait "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+    fi
     declare -F stop_dashboard >/dev/null 2>&1 && stop_dashboard
     if [ -n "$STACK_PID" ] && kill -0 "$STACK_PID" 2>/dev/null; then
         # Signal only run.sh. It owns its worker/backend descendants and waits
@@ -1372,9 +1379,7 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
-if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
-    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
-    STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
+STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
 import json, sys
 from pathlib import Path
 manifest = json.loads(Path(sys.argv[1]).read_text())
@@ -1387,6 +1392,17 @@ if not url:
 print(url)
 PY
 )"
+# Bounded guest diagnostics (one JSON line per 15 s, at most 12 h): CPU/load,
+# backend client connections vs. its Prisma connection_limit, pg_stat_activity
+# states/wait events/longest query. Exported as guest-diagnostics.jsonl with
+# the runtime evidence so a slow stack can be classified as pool queueing, CPU
+# saturation or Postgres contention. 30 is back-end/src/providers/database.ts
+# LOCAL_POOL_SIZE, the pool a localhost DATABASE_URL gets without an override.
+python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
+    "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
+GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
     if ! gosu "$APP_USER" env \
         DATABASE_URL="$STACK_DB_URL" \

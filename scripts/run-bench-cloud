@@ -4708,8 +4708,8 @@ if owner.exists() or owner.is_symlink():
     cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
     expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
                 "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-    # The served WMH log is optional evidence, present only for simulated runs.
-    optional = set(manifest["files"]) & {"wmh-serve-log.txt"}
+    # The served WMH log (simulated runs) and guest diagnostics are optional.
+    optional = set(manifest["files"]) & {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
     assert set(manifest["files"]) - optional == expected
     entries = list(capture.rglob("*"))
     assert all(not path.is_symlink() for path in entries)
@@ -4862,12 +4862,13 @@ while True:
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
 required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
-# Present only when the stack served a world model (its per-step server timing).
-OPTIONAL = "wmh-serve-log.txt"
+# Present only when the stack served a world model (its per-step server timing),
+# or when the guest diagnostics sampler ran (CPU/load, DB pool, pg_stat_activity).
+OPTIONAL = {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or name == OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name in OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -4896,7 +4897,7 @@ for name, metadata in files.items():
 services = json.loads((pending / "services.json").read_text())
 count = services["env"]["worker_processes"]
 assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) - {OPTIONAL} == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 assert manifest() == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
@@ -6845,7 +6846,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
     fi
 fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
-    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt; do
+    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt guest-diagnostics.jsonl; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
         ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
             > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true

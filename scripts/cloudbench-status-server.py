@@ -25,7 +25,7 @@ BENCH_LOG_ANCHOR_BYTES = 4_096
 MAX_RECOVERY_RECEIPT_BYTES = 65_536
 MAX_RECOVERY_STATE_BYTES = 1_048_576
 MAX_RECOVERY_RUN_BYTES = 512 * 1024 * 1024
-OPTIONAL_RUNTIME_EVIDENCE = "wmh-serve-log.txt"
+OPTIONAL_RUNTIME_EVIDENCE = ("wmh-serve-log.txt", "guest-diagnostics.jsonl")
 
 
 def read_runtime_metadata(path: Path, maximum: int) -> bytes:
@@ -62,8 +62,11 @@ def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, P
     paths = {name: context / name for name in ["services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log", *("logs/" + n for n in sorted(names))]}
     # The served WMH's own log (per-step server timing) exists only when the
     # stack served a world model. It is stopped with the stack like the rest.
-    if os.path.lexists(context / OPTIONAL_RUNTIME_EVIDENCE):
-        paths[OPTIONAL_RUNTIME_EVIDENCE] = context / OPTIONAL_RUNTIME_EVIDENCE
+    # The guest diagnostics samples (CPU/load, DB pool, pg_stat_activity) exist
+    # only when the sampler ran.
+    for optional in OPTIONAL_RUNTIME_EVIDENCE:
+        if os.path.lexists(context / optional):
+            paths[optional] = context / optional
     total = 0
     for path in paths.values():
         info = path.lstat()

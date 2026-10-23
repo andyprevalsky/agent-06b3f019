@@ -2600,7 +2600,7 @@ assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 
 cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
 expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
             'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
-assert set(manifest['files']) - {'wmh-serve-log.txt'} == expected
+assert set(manifest['files']) - {'wmh-serve-log.txt', 'guest-diagnostics.jsonl'} == expected
 assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
 cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
 assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
