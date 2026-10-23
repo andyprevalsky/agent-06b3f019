@@ -11,7 +11,9 @@ import argparse
 import codecs
 import contextlib
 import fcntl
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import random
@@ -42,7 +44,6 @@ from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     all_tasks,
     get_task_by_name,
-    selected_tasks_require_gate_type,
 )
 from benchmarks.polar_catalog import is_polar_bench_task
 
@@ -1273,10 +1274,6 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
     return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))
 
 
-def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
-    return selected_tasks_require_gate_type(list(tasks), "source_connect")
-
-
 def _dotenv_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -1330,6 +1327,19 @@ def validate_benchmark_archive_environment() -> None:
         )
 
 
+@functools.cache
+def _cloudbench_catalog():
+    """Load the stdlib-only catalog helper that owns the per-task worker env."""
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_catalog", REPO_ROOT / "scripts" / "cloudbench_catalog.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load scripts/cloudbench_catalog.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
     # The local runner owns both the isolated stack and the later benchmark
     # subprocesses. Keep their isolation view aligned so credential refreshes
@@ -1348,8 +1358,6 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
     if needs_public_tunnel(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL"):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
-    if needs_non_purchase_gates(tasks):
-        os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
     if (AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,
@@ -1386,89 +1394,17 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         if ADMIN_BYPASS_USER_ID not in configured:
             configured.append(ADMIN_BYPASS_USER_ID)
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
-    # Force Claude Code (not Codex) for tasks that declare requires_claude_code
-    # OR expect spawn_claude_code_agent. Codex sessions were failing this bench
-    # with GitHub clone 403s / sandbox timeouts that trip no_tool_failures.
-    if any(
-        task.name in selected
-        and (
-            task.requires_claude_code
-            or "spawn_claude_code_agent" in (task.expected_tools or [])
-            or (task.min_tool_counts or {}).get("spawn_claude_code_agent", 0) > 0
-        )
-        for task in all_tasks()
-    ):
-        os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
-    # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
-    # verifier cannot see sandbox files and false-fails complete runs. Re-enable
-    # by unsetting ROSE_DISABLE_CODE_AGENT_VERIFIER once we have an in-sandbox
-    # agentic verifier. Override with ROSE_DISABLE_CODE_AGENT_VERIFIER=0.
-    if os.environ.get("ROSE_DISABLE_CODE_AGENT_VERIFIER", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
-    # TEMPORARY: strip api_request from explore tool injection + prompt context
-    # so coding-agent GitHub ranking benches are not steered onto that route.
-    # Override with ROSE_DISABLE_API_REQUEST=0.
-    if selected == {"google-oauth"}:
-        os.environ["ROSE_DISABLE_API_REQUEST"] = "0"
-    elif os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_API_REQUEST"] = "1"
-    # When a selected task forbids general-purpose spawn aliases, also strip
-    # general_purpose / for_each from spawn_agent schemas + planner enums so
-    # the model cannot select them (mirrors ROSE_DISABLE_API_REQUEST). Override
-    # with ROSE_DISABLE_GENERAL_PURPOSE_AGENT=0.
-    _GPA_FORBIDDEN = {
-        "spawn_general_purpose_agent",
-        "spawn_general_purpose_agent_for_each",
-    }
-    _GPA_REQUIRED = {
-        "spawn_general_purpose_agent",
-        "spawn_general_purpose_agent_for_each",
-    }
-
-    def _task_requires_general_purpose_agent(task) -> bool:
-        if _GPA_REQUIRED.intersection(task.expected_tools or []):
-            return True
-        for counts in (task.expected_tool_counts or {}, task.min_tool_counts or {}):
-            if _GPA_REQUIRED.intersection(counts):
-                return True
-        return False
-
-    selected_tasks = [task for task in all_tasks() if task.name in selected]
-    gpa_forbidden_by_any = any(_GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks)
-    gpa_required_by_any = any(_task_requires_general_purpose_agent(task) for task in selected_tasks)
-    # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
-    # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
-    # spawn_general_purpose_agent from the whole stack and false-fail the latter.
-    if gpa_required_by_any:
-        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
-    elif gpa_forbidden_by_any and os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
-    browser_max_steps = 0
-    for task in all_tasks():
-        if task.name not in selected:
-            continue
-        browser_limit = task.max_steps.get("browser")
-        if isinstance(browser_limit, int) and browser_limit > browser_max_steps:
-            browser_max_steps = browser_limit
-    if browser_max_steps > 0:
-        os.environ["BROWSER_MAX_ITERATIONS"] = str(browser_max_steps)
-    else:
-        os.environ.pop("BROWSER_MAX_ITERATIONS", None)
+    # Agent-behavior flags come from the one policy cloud guests also export
+    # (scripts/cloudbench-run.sh resolve_task_gate), so a local pass and a cloud
+    # run of the same task get the same worker environment.
+    worker_env = _cloudbench_catalog().task_worker_environment(
+        [vars(task) for task in all_tasks() if task.name in selected], os.environ
+    )
+    for key, value in worker_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def seed_payment_fixture(manifest: dict) -> None:

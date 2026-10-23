@@ -496,37 +496,21 @@ resolve_task_gate() {
         echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
         return 1
     fi
-    "$task_gate_python" "$CATALOG_SCRIPT" requires-gate \
-        "$REPO_DIR/agents/benchmarks/tasks.json" source_connect \
-        "${BENCH_TASK_LIST[@]}"
+    # One per-task worker environment for local and cloud runs: local.py
+    # configure_task_environment applies this same catalog policy. An empty
+    # value is exported as-is so an inherited setting is cleared.
+    local task_env_output entry
+    task_env_output="$("$task_gate_python" "$CATALOG_SCRIPT" task-env \
+        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}")"
     task_gate_status=$?
-    case "$task_gate_status" in
-        0)
-            TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
-            ;;
-        10)
-            ;;
-        *)
-            echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
-            return "$task_gate_status"
-            ;;
-    esac
-    # Same pin as local.py configure_task_environment: a Claude Code task must
-    # not inherit Codex from the root's GPT compute lease.
-    "$task_gate_python" "$CATALOG_SCRIPT" requires-claude-code \
-        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
-    task_gate_status=$?
-    case "$task_gate_status" in
-        0)
-            TASK_WORKER_ENV+=("ROSE_CODE_AGENT_PROVIDER=claude")
-            ;;
-        10)
-            ;;
-        *)
-            echo "[cloudbench] FATAL: code-agent provider resolution failed (exit $task_gate_status)" >&2
-            return "$task_gate_status"
-            ;;
-    esac
+    if [ "$task_gate_status" -ne 0 ]; then
+        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+        return "$task_gate_status"
+    fi
+    while IFS= read -r entry; do
+        [ -n "$entry" ] && TASK_WORKER_ENV+=("$entry")
+    done <<< "$task_env_output"
+    return 0
 }
 # Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
 # cache through the production pooler; every other guest keeps the cache in its

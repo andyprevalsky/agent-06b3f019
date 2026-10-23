@@ -16249,15 +16249,19 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
         check=False,
     )
 
+    def gate_and_cache(result: subprocess.CompletedProcess) -> list[str]:
+        # Other per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if "NON_PURCHASE_GATES_ENABLED" in line or "FAST_" in line]
+
     assert enabled.returncode == 0, enabled.stderr
-    assert enabled.stdout.splitlines() == [
+    assert gate_and_cache(enabled) == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
         "stack:FAST_MODE_CACHE_USE_LOCAL=1",
         "stack:FAST_MODE_CACHE_DATABASE_URL=",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
     ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
-    assert disabled.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert gate_and_cache(disabled) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
@@ -16280,13 +16284,17 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
 
 
 def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
-    """Cloud guests pin Claude Code for code tasks exactly as local runs do.
+    """Cloud guests get exactly the per-task worker environment local runs get.
 
     claude-code-agent failed both cloud copies of descend-full69-20261023: the
     guest exported no ROSE_CODE_AGENT_PROVIDER, so the code tool followed the
     root's GPT lease, ran Codex, and the sub-agent verifier rejected the
-    "Claude Code (not Codex)" goal. Local configure_task_environment sets the
-    pin, so the same task always ran on Claude Code locally.
+    "Claude Code (not Codex)" goal. The same guests also lacked
+    ROSE_DISABLE_CODE_AGENT_VERIFIER, ROSE_DISABLE_API_REQUEST,
+    ROSE_DISABLE_GENERAL_PURPOSE_AGENT and BROWSER_MAX_ITERATIONS, which local
+    configure_task_environment always derives from the selected tasks. Compare
+    the whole catalog: every key local sets must reach the cloud guest with
+    the same value, through the real cloudbench-run.sh task-env path.
     """
     import importlib.util
     import subprocess
@@ -16296,54 +16304,97 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
 
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "scripts" / "cloudbench-run.sh"
-    base_env = {
-        **os.environ,
-        "CLOUDBENCH_REPO_DIR": str(repo_root),
-        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
-        "CLOUDBENCH_PRINT_TASK_ENV": "1",
-        "BENCH_TASKS_B64": "",
+    # Stack fixtures cloud guests provision through their own payment/admin/
+    # frontend setup (cloudbench-run.sh BENCH_NEEDS_* blocks), not worker env.
+    stack_fixture_keys = {
+        "BENCHMARK_ISOLATED_RUN",
+        "BENCHMARK_BUNDLED_FRONTEND",
+        "ALLOW_TEMPORAL_CLEANUP",
+        "BENCHMARK_FAST_MODE_CACHE",
+        "SEED_ALLOW_MISSING_GPT_CODE",
+        "SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS",
+        local_bench.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
+        "AGENTCARD_ONBOARDING_RETURN_URL",
+        "ADMIN_USER_IDS_EXTRA",
     }
-    base_env.pop("CLOUDBENCH_INFRA_PROBE", None)
+    worker_keys = {
+        "NON_PURCHASE_GATES_ENABLED",
+        "ROSE_CODE_AGENT_PROVIDER",
+        "ROSE_DISABLE_CODE_AGENT_VERIFIER",
+        "ROSE_DISABLE_API_REQUEST",
+        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT",
+        "BROWSER_MAX_ITERATIONS",
+    }
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in worker_keys | stack_fixture_keys and key != "CLOUDBENCH_INFRA_PROBE"
+    }
 
-    def print_env(tasks: str) -> list[str]:
+    def local_env(task_name: str) -> dict[str, str]:
+        with patch.dict(os.environ, clean_env, clear=True):
+            local_bench.configure_task_environment([task_name])
+            changed = {key: value for key, value in os.environ.items() if clean_env.get(key) != value}
+        return {key: value for key, value in changed.items() if key not in stack_fixture_keys and value != ""}
+
+    def cloud_env(task_name: str) -> dict[str, str]:
         result = subprocess.run(
             ["bash", str(script)],
-            env={**base_env, "BENCH_TASKS": tasks},
+            env={
+                **clean_env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task_name,
+            },
             capture_output=True,
             text=True,
             check=False,
         )
         assert result.returncode == 0, result.stderr
-        return result.stdout.splitlines()
+        lines = result.stdout.splitlines()
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in lines if line.startswith("stack:"))
+        exported = dict(
+            line.removeprefix("benchmark:export ").split("=", 1) for line in lines if line.startswith("benchmark:")
+        )
+        # The stack (worker) and the benchmark process export the same values.
+        assert {key: value for key, value in stack.items() if key in worker_keys} == {
+            key: value for key, value in exported.items() if key in worker_keys
+        }, (task_name, lines)
+        return {key: value for key, value in stack.items() if key in worker_keys and value != ""}
 
-    code_task = print_env("claude-code-agent")
-    assert "stack:ROSE_CODE_AGENT_PROVIDER=claude" in code_task, code_task
-    assert "benchmark:export ROSE_CODE_AGENT_PROVIDER=claude" in code_task, code_task
-    assert not any("ROSE_CODE_AGENT_PROVIDER" in line for line in print_env("chat-mode"))
+    local_by_task = {task.name: local_env(task.name) for task in benchmark_tasks.all_tasks()}
+    assert local_by_task["claude-code-agent"].get("ROSE_CODE_AGENT_PROVIDER") == "claude"
+    assert local_by_task["google-oauth"].get("ROSE_DISABLE_API_REQUEST") == "0"
+    assert set().union(*local_by_task.values()) <= worker_keys, sorted(
+        set().union(*local_by_task.values()) - worker_keys
+    )
 
+    # Real guest entrypoint, once per distinct local environment.
+    representatives: dict[tuple[tuple[str, str], ...], str] = {}
+    for name, env in local_by_task.items():
+        representatives.setdefault(tuple(sorted(env.items())), name)
+    for signature, name in representatives.items():
+        cloud = cloud_env(name)
+        assert cloud == dict(signature), {"task": name, "local": dict(signature), "cloud": cloud}
+
+    # The guest's catalog helper resolves every task identically to local.
     spec = importlib.util.spec_from_file_location(
         "cloudbench_catalog_parity", repo_root / "scripts" / "cloudbench_catalog.py"
     )
     assert spec is not None and spec.loader is not None
     catalog = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(catalog)
-    tasks_json = repo_root / "agents" / "benchmarks" / "tasks.json"
-
-    local_pinned: set[str] = set()
-    cloud_pinned: set[str] = set()
-    for task in benchmark_tasks.all_tasks():
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ROSE_CODE_AGENT_PROVIDER", None)
-            local_bench.configure_task_environment([task.name])
-            if os.environ.get("ROSE_CODE_AGENT_PROVIDER") == "claude":
-                local_pinned.add(task.name)
-        if catalog.selected_tasks_require_claude_code_provider(tasks_json, [task.name]):
-            cloud_pinned.add(task.name)
-    assert "claude-code-agent" in local_pinned
-    assert cloud_pinned == local_pinned, {
-        "cloud_only": sorted(cloud_pinned - local_pinned),
-        "local_only": sorted(local_pinned - cloud_pinned),
-    }
+    by_name = catalog.index_unified_catalog(repo_root / "agents" / "benchmarks" / "tasks.json")
+    mismatched = {}
+    for name, env in local_by_task.items():
+        resolved = catalog.task_worker_environment([by_name[name]], clean_env)
+        cloud = {key: value for key, value in resolved.items() if value}
+        if cloud != env:
+            mismatched[name] = {"local": env, "cloud": cloud}
+    assert not mismatched, dict(list(mismatched.items())[:5])
 
 
 def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
@@ -16377,37 +16428,41 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             check=False,
         )
 
+    def route(result: subprocess.CompletedProcess) -> list[str]:
+        # Per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if line.startswith("stack:FAST_")]
+
     live = print_env("chat-mode")
     assert live.returncode == 0, live.stderr
-    assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(live) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
     # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
     # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
-    assert shared.stdout.splitlines() == shared_route
+    assert route(shared) == shared_route
 
     # An inherited local route must not divert the replay to the empty local DB.
     inherited = print_env("test-mass-agent-run-0", FAST_MODE_CACHE_USE_LOCAL="1")
     assert inherited.returncode == 0, inherited.stderr
-    assert inherited.stdout.splitlines() == shared_route
+    assert route(inherited) == shared_route
 
     mixed = print_env("chat-mode,test-mass-agent-run-0")
     assert mixed.returncode == 0, mixed.stderr
-    assert mixed.stdout.splitlines() == shared_route
+    assert route(mixed) == shared_route
 
     tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
-    assert tuned.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
+    assert route(tuned) == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(probe) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
         fake_python.write_text(
-            '#!/bin/sh\ncase "$2" in requires-gate|requires-claude-code) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+            '#!/bin/sh\ncase "$2" in task-env) exit 0 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
         )
         fake_python.chmod(0o755)
         broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))

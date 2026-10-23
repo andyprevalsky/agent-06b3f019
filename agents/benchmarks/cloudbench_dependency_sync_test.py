@@ -2779,7 +2779,7 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     write_executable(
         controls / "catalog.py",
         "#!/usr/bin/env python3\nimport sys\n"
-        "sys.exit(10 if sys.argv[1] in ('requires-gate', 'requires-claude-code') else 0)\n",
+        "sys.exit(0)\n",
     )
     write_executable(
         controls / "target.py",
@@ -3036,7 +3036,7 @@ def test_task_gate_uses_pinned_catalog_only_after_exact_checkout_and_patch(
     status_restart = driver.index("# Replace the bootstrap read-only", patch_end)
     assert patch_end < production_resolve < status_restart
     assert "from benchmarks.benchmark_tasks" not in driver
-    assert '"$task_gate_python" "$CATALOG_SCRIPT" requires-gate' in resolve_gate
+    assert '"$task_gate_python" "$CATALOG_SCRIPT" task-env' in resolve_gate
 
     repo = tmp_path / "repo"
     catalog_dir = repo / "agents/benchmarks"
@@ -3075,7 +3075,7 @@ def test_task_gate_uses_pinned_catalog_only_after_exact_checkout_and_patch(
             ]
         )
     )
-    for task, expected in (("selected", "NON_PURCHASE_GATES_ENABLED=1"), ("plain", "")):
+    for task, expected in (("selected", True), ("plain", False)):
         result = subprocess.run(
             [
                 "bash",
@@ -3102,7 +3102,7 @@ printf '%s' "${{TASK_WORKER_ENV[*]:-}}"
             timeout=5,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout == expected
+        assert ("NON_PURCHASE_GATES_ENABLED=1" in result.stdout.split()) is expected, result.stdout
     assert not marker.exists(), "checkout-owned catalog/Python executed as control code"
 
 

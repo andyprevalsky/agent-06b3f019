@@ -11,8 +11,8 @@ symptoms:
   - "[ClaudeCode] Selected code sandbox provider code_provider=codex compute_token_provider=gpt"
   - "[ComputeCredentials] Serving compute token lease type=gpt source=user"
   - Verifier result score=0.5 The SDK events identify the provider as `codex`
-  - The explicit Claude Code-only requirement remains unmet
-  - spawn_agent type=browser Use the authenticated Claude Code web interface
+  - "cloud guest TASK_WORKER_ENV missing ROSE_DISABLE_CODE_AGENT_VERIFIER ROSE_DISABLE_API_REQUEST ROSE_DISABLE_GENERAL_PURPOSE_AGENT BROWSER_MAX_ITERATIONS"
+  - api_request available to the root in a cloud guest but stripped in local runs
 tags:
   - claude-code
   - codex
@@ -27,6 +27,9 @@ sources:
   - agent b729eca1-ad69-4f30-b566-b605a1e0d4ee
   - agent 84db06af-fab5-4c4e-9b33-74b5a2a77093
   - task claude-code-agent
+  - task browser-auth-stale-session-password
+  - task browser-auth-account-locked
+  - task browser-auth-magic-link
 repro: agents/tests/blackbox/benchmark.blackbox.py::test_cloudbench_code_agent_tasks_pin_claude_code_like_local
 status: open
 ---
@@ -123,10 +126,57 @@ Separate product observation, not changed here: with a GPT root lease,
 Claude Code even when the user names it. That is a product/harness question
 for its own RCA.
 
+### Recurrence 2026-10-23 (cluster K9): the K4 guardrail held only one flag
+
+K4 ported one flag and its parity test compared only that flag's predicate,
+so the same drift remained for every other key `configure_task_environment`
+sets. K8's RCA (same run) found `verifier_claude_code` running in the cloud
+guest and scoring claude-code-agent copy 1 at 0.5, which locally is disabled
+by `ROSE_DISABLE_CODE_AGENT_VERIFIER=1`. Run-1 triage cards for
+browser-auth-stale-session-password (r001-j0010), browser-auth-account-locked
+(r002-j0050, counts `'api_request': 2`) and browser-auth-magic-link (r001-j0018)
+show the root calling `api_request`, which local runs strip with
+`ROSE_DISABLE_API_REQUEST=1`. No failed member declares a GP-forbidden tool or
+a browser `max_steps`, so `ROSE_DISABLE_GENERAL_PURPOSE_AGENT` and
+`BROWSER_MAX_ITERATIONS` changed no run-1 verdict; but 303 catalog tasks
+(Polar) declare `max_steps.browser` up to 500, which cloud guests silently
+capped at the 250-step default.
+
+Why the earlier fix did not hold: it hand-copied one rule into a second
+implementation. Deepest owned cause: two independent derivations of one
+per-task worker environment. Fix (Step 6a "unify"): one pure policy,
+`scripts/cloudbench_catalog.py:task_worker_environment(tasks, environ)`, which
+local `configure_task_environment` applies to `os.environ` and cloud
+`resolve_task_gate` exports via the `task-env` subcommand (empty value =
+unset). It covers `NON_PURCHASE_GATES_ENABLED`, `ROSE_CODE_AGENT_PROVIDER`,
+`ROSE_DISABLE_CODE_AGENT_VERIFIER`, `ROSE_DISABLE_API_REQUEST`,
+`ROSE_DISABLE_GENERAL_PURPOSE_AGENT` and `BROWSER_MAX_ITERATIONS`. The K4
+`requires-claude-code` subcommand is removed (subsumed). The helper stays the
+controller's immutable stdlib-only catalog code, read after exact checkout.
+
+Regression (same test, extended): computes the local env delta of
+`configure_task_environment` for every catalog task, requires every non
+stack-fixture key to be a shared worker key, runs the real
+`cloudbench-run.sh` print path once per distinct local env and requires equal
+stack and benchmark exports, then requires the guest helper to resolve every
+task identically. Red on 8ada0056f: `AssertionError: {'task':
+'test-mass-agent-run-0', 'local': {'ROSE_DISABLE_API_REQUEST': '1',
+'ROSE_DISABLE_CODE_AGENT_VERIFIER': '1', 'ROSE_DISABLE_GENERAL_PURPOSE_AGENT':
+'0'}, 'cloud': {}}`; green with the fix, 5 consecutive passes (~3s).
+Remaining gap: stack-fixture keys are excluded by an explicit list;
+`ADMIN_USER_IDS_EXTRA` (admin-bypass task) has no cloud provisioning at all.
+Exact local benchmark outcome cannot reproduce (local already had parity);
+cloud member reruns supply outcome proof.
+
+Archive searches: "cloud guest local parity configure_task_environment
+ROSE_DISABLE_API_REQUEST BROWSER_MAX_ITERATIONS"; "works locally fails in
+cloud benchmark guest missing env flag verifier api_request browser step
+budget". Verdict: recurrence of this case.
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-When a benchmark passes locally but fails in cloud, diff the task environment each runner derives, and make the cloud guest derive it from the same catalog predicate with a parity test across the whole catalog.
+Derive local and cloud per-task worker environments from one shared policy function, and test that every key local sets reaches the cloud guest unchanged across the whole catalog.
