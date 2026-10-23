@@ -9528,7 +9528,7 @@ async def _run_auth_test_site_first_run(
         owned["logs"]["fixture_snapshot"] = data
         owned["logs"]["fixture_early_failure"] = early_fail
     if early_fail or status != "COMPLETED":
-        raise auth_test_site.AuthTestSiteFixtureError(
+        raise auth_test_site.AuthTestSiteFirstRunFailed(
             f"first run did not complete (status={status}, reason={early_fail}); agent {first_agent_id}"
         )
     await auth_test_site.mark_run(base_url, await _api_headers(), str(manifest["siteId"]), "graded-run")
@@ -15539,7 +15539,10 @@ async def _run_single_task_as_run_user(
             and _agentcard_release_skip_enabled()
         )
         release_skip = release_stall and evaluated_failure_reason is None
-        error_status = "SKIPPED" if release_skip else "ERROR"
+        # The two-run auth tasks' first agent failing its goal is a task verdict,
+        # exactly as the graded run scores it; every other exception is untrusted.
+        first_run_failed = isinstance(e, auth_test_site.AuthTestSiteFirstRunFailed)
+        error_status = "SKIPPED" if release_skip else "FAILED" if first_run_failed else "ERROR"
         agent_id = _recover_owned_native_admission_root(task, agent_id)
         try:
             await _retire_owned_native_world(task, agent_id)
@@ -15551,7 +15554,7 @@ async def _run_single_task_as_run_user(
         if release_skip:
             _warn_agentcard_release_skip(task.name, str(e))
         else:
-            print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
+            print(f"\n    ❌ {task.name}: {error_status} - {type(e).__name__}: {e}")
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None

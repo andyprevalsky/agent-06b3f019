@@ -9,8 +9,12 @@ export function normalizeAgentId(value: unknown): string | null {
 }
 
 export function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
+  // run_benchmark records an untrusted (exception) verdict as "ERROR"; the
+  // fleet card spells the same outcome "error". Both are one infrastructure
+  // terminal, so live, final and campaign-retry views agree on it.
   const infrastructureError =
-    task.passed !== true && (task.status === 'INFRA_ERROR' || task.status === 'error');
+    task.passed !== true &&
+    (task.status === 'INFRA_ERROR' || task.status === 'error' || task.status === 'ERROR');
   const passed = !infrastructureError && typeof task.passed === 'boolean' ? task.passed : null;
   // Explicit infrastructure terminals have no benchmark verdict; their archived
   // false sentinel remains unchanged. Otherwise the verdict wins over AGENT
@@ -20,9 +24,11 @@ export function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
       ? passed
         ? 'passed'
         : 'failed'
-      : typeof task.status === 'string' && task.status
-        ? task.status
-        : 'running';
+      : task.status === 'ERROR'
+        ? 'error'
+        : typeof task.status === 'string' && task.status
+          ? task.status
+          : 'running';
   return {
     name: String(task.name ?? ''),
     passed,

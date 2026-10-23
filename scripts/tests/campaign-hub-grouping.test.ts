@@ -986,6 +986,11 @@ test(
       final.result.hub_group_final_error,
       /benchmark Hub upload failed: HTTP Error 409; response_metadata=/,
     );
+    // The Hub's own rejection reason reaches the receipt, not only its status.
+    assert.match(
+      final.result.hub_group_final_error,
+      /HTTP Error 409; response_metadata=\{[^}]*\}; response_error="Benchmark Hub group schedule changed"$/m,
+    );
     assert.equal(
       final.result.hub_group_final_log,
       path.join(fixture.root, "hub-group/hub-group-publication.private.log"),
@@ -1840,4 +1845,41 @@ test("third infrastructure attempt requires the complete physical history and re
     /retry requires/,
   );
   assert.deepEqual([...boundary.objects], before);
+});
+
+test("a released runner ERROR attempt is the infrastructure attempt its campaign retry registers", async () => {
+  // run_benchmark records an untrusted verdict as status "ERROR" with the
+  // archived false sentinel; the campaign retries it as infrastructure.
+  const boundary = owningBoundary();
+  const { owner } = boundary;
+  const members = Array.from({ length: 50 }, (_, i) => `m${i + 1}`);
+  await owner.putRun(schedule("runner-error-group", members), { live: true });
+  const first: any = infraAttempt("runner-error-group", "m1");
+  first.tasks[0].status = "ERROR";
+  await owner.putRun(first, { live: false });
+  const stored = (await owner.getRunDetail(first.run_id)).tasks[0];
+  assert.deepEqual([stored.passed, stored.status], [null, "error"]);
+  const mirror = spawn(
+    "python3",
+    [
+      "-c",
+      "import json,sys; sys.path.insert(0, sys.argv[1]); from benchmarks.hub_upload import final_record_matches; " +
+        "print(final_record_matches(json.loads(sys.argv[2]), json.loads(sys.argv[3])))",
+      path.join(sourceRoot, "agents"),
+      JSON.stringify(first),
+      JSON.stringify(await owner.getRunDetail(first.run_id)),
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  let mirrored = "";
+  mirror.stdout.on("data", (chunk) => (mirrored += chunk));
+  await once(mirror, "close");
+  assert.equal(mirrored.trim(), "True", "hub_upload final_record_matches disagrees with taskSummary");
+  // The retry's starting registration (live) must be admitted, not 409'd.
+  const retry: any = infraAttempt("runner-error-group", "m1", 2);
+  retry.tasks[0] = { name: "repeat-task", status: "starting", passed: null, lifecycle_stage: "starting" };
+  await owner.putRun(retry, { live: true });
+  const detail = await owner.getRunDetail("runner-error-group");
+  assert.equal(detail.tasks[0].child_run_id, retry.run_id);
+  assert.equal(detail.tasks[0].group_attempt, 2);
 });
