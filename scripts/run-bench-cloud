@@ -6619,16 +6619,22 @@ progress_barrier_released="0"
 terminal_pending_exit=""
 terminal_pending_since=""
 terminal_read_failures="0"
-backlog_chunks="0"
+backlog_bytes="0"
 backlog_active="0"
 backlog_failures="0"
 log_read_failures="0"
 BENCH_LOG_CHUNKS_PER_POLL="${CLOUDBENCH_LOG_CHUNKS_PER_POLL:-4}"
 case "$BENCH_LOG_CHUNKS_PER_POLL" in ''|*[!0-9]*|0) BENCH_LOG_CHUNKS_PER_POLL=4 ;; esac
 [ "$BENCH_LOG_CHUNKS_PER_POLL" -le 4 ] || BENCH_LOG_CHUNKS_PER_POLL=4
-BENCH_LOG_BACKLOG_MAX_CHUNKS="${CLOUDBENCH_LOG_BACKLOG_MAX_CHUNKS:-128}"
-case "$BENCH_LOG_BACKLOG_MAX_CHUNKS" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_CHUNKS=128 ;; esac
-[ "$BENCH_LOG_BACKLOG_MAX_CHUNKS" -le 128 ] || BENCH_LOG_BACKLOG_MAX_CHUNKS=128
+# Every accepted chunk strictly advances the validated offset, so a backlog is
+# bounded by bytes, not by a chunk count: the 51-agent mass-agent terminal
+# burst is ~33.5 MiB and tripped the former 128 x 256 KiB cap on every copy
+# (descend-full69-20261023 P8), truncating the guest's own FATAL lines. The
+# ceiling matches the guest's 512 MiB runtime-evidence bound; a backlog that
+# stops advancing still fails after BENCH_LOG_BACKLOG_MAX_FAILURES retries.
+BENCH_LOG_BACKLOG_MAX_BYTES="${CLOUDBENCH_LOG_BACKLOG_MAX_BYTES:-536870912}"
+case "$BENCH_LOG_BACKLOG_MAX_BYTES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_BYTES=536870912 ;; esac
+[ "$BENCH_LOG_BACKLOG_MAX_BYTES" -le 536870912 ] || BENCH_LOG_BACKLOG_MAX_BYTES=536870912
 BENCH_LOG_BACKLOG_MAX_FAILURES="${CLOUDBENCH_LOG_BACKLOG_MAX_FAILURES:-5}"
 case "$BENCH_LOG_BACKLOG_MAX_FAILURES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_FAILURES=5 ;; esac
 [ "$BENCH_LOG_BACKLOG_MAX_FAILURES" -le 5 ] || BENCH_LOG_BACKLOG_MAX_FAILURES=5
@@ -6652,6 +6658,42 @@ DRIVER_DIED="0"
 # process is still alive; if it's gone with no DONE marker, stop promptly and
 # report a bring-up (infra) failure so the fleet controller excludes this box fast.
 DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-210}"
+# A finite terminal artifact burst can be much larger than one chunk. Drain
+# known backlog at wire speed; fail only when it exceeds the byte ceiling or
+# stops advancing. Sets BACKLOG_DECISION to idle|drain|retry|exceeded|stuck.
+cloudbench_bench_log_backlog_step() {  # <refresh-ok 0|1> <bytes appended by this refresh>
+    local refresh_ok="$1" appended="$2"
+    [[ "$appended" =~ ^[0-9]+$ ]] || appended=0
+    if [ "$refresh_ok" = "1" ]; then
+        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+            backlog_active="1"
+            backlog_failures="0"
+        else
+            backlog_active="0"
+            backlog_bytes="0"
+            backlog_failures="0"
+        fi
+    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+        backlog_active="1"
+    fi
+    BACKLOG_DECISION="idle"
+    [ "$backlog_active" = "1" ] || return 0
+    backlog_bytes=$((backlog_bytes + appended))
+    if [ "$backlog_bytes" -gt "$BENCH_LOG_BACKLOG_MAX_BYTES" ]; then
+        BACKLOG_DECISION="exceeded"
+        return 0
+    fi
+    if [ "$refresh_ok" = "1" ]; then
+        BACKLOG_DECISION="drain"
+        return 0
+    fi
+    backlog_failures=$((backlog_failures + 1))
+    if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
+        BACKLOG_DECISION="stuck"
+    else
+        BACKLOG_DECISION="retry"
+    fi
+}
 while :; do
     now="$(date +%s)"
     # Pull only bounded append-only chunks over the data plane. The local file is
@@ -6661,8 +6703,15 @@ while :; do
     # PID remains owned and reapable.
     ensure_status_proxy >/dev/null 2>&1 || true
     log_refresh_ok="0"
+    log_size_before="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     refresh_bench_log "$BENCH_LOG_CHUNKS_PER_POLL" 2>/dev/null \
         && log_refresh_ok="1"
+    log_size_after="$(wc -c < "$SSH_LOG" | tr -d ' ')"
+    if [ "$BENCH_LOG_RESET" = "1" ] || [ "$log_size_after" -lt "$log_size_before" ]; then
+        log_bytes_appended="$log_size_after"
+    else
+        log_bytes_appended=$((log_size_after - log_size_before))
+    fi
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
        && [ "${_start_ok:-1}" = "0" ] && [ "$log_refresh_ok" = "1" ] \
        && [ -s "$SSH_LOG" ] && cloudbench_proxy_alive STATUS_PROXY_PID; then
@@ -6719,41 +6768,24 @@ while :; do
         last_change="$now"
         [ "$WATCHDOG_MODE" = "progress" ] && last_meaningful_progress="$now"
     fi
-    # A finite terminal artifact burst can be much larger than one chunk (the
-    # observed Polar run ended with a 16.34 MiB log). Drain known backlog at wire
-    # speed instead of sleeping 15--20 seconds per chunk or applying a watchdog
-    # to semantic/DONE bytes which are already durable but not parsed yet.
-    if [ "$log_refresh_ok" = "1" ]; then
-        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-            backlog_active="1"
-            backlog_failures="0"
-        else
-            backlog_active="0"
-            backlog_chunks="0"
-            backlog_failures="0"
-        fi
-    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-        backlog_active="1"
-    fi
-    if [ "$backlog_active" = "1" ]; then
-        backlog_chunks=$((backlog_chunks + BENCH_LOG_CHUNKS_READ))
-        if [ "$backlog_chunks" -ge "$BENCH_LOG_BACKLOG_MAX_CHUNKS" ]; then
-            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_CHUNKS} bounded chunks before EOF -- infrastructure failure" >&2
+    cloudbench_bench_log_backlog_step "$log_refresh_ok" "$log_bytes_appended"
+    case "$BACKLOG_DECISION" in
+        drain) continue ;;
+        retry)
+            sleep 1
+            continue
+            ;;
+        exceeded)
+            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_BYTES} bytes before EOF -- infrastructure failure" >&2
             DRIVER_DIED="1"; BENCH_EXIT="1"
             break
-        fi
-        if [ "$log_refresh_ok" = "1" ]; then
-            continue
-        fi
-        backlog_failures=$((backlog_failures + 1))
-        if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
+            ;;
+        stuck)
             echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
             DRIVER_DIED="1"; BENCH_EXIT="1"
             break
-        fi
-        sleep 1
-        continue
-    fi
+            ;;
+    esac
     # A failed first/EOF read provides no current durable state. Never let a
     # healthy but temporarily unreadable guest fall through to a benchmark
     # deadline classification. Retry only a fixed number of times, then report
