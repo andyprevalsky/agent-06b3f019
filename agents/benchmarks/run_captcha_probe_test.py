@@ -515,3 +515,14 @@ def test_run_dir_keeps_the_latest_result_per_probe(tmp_path):
     assert [(row["name"], row["status"], row["agent_id"]) for row in card["per_task"]] == [("bing-search", "passed", "b")]
     assert len((tmp_path / "results.jsonl").read_text().splitlines()) == 2  # every run kept; latest scored
     assert not (tmp_path / "assembled-from.json").exists()
+
+
+def test_sites_flag_selects_an_alternate_catalog(tmp_path, capsys):
+    catalog = {"version": 1, "source": "test", "probes": [{
+        "name": "only-probe", "site": "example.com", "goal": "g", "post_wall_evidence": "first-wall page",
+        "where_captcha_hit": "home", "account_needed": False, "hold": False}]}
+    path = tmp_path / "sites.json"
+    path.write_text(json.dumps(catalog))
+    assert probe_module.main(["--list", "--sites", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "only-probe" in out and "google-search" not in out
