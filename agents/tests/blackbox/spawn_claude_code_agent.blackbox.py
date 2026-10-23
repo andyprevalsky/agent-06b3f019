@@ -1427,7 +1427,8 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
-            # A success exit cannot satisfy an unmaterialized primitive schema.
+            # A success exit cannot satisfy an unmaterialized primitive schema,
+            # but nothing checked that field, so it is unverified, not missing.
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1444,7 +1445,8 @@ async def test_run_verifier_disabled_by_env_flag():
             )
             assert score == 0.5, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
-            assert "incomplete" in reasoning.lower(), reasoning
+            assert "not verified: summary." in reasoning, reasoning
+            assert "incomplete" not in reasoning.lower(), reasoning
             assert struct is None
             assert itok == 0 and otok == 0
 
@@ -1636,6 +1638,103 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
         "python_script": {"path": "/home/user/output/collatz_27.py"},
     }
     assert itok == 0 and otok == 0
+
+
+async def test_disabled_verifier_reports_successful_session_truthfully():
+    """A completed session is never labelled FAILED for fields nobody checked.
+
+    Repro for /descend descend-full69-20261023 claude-code-agent (all five
+    copies, e.g. agent d5def233 task c07d4462): Claude Code exited 0, wrote
+    /home/user/output/collatz.py and returned the whole program and stdout,
+    but the parent read "**Status**: ❌ FAILED ... Required output artifacts
+    were not completely extracted - incomplete." The schema's required
+    ``status`` string has no mechanical extractor while the LLM verifier is
+    disabled, so it was unverified, not missing. A session whose required
+    file was not extracted, or whose process failed, still reports FAILED.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    result_text = (
+        "**Command:** `python3 collatz.py`\n**Script path:** `/home/user/output/collatz.py`\n"
+        "**Step count:** 111\nOutput file for the user: `/home/user/output/collatz.py`"
+    )
+    retry_schema = {
+        "fields": [
+            {"name": "status", "type": "str", "required": True, "nullable": False},
+            {"name": "stdout", "type": "str", "required": False, "nullable": False},
+            {"name": "program_source", "type": "str", "required": False, "nullable": False},
+            {"name": "program_path", "type": "str", "required": False, "nullable": False},
+            {"name": "run_command", "type": "str", "required": False, "nullable": False},
+            {"name": "sequence", "type": "list[int]", "required": False, "nullable": False},
+            {"name": "total_steps", "type": "int", "required": False, "nullable": False},
+        ]
+    }
+    collatz_file = {"id": "f1", "original_filename": "collatz.py", "mime_type": "text/x-python", "size_bytes": 300}
+
+    async def run(output_schema, exit_code, output_files):
+        events = [
+            {"version": 1, "provider": "claude", "type": "tool_use", "tool": "Write"},
+            {"version": 1, "provider": "claude", "type": "result", "status": "completed", "text": result_text},
+        ]
+
+        async def fake_loop(**_kwargs):
+            return (exit_code, False, [], 0, 0, events)
+
+        async def fake_close(**_kwargs):
+            return {"output_files": output_files, "usage": None}
+
+        collector = AsyncMock()
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        with (
+            patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: collector),
+            patch.object(
+                service,
+                "create_e2b_session",
+                AsyncMock(return_value={"task_id": "c07d4462", "sandbox_id": "sb", "ws_url": "wss://x"}),
+            ),
+            patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
+            patch.object(service, "persist_terminal_output", AsyncMock(return_value=None)),
+            patch.object(service, "close_e2b_session", side_effect=fake_close),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value="tok")),
+            patch(
+                "helpers.model_pricing.get_model_pricing_with_fallback",
+                AsyncMock(return_value={"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.2}),
+            ),
+            patch(
+                "loop.activity_helper.call_temporal_activity_from_activity",
+                AsyncMock(side_effect=AssertionError("disabled verifier must not call the LLM")),
+            ),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = await service.spawn_claude_code_activity(
+                user_id="u",
+                agent_id="d5def233",
+                goal="Write and run a Collatz program from 27",
+                tool_call_id="tc",
+                output_schema=output_schema,
+                model="rose-labs/rose-1-flash",
+            )
+        teardown_mock()
+        return result
+
+    completed = await run(retry_schema, 0, [collatz_file])
+    message = completed["message"]
+    assert "❌ FAILED" not in message, message
+    assert "not completely extracted" not in message and "incomplete" not in message.lower(), message
+    assert "**Status**: ⚠️ UNVERIFIED" in message, message
+    assert "not verified: status." in message, message
+    assert completed["success"] is False
+
+    missing_file = await run(
+        {"fields": [{"name": "script", "type": "file_pointer", "required": True}]}, 0, []
+    )
+    assert "**Status**: ❌ FAILED" in missing_file["message"], missing_file["message"]
+    assert "incomplete" in missing_file["message"].lower(), missing_file["message"]
+
+    crashed = await run(retry_schema, 1, [collatz_file])
+    assert "**Status**: ❌ FAILED" in crashed["message"], crashed["message"]
+    assert "UNVERIFIED" not in crashed["message"], crashed["message"]
 
 
 async def test_run_verifier_exception_fallback():
@@ -3737,6 +3836,10 @@ async def _run_all_tests():
     await r.record_async(
         "run_verifier_disabled_includes_sdk_stdout",
         test_run_verifier_disabled_includes_sdk_event_stdout,
+    )
+    await r.record_async(
+        "disabled_verifier_truthful_session_outcome",
+        test_disabled_verifier_reports_successful_session_truthfully,
     )
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
     await r.record_async(

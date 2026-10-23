@@ -396,11 +396,17 @@ def build_context_summary(
     close_reasoning: str,
     action_summary: list[str],
     error_context: Optional[str] = None,
+    verified: bool = True,
 ) -> str:
-    """Build detailed execution context summary for main agent."""
+    """Build detailed execution context summary for main agent.
+
+    ``verified=False`` marks a result nobody judged (the code-agent verifier is
+    disabled and some declared fields have no mechanical evidence): it is
+    neither a success nor a failure.
+    """
     summary_parts: list[str] = []
 
-    status = "✅ SUCCESS" if success else "❌ FAILED"
+    status = "✅ SUCCESS" if success else ("⚠️ UNVERIFIED" if not verified else "❌ FAILED")
     summary_parts.append(f"**Status**: {status}")
 
     if close_reasoning:
@@ -1875,29 +1881,66 @@ def _structured_response_satisfies_declared_schema(
     if not isinstance(structured_response, dict):
         return False
     for field in fields:
-        if not isinstance(field, dict):
+        if not isinstance(field, dict) or not field.get("name"):
             return False
-        name = field.get("name")
-        if not name:
-            return False
-        if name not in structured_response:
-            if field.get("required", True) is False:
-                continue
-            return False
-        value = structured_response[name]
-        if value is None and field.get("nullable") is True:
-            continue
-        # A present empty value only satisfies a required field when its bounds
-        # explicitly allow it; an optional field may be present and empty.
-        if (
-            field.get("required", True) is not False
-            and (value is None or value == "" or value == [] or value == {})
-            and not explicitly_allows_empty_value(value, field)
-        ):
-            return False
-        if not value_satisfies_output_field_constraints(value, field):
+        if not _declared_field_satisfied(field, structured_response):
             return False
     return True
+
+
+def _declared_field_satisfied(field: Dict[str, Any], structured_response: Dict[str, Any]) -> bool:
+    """Return true when one declared field satisfies its output contract."""
+    name = field["name"]
+    if name not in structured_response:
+        return field.get("required", True) is False
+    value = structured_response[name]
+    if value is None and field.get("nullable") is True:
+        return True
+    # A present empty value only satisfies a required field when its bounds
+    # explicitly allow it; an optional field may be present and empty.
+    if (
+        field.get("required", True) is not False
+        and (value is None or value == "" or value == [] or value == {})
+        and not explicitly_allows_empty_value(value, field)
+    ):
+        return False
+    return value_satisfies_output_field_constraints(value, field)
+
+
+def _disabled_verifier_outcome(
+    output_schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+    *,
+    attempt_completion: bool,
+    exit_code: Optional[int],
+) -> tuple[str, list[str]]:
+    """Classify a session that no LLM verifier judged.
+
+    Returns ``(outcome, field_names)``. ``failed``: no process/completion
+    success signal. ``incomplete``: a declared output file was not extracted.
+    ``unverified``: the session succeeded and its files are present, but these
+    declared fields have no mechanical evidence; only a verifier could have
+    judged them. ``complete``: every declared field is satisfied.
+    """
+    if not (attempt_completion or exit_code == 0):
+        return "failed", []
+    if _structured_response_satisfies_declared_schema(output_schema, structured_response):
+        return "complete", []
+    fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
+    structured = structured_response if isinstance(structured_response, dict) else {}
+    unsatisfied = [
+        field
+        for field in fields
+        if not isinstance(field, dict) or not field.get("name") or not _declared_field_satisfied(field, structured)
+    ]
+    missing_files = [
+        str(field.get("name"))
+        for field in unsatisfied
+        if not isinstance(field, dict) or not field.get("name") or "file_pointer" in str(field.get("type") or "")
+    ]
+    if missing_files:
+        return "incomplete", missing_files
+    return "unverified", [str(field["name"]) for field in unsatisfied]
 
 
 def _code_event_text_evidence(code_events: list[Dict[str, Any]]) -> list[str]:
@@ -2137,18 +2180,30 @@ async def _run_verifier(
         # The schema is the contract: file-only, primitive-only, and mixed
         # schemas all require every declared field before the disabled verifier
         # may report success or persist successful judge evidence.
+        # A declared field with no mechanical evidence is unverified, not
+        # missing: only output files can be checked without the verifier.
         has_artifacts = schema_complete
         has_success_signal = attempt_completion or exit_code == 0
         score = 1.0 if has_artifacts and has_success_signal else 0.5
+        outcome, outcome_fields = _disabled_verifier_outcome(
+            output_schema,
+            evidence_structured,
+            attempt_completion=attempt_completion,
+            exit_code=exit_code,
+        )
+        outcome_note = {
+            "complete": "",
+            "failed": " The session ended without a success signal." if not has_artifacts else "",
+            "incomplete": " Required output artifacts were not completely extracted - incomplete.",
+            "unverified": (
+                " The session completed, but these declared fields were not verified: "
+                f"{', '.join(outcome_fields)}. Read them from the session output below."
+            ),
+        }[outcome]
         v_reasoning = (
             "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
-            f", artifacts={len(extracted_output_files)})."
-            + (
-                ""
-                if has_artifacts
-                else " Required output artifacts were not completely extracted - incomplete."
-            )
+            f", artifacts={len(extracted_output_files)})." + outcome_note
         )
         if terminal_output:
             v_reasoning = f"{v_reasoning}\n\nTerminal output:\n\n{terminal_output}"
@@ -3442,6 +3497,16 @@ async def spawn_claude_code_activity(
         )
         total_input_tokens += v_input
         total_output_tokens += v_output
+        # Judged before file-pointer resolution rewrites the response below.
+        verified = not code_agent_verifier_disabled() or (
+            _disabled_verifier_outcome(
+                output_schema,
+                structured_response,
+                attempt_completion=attempt_completion,
+                exit_code=exit_code,
+            )[0]
+            != "unverified"
+        )
 
         # 7. Add any verifier-selected extra paths to the structured response
         # contract, but do not use them for sandbox extraction. The canonical
@@ -3475,6 +3540,7 @@ async def spawn_claude_code_activity(
             success=success,
             close_reasoning=v_reasoning,
             action_summary=action_summary,
+            verified=verified,
         )
         code_session_summary = format_code_session_summary(code_session_facts)
         if code_session_summary:
