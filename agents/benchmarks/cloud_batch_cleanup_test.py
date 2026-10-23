@@ -1233,6 +1233,129 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
                 cleanup.pending_root_payments(payload)
 
 
+def _postgres_binary(name):
+    import glob
+    import shutil
+
+    found = shutil.which(name) or next(iter(sorted(
+        glob.glob(f"/usr/lib/postgresql/*/bin/{name}") + glob.glob(f"/opt/homebrew/opt/postgresql@*/bin/{name}"),
+        reverse=True,
+    )), None)
+    assert found, f"{name} is required: the exact tree query must run against real Postgres rows"
+    return found
+
+
+def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postgres():
+    """Every agent owns a logical BrowserSession row (sessionId NULL) until a
+    provider session exists. The owned-cloud finalizer must not reject such a
+    tree, and must still validate every row that does hold a provider session."""
+    import socket
+    import subprocess
+
+    migration = (
+        cleanup.REPO_ROOT
+        / "back-end/prisma/migrations/20261021180000_browser_logical_identity_verified_credentials/migration.sql"
+    ).read_text()
+    logical_identity_ddl = migration.split('ALTER TABLE "BrowserSiteState"', 1)[0]
+    recovery = __import__("runpy").run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    with tempfile.TemporaryDirectory() as directory:
+        data, sockets = Path(directory) / "data", Path(directory) / "sockets"
+        sockets.mkdir()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        subprocess.run([_postgres_binary("initdb"), "-D", str(data), "-U", "postgres", "--auth=trust", "-E", "UTF8"],
+                       check=True, capture_output=True)
+        server = [_postgres_binary("pg_ctl"), "-D", str(data), "-w", "-s"]
+        # The daemon must not inherit captured pipes, or run() waits for their EOF forever.
+        subprocess.run(server + ["-l", str(Path(directory) / "server.log"),
+                                 "-o", f"-p {port} -k {sockets} -c listen_addresses=localhost", "start"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        try:
+            def sql(statement, database="postgres"):
+                return subprocess.run(
+                    [_postgres_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-p", str(port),
+                     "-U", "postgres", "-d", database, "-c", statement],
+                    capture_output=True, text=True, timeout=30,
+                )
+            assert sql("CREATE DATABASE owned_fixture").returncode == 0
+            # The pre-migration table as main defines it, then the branch's real
+            # logical-identity migration bytes (nullable sessionId + constraints).
+            setup = sql(
+                """
+                CREATE TYPE "BrowserSessionStatus" AS ENUM ('ACTIVE', 'CLOSED', 'ERROR', 'PAUSED');
+                CREATE TABLE "Agent" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL,
+                  "parentAgentId" TEXT, "deletedAt" TIMESTAMP(3));
+                CREATE TABLE "BrowserSession" (id TEXT PRIMARY KEY, "contextId" TEXT NOT NULL,
+                  "agentId" TEXT NOT NULL, "sessionId" TEXT NOT NULL UNIQUE,
+                  status "BrowserSessionStatus" NOT NULL DEFAULT 'ACTIVE', provider TEXT NOT NULL DEFAULT 'steel');
+                CREATE TABLE "PurchaseSpend" (id TEXT PRIMARY KEY, "agentId" TEXT, status TEXT, "cardId" TEXT,
+                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER);
+                CREATE TABLE "PurchaseWalletFunding" ("purchaseId" TEXT, status TEXT, "providerTransferId" TEXT,
+                  "reclaimProviderTransferId" TEXT);
+                """ + logical_identity_ddl,
+                "owned_fixture",
+            )
+            assert setup.returncode == 0, setup.stderr
+            # Agent creation's unmaterialized logical browsers (createLogicalBrowserInTransaction)
+            # plus one child that did materialize a Kernel session.
+            inserted = sql(
+                f"""
+                INSERT INTO "Agent" VALUES ('{ROOT}', '{ROOT}', NULL, NULL), ('{CHILD}', '{ROOT}', '{ROOT}', NULL);
+                INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider,
+                  "logicalOwnerKey", "baselineCheckpointRef") VALUES
+                  ('logical-root', 'context', '{ROOT}', NULL, 'PAUSED', 'kernel', 'agent:{ROOT}', 'empty-baseline'),
+                  ('logical-child', 'context', '{CHILD}', NULL, 'PAUSED', 'kernel', 'agent:{CHILD}', 'empty-baseline');
+                """,
+                "owned_fixture",
+            )
+            assert inserted.returncode == 0, inserted.stderr
+            # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
+            orphan = sql(
+                f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
+                VALUES ('orphan', 'context', '{ROOT}', NULL, 'ACTIVE', 'kernel')""",
+                "owned_fixture",
+            )
+            assert orphan.returncode != 0 and "BrowserSession_unmaterialized_check" in orphan.stderr
+
+            context = Path(directory) / "context"
+            context.mkdir()
+            (context / "services.json").write_text(json.dumps({
+                "worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
+                "temporal_task_queue": "owned-queue", "ports": {"backend": 31001},
+                "database": {"name": "owned_fixture", "port": port},
+            }))
+            environment = {
+                "BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
+                "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+                "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+                "BENCHMARK_CONTEXT_DIR": str(context), "TEMPORAL_TASK_QUEUE": "owned-queue",
+                "PATH": str(Path(_postgres_binary("psql")).parent) + os.pathsep + os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+                # A non-browser task: only unmaterialized logical rows, so no provider session to own.
+                snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+                assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
+                assert snapshot["browser_sessions"] == []
+                # A materialized Kernel session is still returned and owned exactly.
+                materialized = sql(
+                    f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
+                    WHERE id = 'logical-child'""",
+                    "owned_fixture",
+                )
+                assert materialized.returncode == 0, materialized.stderr
+                assert cleanup.exact_root_sessions("http://localhost:31001", ROOT)["browser_sessions"] == [
+                    {"agent_id": CHILD, "session_id": "kernel_session_0001", "provider": "kernel"}
+                ]
+                # A provider-backed row from an unknown provider is still refused.
+                assert sql("""UPDATE "BrowserSession" SET provider = 'unknown-provider' WHERE id = 'logical-child'""",
+                           "owned_fixture").returncode == 0
+                with pytest.raises(RuntimeError, match="unrecognized provider session"):
+                    cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+        finally:
+            subprocess.run(server + ["-m", "immediate", "stop"], capture_output=True, timeout=60)
+
+
 def test_provider_rejection_does_not_skip_other_sessions_in_same_root():
     sealed = {
         "root_exists": True,
