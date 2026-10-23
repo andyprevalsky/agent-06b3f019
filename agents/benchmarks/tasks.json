@@ -21040,7 +21040,7 @@
     "min_steps": {
       "browser": 1
     },
-    "status": "ready",
+    "status": "incomplete",
     "runner": "agent",
     "bench": "rose-bench",
     "world_model_mode": "real",
@@ -21056,7 +21056,7 @@
       "live_targets": [
         "https://www.opentable.com"
       ],
-      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Restaurant page, booking availability API. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent f9ccfb4e. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+      "context_notes": "SAFETY HOLD 2026-10-23: on Kernel the write lock did not fire on OpenTable's Complete reservation and anti-bot-foreign-cinema-menu made a real booking (agent c586f7b4). Do not run until the write lock is proven to stop reservation submits. Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Restaurant page, booking availability API. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent f9ccfb4e. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
     },
     "evaluators": [
       {
@@ -21074,7 +21074,7 @@
       "captcha_probe_sites.json:opentable-prospect",
       "rose-captcha-sites-handoff.csv (2026-10-22)"
     ],
-    "group": "rose-bench",
+    "group": "incomplete",
     "deploy_category": "browser",
     "enforce_declared_evaluators": true,
     "expected_attention_kind": "write_lock",
@@ -21723,7 +21723,7 @@
     "min_steps": {
       "browser": 1
     },
-    "status": "ready",
+    "status": "incomplete",
     "runner": "agent",
     "bench": "rose-bench",
     "world_model_mode": "real",
@@ -21739,7 +21739,7 @@
       "live_targets": [
         "https://kokkari.com"
       ],
-      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Menu and reservation pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ddd11a99. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+      "context_notes": "SAFETY HOLD 2026-10-23: on Kernel the write lock did not fire on OpenTable's Complete reservation and anti-bot-foreign-cinema-menu made a real booking (agent c586f7b4). Do not run until the write lock is proven to stop reservation submits. Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Menu and reservation pages. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent ddd11a99. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
     },
     "evaluators": [
       {
@@ -21757,7 +21757,7 @@
       "captcha_probe_sites.json:kokkari-menu",
       "rose-captcha-sites-handoff.csv (2026-10-22)"
     ],
-    "group": "rose-bench",
+    "group": "incomplete",
     "deploy_category": "browser",
     "enforce_declared_evaluators": true,
     "expected_attention_kind": "write_lock",
@@ -21791,7 +21791,7 @@
     "min_steps": {
       "browser": 1
     },
-    "status": "ready",
+    "status": "incomplete",
     "runner": "agent",
     "bench": "rose-bench",
     "world_model_mode": "real",
@@ -21807,7 +21807,7 @@
       "live_targets": [
         "https://foreigncinema.com"
       ],
-      "context_notes": "Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, reservation page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 06c57bef. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
+      "context_notes": "SAFETY HOLD 2026-10-23: on Kernel the write lock did not fire on OpenTable's Complete reservation and anti-bot-foreign-cinema-menu made a real booking (agent c586f7b4). Do not run until the write lock is proven to stop reservation submits. Anti-bot probe from the 39-site production CAPTCHA list (rose-captcha-sites-handoff.csv, 2026-10-22; agents/benchmarks/captcha_probe_sites.json). CAPTCHA/bot wall in production at: Homepage, reservation page. Round 2 on Tilion only (auto-solve on, 120 s patience, same-provider recovery, 30-min cap): PASSED_CAPTCHA, agent 06c57bef. Single-run results are also produced by benchmarks/run_captcha_probe.py, whose --assemble mode builds one scorecard run context from several lanes."
     },
     "evaluators": [
       {
@@ -21825,7 +21825,7 @@
       "captcha_probe_sites.json:foreign-cinema-menu",
       "rose-captcha-sites-handoff.csv (2026-10-22)"
     ],
-    "group": "rose-bench",
+    "group": "incomplete",
     "deploy_category": "browser",
     "enforce_declared_evaluators": true,
     "expected_attention_kind": "write_lock",

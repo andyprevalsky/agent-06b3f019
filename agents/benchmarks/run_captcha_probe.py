@@ -890,6 +890,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--save-dir", default=".context/captcha-probe-runs", help="where each run's transcripts are saved")
     parser.add_argument(
+        "--sites",
+        default="",
+        help="probe catalog to judge against (default: captcha_probe_sites.json next to this file); e.g. an earlier "
+        "first-wall version to grade only the wall a run met",
+    )
+    parser.add_argument(
         "--rejudge",
         metavar="FILE",
         help="re-grade a saved transcript (a --save-dir file, GET /api/agents/:id JSON or benchmark run record); no agent is run",
@@ -907,7 +913,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--user-id", default=DEFAULT_USER_ID)
     parser.add_argument("--include-held", action="store_true", help="run a probe marked hold")
     args = parser.parse_args(argv)
-    probes = load_probes()
+    probes = load_probes(Path(args.sites)) if args.sites else load_probes()
     if args.assemble:
         run_dir = Path(args.assemble)
         entries, stacks = assemble_entries(args.manifest, run_dir)
