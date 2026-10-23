@@ -75,8 +75,8 @@ from helpers.wait_condition_or_handoff import (
 from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
-from providers.fast_cache.browser_use_cache import cached_browser_decision
-from providers.fast_cache.context import write_through_enabled_for_user
+from providers.demo_cache.browser_use_cache import cached_browser_decision
+from providers.demo_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
@@ -799,7 +799,7 @@ def _remap_cached_browser_action_target(
         params["index"] = best_index
         remapped["params"] = params
     logger.info(
-        "fast_cache.browser_use_replay_target_remapped",
+        "demo_cache.browser_use_replay_target_remapped",
         old_index=action_index,
         new_index=best_index,
         score=best_score,
@@ -4891,7 +4891,7 @@ async def _install_fast_mode_network_cache(
 
     Failures degrade to live (never break the session).
     """
-    from providers.fast_cache.browser_http import BrowserHttpCache
+    from providers.demo_cache.browser_http import BrowserHttpCache
 
     http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled)
 
@@ -7330,8 +7330,8 @@ async def _spawn_browser_agent_activity_v3_real(
     # finalize for dozens of children (verify20). Soft-complete the tool
     # without a provider session so warm paths stay ~$0 and finish. Write-lock
     # / resume still need the live browser. Restricted to exact-match
-    # fast_cache:on bench trees (test-mass-agent-run-0 / OAi demo).
-    from providers.fast_cache.client import soft_complete_allowed_for_agent
+    # demo_cache:on bench trees (test-mass-agent-run-0 / OAi demo).
+    from providers.demo_cache.client import soft_complete_allowed_for_agent
 
     if (
         fast_mode_cache_enabled
@@ -8611,7 +8611,7 @@ async def _spawn_browser_agent_activity_v3_real(
             if skip_browser_network_recording(fast_mode=fast_mode_cache_enabled, goal=goal):
                 return None
             if fast_mode_cache_enabled:
-                from providers.fast_cache.client import soft_complete_allowed_for_agent
+                from providers.demo_cache.client import soft_complete_allowed_for_agent
 
                 if await soft_complete_allowed_for_agent(agent_id, goal):
                     return None
@@ -9783,7 +9783,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 "task": task_prompt,
                                 "dynamic_system_context": dynamic_system_context,
                                 "turn_messages": browser_turn_messages,
-                                # url/title enter the Fast Mode cache key via
+                                # url/title enter the DEMO cache key via
                                 # canonical_browser_use_request — empty {} would
                                 # replay a stale decision after a page change.
                                 "browser_state": {

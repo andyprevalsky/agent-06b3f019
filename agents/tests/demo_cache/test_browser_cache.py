@@ -18,8 +18,8 @@ from typing import Any, Dict
 
 import pytest
 
-from providers.fast_cache import browser_http, browser_use_cache
-from providers.fast_cache import normalize
+from providers.demo_cache import browser_http, browser_use_cache
+from providers.demo_cache import normalize
 from domains.spawn_browser_agent_v3.handler import (
     _attach_browser_replay_target,
     _install_fast_mode_network_cache,

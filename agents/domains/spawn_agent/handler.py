@@ -1259,7 +1259,7 @@ class SpawnAgentManager(ToolManager):
         simulated_args.setdefault(
             "root_goal",
             str(
-                getattr(workflow_instance, "fast_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
+                getattr(workflow_instance, "demo_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
             ),
         )
 

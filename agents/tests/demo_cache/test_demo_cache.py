@@ -1,4 +1,4 @@
-"""Fast Mode aggressive cache — Python behavior tests.
+"""DEMO cache — Python behavior tests.
 
 Each test is annotated with the checklist item(s) it proves (see
 docs/plans/active/fast-mode-aggressive-cache.md). These exercise the REAL cache
@@ -21,9 +21,9 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from providers.fast_cache import normalize, rose_cache
-from providers.fast_cache.context import (
-    FastCacheContext,
+from providers.demo_cache import normalize, rose_cache
+from providers.demo_cache.context import (
+    DemoCacheContext,
     is_enabled,
     reset_context,
     set_context,
@@ -32,7 +32,7 @@ from providers.rose.pools import POOL_REGISTRY
 
 
 def _soft_complete_bench_goal() -> str:
-    """Exact prompt for the sole ``fast_cache:on`` task (test-mass-agent-run-0)."""
+    """Exact prompt for the sole ``demo_cache:on`` task (test-mass-agent-run-0)."""
     from pathlib import Path
 
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
@@ -162,7 +162,7 @@ def test_cache_replay_captures_actual_completion(mem, monkeypatch, tmp_path, ent
         rose_cache.accumulate_chunk(stored, chunk)
 
     async def body():
-        context = FastCacheContext(enabled=True, goal="evidence contract", write_enabled=False)
+        context = DemoCacheContext(enabled=True, goal="evidence contract", write_enabled=False)
         set_context(context)
         key = context.llm_key("execute_loop", rose_cache.request_key_material(kwargs))
         mem.data[key] = stored
@@ -192,7 +192,7 @@ def test_cache_replay_captures_actual_completion(mem, monkeypatch, tmp_path, ent
         assert dump["agent_id"] == agent_id
         assert dump["messages"] == messages
         assert dump["tools"] == tools
-        assert dump["extra"]["completion_source"] == "fast_cache"
+        assert dump["extra"]["completion_source"] == "demo_cache"
         assert dump["extra"]["cache_key"] == key
         assert dump["output"]["actual_model"] == "fast-cache"
         assert dump["output"]["content"] == "Hello world"
@@ -211,7 +211,7 @@ def test_cache_passthrough_dump_is_labeled(mem, monkeypatch, tmp_path, entrypoin
     monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal=_soft_complete_bench_goal()))
+        set_context(DemoCacheContext(enabled=True, goal=_soft_complete_bench_goal()))
         client = RoseClient(openrouter_key="must-not-call-live")
         kwargs = dict(
             pool="rose-1-ultra",
@@ -230,7 +230,7 @@ def test_cache_passthrough_dump_is_labeled(mem, monkeypatch, tmp_path, entrypoin
     dumps = list(tmp_path.rglob("*.json"))
     assert len(dumps) == 1
     dump = json.loads(dumps[0].read_text())
-    assert dump["extra"]["completion_source"] == "fast_cache"
+    assert dump["extra"]["completion_source"] == "demo_cache"
     assert dump["extra"]["replay_reason"] == "fm_terminal_passthrough"
     assert dump["extra"]["cache_hit_key"] == "terminal_passthrough"
     assert dump["output"]["actual_model"] == "fast-cache"
@@ -247,7 +247,7 @@ def test_cache_dump_marks_consumer_abandonment(mem, monkeypatch, tmp_path, entry
     monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
 
     async def body():
-        ctx = FastCacheContext(enabled=True, goal="abandonment contract", write_enabled=False)
+        ctx = DemoCacheContext(enabled=True, goal="abandonment contract", write_enabled=False)
         set_context(ctx)
         kwargs = dict(pool="rose-1-ultra", agent_id="abandoned-contract", messages=[])
         key = ctx.llm_key("execute_loop", rose_cache.request_key_material({**kwargs, "provider_fast_mode": True}))
@@ -1190,8 +1190,8 @@ def test_goal_hash_is_exact_match():
 
 
 def test_llm_key_uses_canonical_request_fingerprint():
-    ctx_a = FastCacheContext(enabled=True, goal="g")
-    ctx_b = FastCacheContext(enabled=True, goal="g")
+    ctx_a = DemoCacheContext(enabled=True, goal="g")
+    ctx_b = DemoCacheContext(enabled=True, goal="g")
     assert ctx_a.llm_key("execute_loop", {"messages": [{"role": "user", "content": "hello"}]}) == ctx_b.llm_key(
         "execute_loop", {"messages": [{"content": "hello", "role": "user"}]}
     )
@@ -1201,7 +1201,7 @@ def test_llm_key_uses_canonical_request_fingerprint():
 
 
 def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
-    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="same goal", base_step=1)
     original_request = rose_cache.request_key_material({"pool": "rose-1-ultra"})
     original_key = ctx.llm_key("execute_loop", original_request)
 
@@ -1218,7 +1218,7 @@ def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
 
 def test_llm_request_key_separates_context_tool_schemas():
     """Declared-only tools shape provider validity and must partition replay."""
-    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="same goal", base_step=1)
     base = {
         "pool": "rose-1-ultra",
         "context_tools": [
@@ -1277,7 +1277,7 @@ def test_fable_51_pool_contract_shares_fable_5_fingerprint():
     assert normalize.oai_demo_position_request_fingerprint(fable_5) == (
         normalize.oai_demo_position_request_fingerprint(fable_51)
     )
-    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="same goal", base_step=1)
     assert ctx.llm_key("dag_param_populator", fable_5) == ctx.llm_key("dag_param_populator", fable_51)
     live = rose_cache.request_key_material({"pool": "rose-1-ultra"})
     assert live["pool_contract"]["claude_auth_model"] == "claude-opus-5-5"
@@ -1293,7 +1293,7 @@ def test_fable_51_pool_contract_shares_fable_5_fingerprint():
 
 def test_llm_request_key_separates_anthropic_exclusion_policy(monkeypatch):
     monkeypatch.delenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", raising=False)
-    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="same goal", base_step=1)
     normal = rose_cache.request_key_material({"pool": "rose-1-ultra"})
     excluded = rose_cache.request_key_material({"pool": "rose-1-ultra", "_exclude_anthropic_family": True})
 
@@ -1310,7 +1310,7 @@ def test_llm_request_key_resolves_environment_provider_policy(monkeypatch):
 
 
 def test_position_llm_key_ignores_prior_tool_outputs_but_keeps_static_prompt():
-    ctx = FastCacheContext(enabled=True, goal="same coding-agent goal", base_step=2)
+    ctx = DemoCacheContext(enabled=True, goal="same coding-agent goal", base_step=2)
     base_request = {
         "pool": "rose-1-ultra",
         "messages": [
@@ -1344,13 +1344,13 @@ def test_position_llm_key_ignores_prior_tool_outputs_but_keeps_static_prompt():
 
     assert ctx.llm_key("execute_loop", base_request) == ctx.llm_key("execute_loop", noisy_request)
     assert ctx.llm_key("execute_loop", base_request) != ctx.llm_key("execute_loop", changed_prompt)
-    assert ctx.llm_key("execute_loop", base_request) != FastCacheContext(
+    assert ctx.llm_key("execute_loop", base_request) != DemoCacheContext(
         enabled=True, goal="same coding-agent goal", base_step=3
     ).llm_key("execute_loop", base_request)
 
 
 def test_position_llm_key_busts_when_user_attachment_metadata_changes():
-    ctx = FastCacheContext(enabled=True, goal="tint the attached image red", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="tint the attached image red", base_step=1)
     image_only = {
         "pool": "rose-1-ultra",
         "messages": [
@@ -1402,7 +1402,7 @@ def test_position_llm_key_busts_when_user_attachment_metadata_changes():
 
 
 def test_position_llm_key_unchanged_when_only_assistant_tool_history_differs():
-    ctx = FastCacheContext(enabled=True, goal="plain coding task", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="plain coding task", base_step=1)
     request = {
         "pool": "rose-1-ultra",
         "messages": [
@@ -1425,7 +1425,7 @@ def test_position_llm_key_unchanged_when_only_assistant_tool_history_differs():
 
 
 def test_position_llm_key_busts_when_user_goal_changes():
-    ctx = FastCacheContext(enabled=True, goal="tint the attached image red", base_step=1)
+    ctx = DemoCacheContext(enabled=True, goal="tint the attached image red", base_step=1)
     base = {
         "pool": "rose-1-ultra",
         "messages": [
@@ -1445,7 +1445,7 @@ def test_position_llm_key_busts_when_user_goal_changes():
 
 
 def test_position_llm_key_ignores_completion_summary_structured_output_block():
-    ctx = FastCacheContext(enabled=True, goal="same coding-agent goal", base_step=0)
+    ctx = DemoCacheContext(enabled=True, goal="same coding-agent goal", base_step=0)
     cold_request = {
         "pool": "rose-1-flash",
         "messages": [
@@ -1506,7 +1506,7 @@ def test_position_llm_key_ignores_completion_summary_structured_output_block():
 
 
 def test_llm_key_ignores_browser_step_index_in_call_site():
-    ctx = FastCacheContext(enabled=True, goal="g")
+    ctx = DemoCacheContext(enabled=True, goal="g")
     request = {"messages": [{"role": "user", "content": "same browser request"}]}
     assert ctx.llm_key("browser_use_step_2", request) == ctx.llm_key("browser_use_step_7", request)
     assert ":browser_use_step:c:" in ctx.llm_key("browser_use_step_2", request)
@@ -2214,7 +2214,7 @@ def test_is_enabled_false_when_no_context():
 def test_passthrough_when_disabled(mem):
     # #1 / #25 flag off: rose called, zero cache reads/writes.
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g"))
+        set_context(DemoCacheContext(enabled=False, goal="g"))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -2234,7 +2234,7 @@ def test_write_only_context_writes_without_reading(mem):
     """
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
+        set_context(DemoCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -2260,7 +2260,7 @@ def test_write_only_continues_live_even_when_prior_slot_exists(mem, monkeypatch)
     monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=3))
+        set_context(DemoCacheContext(enabled=False, goal="g", write_enabled=True, base_step=3))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -2289,12 +2289,12 @@ def test_rose_client_write_only_does_not_trajectory_end_passthrough(mem, monkeyp
         return step is not None and int(step) > 0
 
     monkeypatch.setattr(
-        "providers.fast_cache.client.trajectory_prior_exists",
+        "providers.demo_cache.client.trajectory_prior_exists",
         prior_true,
     )
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="browser-smoke-goal", write_enabled=True, base_step=2))
+        set_context(DemoCacheContext(enabled=False, goal="browser-smoke-goal", write_enabled=True, base_step=2))
         client = RoseClient(openrouter_key="test-key")
         live_calls = {"n": 0}
 
@@ -2327,12 +2327,12 @@ def test_rose_client_write_only_does_not_trajectory_end_passthrough(mem, monkeyp
 
 def test_write_only_context_uses_provider_fast_mode(mem):
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
+        set_context(DemoCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert rose.calls == 1
         assert mem.set_calls == 1
-        assert next(iter(mem.data.keys())) == FastCacheContext(enabled=True, goal="g").llm_key(
+        assert next(iter(mem.data.keys())) == DemoCacheContext(enabled=True, goal="g").llm_key(
             "response_schema",
             rose_cache.request_key_material(
                 {
@@ -2349,7 +2349,7 @@ def test_miss_writes_assembled_response(mem):
     # #7 first run populates; #8 full (saw done) write.
     # Non-soft call_site so cold miss still records (soft sites short-circuit).
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -2368,7 +2368,7 @@ def test_structured_response_model_does_not_write_during_stream(mem):
             response: str
             tool_calls: list = []
 
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(
@@ -2390,7 +2390,7 @@ def test_structured_response_model_does_not_write_during_stream(mem):
 def test_partial_stream_not_written(mem):
     # #8 aborted/partial (no done chunk) is never cached.
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream()[:3])  # metadata + 2 content, NO usage/done
         await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert mem.data == {}
@@ -2401,13 +2401,13 @@ def test_partial_stream_not_written(mem):
 def test_hit_replays_without_calling_rose(mem):
     # #11 replay = no third-party egress; #12 re-streamed.
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         await _drain(
             rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
 
         # Second run, fresh context (new run, same goal) — must hit.
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         rose2 = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose2, call_site="response_schema", pool="rose-1-ultra"))
 
@@ -2436,11 +2436,11 @@ def test_hit_replays_without_calling_rose(mem):
 def test_replay_after_write_does_not_rewrite(mem):
     # #10 replaying the same key hits cache and does not call live Rose again.
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         await _drain(
             rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         # Second run MISSes? No — same key already present → it HITS and won't write again.
         await _drain(
             rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
@@ -2456,7 +2456,7 @@ def test_partial_cache_degrades_gracefully(mem):
     async def body():
         first_messages = [{"role": "user", "content": "hello"}]
         second_messages = [{"role": "user", "content": "goodbye"}]
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         await _drain(
             rose_cache.cached_complete(
                 FakeRose(_full_stream()),
@@ -2466,7 +2466,7 @@ def test_partial_cache_degrades_gracefully(mem):
             )
         )
 
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         hit_rose = FakeRose(_full_stream())
         await _drain(
             rose_cache.cached_complete(
@@ -2507,7 +2507,7 @@ def test_get_error_falls_through_to_live(monkeypatch):
     monkeypatch.setattr(rose_cache.cache_client, "cache_set", noop_set)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(DemoCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1  # soft sites still degrade to live on transport errors
@@ -2546,7 +2546,7 @@ def test_dag_param_positional_candidate_is_not_rekeyed(mem, monkeypatch):
     monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", foreign_position)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
+        set_context(DemoCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="dag_param_populator", pool="rose-1-ultra"))
         assert rose.calls == 0
@@ -2568,7 +2568,7 @@ def test_rose_client_dag_param_positional_candidate_is_not_promoted(mem, monkeyp
     monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", foreign_position)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
+        set_context(DemoCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
         client = RoseClient(openrouter_key="test-key")
         live_calls = {"n": 0}
 
@@ -2596,7 +2596,7 @@ def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
     """Mass-agent Fast Mode must not bill live LLM when get-position times out.
 
     Recurrence of 2026-07-07: a store transport fault is not a semantic miss.
-    Allowlisted reads raise FastCacheLookupError instead of falling through.
+    Allowlisted reads raise DemoCacheLookupError instead of falling through.
     """
 
     async def boom(*_a, **_k):
@@ -2613,7 +2613,7 @@ def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -2622,7 +2622,7 @@ def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
             )
         )
         rose = FakeRose(_full_stream())
-        with pytest.raises(rose_cache.FastCacheLookupError):
+        with pytest.raises(rose_cache.DemoCacheLookupError):
             await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 0
 
@@ -2632,8 +2632,8 @@ def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
 def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch):
     # The workflow keys the cache namespace by the persisted Agent-row goal, not
     # its (possibly chat-refined) input goal. This activity is that resolution.
-    import providers.fast_cache.client as cache_client_module
-    from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
+    import providers.demo_cache.client as cache_client_module
+    from helpers.demo_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
         assert agent_id == "agent-1"
@@ -2651,10 +2651,10 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
 
 
 def test_resolve_fast_cache_goal_activity_returns_child_and_root_goal(monkeypatch):
-    import providers.fast_cache.client as cache_client_module
-    from helpers.fast_cache_goal import (
+    import providers.demo_cache.client as cache_client_module
+    from helpers.demo_cache_goal import (
         resolve_fast_cache_goal_activity,
-        unpack_fast_cache_goal_resolution,
+        unpack_demo_cache_goal_resolution,
     )
 
     leftover = "Produce fresh tool-grounded evidence for Andy Prevalsky"
@@ -2669,16 +2669,16 @@ def test_resolve_fast_cache_goal_activity_returns_child_and_root_goal(monkeypatc
     async def body():
         resolved = await resolve_fast_cache_goal_activity("leftover-child")
         assert resolved == {"goal": leftover, "root_goal": root}
-        assert unpack_fast_cache_goal_resolution(resolved) == (leftover, root)
-        assert unpack_fast_cache_goal_resolution("legacy-string") == ("legacy-string", None)
-        assert unpack_fast_cache_goal_resolution(None) == (None, None)
+        assert unpack_demo_cache_goal_resolution(resolved) == (leftover, root)
+        assert unpack_demo_cache_goal_resolution("legacy-string") == ("legacy-string", None)
+        assert unpack_demo_cache_goal_resolution(None) == (None, None)
 
     asyncio.run(body())
 
 
 def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
-    import providers.fast_cache.client as cache_client_module
-    from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
+    import providers.demo_cache.client as cache_client_module
+    from helpers.demo_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
         return False, None, False, None, None, True
@@ -2693,8 +2693,8 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
 
 def test_resolve_fast_cache_context_activity_returns_general_demo_gate(monkeypatch):
     """Any catalog DEMO tree, not only the legacy OAI demo, enables replay."""
-    import providers.fast_cache.client as cache_client_module
-    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+    import providers.demo_cache.client as cache_client_module
+    from helpers.demo_cache_goal import resolve_fast_cache_context_activity
 
     async def fake_resolve(agent_id: str, *, refresh: bool = False):
         assert refresh is True, "a workflow run start must re-read the agent row"
@@ -2740,14 +2740,14 @@ def test_goal_hash_collapses_run_local_message_refs():
 
 def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
     """Isolated July-cache smokes must not write through Andy/Tamy into prod."""
-    from providers.fast_cache.context import write_through_enabled_for_user
+    from providers.demo_cache.context import write_through_enabled_for_user
 
     monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
     assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is True
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
     assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is False
     assert write_through_enabled_for_user("43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9") is False
-    assert FastCacheContext(enabled=True, goal="benchmark", write_enabled=True).should_write is False
+    assert DemoCacheContext(enabled=True, goal="benchmark", write_enabled=True).should_write is False
 
 
 def test_shared_cache_disable_flag_blocks_ordinary_cache_writes(mem, monkeypatch):
@@ -2755,7 +2755,7 @@ def test_shared_cache_disable_flag_blocks_ordinary_cache_writes(mem, monkeypatch
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="ordinary goal", write_enabled=True))
+        set_context(DemoCacheContext(enabled=True, goal="ordinary goal", write_enabled=True))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -2766,14 +2766,14 @@ def test_shared_cache_disable_flag_blocks_ordinary_cache_writes(mem, monkeypatch
 
 def test_demo_wmh_cache_stores_and_replays_with_benchmark_read_only_flag(mem, monkeypatch):
     """DEMO WHM predictions persist even when ordinary benchmark writes are disabled."""
-    from benchmarks.wmh_rose_provider import _WMHFastCacheContext
+    from benchmarks.wmh_rose_provider import _WMHDemoCacheContext
     from providers.rose.client import RoseClient
 
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
     async def body():
         goal = "DEMO fundraiser cache integration"
-        ctx = _WMHFastCacheContext(enabled=True, goal=goal, write_enabled=True, root_goal=goal)
+        ctx = _WMHDemoCacheContext(enabled=True, goal=goal, write_enabled=True, root_goal=goal)
         set_context(ctx)
         rose = RoseClient(openrouter_key="test-key")
         live_calls = 0
@@ -2877,7 +2877,7 @@ def test_position_fallback_cancellation_preserves_singleflight_ownership(monkeyp
     """Caller cancellation stays local; the shared HTTP task resolves live followers."""
     import httpx
 
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     async def body():
         cache_client.clear_position_memo()
@@ -2978,7 +2978,7 @@ def test_position_fallback_failure_is_owned_and_propagated(monkeypatch, with_fol
 
     import httpx
 
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     async def body():
         loop = asyncio.get_running_loop()
@@ -3048,7 +3048,7 @@ def test_position_fallback_failure_is_owned_and_propagated(monkeypatch, with_fol
 
 def test_position_fallback_memos_and_single_flights_http(monkeypatch):
     """Sibling Fast Mode agents must share one get-position HTTP per durable slot."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     cache_client.clear_position_memo()
     posts: list[int] = []
@@ -3086,7 +3086,7 @@ def test_position_fallback_memos_and_single_flights_http(monkeypatch):
 
 def test_position_fallback_prefetches_upcoming_steps(monkeypatch):
     """A hit should prefetch the next few steps so the sequential loop is local."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     cache_client.clear_position_memo()
     seen: list[int] = []
@@ -3132,7 +3132,7 @@ def test_position_fallback_retries_timeout_then_hits(monkeypatch):
     """get-position ReadTimeout must retry like cache_get, not raise on first fault."""
     import httpx
 
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     cache_client.clear_position_memo()
     posts = {"n": 0}
@@ -3197,7 +3197,7 @@ def test_position_fallback_waiter_timeout_does_not_cancel_shared_slot(monkeypatc
     retry 1s later awaited that cancelled future and a bare CancelledError
     failed the whole explore activity (spawn_agent ERROR, t10-no-tool-failures).
     """
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     cache_client.clear_position_memo()
     posts: list[int] = []
@@ -3225,7 +3225,7 @@ def test_position_fallback_waiter_timeout_does_not_cancel_shared_slot(monkeypatc
 
 def test_position_fallback_owner_timeout_still_resolves_waiters(monkeypatch):
     """The caller that started the fetch may time out; waiters still get the row."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     cache_client.clear_position_memo()
     posts: list[int] = []
@@ -3284,7 +3284,7 @@ def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
     assert "Aman Gottumukkala" not in json.dumps(rewritten)
 
     window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
-    ctx = FastCacheContext(enabled=True, goal=f"Analyze Topol. Window {window}.")
+    ctx = DemoCacheContext(enabled=True, goal=f"Analyze Topol. Window {window}.")
     token = set_context(ctx)
     try:
         chunks: list[Any] = []
@@ -3396,8 +3396,8 @@ def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
     assert normalize.goal_hash(py_goal) != normalize.goal_hash(unsorted)
 
 
-def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
-    """Soft stubs require exact match with a fast_cache:on catalog prompt (or its root)."""
+def test_soft_complete_allowed_only_for_demo_cache_on_bench_goals():
+    """Soft stubs require exact match with a demo_cache:on catalog prompt (or its root)."""
     bench = _soft_complete_bench_goal()
     assert normalize.goal_hash(bench) == normalize.OAI_DEMO_ROOT_GOAL_HASH
     assert normalize.OAI_DEMO_ROOT_GOAL_HASH in normalize.soft_complete_goal_hashes()
@@ -3405,9 +3405,9 @@ def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
     assert normalize.soft_complete_allowed("Order Blue Bottle at Ferry Building") is False
     assert normalize.soft_complete_allowed("child for_each goal", root_goal=bench) is True
     assert normalize.soft_complete_allowed("child for_each goal", root_goal="other root") is False
-    ctx = FastCacheContext(enabled=True, goal="child", root_goal=bench)
+    ctx = DemoCacheContext(enabled=True, goal="child", root_goal=bench)
     assert ctx.soft_complete_allowed is True
-    ctx_other = FastCacheContext(enabled=True, goal="Order coffee")
+    ctx_other = DemoCacheContext(enabled=True, goal="Order coffee")
     assert ctx_other.soft_complete_allowed is False
 
 
@@ -3422,7 +3422,7 @@ def test_wmh_demo_cache_miss_runs_live_and_writes_instead_of_soft_completing(mem
     assert normalize.soft_complete_allowed(bench) is False
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal=bench, root_goal=bench, base_step=0))
+        set_context(DemoCacheContext(enabled=True, goal=bench, root_goal=bench, base_step=0))
         client = RoseClient(openrouter_key="test-key")
         live_calls = {"n": 0}
 
@@ -3460,7 +3460,7 @@ def test_wmh_demo_cache_miss_runs_live_and_writes_instead_of_soft_completing(mem
 
 
 def test_soft_complete_on_miss_for_explore_sites_only():
-    from providers.fast_cache.rose_cache import soft_complete_on_miss, swf_scrape_passthrough
+    from providers.demo_cache.rose_cache import soft_complete_on_miss, swf_scrape_passthrough
 
     explore = soft_complete_on_miss("explore_agent")
     assert explore is not None
@@ -3508,7 +3508,7 @@ def test_soft_complete_dag_reasoning_miss_does_not_call_live(mem, monkeypatch):
 
     async def body():
         bench = _soft_complete_bench_goal()
-        set_context(FastCacheContext(enabled=True, goal=bench, base_step=6, root_goal=bench))
+        set_context(DemoCacheContext(enabled=True, goal=bench, base_step=6, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="dag_reasoning", pool="rose-1-ultra"))
         assert rose.calls == 0
@@ -3531,7 +3531,7 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
     bench = _soft_complete_bench_goal()
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal=bench, base_step=5, root_goal=bench))
+        set_context(DemoCacheContext(enabled=True, goal=bench, base_step=5, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
@@ -3550,7 +3550,7 @@ def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
 
     async def body_allowlisted():
         bench = _soft_complete_bench_goal()
-        set_context(FastCacheContext(enabled=True, goal=bench, base_step=1, root_goal=bench))
+        set_context(DemoCacheContext(enabled=True, goal=bench, base_step=1, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
@@ -3559,7 +3559,7 @@ def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
         assert mem.set_calls == 0
 
     async def body_non_bench_goes_live():
-        set_context(FastCacheContext(enabled=True, goal="Order Blue Bottle", base_step=1))
+        set_context(DemoCacheContext(enabled=True, goal="Order Blue Bottle", base_step=1))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
@@ -3572,7 +3572,7 @@ def test_cold_explore_miss_does_not_soft_complete(mem):
     """Backward-compat alias: non-bench cold FM must not stub (goes live)."""
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
+        set_context(DemoCacheContext(enabled=True, goal="g", base_step=1))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
@@ -3590,7 +3590,7 @@ def test_write_only_cold_execute_loop_does_not_soft(mem):
     """
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
+        set_context(DemoCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1
@@ -3608,13 +3608,13 @@ def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch)
     monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_after_first)
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=1))
+        set_context(DemoCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=1))
         rose = FakeRose(_full_stream())
         await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
         assert mem.set_calls == 1
 
-        set_context(FastCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=2))
+        set_context(DemoCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=2))
         rose2 = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose2, call_site="explore_agent", pool="rose-1-flash"))
         assert rose2.calls == 1
@@ -3694,7 +3694,7 @@ def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
 
     async def body():
         bench = _soft_complete_bench_goal()
-        set_context(FastCacheContext(enabled=True, goal=bench, base_step=2, root_goal=bench))
+        set_context(DemoCacheContext(enabled=True, goal=bench, base_step=2, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(
@@ -3717,7 +3717,7 @@ def test_swf_miss_non_bench_goes_live(mem):
     """Non-allowlisted FM goals do not get SWF scrape passthrough stubs."""
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="Order coffee", base_step=2))
+        set_context(DemoCacheContext(enabled=True, goal="Order coffee", base_step=2))
         rose = FakeRose(_full_stream())
         await _drain(
             rose_cache.cached_complete(
@@ -3803,7 +3803,7 @@ def test_july_gp_execute_first_step_retries_and_replays_web_search(mem, monkeypa
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -3852,7 +3852,7 @@ def test_july_gp_execute_skips_first_step_attempt_completion(mem, monkeypatch):
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -3879,7 +3879,7 @@ def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
     async def july_goes_live():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -3894,7 +3894,7 @@ def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
     async def tokyo_still_stubs():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal="Find the current professional profile of Andy Prevalsky, founder of Rose Labs.",
                 base_step=1,
@@ -3913,7 +3913,7 @@ def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
 
 def test_read_only_benchmark_clean_miss_never_calls_provider(mem, monkeypatch):
     """A missing shared-cache row fails closed before any live benchmark spend."""
-    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.demo_cache.rose_cache import DemoCacheLookupError
     from providers.rose.client import RoseClient
 
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
@@ -3921,7 +3921,7 @@ def test_read_only_benchmark_clean_miss_never_calls_provider(mem, monkeypatch):
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -3937,7 +3937,7 @@ def test_read_only_benchmark_clean_miss_never_calls_provider(mem, monkeypatch):
                 yield chunk
 
         monkeypatch.setattr(client, "_complete_impl", fake_impl)
-        with pytest.raises(FastCacheLookupError, match="Strict read-only benchmark cache miss"):
+        with pytest.raises(DemoCacheLookupError, match="Strict read-only benchmark cache miss"):
             await _drain(
                 client.complete(
                     pool="rose-1-ultra",
@@ -3965,13 +3965,13 @@ def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):
             return None, None
         return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
 
-    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", flake_then_hit)
+    monkeypatch.setattr("providers.demo_cache.client.cache_get_position_fallback", flake_then_hit)
     monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
 
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_gp_child_goal(),
                 base_step=1,
@@ -4048,7 +4048,7 @@ def test_july_explore_falls_back_to_july_hash_and_replays_web_search(mem, monkey
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=1,
@@ -4099,7 +4099,7 @@ def test_july_explore_skips_first_step_attempt_completion(mem, monkeypatch):
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=1,
@@ -4151,7 +4151,7 @@ def test_july_explore_replays_last_step_completion_summary(mem, monkeypatch):
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=5,
@@ -4208,7 +4208,7 @@ def test_july_explore_recovers_last_completion_when_step_exhausted(mem, monkeypa
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=8,
@@ -4231,7 +4231,7 @@ def test_july_explore_miss_does_not_cold_passthrough(mem):
     async def molly_goes_live():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=1,
@@ -4258,13 +4258,13 @@ def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
             return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}"
         return None, None
 
-    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", by_hash)
+    monkeypatch.setattr("providers.demo_cache.client.cache_get_position_fallback", by_hash)
     monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", by_hash)
 
     async def body():
         bench = _soft_complete_bench_goal()
         set_context(
-            FastCacheContext(
+            DemoCacheContext(
                 enabled=True,
                 goal=_july_explore_molly_goal(),
                 base_step=1,
@@ -4300,8 +4300,8 @@ def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
 @pytest.mark.parametrize("boundary", ["unresolved-context", "browser-bypass", "non-demo-cache-miss"])
 def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monkeypatch, boundary):
     """The opted-in isolated probe never spends after cache admission is lost."""
-    from providers.fast_cache import client as cache_client
-    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.demo_cache import client as cache_client
+    from providers.demo_cache.rose_cache import DemoCacheLookupError
     from providers.rose.client import RoseClient
 
     monkeypatch.setenv("BENCHMARK_DEMO_CACHE_READ_ONLY", "1")
@@ -4319,7 +4319,7 @@ def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monk
 
     async def body():
         token = set_context(
-            FastCacheContext(enabled=True, goal="ordinary goal", base_step=1)
+            DemoCacheContext(enabled=True, goal="ordinary goal", base_step=1)
             if boundary == "non-demo-cache-miss"
             else None
         )
@@ -4333,7 +4333,7 @@ def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monk
 
         monkeypatch.setattr(client, "_complete_impl", live_boundary)
         try:
-            with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+            with pytest.raises(DemoCacheLookupError, match="DEMO replay probe.*live"):
                 await _drain(
                     client.complete(
                         pool="rose-1-browser-use" if boundary == "browser-bypass" else "rose-1-ultra",
@@ -4353,7 +4353,7 @@ def test_demo_cache_probe_refuses_unresolved_or_uncached_live_provider(mem, monk
 @pytest.mark.parametrize("probe,isolated", [(None, "true"), ("1", None)])
 def test_demo_cache_probe_flag_off_or_nonisolated_preserves_live_fallback(mem, monkeypatch, probe, isolated):
     """The new guard must not redefine the generic read-only write flag."""
-    from providers.fast_cache import client as cache_client
+    from providers.demo_cache import client as cache_client
     from providers.rose.client import RoseClient
 
     for key, value in {"BENCHMARK_DEMO_CACHE_READ_ONLY": probe, "BENCHMARK_ISOLATED_RUN": isolated}.items():
@@ -4404,7 +4404,7 @@ def test_demo_cache_probe_flag_off_or_nonisolated_preserves_live_fallback(mem, m
 @pytest.mark.parametrize("probe", ["1", None])
 def test_demo_cache_probe_compatibility_wrapper_fences_non_demo_miss(mem, monkeypatch, probe):
     """Legacy callers must not bypass the opted-in task guard through _complete_impl."""
-    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.demo_cache.rose_cache import DemoCacheLookupError
     from providers.rose.client import RoseClient
 
     if probe is None:
@@ -4415,7 +4415,7 @@ def test_demo_cache_probe_compatibility_wrapper_fences_non_demo_miss(mem, monkey
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
     async def body():
-        token = set_context(FastCacheContext(enabled=True, goal="ordinary goal", base_step=1))
+        token = set_context(DemoCacheContext(enabled=True, goal="ordinary goal", base_step=1))
         client = RoseClient(openrouter_key="test-key")
         live_calls = {"n": 0}
 
@@ -4434,7 +4434,7 @@ def test_demo_cache_probe_compatibility_wrapper_fences_non_demo_miss(mem, monkey
                 agent_id="agent-fixture",
             )
             if probe is not None:
-                with pytest.raises(FastCacheLookupError, match="DEMO replay probe.*live"):
+                with pytest.raises(DemoCacheLookupError, match="DEMO replay probe.*live"):
                     await _drain(stream)
                 assert live_calls["n"] == 0
             else:
@@ -4533,7 +4533,7 @@ def test_backend_policy_cache_identities_mirror_the_immutable_registry():
 
     from benchmarks import wmh_execution_policy as policies
 
-    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/fastCacheNormalizeConstants.ts").read_text()
+    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/demoCacheNormalizeConstants.ts").read_text()
     constants = dict(re.findall(r"const (WMH_[A-Z0-9_]+) =\s*'([^']+)'", source))
     table = source[
         source.index("const WMH_EXECUTION_POLICIES") : source.index("]);", source.index("const WMH_EXECUTION_POLICIES"))
@@ -4573,7 +4573,7 @@ def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monke
 
     async def body():
         monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v1")
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        set_context(DemoCacheContext(enabled=True, goal="g", base_step=base_step))
         old_chunks = _full_stream()
         old_chunks[1].data["text"] = "v1 stale "
         old_rose = FakeRose(old_chunks)
@@ -4582,7 +4582,7 @@ def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monke
         old_keys = set(mem.data)
 
         monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v2")
-        context = FastCacheContext(enabled=True, goal="g", base_step=base_step)
+        context = DemoCacheContext(enabled=True, goal="g", base_step=base_step)
         set_context(context)
         material = rose_cache.request_key_material(kwargs)
         assert material["tool_choice"] == tool_choice
@@ -4603,7 +4603,7 @@ def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monke
         assert new_rose.calls == 1 and mem.set_calls == 2
         assert mem.data[key]["content"] == "v2 fresh world"
 
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        set_context(DemoCacheContext(enabled=True, goal="g", base_step=base_step))
         replay_rose = FakeRose(_full_stream())
         replay = await _drain(rose_cache.cached_complete(replay_rose, call_site="response_schema", **kwargs))
         assert replay_rose.calls == 0 and mem.set_calls == 2
@@ -4622,7 +4622,7 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     import asyncio
 
     from benchmarks.benchmark_tasks import get_task_by_name
-    from providers.fast_cache import client, context, normalize
+    from providers.demo_cache import client, context, normalize
 
     demo_goal = get_task_by_name("test-mass-agent-run-0").prompt
     posts = []
@@ -4650,7 +4650,7 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
 
     demo_hash = normalize.goal_hash(demo_goal)
     assert asyncio.run(client.cache_set("demo-key", "llm", demo_hash, {"schema": {}})) is False
-    child = context.FastCacheContext(enabled=True, goal="for_each child", root_goal=demo_goal, write_enabled=True)
+    child = context.DemoCacheContext(enabled=True, goal="for_each child", root_goal=demo_goal, write_enabled=True)
     assert child.should_write is False
     # Direct callers (browser-use, web search/fetch, files) pass their goal so an
     # identity-bound OAi child goal is guarded even though its hash differs.

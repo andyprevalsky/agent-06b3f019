@@ -27,10 +27,10 @@ def test_fast_mode_does_not_cache_whole_tool_results():
         "explore_agent_result",
         "sub_agent_result",
         "claude_code_agent_result",
-        "fast_cache.explore_result_",
-        "fast_cache.sub_agent_result_",
-        "fast_cache.code_agent_result_",
-        "fast-cache:sub-agent",
+        "demo_cache.explore_result_",
+        "demo_cache.sub_agent_result_",
+        "demo_cache.code_agent_result_",
+        "demo-cache:sub-agent",
         "cached_activity_result",
     ]
     for marker in disallowed_markers:
@@ -41,9 +41,9 @@ def test_fast_mode_still_allows_leaf_provider_and_llm_caches():
     rose_client = _read("providers/rose/client.py")
     web_search = _read("tools/web_search/handler.py")
     web_fetch = _read("domains/web_fetch/handler.py")
-    browser_http = _read("providers/fast_cache/browser_http.py")
+    browser_http = _read("providers/demo_cache/browser_http.py")
 
     assert "llm.cache.replay" in rose_client
-    assert "fast_cache.web_search_hit" in web_search
-    assert "fast_cache.web_fetch_hit" in web_fetch
-    assert "fast_cache.browser_http_hit" in browser_http
+    assert "demo_cache.web_search_hit" in web_search
+    assert "demo_cache.web_fetch_hit" in web_fetch
+    assert "demo_cache.browser_http_hit" in browser_http

@@ -106,7 +106,7 @@ with workflow.unsafe.imports_passed_through():
         _verifier_superseded_by_user_feedback,
         run_agent,
     )
-    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
+    from providers.demo_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
@@ -200,7 +200,7 @@ ATTENTION_CONTROL_RESPONSES = frozenset(
 def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
     """Return durable provider provenance for usage accounting.
 
-    Legacy Fast Mode cache entries serialize the literal ``unknown`` when the
+    Legacy DEMO cache entries serialize the literal ``unknown`` when the
     original transport model was not stored. Treating that sentinel as a model
     creates an unactionable ``unclassified`` bucket in benchmark artifacts.
     The requested pool alias is still known and encodes the credential path, so
@@ -210,7 +210,7 @@ def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> s
     return requested_model if not candidate or candidate == "unknown" else candidate
 
 
-def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
+def _demo_cache_compute_affinity_key(user_id: str, goal: str) -> str:
     material = _json.dumps(
         {"version": 1, "user_id": user_id, "goal": goal},
         sort_keys=True,
@@ -413,7 +413,7 @@ def strip_fast_mode_card_narration(text: str) -> str:
     """Drop Fast Mode lead-in sentences; keep extracted report text.
 
     July Fast Mode sometimes prefixes a valid Extracted Output block with
-    ``Fast Mode cache trajectory ended...``. T7 forbids that substring even
+    ``DEMO cache trajectory ended...``. T7 forbids that substring even
     when the rest of the card is a real 200+ character summary.
     """
     raw = str(text or "").strip()
@@ -761,12 +761,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
-        # Fast Mode cache namespace goal — the persisted Agent-row goal, which may
+        # DEMO cache namespace goal — the persisted Agent-row goal, which may
         # differ from the workflow-input goal (chat escalation passes an LLM-refined
         # goal that varies run to run). All cache keying threads this, never self.goal.
-        self.fast_cache_goal: Optional[str] = None
+        self.demo_cache_goal: Optional[str] = None
         # Tree-root goal for DEMO inheritance. Child cache keys stay on
-        # fast_cache_goal; wait_for / spawn gates read this when the child's
+        # demo_cache_goal; wait_for / spawn gates read this when the child's
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
         self._browser_activity_cleanup_unknown: bool = False
@@ -915,7 +915,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
-        self.compute_token_fast_cache_affinity_key: Optional[str] = None
+        self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
@@ -1190,18 +1190,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
         last_parent_state = runtime.get("last_parent_state")
         self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
-        for field_name in (
-            "compute_token_lineage_key",
-            "compute_token_fast_cache_affinity_key",
-            "actual_model",
-            "system_name",
-            "custom_system_prompt",
-            "agent_source",
-            "user_context_section",
-            "fast_cache_goal",
-            "root_goal",
+        # Runtime keys are persisted across continuation runs, so the DEMO cache
+        # fields keep their original stored names (fast_cache_*).
+        for runtime_key, field_name in (
+            ("compute_token_lineage_key", "compute_token_lineage_key"),
+            ("compute_token_fast_cache_affinity_key", "compute_token_demo_cache_affinity_key"),
+            ("actual_model", "actual_model"),
+            ("system_name", "system_name"),
+            ("custom_system_prompt", "custom_system_prompt"),
+            ("agent_source", "agent_source"),
+            ("user_context_section", "user_context_section"),
+            ("fast_cache_goal", "demo_cache_goal"),
+            ("root_goal", "root_goal"),
         ):
-            value = runtime.get(field_name)
+            value = runtime.get(runtime_key)
             if isinstance(value, str):
                 setattr(self, field_name, value)
         if isinstance(runtime.get("model_pricing_cache"), dict):
@@ -1393,7 +1395,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
                 "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
-                "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
+                "compute_token_fast_cache_affinity_key": (self.compute_token_demo_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
                 "output_cents_per_1k": self.output_cents_per_1k,
                 "model_pricing_cache": dict(self.model_pricing_cache),
@@ -1402,7 +1404,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
-                "fast_cache_goal": self.fast_cache_goal,
+                "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
@@ -1453,7 +1455,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """Keep iteration/cache history across replacement and continuation runs."""
         values = {
             "iteration_offset": self.iteration_offset,
-            "fast_cache_position_offset": self.iteration_offset,
+            "demo_cache_position_offset": self.iteration_offset,
         }
         if self.max_iterations is not None:
             values["max_iterations"] = self.max_iterations
@@ -1652,7 +1654,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if not self._response_schema_baseline_initialized:
             first_user = next((message for message in messages if _real_user_requirement_keys([message])), None)
             if first_user is not None:
-                if first_user.get("text") in (self.goal, self.fast_cache_goal):
+                if first_user.get("text") in (self.goal, self.demo_cache_goal):
                     self._response_schema_feedback_rows.update(_real_user_requirement_keys([first_user]))
                 self._response_schema_baseline_initialized = True
         for message in messages:
@@ -1986,8 +1988,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.root_agent_id = root_agent_id
         self.user_id = user_id
         self.goal = goal
-        self.fast_cache_goal = goal  # Overridden by the persisted row goal below
-        self.fast_cache_root_goal = goal
+        self.demo_cache_goal = goal  # Overridden by the persisted row goal below
+        self.demo_cache_root_goal = goal
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -1998,7 +2000,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         # Arg is the Fast Mode button (LLM provider speed). Cache replay is
-        # DEMO-prompt only and ignores the button. Catalog DEMO / fast_cache:on
+        # DEMO-prompt only and ignores the button. Catalog DEMO / demo_cache:on
         # goals (incl. small fleet-concurrency probes) share the same gate via
         # is_demo_cache_task; mass-agent-only spawn rules stay on
         # is_oai_demo_mass_agent_task.
@@ -2011,18 +2013,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
-        # continue_as_new / deployment resume may restore fast_cache_goal from
+        # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
         # so a non-demo input goal cannot leave cache replay disabled when the
         # durable goal is demo (the persisted-goal resolver below no-ops when
         # the restored goal already matches).
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or goal)
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal or goal)
             if self.fast_mode_cache_enabled
             else None
         )
@@ -2190,19 +2192,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
             root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
             if persisted_goal:
-                if persisted_goal != self.fast_cache_goal:
+                if persisted_goal != self.demo_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
-                self.fast_cache_goal = persisted_goal
+                self.demo_cache_goal = persisted_goal
             if root_goal:
-                self.fast_cache_root_goal = root_goal
+                self.demo_cache_root_goal = root_goal
                 self.root_goal = root_goal
             if isinstance(cache_context, dict) and cache_context.get("resolved", isinstance(persisted_goal, str)):
                 self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
                 self.provider_fast_mode = bool(cache_context.get("provider_fast_mode", self.provider_fast_mode))
-            self.compute_token_fast_cache_affinity_key = (
-                _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal)
+            self.compute_token_demo_cache_affinity_key = (
+                _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal)
                 if self.fast_mode_cache_enabled
                 else None
             )
@@ -2385,7 +2387,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         # this text, so the stable goal keeps it cacheable (and
                         # matches the TS-side setResponseSchema, which reads the
                         # Agent row).
-                        [self.fast_cache_goal],
+                        [self.demo_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
                         True,
@@ -2549,9 +2551,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 get_gpt_token_source=self._active_gpt_source,
                 get_gpt_token_pool_id=self._active_gpt_pool_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                goal_text=self.fast_cache_goal,
+                goal_text=self.demo_cache_goal,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -2783,9 +2785,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             get_gpt_token_source=self._active_gpt_source,
             get_gpt_token_pool_id=self._active_gpt_pool_id,
             compute_token_lineage_key=self.compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-            goal_text=self.fast_cache_goal,
+            goal_text=self.demo_cache_goal,
             **self._iteration_resume_kwargs(),
         )
 
@@ -2874,11 +2876,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 gpt_token_pool_id=self._active_gpt_pool_id(),
                 gpt_token_user_id=user_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 is_plan_loop=False,
                 tool_call_id=tool_call_id,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                fast_mode_goal=self.fast_cache_goal,
+                fast_mode_goal=self.demo_cache_goal,
                 fast_mode_step=0,
                 interrupts=self._dag_hooks(),
             )
@@ -2990,7 +2992,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
     async def _response_schema_user_messages(self) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
-        goal = self._response_schema_task_base or (self.fast_cache_goal or self.goal or "").strip()
+        goal = self._response_schema_task_base or (self.demo_cache_goal or self.goal or "").strip()
         if goal:
             messages.append(goal)
         if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
@@ -3745,7 +3747,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     self.compute_token_lineage_key,
                     self.agent_id,
                     self.agent_id,
-                    self.compute_token_fast_cache_affinity_key,
+                    self.compute_token_demo_cache_affinity_key,
                     token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
@@ -3815,7 +3817,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         if self.compute_token_provider == "gpt" and self.gpt_code_token:
             return {
@@ -3828,7 +3830,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         return None
 
@@ -4256,7 +4258,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     self.fast_mode_cache_enabled or fast_mode_write_through
                 ):
                     extra_executor_kwargs["fast_mode_cache_enabled"] = self.fast_mode_cache_enabled
-                    extra_executor_kwargs["fast_mode_goal"] = self.fast_cache_goal
+                    extra_executor_kwargs["fast_mode_goal"] = self.demo_cache_goal
                     extra_executor_kwargs["fast_mode_cache_write_enabled"] = (
                         self.fast_mode_cache_enabled or fast_mode_write_through
                     )
@@ -4495,10 +4497,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 self._active_gpt_pool_id(),
                 self.user_id,
                 self.compute_token_lineage_key,
-                self.compute_token_fast_cache_affinity_key,
+                self.compute_token_demo_cache_affinity_key,
                 self.user_id,
                 self.fast_mode_cache_enabled,
-                self.fast_cache_goal,
+                self.demo_cache_goal,
                 None,
                 True,
                 True,
@@ -5261,7 +5263,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     f"in={tokens_in_delta}, out={tokens_out_delta}{cache_info})"
                 )
 
-        # Token aggregation is independent of price. Direct-token and fast-cache
+        # Token aggregation is independent of price. Direct-token and demo-cache
         # calls must still update the child subtree reported to the parent.
         await self._update_cost_and_signal_parent()
 
@@ -6225,8 +6227,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     args=[
                         context,
                         # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                        # GOAL" and it doubles as the Fast Mode cache namespace.
-                        self.fast_cache_goal,
+                        # GOAL" and it doubles as the DEMO cache namespace.
+                        self.demo_cache_goal,
                         self.model,
                         structured_response,
                         self.output_schema,
@@ -6242,7 +6244,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         self.user_id,
                         self.agent_id,
                         self.compute_token_lineage_key,
-                        self.compute_token_fast_cache_affinity_key,
+                        self.compute_token_demo_cache_affinity_key,
                         self.fast_mode_cache_enabled,
                         0,  # Fast Mode step — one completion summary per agent
                     ],

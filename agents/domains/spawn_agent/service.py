@@ -534,7 +534,7 @@ async def spawn_explore_agent_activity(
     from helpers.agent_inbox import AgentInbox, agent_message_metadata
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
     from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
     from tools.inspect_code import InspectCodeManager

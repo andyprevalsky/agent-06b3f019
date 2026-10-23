@@ -545,7 +545,7 @@ The curated tag vocabulary (each task carries zero or more):
 | `attachments`       | Tasks with file attachments or document handling                        |
 | `auth`              | Tasks needing authenticated sessions (cookie, minted, or anon accounts) |
 | `browser`           | Browser agent tasks                                                     |
-| `cache`             | Fast-mode cache record/replay tasks                                     |
+| `cache`             | DEMO cache record/replay tasks                                          |
 | `chat`              | Chat mode only                                                          |
 | `code-agent`        | Claude Code sandbox tasks                                               |
 | `grep`              | User-data grep/search tasks                                             |
@@ -1110,10 +1110,10 @@ that live-query requirement. Choose compatible smoke tasks for the proof.
 Shared asynchronous cache requests have one HTTP owner. A cancelled waiter must
 not cancel the shared result; owner cancellation must release the exact entry so
 live followers can retry. Keep actual request failures typed and visible, and
-account for settled shared exceptions. Existing Fast Cache regressions cover
+account for settled shared exceptions. Existing DEMO cache regressions cover
 waiter/owner cancellation and HTTP-error propagation without longer deadlines.
 The existing `BENCHMARK_FAST_MODE_CACHE` A/B setting controls the Fast Mode provider-speed button;
-it does not disable DEMO cache replay. Catalog `fast_cache: on/off` declarations
+it does not disable DEMO cache replay. Catalog `demo_cache: on/off` (legacy `fast_cache`) declarations
 still win at request construction, and simulation forces provider Fast Mode off.
 Live-query selection also excludes goals admitted by the runtime's DEMO replay
 policy, including an identity-bound creator child without a DEMO tag or

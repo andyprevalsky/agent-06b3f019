@@ -16421,10 +16421,10 @@ def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
     assert not mismatched, dict(list(mismatched.items())[:5])
 
 
-def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
-    """Only fast_cache:on DEMO replays may hold production pooler slots.
+def test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler():
+    """Only demo_cache:on DEMO replays may hold production pooler slots.
 
-    Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
+    Every other cloud guest keeps its DEMO cache in the isolated local DB,
     matching local isolated stacks; a broken resolver fails closed instead of
     silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
     still read the shared cache use bounded Prisma pools (20 per run.sh stack, 4 per
@@ -16467,7 +16467,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     ]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
-    # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
+    # demo_cache:on replay keeps the frozen shared cache with a small pool, so a
     # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
     assert route(shared) == shared_route
 
@@ -16507,7 +16507,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
         [
             sys.executable,
             str(repo_root / "scripts" / "cloudbench_catalog.py"),
-            "needs-shared-fast-cache",
+            "needs-shared-demo-cache",
             str(repo_root / "agents" / "benchmarks" / "tasks.json"),
             "no-such-benchmark-task",
         ],
@@ -16529,7 +16529,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             [
                 "bash",
                 "-c",
-                '. "$1"; apply_fast_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                '. "$1"; apply_demo_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
                 "pool",
                 str(lib),
                 mode,
@@ -16547,7 +16547,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert pool_after("any", "9") == "9", "an explicit operator pool size wins"
 
     run_sh = (repo_root / "scripts" / "run.sh").read_text()
-    pool_call = run_sh.index("apply_fast_cache_pool_default\n")
+    pool_call = run_sh.index("apply_demo_cache_pool_default\n")
     assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
     assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
 
@@ -17875,7 +17875,7 @@ def test_dotenv_fast_mode_cache_falls_back_to_database_url():
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
-def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
+def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
     """test-mass-agent-run-0 must read the July cache without Andy write-through."""
     from unittest.mock import patch
 
@@ -17998,10 +17998,10 @@ def test_claude_code_only_run_withholds_gpt_compute_credentials():
         psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
 
 
-def test_cloudbench_fast_cache_on_guest_is_read_only_like_local():
+def test_cloudbench_demo_cache_on_guest_is_read_only_like_local():
     """A cloud guest replays the shared July cache under the same write policy as local.
 
-    Local isolated stacks make every shared-cache (fast_cache:on) run strict
+    Local isolated stacks make every shared-cache (demo_cache:on) run strict
     read-only, so a cache miss fails loudly instead of calling a live model. The
     cloud guest route used the shared cache without that flag: the
     test-mass-agent-run-0 root's response_schema miss went to a live model,
@@ -21504,7 +21504,7 @@ def test_root_exact_tool_count_fails_fast_after_duplicate_call():
     assert _root_exact_tool_count_exceeded(task, messages[:2]) is None
 
 
-def test_message_side_effect_benchmarks_force_fast_cache_off():
+def test_message_side_effect_benchmarks_force_demo_cache_off():
     """Cached agent decisions cannot prove a live external side effect."""
     import os
 
@@ -21516,7 +21516,7 @@ def test_message_side_effect_benchmarks_force_fast_cache_off():
     try:
         for name in ("message-person", "message-person-agent-sms"):
             task = get_task_by_name(name)
-            assert task.fast_cache == "off"
+            assert task.demo_cache == "off"
             assert _resolved_fast_mode_cache(task) is False
     finally:
         if previous is None:
@@ -21571,7 +21571,7 @@ def test_unified_catalog_delineates_bench_axes():
     mass = by_name["test-mass-agent-run-0"]
     assert "smoke" in mass["tags"]
     assert mass["group"] == "pre-deploy"
-    assert mass["fast_cache"] == "on"
+    assert mass["demo_cache"] == "on"
     assert mass["enforce_declared_evaluators"] is True
     assert mass["min_agent_count"] == 50
     evaluators = {evaluator["id"]: evaluator for evaluator in mass["evaluators"]}
@@ -21665,7 +21665,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert any(criterion.startswith("T8:") for criterion in criteria)
     assert any(criterion.startswith("T9:") for criterion in criteria)
     assert any(criterion.startswith("T10:") for criterion in criteria)
-    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in criteria)
+    assert any("0 tokens streamed from non-demo-cache" in criterion for criterion in criteria)
     assert any("$0 spent" in criterion for criterion in criteria)
     assert any("assemble-final" in criterion for criterion in criteria)
     assert any(evaluator.get("method") == "static_check" for evaluator in mass["evaluators"])
@@ -25720,8 +25720,8 @@ async def run_all_tests():
         test_cloudbench_code_agent_tasks_pin_claude_code_like_local,
     )
     r.record(
-        "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
-        test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler,
+        "cloudbench_demo_cache_route_keeps_live_guests_off_shared_pooler",
+        test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler,
     )
     r.record(
         "cloudbench_task_gate_resolution_fails_closed",
@@ -25796,7 +25796,7 @@ async def run_all_tests():
     )
     r.record(
         "local_isolated_july_cache_read_only",
-        test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
+        test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
     )
     r.record(
         "local_cold_seed_extended_start_timeout",
@@ -25986,7 +25986,7 @@ async def run_all_tests():
         test_logical_tool_counts_canonicalize_model_facing_routed_calls,
     )
     r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
-    r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
+    r.record("message_side_effect_demo_cache_off", test_message_side_effect_benchmarks_force_demo_cache_off)
     r.record(
         "message_person_requires_confirmed_send",
         test_message_person_benchmark_requires_confirmed_send,

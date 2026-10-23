@@ -1,4 +1,4 @@
-"""Blackbox tests for the fast_cache backend client (providers/fast_cache/client.py).
+"""Blackbox tests for the demo_cache backend client (providers/demo_cache/client.py).
 
 Owning-boundary regression for RCA 2026-10-02 (test-mass-agent-run-0,
 `t10-no-tool-failures`: `spawn_agent ... status=ERROR` on child 1230af01):
@@ -75,13 +75,13 @@ class _PatchedClient:
         self.backend = _HangingBackend()
 
     async def __aenter__(self):
-        import providers.fast_cache.client as cache_client
+        import providers.demo_cache.client as cache_client
 
         self._mod = cache_client
         self._orig_backend = cache_client._backend
         self._orig_shared = cache_client._shared_client
         cache_client.clear_position_memo()
-        cache_client._backend = lambda: ("http://fast-cache.test", "key")
+        cache_client._backend = lambda: ("http://demo-cache.test", "key")
         cache_client._shared_client = lambda: self.backend
         return self.backend
 
@@ -104,7 +104,7 @@ class _PatchedClient:
 async def test_cancelled_waiter_does_not_poison_shared_get_position():
     """A waiter cancelled by call_temporal_activity_from_activity's wait_for must
     not break the shared fetch for the owner or for its own retry attempt."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
     from loop.activity_helper import call_temporal_activity_from_activity
 
     async with _PatchedClient() as backend:
@@ -154,7 +154,7 @@ async def test_cancelled_waiter_does_not_poison_shared_get_position():
 
 async def test_cancelled_owner_still_resolves_waiters():
     """Cancelling the first caller must not strand later callers on a dead future."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     async with _PatchedClient() as backend:
         owner = asyncio.create_task(cache_client.cache_get_position_fallback("goal-h", "explore_agent", 7))
@@ -182,7 +182,7 @@ async def test_cancelled_owner_still_resolves_waiters():
 async def test_shared_fetch_failure_is_a_plain_exception_for_every_waiter():
     """A transport failure on the shared fetch must surface as a retryable Exception
     (never a BaseException) to each caller, and must not be memoized as a miss."""
-    import providers.fast_cache.client as cache_client
+    import providers.demo_cache.client as cache_client
 
     class _FailingBackend:
         def __init__(self) -> None:
@@ -197,7 +197,7 @@ async def test_shared_fetch_failure_is_a_plain_exception_for_every_waiter():
     orig_backend, orig_shared = cache_client._backend, cache_client._shared_client
     orig_backoff = cache_client._GET_RETRY_BACKOFF_S
     failing = _FailingBackend()
-    cache_client._backend = lambda: ("http://fast-cache.test", "key")
+    cache_client._backend = lambda: ("http://demo-cache.test", "key")
     cache_client._shared_client = lambda: failing
     cache_client._GET_RETRY_BACKOFF_S = 0.0
     try:
@@ -229,10 +229,10 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
     namespace or the server rejects its write.
     """
     import benchmarks.wmh_rose_provider as native
-    import providers.fast_cache.client as cache_client
-    import providers.fast_cache.rose_cache as cache_wrapper
+    import providers.demo_cache.client as cache_client
+    import providers.demo_cache.rose_cache as cache_wrapper
     import providers.rose.client as rose_module
-    from providers.fast_cache.context import reset_context, set_context
+    from providers.demo_cache.context import reset_context, set_context
     from providers.rose.types import StreamChunk
 
     rows, events, provider_calls = {}, [], []
@@ -259,7 +259,7 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
 
     tasks = json.loads((Path(__file__).parents[2] / "benchmarks/tasks.json").read_text())
     goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
-    context = native._WMHFastCacheContext(
+    context = native._WMHDemoCacheContext(
         enabled=True,
         goal=goal,
         root_goal=goal,
@@ -345,7 +345,7 @@ async def test_compatibility_native_recording_replays_exact_key_with_provider_fa
 
 
 async def test_http_200_skipped_persistence_never_reports_store():
-    import providers.fast_cache.client as client
+    import providers.demo_cache.client as client
 
     class Response:
         status_code = 200
@@ -364,7 +364,7 @@ async def test_http_200_skipped_persistence_never_reports_store():
 
 
 def test_candidate_exclusions_shape_cache_request_material():
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.rose_cache import request_key_material
     from providers.rose.truncation import model_key
 
     original = {"pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}]}
@@ -379,8 +379,8 @@ def test_candidate_exclusions_shape_cache_request_material():
 async def test_excluded_cached_actual_candidate_is_not_replayed():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
-    from providers.fast_cache.rose_cache import lookup_llm_cache
-    import providers.fast_cache.rose_cache as owner
+    from providers.demo_cache.rose_cache import lookup_llm_cache
+    import providers.demo_cache.rose_cache as owner
 
     ctx = SimpleNamespace(llm_lookup_keys=lambda *args: ["key"])
     for actual, expected in (("candidate-a-gpt", False), ("unknown", False), ("candidate-b-gpt", True)):
@@ -429,18 +429,18 @@ async def test_workflow_start_reads_the_goal_a_wake_persisted():
     A wake (send_message_to_agent NEW_TASK) persists the message as Agent.goal
     and starts a new workflow run, often on the worker process that ran the
     previous run. Its per-process memo still held the old goal, so the new
-    run's fast_cache_goal was the previous task: the schema baseline consumed
+    run's demo_cache_goal was the previous task: the schema baseline consumed
     the original goal row, no schema was regenerated, and the verifier judged
     with neither goal nor schema (0% on correct work).
     """
-    import providers.fast_cache.client as cache_client
-    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+    import providers.demo_cache.client as cache_client
+    from helpers.demo_cache_goal import resolve_fast_cache_context_activity
 
     agent_id = "woken-drafter"
     backend = _AgentFlagBackend("Draft one cold email to Garry Tan.")
     orig_backend, orig_shared = cache_client._backend, cache_client._shared_client
     cache_client._AGENT_FASTMODE.pop(agent_id, None)
-    cache_client._backend = lambda: ("http://fast-cache.test", "key")
+    cache_client._backend = lambda: ("http://demo-cache.test", "key")
     cache_client._shared_client = lambda: backend
     try:
         first = await resolve_fast_cache_context_activity(agent_id)
@@ -463,7 +463,7 @@ async def test_workflow_start_reads_the_goal_a_wake_persisted():
 
 
 async def run_all_tests():
-    print("fast-cache-client blackbox tests:")
+    print("demo-cache-client blackbox tests:")
     r = BlackboxResult()
     await r.record_async(
         "excluded_cached_candidate_not_replayed", test_excluded_cached_actual_candidate_is_not_replayed

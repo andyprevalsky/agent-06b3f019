@@ -1,4 +1,4 @@
-"""Fast Mode cache — backend HTTP client.
+"""DEMO cache — backend HTTP client.
 
 Reads/writes go to the backend store (Postgres + Supabase) via /api/fast-cache.
 Gating is the caller's job: reads happen only when Fast Mode is on; allowlisted
@@ -23,12 +23,13 @@ from helpers.tracing import backend_api_headers, current_root_agent_id, current_
 
 from . import normalize
 from .context import demo_recording_enabled
+from .env import demo_cache_env
 
 logger = structlog.get_logger(__name__)
 
 _GET_TIMEOUT_S = 15.0
 # A failed GET is conceded as a cache MISS, which sends the caller to an EXPENSIVE
-# live LLM call. Under a fan-out the backend fast-cache endpoint 500s from DB-pool
+# live LLM call. Under a fan-out the backend demo-cache endpoint 500s from DB-pool
 # pressure, so retry the cheap GET a few times before conceding — a retry costs
 # milliseconds; a false miss costs a full live model call.
 _GET_MAX_ATTEMPTS = 3
@@ -36,9 +37,9 @@ _GET_RETRY_BACKOFF_S = 0.15
 _SET_TIMEOUT_S = 30.0
 _GET_BATCH_DELAY_S = 0.005
 _GET_BATCH_MAX_KEYS = 500
-_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "16") or "16")
-_HTTP_MAX_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_CONNECTIONS", "80") or "80")
-_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40")
+_GET_BATCH_MAX_IN_FLIGHT = int(demo_cache_env("DEMO_CACHE_GET_BATCH_MAX_IN_FLIGHT", "16") or "16")
+_HTTP_MAX_CONNECTIONS = int(demo_cache_env("DEMO_CACHE_HTTP_MAX_CONNECTIONS", "80") or "80")
+_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(demo_cache_env("DEMO_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40")
 _ARCHIVE_READ_MAX_CONCURRENCY = 4
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
@@ -61,7 +62,7 @@ _PREFETCH_TTL_S = 5.0
 # and slide a small prefetch window so the next steps are already local.
 _POSITION_MEMO_TTL_S = 1800.0
 _POSITION_PREFETCH_AHEAD = 8
-_POSITION_HTTP_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_POSITION_MAX_IN_FLIGHT", "16") or "16")
+_POSITION_HTTP_MAX_IN_FLIGHT = int(demo_cache_env("DEMO_CACHE_POSITION_MAX_IN_FLIGHT", "16") or "16")
 _position_memo: dict[tuple[str, str, int], tuple[Optional[Any], Optional[str], float]] = {}
 _position_inflight: dict[tuple[str, str, int], asyncio.Future[tuple[Optional[Any], Optional[str]]]] = {}
 _position_http_sem: Optional[asyncio.Semaphore] = None
@@ -130,7 +131,7 @@ async def cache_get_record(key: str) -> CacheRecord:
             status=200,
         )
         logger.info(
-            "fast_cache.prefetch_hit",
+            "demo_cache.prefetch_hit",
             key=key,
             key_hash=_key_hash(key),
             kind=_key_kind(key),
@@ -172,9 +173,9 @@ async def cache_get_record(key: str) -> CacheRecord:
 
     # Retries exhausted — concede a miss so the cache never hard-breaks a run.
     if last_status is not None:
-        logger.warning("fast_cache.get_failed", key=key, status=last_status, attempts=_GET_MAX_ATTEMPTS)
+        logger.warning("demo_cache.get_failed", key=key, status=last_status, attempts=_GET_MAX_ATTEMPTS)
     else:
-        logger.warning("fast_cache.get_error", key=key, error=(last_error or "")[:300], attempts=_GET_MAX_ATTEMPTS)
+        logger.warning("demo_cache.get_error", key=key, error=(last_error or "")[:300], attempts=_GET_MAX_ATTEMPTS)
     _queue_archive_cache_read(key, hit=False, value=None, blob_path=None, status=last_status, error=last_error)
     return {"hit": False, "value": None, "blobPath": None}
 
@@ -208,14 +209,14 @@ async def _cache_get_record_batched(key: str) -> CacheRecord:
         if _pending_gets_flush_task is None or _pending_gets_flush_task.done():
             _pending_gets_flush_task = asyncio.create_task(_flush_pending_gets())
     async with span(
-        "fast_cache.cache_get_wait",
+        "demo_cache.cache_get_wait",
         cache_key_hash=_key_hash(key),
         cache_key_kind=_key_kind(key),
         max_in_flight=_GET_BATCH_MAX_IN_FLIGHT,
     ):
         record = await future
     logger.info(
-        "fast_cache.cache_get_timing",
+        "demo_cache.cache_get_timing",
         key=key,
         key_hash=_key_hash(key),
         kind=_key_kind(key),
@@ -251,7 +252,7 @@ async def _flush_pending_gets() -> None:
             try:
                 done.result()
             except Exception as exc:
-                logger.warning("fast_cache.get_many_batch_task_error", error=str(exc)[:200])
+                logger.warning("demo_cache.get_many_batch_task_error", error=str(exc)[:200])
 
         task.add_done_callback(_on_done)
         await asyncio.sleep(0)
@@ -269,7 +270,7 @@ async def _deliver_pending_get_batch(
     queue_max_ms = max(queue_wait_ms) if queue_wait_ms else 0
     try:
         async with span(
-            "fast_cache.get_many.http",
+            "demo_cache.get_many.http",
             key_count=len(keys),
             waiter_count=waiter_count,
             queue_wait_avg_ms=queue_avg_ms,
@@ -278,7 +279,7 @@ async def _deliver_pending_get_batch(
         ):
             records = await _fetch_cache_records_many(keys)
         logger.info(
-            "fast_cache.get_many_batch",
+            "demo_cache.get_many_batch",
             key_count=len(keys),
             waiter_count=waiter_count,
             queue_wait_avg_ms=queue_avg_ms,
@@ -307,7 +308,7 @@ async def _fetch_cache_records_many(keys: list[str]) -> dict[str, CacheRecord]:
     if resp.status_code in {404, 405}:
         raise _BatchUnsupported()
     if resp.status_code != 200:
-        raise RuntimeError(f"fast-cache get-many failed: {resp.status_code}")
+        raise RuntimeError(f"demo-cache get-many failed: {resp.status_code}")
     data = resp.json()
     raw_results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(raw_results, dict):
@@ -338,10 +339,10 @@ def _pop_valid_prefetched_record(key: str) -> Optional[CacheRecord]:
 
 
 async def prefetch_cache_records(keys: list[str], *, reason: str = "") -> None:
-    """Fetch exact fast-cache keys now so immediate tool handlers can consume them.
+    """Fetch exact demo-cache keys now so immediate tool handlers can consume them.
 
     This is intentionally one-shot and short-lived: it is not a durable Python LRU,
-    so purge/write semantics still belong to the backend fast-cache store.
+    so purge/write semantics still belong to the backend demo-cache store.
     """
     unique_keys = []
     seen = set()
@@ -359,14 +360,14 @@ async def prefetch_cache_records(keys: list[str], *, reason: str = "") -> None:
 
     try:
         async with span(
-            "fast_cache.prefetch",
+            "demo_cache.prefetch",
             key_count=len(unique_keys),
             reason=reason,
         ):
             records = await _fetch_cache_records_many(unique_keys)
     except Exception as exc:
         logger.warning(
-            "fast_cache.prefetch_error",
+            "demo_cache.prefetch_error",
             key_count=len(unique_keys),
             reason=reason,
             error=str(exc)[:200],
@@ -382,7 +383,7 @@ async def prefetch_cache_records(keys: list[str], *, reason: str = "") -> None:
         _prefetched_records[key] = (record, expires_at)
         hit_count += 1
     logger.info(
-        "fast_cache.prefetch_done",
+        "demo_cache.prefetch_done",
         key_count=len(unique_keys),
         hit_count=hit_count,
         reason=reason,
@@ -434,7 +435,7 @@ async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]
                 continue
             if value is not None:
                 return value, key
-        raise RuntimeError(f"fast-cache get-first failed: {exc}") from exc
+        raise RuntimeError(f"demo-cache get-first failed: {exc}") from exc
 
 
 def _position_memo_key(goal_hash: str, call_site: str, step: int) -> tuple[str, str, int]:
@@ -569,7 +570,7 @@ async def _fetch_position_http_once(
             except Exception as exc:
                 last_error = exc
                 logger.warning(
-                    "fast_cache.get_position_error",
+                    "demo_cache.get_position_error",
                     error=f"{type(exc).__name__}: {exc}"[:300],
                     attempt=attempt + 1,
                 )
@@ -580,20 +581,20 @@ async def _fetch_position_http_once(
                 continue
             if last_error is not None:
                 raise last_error
-            raise RuntimeError("fast-cache get-position failed after retries")
+            raise RuntimeError("demo-cache get-position failed after retries")
         if resp.status_code != 200:
             if resp.status_code in {404, 405}:
                 _position_memo_put(goal_hash, call_site, step, None, None)
                 return (None, None)
             logger.warning(
-                "fast_cache.get_position_failed",
+                "demo_cache.get_position_failed",
                 status=resp.status_code,
                 attempt=attempt + 1,
             )
             if resp.status_code >= 500 and attempt < _GET_MAX_ATTEMPTS - 1:
                 await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
                 continue
-            raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+            raise RuntimeError(f"demo-cache get-position failed: {resp.status_code}")
         data = resp.json()
         if not data.get("hit"):
             result: tuple[Optional[Any], Optional[str]] = (None, None)
@@ -603,7 +604,7 @@ async def _fetch_position_http_once(
         return result
     if last_error is not None:
         raise last_error
-    raise RuntimeError("fast-cache get-position failed after retries")
+    raise RuntimeError("demo-cache get-position failed after retries")
 
 
 async def cache_get_position_fallback(
@@ -712,9 +713,9 @@ async def resolve_agent_fast_mode(
                 # Legacy responses: button lived on the same flag as cache.
                 provider_fast_mode = bool(data.get("enabled", True))
         else:
-            logger.warning("fast_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
+            logger.warning("demo_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
     except Exception as exc:
-        logger.warning("fast_cache.resolve_agent_error", agent_id=agent_id, error=str(exc))
+        logger.warning("demo_cache.resolve_agent_error", agent_id=agent_id, error=str(exc))
     # Only memoize a positive resolution — a transient failure shouldn't disable
     # the cache for the rest of the run.
     if goal and (enabled or write_enabled):
@@ -780,16 +781,16 @@ async def resolve_archive_root_agent_id() -> Optional[str]:
             if resolved_root:
                 return resolved_root
         except Exception as exc:  # archive best-effort path
-            logger.warning("fast_cache.resolve_archive_root_error", agent_id=agent_id, error=str(exc)[:200])
+            logger.warning("demo_cache.resolve_archive_root_error", agent_id=agent_id, error=str(exc)[:200])
     return root_agent_id
 
 
 async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
-    """Ensure a FastCacheContext is set for the current activity. No-op if one is
+    """Ensure a DemoCacheContext is set for the current activity. No-op if one is
     already enabled. Otherwise auto-resolves (enabled, goal) from the agent row.
     One line at an activity's entry makes every LLM call inside it cache-aware —
     no signature threading."""
-    from .context import FastCacheContext, current_context, set_context
+    from .context import DemoCacheContext, current_context, set_context
 
     existing = current_context()
     if existing is not None and existing.active:
@@ -806,7 +807,7 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
     ) = await resolve_agent_fast_mode(agent_id)
     g = goal or resolved_goal
     if g and (enabled or write_enabled):
-        ctx = FastCacheContext(
+        ctx = DemoCacheContext(
             enabled=enabled,
             goal=g,
             write_enabled=write_enabled,
@@ -825,7 +826,7 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
     tool-result IDs and timing do not bust cache hits, while the static request
     fingerprint still invalidates prompt/schema/config changes.
     """
-    from .context import FastCacheContext, set_context
+    from .context import DemoCacheContext, set_context
 
     if not agent_id:
         return None
@@ -833,7 +834,7 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
         agent_id
     )
     if goal and (enabled or write_enabled):
-        ctx = FastCacheContext(
+        ctx = DemoCacheContext(
             enabled=enabled,
             goal=goal,
             base_step=step,
@@ -879,7 +880,7 @@ async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[
     if not resolved_goal:
         # An unresolved tree root may be a frozen DEMO recording; losing one
         # write-through entry is safer than poisoning a replay namespace.
-        logger.info("fast_cache.write_skipped_unresolved_agent", agent_id=agent_id)
+        logger.info("demo_cache.write_skipped_unresolved_agent", agent_id=agent_id)
         return False
     return not normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
 
@@ -896,8 +897,8 @@ async def cache_set(
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
     if not cache_write_allowed(goal_hash, goal=goal, root_goal=root_goal):
-        # DEMO replay namespaces are frozen recordings (FAST_MODE_CACHE_RECORD_DEMO=1 re-records).
-        logger.info("fast_cache.set_skipped_demo_namespace", key=key)
+        # DEMO replay namespaces are frozen recordings (DEMO_CACHE_RECORD_DEMO=1 re-records).
+        logger.info("demo_cache.set_skipped_demo_namespace", key=key)
         return False
     sanitized_value = normalize.strip_secrets(value)
     await _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
@@ -916,11 +917,11 @@ async def cache_set(
             timeout=_SET_TIMEOUT_S,
         )
         if resp.status_code != 200:
-            logger.warning("fast_cache.set_failed", key=key, status=resp.status_code)
+            logger.warning("demo_cache.set_failed", key=key, status=resp.status_code)
             return False
         return resp.json().get("stored") is True
     except Exception as exc:
-        logger.warning("fast_cache.set_error", key=key, error=str(exc))
+        logger.warning("demo_cache.set_error", key=key, error=str(exc))
         return False
 
 
@@ -972,7 +973,7 @@ async def _archive_cache_write(
             payload_factory=payload,
         )
     except Exception as exc:  # cache/archive must never break provider calls
-        logger.warning("fast_cache.archive_error", key=key, kind=kind, error=str(exc)[:200])
+        logger.warning("demo_cache.archive_error", key=key, kind=kind, error=str(exc)[:200])
 
 
 async def _archive_cache_read(
@@ -1013,7 +1014,7 @@ async def _archive_cache_read(
             payload_factory=payload,
         )
     except Exception as exc:  # cache/archive must never break provider calls
-        logger.warning("fast_cache.archive_read_error", key=key, error=str(exc)[:200])
+        logger.warning("demo_cache.archive_read_error", key=key, error=str(exc)[:200])
 
 
 def _archive_read_limiter() -> asyncio.Semaphore:
@@ -1055,7 +1056,7 @@ def _queue_archive_cache_read(
     status: Optional[int] = None,
     error: Optional[str] = None,
 ) -> None:
-    """Archive fast-cache read evidence without blocking cache replay.
+    """Archive demo-cache read evidence without blocking cache replay.
 
     A read archive is diagnostic side work. Waiting for it on a cache hit makes
     a replay depend on archive/root-resolution IO even though the cached value is
@@ -1079,6 +1080,6 @@ def _queue_archive_cache_read(
         try:
             done.result()
         except Exception as exc:  # archive must never break cache callers
-            logger.warning("fast_cache.archive_read_task_error", key=key, error=str(exc)[:200])
+            logger.warning("demo_cache.archive_read_task_error", key=key, error=str(exc)[:200])
 
     task.add_done_callback(_on_done)

@@ -69,11 +69,11 @@ _VAPI_ORCHESTRATION_TOOLS = {"call_phone_number", "vapi"}
 _VAPI_BOUNDARY_TOOLS = {"vapi_create_call", "vapi_poll_call", "vapi_recording_fetch"}
 _VAPI_TOOLS = _VAPI_ORCHESTRATION_TOOLS | _VAPI_BOUNDARY_TOOLS
 _GREP_TOOLS = {"grep", "web_search", "web_fetch", "web_fetch_download", "people_search"}
-_FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
-# Fast cache is intentionally NOT an environment boundary: simulated runs keep
+_DEMO_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
+# DEMO cache is intentionally NOT an environment boundary: simulated runs keep
 # the real cache active (WMH steps are expensive) and are isolated from real-run
 # entries by the world-model scope segment in every cache key
-# (fast_cache/normalize.py:world_model_cache_scope).
+# (demo_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
     _EXPLORE_ORCHESTRATION_TOOLS
     | _CODE_TOOLS
@@ -269,7 +269,7 @@ def canonical_category_for_tool(tool_name: str) -> str:
         return "vapi"
     if tool_name in _GREP_TOOLS or tool_name.startswith("grep"):
         return "grep"
-    if tool_name in _FAST_CACHE_TOOLS or "cache" in tool_name:
+    if tool_name in _DEMO_CACHE_TOOLS or "cache" in tool_name:
         return "fast_cache"
     if tool_name in {"request_user_approval", "request_user_signup", "request_user_auth"}:
         return "auth_approval"
@@ -470,7 +470,7 @@ class WorldModelToolExecutionAdapter:
         # Activity actor -> durable agent tree -> root-scoped WMH session.
         # Workflow tracing contextvars are not inherited by Temporal activities.
         if not self._explicit_session_scope and activity.in_activity():
-            from providers.fast_cache.client import resolve_agent_fast_mode
+            from providers.demo_cache.client import resolve_agent_fast_mode
 
             if not self.agent_id:
                 raise RuntimeError("WMH activity requires its acting agent identity")
@@ -694,7 +694,7 @@ async def world_time_ms(agent_id: str | None) -> int | None:
     model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
     if not base_url or not model or not agent_id:
         return None
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
 
     scope = (await resolve_agent_fast_mode(agent_id))[3]
     if not scope:
@@ -762,7 +762,7 @@ async def world_clock_activity(
         return {"skipped": "no_world_session"} if time_ms is None else {"agent_id": agent_id, "time_ms": time_ms}
     scope = session_scope_id
     if not scope:
-        from providers.fast_cache.client import resolve_agent_fast_mode
+        from providers.demo_cache.client import resolve_agent_fast_mode
 
         scope = (await resolve_agent_fast_mode(agent_id))[3]
         if not scope:

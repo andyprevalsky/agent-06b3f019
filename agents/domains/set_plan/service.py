@@ -689,11 +689,11 @@ async def run_planner_attempt(
         gpt_token_pool_id,
         getattr(workflow_instance, "user_id", None),
         getattr(workflow_instance, "compute_token_lineage_key", None),
-        getattr(workflow_instance, "compute_token_fast_cache_affinity_key", None),
+        getattr(workflow_instance, "compute_token_demo_cache_affinity_key", None),
         getattr(workflow_instance, "fast_mode_cache_enabled", False),
-        # Prefer the durable Agent-row goal (fast_cache_goal) so chat-escalation
+        # Prefer the durable Agent-row goal (demo_cache_goal) so chat-escalation
         # refined workflow input goals do not open a fresh empty cache namespace.
-        getattr(workflow_instance, "fast_cache_goal", None) or getattr(workflow_instance, "goal", None),
+        getattr(workflow_instance, "demo_cache_goal", None) or getattr(workflow_instance, "goal", None),
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
         bool(getattr(workflow_instance, "memory_enabled", False)),  # Planner memory (get_memories fork)
     ]

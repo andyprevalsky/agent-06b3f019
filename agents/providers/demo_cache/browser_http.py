@@ -112,10 +112,10 @@ class BrowserHttpCache:
         key = normalize.browser_http_key(self.goal, method, url, request_headers, request_body)
         stored = await cache_client.cache_get(key)
         if stored is None:
-            logger.info("fast_cache.browser_http_miss", url=url, key=key)
+            logger.info("demo_cache.browser_http_miss", url=url, key=key)
             return None
         self._fulfilled_keys.add(key)
-        logger.info("fast_cache.browser_http_hit", url=url, key=key)
+        logger.info("demo_cache.browser_http_hit", url=url, key=key)
         return {
             "status": stored.get("status", 200),
             "headers": stored.get("headers", {}),
@@ -153,5 +153,5 @@ class BrowserHttpCache:
         }
         ok = await cache_client.cache_set(key, "browser_http", self.goal_hash, value)
         if ok:
-            logger.info("fast_cache.browser_http_stored", url=url, key=key, bytes=len(body))
+            logger.info("demo_cache.browser_http_stored", url=url, key=key, bytes=len(body))
         return ok

@@ -626,34 +626,34 @@ class RoseClient:
         return load_config().openrouter.api_key
 
     async def complete(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
-        """CENTRAL Fast Mode cache notch. EVERY agent LLM call funnels through
+        """CENTRAL DEMO cache notch. EVERY agent LLM call funnels through
         `RoseClient.complete()`, so record/replay lives here — one place, no gaps,
         no per-call-site wiring. The cache context is read from the contextvar
         (position keying, set by the main loop for drift-robustness) or auto-resolved
         from `agent_id` (content keying, for every other call). On a hit the stored
         response is re-emitted as a synthetic stream; on a miss the live stream is
         teed and written when the `done` chunk arrives (never in a finally — see the
-        GeneratorExit note in fast_cache.rose_cache). Allowlisted accounts can
+        GeneratorExit note in demo_cache.rose_cache). Allowlisted accounts can
         write-through with Fast Mode off: no read/replay, but successful calls are
         recorded for future Fast Mode runs.
         """
-        from providers.fast_cache import client as _fc
-        from providers.fast_cache.context import cache_writes_disabled, current_context
-        from providers.fast_cache.rose_cache import FastCacheLookupError
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache import client as _fc
+        from providers.demo_cache.context import cache_writes_disabled, current_context
+        from providers.demo_cache.rose_cache import DemoCacheLookupError
+        from providers.demo_cache.rose_cache import (
             accumulate_chunk as _fc_accumulate,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             empty_response as _fc_empty,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             replay_with_context as _fc_replay,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
         )
-        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
-        from providers.fast_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
+        from providers.demo_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
+        from providers.demo_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
@@ -665,7 +665,7 @@ class RoseClient:
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
         if pool == "rose-local":
-            # Local mode must never consult the cloud-backed Fast Mode cache.
+            # Local mode must never consult the cloud-backed DEMO cache.
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -682,7 +682,7 @@ class RoseClient:
         browser_use = bool(kwargs.pop("browser_use", False))
         if browser_use or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
+                raise DemoCacheLookupError("DEMO replay probe forbids live browser LLM calls")
             async with aclosing(self._complete_impl(**kwargs, browser_use=True)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -696,7 +696,7 @@ class RoseClient:
             if ctx is not None and ctx.active:
                 kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
             elif agent_id:
-                from providers.fast_cache.client import resolve_provider_fast_mode
+                from providers.demo_cache.client import resolve_provider_fast_mode
 
                 kwargs = {
                     **kwargs,
@@ -705,7 +705,7 @@ class RoseClient:
 
         if ctx is None or not ctx.active or messages is None:
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
+                raise DemoCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -717,12 +717,12 @@ class RoseClient:
             stored: Any = None
             hit_key: Any = None
             try:
-                from providers.fast_cache.rose_cache import lookup_llm_cache
+                from providers.demo_cache.rose_cache import lookup_llm_cache
 
                 stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
-            except FastCacheLookupError as exc:
+            except DemoCacheLookupError as exc:
                 logger.warning(
-                    "fast_cache.get_error",
+                    "demo_cache.get_error",
                     key=key,
                     error=f"{type(exc).__name__}: {exc}"[:200],
                 )
@@ -854,7 +854,7 @@ class RoseClient:
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
                 # as cold when the first get-position flakes.
-                from providers.fast_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
+                from providers.demo_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
 
                 if (
                     soft is not None
@@ -892,9 +892,9 @@ class RoseClient:
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
         if probe_read_only:
-            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
+            raise DemoCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
         if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
-            raise FastCacheLookupError(
+            raise DemoCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
             )
 

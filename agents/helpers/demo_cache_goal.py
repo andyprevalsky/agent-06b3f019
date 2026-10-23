@@ -1,9 +1,9 @@
-"""Fast Mode cache — persisted-goal resolution activity.
+"""DEMO cache — persisted-goal resolution activity.
 
 The Temporal workflow may start with a goal that differs from the persisted
 Agent row: chat escalation passes an LLM-refined goal to the workflow
 (back-end/src/providers/chat/chatHandler.ts, "Use refined goal if provided")
-and that refined text varies run to run. Fast Mode cache keys namespace by
+and that refined text varies run to run. DEMO cache keys namespace by
 exact goal hash, so keying on the workflow-input goal gives every
 chat-originated run a fresh, empty namespace — a 100% miss.
 
@@ -25,7 +25,7 @@ from temporalio import activity
 logger = structlog.get_logger()
 
 
-def unpack_fast_cache_goal_resolution(
+def unpack_demo_cache_goal_resolution(
     resolved: Any,
 ) -> tuple[Optional[str], Optional[str]]:
     """Accept the current dict payload or a legacy persisted-goal string."""
@@ -48,15 +48,15 @@ async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[dict[str, 
     Returns None when the agent row can't be resolved; the workflow falls back
     to its input goal (pre-fix behavior).
     """
-    # Lazy import: providers.fast_cache.client imports helpers.trace_archive,
+    # Lazy import: providers.demo_cache.client imports helpers.trace_archive,
     # so a module-level import here would cycle through helpers/__init__.
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
 
     # resolve_agent_fast_mode returns
     # (enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode).
     _enabled, goal, _write_enabled, _root_agent_id, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
     logger.info(
-        "fast_cache.goal_resolved",
+        "demo_cache.goal_resolved",
         agent_id=agent_id,
         resolved=bool(goal),
         root_resolved=bool(root_goal),
@@ -74,7 +74,7 @@ async def resolve_fast_cache_context_activity(agent_id: str) -> dict[str, Any]:
     prompt.  The backend is the authoritative source because it resolves the
     persisted child and root goals against every catalog task tagged ``DEMO``.
     """
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
 
     # One read per workflow run start: the agent row's goal can change between
     # runs (wake / follow-up), so never reuse a previous run's process memo.
@@ -91,7 +91,7 @@ async def resolve_fast_cache_context_activity(agent_id: str) -> dict[str, Any]:
         "provider_fast_mode": bool(provider_fast_mode),
     }
     logger.info(
-        "fast_cache.context_resolved",
+        "demo_cache.context_resolved",
         agent_id=agent_id,
         enabled=result["enabled"],
         write_enabled=result["write_enabled"],

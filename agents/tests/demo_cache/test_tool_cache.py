@@ -15,7 +15,7 @@ from typing import Any, Dict
 
 import pytest
 
-from providers.fast_cache import normalize
+from providers.demo_cache import normalize
 import tools.web_search.handler as ws
 import domains.web_fetch.handler as wf
 import json
@@ -31,7 +31,7 @@ def _soft_complete_bench_goal() -> str:
     return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
-def _without_fast_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
+def _without_demo_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in value.items() if k != "_fast_cache_hit"}
 
 
@@ -81,8 +81,8 @@ class MemStore:
 @pytest.fixture
 def mem(monkeypatch):
     store = MemStore()
-    monkeypatch.setattr(ws.fast_cache_client, "cache_get", store.get)
-    monkeypatch.setattr(ws.fast_cache_client, "cache_set", store.set)
+    monkeypatch.setattr(ws.demo_cache_client, "cache_get", store.get)
+    monkeypatch.setattr(ws.demo_cache_client, "cache_set", store.set)
     return store
 
 
@@ -141,7 +141,7 @@ def test_web_search_miss_soft_completes_without_provider(mem, monkeypatch):
             "weather", 100, fast_mode_cache_enabled=True, fast_mode_goal=bench
         )
         assert calls["n"] == 0
-        assert out.pop(ws.FAST_CACHE_HIT_FIELD) is True
+        assert out.pop(ws.DEMO_CACHE_HIT_FIELD) is True
         assert out["provider"] == "fast-mode-soft-complete"
         assert mem.data == {}
 
@@ -185,7 +185,7 @@ def test_web_search_record_then_replay(mem, monkeypatch):
         )
         r2 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
         assert calls["n"] == 1  # provider hit once on write-only; #11 replay from cache
-        assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
+        assert r2.pop(ws.DEMO_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -214,7 +214,7 @@ def test_web_search_replays_across_goals(mem, monkeypatch):
             fast_mode_goal="goal-b",
         )
         assert calls["n"] == 1
-        assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
+        assert r2.pop(ws.DEMO_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -226,7 +226,7 @@ def memwf(monkeypatch):
     monkeypatch.setattr(wf, "logger", wf.logger)
     # web_fetch_activity imports the cache client lazily inside the function, so patch
     # the module functions it resolves.
-    import providers.fast_cache.client as cclient
+    import providers.demo_cache.client as cclient
     monkeypatch.setattr(cclient, "cache_get", store.get)
     monkeypatch.setattr(cclient, "cache_set", store.set)
     return store
@@ -244,7 +244,7 @@ def test_web_fetch_miss_soft_completes_without_provider(memwf, monkeypatch):
         monkeypatch.setattr(wf, "scrape_url", fake_scrape)
         out = await wf.web_fetch_activity("https://x.com/a", True, bench)
         assert calls["n"] == 0
-        assert out.pop(wf.FAST_CACHE_HIT_FIELD) is True
+        assert out.pop(wf.DEMO_CACHE_HIT_FIELD) is True
         assert out["metadata"]["provider"] == "fast-mode-soft-complete"
         assert memwf.data == {}
 
@@ -270,7 +270,7 @@ def test_web_fetch_record_then_replay(memwf, monkeypatch):
         )
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "g")
         assert calls["n"] == 1
-        assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
+        assert r2.pop(wf.DEMO_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -294,7 +294,7 @@ def test_web_fetch_replays_across_goals(memwf, monkeypatch):
         )
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "goal-b")
         assert calls["n"] == 1
-        assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
+        assert r2.pop(wf.DEMO_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -343,8 +343,8 @@ def test_web_fetch_write_only_stores_without_read(memwf, monkeypatch):
 def test_web_fetch_file_download_record_then_replay(memwf, monkeypatch):
     async def body():
         import domains.web_fetch.service as service
-        import providers.fast_cache.blob_store as blob_store
-        import providers.fast_cache.client as cclient
+        import providers.demo_cache.blob_store as blob_store
+        import providers.demo_cache.client as cclient
 
         calls = {"n": 0}
 
@@ -365,12 +365,12 @@ def test_web_fetch_file_download_record_then_replay(memwf, monkeypatch):
         monkeypatch.setattr(blob_store, "upload_blob", fake_upload_blob)
         monkeypatch.setattr(blob_store, "download_blob", fake_download_blob)
 
-        first = await service._download_files_with_fast_cache(
+        first = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf?t=1"],
             fast_mode_cache_enabled=True,
             fast_mode_goal="g",
         )
-        second = await service._download_files_with_fast_cache(
+        second = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf?t=99999"],
             fast_mode_cache_enabled=True,
             fast_mode_goal="g",
@@ -389,7 +389,7 @@ def test_web_fetch_file_download_record_then_replay(memwf, monkeypatch):
 def test_web_fetch_file_download_failed_download_record_then_replay(memwf, monkeypatch):
     async def body():
         import domains.web_fetch.service as service
-        import providers.fast_cache.client as cclient
+        import providers.demo_cache.client as cclient
 
         calls = {"n": 0}
 
@@ -401,12 +401,12 @@ def test_web_fetch_file_download_failed_download_record_then_replay(memwf, monke
         monkeypatch.setattr(cclient, "cache_get_record", memwf.get_record)
         monkeypatch.setattr(cclient, "cache_set", memwf.set)
 
-        first = await service._download_files_with_fast_cache(
+        first = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf?t=1"],
             fast_mode_cache_enabled=True,
             fast_mode_goal="g",
         )
-        second = await service._download_files_with_fast_cache(
+        second = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf?t=99999"],
             fast_mode_cache_enabled=True,
             fast_mode_goal="g",
@@ -426,8 +426,8 @@ def test_web_fetch_file_download_failed_download_record_then_replay(memwf, monke
 def test_web_fetch_file_download_write_only_stores_without_read(memwf, monkeypatch):
     async def body():
         import domains.web_fetch.service as service
-        import providers.fast_cache.blob_store as blob_store
-        import providers.fast_cache.client as cclient
+        import providers.demo_cache.blob_store as blob_store
+        import providers.demo_cache.client as cclient
 
         calls = {"n": 0}
 
@@ -444,7 +444,7 @@ def test_web_fetch_file_download_write_only_stores_without_read(memwf, monkeypat
         monkeypatch.setattr(cclient, "cache_set", memwf.set)
         monkeypatch.setattr(blob_store, "upload_blob", fake_upload_blob)
 
-        out = await service._download_files_with_fast_cache(
+        out = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf"],
             fast_mode_cache_enabled=False,
             fast_mode_goal="g",
@@ -465,8 +465,8 @@ def test_web_fetch_file_download_skips_frozen_demo_namespace(memwf, monkeypatch)
 
     async def body():
         import domains.web_fetch.service as service
-        import providers.fast_cache.blob_store as blob_store
-        import providers.fast_cache.client as cclient
+        import providers.demo_cache.blob_store as blob_store
+        import providers.demo_cache.client as cclient
 
         async def fake_download(urls):
             return {url: b"LIVE-FILE-BYTES" for url in urls}
@@ -481,7 +481,7 @@ def test_web_fetch_file_download_skips_frozen_demo_namespace(memwf, monkeypatch)
         monkeypatch.setattr(cclient, "cache_set", memwf.set)
         monkeypatch.setattr(blob_store, "upload_blob", fake_upload_blob)
 
-        out = await service._download_files_with_fast_cache(
+        out = await service._download_files_with_demo_cache(
             ["https://x.com/report.pdf"],
             fast_mode_cache_enabled=False,
             fast_mode_goal=_soft_complete_bench_goal(),
@@ -497,7 +497,7 @@ def test_web_fetch_file_download_skips_frozen_demo_namespace(memwf, monkeypatch)
 
 def _demo_tree(monkeypatch):
     """Resolve agent tree roots: one DEMO-root child, one ordinary agent, one failed lookup."""
-    import providers.fast_cache.client as cclient
+    import providers.demo_cache.client as cclient
 
     demo_root = _soft_complete_bench_goal()
     child = "an ordinary child goal"
@@ -558,8 +558,8 @@ def test_web_fetch_download_child_under_demo_root_does_not_write(memwf, monkeypa
 
     async def body():
         import domains.web_fetch.service as service
-        import providers.fast_cache.blob_store as blob_store
-        import providers.fast_cache.client as cclient
+        import providers.demo_cache.blob_store as blob_store
+        import providers.demo_cache.client as cclient
 
         async def fake_download(urls):
             return {url: b"LIVE-FILE-BYTES" for url in urls}
@@ -574,7 +574,7 @@ def test_web_fetch_download_child_under_demo_root_does_not_write(memwf, monkeypa
         monkeypatch.setattr(blob_store, "upload_blob", fake_upload_blob)
         child = _demo_tree(monkeypatch)
         for agent_id in ("demo-child", "unresolved-agent"):
-            out = await service._download_files_with_fast_cache(
+            out = await service._download_files_with_demo_cache(
                 ["https://x.com/report.pdf"],
                 fast_mode_cache_enabled=False,
                 fast_mode_goal=child,

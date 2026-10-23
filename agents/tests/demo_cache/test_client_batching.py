@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from providers.fast_cache import client
+from providers.demo_cache import client
 
 EVENT_TIMEOUT_S = 1.0
 

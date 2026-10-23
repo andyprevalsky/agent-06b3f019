@@ -938,7 +938,7 @@ def _with_native_schema_test_transport(test):
         with (
             patch("helpers.messages._get_broadcast_client", return_value=client),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 new=AsyncMock(return_value=(False, None, False, None, None, True)),
             ),
         ):
@@ -2069,7 +2069,7 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
             {
                 "lineage_key": "agent:agent-test",
                 "agent_id": "agent-test",
-                "fast_cache_affinity_key": None,
+                "demo_cache_affinity_key": None,
                 "token_type": "claude",
             },
         )
@@ -2274,10 +2274,10 @@ async def test_run_agent_records_served_lease_identity_without_rotation():
     assert lease_fetches == []
 
 
-async def test_fast_cache_position_retries_same_step_after_llm_failure():
-    """A failed LLM attempt must not consume the next fast-cache position."""
+async def test_demo_cache_position_retries_same_step_after_llm_failure():
+    """A failed LLM attempt must not consume the next demo-cache position."""
     from loop.run_agent import run_agent
-    import providers.fast_cache.context as fast_cache_context
+    import providers.demo_cache.context as demo_cache_context
 
     cache_steps = []
     llm_calls = []
@@ -2311,8 +2311,8 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
         ),
         patch("loop.run_agent.asyncio.sleep", new=AsyncMock()),
-        patch.object(fast_cache_context, "set_context", side_effect=mock_set_context),
-        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch.object(demo_cache_context, "set_context", side_effect=mock_set_context),
+        patch.object(demo_cache_context, "write_through_enabled_for_user", return_value=False),
     ):
         result = await run_agent(
             agent_id="agent-test",
@@ -2337,7 +2337,7 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
     # (see failed_llm_call_does_not_consume_iteration_budget), so both of
     # max_iterations=2's turns remain available for real work.
     assert len(llm_calls) == 3
-    # The invariant under test: the retry reuses the SAME fast-cache step.
+    # The invariant under test: the retry reuses the SAME demo-cache step.
     assert cache_steps[:2] == [1, 1]
     assert result["status"] in {"max_iterations", "error"}
 
@@ -3346,7 +3346,7 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
         return [{"tool": "web_search", "query": "correct the rejected handoff"}]
 
     with patch(
-        "providers.fast_cache.client.ensure_position_context",
+        "providers.demo_cache.client.ensure_position_context",
         new=AsyncMock(side_effect=record_cache_step),
     ):
         result, _, executed = await _run_single_iteration(
@@ -3422,7 +3422,7 @@ async def test_verifier_usage_does_not_invent_cache_sequence_identity():
 
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
     """A schema-complete child dispatches completion without another LLM call."""
-    import providers.fast_cache.context as fast_cache_context
+    import providers.demo_cache.context as demo_cache_context
 
     response_schema = {
         "fields": [
@@ -3474,7 +3474,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     usage_reports = []
     event_order = []
     llm_call_count = 0
-    original_set_context = fast_cache_context.set_context
+    original_set_context = demo_cache_context.set_context
 
     class CapturingBroadcaster:
         def __init__(self, **_kwargs):
@@ -3501,7 +3501,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
         nonlocal llm_call_count
         llm_call_count += 1
         event_order.append(f"llm_{llm_call_count}")
-        cache_context = fast_cache_context.current_context()
+        cache_context = demo_cache_context.current_context()
         if cache_context is not None and cache_context.active:
             return [{"tool": "web_search", "query": "replayed rejected response"}]
         return [{"tool": "attempt_completion"}]
@@ -3522,8 +3522,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
         tool_calls: list = Field(default_factory=list)
 
     with (
-        patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
-        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch.object(demo_cache_context, "set_context", side_effect=capture_cache_context),
+        patch.object(demo_cache_context, "write_through_enabled_for_user", return_value=False),
         patch("loop.run_agent.CoalescingStreamBroadcaster", CapturingBroadcaster),
         patch("loop.run_agent.activity.heartbeat"),
     ):
@@ -4062,8 +4062,8 @@ async def run_all_tests():
         test_run_agent_records_served_lease_identity_without_rotation,
     )
     await r.record_async(
-        "fast_cache_position_retries_same_step_after_llm_failure",
-        test_fast_cache_position_retries_same_step_after_llm_failure,
+        "demo_cache_position_retries_same_step_after_llm_failure",
+        test_demo_cache_position_retries_same_step_after_llm_failure,
     )
     await r.record_async(
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
@@ -4188,7 +4188,7 @@ async def run_all_tests():
         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
     )
     await r.record_async(
-        "completed_child_bypasses_llm_and_fast_cache",
+        "completed_child_bypasses_llm_and_demo_cache",
         test_completed_child_required_tool_is_enforced_inside_direct_activity,
     )
     await r.record_async(

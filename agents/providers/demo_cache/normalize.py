@@ -1,6 +1,6 @@
-"""Fast Mode cache — normalization + key building (Python side).
+"""DEMO cache — normalization + key building (Python side).
 
-Mirror of back-end/src/domains/fast-cache/normalize.ts. Keep the two in sync:
+Mirror of back-end/src/domains/demo-cache/normalize.ts. Keep the two in sync:
 identical rules → identical keys across the TS/Python split. The ONLY defense
 against cache "busts" is normalization (we never validate freshness).
 """
@@ -739,7 +739,7 @@ def goal_hash(goal: str) -> str:
     3. per-creator for_each children alias onto the July execute_loop
        goalHash (item JSON / template drift must not mint a cold namespace)
 
-    Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
+    Keep in sync with `goalHash` in back-end demoCacheNormalizeCore.ts.
     """
     canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
     canonical = canonicalize_oai_demo_goal_for_hash(canonical)
@@ -780,7 +780,7 @@ def _canonical_request_body(body: Any) -> str:
 
 # Immutable WMH execution-policy identities: (version, policy_sha256[:16]).
 # Kept here so the workflow replay surface never imports benchmark modules; a
-# fast-cache parity test binds every entry to benchmarks.wmh_execution_policy.
+# demo-cache parity test binds every entry to benchmarks.wmh_execution_policy.
 WMH_POLICY_CACHE_IDENTITIES: dict[str, tuple[str, str]] = {
     "rose-virtual-public-affordances-v1": ("1", "49d9d1f0430a5d8e"),
     "rose-virtual-public-affordances-v2": ("2", "5dd9924e9a1ff4c5"),
@@ -796,7 +796,7 @@ def world_model_cache_scope() -> str:
 
     Simulated runs observe WMH-emulated environment responses, so their cache
     entries must never be replayed by (or overwrite) real-run entries. Scoping
-    the key keeps the fast cache fully active during simulation — WMH steps are
+    the key keeps the DEMO cache fully active during simulation — WMH steps are
     expensive, so sim-space replays still pay off — while real-run keys stay
     byte-identical (empty scope).
     """
@@ -1121,7 +1121,8 @@ def demo_cache_goal_hashes() -> frozenset[str]:
 
     Always includes ``OAI_DEMO_ROOT_GOAL_HASH`` so the Jul 2026 warm namespace
     cannot drift if the catalog load fails in workers. Also accepts legacy
-    ``fast_cache: "on"`` so older catalog rows keep working until retagged.
+    ``demo_cache: "on"`` (legacy spelling ``fast_cache``) so older catalog rows keep
+    working until retagged.
     """
     hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH, GOOGLE_OAUTH_DEMO_GOAL_HASH}
     try:
@@ -1132,8 +1133,8 @@ def demo_cache_goal_hashes() -> frozenset[str]:
             for task in tasks:
                 if not isinstance(task, dict):
                     continue
-                fast_cache_on = str(task.get("fast_cache") or "").strip().lower() == "on"
-                if not (_task_has_demo_tag(task) or fast_cache_on):
+                demo_cache_on = str(task.get("demo_cache", task.get("fast_cache")) or "").strip().lower() == "on"
+                if not (_task_has_demo_tag(task) or demo_cache_on):
                     continue
                 prompt = task.get("prompt")
                 if isinstance(prompt, str) and prompt.strip():
@@ -1154,10 +1155,10 @@ def demo_cache_allowed(
     *,
     root_goal: str | None = None,
 ) -> bool:
-    """True when Fast Mode cache replay may run for this agent namespace.
+    """True when DEMO cache replay may run for this agent namespace.
 
     Exact match: ``goal_hash(goal)`` or ``goal_hash(root_goal)`` must equal a
-    DEMO-tagged (or legacy fast_cache:on) benchmark prompt hash. Child agents
+    DEMO-tagged (or legacy demo_cache:on) benchmark prompt hash. Child agents
     under that root inherit via ``root_goal``. OAi child/window prefixes also
     qualify so truncated for_each goals still replay under the demo tree.
     """

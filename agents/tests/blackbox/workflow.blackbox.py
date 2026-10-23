@@ -414,7 +414,7 @@ async def mock_fetch_compute_token_activity(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     return None
@@ -533,7 +533,7 @@ async def mock_generate_completion_summary(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -571,11 +571,11 @@ async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: i
     return None
 
 
-# Captures the Fast Mode cache args the workflow threads into LLM activities,
+# Captures the DEMO cache args the workflow threads into LLM activities,
 # keyed by agent_id. Tests clear their agent's entry before starting.
 FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
-RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
+RESOLVE_DEMO_CACHE_GOAL_CALLS: List[str] = []
 LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
 LEFTOVER_CHILD_GOAL = "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
 # A finished drafting sub-agent woken by its parent's send_message_to_agent
@@ -593,7 +593,7 @@ VERIFIER_SCHEMA_CAPTURE: Dict[str, List[Optional[Dict[str, Any]]]] = {}
 async def mock_resolve_fast_cache_goal_activity(
     agent_id: str,
 ) -> Optional[dict[str, Optional[str]]]:
-    RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
+    RESOLVE_DEMO_CACHE_GOAL_CALLS.append(agent_id)
     if agent_id == LEFTOVER_CHILD_AGENT_ID:
         from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
@@ -609,7 +609,7 @@ async def mock_resolve_fast_cache_goal_activity(
 @activity.defn(name="resolve_fast_cache_context_activity")
 async def mock_resolve_fast_cache_context_activity(agent_id: str) -> dict:
     persisted = await mock_resolve_fast_cache_goal_activity(agent_id)
-    enabled = agent_id in {"agent-test-fastcache", LEFTOVER_CHILD_AGENT_ID}
+    enabled = agent_id in {"agent-test-democache", LEFTOVER_CHILD_AGENT_ID}
     return {
         "enabled": enabled,
         "goal": persisted["goal"] if enabled else None,
@@ -645,7 +645,7 @@ async def mock_call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -1452,15 +1452,15 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
 
-            # --- test: fast cache goal comes from the persisted agent row ---
+            # --- test: DEMO cache goal comes from the persisted agent row ---
             # Chat escalation starts the workflow with an LLM-refined goal that
             # differs from the persisted Agent row and varies run to run. Cache
             # keys namespace by exact goal hash, so keying on the workflow-input
             # goal gives every chat-originated run a fresh, empty namespace.
             # The workflow must thread the DB-row goal into LLM activities.
-            name = "wf_fast_cache_goal_uses_persisted_row"
+            name = "wf_demo_cache_goal_uses_persisted_row"
             try:
-                fc_agent_id = "agent-test-fastcache"
+                fc_agent_id = "agent-test-democache"
                 FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
                 demo_prefix = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
                 persisted_goal = f"{demo_prefix} — persisted DB goal"
@@ -1484,7 +1484,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                         None,  # context_gates
                         True,  # fast_mode_cache_enabled (button; cache still DEMO-gated)
                     ],
-                    id=_next_wf_id("fast-cache-goal"),
+                    id=_next_wf_id("demo-cache-goal"),
                     task_queue=TASK_QUEUE,
                 )
                 # Wait until the workflow reaches its first LLM call.
@@ -1512,8 +1512,8 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 leftover_id = LEFTOVER_CHILD_AGENT_ID
                 FAST_MODE_GOAL_CAPTURE.pop(leftover_id, None)
                 FAST_MODE_ENABLED_CAPTURE.pop(leftover_id, None)
-                while leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
-                    RESOLVE_FAST_CACHE_GOAL_CALLS.remove(leftover_id)
+                while leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS:
+                    RESOLVE_DEMO_CACHE_GOAL_CALLS.remove(leftover_id)
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
@@ -1538,10 +1538,10 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     task_queue=TASK_QUEUE,
                 )
                 for _ in range(60):
-                    if leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                    if leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS:
                         break
                     await asyncio.sleep(0.5)
-                assert leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS, (
+                assert leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS, (
                     "leftover child must resolve tree root_goal even when Fast Mode is off"
                 )
                 for _ in range(60):
@@ -2224,7 +2224,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.gpt_code_token_source = "pool"
     wf.gpt_code_token_pool_id = "pool-1"
     wf.compute_token_lineage_key = "lineage-1"
-    wf.compute_token_fast_cache_affinity_key = "affinity-1"
+    wf.compute_token_demo_cache_affinity_key = "affinity-1"
     wf.compute_token_fetched_at = datetime(2025, 1, 1, 10, 2, tzinfo=timezone.utc)
     wf.model_pricing_cache = {"model": {"input_cents_per_1k": 1.0}}
     wf.input_cents_per_1k = 1.25
@@ -2234,7 +2234,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
-    wf.fast_cache_goal = "stable persisted goal"
+    wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
     context = [{"role": "USER", "text": "durable context"}]
@@ -2294,7 +2294,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert merged.child_tool_counts == {"web_search": 4, "web_fetch": 2}
     assert restored._iteration_resume_kwargs() == {
         "iteration_offset": 41,
-        "fast_cache_position_offset": 41,
+        "demo_cache_position_offset": 41,
     }
     restored.max_iterations = 80
     assert restored._iteration_resume_kwargs()["max_iterations"] == 80
@@ -3509,7 +3509,7 @@ def _user_schema_refresh_fixture():
     wf.agent_id = "schema-feedback-agent"
     wf.user_id = "schema-feedback-user"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.current_phase = "EXECUTE"
     wf.user_context_section = ""
     wf._cloud_agent_lifecycle_finished = True
@@ -3686,7 +3686,7 @@ async def test_workflow_keyed_rejection_admits_already_polled_durable_feedback()
         resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
         resumed.agent_id = wf.agent_id
         resumed.goal = wf.goal
-        resumed.fast_cache_goal = wf.goal
+        resumed.demo_cache_goal = wf.goal
         await resumed.receive_user_response(json.dumps({"request_id": "rejected-request", "response": "__REJECTED__"}))
         await resumed._wait_for_response_schema_refresh()
         assert resumed._response_schema_revision == 1, "continue-as-new admitted the same durable correction twice"
@@ -4032,7 +4032,7 @@ async def test_workflow_attention_event_ledger_survives_continue_as_new():
         wf.context_gates = {}
         resumed = _bare_workflow_instance()
         resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
-        resumed.agent_id, resumed.goal, resumed.fast_cache_goal = wf.agent_id, wf.goal, wf.goal
+        resumed.agent_id, resumed.goal, resumed.demo_cache_goal = wf.agent_id, wf.goal, wf.goal
         # A producer retry can redeliver the same event under another Message ID.
         fake.activity_returns["poll_new_messages"] = [{**row, "id": "retry-message-id"}]
         await resumed._poll_messages(datetime.fromtimestamp(0, timezone.utc))
@@ -4134,7 +4134,7 @@ async def test_workflow_refreshes_response_schema_from_user_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = "Research three venues"
+    wf.demo_cache_goal = "Research three venues"
     wf.current_phase = "EXECUTE"
     wf.user_context_section = ""
     wf._cloud_agent_lifecycle_finished = True
@@ -4207,7 +4207,7 @@ async def test_workflow_verifier_refreshes_response_schema_from_user_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = "Research three venues"
+    wf.demo_cache_goal = "Research three venues"
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4247,7 +4247,7 @@ async def test_workflow_schema_refresh_skips_context_message_when_unchanged():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4381,7 +4381,7 @@ async def test_workflow_schema_refresh_failure_remains_pending_for_native_retry(
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4468,7 +4468,7 @@ async def test_workflow_failed_schema_continuation_retries_original_input_withou
             resumed._restore_deployment_state(snapshot)
             assert resumed._response_schema_applied_revision == 0
             resumed.agent_id, resumed.user_id = wf.agent_id, wf.user_id
-            resumed.goal, resumed.fast_cache_goal = wf.goal, wf.fast_cache_goal
+            resumed.goal, resumed.demo_cache_goal = wf.goal, wf.demo_cache_goal
             getter = resumed._make_response_schema_getter()
             assert await getter() == replacement
             assert resumed._response_schema_feedback == [authored]
@@ -4541,7 +4541,7 @@ async def test_workflow_schema_refresh_does_not_depend_on_message_write():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4574,7 +4574,7 @@ async def test_workflow_schema_refresh_reloads_prior_feedback_after_continuation
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4619,7 +4619,7 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4739,7 +4739,7 @@ async def _exercise_schema_refresh_persistence(
             patch("helpers.llm.load_config", return_value=config),
             patch("helpers.llm._generate_response_schema_with_rose", generate_schema),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 AsyncMock(return_value=(False, "", False, "", "", False)),
             ),
         ):
@@ -5540,7 +5540,7 @@ async def test_workflow_track_llm_cost_zero_when_no_pricing():
         _restore_workflow(original)
 
 
-async def test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost():
+async def test_workflow_track_llm_cost_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -5684,7 +5684,7 @@ async def test_workflow_track_usage_foundry_is_zero_user_cost():
         _restore_workflow(original)
 
 
-async def test_workflow_track_usage_fast_cache_replay_is_zero_cost():
+async def test_workflow_track_usage_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -6142,7 +6142,7 @@ async def test_workflow_on_tokens_no_pricing_still_logs():
         _restore_workflow(original)
 
 
-async def test_workflow_on_tokens_fast_cache_replay_is_zero_cost():
+async def test_workflow_on_tokens_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -9230,9 +9230,9 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
     wf.current_phase = "EXECUTE"
     wf.output_schema = {"fields": []}
     wf.fast_mode_cache_enabled = False
-    wf.fast_cache_goal = "goal"
+    wf.demo_cache_goal = "goal"
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
 
     dispatched_tools = []
     verifier_kwargs = {}
@@ -9308,7 +9308,7 @@ async def test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row
     wf, fake, replacement = _user_schema_refresh_fixture()
     wf.fast_mode_cache_enabled = False
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
     wf.context = []
 
     async def execute_tool(*args, **kwargs):
@@ -9549,9 +9549,9 @@ async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool()
     wf.current_phase = "EXECUTE"
     wf.output_schema = {"fields": []}
     wf.fast_mode_cache_enabled = False
-    wf.fast_cache_goal = "goal"
+    wf.demo_cache_goal = "goal"
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
 
     dispatched_tools = []
     posted_events = []
@@ -11121,7 +11121,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     # Cache kwargs must thread the persisted-row goal, not the (possibly
     # chat-refined) workflow input goal.
     wf.goal = "refined workflow input goal"
-    wf.fast_cache_goal = "root goal"
+    wf.demo_cache_goal = "root goal"
     wf.fast_mode_cache_enabled = True
     captured_kwargs: Dict[str, Any] = {}
 
@@ -11211,7 +11211,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
     wf.model = "rose-labs/rose-1-flash"
     wf.current_phase = "EXECUTE"
     wf.fast_mode_cache_enabled = True
-    wf.fast_cache_goal = "Call the restaurant and book dinner"
+    wf.demo_cache_goal = "Call the restaurant and book dinner"
     wf._current_tools = ["call_phone_number", "web_search", "attempt_completion"]
     wf.context = [
         {
@@ -12350,8 +12350,8 @@ async def run_all_tests():
         test_workflow_track_llm_cost_foundry_is_zero_user_cost,
     )
     await r.record_async(
-        "wf_track_llm_cost_fast_cache_replay",
-        test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost,
+        "wf_track_llm_cost_demo_cache_replay",
+        test_workflow_track_llm_cost_demo_cache_replay_is_zero_cost,
     )
     await r.record_async("wf_track_usage_empty", test_workflow_track_usage_empty_is_no_op)
     await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
@@ -12364,8 +12364,8 @@ async def run_all_tests():
         test_workflow_track_usage_foundry_is_zero_user_cost,
     )
     await r.record_async(
-        "wf_track_usage_fast_cache_replay",
-        test_workflow_track_usage_fast_cache_replay_is_zero_cost,
+        "wf_track_usage_demo_cache_replay",
+        test_workflow_track_usage_demo_cache_replay_is_zero_cost,
     )
     await r.record_async(
         "wf_track_usage_browser_pool_pricing",
@@ -12399,7 +12399,7 @@ async def run_all_tests():
     await r.record_async("wf_refresh_claude_token_fresh", test_workflow_refresh_claude_token_still_fresh_returns_early)
     await r.record_async("wf_on_tokens_with_pricing", test_workflow_on_tokens_calculates_cost_with_pricing)
     await r.record_async("wf_on_tokens_no_pricing", test_workflow_on_tokens_no_pricing_still_logs)
-    await r.record_async("wf_on_tokens_fast_cache_replay", test_workflow_on_tokens_fast_cache_replay_is_zero_cost)
+    await r.record_async("wf_on_tokens_demo_cache_replay", test_workflow_on_tokens_demo_cache_replay_is_zero_cost)
     await r.record_async("wf_wait_for_messages_timeout", test_workflow_wait_for_messages_timeout_returns_false)
     await r.record_async("wf_get_model_pricing_primary", test_workflow_get_model_pricing_returns_primary_when_matches)
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)

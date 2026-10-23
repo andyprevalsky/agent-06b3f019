@@ -9892,8 +9892,8 @@ def test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool():
         assert llm_rows[0]["output_tokens"] == 200
 
 
-def test_browser_usage_rows_never_leak_the_internal_fast_cache_marker():
-    """The ledger's internal fast-cache key must never surface as a model name.
+def test_browser_usage_rows_never_leak_the_internal_demo_cache_marker():
+    """The ledger's internal demo-cache key must never surface as a model name.
 
     The ledger keys Fast-Mode replays as `f"{model}\\x00fast_cache"` so a replay
     cannot merge into the model's paid bucket. When `actual_model` is missing —
@@ -9917,7 +9917,7 @@ def test_browser_usage_rows_never_leak_the_internal_fast_cache_marker():
     assert len(rows) == 1
     emitted_model = rows[0]["model"]
     assert "\x00" not in emitted_model, f"internal ledger marker leaked into model: {emitted_model!r}"
-    assert "fast_cache" not in emitted_model, f"internal marker leaked: {emitted_model!r}"
+    assert "demo_cache" not in emitted_model, f"internal marker leaked: {emitted_model!r}"
     # An unattributed model must still price at the browser pool, never fall
     # through to the parent agent's cheaper pool.
     assert emitted_model == BROWSER_USE_PRICING_POOL
@@ -10020,7 +10020,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         and node.target.id == "total_input_tokens"
     ]
     assert total_increments, "no total_input_tokens accumulation found — test is looking at the wrong function"
-    # Soft-complete early-return attributes a zero-token fast-cache ledger row via
+    # Soft-complete early-return attributes a zero-token demo-cache ledger row via
     # accumulate_model_usage without touching total_input_tokens (it passes 0s
     # straight into build_usage_items). Extra accumulate calls are allowed; missing
     # ones (token += without accumulate) are not.
@@ -33044,8 +33044,8 @@ async def run_all_tests():
         test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool,
     )
     r.record(
-        "browser_usage_rows_never_leak_the_internal_fast_cache_marker",
-        test_browser_usage_rows_never_leak_the_internal_fast_cache_marker,
+        "browser_usage_rows_never_leak_the_internal_demo_cache_marker",
+        test_browser_usage_rows_never_leak_the_internal_demo_cache_marker,
     )
     r.record(
         "browser_usage_rows_carry_cache_metadata_for_the_workflow_discount",

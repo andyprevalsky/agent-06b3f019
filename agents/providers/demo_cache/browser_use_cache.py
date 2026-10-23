@@ -64,7 +64,7 @@ async def cached_browser_decision(
     `call_llm` is the live decision call (zero-arg coroutine). `enabled`
     controls read/replay. `write_enabled` records live decisions without a read.
     Under Fast Mode read, a clean miss soft-completes with ``done`` only for
-    exact-match ``fast_cache:on`` bench trees (mass-agent OAi demo) so warm paths
+    exact-match ``demo_cache:on`` bench trees (mass-agent OAi demo) so warm paths
     stay ~$0 instead of live browser-use.
     """
     if not goal or not (enabled or write_enabled):
@@ -76,33 +76,33 @@ async def cached_browser_decision(
         try:
             stored = await cache_client.cache_get(key)
         except Exception as exc:  # never break a run on a cache read
-            logger.warning("fast_cache.browser_use_get_error", key=key, error=str(exc))
+            logger.warning("demo_cache.browser_use_get_error", key=key, error=str(exc))
             stored = None
             lookup_failed = True
         if stored is not None:
-            logger.info("fast_cache.browser_use_hit", key=key)
+            logger.info("demo_cache.browser_use_hit", key=key)
             return stored
-        logger.info("fast_cache.browser_use_miss", key=key)
-        # Soft-complete only for exact-match fast_cache:on benches (mass-agent OAi).
+        logger.info("demo_cache.browser_use_miss", key=key)
+        # Soft-complete only for exact-match demo_cache:on benches (mass-agent OAi).
         allowed = normalize.soft_complete_allowed(goal, root_goal=root_goal)
         if not allowed and agent_id:
             allowed = await cache_client.soft_complete_allowed_for_agent(agent_id, goal)
         if not allowed:
             logger.info(
-                "fast_cache.browser_use_miss_live",
+                "demo_cache.browser_use_miss_live",
                 key=key,
                 reason="soft_complete_not_allowlisted",
             )
         else:
             soft = soft_complete_browser_decision()
             logger.info(
-                "fast_cache.browser_use_soft_complete",
+                "demo_cache.browser_use_soft_complete",
                 key=key,
                 reason=("browser_cache_lookup_error" if lookup_failed else "browser_trajectory_exhausted"),
             )
             return soft
     else:
-        logger.info("fast_cache.browser_use_write_only", key=key)
+        logger.info("demo_cache.browser_use_write_only", key=key)
 
     result = await call_llm()
     if write_enabled:
@@ -110,12 +110,12 @@ async def cached_browser_decision(
             # A non-DEMO child under a DEMO root must not write into the frozen
             # replay namespace; only the agent's resolved tree root knows.
             if agent_id and not await cache_client.cache_write_allowed_for_agent(agent_id, goal):
-                logger.info("fast_cache.browser_use_write_skipped", key=key, reason="demo_tree_root")
+                logger.info("demo_cache.browser_use_write_skipped", key=key, reason="demo_tree_root")
                 return result
             await cache_client.cache_set(
                 key, "browser_use", normalize.goal_hash(goal), result, goal=goal, root_goal=root_goal
             )
-            logger.info("fast_cache.browser_use_stored", key=key)
+            logger.info("demo_cache.browser_use_stored", key=key)
         except Exception as exc:
-            logger.warning("fast_cache.browser_use_set_error", key=key, error=str(exc))
+            logger.warning("demo_cache.browser_use_set_error", key=key, error=str(exc))
     return result

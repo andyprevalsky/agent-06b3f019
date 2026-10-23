@@ -66,12 +66,12 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
     assert not is_oai_demo_goal("")
 
 
-def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
-    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
+def test_is_oai_demo_mass_agent_task_reads_goal_or_demo_cache_goal():
+    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, demo_cache_goal=""))
     assert is_oai_demo_mass_agent_task(
-        SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
+        SimpleNamespace(goal="Buy socks", demo_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
     )
-    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
+    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", demo_cache_goal=None))
 
 
 def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
@@ -80,11 +80,11 @@ def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
         "deliverables for Andy Prevalsky's [REDACTED] brand task."
     )
     assert not is_oai_demo_goal(leftover)
-    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None))
+    assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal=leftover, demo_cache_goal=leftover, root_goal=None))
     assert is_oai_demo_mass_agent_task(
         SimpleNamespace(
             goal=leftover,
-            fast_cache_goal=leftover,
+            demo_cache_goal=leftover,
             root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
         )
     )
@@ -784,11 +784,11 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
 
     demo_wf = SimpleNamespace(
         goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-        fast_cache_goal="",
+        demo_cache_goal="",
         fast_mode_cache_enabled=True,
         child_results={"cid": {"status": "completed"}},
     )
-    live_wf = SimpleNamespace(goal="Buy socks", fast_cache_goal="", fast_mode_cache_enabled=True)
+    live_wf = SimpleNamespace(goal="Buy socks", demo_cache_goal="", fast_mode_cache_enabled=True)
 
     async def _recover():
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "", TimeoutError("timed out")) is None
@@ -806,7 +806,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
             await _recover_oai_demo_for_each_timeout(
                 SimpleNamespace(
                     goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-                    fast_cache_goal="",
+                    demo_cache_goal="",
                     fast_mode_cache_enabled=True,
                     child_results="bad",
                 ),
@@ -821,7 +821,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
 
         demo_empty = SimpleNamespace(
             goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-            fast_cache_goal="",
+            demo_cache_goal="",
             fast_mode_cache_enabled=True,
             child_results={},
             pending_children={"cid"},
@@ -992,7 +992,7 @@ def test_for_each_timeout_recovers_terminal_child_without_completion_signal(monk
     child_id = "completed-without-signal"
     workflow_instance = SimpleNamespace(
         goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-        fast_cache_goal="",
+        demo_cache_goal="",
         fast_mode_cache_enabled=True,
         child_results={},
         pending_children={child_id},

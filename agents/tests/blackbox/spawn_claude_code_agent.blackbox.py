@@ -2406,7 +2406,7 @@ async def test_run_agentic_loop_keepalive_extends_attached_sandbox():
     assert len(keepalives) >= 3 and all(call == ("t", "claude") for call in keepalives), keepalives
 
 
-def test_log_code_agent_event_promotes_codex_fast_cache_request():
+def test_log_code_agent_event_promotes_codex_demo_cache_request():
     """Codex proxy events are promoted into worker logs with cache details."""
     from domains.spawn_claude_code_agent import service
 
@@ -3897,7 +3897,7 @@ async def _run_all_tests():
         "run_agentic_loop_keepalive_extends_sandbox",
         test_run_agentic_loop_keepalive_extends_attached_sandbox,
     )
-    r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record("log_codex_demo_cache_event", test_log_code_agent_event_promotes_codex_demo_cache_request)
     r.record(
         "log_claude_tool_use_event",
         test_log_code_agent_event_promotes_claude_tool_use_to_info,

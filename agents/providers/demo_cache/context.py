@@ -1,4 +1,4 @@
-"""Fast Mode cache — per-activity context.
+"""DEMO cache — per-activity context.
 
 A contextvar carries the run's Fast Mode state into deep call sites (the Rose
 wrapper) without threading kwargs through every signature. LLM keys are canonical
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import normalize
+from .env import demo_cache_env
 
 WRITE_THROUGH_USER_IDS = {
     "1f85ff25-6e29-4c1b-8739-f917bd101a30",  # Andy
@@ -24,12 +25,12 @@ WRITE_THROUGH_USER_IDS = {
 
 def demo_recording_enabled() -> bool:
     """Return whether a deliberate DEMO re-recording may write its replay namespace."""
-    return os.environ.get("FAST_MODE_CACHE_RECORD_DEMO", "").strip().lower() in {"1", "true", "yes", "on"}
+    return (demo_cache_env("DEMO_CACHE_RECORD_DEMO") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def cache_writes_disabled() -> bool:
     """Return whether ordinary cache contexts are read-only in this process."""
-    return os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower() in {
+    return (demo_cache_env("DEMO_CACHE_DISABLE_WRITE_THROUGH") or "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -38,7 +39,7 @@ def cache_writes_disabled() -> bool:
 
 
 @dataclass
-class FastCacheContext:
+class DemoCacheContext:
     # `enabled` is the DEMO-prompt cache read/replay switch. Independent of the
     # Fast Mode button (which only controls provider_fast_mode / LLM speed).
     enabled: bool
@@ -93,12 +94,12 @@ class FastCacheContext:
         return [self.llm_key(call_site, messages)]
 
 
-_CTX: contextvars.ContextVar[Optional[FastCacheContext]] = contextvars.ContextVar(
-    "fast_cache_context", default=None
+_CTX: contextvars.ContextVar[Optional[DemoCacheContext]] = contextvars.ContextVar(
+    "demo_cache_context", default=None
 )
 
 
-def set_context(ctx: Optional[FastCacheContext]) -> contextvars.Token:
+def set_context(ctx: Optional[DemoCacheContext]) -> contextvars.Token:
     return _CTX.set(ctx)
 
 
@@ -106,7 +107,7 @@ def reset_context(token: contextvars.Token) -> None:
     _CTX.reset(token)
 
 
-def current_context() -> Optional[FastCacheContext]:
+def current_context() -> Optional[DemoCacheContext]:
     return _CTX.get()
 
 

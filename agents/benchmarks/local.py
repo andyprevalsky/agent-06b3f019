@@ -58,10 +58,10 @@ def apply_owned_wmh_recording(
     fixture_database: str,
 ) -> bool:
     """Admit explicitly selected recording only into its retained owned cache."""
-    recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", "").strip().lower()
+    recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", env.get("DEMO_CACHE_RECORD_DEMO", "")).strip().lower()
     if not (isolated and simulate and recording in {"1", "true", "yes", "on"}):
         return False
-    if not tasks or not all(getattr(task, "fast_cache", None) == "on" for task in tasks):
+    if not tasks or not all(getattr(task, "demo_cache", None) == "on" for task in tasks):
         return False
     manifest_path = env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST", "")
     retained_url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
@@ -91,15 +91,21 @@ def apply_owned_wmh_recording(
     if not owned:
         raise ValueError("WMH recording cache must be a retained loopback owner separate from the fixture")
     env["FAST_MODE_CACHE_DATABASE_URL"] = url
-    env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
+    _pop_demo_cache_env(env, "USE_LOCAL")
     env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "0"
     return True
 
 
-def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
-    """True when a selected task must read the shared July Fast Mode cache."""
+def _pop_demo_cache_env(env: dict[str, str], suffix: str) -> None:
+    """Clear both spellings (DEMO_CACHE_* and legacy FAST_MODE_CACHE_*) from a child env."""
+    env.pop(f"DEMO_CACHE_{suffix}", None)
+    env.pop(f"FAST_MODE_CACHE_{suffix}", None)
+
+
+def selected_tasks_need_shared_demo_cache(task_names: Sequence[str]) -> bool:
+    """True when a selected task must read the shared July DEMO cache."""
     selected = set(task_names)
-    return any(task.fast_cache == "on" and task.name in selected for task in all_tasks())
+    return any(task.demo_cache == "on" and task.name in selected for task in all_tasks())
 
 
 def _dotenv_fast_mode_cache_database_url() -> str:
@@ -120,13 +126,18 @@ def _dotenv_fast_mode_cache_database_url() -> str:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DATABASE_URL"}:
+        if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DEMO_CACHE_DATABASE_URL", "DATABASE_URL"}:
             continue
         value = value.strip()
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
         found[key] = value
-    return found.get("FAST_MODE_CACHE_DATABASE_URL") or found.get("DATABASE_URL") or ""
+    return (
+        found.get("FAST_MODE_CACHE_DATABASE_URL")
+        or found.get("DEMO_CACHE_DATABASE_URL")
+        or found.get("DATABASE_URL")
+        or ""
+    )
 
 
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
@@ -1721,7 +1732,7 @@ def apply_isolated_postgres_default(
 def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the run_benchmark.py process a local run launches."""
     env = {**(os.environ if base is None else base), "PYTHONUNBUFFERED": "1"}
-    # Disable fast-cache for local benchmark runs so trajectories are actually executed
+    # Disable demo-cache for local benchmark runs so trajectories are actually executed
     # rather than replayed from cache. This is required for payment-lifecycle tasks (real
     # side effects must not be cache-replayed) and also ensures the world model is exercised
     # during simulate runs. run_benchmark reads this and sets fast_mode_cache_enabled=false
@@ -1775,11 +1786,11 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
-        # Default isolated stacks keep Fast Mode cache on the local Postgres so
+        # Default isolated stacks keep DEMO cache on the local Postgres so
         # Tokyo / other smokes cannot write through Andy into the shared pooler.
-        # fast_cache:on tasks read the shared July cache. Ordinary agent
+        # demo_cache:on tasks read the shared July cache. Ordinary agent
         # write-through stays disabled; recognized DEMO WHM completions are
-        # allowed to populate their scoped keys via _WMHFastCacheContext.
+        # allowed to populate their scoped keys via _WMHDemoCacheContext.
         owned_recording = apply_owned_wmh_recording(
             env,
             isolated=stack.isolated,
@@ -1794,25 +1805,25 @@ def start_services(
         )
         if owned_recording:
             pass
-        elif selected_tasks_need_shared_fast_cache(tasks):
+        elif selected_tasks_need_shared_demo_cache(tasks):
             shared_url = (
-                env.get("FAST_MODE_CACHE_DATABASE_URL") or ""
+                env.get("FAST_MODE_CACHE_DATABASE_URL") or env.get("DEMO_CACHE_DATABASE_URL") or ""
             ).strip() or _dotenv_fast_mode_cache_database_url()
             if not shared_url:
                 raise RuntimeError(
-                    "fast_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
+                    "demo_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
                     "(shared July cache). Set it in back-end/.env."
                 )
             env["FAST_MODE_CACHE_DATABASE_URL"] = shared_url
-            env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
+            _pop_demo_cache_env(env, "USE_LOCAL")
             # This exact, synthetic DEMO needs one live seed run before it can
             # replay its own tool trajectory. Other shared-cache benches stay read-only.
             if set(tasks) == {"google-oauth"}:
-                env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
+                _pop_demo_cache_env(env, "DISABLE_WRITE_THROUGH")
             else:
                 env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "1"
         else:
-            env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+            _pop_demo_cache_env(env, "DATABASE_URL")
             env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
         # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
@@ -1852,7 +1863,7 @@ def start_services(
             env.setdefault("BENCHMARK_SKIP_WMH_BUILD", "1")
         if simulate:
             # Put the worker into simulate mode. run.sh forks the agents worker from this
-            # env, so these must be set here (the worker's WMH adapter + fast-cache scope
+            # env, so these must be set here (the worker's WMH adapter + demo-cache scope
             # read them from its process env). WMH_PORT mirrors run.sh's +6 offset.
             apply_local_simulate_wmh_env(
                 env,
@@ -2685,7 +2696,7 @@ def apply_local_simulate_wmh_env(
     """Env overrides so a local simulate stack serves the complete eligible WHM corpus.
 
     run.sh forks the agents worker from this env, so the worker's WMH adapter and
-    fast-cache scope read these from its process env. WMH_PORT mirrors run.sh's
+    demo-cache scope read these from its process env. WMH_PORT mirrors run.sh's
     +6 offset.
     """
     env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"

@@ -51,8 +51,8 @@ rm -f .coverage .coverage.*
 COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
 "$COVERAGE_BIN" combine
 
-if [ -d tests/fast_cache ]; then
-    "$COVERAGE_BIN" run --append -m pytest tests/fast_cache -q
+if [ -d tests/demo_cache ]; then
+    "$COVERAGE_BIN" run --append -m pytest tests/demo_cache -q
 fi
 
 if [ -d tests/unit ]; then

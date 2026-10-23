@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from providers.fast_cache.normalize import (
+from providers.demo_cache.normalize import (
     GOOGLE_OAUTH_DEMO_GOAL_HASH,
     GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
     goal_hash,

@@ -23,10 +23,10 @@ async def api_request_activity(
     url = str(request_payload.get("url") or "")
     activity.heartbeat(f"{method} {url[:80]}")
 
-    from providers.fast_cache.google_oauth_demo_fixture import DEMO_URL, matches_demo_goal, run_fixture
+    from providers.demo_cache.google_oauth_demo_fixture import DEMO_URL, matches_demo_goal, run_fixture
 
     if url == DEMO_URL:
-        from providers.fast_cache.client import resolve_agent_fast_mode
+        from providers.demo_cache.client import resolve_agent_fast_mode
 
         if method != "GET" or not agent_id:
             raise ValueError("Google OAuth DEMO fixture requires a GET from its benchmark agent")

@@ -46,19 +46,19 @@ from helpers.messages import (
 )
 from helpers.tracing import backend_api_headers, current_request_id, span, traced
 from helpers.workflow_generation import workflow_generation_headers
-from providers.fast_cache import client as fast_cache_client
-from providers.fast_cache.client import (
-    ensure_position_context as ensure_fast_cache_position_context,
+from providers.demo_cache import client as demo_cache_client
+from providers.demo_cache.client import (
+    ensure_position_context as ensure_demo_cache_position_context,
 )
-from providers.fast_cache.context import (
-    FastCacheContext,
+from providers.demo_cache.context import (
+    DemoCacheContext,
     write_through_enabled_for_user,
 )
-from providers.fast_cache.context import (
-    current_context as current_fast_cache_context,
+from providers.demo_cache.context import (
+    current_context as current_demo_cache_context,
 )
-from providers.fast_cache.context import (
-    set_context as set_fast_cache_context,
+from providers.demo_cache.context import (
+    set_context as set_demo_cache_context,
 )
 from providers.planner_memory.inject import (
     build_memory_fork,
@@ -545,7 +545,7 @@ def _build_claude_auth_context(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
@@ -577,7 +577,7 @@ def _build_claude_auth_context(
             lineage_key=lineage_key,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
         )
         if not result or not result.get("accessToken"):
             return None
@@ -586,7 +586,7 @@ def _build_claude_auth_context(
             fetch_user_id,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
             max_rotations=max_rotations,
         )
 
@@ -616,7 +616,7 @@ def _build_gpt_auth_context(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
@@ -648,7 +648,7 @@ def _build_gpt_auth_context(
             lineage_key=lineage_key,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
         )
         if not result or not result.get("accessToken"):
             return None
@@ -657,7 +657,7 @@ def _build_gpt_auth_context(
             fetch_user_id,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
             max_rotations=max_rotations,
         )
 
@@ -684,7 +684,7 @@ def _build_compute_auth_context(
     *,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ComputeAuthContext]:
     """Build a direct auth context from the unified compute-token endpoint."""
@@ -701,7 +701,7 @@ def _build_compute_auth_context(
             lineage_key=result.get("lineageKey"),
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
+            demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
             max_rotations=max_rotations,
         )
     return _build_gpt_auth_context(
@@ -713,7 +713,7 @@ def _build_compute_auth_context(
         lineage_key=result.get("lineageKey"),
         agent_id=agent_id,
         root_agent_id=root_agent_id,
-        fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
+        demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
 
@@ -736,7 +736,7 @@ def _build_compute_auth_context_from_payload(
             user_id,
             agent_id=compute_auth.get("agentId"),
             root_agent_id=compute_auth.get("rootAgentId"),
-            fast_cache_affinity_key=compute_auth.get("fastCacheAffinityKey"),
+            demo_cache_affinity_key=compute_auth.get("fastCacheAffinityKey"),
         )
         if isinstance(ctx, ClaudeAuthContext):
             return ctx, None
@@ -2788,7 +2788,7 @@ async def call_llm_structured_streaming(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
@@ -2901,7 +2901,7 @@ async def call_llm_structured_streaming(
             lineage_key=compute_token_lineage_key,
             agent_id=agent_id,
             root_agent_id=agent_id,
-            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
         gpt_auth_context = _build_gpt_auth_context(
             gpt_token,
@@ -2912,7 +2912,7 @@ async def call_llm_structured_streaming(
             lineage_key=compute_token_lineage_key,
             agent_id=agent_id,
             root_agent_id=agent_id,
-            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
 
         def _native_visible_text() -> str:
@@ -2942,26 +2942,26 @@ async def call_llm_structured_streaming(
         if idle_timeout_s is not None:
             rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
 
-        deferred_fast_cache_key: Optional[str] = None
-        deferred_fast_cache_goal_hash: Optional[str] = None
-        deferred_fast_cache_goal_str: Optional[str] = None
-        deferred_fast_cache_root_goal_str: Optional[str] = None
-        deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
-        fast_cache_accumulate = None
+        deferred_demo_cache_key: Optional[str] = None
+        deferred_demo_cache_goal_hash: Optional[str] = None
+        deferred_demo_cache_goal_str: Optional[str] = None
+        deferred_demo_cache_root_goal_str: Optional[str] = None
+        deferred_demo_cache_acc: Optional[Dict[str, Any]] = None
+        demo_cache_accumulate = None
         try:
-            from providers.fast_cache.rose_cache import (
-                accumulate_chunk as fast_cache_accumulate,
+            from providers.demo_cache.rose_cache import (
+                accumulate_chunk as demo_cache_accumulate,
             )
-            from providers.fast_cache.rose_cache import (
-                empty_response as fast_cache_empty_response,
+            from providers.demo_cache.rose_cache import (
+                empty_response as demo_cache_empty_response,
             )
-            from providers.fast_cache.rose_cache import (
-                request_key_material as fast_cache_request_key_material,
+            from providers.demo_cache.rose_cache import (
+                request_key_material as demo_cache_request_key_material,
             )
 
-            fast_cache_context = current_fast_cache_context()
-            if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
-                fast_cache_complete_kwargs: Dict[str, Any] = {
+            demo_cache_context = current_demo_cache_context()
+            if demo_cache_context is not None and demo_cache_context.active and demo_cache_context.should_write:
+                demo_cache_complete_kwargs: Dict[str, Any] = {
                     "pool": pool,
                     "messages": messages,
                     "response_model": response_model,
@@ -2977,21 +2977,21 @@ async def call_llm_structured_streaming(
                     "request_id": request_id,
                     "thinking": thinking,
                     "effort": effort,
-                    "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                    "provider_fast_mode": bool(demo_cache_context.provider_fast_mode),
                     "cache_namespace": cache_sequence_id,
                     "_exclude_anthropic_family": _exclude_anthropic_family,
                     **rose_kwargs,
                 }
-                deferred_fast_cache_key = fast_cache_context.llm_key(
+                deferred_demo_cache_key = demo_cache_context.llm_key(
                     call_site,
-                    fast_cache_request_key_material(fast_cache_complete_kwargs),
+                    demo_cache_request_key_material(demo_cache_complete_kwargs),
                 )
-                deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
-                deferred_fast_cache_goal_str = fast_cache_context.goal
-                deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
-                deferred_fast_cache_acc = fast_cache_empty_response()
+                deferred_demo_cache_goal_hash = demo_cache_context.goal_hash
+                deferred_demo_cache_goal_str = demo_cache_context.goal
+                deferred_demo_cache_root_goal_str = demo_cache_context.root_goal
+                deferred_demo_cache_acc = demo_cache_empty_response()
         except Exception as exc:
-            logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
+            logger.warning("demo_cache.defer_setup_error", call_site=call_site, error=str(exc))
 
         # Per-stream wall-time profiler: splits stream duration into time spent in
         # inline per-chunk callbacks (broadcasts / tool-progress events, which do
@@ -3005,7 +3005,7 @@ async def call_llm_structured_streaming(
         # from per-chunk processing, regardless of the `continue`s in the body.
         # Fast Mode record/replay: transparent passthrough when off; on a cache
         # hit this re-streams the stored response without touching Rose/Anthropic.
-        from providers.fast_cache.rose_cache import cached_complete
+        from providers.demo_cache.rose_cache import cached_complete
 
         _stream_iter = cached_complete(
             rose_client,
@@ -3039,8 +3039,8 @@ async def call_llm_structured_streaming(
                 finally:
                     _await_s += _safe_time() - _t_await
                 chunk_count += 1
-                if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
-                    fast_cache_accumulate(deferred_fast_cache_acc, chunk)
+                if deferred_demo_cache_acc is not None and demo_cache_accumulate is not None:
+                    demo_cache_accumulate(deferred_demo_cache_acc, chunk)
 
                 if not ttft_logged:
                     ttft_ms = int((_safe_time() - request_start_time) * 1000)
@@ -3416,7 +3416,7 @@ async def call_llm_structured_streaming(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 cache_sequence_id=cache_sequence_id,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
@@ -3700,7 +3700,7 @@ async def call_llm_structured_streaming(
                     gpt_token_pool_id=gpt_token_pool_id,
                     gpt_token_user_id=gpt_token_user_id,
                     compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                     cache_sequence_id=cache_sequence_id,
                     on_model_detected=on_model_detected,
                     skip_cache_write=skip_cache_write,
@@ -3771,44 +3771,44 @@ async def call_llm_structured_streaming(
             }
 
         if (
-            deferred_fast_cache_key
-            and deferred_fast_cache_goal_hash
-            and deferred_fast_cache_acc is not None
+            deferred_demo_cache_key
+            and deferred_demo_cache_goal_hash
+            and deferred_demo_cache_acc is not None
             and not usage.get("from_fast_cache")
         ):
             try:
-                stored_ok = await fast_cache_client.cache_set(
-                    deferred_fast_cache_key,
+                stored_ok = await demo_cache_client.cache_set(
+                    deferred_demo_cache_key,
                     "llm",
-                    deferred_fast_cache_goal_hash,
-                    deferred_fast_cache_acc,
-                    goal=deferred_fast_cache_goal_str,
-                    root_goal=deferred_fast_cache_root_goal_str,
+                    deferred_demo_cache_goal_hash,
+                    deferred_demo_cache_acc,
+                    goal=deferred_demo_cache_goal_str,
+                    root_goal=deferred_demo_cache_root_goal_str,
                 )
                 # Diagnostic: the goal STRING behind the goal_hash. A trajectory whose
                 # terminal call caches under a run-unique goal (timestamp/uuid leaking
                 # into the goal) never replays — see explore-final-call-cache-miss.
-                goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+                goal_preview = (deferred_demo_cache_goal_str or "")[:160]
                 if stored_ok:
                     logger.info(
                         "llm.cache.stored",
                         call_site=call_site,
-                        key=deferred_fast_cache_key,
-                        goal_hash=deferred_fast_cache_goal_hash,
+                        key=deferred_demo_cache_key,
+                        goal_hash=deferred_demo_cache_goal_hash,
                         goal_preview=goal_preview,
                     )
                 else:
                     # cache_set returns False (never raises) on a non-200/timeout write.
                     # Previously we logged "stored" unconditionally, masking dropped writes.
                     logger.warning(
-                        "fast_cache.write_dropped",
+                        "demo_cache.write_dropped",
                         call_site=call_site,
-                        key=deferred_fast_cache_key,
-                        goal_hash=deferred_fast_cache_goal_hash,
+                        key=deferred_demo_cache_key,
+                        goal_hash=deferred_demo_cache_goal_hash,
                         goal_preview=goal_preview,
                     )
             except Exception as exc:
-                logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
+                logger.warning("demo_cache.set_error", key=deferred_demo_cache_key, error=str(exc))
 
         # Deduplicate single-call-per-step tools (keep only first occurrence)
         # These tools should never be called more than once in the same response
@@ -4118,7 +4118,7 @@ async def call_llm(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
@@ -4180,7 +4180,7 @@ async def call_llm(
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
                 root_agent_id=agent_id,
-                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             gpt_auth_context = _build_gpt_auth_context(
                 gpt_token,
@@ -4191,7 +4191,7 @@ async def call_llm(
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
                 root_agent_id=agent_id,
-                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             try:
                 rose_response = await rose_client.collect(
@@ -4288,7 +4288,7 @@ async def call_llm(
                     gpt_token_pool_id=gpt_token_pool_id,
                     gpt_token_user_id=gpt_token_user_id,
                     compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                     cache_sequence_id=cache_sequence_id,
                     skip_cache_write=skip_cache_write,
                     call_site=call_site,
@@ -4299,11 +4299,11 @@ async def call_llm(
                 )
 
             if response_model is not None and not skip_cache_write and not usage.get("from_fast_cache"):
-                ctx = current_fast_cache_context()
+                ctx = current_demo_cache_context()
                 if ctx is not None and ctx.active and ctx.should_write:
-                    from providers.fast_cache.rose_cache import request_key_material as fast_cache_request_key_material
+                    from providers.demo_cache.rose_cache import request_key_material as demo_cache_request_key_material
 
-                    fast_cache_kwargs = {
+                    demo_cache_kwargs = {
                         "pool": pool,
                         "messages": messages,
                         "response_model": response_model,
@@ -4312,8 +4312,8 @@ async def call_llm(
                         "provider_fast_mode": bool(ctx.provider_fast_mode),
                         "cache_namespace": cache_sequence_id,
                     }
-                    key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
-                    stored_ok = await fast_cache_client.cache_set(
+                    key = ctx.llm_key(call_site, demo_cache_request_key_material(demo_cache_kwargs))
+                    stored_ok = await demo_cache_client.cache_set(
                         key,
                         "llm",
                         ctx.goal_hash,
@@ -4341,7 +4341,7 @@ async def call_llm(
                         )
                     else:
                         logger.warning(
-                            "fast_cache.write_dropped",
+                            "demo_cache.write_dropped",
                             call_site=call_site,
                             key=key,
                             structured=True,
@@ -4416,7 +4416,7 @@ async def call_llm(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 cache_sequence_id=cache_sequence_id,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -4527,7 +4527,7 @@ async def _call_llm_verifier(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
@@ -4585,7 +4585,7 @@ async def _call_llm_verifier(
         lineage_key=compute_token_lineage_key,
         agent_id=agent_id,
         root_agent_id=agent_id,
-        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+        demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
     )
     gpt_auth_context = _build_gpt_auth_context(
         gpt_token,
@@ -4596,32 +4596,32 @@ async def _call_llm_verifier(
         lineage_key=compute_token_lineage_key,
         agent_id=agent_id,
         root_agent_id=agent_id,
-        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+        demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
     )
-    deferred_fast_cache_key: Optional[str] = None
-    deferred_fast_cache_goal_hash: Optional[str] = None
-    deferred_fast_cache_goal_str: Optional[str] = None
-    deferred_fast_cache_root_goal_str: Optional[str] = None
-    deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
-    fast_cache_accumulate = None
+    deferred_demo_cache_key: Optional[str] = None
+    deferred_demo_cache_goal_hash: Optional[str] = None
+    deferred_demo_cache_goal_str: Optional[str] = None
+    deferred_demo_cache_root_goal_str: Optional[str] = None
+    deferred_demo_cache_acc: Optional[Dict[str, Any]] = None
+    demo_cache_accumulate = None
     try:
-        from providers.fast_cache.rose_cache import (
-            accumulate_chunk as fast_cache_accumulate,
+        from providers.demo_cache.rose_cache import (
+            accumulate_chunk as demo_cache_accumulate,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             cached_complete,
         )
-        from providers.fast_cache.rose_cache import (
-            empty_response as fast_cache_empty_response,
+        from providers.demo_cache.rose_cache import (
+            empty_response as demo_cache_empty_response,
         )
-        from providers.fast_cache.rose_cache import (
-            request_key_material as fast_cache_request_key_material,
+        from providers.demo_cache.rose_cache import (
+            request_key_material as demo_cache_request_key_material,
         )
 
         verifier_max_tokens = max_tokens_for_verifier_call_site(call_site)
-        fast_cache_context = current_fast_cache_context()
-        if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
-            fast_cache_complete_kwargs: Dict[str, Any] = {
+        demo_cache_context = current_demo_cache_context()
+        if demo_cache_context is not None and demo_cache_context.active and demo_cache_context.should_write:
+            demo_cache_complete_kwargs: Dict[str, Any] = {
                 "pool": pool,
                 "messages": messages,
                 "response_model": response_model,
@@ -4632,19 +4632,19 @@ async def _call_llm_verifier(
                 "agent_id": agent_id,
                 "request_id": verifier_request_id,
                 "dump_extra": dump_extra,
-                "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                "provider_fast_mode": bool(demo_cache_context.provider_fast_mode),
             }
-            deferred_fast_cache_key = fast_cache_context.llm_key(
+            deferred_demo_cache_key = demo_cache_context.llm_key(
                 call_site,
-                fast_cache_request_key_material(fast_cache_complete_kwargs),
+                demo_cache_request_key_material(demo_cache_complete_kwargs),
             )
-            deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
-            deferred_fast_cache_goal_str = fast_cache_context.goal
-            deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
-            deferred_fast_cache_acc = fast_cache_empty_response()
+            deferred_demo_cache_goal_hash = demo_cache_context.goal_hash
+            deferred_demo_cache_goal_str = demo_cache_context.goal
+            deferred_demo_cache_root_goal_str = demo_cache_context.root_goal
+            deferred_demo_cache_acc = demo_cache_empty_response()
     except Exception as exc:
-        logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
-        from providers.fast_cache.rose_cache import cached_complete
+        logger.warning("demo_cache.defer_setup_error", call_site=call_site, error=str(exc))
+        from providers.demo_cache.rose_cache import cached_complete
 
     try:
         # Fast Mode record/replay (verifier path).
@@ -4666,8 +4666,8 @@ async def _call_llm_verifier(
             idle_timeout_s=VERIFIER_IDLE_TIMEOUT_S,
         ):
             chunk_count += 1
-            if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
-                fast_cache_accumulate(deferred_fast_cache_acc, chunk)
+            if deferred_demo_cache_acc is not None and demo_cache_accumulate is not None:
+                demo_cache_accumulate(deferred_demo_cache_acc, chunk)
             if chunk_count % 10 == 0:
                 _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
 
@@ -4784,39 +4784,39 @@ async def _call_llm_verifier(
     }
 
     if (
-        deferred_fast_cache_key
-        and deferred_fast_cache_goal_hash
-        and deferred_fast_cache_acc is not None
+        deferred_demo_cache_key
+        and deferred_demo_cache_goal_hash
+        and deferred_demo_cache_acc is not None
         and not usage.get("from_fast_cache")
     ):
         try:
-            stored_ok = await fast_cache_client.cache_set(
-                deferred_fast_cache_key,
+            stored_ok = await demo_cache_client.cache_set(
+                deferred_demo_cache_key,
                 "llm",
-                deferred_fast_cache_goal_hash,
-                deferred_fast_cache_acc,
-                goal=deferred_fast_cache_goal_str,
-                root_goal=deferred_fast_cache_root_goal_str,
+                deferred_demo_cache_goal_hash,
+                deferred_demo_cache_acc,
+                goal=deferred_demo_cache_goal_str,
+                root_goal=deferred_demo_cache_root_goal_str,
             )
-            goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+            goal_preview = (deferred_demo_cache_goal_str or "")[:160]
             if stored_ok:
                 logger.info(
                     "llm.cache.stored",
                     call_site=call_site,
-                    key=deferred_fast_cache_key,
-                    goal_hash=deferred_fast_cache_goal_hash,
+                    key=deferred_demo_cache_key,
+                    goal_hash=deferred_demo_cache_goal_hash,
                     goal_preview=goal_preview,
                 )
             else:
                 logger.warning(
-                    "fast_cache.write_dropped",
+                    "demo_cache.write_dropped",
                     call_site=call_site,
-                    key=deferred_fast_cache_key,
-                    goal_hash=deferred_fast_cache_goal_hash,
+                    key=deferred_demo_cache_key,
+                    goal_hash=deferred_demo_cache_goal_hash,
                     goal_preview=goal_preview,
                 )
         except Exception as exc:
-            logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
+            logger.warning("demo_cache.set_error", key=deferred_demo_cache_key, error=str(exc))
 
     return parsed, usage
 
@@ -5912,7 +5912,7 @@ async def check_progress(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -5996,12 +5996,12 @@ async def check_progress(
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
-    fast_cache_should_write = fast_mode_cache_enabled or write_through_enabled
-    if fast_mode_goal and fast_cache_should_write:
+    demo_cache_should_write = fast_mode_cache_enabled or write_through_enabled
+    if fast_mode_goal and demo_cache_should_write:
         root_goal = fast_mode_goal
         if agent_id:
             try:
-                from providers.fast_cache.client import resolve_agent_fast_mode as _resolve_fm
+                from providers.demo_cache.client import resolve_agent_fast_mode as _resolve_fm
 
                 _e, _g, _w, _r, resolved_root_goal, provider_fast_mode = await _resolve_fm(agent_id)
                 if resolved_root_goal:
@@ -6010,12 +6010,12 @@ async def check_progress(
                 provider_fast_mode = True
         else:
             provider_fast_mode = True
-        set_fast_cache_context(
-            FastCacheContext(
+        set_demo_cache_context(
+            DemoCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
-                write_enabled=fast_cache_should_write,
+                write_enabled=demo_cache_should_write,
                 root_goal=root_goal,
                 provider_fast_mode=provider_fast_mode,
             )
@@ -6066,9 +6066,9 @@ async def check_progress(
             "verifier_execute",
             "verifier_post_dag",
         ) and _verifier_context_has_successful_browser_result(context)
-        if browser_success_context and fast_mode_goal and fast_cache_should_write:
-            set_fast_cache_context(
-                FastCacheContext(
+        if browser_success_context and fast_mode_goal and demo_cache_should_write:
+            set_demo_cache_context(
+                DemoCacheContext(
                     enabled=False,
                     goal=fast_mode_goal,
                     base_step=fast_mode_step,
@@ -6076,7 +6076,7 @@ async def check_progress(
                 )
             )
             logger.info(
-                "Verifier fast-cache read disabled for browser-success context",
+                "Verifier demo-cache read disabled for browser-success context",
                 call_site=call_site,
                 fast_mode_step=fast_mode_step,
             )
@@ -6177,7 +6177,7 @@ async def check_progress(
                         gpt_token_pool_id=gpt_token_pool_id,
                         gpt_token_user_id=gpt_token_user_id,
                         compute_token_lineage_key=compute_token_lineage_key,
-                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                         call_site=call_site,
                         agent_id=agent_id,
                         dump_extra=verifier_dump_extra or None,
@@ -6192,12 +6192,12 @@ async def check_progress(
                     # LLM. That path was the verify8/10 cost bleed when a cache
                     # miss/parse failure exhausted the warm trajectory. Soft-pass
                     # instead so hits stay at 100% and tree cost stays ~$0.
-                    from providers.fast_cache.context import current_context as _fm_ctx
-                    from providers.fast_cache.rose_cache import soft_complete_on_miss
+                    from providers.demo_cache.context import current_context as _fm_ctx
+                    from providers.demo_cache.rose_cache import soft_complete_on_miss
 
                     # Gate on Fast Mode *read* (not merely goal / write-through).
                     # Soft-pass stubs are further restricted to exact-match
-                    # fast_cache:on bench trees (mass-agent OAi demo) via context.
+                    # demo_cache:on bench trees (mass-agent OAi demo) via context.
                     _ctx = _fm_ctx()
                     if (
                         fast_mode_cache_enabled
@@ -6251,7 +6251,7 @@ async def check_progress(
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         delay=round(sleep_s, 3),
-                        fast_cache_read_enabled=True if fast_mode_cache_enabled else None,
+                        demo_cache_read_enabled=True if fast_mode_cache_enabled else None,
                         error=extract_error_message(e),
                     )
                     await asyncio.sleep(sleep_s)
@@ -6286,8 +6286,8 @@ async def check_progress(
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
         if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
-            from providers.fast_cache.context import current_context as _fm_ctx
-            from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
+            from providers.demo_cache.context import current_context as _fm_ctx
+            from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
             _ctx = _fm_ctx()
             if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
@@ -6331,8 +6331,8 @@ async def check_progress(
         logger.error("Failed to check progress", error=error_message)
         # Fast Mode: never return the 0.5 error soft-fail that keeps browser/
         # execute loops spinning on soft-complete trajectories (verify15).
-        from providers.fast_cache.context import current_context as _fm_ctx
-        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
+        from providers.demo_cache.context import current_context as _fm_ctx
+        from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
         _ctx = _fm_ctx()
         if (
@@ -6412,7 +6412,7 @@ async def call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -6482,11 +6482,11 @@ async def call_llm_activity(
     # Keys are canonical request fingerprints, so prompt/schema/message changes miss.
     write_through_enabled = write_through_enabled_for_user(user_id)
     if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
-        from providers.fast_cache.client import resolve_soft_complete_root_goal
+        from providers.demo_cache.client import resolve_soft_complete_root_goal
 
         root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
-        set_fast_cache_context(
-            FastCacheContext(
+        set_demo_cache_context(
+            DemoCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
@@ -6495,7 +6495,7 @@ async def call_llm_activity(
             )
         )
     elif fast_mode_step is not None:
-        await ensure_fast_cache_position_context(agent_id, fast_mode_step)
+        await ensure_demo_cache_position_context(agent_id, fast_mode_step)
 
     try:
         _safe_heartbeat("Calling LLM for structured output")
@@ -6718,7 +6718,7 @@ async def call_llm_activity(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 on_model_detected=on_model_detected,
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
@@ -6948,12 +6948,12 @@ async def set_response_schema_activity(
             compute_auth.get("user_id") or compute_auth.get("userId")
         )
     if not write_through_enabled and agent_id:
-        from providers.fast_cache import client as _fc_client
+        from providers.demo_cache import client as _fc_client
 
         _, _, write_through_enabled, _, _, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
     if goal and (fast_mode_cache_enabled or write_through_enabled):
-        from providers.fast_cache import client as _fc_client
-        from providers.fast_cache import normalize as _fc_norm
+        from providers.demo_cache import client as _fc_client
+        from providers.demo_cache import normalize as _fc_norm
 
         # Content key includes the pool name. Dual-read rose-1-flash + legacy
         # rose-1-lite so the warm July/Aug response_schema row still hits after
@@ -6984,7 +6984,7 @@ async def set_response_schema_activity(
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
-            # 1. Generate schema in-process (or replay from the Fast Mode cache) so the
+            # 1. Generate schema in-process (or replay from the DEMO cache) so the
             # stable agents-side Rose routing owns claudeAuth/gptAuth selection,
             # waterfall, and token rotation.
             generate_start = time.perf_counter()
@@ -6992,7 +6992,7 @@ async def set_response_schema_activity(
                 schema = _fc_cached.get("schema", {})
                 title = _fc_cached.get("title") if include_title else None
                 if include_title:
-                    from providers.fast_cache.rose_cache import meaningful_response_schema_title
+                    from providers.demo_cache.rose_cache import meaningful_response_schema_title
 
                     title = meaningful_response_schema_title(schema, title)
                 usage = _fc_cached.get("usage", {})
@@ -7004,8 +7004,8 @@ async def set_response_schema_activity(
                     include_title=include_title,
                 )
                 if _fc_key is not None:
-                    from providers.fast_cache import client as _fc_client
-                    from providers.fast_cache import normalize as _fc_norm
+                    from providers.demo_cache import client as _fc_client
+                    from providers.demo_cache import normalize as _fc_norm
 
                     await _fc_client.cache_set(
                         _fc_key,
@@ -7174,7 +7174,7 @@ async def fetch_compute_token_activity(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Fetch one provider-typed compute token across Claude/GPT from the backend.
@@ -7206,8 +7206,8 @@ async def fetch_compute_token_activity(
                 params["agentId"] = agent_id
             if root_agent_id:
                 params["rootAgentId"] = root_agent_id
-            if fast_cache_affinity_key:
-                params["fastCacheAffinityKey"] = fast_cache_affinity_key
+            if demo_cache_affinity_key:
+                params["fastCacheAffinityKey"] = demo_cache_affinity_key
             if pinned_benchmark_type:
                 # Pin wins over callers (including _rotate_compute_token).
                 params["tokenType"] = pinned_benchmark_type
@@ -7249,7 +7249,7 @@ async def fetch_compute_token_activity(
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
                         "lineageKey": data.get("lineageKey"),
-                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or fast_cache_affinity_key,
+                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
                     }
             elif response.status_code == 404:
                 logger.info(f"Compute credentials not found for user {user_id}")
@@ -7528,7 +7528,7 @@ async def call_planner_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
@@ -7599,11 +7599,11 @@ async def call_planner_llm_activity(
         # request fingerprint. call_site "planner" keeps it distinct.
         write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
         if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
-            from providers.fast_cache.client import resolve_soft_complete_root_goal
+            from providers.demo_cache.client import resolve_soft_complete_root_goal
 
             root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
-            set_fast_cache_context(
-                FastCacheContext(
+            set_demo_cache_context(
+                DemoCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=fast_mode_goal,
                     base_step=fast_mode_step,
@@ -7727,7 +7727,7 @@ async def call_planner_llm_activity(
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
             compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             skip_cache_write=False,
             call_site="planner",
             effort="max",
@@ -7777,7 +7777,7 @@ async def call_planner_llm_activity(
                         "tokens_out": tokens_out,
                         "model": actual_model,
                         "provider": "Rose Planner",
-                        # Propagate fast-cache replay + cache-token fields so the
+                        # Propagate demo-cache replay + cache-token fields so the
                         # workflow cost aggregator zeroes a replayed planner call
                         # instead of billing the replayed output tokens.
                         "from_fast_cache": usage.get("from_fast_cache", False),

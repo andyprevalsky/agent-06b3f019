@@ -99,9 +99,9 @@ def test_is_oai_demo_mass_agent_task_only_matches_catalog_task():
     from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 
     class _Goal:
-        def __init__(self, goal, fast_cache_goal=None):
+        def __init__(self, goal, demo_cache_goal=None):
             self.goal = goal
-            self.fast_cache_goal = fast_cache_goal
+            self.demo_cache_goal = demo_cache_goal
 
     assert is_oai_demo_mass_agent_task(
         _Goal(
@@ -1065,7 +1065,7 @@ async def _explore_cold_stub_activity_result():
     from unittest.mock import patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
-    from providers.fast_cache.rose_cache import soft_complete_on_miss
+    from providers.demo_cache.rose_cache import soft_complete_on_miss
 
     stub_call = soft_complete_on_miss("explore_agent")["tool_calls"][0]
     stub_args = json.loads(stub_call["arguments"])
@@ -3733,7 +3733,7 @@ async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=search),
@@ -4535,7 +4535,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
@@ -4942,7 +4942,7 @@ async def test_spawn_explore_agent_activity_unavailable_sources_still_completed(
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
@@ -4985,7 +4985,7 @@ async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_source
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
@@ -5514,7 +5514,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             new=AsyncMock(return_value=(False, "parent g", True, None, None, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),

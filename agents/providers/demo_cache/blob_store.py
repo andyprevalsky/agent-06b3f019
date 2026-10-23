@@ -32,7 +32,7 @@ async def upload_blob(path: str, body: bytes, content_type: str = "application/o
     supabase_url = config.supabase.url
     supabase_key = config.supabase.service_role_key
     if not supabase_url or not supabase_key:
-        logger.warning("fast_cache.blob_upload_missing_config", path=path)
+        logger.warning("demo_cache.blob_upload_missing_config", path=path)
         return False
 
     url = f"{supabase_url}/storage/v1/object/{_BUCKET}/{path}"
@@ -48,12 +48,12 @@ async def upload_blob(path: str, body: bytes, content_type: str = "application/o
                 content=body,
             )
         if response.status_code in (200, 201):
-            logger.info("fast_cache.blob_uploaded", path=path, bytes=len(body))
+            logger.info("demo_cache.blob_uploaded", path=path, bytes=len(body))
             return True
-        logger.warning("fast_cache.blob_upload_failed", path=path, status=response.status_code)
+        logger.warning("demo_cache.blob_upload_failed", path=path, status=response.status_code)
         return False
     except Exception as exc:  # cache must never break a run
-        logger.warning("fast_cache.blob_upload_error", path=path, error=str(exc))
+        logger.warning("demo_cache.blob_upload_error", path=path, error=str(exc))
         return False
 
 
@@ -64,7 +64,7 @@ async def download_blob(path: Optional[str]) -> Optional[bytes]:
     supabase_url = config.supabase.url
     supabase_key = config.supabase.service_role_key
     if not supabase_url or not supabase_key:
-        logger.warning("fast_cache.blob_download_missing_config", path=path)
+        logger.warning("demo_cache.blob_download_missing_config", path=path)
         return None
 
     url = f"{supabase_url}/storage/v1/object/{_BUCKET}/{path}"
@@ -72,10 +72,10 @@ async def download_blob(path: Optional[str]) -> Optional[bytes]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(url, headers={"Authorization": f"Bearer {supabase_key}"})
         if response.status_code != 200:
-            logger.warning("fast_cache.blob_download_failed", path=path, status=response.status_code)
+            logger.warning("demo_cache.blob_download_failed", path=path, status=response.status_code)
             return None
-        logger.info("fast_cache.blob_downloaded", path=path, bytes=len(response.content))
+        logger.info("demo_cache.blob_downloaded", path=path, bytes=len(response.content))
         return response.content
     except Exception as exc:  # cache must never break a run
-        logger.warning("fast_cache.blob_download_error", path=path, error=str(exc))
+        logger.warning("demo_cache.blob_download_error", path=path, error=str(exc))
         return None

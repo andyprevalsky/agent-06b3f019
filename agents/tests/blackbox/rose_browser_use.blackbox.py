@@ -27,7 +27,7 @@ from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 import httpx
 
 from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool, gpt_auth_from_token
-from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
     _ACTION_NAME_MAP,
@@ -2194,8 +2194,8 @@ async def test_complete_browser_use_cancellation_skips_failure_capture():
     await _assert_failed_browser_context_capture(cancelled=True)
 
 
-async def test_complete_browser_use_bypasses_fast_cache_context():
-    """Browser-use LLM calls must not read or write provider fast-cache."""
+async def test_complete_browser_use_bypasses_demo_cache_context():
+    """Browser-use LLM calls must not read or write provider demo-cache."""
     sse_body = _openai_sse(
         [
             {
@@ -2224,13 +2224,13 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.cerebras.ai" in url:
             return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected endpoint")
 
     set_mock_handler(handler)
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         client = RoseClient(openrouter_key="ork-x")
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
@@ -2241,7 +2241,7 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
                 available_actions=["click", "click_coordinates"],
                 include_screenshot=False,
                 gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
-                agent_id="agent-fast-cache-bypass",
+                agent_id="agent-demo-cache-bypass",
                 call_site="browser_use_step_1",
             )
     finally:
@@ -2377,7 +2377,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.anthropic.com" in url:
             anthropic_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
@@ -2389,7 +2389,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
     dump_root = ROOT.parent / ".llm-dumps" / "unbound"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test", "GPT_API_KEY": ""}, clear=False):
             result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
@@ -2698,7 +2698,7 @@ async def run_all_tests():
         "complete_browser_use_cancellation_no_capture", test_complete_browser_use_cancellation_skips_failure_capture
     )
     await r.record_async(
-        "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
+        "complete_browser_use_bypasses_demo_cache", test_complete_browser_use_bypasses_demo_cache_context
     )
     await r.record_async(
         "complete_browser_use_cerebras_failure_preserves_tools",

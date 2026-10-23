@@ -1,4 +1,4 @@
-"""Fast Mode cache — Rose LLM call record/replay.
+"""DEMO cache — Rose LLM call record/replay.
 
 Wraps `RoseClient.complete()` (an async iterator of StreamChunk). On a cache HIT it
 re-emits stored content chunks with their normalized item provenance;
@@ -22,14 +22,14 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
 
 import structlog
 
-from providers.fast_cache import client as cache_client
-from providers.fast_cache.context import cache_writes_disabled, current_context
-from providers.fast_cache.normalize import (
+from providers.demo_cache import client as cache_client
+from providers.demo_cache.context import cache_writes_disabled, current_context
+from providers.demo_cache.normalize import (
     GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
     google_oauth_demo_goal_hash,
     rewrite_oai_demo_display_names,
 )
-from providers.fast_cache.normalize import (
+from providers.demo_cache.normalize import (
     goal_hash as normalize_goal_hash,
 )
 from providers.rose.policy import anthropic_family_excluded
@@ -64,7 +64,7 @@ _GENERIC_RESPONSE_SCHEMA_TITLES = frozenset(
 )
 
 
-class FastCacheLookupError(RuntimeError):
+class DemoCacheLookupError(RuntimeError):
     """Fast Mode store transport failure after retries. Not a clean cache miss."""
 
 
@@ -302,7 +302,7 @@ async def replay_with_context(
                 },
                 extra={
                     **(complete_kwargs.get("dump_extra") or {}),
-                    "completion_source": "fast_cache",
+                    "completion_source": "demo_cache",
                     "cache_key": cache_key,
                     "cache_hit_key": hit_key,
                     "replay_reason": reason,
@@ -418,7 +418,7 @@ def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
     Many July OAi explore namespaces recorded web_fetch tool rows + explore_agent
     LLM rows but never summarize_web_fetch LLM rows. Soft-completing those SWF
     misses with a stub summary was reward hacking. When the scrape itself came
-    from Fast Mode cache, pass the page markdown through as the summary so the
+    from DEMO cache, pass the page markdown through as the summary so the
     warm path stays $0 and returns real page text instead of a fake stub.
     """
     import json as _json
@@ -915,7 +915,7 @@ async def lookup_llm_cache(
     call_site: str,
     key_material: Any,
 ) -> tuple[Any, Any]:
-    """Exact-key + July position lookup. Raises FastCacheLookupError on transport fault.
+    """Exact-key + July position lookup. Raises DemoCacheLookupError on transport fault.
 
     Transient get/get-position failures are retried. A remaining failure is
     never returned as ``(None, None)`` — callers must not treat it as a miss.
@@ -943,23 +943,23 @@ async def lookup_llm_cache(
             if stored is not None and exclusions:
                 actual = stored.get("actual_model") if isinstance(stored, dict) else None
                 if not actual or actual == "unknown" or model_key(actual) in exclusions:
-                    logger.warning("fast_cache.candidate_excluded", actual_model=actual, skip_models=exclusions)
+                    logger.warning("demo_cache.candidate_excluded", actual_model=actual, skip_models=exclusions)
                     return None, None
             return stored, hit_key
-        except FastCacheLookupError:
+        except DemoCacheLookupError:
             raise
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "fast_cache.get_error",
+                "demo_cache.get_error",
                 call_site=call_site,
                 error=f"{type(exc).__name__}: {exc}"[:300],
                 attempt=attempt + 1,
             )
             if attempt < _LOOKUP_RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(_LOOKUP_RETRY_BACKOFF_S * (attempt + 1))
-    raise FastCacheLookupError(
-        f"fast-cache lookup failed for {call_site} after {_LOOKUP_RETRY_ATTEMPTS} attempts"
+    raise DemoCacheLookupError(
+        f"demo-cache lookup failed for {call_site} after {_LOOKUP_RETRY_ATTEMPTS} attempts"
     ) from last_exc
 
 
@@ -998,8 +998,8 @@ async def cached_complete(
         lookup_failed = False
         try:
             stored, hit_key = await lookup_llm_cache(ctx, call_site, request_key_material(complete_kwargs))
-        except FastCacheLookupError as exc:
-            logger.warning("fast_cache.get_error", key=key, error=f"{type(exc).__name__}: {exc}"[:300])
+        except DemoCacheLookupError as exc:
+            logger.warning("demo_cache.get_error", key=key, error=f"{type(exc).__name__}: {exc}"[:300])
             if ctx.soft_complete_allowed:
                 # Allowlisted Fast Mode (mass-agent) must not bill a live LLM for
                 # a store timeout. The activity/Temporal retry re-enters this path.
@@ -1018,7 +1018,7 @@ async def cached_complete(
                         key, "llm", ctx.goal_hash, stored, goal=ctx.goal, root_goal=ctx.root_goal
                     )
                 except Exception as exc:
-                    logger.warning("fast_cache.set_error", key=key, error=str(exc))
+                    logger.warning("demo_cache.set_error", key=key, error=str(exc))
             logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
             async with aclosing(
                 replay_with_context(
@@ -1165,9 +1165,9 @@ async def cached_complete(
     if os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
         "BENCHMARK_ISOLATED_RUN", ""
     ).strip().lower() in {"1", "true", "yes", "on"}:
-        raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
+        raise DemoCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
     if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
-        raise FastCacheLookupError(
+        raise DemoCacheLookupError(
             f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
         )
 
@@ -1187,5 +1187,5 @@ async def cached_complete(
                 )
                 logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
             except Exception as exc:
-                logger.warning("fast_cache.set_error", key=key, error=str(exc))
+                logger.warning("demo_cache.set_error", key=key, error=str(exc))
         yield chunk
