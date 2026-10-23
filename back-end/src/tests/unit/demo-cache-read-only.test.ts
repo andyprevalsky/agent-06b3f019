@@ -1,16 +1,16 @@
 #!/usr/bin/env tsx
 /**
  * FAST_MODE_CACHE_DISABLE_WRITE_THROUGH makes the backend an authoritative
- * read-only Fast Mode cache client, matching the Python worker
- * (agents/providers/fast_cache/context.py:cache_writes_disabled).
+ * read-only DEMO cache client, matching the Python worker
+ * (agents/providers/demo_cache/context.py:cache_writes_disabled).
  *
  * Incident 40ebcb24 (test-mass-agent-run-0, 2026-10-02): the pre-deploy shared
  * July cache batch set the flag, the worker wrote nothing, but the backend
  * chat router still stored its live Cerebras decision into the shared prod
- * cache (`fast_cache.chat_router_stored`), so the next run would replay a live
+ * cache (`demo_cache.chat_router_stored`), so the next run would replay a live
  * recording and hide the regression.
  *
- * Run: npx tsx src/tests/unit/fast-cache-read-only.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-read-only.test.ts
  */
 
 import assert from 'node:assert';
@@ -18,10 +18,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   demoCacheWriteEnabled,
-  fastCacheWritesDisabled,
+  demoCacheWritesDisabled,
   resolveFastModeWriteEnabled,
-} from '../../providers/fastCacheAccountPolicy';
-import { cacheSet } from '../../providers/fastCacheStore';
+} from '../../providers/demoCacheAccountPolicy';
+import { cacheSet } from '../../providers/demoCacheStore';
 
 const ANDY = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const FLAG = 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH';
@@ -54,10 +54,10 @@ function withFlag(value: string | undefined, fn: () => void): void {
 async function main(): Promise<void> {
   await test('read-only flag accepts the same truthy values as the Python worker', () => {
     for (const value of ['1', 'true', 'TRUE', ' yes ', 'on']) {
-      withFlag(value, () => assert.equal(fastCacheWritesDisabled(), true, value));
+      withFlag(value, () => assert.equal(demoCacheWritesDisabled(), true, value));
     }
     for (const value of [undefined, '', '0', 'false', 'off']) {
-      withFlag(value, () => assert.equal(fastCacheWritesDisabled(), false, String(value)));
+      withFlag(value, () => assert.equal(demoCacheWritesDisabled(), false, String(value)));
     }
   });
 
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
 
   await test('agentFastMode derives writeEnabled from the read-only policy', () => {
     const store = readFileSync(
-      join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'),
+      join(process.cwd(), 'src', 'providers', 'demoCacheStore.ts'),
       'utf8'
     );
     assert.match(store, /writeEnabled: demoCacheWriteEnabled\(enabled\)/);

@@ -1,5 +1,5 @@
 /**
- * Fast Mode cache routes — thin controller.
+ * DEMO cache routes — thin controller.
  *
  * POST /api/fast-cache/get      { key }                       -> { hit, value, blobPath }
  * POST /api/fast-cache/get-many { keys }                      -> { results }
@@ -25,7 +25,7 @@ import {
   agentFastMode,
 } from './service';
 
-const log = createLogger('FastCache');
+const log = createLogger('DemoCache');
 const router = Router();
 
 const getSchema = z.object({ key: z.string().min(1) });

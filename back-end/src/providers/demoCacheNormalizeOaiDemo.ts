@@ -1,7 +1,7 @@
 /**
  * OAi demo (test-mass-agent-run-0) goalHash canonicalization.
  *
- * Split from fastCacheNormalizeCore so the core module stays under max-lines.
+ * Split from demoCacheNormalizeCore so the core module stays under max-lines.
  * Keep the July execute_loop aliases in sync with
  * agents/domains/spawn_agent/oai_demo_july.py JULY_GP_GOAL_HASHES.
  */

@@ -2,7 +2,7 @@
 
 /**
  * Post-completion chat re-escalation must persist the router goal onto
- * Agent.goal (schema / fast-cache / UI source of truth) without dropping the
+ * Agent.goal (schema / demo-cache / UI source of truth) without dropping the
  * prior goal, and first-run escalate must keep the create-time row.
  */
 
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     assert.strictEqual(firstRun.goal, previousGoal);
     // Handler only applies followUpRunStateUpdate when a prior run finished.
     // Calling it here would persist a router paraphrase — that is the
-    // 2026-07-03 fast-cache miss, so first-run must not take this write.
+    // 2026-07-03 demo-cache miss, so first-run must not take this write.
     assert.notStrictEqual(routerParaphrase, previousGoal);
   } finally {
     await prisma.agent.deleteMany({ where: { userId: firstRunUserId } });

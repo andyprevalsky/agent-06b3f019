@@ -182,8 +182,8 @@ async function deleteAgentRecursiveInternal(
     }
 
     await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
-    // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
-    // goal hash and only removed by the explicit fast-cache purge endpoint.
+    // DEMO cache entries intentionally outlive agent deletion. They are keyed by
+    // goal hash and only removed by the explicit demo-cache purge endpoint.
 
     if (sealed.traceArchiveDeletionLease !== null && workflowTerminationHandled) {
       try {

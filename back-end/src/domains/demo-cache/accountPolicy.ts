@@ -1,1 +1,1 @@
-export { shouldWriteFastModeCacheForUser } from '../../providers/fastCacheAccountPolicy';
+export { shouldWriteDemoCacheForUser } from '../../providers/demoCacheAccountPolicy';

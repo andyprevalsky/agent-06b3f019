@@ -9,17 +9,17 @@
  * zero-live-spend failed. The opening turn must replay the goal's recorded
  * opening decision instead; follow-up turns must never borrow it.
  *
- * Run: npx tsx src/tests/unit/chat-router-fast-cache-drift.test.ts
+ * Run: npx tsx src/tests/unit/chat-router-demo-cache-drift.test.ts
  */
 
 import assert from 'node:assert';
-import { goalHash } from '../../providers/fastCacheNormalizeCore';
-import type { CacheGetResult } from '../../providers/fastCacheStore';
+import { goalHash } from '../../providers/demoCacheNormalizeCore';
+import type { CacheGetResult } from '../../providers/demoCacheStore';
 import {
   isOpeningRouterTurn,
-  readRouterFastCache,
-  type RouterFastCacheDeps,
-} from '../../providers/chat/routerFastCache';
+  readRouterDemoCache,
+  type RouterDemoCacheDeps,
+} from '../../providers/chat/routerDemoCache';
 
 const GOAL = 'Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.';
 const DRIFTED_KEY =
@@ -44,7 +44,7 @@ const EXACT_JSON = JSON.stringify({
 const MISS: CacheGetResult = { hit: false, value: null, blobPath: null };
 
 interface FakeStore {
-  deps: RouterFastCacheDeps;
+  deps: RouterDemoCacheDeps;
   positionCalls: Array<{ goalHash: string; callSite: string; step?: number | null }>;
 }
 
@@ -93,7 +93,7 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 async function main(): Promise<void> {
   await test('opening turn replays the recorded opening decision after key drift', async () => {
     const store = fakeStore({ recorded: { key: RECORDED_KEY, value: { json: RECORDED_JSON } } });
-    const result = await readRouterFastCache(
+    const result = await readRouterDemoCache(
       { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
       store.deps
     );
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
       exact: { [DRIFTED_KEY]: { json: EXACT_JSON } },
       recorded: { key: RECORDED_KEY, value: { json: RECORDED_JSON } },
     });
-    const result = await readRouterFastCache(
+    const result = await readRouterDemoCache(
       { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
       store.deps
     );
@@ -115,7 +115,7 @@ async function main(): Promise<void> {
 
   await test('follow-up turns never borrow a recorded opening decision', async () => {
     const store = fakeStore({ recorded: { key: RECORDED_KEY, value: { json: RECORDED_JSON } } });
-    const result = await readRouterFastCache(
+    const result = await readRouterDemoCache(
       { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: null },
       store.deps
     );
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
       exact: { [DRIFTED_KEY]: { json: '{\n  "' } },
       recorded: { key: RECORDED_KEY, value: { json: RECORDED_JSON } },
     });
-    const result = await readRouterFastCache(
+    const result = await readRouterDemoCache(
       { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
       store.deps
     );
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
         value: { json: JSON.stringify({ action: 'web_search', reasoning: 'no query' }) },
       },
     });
-    const result = await readRouterFastCache(
+    const result = await readRouterDemoCache(
       { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
       store.deps
     );
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
         exact: { [DRIFTED_KEY]: { json: EXACT_JSON } },
         recorded: 'reject',
       });
-      const result = await readRouterFastCache(
+      const result = await readRouterDemoCache(
         { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
         store.deps
       );
@@ -175,7 +175,7 @@ async function main(): Promise<void> {
   await test('a failed drift lookup on an exact miss surfaces as a cache error', async () => {
     const store = fakeStore({ recorded: 'reject' });
     await assert.rejects(
-      readRouterFastCache(
+      readRouterDemoCache(
         { agentId: 'agent-1', cacheKey: DRIFTED_KEY, driftGoal: GOAL },
         store.deps
       ),

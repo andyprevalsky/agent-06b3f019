@@ -1,11 +1,11 @@
-export { CACHE_KEY_VERSION, type CacheKind } from '../../providers/fastCacheNormalizeConstants';
+export { CACHE_KEY_VERSION, type CacheKind } from '../../providers/demoCacheNormalizeConstants';
 export {
   canonicalMessages,
   goalHash,
   normalizeUrl,
   sha256,
   stripSecrets,
-} from '../../providers/fastCacheNormalizeCore';
+} from '../../providers/demoCacheNormalizeCore';
 export {
   anthropicKey,
   anthropicKeyFromHash,
@@ -20,4 +20,4 @@ export {
   normalizeCallSite,
   webFetchKey,
   webSearchKey,
-} from '../../providers/fastCacheNormalizeKeys';
+} from '../../providers/demoCacheNormalizeKeys';

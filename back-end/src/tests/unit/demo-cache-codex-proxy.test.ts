@@ -3,7 +3,7 @@
 /**
  * Unit tests for the Fast Mode Codex tee-proxy core (code agent).
  *
- * Run: npx tsx src/tests/unit/fast-cache-codex-proxy.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-codex-proxy.test.ts
  */
 
 import assert from 'node:assert';
@@ -14,7 +14,7 @@ import {
   resolveCodex,
   rewriteCachedCodexReplayBody,
   type CodexProxyDeps,
-} from '../../domains/fast-cache/codexProxy';
+} from '../../domains/demo-cache/codexProxy';
 
 let passed = 0;
 const failures: string[] = [];
@@ -496,7 +496,7 @@ async function main(): Promise<void> {
     console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);
   }
-  console.log(`\n✅ fast-cache codex proxy: ${passed}/${passed} passed`);
+  console.log(`\n✅ demo-cache codex proxy: ${passed}/${passed} passed`);
 }
 
 void main();

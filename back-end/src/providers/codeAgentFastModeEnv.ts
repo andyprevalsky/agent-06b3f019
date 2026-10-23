@@ -8,12 +8,9 @@
  */
 
 import { createHash } from './crypto';
-import {
-  shouldWriteFastModeCacheForUser,
-  resolveFastModeWriteEnabled,
-} from './fastCacheAccountPolicy';
+import { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled } from './demoCacheAccountPolicy';
 
-export { shouldWriteFastModeCacheForUser, resolveFastModeWriteEnabled };
+export { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled };
 
 export interface CodeAgentTraceInput {
   goal: string;
@@ -130,10 +127,10 @@ export function buildFastModeAnthropicEnv(
   goal: string,
   fastModeCacheEnabled: boolean,
   proxyBaseUrl: string | undefined = process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
-  fastModeCacheWriteEnabled: boolean = fastModeCacheEnabled,
+  demoCacheWriteEnabled: boolean = fastModeCacheEnabled,
   traceOptions?: CodeAgentTraceOptions
 ): Record<string, string> {
-  if (fastModeCacheEnabled !== true && fastModeCacheWriteEnabled !== true) return {};
+  if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
@@ -157,10 +154,10 @@ export function buildFastModeCodexEnv(
   goal: string,
   fastModeCacheEnabled: boolean,
   proxyBaseUrl: string | undefined = defaultCodexProxyUrl(),
-  fastModeCacheWriteEnabled: boolean = fastModeCacheEnabled,
+  demoCacheWriteEnabled: boolean = fastModeCacheEnabled,
   traceOptions?: CodeAgentTraceOptions
 ): Record<string, string> {
-  if (fastModeCacheEnabled !== true && fastModeCacheWriteEnabled !== true) return {};
+  if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {

@@ -3,14 +3,14 @@ import assert from 'node:assert';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { worldModelCacheScope } from '../../providers/fastCacheNormalizeConstants';
+import { worldModelCacheScope } from '../../providers/demoCacheNormalizeConstants';
 import {
   llmKey,
   browserHttpKey,
   buildGlobalKey,
   anthropicKeyFromHash,
   codexKeyFromHash,
-} from '../../domains/fast-cache/normalize';
+} from '../../domains/demo-cache/normalize';
 
 export function testRegisteredWmhExecutionPolicy(): void {
   const keys = [

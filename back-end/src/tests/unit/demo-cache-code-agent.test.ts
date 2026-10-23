@@ -172,7 +172,7 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
   );
   assert.ok(
     wsServer.includes('upstream.headers.get("x-fast-mode-cache")'),
-    'wrapper must record the backend fast-cache header for each proxied request'
+    'wrapper must record the backend demo-cache header for each proxied request'
   );
   assert.ok(
     wsServer.includes('wire_api="responses"'),
@@ -307,4 +307,4 @@ if (failures.length > 0) {
   console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
   process.exit(1);
 }
-console.log(`\n✅ ${passed} fast-cache code-agent/provider tests passed`);
+console.log(`\n✅ ${passed} demo-cache code-agent/provider tests passed`);

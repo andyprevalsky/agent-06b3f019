@@ -7,4 +7,4 @@ export {
   cacheSet,
   cacheSetWithAck,
   type CacheGetResult,
-} from '../../providers/fastCacheStore';
+} from '../../providers/demoCacheStore';

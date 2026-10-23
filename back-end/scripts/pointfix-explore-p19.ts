@@ -1,6 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 
-const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+const url =
+  (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+  process.env.DATABASE_URL;
 const p = new PrismaClient({ datasources: { db: { url } } });
 
 // Source: b429f478's successfully-stored final explore call, written under the
@@ -22,8 +24,12 @@ async function main() {
   }
   const existing = await p.fastModeCacheEntry.findUnique({ where: { key: DST_KEY } });
   const vlen = src.value ? JSON.stringify(src.value).length : 0;
-  console.log(`SRC ${SRC_KEY}\n  created=${src.createdAt.toISOString()} kind=${src.kind} valueLen=${vlen} blobPath=${src.blobPath ?? 'none'}`);
-  console.log(`DST ${DST_KEY}\n  currently=${existing ? 'EXISTS (will skip)' : 'MISSING (will backfill)'}`);
+  console.log(
+    `SRC ${SRC_KEY}\n  created=${src.createdAt.toISOString()} kind=${src.kind} valueLen=${vlen} blobPath=${src.blobPath ?? 'none'}`
+  );
+  console.log(
+    `DST ${DST_KEY}\n  currently=${existing ? 'EXISTS (will skip)' : 'MISSING (will backfill)'}`
+  );
 
   // Sanity: the source value should be a real explore completion (tool_calls present).
   const v = src.value as { tool_calls?: unknown[]; content?: string } | null;
@@ -51,7 +57,9 @@ async function main() {
     },
   });
   const check = await p.fastModeCacheEntry.findUnique({ where: { key: DST_KEY } });
-  console.log(`\n✅ Backfilled. Read-back: ${check ? 'PRESENT valueLen=' + JSON.stringify(check.value).length : 'STILL MISSING (!)'}`);
+  console.log(
+    `\n✅ Backfilled. Read-back: ${check ? 'PRESENT valueLen=' + JSON.stringify(check.value).length : 'STILL MISSING (!)'}`
+  );
   await p.$disconnect();
 }
 

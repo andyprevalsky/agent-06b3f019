@@ -362,11 +362,11 @@ function testRetryResetsPerAttemptStreamState(): void {
     'router must drop a stale cache-winner flag before each attempt'
   );
   assert.ok(
-    router.indexOf('skipFastCache = attempt > 1 && fcCacheWon', routerAttempt) > routerAttempt,
+    router.indexOf('skipDemoCache = attempt > 1 && fcCacheWon', routerAttempt) > routerAttempt,
     'router must skip Fast Mode cache only after a cache-won miss'
   );
   assert.ok(
-    router.indexOf('fcKey && fastModeRead && !skipFastCache', routerAttempt) > routerAttempt,
+    router.indexOf('fcKey && fastModeRead && !skipDemoCache', routerAttempt) > routerAttempt,
     'router must still hedge Fast Mode cache after a live timeout'
   );
   assert.ok(
@@ -382,12 +382,12 @@ function testRetryResetsPerAttemptStreamState(): void {
     'generator must drop a stale cache-winner flag before each attempt'
   );
   assert.ok(
-    generator.indexOf('skipFastCache = attempt > 1 && fcCacheWon', generatorAttempt) >
+    generator.indexOf('skipDemoCache = attempt > 1 && fcCacheWon', generatorAttempt) >
       generatorAttempt,
     'generator must skip Fast Mode cache only after a cache-won miss'
   );
   assert.ok(
-    generator.indexOf('fcKey && fastModeRead && !skipFastCache', generatorAttempt) >
+    generator.indexOf('fcKey && fastModeRead && !skipDemoCache', generatorAttempt) >
       generatorAttempt,
     'generator must still hedge Fast Mode cache after a live timeout'
   );

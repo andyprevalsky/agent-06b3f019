@@ -3,7 +3,7 @@ export {
   buildFastModeCodexEnv,
   codeAgentTraceHash,
   isE2bReachableProxyBaseUrl,
-  shouldWriteFastModeCacheForUser,
+  shouldWriteDemoCacheForUser,
   type CodeAgentTraceInput,
   type CodeAgentTraceOptions,
 } from '../../providers/codeAgentFastModeEnv';

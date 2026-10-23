@@ -1,47 +1,48 @@
 import { PrismaClient } from '@prisma/client';
-import { FAST_CACHE_POOL_LIMIT, prisma } from './database';
+import { DEMO_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
-import { demoCacheWriteEnabled, fastCacheWritesDisabled } from './fastCacheAccountPolicy';
-import { type CacheKind } from './fastCacheNormalizeConstants';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { demoCacheWriteEnabled, demoCacheWritesDisabled } from './demoCacheAccountPolicy';
+import { type CacheKind } from './demoCacheNormalizeConstants';
+import { stripSecrets } from './demoCacheNormalizeCore';
 import { createLogger } from './logger';
 import { withSpan } from './tracing';
+import { demoCacheEnv } from './demoCacheEnv';
 
-const log = createLogger('FastCacheStore');
+const log = createLogger('DemoCacheStore');
 
-const globalForFastCachePrisma = global as unknown as {
-  fastCacheMemory?: Map<string, FastCacheMemoryEntry>;
-  fastCacheInFlightReads?: Map<string, InFlightFastCacheRead>;
-  fastCachePrisma?: PrismaClient;
+const globalForDemoCachePrisma = global as unknown as {
+  demoCacheMemory?: Map<string, DemoCacheMemoryEntry>;
+  demoCacheInFlightReads?: Map<string, InFlightDemoCacheRead>;
+  demoCachePrisma?: PrismaClient;
 };
 
-interface FastCacheMemoryEntry {
+interface DemoCacheMemoryEntry {
   expiresAt: number;
   goalHash: string;
   result: CacheGetResult;
 }
 
-interface InFlightFastCacheRead {
+interface InFlightDemoCacheRead {
   promise: Promise<CacheGetResult>;
   resolve: (result: CacheGetResult) => void;
   reject: (error: unknown) => void;
 }
 
-const MEMORY_CACHE_TTL_MS = Number(process.env.FAST_CACHE_MEMORY_TTL_MS ?? '300000');
-const MEMORY_CACHE_MAX_ENTRIES = Number(process.env.FAST_CACHE_MEMORY_MAX_ENTRIES ?? '50000');
+const MEMORY_CACHE_TTL_MS = Number(demoCacheEnv('DEMO_CACHE_MEMORY_TTL_MS') ?? '300000');
+const MEMORY_CACHE_MAX_ENTRIES = Number(demoCacheEnv('DEMO_CACHE_MEMORY_MAX_ENTRIES') ?? '50000');
 
-function getMemoryCache(): Map<string, FastCacheMemoryEntry> {
-  if (!globalForFastCachePrisma.fastCacheMemory) {
-    globalForFastCachePrisma.fastCacheMemory = new Map();
+function getMemoryCache(): Map<string, DemoCacheMemoryEntry> {
+  if (!globalForDemoCachePrisma.demoCacheMemory) {
+    globalForDemoCachePrisma.demoCacheMemory = new Map();
   }
-  return globalForFastCachePrisma.fastCacheMemory;
+  return globalForDemoCachePrisma.demoCacheMemory;
 }
 
-function getInFlightReads(): Map<string, InFlightFastCacheRead> {
-  if (!globalForFastCachePrisma.fastCacheInFlightReads) {
-    globalForFastCachePrisma.fastCacheInFlightReads = new Map();
+function getInFlightReads(): Map<string, InFlightDemoCacheRead> {
+  if (!globalForDemoCachePrisma.demoCacheInFlightReads) {
+    globalForDemoCachePrisma.demoCacheInFlightReads = new Map();
   }
-  return globalForFastCachePrisma.fastCacheInFlightReads;
+  return globalForDemoCachePrisma.demoCacheInFlightReads;
 }
 
 function memoryCacheEnabled(): boolean {
@@ -86,21 +87,21 @@ function writeMemoryCache(key: string, goalHash: string, result: CacheGetResult)
 }
 
 function deleteMemoryCache(key: string): void {
-  if (!globalForFastCachePrisma.fastCacheMemory) return;
-  globalForFastCachePrisma.fastCacheMemory.delete(key);
+  if (!globalForDemoCachePrisma.demoCacheMemory) return;
+  globalForDemoCachePrisma.demoCacheMemory.delete(key);
 }
 
 function purgeMemoryCacheByGoalHash(goalHash: string): void {
-  if (!globalForFastCachePrisma.fastCacheMemory) return;
-  for (const [key, entry] of globalForFastCachePrisma.fastCacheMemory.entries()) {
+  if (!globalForDemoCachePrisma.demoCacheMemory) return;
+  for (const [key, entry] of globalForDemoCachePrisma.demoCacheMemory.entries()) {
     if (entry.goalHash === goalHash) {
-      globalForFastCachePrisma.fastCacheMemory.delete(key);
+      globalForDemoCachePrisma.demoCacheMemory.delete(key);
     }
   }
 }
 
-function getFastCacheDatabaseUrl(): string {
-  const explicitUrl = process.env.FAST_MODE_CACHE_DATABASE_URL;
+function getDemoCacheDatabaseUrl(): string {
+  const explicitUrl = demoCacheEnv('DEMO_CACHE_DATABASE_URL');
   const base =
     explicitUrl ??
     (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL
@@ -122,7 +123,7 @@ function getFastCacheDatabaseUrl(): string {
     if (!url.searchParams.has('connection_limit')) {
       // Shared constant from database.ts — this pool is subtracted from the
       // Supavisor client-connection budget there, so the sizes must not drift.
-      url.searchParams.set('connection_limit', String(FAST_CACHE_POOL_LIMIT));
+      url.searchParams.set('connection_limit', String(DEMO_CACHE_POOL_LIMIT));
     }
     if (!url.searchParams.has('pool_timeout')) {
       url.searchParams.set('pool_timeout', '20');
@@ -133,28 +134,28 @@ function getFastCacheDatabaseUrl(): string {
   }
 }
 
-function getFastCachePrisma(): PrismaClient {
+function getDemoCachePrisma(): PrismaClient {
   // Cache the client as a process-wide singleton in ALL environments. The previous
   // code only memoized it outside production, so in prod every `.fastModeCacheEntry`
   // access constructed a fresh PrismaClient with its own connection pool — under a
   // 50-way fan-out that spawns hundreds of pools and blows past Postgres
   // max_connections, which is a second source of the 500s above.
-  if (!globalForFastCachePrisma.fastCachePrisma) {
-    globalForFastCachePrisma.fastCachePrisma = new PrismaClient({
+  if (!globalForDemoCachePrisma.demoCachePrisma) {
+    globalForDemoCachePrisma.demoCachePrisma = new PrismaClient({
       log: ['error', 'warn'],
       datasources: {
         db: {
-          url: getFastCacheDatabaseUrl(),
+          url: getDemoCacheDatabaseUrl(),
         },
       },
     });
   }
-  return globalForFastCachePrisma.fastCachePrisma;
+  return globalForDemoCachePrisma.demoCachePrisma;
 }
 
-const fastCachePrisma = {
+const demoCachePrisma = {
   get fastModeCacheEntry() {
-    return getFastCachePrisma().fastModeCacheEntry;
+    return getDemoCachePrisma().fastModeCacheEntry;
   },
 };
 
@@ -164,7 +165,7 @@ export interface CacheGetResult {
   blobPath: string | null;
 }
 
-interface FastCacheReadRow {
+interface DemoCacheReadRow {
   key: string;
   value: unknown;
   blobPath: string | null;
@@ -181,7 +182,7 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
   if (uniqueKeys.length === 0) return {};
 
   const { result, missedKeys } = await withSpan(
-    'fast_cache.memory_lookup',
+    'demo_cache.memory_lookup',
     { key_count: uniqueKeys.length },
     async () => {
       const result: Record<string, CacheGetResult> = {};
@@ -204,7 +205,7 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
   const keysToFetch: string[] = [];
   const waits: Promise<void>[] = [];
   await withSpan(
-    'fast_cache.singleflight_claim',
+    'demo_cache.singleflight_claim',
     { missed_key_count: missedKeys.length },
     async () => {
       for (const key of missedKeys) {
@@ -232,7 +233,7 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
 
   const waitPromise =
     waits.length > 0
-      ? withSpan('fast_cache.singleflight_wait', { waiter_count: waits.length }, async () => {
+      ? withSpan('demo_cache.singleflight_wait', { waiter_count: waits.length }, async () => {
           await Promise.all(waits);
         })
       : Promise.resolve();
@@ -246,10 +247,10 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
     missed_key_count: keysToFetch.length,
     row_count: 0,
   };
-  let rows: FastCacheReadRow[] = [];
+  let rows: DemoCacheReadRow[] = [];
   try {
-    rows = await withSpan('fast_cache.prisma_find_many', dbSpanMeta, async () => {
-      const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
+    rows = await withSpan('demo_cache.prisma_find_many', dbSpanMeta, async () => {
+      const rows = await demoCachePrisma.fastModeCacheEntry.findMany({
         where: { key: { in: keysToFetch } },
         select: { key: true, value: true, blobPath: true, goalHash: true },
       });
@@ -258,7 +259,7 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
     });
 
     await withSpan(
-      'fast_cache.result_build',
+      'demo_cache.result_build',
       { missed_key_count: keysToFetch.length, row_count: rows.length },
       async () => {
         const byKey = new Map(rows.map((row) => [row.key, row]));
@@ -303,15 +304,15 @@ export async function cacheSetWithAck(args: {
   value: unknown;
   blobPath?: string | null;
 }): Promise<boolean> {
-  if (fastCacheWritesDisabled()) {
-    log.info('fast_cache.write_skipped_read_only', { key: args.key, kind: args.kind });
+  if (demoCacheWritesDisabled()) {
+    log.info('demo_cache.write_skipped_read_only', { key: args.key, kind: args.kind });
     return false;
   }
   const value = stripSecrets(args.value);
   const blobPath = args.blobPath ?? null;
   deleteMemoryCache(args.key);
   try {
-    await fastCachePrisma.fastModeCacheEntry.upsert({
+    await demoCachePrisma.fastModeCacheEntry.upsert({
       where: { key: args.key },
       create: {
         key: args.key,
@@ -333,7 +334,7 @@ export async function cacheSetWithAck(args: {
       'code' in error &&
       (error as { code?: string }).code === 'P2002'
     ) {
-      await fastCachePrisma.fastModeCacheEntry.update({
+      await demoCachePrisma.fastModeCacheEntry.update({
         where: { key: args.key },
         data: {
           kind: args.kind,
@@ -351,7 +352,7 @@ export async function cacheSetWithAck(args: {
   return true;
 }
 export async function cachePurge(goalHash: string): Promise<number> {
-  const res = await fastCachePrisma.fastModeCacheEntry.deleteMany({ where: { goalHash } });
+  const res = await demoCachePrisma.fastModeCacheEntry.deleteMany({ where: { goalHash } });
   purgeMemoryCacheByGoalHash(goalHash);
   return res.count;
 }
@@ -399,7 +400,7 @@ export async function cacheGetPosition(args: {
   if (step === null) {
     // One goalHash-indexed scan replaces up to four serial remote DB round
     // trips. The ranking is version, warm-era row, then creation time.
-    rows = await getFastCachePrisma().$queryRawUnsafe(
+    rows = await getDemoCachePrisma().$queryRawUnsafe(
       `
         SELECT key, value, "blobPath"
         FROM "FastModeCacheEntry"
@@ -419,7 +420,7 @@ export async function cacheGetPosition(args: {
     // Rank exact v42, forward v42, exact v43, forward v43. Within each
     // bucket prefer warm-era entries, then the nearest forward step and
     // oldest write. Filtering to this goalHash keeps the scan bounded.
-    rows = await getFastCachePrisma().$queryRawUnsafe(
+    rows = await getDemoCachePrisma().$queryRawUnsafe(
       `
         WITH candidates AS (
           SELECT key, value, "blobPath", "createdAt",

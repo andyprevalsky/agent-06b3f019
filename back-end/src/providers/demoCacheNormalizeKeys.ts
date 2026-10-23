@@ -5,8 +5,8 @@ import {
   REQUEST_PARTITION_HEADERS,
   worldModelCacheScope,
   type CacheKind,
-} from './fastCacheNormalizeConstants';
-import { canonicalMessages, goalHash, normalizeUrl, sha256 } from './fastCacheNormalizeCore';
+} from './demoCacheNormalizeConstants';
+import { canonicalMessages, goalHash, normalizeUrl, sha256 } from './demoCacheNormalizeCore';
 
 export function buildKey(kind: CacheKind, goal: string, detail: string): string {
   return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}${kind}:${goalHash(goal)}:${detail}`;

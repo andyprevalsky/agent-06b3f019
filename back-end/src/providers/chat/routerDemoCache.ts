@@ -1,5 +1,5 @@
 /**
- * Router Fast Mode cache read.
+ * Router DEMO cache read.
  *
  *   exact content key ── valid hit ──────────────────────────────> CACHE
  *          │
@@ -11,20 +11,20 @@
  * alongside the exact read so a miss costs one round trip, not two.
  */
 
-import { cacheGet, cacheGetPosition } from '../fastCacheStore';
-import { goalHash } from '../fastCacheNormalizeCore';
+import { cacheGet, cacheGetPosition } from '../demoCacheStore';
+import { goalHash } from '../demoCacheNormalizeCore';
 import { createLogger } from '../logger';
 import type { CacheLookupResult } from './delayedCacheStreamHedge';
 import { isValidRouterCacheJson } from './routerDecision';
 
 const log = createLogger('RouterLLM');
 
-export interface RouterFastCacheDeps {
+export interface RouterDemoCacheDeps {
   cacheGet: typeof cacheGet;
   cacheGetPosition: typeof cacheGetPosition;
 }
 
-const defaultDeps: RouterFastCacheDeps = { cacheGet, cacheGetPosition };
+const defaultDeps: RouterDemoCacheDeps = { cacheGet, cacheGetPosition };
 
 export function isOpeningRouterTurn(messages: ReadonlyArray<{ role: string }>): boolean {
   const conversation = messages.filter((message) => message.role !== 'system');
@@ -41,9 +41,9 @@ function recordedJson(value: unknown): unknown {
  * router row, which is the opening decision every conversation for that goal
  * starts with. Follow-up turns would replay another conversation state.
  */
-export async function readRouterFastCache(
+export async function readRouterDemoCache(
   params: { agentId: string; cacheKey: string; driftGoal: string | null },
-  deps: RouterFastCacheDeps = defaultDeps
+  deps: RouterDemoCacheDeps = defaultDeps
 ): Promise<CacheLookupResult<string>> {
   const { agentId, cacheKey } = params;
   const drift =
@@ -56,17 +56,17 @@ export async function readRouterFastCache(
   const json = hit.hit ? recordedJson(hit.value) : undefined;
   if (typeof json === 'string' && json.length > 0) {
     if (isValidRouterCacheJson(json)) {
-      log.info('fast_cache.chat_router_hit', { agentId, key: cacheKey });
+      log.info('demo_cache.chat_router_hit', { agentId, key: cacheKey });
       return { hit: true, value: json };
     }
-    log.warn('fast_cache.chat_router_invalid', { agentId, key: cacheKey });
+    log.warn('demo_cache.chat_router_invalid', { agentId, key: cacheKey });
   }
 
   const recorded = await drift;
   if (recorded !== null && recorded.hit && recorded.key !== null) {
     const replay = recordedJson(recorded.value);
     if (isValidRouterCacheJson(replay)) {
-      log.info('fast_cache.chat_router_drift_hit', {
+      log.info('demo_cache.chat_router_drift_hit', {
         agentId,
         key: cacheKey,
         replayKey: recorded.key,
@@ -74,6 +74,6 @@ export async function readRouterFastCache(
       return { hit: true, value: replay };
     }
   }
-  log.info('fast_cache.chat_router_miss', { agentId, key: cacheKey });
+  log.info('demo_cache.chat_router_miss', { agentId, key: cacheKey });
   return { hit: false };
 }

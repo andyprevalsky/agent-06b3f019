@@ -1,13 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Fast Mode store/cache/chat invariants (split from fast-cache-flag.test.ts for max-lines).
+ * Fast Mode store/cache/chat invariants (split from demo-cache-flag.test.ts for max-lines).
  *
  *  - #23 store has NO TTL/expiry (entries live forever)
  *  - delete-agent paths do NOT purge cache records (manual purge only)
  *  - cache entries use FAST_MODE_CACHE_DATABASE_URL while agent flags use app DB
  *  - #17/#18/#19 the cache never keys live infra (no session/sandbox/e2b cache kind)
  *
- * Run: npx tsx src/tests/unit/fast-cache-flag.part2.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-flag.part2.test.ts
  */
 
 import assert from 'node:assert';
@@ -50,17 +50,17 @@ test('delete-agent paths do not purge Fast Mode cache entries', () => {
   const deletePath = extractFunction(kill, 'deleteAgentRecursive');
   assert.ok(!/fastModeCacheEntry/i.test(deletePath), 'delete path must not touch cache table');
   assert.ok(
-    !/cachePurge|purgeByGoalHash|fast-cache\/purge/i.test(deletePath),
+    !/cachePurge|purgeByGoalHash|demo-cache\/purge/i.test(deletePath),
     'delete path must not purge cache'
   );
   assert.ok(
-    /Fast Mode cache entries intentionally outlive/.test(kill),
+    /DEMO cache entries intentionally outlive/.test(kill),
     'canonical kill must document that cache outlives deletion'
   );
 });
 
 test('cache entry storage uses the shared Fast Mode database URL', () => {
-  const repo = readFileSync(join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'), 'utf8');
+  const repo = readFileSync(join(process.cwd(), 'src', 'providers', 'demoCacheStore.ts'), 'utf8');
   assert.ok(repo.includes('FAST_MODE_CACHE_DATABASE_URL'), 'cache DB override env is wired');
   assert.ok(
     !/FAST_MODE_CACHE_DATABASE_URL\s*\?\?\s*process\.env\.DATABASE_URL/.test(repo),
@@ -72,15 +72,15 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
   );
   assert.ok(
     // findMany since the fanout read-coalescing change (#735); findUnique before.
-    /fastCachePrisma\.fastModeCacheEntry\.find(Unique|Many)/.test(repo),
+    /demoCachePrisma\.fastModeCacheEntry\.find(Unique|Many)/.test(repo),
     'cache reads use shared cache DB'
   );
   assert.ok(
-    /fastCachePrisma\.fastModeCacheEntry\.upsert/.test(repo),
+    /demoCachePrisma\.fastModeCacheEntry\.upsert/.test(repo),
     'cache writes use shared cache DB'
   );
   assert.ok(
-    /fastCachePrisma\.fastModeCacheEntry\.deleteMany/.test(repo),
+    /demoCachePrisma\.fastModeCacheEntry\.deleteMany/.test(repo),
     'manual purge uses shared cache DB'
   );
   assert.ok(/prisma\.agent\.findUnique/.test(repo), 'agent flag lookup stays on active app DB');
@@ -89,18 +89,18 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
     'position fallback must be available for OAi-demo fingerprint drift'
   );
   assert.ok(
-    /getFastCachePrisma\(\)\.\$queryRawUnsafe/.test(repo),
+    /getDemoCachePrisma\(\)\.\$queryRawUnsafe/.test(repo),
     'cacheGetPosition must use the real Prisma client, not the fastModeCacheEntry proxy'
   );
   assert.ok(
-    !/fastCachePrisma\.\$queryRawUnsafe/.test(repo),
+    !/demoCachePrisma\.\$queryRawUnsafe/.test(repo),
     'cacheGetPosition must not call $queryRawUnsafe on the model-only proxy'
   );
 });
 
-test('fast-cache routes expose get-position for durable trajectory replay', () => {
+test('demo-cache routes expose get-position for durable trajectory replay', () => {
   const routes = readFileSync(
-    join(process.cwd(), 'src', 'domains', 'fast-cache', 'routes.ts'),
+    join(process.cwd(), 'src', 'domains', 'demo-cache', 'routes.ts'),
     'utf8'
   );
   assert.ok(routes.includes("'/get-position'"), 'get-position route registered');
@@ -109,7 +109,7 @@ test('fast-cache routes expose get-position for durable trajectory replay', () =
 
 test('Andy and Tamy are Fast Mode write-through accounts', () => {
   const policy = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'fastCacheAccountPolicy.ts'),
+    join(process.cwd(), 'src', 'providers', 'demoCacheAccountPolicy.ts'),
     'utf8'
   );
   assert.ok(policy.includes('1f85ff25-6e29-4c1b-8739-f917bd101a30'), 'Andy write-through');
@@ -117,8 +117,8 @@ test('Andy and Tamy are Fast Mode write-through accounts', () => {
 });
 
 test('cache writes are last-write-wins', () => {
-  const repo = readFileSync(join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'), 'utf8');
-  const upsert = repo.slice(repo.indexOf('fastCachePrisma.fastModeCacheEntry.upsert'));
+  const repo = readFileSync(join(process.cwd(), 'src', 'providers', 'demoCacheStore.ts'), 'utf8');
+  const upsert = repo.slice(repo.indexOf('demoCachePrisma.fastModeCacheEntry.upsert'));
   assert.ok(!/update:\s*\{\s*\}/.test(upsert), 'cache upsert must not keep the first value');
   assert.ok(
     /update:\s*\{[\s\S]*value:\s*\(value \?\? null\) as object/.test(upsert),
@@ -126,7 +126,7 @@ test('cache writes are last-write-wins', () => {
   );
   assert.ok(/update:\s*\{[\s\S]*blobPath/.test(upsert), 'cache upsert must replace blobPath');
   assert.ok(
-    /P2002[\s\S]*fastCachePrisma\.fastModeCacheEntry\.update/.test(upsert),
+    /P2002[\s\S]*demoCachePrisma\.fastModeCacheEntry\.update/.test(upsert),
     'concurrent insert races must retry update'
   );
 });
@@ -137,7 +137,7 @@ test('chat router caches successful output without gating downstream work', () =
     'utf8'
   );
   const routerRead = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'chat', 'routerFastCache.ts'),
+    join(process.cwd(), 'src', 'providers', 'chat', 'routerDemoCache.ts'),
     'utf8'
   );
   assert.ok(router.includes('agentFastMode'), 'router must read Fast Mode flag');
@@ -149,7 +149,7 @@ test('chat router caches successful output without gating downstream work', () =
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
   assert.ok(
-    router.includes('readCache: () => readRouterFastCache('),
+    router.includes('readCache: () => readRouterDemoCache('),
     'router must read through the shared router cache lookup before live LLM'
   );
   assert.ok(routerRead.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
@@ -167,19 +167,19 @@ test('chat router caches successful output without gating downstream work', () =
     router.indexOf('cacheSet({') > router.indexOf('requireRouterDecision'),
     'router must validate generated output before caching it'
   );
-  assert.ok(routerRead.includes('fast_cache.chat_router_hit'), 'router must log Fast Mode hits');
+  assert.ok(routerRead.includes('demo_cache.chat_router_hit'), 'router must log Fast Mode hits');
   assert.ok(
-    routerRead.includes('fast_cache.chat_router_drift_hit'),
+    routerRead.includes('demo_cache.chat_router_drift_hit'),
     'router must log drift replays'
   );
-  assert.ok(routerRead.includes('fast_cache.chat_router_miss'), 'router must log Fast Mode misses');
+  assert.ok(routerRead.includes('demo_cache.chat_router_miss'), 'router must log Fast Mode misses');
   assert.ok(
-    router.includes('fast_cache.chat_router_write_only'),
+    router.includes('demo_cache.chat_router_write_only'),
     'router must log write-only mode'
   );
-  assert.ok(router.includes('fast_cache.chat_router_stored'), 'router must log Fast Mode writes');
+  assert.ok(router.includes('demo_cache.chat_router_stored'), 'router must log Fast Mode writes');
   assert.ok(
-    router.includes('fcKey && fastModeRead && !skipFastCache'),
+    router.includes('fcKey && fastModeRead && !skipDemoCache'),
     'router must skip Fast Mode cache only after a cache-won miss'
   );
   assert.doesNotMatch(
@@ -220,11 +220,11 @@ test('backend chat cache sites support write-only without reads', () => {
     'generator must honor write-through accounts'
   );
   assert.ok(
-    generator.includes('fast_cache.chat_generator_write_only'),
+    generator.includes('demo_cache.chat_generator_write_only'),
     'generator must skip reads in write-only mode'
   );
   assert.ok(
-    generator.includes('fcKey && fastModeRead && !skipFastCache'),
+    generator.includes('fcKey && fastModeRead && !skipDemoCache'),
     'generator must skip Fast Mode cache only after a cache-won miss'
   );
   assert.ok(
@@ -233,7 +233,7 @@ test('backend chat cache sites support write-only without reads', () => {
   );
   assert.ok(tools.includes('fastModeWriteEnabled'), 'chat web_search must accept write-only flag');
   assert.ok(
-    tools.includes('fast_cache.chat_web_search_write_only'),
+    tools.includes('demo_cache.chat_web_search_write_only'),
     'chat web_search must log write-only mode'
   );
   assert.ok(
@@ -306,7 +306,7 @@ test('Codex Code session service gates proxy on DEMO cache, not the Fast Mode bu
 
 test('#17-19 no cache kind for browser session / E2B sandbox / token', () => {
   const normalize = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'fastCacheNormalizeConstants.ts'),
+    join(process.cwd(), 'src', 'providers', 'demoCacheNormalizeConstants.ts'),
     'utf8'
   );
   const kindLine = normalize.slice(normalize.indexOf('export type CacheKind'));
@@ -352,4 +352,4 @@ if (failures.length > 0) {
   );
   process.exit(1);
 }
-process.stdout.write(`\n✅ fast-cache flag/invariants part2: ${passed}/${passed} passed\n`);
+process.stdout.write(`\n✅ demo-cache flag/invariants part2: ${passed}/${passed} passed\n`);

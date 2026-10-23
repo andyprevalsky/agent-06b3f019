@@ -1,10 +1,10 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { stripSecrets } from './demoCacheNormalizeCore';
 
 const requestDumpCounters = new Map<string, number>();
 
-export function maybeDumpFastCacheRequest(
+export function maybeDumpDemoCacheRequest(
   goalHash: string,
   key: string | null,
   body: unknown

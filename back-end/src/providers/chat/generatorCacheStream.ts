@@ -1,6 +1,6 @@
 import type { CompletionChunk } from '../rose';
-import { cacheGet } from '../fastCacheStore';
-import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
+import { cacheGet } from '../demoCacheStore';
+import { isOaiDemoGoal } from '../demoCacheNormalizeOaiDemo';
 import { createLogger } from '../logger';
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 
@@ -30,13 +30,13 @@ export function createGeneratorCacheStream(
       const hit = await cacheGet(options.cacheKey);
       const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
       if (typeof json === 'string' && json.length > 0) {
-        log.info('fast_cache.chat_generator_hit', {
+        log.info('demo_cache.chat_generator_hit', {
           agentId: options.agentId,
           key: options.cacheKey,
         });
         return { hit: true, value: json };
       }
-      log.info('fast_cache.chat_generator_miss', {
+      log.info('demo_cache.chat_generator_miss', {
         agentId: options.agentId,
         key: options.cacheKey,
       });
@@ -51,7 +51,7 @@ export function createGeneratorCacheStream(
     awaitCacheFirst: isOaiDemoGoal(options.goal),
     hangTimeoutMs: GENERATOR_CACHE_HANG_MS,
     onCacheError: (error) =>
-      log.warn('fast_cache.chat_generator_read_failed', {
+      log.warn('demo_cache.chat_generator_read_failed', {
         agentId: options.agentId,
         key: options.cacheKey,
         error: error instanceof Error ? error.message : String(error),

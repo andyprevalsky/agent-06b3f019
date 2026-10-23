@@ -35,10 +35,10 @@ const WMH_EXECUTION_POLICIES = new Map([
 
 /**
  * Cache-key namespace segment for world-model-simulated runs (mirror of
- * agents/providers/fast_cache/normalize.py:world_model_cache_scope — keep in
+ * agents/providers/demo_cache/normalize.py:world_model_cache_scope — keep in
  * sync). Simulated runs observe WMH-emulated environment responses, so their
  * cache entries must never be replayed by (or overwrite) real-run entries.
- * The scope keeps the fast cache fully active during simulation while
+ * The scope keeps the DEMO cache fully active during simulation while
  * real-run keys stay byte-identical (empty scope).
  */
 export function worldModelCacheScope(): string {

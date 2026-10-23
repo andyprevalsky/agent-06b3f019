@@ -10,7 +10,7 @@
  *  - #26 secrets are stripped before the value is stored
  *  - #10 replay after write hits without a second upstream call
  *
- * Run: npx tsx src/tests/unit/fast-cache-anthropic-proxy.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-anthropic-proxy.test.ts
  */
 
 import assert from 'node:assert';
@@ -19,7 +19,7 @@ import {
   resolveAnthropic,
   requestSeq,
   type ProxyDeps,
-} from '../../domains/fast-cache/anthropicProxy';
+} from '../../domains/demo-cache/anthropicProxy';
 
 let passed = 0;
 const failures: string[] = [];
@@ -268,7 +268,7 @@ async function main(): Promise<void> {
     console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);
   }
-  console.log(`\n✅ fast-cache anthropic proxy: ${passed}/${passed} passed`);
+  console.log(`\n✅ demo-cache anthropic proxy: ${passed}/${passed} passed`);
 }
 
 void main();

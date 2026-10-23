@@ -1,23 +1,23 @@
 #!/usr/bin/env tsx
 /**
- * Unit tests for the Fast Mode cache normalization + key builder (TS side).
+ * Unit tests for the DEMO cache normalization + key builder (TS side).
  *
  * Proves the anti-bust + PII-stripping + canonical fingerprint invariants that
- * the cache relies on, and parity with the Python mirror (agents/providers/fast_cache).
+ * the cache relies on, and parity with the Python mirror (agents/providers/demo_cache).
  *
- * Run: npx tsx src/tests/unit/fast-cache-normalize.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-normalize.test.ts
  */
 
 import assert from 'node:assert';
-import { testRegisteredWmhExecutionPolicy } from './fast-cache-normalize-policy-controls';
+import { testRegisteredWmhExecutionPolicy } from './demo-cache-normalize-policy-controls';
 import {
   normalizeUrl,
   canonicalMessages,
   goalHash,
   llmKey,
   browserHttpKey,
-} from '../../domains/fast-cache/normalize';
-import { isOaiDemoGoal } from '../../providers/fastCacheNormalizeOaiDemo';
+} from '../../domains/demo-cache/normalize';
+import { isOaiDemoGoal } from '../../providers/demoCacheNormalizeOaiDemo';
 
 let passed = 0;
 const failures: string[] = [];
@@ -618,4 +618,4 @@ if (failures.length > 0) {
   );
   process.exit(1);
 }
-process.stdout.write(`\n✅ fast-cache normalize: ${passed}/${passed} passed\n`);
+process.stdout.write(`\n✅ demo-cache normalize: ${passed}/${passed} passed\n`);

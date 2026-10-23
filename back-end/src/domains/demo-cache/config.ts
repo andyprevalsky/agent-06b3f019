@@ -8,8 +8,10 @@ export const FAST_MODE_CODEX_REPLAY_WRITE_STDIN_YIELD_MS = Number(
   process.env.FAST_MODE_CODEX_REPLAY_WRITE_STDIN_YIELD_MS ?? '30000'
 );
 
-export const FAST_MODE_CACHE_DATABASE_URL =
+export const DEMO_CACHE_DATABASE_URL =
+  // Legacy FAST_MODE_CACHE_DATABASE_URL wins while present (see providers/demoCacheEnv.ts).
   process.env.FAST_MODE_CACHE_DATABASE_URL ??
+  process.env.DEMO_CACHE_DATABASE_URL ??
   (process.env.NODE_ENV === 'production' ? (process.env.DATABASE_URL ?? '') : '');
 
 export const FAST_MODE_ANTHROPIC_PROXY_URL = process.env.FAST_MODE_ANTHROPIC_PROXY_URL;

@@ -8,7 +8,7 @@ import {
   codexKeyFromHash,
   webFetchKey,
   webSearchKey,
-} from '../../domains/fast-cache/normalize';
+} from '../../domains/demo-cache/normalize';
 
 let passed = 0;
 const failures: string[] = [];
@@ -496,4 +496,4 @@ if (failures.length > 0) {
   console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
   process.exit(1);
 }
-console.log(`\n✅ fast-cache code-agent normalize: ${passed}/${passed} passed`);
+console.log(`\n✅ demo-cache code-agent normalize: ${passed}/${passed} passed`);

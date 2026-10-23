@@ -1,4 +1,4 @@
-// One-off: re-key Fast Mode cache entries recorded by run b429f478 (2026-07-03)
+// One-off: re-key DEMO cache entries recorded by run b429f478 (2026-07-03)
 // so a rerun (with the persisted-goal + canonical-ref-hash fixes) replays them.
 // Non-destructive: copies rows to the new namespace, ON CONFLICT DO NOTHING.
 import { PrismaClient } from '@prisma/client';

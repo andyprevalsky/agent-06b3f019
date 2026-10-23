@@ -609,7 +609,7 @@ if ! $DB_FOUND || [ -z "${LOCAL_DB_URL:-}" ]; then
   exit 1
 fi
 
-# Fast Mode cache still requires an explicit URL outside production, but a local
+# DEMO cache still requires an explicit URL outside production, but a local
 # coverage run must not write fixtures into (or depend on capacity from) the
 # shared production cache database. The local schema includes FastModeCacheEntry,
 # so point the instrumented backend at the same isolated database used by every

@@ -8,8 +8,8 @@
  *  - World-model / Fast Mode interaction
  *
  * Defaults/inheritance: fast-mode-defaults.test.ts
- * Store/cache/chat invariants: fast-cache-flag.part2.test.ts
- * Run: npx tsx src/tests/unit/fast-cache-flag.test.ts
+ * Store/cache/chat invariants: demo-cache-flag.part2.test.ts
+ * Run: npx tsx src/tests/unit/demo-cache-flag.test.ts
  */
 
 import assert from 'node:assert';
@@ -18,7 +18,7 @@ import {
   buildFastModeCodexEnv,
   codeAgentTraceHash,
   isE2bReachableProxyBaseUrl,
-} from '../../domains/fast-cache/codeAgentEnv';
+} from '../../domains/demo-cache/codeAgentEnv';
 import { createAgentSchema } from '../../domains/agents/types';
 import { createSessionSchema as createCodexSessionSchema } from '../../domains/codex-code/types';
 import {
@@ -300,4 +300,4 @@ if (failures.length > 0) {
   );
   process.exit(1);
 }
-process.stdout.write(`\n✅ fast-cache flag/invariants: ${passed}/${passed} passed\n`);
+process.stdout.write(`\n✅ demo-cache flag/invariants: ${passed}/${passed} passed\n`);

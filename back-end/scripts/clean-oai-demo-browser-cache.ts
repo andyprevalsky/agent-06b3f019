@@ -20,8 +20,8 @@ import {
   containsBrowserToolCall,
   containsNestedAgentToolCall,
   rewriteOaiDemoCacheValue,
-} from '../src/domains/fast-cache/oaiDemoCacheCleaner';
-import { OAI_DEMO_JULY_GP_GOAL_HASHES } from '../src/providers/fastCacheNormalizeOaiDemo';
+} from '../src/domains/demo-cache/oaiDemoCacheCleaner';
+import { OAI_DEMO_JULY_GP_GOAL_HASHES } from '../src/providers/demoCacheNormalizeOaiDemo';
 
 const CLEANUP_VERSION = 'oai-demo-no-disallowed-agent-v4';
 const PREVIOUS_CLEANUP_VERSIONS = [
@@ -121,7 +121,9 @@ function buildArchivePatches(
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');
-  const databaseUrl = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+  const databaseUrl =
+    (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+    process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('FAST_MODE_CACHE_DATABASE_URL or DATABASE_URL is required');
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 

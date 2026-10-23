@@ -162,7 +162,7 @@ model Tool {
   agents      AgentTool[]
 }
 
-// Fast Mode aggressive cache. Record/replay store for third-party responses so a
+// DEMO cache. Record/replay store for third-party responses so a
 // slow real run can be replayed instantly. Entries live forever (no TTL); re-record
 // is a manual purge by goalHash. Writes only happen when Fast Mode is enabled.
 // `value` holds JSON (LLM responses, search/fetch results, browser response metadata);

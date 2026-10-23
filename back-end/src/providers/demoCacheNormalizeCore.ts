@@ -58,13 +58,13 @@ import {
   VOLATILE_OBJECT_FIELDS,
   VOLATILE_QUERY_PARAMS,
   VOLATILE_QUERY_PREFIXES,
-} from './fastCacheNormalizeConstants';
+} from './demoCacheNormalizeConstants';
 import {
   OAI_DEMO_CHILD_WINDOW,
   OAI_DEMO_ROOT_GOAL_PREFIX,
   canonicalizeOaiDemoGoalForHash,
   julyGpGoalHashForGoal,
-} from './fastCacheNormalizeOaiDemo';
+} from './demoCacheNormalizeOaiDemo';
 
 function isVolatileParam(name: string): boolean {
   const lower = name.toLowerCase();
@@ -127,7 +127,7 @@ export function sha256(input: string): string {
  * 2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
  *    cache namespace so child/explore lookups hit the original trajectories
  * 3. per-creator for_each children alias onto the July execute_loop goalHash
- * Keep in sync with `goal_hash` in agents providers/fast_cache/normalize.py.
+ * Keep in sync with `goal_hash` in agents providers/demo_cache/normalize.py.
  */
 export function goalHash(goal: string): string {
   const collapsed = goal.replace(

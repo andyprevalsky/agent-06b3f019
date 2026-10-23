@@ -5,7 +5,7 @@ import {
   containsBrowserToolCall,
   containsNestedAgentToolCall,
   rewriteOaiDemoCacheValue,
-} from '../../domains/fast-cache/oaiDemoCacheCleaner';
+} from '../../domains/demo-cache/oaiDemoCacheCleaner';
 
 let passed = 0;
 const failures: string[] = [];

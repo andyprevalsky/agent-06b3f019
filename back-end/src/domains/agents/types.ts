@@ -168,7 +168,7 @@ const createAgentBaseSchema = z.object({
     .optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
-  // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
+  // DEMO cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
   // Planner memory: retrieve compressed past trajectories for similar goals and

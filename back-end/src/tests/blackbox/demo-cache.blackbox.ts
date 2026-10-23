@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Black-box tests for the Fast Mode cache routes + flag persistence (live server).
+ * Black-box tests for the DEMO cache routes + flag persistence (live server).
  *
  * Covers the DB-dependent checklist items that the unit tests can't:
  *  - store set→get roundtrip + last-write-wins overwrite (#10)
@@ -9,18 +9,18 @@
  *  - create-agent persists fast_mode_cache_enabled (#3/#5)
  *  - sub-agent inherits the parent's flag (#6)
  *
- * Usage: npx tsx src/tests/blackbox/fast-cache.blackbox.ts
+ * Usage: npx tsx src/tests/blackbox/demo-cache.blackbox.ts
  * Requires a running backend (BASE_URL) + local Postgres.
  */
 
 import express from 'express';
-import fastCacheRoutes from '../../domains/fast-cache/routes';
+import demoCacheRoutes from '../../domains/demo-cache/routes';
 import { config } from 'dotenv';
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
 import { codeAgentSlotKey } from '../../providers/codexProxyCore';
-import { rewriteOaiDemoCacheValue } from '../../domains/fast-cache/oaiDemoCacheCleaner';
+import { rewriteOaiDemoCacheValue } from '../../domains/demo-cache/oaiDemoCacheCleaner';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -68,7 +68,7 @@ async function main(): Promise<void> {
     process.env.FAST_MODE_CACHE_DISABLE_WRITE_THROUGH = '1';
     const app = express();
     app.use(express.json());
-    app.use('/api/fast-cache', fastCacheRoutes);
+    app.use('/api/fast-cache', demoCacheRoutes);
     const server = app.listen(0, '127.0.0.1');
     try {
       await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -518,7 +518,7 @@ async function main(): Promise<void> {
     console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);
   }
-  console.log(`\n✅ fast-cache blackbox: ${passed}/${passed} passed`);
+  console.log(`\n✅ demo-cache blackbox: ${passed}/${passed} passed`);
 }
 
 void main();
