@@ -17,7 +17,7 @@
  * collectDisplayBundleFiles follows relative references (HTML attributes, CSS
  * url()/@import, JS imports/fetch/new URL, glTF buffers/images, OBJ mtllib and
  * MTL maps) from the entry through a caller-supplied resolver: local files
- * for the `rose` CLI (rose.mjs mirrors this walk) and the agent tree's files
+ * for the `rose` CLI (rose.cjs mirrors this walk) and the agent tree's files
  * for Rose agents.
  *
  * 10k-agent behaviour: per-call work is bounded by the caps; serving is one
@@ -91,7 +91,8 @@ function displayAssetsDir(): string {
     resolve(__dirname, '../../../src/assets/display'),
   ];
   const found = candidates.find((dir) => existsSync(join(dir, 'model-viewer.html')));
-  if (!found) throw new Error(`display viewer assets not found (looked in ${candidates.join(', ')})`);
+  if (!found)
+    throw new Error(`display viewer assets not found (looked in ${candidates.join(', ')})`);
   return found;
 }
 
@@ -107,8 +108,7 @@ function template(name: string): string {
 
 /** JSON safe inside <script type="application/json"> (no `</script>` break-out). */
 function scriptJson(value: unknown): string {
-  return JSON.stringify(value)
-    .replace(/</g, "\\u003c");
+  return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
 /** The built-in three.js viewer page for `src` (orbit controls, auto-framing). */
@@ -140,9 +140,14 @@ export function buildDisplayBundle(
   const all = new Map(files);
   if (kind !== 'bundle') {
     if (all.has(DISPLAY_VIEWER_ENTRY)) {
-      errors.push(`a ${kind} bundle cannot contain ${DISPLAY_VIEWER_ENTRY} (display the page instead)`);
+      errors.push(
+        `a ${kind} bundle cannot contain ${DISPLAY_VIEWER_ENTRY} (display the page instead)`
+      );
     }
-    all.set(DISPLAY_VIEWER_ENTRY, kind === 'model' ? modelViewerHtml(source) : pdfViewerHtml(source));
+    all.set(
+      DISPLAY_VIEWER_ENTRY,
+      kind === 'model' ? modelViewerHtml(source) : pdfViewerHtml(source)
+    );
   }
   if (all.size > DISPLAY_BUNDLE_MAX_FILES) {
     errors.push(`bundle has ${all.size} files (max ${DISPLAY_BUNDLE_MAX_FILES})`);
@@ -293,7 +298,8 @@ function rawRefs(path: string, bytes: Buffer): string[] {
   const text = bytes.toString('utf8');
   if (kind === 'gltf') return gltfRefs(text);
   if (kind === 'obj') return matches(/^\s*mtllib\s+(.+?)\s*$/gm, text);
-  if (kind === 'mtl') return matches(/^\s*(?:map_\w+|bump|disp|decal|refl)\s+(?:-\S+\s+\S+\s+)*(\S+)\s*$/gm, text);
+  if (kind === 'mtl')
+    return matches(/^\s*(?:map_\w+|bump|disp|decal|refl)\s+(?:-\S+\s+\S+\s+)*(\S+)\s*$/gm, text);
   if (kind === 'css') return [...matches(CSS_URL_RE, text), ...matches(CSS_IMPORT_RE, text)];
   if (kind === 'js' || kind === 'mjs') return matches(JS_RE, text);
   const srcset = matches(SRCSET_RE, text).flatMap((value) =>

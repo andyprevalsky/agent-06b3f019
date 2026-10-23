@@ -7,7 +7,7 @@ back-end/src/domains/agent-tools; its own suites run against a real DB):
    backend is mocked through the httpx capture harness; the handler runs its
    real validation, activity and wait. One case runs the pinned path inside a
    real Temporal production workflow sandbox (payload decode + block/resume).
-2. ``rose`` (back-end/src/assets/rose-tools/rose.mjs) — the CLI and MCP stdio
+2. ``rose`` (back-end/src/assets/rose-tools/rose.cjs) — the CLI and MCP stdio
    server a code agent uses. Real ``node`` subprocesses talk to an in-process
    fake of the agent-tools HTTP API that dedupes by content hash, routes pinned
    questions, and long-polls answers.
@@ -37,7 +37,7 @@ import httpx
 from _test_utils import BlackboxResult, get_captured_requests, setup_mock_fn, teardown_mock
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
-ROSE_CLI = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-tools" / "rose.mjs"
+ROSE_CLI = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-tools" / "rose.cjs"
 TOKEN = "rtt.test-token"
 # A long-lived agent-graph token (exp far ahead → no refresh call).
 AGENTS_TOKEN = "rag." + base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=") + ".sig"

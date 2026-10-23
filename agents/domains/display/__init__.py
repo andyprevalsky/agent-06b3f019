@@ -17,5 +17,5 @@ System context (docs/plans/active/rose-builds-rose.md, rows A5 and C12)::
             FINISHED with the answer as the tool result.
 
 Code agents reach the same backend route from their sandbox through the
-``rose`` CLI / MCP server (back-end/src/assets/rose-tools/rose.mjs).
+``rose`` CLI / MCP server (back-end/src/assets/rose-tools/rose.cjs).
 """

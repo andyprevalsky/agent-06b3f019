@@ -212,6 +212,8 @@ export function userUiPullCases(ctx: UserUiPullCaseContext) {
 export async function installedCliPackageBoundaryCase(): Promise<void> {
   const { dirname } = await import('path');
   const { AGENT_GRAPH_CLI_SCRIPT } = await import('../../providers/agentGraph/cli');
+  const { AGENT_TOOLS_CLI_PATH, agentToolsCliScript } =
+    await import('../../providers/agentTools/workspace');
   const { userUiToolFiles } = await import('../../providers/userUi/seed');
   const { writeUserUiWorkspaceToDir, writeUserUiWorkspaceToSandbox } =
     await import('../../providers/userUi/workspace');
@@ -225,6 +227,7 @@ export async function installedCliPackageBoundaryCase(): Promise<void> {
         files: [
           ...userUiToolFiles(),
           { path: '.rose/bin/rose-agents', content: Buffer.from(AGENT_GRAPH_CLI_SCRIPT) },
+          { path: AGENT_TOOLS_CLI_PATH, content: agentToolsCliScript() },
           {
             path: '.rose/bin/esm-probe.mjs',
             content: Buffer.from('import fs from "node:fs"; console.log(typeof fs.readFileSync);'),
@@ -271,6 +274,30 @@ export async function installedCliPackageBoundaryCase(): Promise<void> {
           `${kind} ${cli} reaches its actual CLI parser`
         );
       }
+      // The rose CLI must reach its parser under the bin package scope: an ESM
+      // file there exited 0 silently, so `rose display` faked success.
+      const rose = join(home, AGENT_TOOLS_CLI_PATH);
+      const unconfigured: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: home,
+        ROSE_TOOLS_URL: '',
+        ROSE_TOOLS_TOKEN: '',
+        ROSE_TOOLS_CONFIG: join(home, 'missing-tools.json'),
+      };
+      for (const help of ['help', '--help']) {
+        const output = await execFileAsync(process.execPath, [rose, help], { env: unconfigured });
+        assert(/rose display/.test(output.stdout), `${kind} rose ${help} prints usage`);
+      }
+      const display = await execFileAsync(process.execPath, [rose, 'display', 'chart.png'], {
+        env: unconfigured,
+      }).then(
+        () => null,
+        (error) => error
+      );
+      assert(
+        display?.code === 1 && /^rose: /.test(display.stderr),
+        `${kind} rose display fails loudly when it cannot deliver: ${JSON.stringify(display?.stderr)}`
+      );
       const esm = await execFileAsync(process.execPath, [join(home, '.rose/bin/esm-probe.mjs')]);
       assert(esm.stdout.trim() === 'function', 'explicit .mjs stays ESM');
       assert(

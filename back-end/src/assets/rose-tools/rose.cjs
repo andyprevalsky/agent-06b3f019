@@ -20,12 +20,15 @@
 // until answered: the wait is a loop of bounded long-polls with no overall
 // deadline; each poll is the liveness heartbeat. Re-running the same blocking
 // command after an interruption resumes the same request instead of asking twice.
-import { execFileSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { cpus, freemem, homedir, loadavg, totalmem } from 'node:os';
-import { basename, dirname, join, posix, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
+//
+// CommonJS: ~/.rose/bin is a {"type":"commonjs"} package scope, where an ES
+// module silently exits 0 without running (back-end userUi/workspace.ts).
+const { execFileSync } = require('node:child_process');
+const { createHash, randomUUID } = require('node:crypto');
+const { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } = require('node:fs');
+const { cpus, freemem, homedir, loadavg, totalmem } = require('node:os');
+const { basename, dirname, join, posix, resolve } = require('node:path');
+const { createInterface } = require('node:readline');
 
 const VERSION = '1';
 const MAX_ITEMS = 20;
@@ -230,7 +233,8 @@ function referencedFiles(abs, ref) {
     for (const child of relativeRefs(path, files.get(path))) {
       if (tried.has(child)) continue;
       tried.add(child);
-      if (child.split('/').some((part) => part.startsWith('.') || part === 'node_modules')) continue;
+      if (child.split('/').some((part) => part.startsWith('.') || part === 'node_modules'))
+        continue;
       const full = join(root, ...child.split('/'));
       let stat;
       try {
@@ -1042,7 +1046,7 @@ function parseFlags(argv, valueFlags) {
 
 async function main(argv) {
   const [command, ...rest] = argv;
-  if (!command || command === '--help' || command === '-h') {
+  if (!command || command === 'help' || command === '--help' || command === '-h') {
     console.log(usage());
     return 0;
   }

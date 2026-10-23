@@ -85,7 +85,7 @@ function cliHelp(roseDesktop: boolean): Record<Cli, string> {
   const agentsCli = path.join(scratch, 'rose-agents.cjs');
   writeFileSync(agentsCli, AGENT_GRAPH_CLI_SCRIPT);
   return {
-    rose: run(path.join(srcDir, 'assets/rose-tools/rose.mjs'), ['--help'], {
+    rose: run(path.join(srcDir, 'assets/rose-tools/rose.cjs'), ['--help'], {
       ROSE_TOOLS_ROSE_DESKTOP: roseDesktop ? '1' : '0',
     }),
     'rose-ui': run(path.join(srcDir, 'assets/user-ui/bin/rose-ui.cjs'), ['--help'], {}),

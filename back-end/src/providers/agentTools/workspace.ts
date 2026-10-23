@@ -37,7 +37,7 @@ export const AGENT_TOOLS_ENV_TOKEN = 'ROSE_TOOLS_TOKEN';
 /** '1' for Rose Desktop accounts: the CLI/MCP then offers pinned questions and inline views. */
 export const AGENT_TOOLS_ENV_ROSE_DESKTOP = 'ROSE_TOOLS_ROSE_DESKTOP';
 
-const SCRIPT_PATH = join(__dirname, '../../assets/rose-tools/rose.mjs');
+const SCRIPT_PATH = join(__dirname, '../../assets/rose-tools/rose.cjs');
 const ENV_SIZE_SKILL_SOURCE = join(
   __dirname,
   '../../assets/rose-skills/change-environment-size/SKILL.md'
@@ -159,7 +159,7 @@ export function withAgentTools(
     const homeDir = session.homeDir ?? '/home/user';
     const base: UserUiWorkspace = workspace ?? { files: [], envs: {}, source: { kind: 'seed' } };
     // Pinned questions and inline views need the Rose Desktop UI; stock
-    // sessions get the stock tool list (rose.mjs reads this flag).
+    // sessions get the stock tool list (rose.cjs reads this flag).
     const featureEnvs: Record<string, string> =
       (session.roseDesktop ?? isRoseDesktopUser(session.userId))
         ? { [AGENT_TOOLS_ENV_ROSE_DESKTOP]: '1' }

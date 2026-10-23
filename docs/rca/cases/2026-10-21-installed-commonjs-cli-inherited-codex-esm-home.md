@@ -89,3 +89,36 @@ are ready. Parent supplied session CLOSED and exact process retirement receipts.
 Copying a .cjs asset to an extensionless command changes how Node finds its
 module format. A session's own package metadata is part of the runtime fixture;
 execute installed tools under that fixture rather than checking only bytes.
+
+## Recurrence 2026-10-23: the CommonJS pin silenced the ESM `rose` CLI
+
+Evidence: /descend descend-full69-20261023 worker W4, local run 3, agent
+46a95467. In the E2B Claude Code sandbox `rose display <file>` and
+`rose help 2>&1` printed nothing and exited 0; the backend received no
+/api/agent-tools request, while `rose-ui publish` worked over the same tunnel.
+The code agent believed the chart was displayed: a silent false success.
+
+First-bad boundary: this case's fix writes `~/.rose/bin/package.json`
+`{"type":"commonjs"}` for every installed CLI, but the agent-tools CLI was the
+ES module `rose.mjs` installed extensionless at `~/.rose/bin/rose`. Under an
+explicit CommonJS scope Node 22 loads it through ES module syntax detection
+and exits 0 without running any top-level code (with detection disabled it is
+a loud SyntaxError). The MCP server (`node ~/.rose/bin/rose mcp`) was equally
+dead. The existing boundary test covered only rose-ui and rose-agents; the
+agent-tools tests wrote `~/.rose/bin/rose` without the package file.
+
+Reproduction: `installedCliPackageBoundaryCase` (user-ui-pull.cases.ts, user-ui
+blackbox) now installs the real `rose` bytes through both installers and runs
+`rose help`, `rose --help` and an undeliverable `rose display`. Before the fix:
+`FAIL local rose help prints usage`. After: PASS 5/5; `rose display` without
+configuration exits 1 with `rose: ...` on stderr; MCP initialize/tools/list
+answer.
+
+Fix: the CLI is now CommonJS (`assets/rose-tools/rose.cjs`, `require` instead
+of `import`), matching the bin package boundary; `rose help` is a help alias.
+Runtime-installed bytes only; no E2B template rebuild. Deploy restores
+`rose display` delivery for every code session.
+
+Lesson: when a package boundary is added for a directory, execute every file
+installed under it through the real installer, not only the CLI that motivated
+the change.

@@ -55,7 +55,7 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'code-session-resize-'));
 const userId = `resize-user-${randomUUID()}`;
 const agentId = randomUUID();
 const cliSessionId = randomUUID();
-const roseCli = join(__dirname, '../../assets/rose-tools/rose.mjs');
+const roseCli = join(__dirname, '../../assets/rose-tools/rose.cjs');
 const TEMPLATES = {
   claude: { '2x4': 'tpl-c2-m4', '2x16': 'tpl-c2-m16', '8x4': 'tpl-c8-m4', '8x16': 'tpl-c8-m16' },
 };
