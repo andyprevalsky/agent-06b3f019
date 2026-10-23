@@ -68,25 +68,37 @@ def _ancestors(pid: int) -> set[int]:
     return seen
 
 
+def _read_proc_entry(entry: Path, uid: int) -> tuple[int, str, str, str] | None:
+    """(pid, argv, environ, cwd) for one same-user /proc entry; None if foreign or exited.
+
+    A same-user process that has just exec'd a setuid program (another session's
+    sudo) keeps a world-readable cmdline while its environ and cwd turn
+    unreadable. Match it by argv alone rather than declaring the table unobservable.
+    """
+    try:
+        if entry.stat().st_uid != uid:
+            return None
+        argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except (FileNotFoundError, ProcessLookupError):
+        return None  # exited during the scan
+    try:
+        environ = (entry / "environ").read_bytes().replace(b"\0", b"\n").decode(errors="replace")
+        cwd = os.readlink(entry / "cwd")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except PermissionError:
+        environ, cwd = "", ""
+    return (int(entry.name), argv, environ, cwd)
+
+
 def _process_table() -> list[tuple[int, str, str, str]]:
     """(pid, argv, environ, cwd) for every readable same-user process; raises when unobservable."""
     rows: list[tuple[int, str, str, str]] = []
     if platform.system() == "Linux":
         uid = os.getuid()
         for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                if entry.stat().st_uid != uid:
-                    continue
-                argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-                environ = (entry / "environ").read_bytes().replace(b"\0", b"\n").decode(errors="replace")
-                cwd = os.readlink(entry / "cwd")
-            except FileNotFoundError:
-                continue  # exited during the scan
-            except ProcessLookupError:
-                continue
-            rows.append((int(entry.name), argv, environ, cwd))
+            if entry.name.isdigit() and (row := _read_proc_entry(entry, uid)) is not None:
+                rows.append(row)
         return rows
     out = subprocess.run(["ps", "-axeww", "-o", "pid=,command="], capture_output=True, text=True, timeout=30)
     if out.returncode != 0:
