@@ -1,7 +1,7 @@
 /**
  * STATE MACHINE: AgentTreeListing (list_agents output as a real tree; stateless)
  *
- * Rows from agentTreeListing.ts:
+ * Rows from agentTreeListingModel.ts:
  *   tree    → indented rows with ├─ └─ │ tree lines (SubAgentTree prefixes)
  *   matches → flat rows with path breadcrumbs (search results)
  * Each row: type icon (agent/explore/browser/code/phone) · status dot ·
@@ -13,7 +13,7 @@
 import { Bot, Code2, Globe, Phone, Search, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { TREE_BRANCH, TREE_LAST, TREE_VERT } from '../subAgentTree.helpers';
-import type { AgentListing, ListingRow } from './agentTreeListing';
+import type { AgentListing, ListingRow } from './agentTreeListingModel';
 
 const TYPE_ICONS: Record<string, LucideIcon> = {
   agent: Bot,

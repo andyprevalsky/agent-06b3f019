@@ -6,7 +6,7 @@ import { TOOL_ICONS } from '@/lib/toolIcons';
 
 import type { ExploreStep } from '../types';
 import { AgentTreeListing } from './agent-rows/AgentTreeListing';
-import { buildAgentListing } from './agent-rows/agentTreeListing';
+import { buildAgentListing } from './agent-rows/agentTreeListingModel';
 
 function isThinkingStep(step: ExploreStep): boolean {
   return (
