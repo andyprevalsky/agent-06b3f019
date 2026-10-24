@@ -277,7 +277,23 @@ function installBackendMocks(integrations: IntegrationFixture[] = []): void {
     http.post(`${API_BASE}/integrations/email/gmail/start`, () =>
       HttpResponse.json({ authUrl: 'https://accounts.google.com/o/oauth2/test' })
     ),
-    http.post(`${API_BASE}/agents`, () => HttpResponse.json({ id: 'linkedin-agent-1' }))
+    // LinkedIn connect (front-end createLinkedInSyncAgentApi): create the export
+    // agent, then record it via /integrations/linkedin/sync. Mirror the real
+    // backend contracts: create returns `agent_id`, and sync rejects a missing one.
+    http.post(`${API_BASE}/agents`, () =>
+      HttpResponse.json({ agent_id: 'linkedin-agent-1', status: 'ACTIVE' }, { status: 201 })
+    ),
+    http.post(`${API_BASE}/integrations/linkedin/sync`, async ({ request }) => {
+      const body = (await request.json()) as { agent_id?: unknown };
+      if (typeof body.agent_id !== 'string' || body.agent_id === '') {
+        return HttpResponse.json({ error: 'agent_id is required' }, { status: 400 });
+      }
+      return HttpResponse.json({
+        integration_id: 'linkedin',
+        status: 'SYNCING',
+        agent_id: body.agent_id,
+      });
+    })
   );
 }
 
