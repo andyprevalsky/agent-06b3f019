@@ -14298,10 +14298,10 @@ normalize_current_pool_shape() {
     # An explicit admission already forbids normalization of a Machine. Read
     # every pool row's admission proof in one process (one spawn per row cost
     # ~10s at 447 rows), with the same key-presence test as before.
-    local -A explicit_ids=()
-    local explicit_id
+    # Newline-delimited set: the script snapshot keeps the Bash 3.2 contract.
+    local explicit_ids=$'\n' explicit_id
     while IFS= read -r explicit_id; do
-        [ -n "$explicit_id" ] && explicit_ids["$explicit_id"]=1
+        [ -n "$explicit_id" ] && explicit_ids+="$explicit_id"$'\n'
     done < <(python3 - "$POOL_IDS_FILE" "$GIT_COMMON_DIR/cloudbench-pool-reuse" <<'PY' 2>/dev/null
 import json, sys
 from pathlib import Path
@@ -14318,7 +14318,7 @@ PY
 )
     while read -r id; do
         [ -n "$id" ] || continue
-        [ -z "${explicit_ids[$id]+x}" ] || continue
+        case "$explicit_ids" in *$'\n'"$id"$'\n'*) continue ;; esac
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
