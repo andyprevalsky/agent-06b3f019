@@ -6311,7 +6311,6 @@ async def check_progress(
         if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.demo_cache.context import current_context as _fm_ctx
             from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
-            from providers.demo_cache.rose_cache import soft_pass_verifier_reasoning
 
             _ctx = _fm_ctx()
             if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
@@ -6321,11 +6320,10 @@ async def check_progress(
                     prior_score=score,
                     actual_model=(usage or {}).get("actual_model"),
                 )
-                soft_reasoning = soft_pass_verifier_reasoning(reasoning)
                 return {
                     "score": 1.0,
-                    "reasoning": soft_reasoning,
-                    "message": f"{soft_reasoning}\n\nScore: 1.0",
+                    "reasoning": reasoning,
+                    "message": f"{reasoning}\n\nScore: 1.0",
                     "structured_response": structured_response,
                     "usage": {
                         **(usage or {}),
