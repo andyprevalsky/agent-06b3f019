@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 import httpx
 import structlog
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
@@ -940,7 +941,19 @@ async def poll_new_messages(
 
     except Exception as e:
         logger.error(f"Failed to poll messages: agent_id={agent_id}, error={str(e)}")
+        if isinstance(e, httpx.HTTPStatusError) and not _poll_status_is_retryable(e.response.status_code):
+            # Same split as claude-code-src/src/services/api/withRetry.ts:757-785:
+            # retry 408/409/429/5xx; another 4xx will not change on retry.
+            raise ApplicationError(
+                f"poll_new_messages: {e.response.status_code} from backend: {e}",
+                type="PollNonRetryableStatus",
+                non_retryable=True,
+            ) from e
         raise
+
+
+def _poll_status_is_retryable(status_code: int) -> bool:
+    return status_code in (408, 409, 429) or status_code >= 500
 
 
 @activity.defn

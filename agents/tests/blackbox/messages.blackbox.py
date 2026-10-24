@@ -275,6 +275,30 @@ async def test_poll_messages_happy_path():
     assert result[0]["role"] == "USER"
 
 
+async def test_poll_messages_status_retryability():
+    """Permanent 4xx polls fail non-retryable; 408/409/429/5xx stay retryable (RCA P9).
+
+    The loop poll retries 10 times; a 404/403 will not change on retry, so it
+    must not burn that schedule (claude-code-src withRetry.ts:757-785 split).
+    """
+    from temporalio.exceptions import ApplicationError
+
+    for status, retryable in ((404, False), (403, False), (400, False), (408, True), (429, True), (503, True)):
+        setup_mock_fn(lambda request, status=status: httpx.Response(status, json={"error": "x"}))
+        with patch("temporalio.activity.heartbeat"):
+            from helpers.messages import poll_new_messages
+
+            try:
+                await poll_new_messages(agent_id="agent-status-1", last_checked="2020-01-01T00:00:00Z")
+            except ApplicationError as exc:
+                assert not retryable and exc.non_retryable, f"{status}: unexpected non-retryable {exc!r}"
+                assert str(status) in str(exc), f"{status}: error lost the real status: {exc}"
+            except httpx.HTTPStatusError:
+                assert retryable, f"{status}: permanent 4xx raised retryable HTTPStatusError"
+            else:
+                raise AssertionError(f"{status}: poll did not raise")
+
+
 async def test_poll_messages_accepts_temporal_iso_string():
     """Adding a third activity arg must not crash when Temporal delivers last_checked as ISO."""
     _setup()
@@ -1169,6 +1193,7 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
+    await r.record_async("poll_messages_status_retryability", test_poll_messages_status_retryability)
     await r.record_async(
         "poll_messages_accepts_temporal_iso_string",
         test_poll_messages_accepts_temporal_iso_string,

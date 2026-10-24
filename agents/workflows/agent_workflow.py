@@ -18,7 +18,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
@@ -152,6 +152,22 @@ with workflow.unsafe.imports_passed_through():
     from workflows.environment_context import EnvironmentContextMixin
 
 logger = structlog.get_logger()
+
+# Loop-critical control-plane read (poll_new_messages), modelled on Claude
+# Code's session-transcript ingress client: 20 s per request
+# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
+# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
+# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
+# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
+# the agent FAILED with the real error. Permanent 4xx responses are raised
+# non-retryable by the activity itself.
+CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
+CONTROL_PLANE_POLL_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=10,
+)
 
 # Consecutive transient parent-state read failures (while paused-by-parent) after
 # which a child treats its parent as gone and aborts. Backstop for when the parent
@@ -1977,6 +1993,67 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
         memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
     ) -> Dict:
+        """Execute agent task; an escaping activity failure ends the agent FAILED."""
+        try:
+            return await self._run_phases(
+                agent_id,
+                user_id,
+                goal,
+                model,
+                reasoning_max_tokens,
+                verifier,
+                context,
+                parent_workflow_id,
+                parent_agent_id,
+                depth,
+                bus_id,
+                start_phase,
+                max_iterations,
+                price_limit_cents,
+                context_gates,
+                fast_mode_cache_enabled,
+                resume_state,
+                world_model_mode,
+                memory_enabled,
+            )
+        except FailureError as e:
+            # Only Temporal failures (ActivityError, ApplicationError, ...) end the
+            # execution; other exceptions fail just the workflow task, which
+            # Temporal retries without a terminal status. An escaping activity
+            # failure (e.g. poll_new_messages timing out on a saturated worker)
+            # would otherwise close the execution with the agent row still ACTIVE,
+            # and the parent would wait on it indefinitely. End it FAILED instead.
+            if self._is_finished or any(
+                error_chain_has_type(e, kind)
+                for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+            ):
+                raise
+            message = f"Execution stopped by an unrecoverable error: {extract_error_message(e)}"
+            await self._mark_failed(context=self.context, reason="workflow_error", message=message)
+            return {"status": "failed", "reason": "workflow_error", "goal": goal}
+
+    async def _run_phases(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+        model: str,
+        reasoning_max_tokens: int,
+        verifier: Dict,
+        context: Optional[List[Dict]] = None,
+        parent_workflow_id: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        depth: int = 0,
+        bus_id: Optional[str] = None,
+        start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
+        max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
+        price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
+        context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
+        fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
+        resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
+        world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
+    ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
@@ -2364,8 +2441,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             startup_execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
@@ -2591,8 +2668,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             execute_context = filter_internal_subagent_messages(execute_context)
 
@@ -2849,8 +2926,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             context = filter_internal_subagent_messages(context)
 
@@ -2943,8 +3020,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             return {
                 "score": 0.0,
@@ -3008,8 +3085,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             persisted_messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
         except Exception as e:
             if any(
@@ -3908,8 +3985,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         messages = await workflow.execute_activity(
             poll_new_messages,
             args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+            retry_policy=CONTROL_PLANE_POLL_RETRY,
         )
 
         terminal_tool_call_ids = set()
@@ -4048,8 +4125,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, last_checked],  # Use run_agent's timestamp, not self.last_message_check
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             note_context_snapshot(self, snapshot_mark)
 
