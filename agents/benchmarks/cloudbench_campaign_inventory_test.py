@@ -171,6 +171,11 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
     env.update(CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
                CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
                CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0")
+    # One confirmed INFRA job of two scheduled meets the native fixed-total stop
+    # (20*1 >= 2, K11), which correctly cancels before any retry. This case owns
+    # the retry mechanics, so it uses the documented operator opt-out; the stop
+    # itself is owned by the campaign-hub-grouping regression.
+    env["CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP"] = "disabled"
     if failure == "infra-parent-owned":
         # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
         env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
@@ -206,10 +211,17 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
                 'physical run handle unavailable' if failure == 'retry-handle-missing'
                 else 'terminal result or release remains unverified'
             )
-            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'task_status',
-                        'infra_failure', 'terminal_task', 'released_at_epoch'):
+            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'released_at_epoch'):
                 assert current[key] is None, f'current attempt inherited prior {key}'
                 assert broken.get(key) is None, f'current job inherited prior {key}'
+            # K11: an exited attempt's own recorded verdict stands even while its
+            # release is unverified; it must be attempt 2's record, never attempt 1's.
+            own = ({'task_status': 'PASSED', 'infra_failure': False, 'terminal_task': True}
+                   if failure == 'retry-unverified' else {})
+            assert previous['task_status'] == 'INFRA_ERROR'
+            for key in ('task_status', 'infra_failure', 'terminal_task'):
+                assert current.get(key) == own.get(key), f'current attempt {key} is not its own verdict'
+                assert broken.get(key) == own.get(key), f'current job {key} is not its own verdict'
         if failure.startswith('infra'):
             retry = next(index for index, event in enumerate(events) if event['task'] == 'broken' and event['attempt'] == 2 and event['event'] == 'started')
             peer_end = next(index for index, event in enumerate(events) if event['task'] == 'healthy' and event['event'] == 'finished')
@@ -600,6 +612,8 @@ def seed_fixture(tmp_path, monkeypatch):
     root.mkdir()
     for relative in (
         "scripts/run-bench-campaign.py",
+        # The campaign's fixed-total infra stop runs its sibling coordinator (K11).
+        "scripts/cloudbench-shard-coordinator.py",
         "scripts/cloudbench-campaign-seed.py",
         "scripts/cloudbench-seed-get.sh",
         # The campaign planner reads its sibling provider-capacity contract.
