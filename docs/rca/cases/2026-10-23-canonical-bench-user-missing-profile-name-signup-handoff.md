@@ -23,7 +23,7 @@ sources:
   - agent b27a099b-6510-411d-9cea-63f3222dc28f (sharded run original600-1792795636260090257, job r001-j0008, source 7eb275b1b)
   - agent e0c401c1-3d19-4933-a43d-61448f9b9779 (local outcome run 2026-10-24, source 2a7a0479e)
 repro: scripts/tests/canonical-seed-whatsapp-content.test.sh
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -124,3 +124,25 @@ Andy (2026-10-24): "the fixture should be providing my name, what's the issue" a
 ## Reusable lesson
 
 When a benchmark agent asks the user for a fact, first check whether the canonical fixture's user row is missing that fact compared with prod, before blaming the model or the harness.
+
+### Q3b root cause and fix (2026-10-24, rca/Q3b-signup-identity)
+
+The decisive input was the spawn_agent `goal` field description, which told the root that "Spawned
+agents have no access to ANY of your context ... Include all relevant details: user preferences,
+constraints, addresses, names". That is false for browser agents, which receive the user's profile
+and the site's Auth Options themselves. So the root restated the user's email as the browser's
+identity. Counterfactual with only that email removed from the goal: step 31 completes 5/5 and step
+32 returns to the member tab 5/5.
+
+Fix: a truthful browser exception in the goal description (BROWSER_GOAL_PROFILE_NOTE, on
+SpawnAgentTool and SpawnAgentToolNoGP, not the explore-only tool), plus an auth-contract rule that
+sign-in/sign-up identities come from Auth Options. Replays on the root call: the goal left out the
+user email 5/5 (was 0/5). Full chain on those goals: step 4 minted 4/5, step 31 attempt_completion 5/5
+(was 0/5), step 32 no handoff 5/5 (was 0/5). Regression: prompt_invariants
+`browser_identity_facts_in_spawn_goal_and_auth_contract`, red on c8422b386 and green 5x. Both hunks are
+LLM-visible and need approval at /deploy.
+
+Outcome (exact unchanged task, `scripts/run-bench --local browser-auth-created-account-reused`, source
+d47baafa2): run 1 PASSED (260 s, graded agent 07873d63) and run 2 PASSED (261 s, graded agent 7287416c).
+Both first runs signed up with the minted identity (signup → code_sent → signed_in), and both graded runs
+signed in by password. No handoff.

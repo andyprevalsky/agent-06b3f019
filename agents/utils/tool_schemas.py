@@ -1079,6 +1079,13 @@ SPAWN_AGENT_TYPE_DESCRIPTION = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_STOCK + _S
 SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CODE_ROSE_DESKTOP + _SPAWN_TYPE_REST
 
 
+BROWSER_GOAL_PROFILE_NOTE = (
+    "Exception: a browser agent also receives the user's profile (name, email, phone, delivery "
+    "address) and the target site's sign-in options itself; do not restate the user's profile in "
+    "its goal."
+)
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -1103,6 +1110,7 @@ class SpawnAgentTool(BaseModel):
             "Spawned agents have no access to ANY of your context by default. "
             "The goal and attachments parameters are their ONLY source of information. "
             "Include all relevant pieces of information. "
+            f"{BROWSER_GOAL_PROFILE_NOTE} "
             f"{SELF_CONTAINED_GOAL_RULE.strip()}"
         )
     )
@@ -1296,6 +1304,7 @@ class SpawnAgentToolNoGP(BaseModel):
             "Spawned agents have no access to ANY of your context by default. "
             "The goal and attachments parameters are their ONLY source of information. "
             "Include all relevant pieces of information. "
+            f"{BROWSER_GOAL_PROFILE_NOTE} "
             f"{SELF_CONTAINED_GOAL_RULE.strip()}"
         )
     )
