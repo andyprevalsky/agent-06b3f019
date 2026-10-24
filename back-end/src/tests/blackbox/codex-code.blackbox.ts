@@ -235,8 +235,10 @@ async function testSmoke_codexCompletesE2bTask() {
       body: JSON.stringify({
         agent_id: agentId,
         user_id: DEV_USER_ID,
+        // The result is the handoff (turn/start outputSchema makes the final
+        // message that JSON), so no free-text reply sentinel is requested.
         goal: handoffSmokeGoal(
-          'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.'
+          'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK.'
         ),
       }),
     });
@@ -286,15 +288,25 @@ async function testSmoke_codexCompletesE2bTask() {
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
     // a deploy-approved SKIP rather than a FAIL.
-    const creditSkip = codexSmokeCreditSkipReason(output, events);
+    const turnCompleted = events.some((event) => {
+      const typed = event as { type?: string; raw_type?: string; status?: string };
+      return (
+        typed.type === 'turn_ended' &&
+        typed.raw_type === 'turn/completed' &&
+        typed.status === 'completed'
+      );
+    });
+    const succeeded = turnCompleted || exitCode === 0;
+    // A completed turn is the success signal; success always wins over a skip.
+    const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
         `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
       );
     }
     assert(
-      output.includes('CODEX_E2B_DONE'),
-      `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
+      succeeded,
+      `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
     assert(
       events.some((event) => {
@@ -306,7 +318,7 @@ async function testSmoke_codexCompletesE2bTask() {
 
     // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
     // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise CODEX_E2B_DONE above
+    // (auth_fallback event) rather than giving up — otherwise the completed turn above
     // could never have been produced on an exhausted token. This is exactly the
     // failure that stalled deploy; it passes trivially when the OAuth token is
     // healthy (no usage-limit event → no requirement).
