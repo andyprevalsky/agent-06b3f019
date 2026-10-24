@@ -6221,7 +6221,7 @@ async def check_progress(
                     # miss/parse failure exhausted the warm trajectory. Soft-pass
                     # instead so hits stay at 100% and tree cost stays ~$0.
                     from providers.demo_cache.context import current_context as _fm_ctx
-                    from providers.demo_cache.rose_cache import soft_complete_on_miss
+                    from providers.demo_cache.rose_cache import SOFT_PASS_VERIFIER_REASONING, soft_complete_on_miss
 
                     # Gate on Fast Mode *read* (not merely goal / write-through).
                     # Soft-pass stubs are further restricted to exact-match
@@ -6240,15 +6240,8 @@ async def check_progress(
                         )
                         return {
                             "score": 1.0,
-                            "reasoning": (
-                                "Fast Mode cache trajectory ended; prior tool "
-                                "evidence is sufficient to treat the goal as complete."
-                            ),
-                            "message": (
-                                "Fast Mode cache trajectory ended; prior tool "
-                                "evidence is sufficient to treat the goal as complete.\n\n"
-                                "Score: 1.0"
-                            ),
+                            "reasoning": SOFT_PASS_VERIFIER_REASONING,
+                            "message": f"{SOFT_PASS_VERIFIER_REASONING}\n\nScore: 1.0",
                             "structured_response": None,
                             "usage": {
                                 "prompt_tokens": 0,
@@ -6316,6 +6309,7 @@ async def check_progress(
         if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.demo_cache.context import current_context as _fm_ctx
             from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
+            from providers.demo_cache.rose_cache import soft_pass_verifier_reasoning
 
             _ctx = _fm_ctx()
             if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
@@ -6325,17 +6319,11 @@ async def check_progress(
                     prior_score=score,
                     actual_model=(usage or {}).get("actual_model"),
                 )
+                soft_reasoning = soft_pass_verifier_reasoning(reasoning)
                 return {
                     "score": 1.0,
-                    "reasoning": (
-                        "Fast Mode cache trajectory ended; prior tool "
-                        "evidence is sufficient to treat the goal as complete."
-                    ),
-                    "message": (
-                        "Fast Mode cache trajectory ended; prior tool "
-                        "evidence is sufficient to treat the goal as complete.\n\n"
-                        "Score: 1.0"
-                    ),
+                    "reasoning": soft_reasoning,
+                    "message": f"{soft_reasoning}\n\nScore: 1.0",
                     "structured_response": structured_response,
                     "usage": {
                         **(usage or {}),
@@ -6360,6 +6348,7 @@ async def check_progress(
         # Fast Mode: never return the 0.5 error soft-fail that keeps browser/
         # execute loops spinning on soft-complete trajectories (verify15).
         from providers.demo_cache.context import current_context as _fm_ctx
+        from providers.demo_cache.rose_cache import SOFT_PASS_VERIFIER_REASONING
         from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
         _ctx = _fm_ctx()
@@ -6370,13 +6359,8 @@ async def check_progress(
         ):
             return {
                 "score": 1.0,
-                "reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as complete."
-                ),
-                "message": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is "
-                    "sufficient to treat the goal as complete.\n\nScore: 1.0"
-                ),
+                "reasoning": SOFT_PASS_VERIFIER_REASONING,
+                "message": f"{SOFT_PASS_VERIFIER_REASONING}\n\nScore: 1.0",
                 "usage": {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,

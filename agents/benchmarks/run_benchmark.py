@@ -1026,6 +1026,22 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     return DURABLE_BENCHMARK_FRONTEND_URL
 
 
+def _bind_backend_api_url(base_url: str) -> None:
+    """Point this process's backend client config at the backend under test.
+
+    Declared judges lease compute tokens through ``helpers.llm`` fetchers,
+    which read ``BACKEND_API_URL``. agents/.env pins that to the default dev
+    stack (localhost:3001), so an isolated ``--port`` stack's judge reached a
+    port nothing listens on and failed with "All connection attempts failed".
+    A non-loopback value (a guest's public tunnel) is a deliberate binding and
+    stays as is.
+    """
+    current = os.environ.get("BACKEND_API_URL", "").strip()
+    if current and urlparse(current).hostname not in {"localhost", "127.0.0.1"}:
+        return
+    os.environ["BACKEND_API_URL"] = base_url.rstrip("/")
+
+
 def _rose_api_url_for_codex_harness(base_url: str) -> str:
     """Public Rose API origin reachable from E2B (frontend dev server proxies /api)."""
     for key in ("BENCHMARK_PUBLIC_API_URL", "BACKEND_API_URL", "PUBLIC_API_URL"):
@@ -16807,6 +16823,8 @@ async def main_async(args):
         print("ERROR: --port N is required for local runs.")
         print("Example: python benchmarks/run_benchmark.py --suite smoke --port 3001")
         sys.exit(1)
+
+    _bind_backend_api_url(base_url)
 
     tasks = resolve_tasks(args)
     if not tasks:
