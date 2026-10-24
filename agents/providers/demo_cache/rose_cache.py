@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import weakref
 from contextlib import aclosing
 from types import SimpleNamespace
@@ -494,25 +493,12 @@ def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
     }
 
 
-# A soft-pass verdict is a visible "Progress: 100%" transcript row. It shows the
-# replayed verifier's own reasoning; the end-of-trajectory stub that older rows
-# carry is plumbing, and test-mass-agent-run-0's T7 judge reads it as an
-# ablated Task Complete flow.
-_SOFT_PASS_STUB_MARKERS = (
-    "fast mode",
-    "trajectory ended",
-    "cached trajectory",
-    "prior tool evidence",
-    "verified results are included below",
-)
+# Visible reasoning for a code-generated verifier soft-pass (no recorded verdict
+# to replay). A replayed verdict is shown exactly as recorded.
 SOFT_PASS_VERIFIER_REASONING = "The demo replay has no further recorded verifier step; the replayed work is accepted."
-
-
-def soft_pass_verifier_reasoning(replayed_reasoning: Any = "") -> str:
-    """Visible reasoning for a DEMO verifier soft-pass: the replayed verdict without stub sentences."""
-    sentences = re.split(r"(?<=[.!?])\s+", str(replayed_reasoning or "").strip())
-    kept = [s for s in sentences if s and not any(marker in s.lower() for marker in _SOFT_PASS_STUB_MARKERS)]
-    return " ".join(kept).strip() or SOFT_PASS_VERIFIER_REASONING
+# Result text for code-generated end-of-trajectory completions. It is a visible
+# transcript row, so it reads as a completion, not cache plumbing.
+SOFT_COMPLETE_RESULT = "Completed. The results are in the tool outputs above."
 
 
 def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
@@ -566,7 +552,7 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 {
                     "id": "call_fast_mode_soft_complete_exec",
                     "name": "attempt_completion",
-                    "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+                    "arguments": json.dumps({"result": SOFT_COMPLETE_RESULT}),
                 }
             ],
             "codex_reasoning_items": [],

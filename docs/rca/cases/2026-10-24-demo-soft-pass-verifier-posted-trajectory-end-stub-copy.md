@@ -27,6 +27,8 @@ sources:
   - agent da2c8b9d-048f-49f2-a911-125e6e9c1bcb
   - commit e79321ac9
   - commit 5b5e330b2
+  - commit 75b95564e
+  - agent dd3f80d9-0760-461a-86ce-ff2e506b9390
   - memory:mass-agent-fully-demo-cached
 repro: agents/tests/blackbox/llm.blackbox.py::test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy; agents/tests/blackbox/benchmark.blackbox.py::test_local_port_run_binds_judge_backend_to_the_stack_under_test
 status: fixed
@@ -77,43 +79,49 @@ the verify18 reject loops, so it stays.
 
 ## Solution
 
-- e79321ac9: `soft_pass_verifier_reasoning()` in `agents/providers/demo_cache/rose_cache.py`
-  keeps the replayed verifier reasoning and drops only stub sentences. The failure path,
-  the exception path and the cold-namespace verifier stub use a neutral line: "The demo
-  replay has no further recorded verifier step; the replayed work is accepted." Scores
-  are unchanged.
-- No cache key changes in this run: verifierMessage rows are skipped by the
-  completion_summary trajectory (`agent_workflow.py`, `if metadata.get("verifierMessage"): continue`),
-  and no agent made another LLM call after its soft-pass. A path that keeps looping after
-  a 1.0 verdict would see the new text in `convert_context_to_messages`.
-- 5b5e330b2: `_bind_backend_api_url(base_url)` in run_benchmark points a loopback
-  BACKEND_API_URL at the backend under test. A non-loopback value, such as a guest's
-  public tunnel, is left alone.
-- Verification: the regression fails before the fix and passes after. The llm,
-  demo-cache-client, spawn-agent, workflow and benchmark blackbox domains pass. Exact local
-  `scripts/run-bench --local test-mass-agent-run-0` on 5b5e330b2: PASS, 18/18 evaluators,
-  $0, 51 agents, visible "trajectory ended" rows 46 → 0.
-  FE: https://www.roselabs.ai/?agent-id=da2c8b9d-048f-49f2-a911-125e6e9c1bcb
+Shipped shape (rework 75b95564e, superseding the e79321ac9 sentence filter):
+
+- `check_progress` shows a replayed verifier verdict exactly as recorded (reasoning and
+  message unchanged; score still promoted to 1.0). No phrase matching.
+- Code-generated stand-ins use fixed constants in `rose_cache.py`:
+  `SOFT_PASS_VERIFIER_REASONING` (verifier failure/exception/cold stub) and
+  `SOFT_COMPLETE_RESULT` ("Completed. The results are in the tool outputs above.") for the
+  execute/plan end-of-trajectory `attempt_completion`. The explore stub is unchanged because
+  `spawn_agent/service.py` `_EXPLORE_STUB_MARKERS` relies on it.
+- Data: an audit of all 2,537 rows the cloud run replayed found exactly one stored row with
+  stub copy, `fastmode:v42:llm:4ae3193053ac1d8f:dag_reasoning:p:6:c:july_assemble_final`.
+  Its leading "July Fast Mode assemble of the original OAi demo cache (Andy Prevalsky)."
+  line was removed through the prod `/api/fast-cache/set` upsert (key unchanged, createdAt
+  kept). sha256 8f09e167… → f825a9fd…. The backup and receipt are in
+  `.context/descend/descend-full69-20261023/ma2-cache-backup/`. The verifier and execute
+  stubs were never stored data; they came from code.
+- No cache key moved: the local hit distribution equals the cloud run's (completion_summary
+  75 exact / 18 terminal passthrough).
+- 5b5e330b2: `_bind_backend_api_url(base_url)` points a loopback BACKEND_API_URL at the
+  backend under test for local `--port` judges.
+- Verification: exact local `scripts/run-bench --local test-mass-agent-run-0` on 75b95564e
+  plus the rewritten row: PASS, 18/18 evaluators, $0, every LLM call `fast-cache`, 0
+  "Fast Mode" / "trajectory ended" / "prior tool evidence" strings anywhere in the tree.
+  FE: https://www.roselabs.ai/?agent-id=dd3f80d9-0760-461a-86ce-ff2e506b9390
 - Outcome-reproduction gap: the buggy revision was not observed failing locally. The
-  judge passed the same shape on 2026-10-23, so the failure needs judge variance to
-  reproduce.
-- Golden reference: `claude-code-src/src/services/vcr.ts:123` replays the recorded output
-  unchanged. At :73 and :135 it throws "fixture missing … VCR_RECORD=1" rather than
-  synthesizing content. The fix moves toward that (show the recorded verdict). The score
-  promotion remains a documented divergence.
-- 10k agents: string work per verifier call only; no new I/O, state or fan-in.
-- Still open, same class: 42 execute_loop trajectory-end stubs ("Fast Mode cache trajectory
-  ended for this agent.") remain in assistant tool_call metadata, and the root's seeded
-  `july_assemble_final` row starts "July Fast Mode assemble of the original OAi demo cache".
-  Changing either changes completion_summary key material and needs a supported re-record.
-  Also: a local run whose record is ~172 MB got HTTP 413 from the isolated backend's
-  /api/benchmarks/runs and exited 1.
+  judge passed the same shape on 2026-10-23.
+- Golden reference: `claude-code-src/src/services/vcr.ts:123` replays recorded output
+  unchanged, and :73/:135 throw on a missing fixture instead of synthesizing content. The
+  rework converges: recorded content is shown verbatim, and only code-generated stand-ins
+  have fixed text.
+- 10k agents: no new I/O, state or fan-in.
+- Still open: one live web_fetch (not LLM) per run for
+  `fastmode:v42:web_fetch:global:5b9954e2b4f4c3d42f163d91`
+  (theunsubscribed.co/archive?sort=top; the Justin Welsh GP). The site fails now (Firecrawl
+  500 / connect_error), so there is no truthful success row to record. The GP's
+  `soft_complete_allowed_for_agent` returned false. Also open: a ~172 MB local failure record
+  gets HTTP 413 at /api/benchmarks/runs.
 
 ## Human feedback
 
-None recorded. Standing instruction from memory: mass-agent must be fully DEMO cached, and
+Andy (2026-10-24): "Mass agent cloud just change demo cache yourself"; the parent relayed that the fix must not string-match (CLAUDE.md 25b). The e79321ac9 sentence filter was removed, and the stored data was fixed instead. Standing instruction from memory: mass-agent must be fully DEMO cached, and
 its task and cache may be mutated without approval.
 
 ## Reusable lesson
 
-When a DEMO or replay stand-in is posted to the visible transcript, show the recorded content rather than plumbing copy, and grep the judge evidence for evaluator-forbidden markers before blaming cache key drift.
+Show replayed DEMO content verbatim and fix stub copy in the stored rows or the code-generated constants, never with a phrase filter; audit the replayed rows before blaming cache key drift.

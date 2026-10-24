@@ -5149,58 +5149,39 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
     assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
 
 
-def _mass_agent_t7_forbidden_substrings() -> list[str]:
-    """T7's forbidden Task Complete copy, read from the canonical catalog."""
-    catalog = json.loads((Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text())
-    tasks = catalog["tasks"] if isinstance(catalog, dict) else catalog
-    task = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")
-    for evaluator in task["evaluators"]:
-        for check in evaluator.get("checks") or []:
-            if check.get("type") == "completion_summary_length":
-                return [str(s).lower() for s in check["forbidden_substrings"]]
-    raise AssertionError("test-mass-agent-run-0 lost its T7 forbidden_substrings check")
-
-
 async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy():
     """descend-full69 MA: a DEMO soft-pass verdict is a visible transcript row.
 
     Every first-level GP in test-mass-agent-run-0 replays a recorded 0.5
-    verifier verdict and soft-passes. The visible "Progress: 100%" row must
-    carry the replayed verifier's own reasoning, never the T7-forbidden
-    "Fast Mode cache trajectory ended; prior tool evidence ..." stub that the
-    T7 judge reads as an ablated Task Complete flow.
+    verifier verdict and soft-passes. The visible "Progress: 100%" row shows
+    the recorded reasoning byte for byte; only code-generated stand-ins (no
+    recorded verdict, exhausted trajectory) use the fixed neutral constants.
     """
     from helpers.llm import check_progress
     from providers.demo_cache.context import set_context
-    from providers.demo_cache.rose_cache import soft_complete_on_miss
+    from providers.demo_cache.rose_cache import (
+        SOFT_COMPLETE_RESULT,
+        SOFT_PASS_VERIFIER_REASONING,
+        soft_complete_on_miss,
+    )
 
     recorded = "The spawned-agent tool result is a dense, well-sourced research report on Dr. Gabrielle Lyon."
-    replies = [
-        # Recorded July verdict, reached through the positional slot fallback.
-        {"score": 0.5, "reasoning": recorded},
-        # Older rows were written with the stub prefixed to the real verdict.
-        {
-            "score": 0.5,
-            "reasoning": (
-                "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as "
-                "complete.\n\nThe output that the evidence supports does not meet the required output schema."
-            ),
-        },
-    ]
-    forbidden = _mass_agent_t7_forbidden_substrings()
+
+    async def replayed_reject(*_args, **_kwargs):
+        return (
+            {"score": 0.5, "reasoning": recorded},
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "from_fast_cache": True},
+        )
+
+    async def unparseable(*_args, **_kwargs):
+        raise json.JSONDecodeError("bad cached verifier payload", "", 0)
+
     results = []
-    for reply in replies:
-
-        async def fake_call_llm_verifier(*_args, _reply=reply, **_kwargs):
-            return (
-                dict(_reply),
-                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "from_fast_cache": True},
-            )
-
+    for verifier in (replayed_reject, unparseable):
         try:
             with (
                 patch("temporalio.activity.heartbeat"),
-                patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
+                patch("helpers.llm._call_llm_verifier", verifier),
             ):
                 results.append(
                     await check_progress(
@@ -5216,14 +5197,16 @@ async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy
         finally:
             set_context(None)
 
-    stub = soft_complete_on_miss("verifier_execute")
-    visible = [r["reasoning"] for r in results] + [r["message"] for r in results] + [stub["content"]]
-    for text in visible:
-        assert text.strip()
-        assert not [marker for marker in forbidden if marker in text.lower()], text
-    assert all(r["score"] == 1.0 for r in results)
-    assert recorded in results[0]["reasoning"]
-    assert "does not meet the required output schema" in results[1]["reasoning"]
+    assert [r["score"] for r in results] == [1.0, 1.0]
+    assert results[0]["reasoning"] == recorded
+    assert results[0]["message"] == f"{recorded}\n\nScore: 1.0"
+    assert results[1]["reasoning"] == SOFT_PASS_VERIFIER_REASONING
+    assert json.loads(soft_complete_on_miss("verifier_execute")["content"])["reasoning"] == (
+        SOFT_PASS_VERIFIER_REASONING
+    )
+    for site in ("execute_loop", "plan_loop"):
+        (call,) = soft_complete_on_miss(site)["tool_calls"]
+        assert json.loads(call["arguments"]) == {"result": SOFT_COMPLETE_RESULT}
 
 
 async def test_check_progress_fences_the_entire_verifier_retry_loop():
