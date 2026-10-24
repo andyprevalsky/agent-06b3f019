@@ -2327,6 +2327,138 @@ async def test_claude_auth_400_raises_invalid_request_no_rotation():
     assert len([u for u in captured if "api.anthropic.com" in u]) == 1
 
 
+def _anthropic_request_violations(body):
+    """Anthropic /v1/messages rejections captured verbatim from live 400s (descend R4).
+
+    - "messages: text content blocks must be non-empty"
+    - "output_config.format.schema: For 'object' type, 'additionalProperties'
+      must be explicitly set to false"
+    """
+    violations = []
+    for idx, msg in enumerate(body["messages"]):
+        content = msg.get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        if not blocks:
+            violations.append(f"messages.{idx}: empty content")
+        for block in blocks or []:
+            if isinstance(block, dict) and block.get("type") == "text" and not str(block.get("text") or "").strip():
+                violations.append(f"messages.{idx}: text content blocks must be non-empty")
+    schema = ((body.get("output_config") or {}).get("format") or {}).get("schema")
+    for node in _walk_schema(schema):
+        if node.get("type") == "object" and node.get("additionalProperties") is not False:
+            violations.append("output_config.format.schema: additionalProperties must be explicitly set to false")
+    return violations
+
+
+def test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows():
+    """completion_summary context (convert_context_to_messages) carries empty attachment
+    and assistant rows; the Claude body must not contain empty text blocks (descend R4,
+    agent-display-revenue-chart 5/5 copies fell through to the waterfall)."""
+    messages = [
+        {"role": "system", "content": "You are summarizing the work completed by an AI agent."},
+        {"role": "user", "content": "I've attached our orders export. Show me revenue."},
+        {"role": "user", "content": ""},
+        {"role": "user", "content": ""},
+        {"role": "system", "content": "Initialized: Agent initialization complete."},
+        {"role": "user", "content": "<environment>\nYou are /root, the root agent.\n</environment>"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "toolu_01", "type": "function", "function": {"name": "set_plan", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "toolu_01", "content": "2 tasks."},
+        {"role": "user", "content": "<environment>\nYou are /root, the root agent.\n</environment>"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "3bc0250f-f26e-415e-a27c-5a971c7db727",
+                    "type": "function",
+                    "function": {"name": "attempt_completion", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "3bc0250f-f26e-415e-a27c-5a971c7db727", "content": "Beginning Execute Phase:"},
+        {"role": "system", "content": "Started code agent in background."},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "Message Type: FINAL_ANSWER\nPayload: totals"},
+        {"role": "user", "content": "   "},
+        {"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": "Summarize."}]},
+    ]
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=1024,
+        skip_cache_write=True,
+    )
+    assert _anthropic_request_violations(body) == [], body["messages"]
+    # Real content survives: the goal, both tool pairs, the final answer, the ask.
+    flat = json.dumps(body["messages"])
+    for kept in ("orders export", "toolu_01", "3bc0250f", "FINAL_ANSWER", "Summarize."):
+        assert kept in flat
+    assert body["messages"][-1]["role"] == "user"
+
+
+def test_build_anthropic_body_closes_non_strict_output_format_objects():
+    """A non-strict Pydantic schema (optional verifier fields) has no additionalProperties;
+    Anthropic output_config.format requires it explicitly false on every object
+    (descend R4, verifier_browser j0045/j0061)."""
+    from typing import Optional as _Opt
+
+    from pydantic import create_model
+
+    inner = create_model("VerifierOutput", url=(str, ...), price=(_Opt[str], None))
+    model = create_model("ProgressScoreWithOutput", output=(inner, ...), reasoning=(str, ...), score=(float, ...))
+    setattr(model, "rose_openai_strict", False)
+    response_format = build_openai_response_format(model)
+    assert "additionalProperties" not in json.dumps(response_format)  # the captured shape
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "Goal: buy one Canvas Tote"}],
+        tools=None,
+        tool_choice=None,
+        response_format=response_format,
+        max_tokens=1024,
+    )
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert _anthropic_request_violations(body) == []
+    schema = body["output_config"]["format"]["schema"]
+    assert set(schema["properties"]) == {"output", "reasoning", "score"}
+    assert set(schema["properties"]["output"]["properties"]) == {"url", "price"}
+
+
+async def test_claude_auth_400_logs_provider_message():
+    """A claudeAuth 400 must name Anthropic's validation message, not only its body length."""
+    from structlog.testing import capture_logs
+
+    message = "messages: text content blocks must be non-empty"
+    error = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+    set_mock_handler(lambda req: httpx.Response(400, json=error))
+    auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=3)
+    with capture_logs() as logs:
+        try:
+            await _drain(
+                claude_auth_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    auth=auth,
+                    request_id="r-400-message",
+                    max_tokens=16,
+                )
+            )
+        except RoseInvalidRequest:
+            pass
+        else:
+            raise AssertionError("400 must raise RoseInvalidRequest")
+    invalid = [log for log in logs if log.get("event") == "rose.claude_auth.invalid_request"]
+    assert len(invalid) == 1, logs
+    assert invalid[0]["provider_message"] == message
+
+
 async def test_claude_auth_5xx_retries_then_raises_server_error():
     calls = {"n": 0}
 
@@ -10598,6 +10730,15 @@ async def run_all_tests():
         "browser_use_dump_records_foundry_wire_effort",
         test_browser_use_dump_records_foundry_wire_effort_and_temperature,
     )
+    r.record(
+        "claude_body_drops_empty_context_rows",
+        test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows,
+    )
+    r.record(
+        "claude_body_closes_output_format_objects",
+        test_build_anthropic_body_closes_non_strict_output_format_objects,
+    )
+    await r.record_async("claude_auth_400_logs_provider_message", test_claude_auth_400_logs_provider_message)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
     await r.record_async(
