@@ -13,6 +13,7 @@ export async function waitForCodexOutput(
   const events: unknown[] = [];
   let connected = false;
   let exitSeen = false;
+  let turnCompleted = false;
 
   return await new Promise<CodexWsOutput>((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -35,13 +36,35 @@ export async function waitForCodexOutput(
         if ((msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') && msg.data) {
           output += msg.data;
         }
-        if (msg.type === 'code_agent_event' && msg.data) {
-          events.push(msg.data);
+        const received: unknown[] =
+          msg.type === 'code_agent_event' && msg.data
+            ? [msg.data]
+            : msg.type === 'code_agent_events' && Array.isArray(msg.data)
+              ? msg.data
+              : [];
+        for (const event of received) {
+          events.push(event);
+          // The app-server transport is a persistent process: a finished turn
+          // ends with turn/completed (the worker's contract), not an exit, and
+          // the agent's reply arrives as a completed agent_message, not stdout.
+          const typed = event as {
+            type?: string;
+            raw_type?: string;
+            text?: unknown;
+            partial?: unknown;
+          };
+          if (
+            typed.type === 'agent_message' &&
+            typed.partial !== true &&
+            typeof typed.text === 'string'
+          ) {
+            output += `${typed.text}\n`;
+          }
+          if (typed.type === 'turn_ended' && typed.raw_type === 'turn/completed') {
+            turnCompleted = true;
+          }
         }
-        if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
-          events.push(...msg.data);
-        }
-        if (msg.type === 'exit') {
+        if (msg.type === 'exit' || turnCompleted) {
           exitSeen = true;
           clearTimeout(timeout);
           ws.close();
