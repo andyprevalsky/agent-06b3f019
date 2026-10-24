@@ -111,6 +111,7 @@ describe('QuickQueryController open-time screenshot', () => {
       name: 'Screenshot 2026-10-24 at 15.04.09.png',
       mimeType: 'image/png',
       size: PNG_BYTES.length,
+      autoCaptured: true,
     });
     // A plain ArrayBuffer (not a Node Buffer view), as QuickQueryAttachment declares.
     // jsdom has its own ArrayBuffer global, so compare the tag, not instanceof.

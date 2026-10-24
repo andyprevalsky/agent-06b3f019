@@ -544,6 +544,7 @@ describe('launcher blackbox', () => {
     expect(payload.attachments?.[0]?.name).toBe('brief.md');
     expect(payload.attachments?.[0]?.mimeType).toBe('text/markdown');
     expect(payload.attachments?.[0]?.data.byteLength).toBeGreaterThan(0);
+    expect(payload.attachments?.[0]).not.toHaveProperty('autoCaptured');
   });
 
   it('allows submit with attachments only (no typed query)', async () => {
@@ -619,6 +620,7 @@ describe('launcher blackbox', () => {
           mimeType: 'image/png',
           size: pngBytes.byteLength,
           data: pngBytes.buffer,
+          autoCaptured: true,
         },
       });
     });
@@ -638,6 +640,7 @@ describe('launcher blackbox', () => {
     expect(payload.attachments).toHaveLength(1);
     expect(payload.attachments?.[0]?.name).toBe('Screenshot 2026-10-24 at 15.04.09.png');
     expect(payload.attachments?.[0]?.mimeType).toBe('image/png');
+    expect(payload.attachments?.[0]?.autoCaptured).toBe(true);
     expect(
       Array.from(new Uint8Array(payload.attachments?.[0]?.data ?? new ArrayBuffer(0)))
     ).toEqual(Array.from(pngBytes));

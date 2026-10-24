@@ -5,7 +5,9 @@
  *   Alt+Space → QuickQueryController → capture display under cursor (launcher
  *     still hidden, so the pill is not in the shot) → show launcher →
  *     quick-query:toggle { open, screenshot } → launcher holds it as a normal
- *     removable attachment → submit → main window uploads it → createAgent
+ *     removable attachment → submit → main window uploads it as an
+ *     auto_captured file pointer → createAgent → the chat and agent LLM
+ *     context mark it as automatic and possibly unrelated to the request
  *
  * macOS returns wallpaper-only frames without Screen Recording access, so
  * nothing is attached until the user grants it. The first ungranted open in a
@@ -66,6 +68,7 @@ export class QuickQueryScreenshots {
         mimeType: 'image/png',
         size: png.byteLength,
         data: png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer,
+        autoCaptured: true,
       };
     } catch (error) {
       console.warn('[QuickQuery] Screenshot capture failed; opening without it', error);

@@ -43,13 +43,18 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
 
-  const addFiles = useCallback((files: FileList | File[]) => {
-    const { accepted, error } = acceptIncomingFiles(Array.from(files), attachmentsRef.current);
+  const hold = useCallback((files: File[], autoCaptured: boolean) => {
+    const { accepted, error } = acceptIncomingFiles(files, attachmentsRef.current, autoCaptured);
     setAttachError(error);
     if (accepted.length > 0) {
       setAttachments((prev) => [...prev, ...accepted]);
     }
   }, []);
+
+  const addFiles = useCallback(
+    (files: FileList | File[]) => hold(Array.from(files), false),
+    [hold]
+  );
 
   const remove = useCallback((id: string) => {
     setAttachError(null);
@@ -58,15 +63,15 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
 
   const reset = useCallback(
     (screenshot?: QuickQueryAttachment) => {
-      // addFiles size-checks against the ref, which must not count the files
+      // hold() size-checks against the ref, which must not count the files
       // being dropped here.
       attachmentsRef.current = [];
       setAttachError(null);
       setIsDragOver(false);
       setAttachments([]);
-      if (screenshot !== undefined) addFiles([attachmentToFile(screenshot)]);
+      if (screenshot !== undefined) hold([attachmentToFile(screenshot)], true);
     },
-    [addFiles]
+    [hold]
   );
 
   const serializeForSubmit = useCallback(async (): Promise<QuickQueryAttachment[]> => {
@@ -76,6 +81,7 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
         mimeType: a.file.type || 'application/octet-stream',
         size: a.file.size,
         data: await readFileBytes(a.file),
+        ...(a.autoCaptured === true ? { autoCaptured: true } : {}),
       }))
     );
   }, []);
@@ -96,7 +102,8 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
 
 function acceptIncomingFiles(
   incoming: File[],
-  current: LauncherLocalAttachment[]
+  current: LauncherLocalAttachment[],
+  autoCaptured: boolean
 ): { accepted: LauncherLocalAttachment[]; error: string | null } {
   let total = current.reduce((sum, a) => sum + a.file.size, 0);
   const accepted: LauncherLocalAttachment[] = [];
@@ -111,7 +118,7 @@ function acceptIncomingFiles(
       break;
     }
     total += file.size;
-    accepted.push({ id: crypto.randomUUID(), file });
+    accepted.push({ id: crypto.randomUUID(), file, ...(autoCaptured ? { autoCaptured } : {}) });
   }
   return { accepted, error };
 }

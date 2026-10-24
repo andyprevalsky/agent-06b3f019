@@ -90,6 +90,7 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  auto_captured?: boolean;
 }
 
 /**

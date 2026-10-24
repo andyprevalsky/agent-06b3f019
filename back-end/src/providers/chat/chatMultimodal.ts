@@ -7,6 +7,11 @@ import { createLogger } from '../logger';
 
 const log = createLogger('ChatMultimodal');
 
+/** Same wording as AUTO_CAPTURED_SCREENSHOT_NOTE in agents/helpers/attachments.py. */
+export const AUTO_CAPTURED_SCREENSHOT_NOTE =
+  "Rose captured this screenshot of the user's screen automatically when they opened the " +
+  'quick launcher; the user did not choose to attach it, and it may not be relevant to their request.';
+
 export interface FilePointer {
   id: string;
   storage_path: string;
@@ -14,6 +19,7 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  auto_captured?: boolean;
 }
 
 export type MultimodalContentBlock = {
@@ -88,6 +94,9 @@ export async function buildMultimodalContentFromFile(
           url: `data:${filePointer.mime_type};base64,${base64}`,
         },
       });
+      if (filePointer.auto_captured === true) {
+        content.push({ type: 'text', text: `[${AUTO_CAPTURED_SCREENSHOT_NOTE}]` });
+      }
     } else if (
       TEXT_MIME_TYPES.has(filePointer.mime_type) ||
       filePointer.mime_type.startsWith('text/')

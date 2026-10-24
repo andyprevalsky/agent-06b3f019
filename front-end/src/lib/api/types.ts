@@ -9,6 +9,8 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  /** Desktop launcher screenshot attached automatically; agents treat it as possibly unrelated. */
+  auto_captured?: boolean;
 }
 
 // Size thresholds for file handling

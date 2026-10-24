@@ -869,6 +869,45 @@ async def test_attachment_admission_counts_overhead_and_actual_download_bytes():
         _clear_cache()
 
 
+async def test_build_llm_messages_marks_auto_captured_screenshot():
+    """The launcher's automatic screenshot reaches the model with a may-be-unrelated note."""
+    from helpers.attachments import AUTO_CAPTURED_SCREENSHOT_NOTE, _file_cache
+    from helpers.llm import build_llm_messages
+
+    _clear_cache()
+    png = b"\x89PNG" + b"\x00" * 10
+    shot = {"id": "auto-shot", "storage_path": "u/shot.png", "original_filename": "Screenshot 2026-10-24 at 15.04.09.png", "mime_type": "image/png", "size_bytes": len(png), "created_at": "", "auto_captured": True}
+    dropped = {**shot, "id": "dropped-shot", "original_filename": "dropped.png"}
+    del dropped["auto_captured"]
+    _file_cache[shot["id"]] = (png, {})
+    _file_cache[dropped["id"]] = (png, {})
+
+    def user_text(messages):
+        content = messages[1]["content"]
+        assert any(block.get("type") == "image_url" for block in content)
+        return "\n".join(block["text"] for block in content if block.get("type") == "text")
+
+    try:
+        with patch("helpers.attachments.get_file_content", side_effect=AssertionError("Network forbidden")):
+            auto = await build_llm_messages([{"role": "USER", "text": "what is this error", "file_pointer": shot}], "system", pre_resolved_ids={shot["id"]})
+            chosen = await build_llm_messages([{"role": "USER", "text": "what is this error", "file_pointer": dropped}], "system", pre_resolved_ids={dropped["id"]})
+        assert f"auto_captured: {AUTO_CAPTURED_SCREENSHOT_NOTE}" in user_text(auto)
+        assert "may not be relevant" in AUTO_CAPTURED_SCREENSHOT_NOTE
+        assert "auto_captured" not in user_text(chosen)
+    finally:
+        _clear_cache()
+
+
+async def test_file_pointer_auto_captured_round_trip():
+    """The flag survives from_dict/to_dict (sub-agent forwarding) and is omitted when unset."""
+    from helpers.attachments import FilePointer
+
+    base = {"id": "f", "storage_path": "u/f.png", "original_filename": "f.png", "mime_type": "image/png", "size_bytes": 1, "created_at": ""}
+    assert FilePointer.from_dict({**base, "auto_captured": True}).to_dict() == {**base, "auto_captured": True}
+    assert FilePointer.from_dict(base).to_dict() == base
+    assert FilePointer.from_dict({**base, "auto_captured": "yes"}).auto_captured is False
+
+
 async def test_attachment_resolver_and_message_builder_share_smaller_budget():
     from helpers.attachments import FilePointer, resolve_attachments_for_llm, _file_cache
     from helpers.llm import build_llm_messages
@@ -1069,6 +1108,8 @@ async def run_all_tests():
     )
     await r.record_async("get_file_from_pointer_cache_hit", test_get_file_from_pointer_cache_hit)
     await r.record_async("get_file_from_pointer_download", test_get_file_from_pointer_download)
+    await r.record_async("llm_messages_auto_captured_screenshot", test_build_llm_messages_marks_auto_captured_screenshot)
+    await r.record_async("file_pointer_auto_captured_round_trip", test_file_pointer_auto_captured_round_trip)
     teardown_mock()
     return r.all_passed
 

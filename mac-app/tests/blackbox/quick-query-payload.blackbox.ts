@@ -124,4 +124,17 @@ describe('normalizeQuickQueryPayload', () => {
     expect(result.attachments).toHaveLength(1);
     expect(result.attachments?.[0].name).toBe('good.png');
   });
+
+  it('keeps the launcher auto-screenshot mark only when it is exactly true', () => {
+    const data = new Uint8Array([1, 2, 3]).buffer;
+    const result = normalizeQuickQueryPayload({
+      query: 'what is this error',
+      attachments: [
+        { name: 'Screenshot.png', mimeType: 'image/png', size: 3, data, autoCaptured: true },
+        { name: 'chosen.png', mimeType: 'image/png', size: 3, data, autoCaptured: 'yes' },
+      ],
+    });
+    expect(result.attachments?.[0]?.autoCaptured).toBe(true);
+    expect(result.attachments?.[1]).not.toHaveProperty('autoCaptured');
+  });
 });
