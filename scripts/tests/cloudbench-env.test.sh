@@ -1667,8 +1667,13 @@ unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 # primary shape rather than inheriting the oversized warm maintenance machine.
 primary_default_line="$(grep '^FLEET_PRIMARY_VM_SIZE=' "$ROOT_DIR/scripts/run-bench-fleet")"
 primary_memory_line="$(grep '^FLEET_PRIMARY_VM_MEMORY=' "$ROOT_DIR/scripts/run-bench-fleet")"
-[[ "$primary_default_line" = *"shared-cpu-2x"* && "$primary_memory_line" = *"4096"* ]] ||
+[[ "$primary_default_line" = *":-shared-cpu-4x}\"" && "$primary_memory_line" = *"4096"* ]] ||
   fail "fleet default must fit both Fly's shared-memory matrix and performance-CPU reservation ceiling"
+# descend-full69 proof 2: 3 of 15 shared-cpu-2x primaries were throttled to
+# 81-93% steal and expired interactive transactions; 0 of 55 shared-cpu-4x
+# primaries exceeded 9%. The default primary must never fall back to 2x.
+[ "$(CLOUDBENCH_FLEET_PRIMARY_VM_SIZE='' bash -c "$primary_default_line"'; printf %s "$FLEET_PRIMARY_VM_SIZE"')" = "shared-cpu-4x" ] ||
+  fail "default fleet primary must be shared-cpu-4x (shared-cpu-2x guests were throttled to 81-93% steal)"
 clone_function_source="$(awk '
   /^clone_machine_target\(\)/ { capture = 1 }
   capture { print }

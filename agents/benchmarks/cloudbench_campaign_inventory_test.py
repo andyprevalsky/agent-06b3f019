@@ -2416,7 +2416,7 @@ def test_campaign_inventory_plans_native_wmh_guests_for_simulate_tasks(tmp_path)
             {'name': 'plain-fixture', 'requires_browser_agent': False}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
     assert result['planned_performance_cpu_units'] == 8
-    assert result['planned_shared_cpu_units'] == 2
+    assert result['planned_shared_cpu_units'] == 4
     assert result['planned_memory_mib'] == 65536 + 4096
 
 
@@ -2426,14 +2426,14 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     rows = [{'name': 'browser-fixture', 'requires_browser_agent': True}, {'name': 'plain-fixture', 'requires_browser_agent': False}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
-    assert result['planned_shared_cpu_units'] == 6
+    assert result['planned_shared_cpu_units'] == 8
     assert result['planned_memory_mib'] == 12288
     assert result['local_shared_cpu_governor_minimum'] is None
     assert result['local_machine_ceiling_minimum'] is None
     assert result['admission'] == 'withheld-unknown-native-capacity'
     known_inventory = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=known_inventory)
-    assert result['local_shared_cpu_governor_minimum'] == 27  # actual6+baseline1+original20
+    assert result['local_shared_cpu_governor_minimum'] == 29  # actual8+baseline1+original20
     assert result['local_machine_ceiling_minimum'] == 33  # baseline1+twofresh+two replacements+28 bounded worker slots
     assert result['worker_slots'] == 'dynamically-serialized-under-global-ceiling'
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
@@ -2502,11 +2502,11 @@ def test_campaign_inventory_stress_defaults_count_three_simultaneous_copies():
     baseline = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
     result = module.stress_default_requirements(ROOT, rows, peak=6, repetitions=3, baseline=baseline)
     assert result['planned_peak'] == 6
-    assert result['planned_shared_cpu_units'] == 18
+    assert result['planned_shared_cpu_units'] == 24
     assert result['planned_memory_mib'] == 36864
     assert result['disk_floor_mib'] == 6 * 288
     assert result['worker_reservation_slots'] == 84
-    assert result['local_shared_cpu_governor_minimum'] == 39
+    assert result['local_shared_cpu_governor_minimum'] == 45
     assert result['local_machine_ceiling_minimum'] == 97
     with pytest.raises(ValueError, match='invalid stress peak'):
         module.stress_default_requirements(ROOT, rows, peak=7, repetitions=3, baseline=None)
@@ -2528,7 +2528,7 @@ def test_campaign_inventory_stress600_plan_cli_counts_actual_three_copies(monkey
     assert module.main() == 2
     plan = json.loads(capsys.readouterr().out)
     assert plan['planned_peak'] == 600
-    assert plan['planned_shared_cpu_units'] == 2310
+    assert plan['planned_shared_cpu_units'] == 2400
     assert plan['planned_memory_mib'] == 4730880
     assert plan['disk_floor_mib'] == 172800
     assert plan['worker_reservation_slots'] == 8400

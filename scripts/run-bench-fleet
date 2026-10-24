@@ -894,7 +894,14 @@ case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exi
 # shared-cpu-2x/4GB: 74 running CPU units at full concurrency, below the
 # observed ceiling, with no performance reservation dependency. Worker-only
 # clones mirror prod's performance-1x/2GB shape.
-FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
+# descend-full69 proof 2 (7eb275b1b, 70 fresh clones started together) then
+# showed shared-cpu-2x is too small for one isolated stack: 3 of 15 2x primaries
+# were throttled to 81-93% CPU steal while their own user CPU stayed near 5%,
+# so interactive Prisma transactions expired (POST /messages, PATCH /status
+# 500s) and a terminal PATCH outlived the worker's 30s read. None of the 55
+# shared-cpu-4x primaries in the same run exceeded 9% steal. Campaigns derive
+# their shared-CPU governor from this shape, so planned capacity follows it.
+FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-4x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 # A small subset of benchmarks runs the test-payment frontend bundled inside
 # the primary VM. Browser tasks can also copy a large production credential
