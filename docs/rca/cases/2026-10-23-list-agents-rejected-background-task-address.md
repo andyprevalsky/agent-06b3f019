@@ -68,6 +68,14 @@ renders this as `- /root/member_number [task of your parent] browser completed: 
 task view reuses the owner row already read for resolution (one PK read),
 constant-size response.
 
+Outcome check: the exact unchanged task passed locally on 3788811fa
+(`scripts/run-bench --local browser-auth-assistance-declined`, 184s, agent
+fad726ce-b76b-42a0-9cc6-4db024de70c9), but its explore only listed `/root`, so
+it did not exercise a task address. The failing path is LLM-stochastic (first
+occurrence in 73 recorded attempts), so a pre-fix local failure was not
+reproduced: the outcome-reproduction gap stays open; causal proof is the
+blackbox red/green.
+
 Evaluator note: `no_tool_failures` stays a truthful gate once the tool stops
 erroring; removing it from this task (as Andy did for four sibling
 browser-auth tasks) is a separate benchmark-definition decision.
