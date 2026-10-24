@@ -117,7 +117,7 @@ production error `guest shutdown without sealed runtime evidence`.
   that exact Machine.
 - `verify()` requires the `pre-service` phase for any accepted start.
 
-The run's source fingerprint `e7b8eafe…` (da22666f3) received an independent
+An adversarial review then tightened this route. An accepted start now qualifies only when no `repo/.context/cloudbench` original exists. A failed fallback capture is moved aside as preserved evidence, so it cannot block a later recovery plan. The run's source fingerprint `e7b8eafe…` (da22666f3) received an independent
 read-only review and was granted `before-stack-launch` only.
 
 **Outcome.**
