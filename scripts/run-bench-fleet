@@ -2604,6 +2604,17 @@ PY
     fi
 }
 
+cloudbench_primary_runtime_evidence_prelaunch() {  # <bench-output>
+    python3 - "$1/remote-logs/runtime-evidence/manifest.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+if not os.path.isfile(path) or os.path.islink(path):
+    raise SystemExit(1)
+with open(path, 'rb') as manifest:
+    raise SystemExit(0 if json.loads(manifest.read(1048577)).get('prelaunch') is True else 1)
+PY
+}
+
 cloudbench_validate_primary_runtime_evidence() {  # <bench-output> <machine> <run-token>
     python3 - "$@" <<'PY'
 import hashlib, json, os, re, stat, sys
@@ -2635,16 +2646,26 @@ assert owner['version'] == manifest['version'] == 1
 assert re.fullmatch(r'[0-9a-f]+', owner['machine_id'])
 assert re.fullmatch(r'[A-Za-z0-9._-]+', owner['run_token'])
 assert all(owner[k] == manifest[k] for k in ('run_token', 'machine_id'))
-services = json.loads(read(root / 'services.json'))
-count = services['env']['worker_processes']
-assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024
-cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
-expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
-            'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
-assert set(manifest['files']) - {'wmh-serve-log.txt', 'guest-diagnostics.jsonl'} == expected
-assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
-cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
-assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
+prelaunch = manifest.get('prelaunch') is True
+if prelaunch:
+    # The guest stopped before launching any driver or stack: its exact
+    # bench.log is the complete runtime evidence.
+    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', 'prelaunch'}
+    assert set(manifest['files']) == {'bench.log'}
+    stamp = ('RUNSTAMP-' + owner['run_token'] + '\n').encode()
+    with open(root / 'bench.log', 'rb') as log:
+        assert log.read(len(stamp)) == stamp
+else:
+    services = json.loads(read(root / 'services.json'))
+    count = services['env']['worker_processes']
+    assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024
+    cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
+    expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
+                'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
+    assert set(manifest['files']) - {'wmh-serve-log.txt', 'guest-diagnostics.jsonl'} == expected
+    assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
+    cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
+    assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
 total = 0
 for name, row in manifest['files'].items():
     assert type(row['bytes']) is int and row['bytes'] >= 0
@@ -2666,7 +2687,7 @@ for name, row in manifest['files'].items():
         assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
         assert digest.hexdigest() == row['sha256']
         os.fsync(f.fileno())
-for directory in (root / 'logs', root, root.parent, out):
+for directory in ((root, root.parent, out) if prelaunch else (root / 'logs', root, root.parent, out)):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -10834,6 +10855,23 @@ PY
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
                     "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}" --driver-log; then
+                # A guest cancelled before launch by an older status server
+                # cannot seal a bundle; preserve its pre-service originals.
+                if [ -e "$output/post-config-start.accepted" ]; then
+                    if fleet_recovery_capture_startup_failure "$registry" "$output" \
+                        "${recovery_machine_ids[$recovery_index]}" "${recovery_guest_tokens[$recovery_index]}"; then
+                        continue
+                    fi
+                    # A launched guest is not pre-service. Keep its rejected
+                    # capture as evidence, outside the path whose presence
+                    # marks a verified startup archive to later recovery plans.
+                    if [ -d "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -L "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -e "$output/failed-startup-runtime-archive/verified.json" ]; then
+                        mv "$output/failed-startup-runtime-archive" \
+                            "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
+                    fi
+                fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
             else
@@ -11696,6 +11734,14 @@ PY
         fi
         CHILD_OUT[$index]="$out"
         CHILD_MACHINE[$index]="$machine"
+        # A guest stopped before launch has no result to bind; its validated
+        # pre-launch bundle already released the latch.
+        if cloudbench_primary_runtime_evidence_prelaunch "$out"; then
+            cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
+                && [ ! -e "$out/runtime-evidence.pending" ] && [ ! -L "$out/runtime-evidence.pending" ] \
+                || status=1
+            continue
+        fi
         if ! cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
             || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py" \
                 "$out/remote-logs/runtime-evidence/run.json" --expected-task "$bench" \

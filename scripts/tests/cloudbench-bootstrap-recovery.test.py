@@ -4019,7 +4019,7 @@ log(){ printf '%s\\n' "$*"; }
 finish(){ exit "$1"; }
 step(){ :; }
 '''+boot[a:b]+'\n'+driver[c:d]+'\n'+driver[e:f]
-        env=dict(self.env,REPO=str(self.destination),REPO_DIR=str(self.destination),REF=self.ref,FETCH_REF_SCRIPT=str(ROOT/'cloudbench-fetch-ref.sh'),APP_USER='',BENCH_SIMULATE='0',LOG=str(self.root/'boot.log'),CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP='1'if cold else'0')
+        env=dict(self.env,REPO=str(self.destination),REPO_DIR=str(self.destination),REF=self.ref,FETCH_REF_SCRIPT=str(ROOT/'cloudbench-fetch-ref.sh'),APP_USER='',BENCH_SIMULATE='0',LOG=str(self.root/'boot.log'),SHUTDOWN_REQUEST_FILE=str(self.root/'shutdown.request'),CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP='1'if cold else'0')
         r=subprocess.run(['bash','-c',shell],env=env,text=True,capture_output=True,timeout=15)
         return r,(self.root/'boot.log').read_text()
     def test_cold_actual_boot_then_driver_has_one_empty_checkout_owner(self):
