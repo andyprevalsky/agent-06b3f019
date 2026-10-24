@@ -398,7 +398,7 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
     from copy import deepcopy
 
     from providers.rose.cerebras import build_cerebras_body
-    from utils.tool_schemas import GrepTool, create_agent_action_model
+    from utils.tool_schemas import GrepTool, SpawnAgentTool, create_agent_action_model
 
     tools = build_anthropic_tools_from_response_model(
         create_agent_action_model(["grep"], tool_registry={"grep": GrepTool})
@@ -420,6 +420,23 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
         assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
     assert props["sources"]["items"]["enum"][0] == "messages"
     assert tools == original, "caller tool schemas must not be mutated"
+    # The field's own description wins over a nested model's docstring.
+    spawn_tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["spawn_agent"], tool_registry={"spawn_agent": SpawnAgentTool})
+    )
+    field = spawn_tools[0]["input_schema"]["properties"]["output_schema"]
+    sent = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=spawn_tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )["tools"][0]["function"]["parameters"]["properties"]["output_schema"]
+    assert sent.get("description") == field["description"], sent.get("description")
+    assert "anyOf" not in sent
     assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
 
 

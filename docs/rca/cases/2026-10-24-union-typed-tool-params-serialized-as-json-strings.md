@@ -75,6 +75,9 @@ array-or-sentinel-string union. Stop: below that is provider/model behaviour.
   `Optional[X] = None` property as plain `X`, for both strict and non-strict
   toolsets. The caller's Pydantic model stays authoritative, since omission
   validates to None. Required and non-null-default fields keep their union.
+  The field's own description wins over a nested model's docstring (the
+  adversarial review caught `spawn_agent.output_schema` losing its field
+  description in the first cut; asserted in the regression).
   This matches Claude Code, whose optional tool params are `.optional()` (omit,
   no null), e.g. `claude-code-src/src/tools/GrepTool/GrepTool.ts:40-48`. We do not
   adopt its `semanticNumber` coercion, because harness rewriting of model output

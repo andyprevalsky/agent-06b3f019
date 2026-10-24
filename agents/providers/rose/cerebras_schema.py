@@ -78,7 +78,8 @@ class _SchemaProjection:
         self.properties_count += len(props)
         self.counted_text += sum(len(key) for key in props)
         # Cerebras supports omitted optional properties. Preserve required
-        # and nullable fields rather than introducing null into non-null types.
+        # fields and never introduce null into non-null types; omittable
+        # Optional[X] = None fields arrive here already collapsed to X.
         return {
             "properties": {key: self.walk(value, depth + 1) for key, value in props.items()},
             "required": list(required),
@@ -170,9 +171,8 @@ def _collapse_node(node: Any) -> Any:
             (kept,) = [branch for branch in branches if branch != _NULL_BRANCH]
             if not isinstance(kept, dict):
                 continue
-            collapsed = {name: value for name, value in prop.items() if name not in ("anyOf", "default")}
-            collapsed.update(kept)
-            props[key] = collapsed
+            # The field's own description/title win over a nested model's docstring.
+            props[key] = {**kept, **{name: value for name, value in prop.items() if name not in ("anyOf", "default")}}
     return result
 
 

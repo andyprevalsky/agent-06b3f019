@@ -305,6 +305,9 @@ decoded completion_summary dump showed the root's final assistant turn with its
 `attempt_completion` tool_call already removed and the verifier verdict
 (`⚖️ Progress: 100%: …`) as a separate assistant message. The count did not
 change because stripping a tool_call removes no message.
+The 11 copies that did not fire never reached `run_agent._run_verifier`: 6 auth
+copies never completed (no completion_summary call), and 5 revenue-chart copies
+completed via the post-DAG verifier path, which posts no attempt_completion verdict row.
 
 **First-bad boundary.** `convert_context_to_messages` turned every
 `verifierMessage=True` TOOL row into assistant text. `run_agent` posts the
