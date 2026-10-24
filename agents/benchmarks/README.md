@@ -1717,10 +1717,11 @@ ceiling, shared-CPU governor or production headroom. `--strict-barrier` coordina
 all surviving eligible copies in one ready cohort. Keep the original requested
 50-copy count alongside `released_count` and `failed_count`; a partial release
 never earns full-width credit. Controller occupancy does not prove execution overlap.
-The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
-uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
-The unchanged governor keeps 20 of 160 shared units for production, leaving
-140 for this app. Native CPU kinds/counts and live workstream reservations
+The default mass-task primary uses `shared-cpu-4x` / 4 GB; its optional worker
+uses `performance-1x` / 2 GB (`shared-cpu-2x` primaries were throttled to 81-93%
+CPU steal in descend-full69 proof 2). Fifty primaries add 200 active shared CPU
+units, above the default 160-unit governor less its 20 production units; the
+campaign planner derives the required governor from the actual task shapes. Native CPU kinds/counts and live workstream reservations
 must fit as well as the Machine count; the CLI rechecks both during admission.
 
 Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
