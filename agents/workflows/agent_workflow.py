@@ -5593,6 +5593,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # order, so an older snapshot must never be in flight beside a newer one.
         background_changed = self._background_tree_snapshot() != getattr(self, "_persisted_background_tasks", [])
         if not self.bus_id:
+            if status is not None:
+                # No bus to broadcast on, but an explicit transition (e.g. paused
+                # awaiting the user's auth help) must still reach the DB, exactly
+                # as it does for a tree member; otherwise the root reads ACTIVE.
+                async with self._background_tasks_write_lock:
+                    payload: Dict[str, Any] = {"status": status, "_statusExplicit": True}
+                    background_tasks = self._background_tree_snapshot()
+                    carries_background = background_tasks != getattr(self, "_persisted_background_tasks", [])
+                    if carries_background:
+                        payload["backgroundTasks"] = background_tasks
+                    if await self._send_tree_state(list(self.tools_in_use), payload) and carries_background:
+                        self._persisted_background_tasks = background_tasks
+                return
             if background_changed:
                 await self._persist_background_tasks()
             return

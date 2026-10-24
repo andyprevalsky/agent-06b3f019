@@ -6191,9 +6191,35 @@ async def test_workflow_update_tree_state_skips_without_bus():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        await wf._update_tree_state(status="ACTIVE")
-        # No activity calls because bus_id missing
+        await wf._update_tree_state(progress=0.5)
+        # No bus and no status transition: nothing to broadcast or persist.
         assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_tree_state_persists_status_without_bus():
+    """A bus-less root that pauses for the user's auth help must not stay ACTIVE in the DB.
+
+    Run e0c401c1 (browser-auth-created-account-reused): the browser handler set the
+    root PAUSED awaiting authentication assistance, but the root had no bus, so the
+    status never left the workflow and the fleet reported a silent ACTIVE tree stall.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-1"
+    wf.bus_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_tree_state(status="PAUSED")
+        calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(calls) == 1, fake.activity_calls
+        args = calls[0][1]
+        assert args[0] == "root-1" and args[2] is None
+        assert args[3]["status"] == "PAUSED" and args[3]["_statusExplicit"] is True
+        await wf._update_tree_state(status="ACTIVE")
+        calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert [c[1][3]["status"] for c in calls] == ["PAUSED", "ACTIVE"]
     finally:
         _restore_workflow(original)
 
@@ -12574,6 +12600,7 @@ async def run_all_tests():
         test_workflow_cost_limit_flushes_tree_cost_before_pausing,
     )
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
+    await r.record_async("wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus)
     await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
     await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
     await r.record_async("wf_query_parent_state_empty", test_workflow_query_parent_state_returns_empty_without_parent)
