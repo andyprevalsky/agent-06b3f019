@@ -395,6 +395,8 @@ export interface QuickQueryResizePayload {
 
 export interface QuickQueryToggleState {
   open: boolean;
+  /** Screen the launcher was summoned from, captured before it was shown. */
+  screenshot?: QuickQueryAttachment;
 }
 
 export type UpdateStatusState =

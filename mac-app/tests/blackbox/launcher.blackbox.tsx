@@ -600,4 +600,81 @@ describe('launcher blackbox', () => {
       expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
     });
   });
+
+  it('holds the open-time screenshot in place of earlier files and submits its bytes', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('stale.txt', 'from-last-open')]);
+    await screen.findByTestId('launcher-attachment-chip');
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await act(async () => {
+      ipc.toggleCallbacks[0]?.({
+        open: true,
+        screenshot: {
+          name: 'Screenshot 2026-10-24 at 15.04.09.png',
+          mimeType: 'image/png',
+          size: pngBytes.byteLength,
+          data: pngBytes.buffer,
+        },
+      });
+    });
+
+    const chips = await screen.findAllByTestId('launcher-attachment-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('Screenshot 2026-10-24 at 15.04.09.png');
+
+    await user.type(screen.getByPlaceholderText('Enter any desire'), 'what is this error');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('what is this error');
+    expect(payload.attachments).toHaveLength(1);
+    expect(payload.attachments?.[0]?.name).toBe('Screenshot 2026-10-24 at 15.04.09.png');
+    expect(payload.attachments?.[0]?.mimeType).toBe('image/png');
+    expect(
+      Array.from(new Uint8Array(payload.attachments?.[0]?.data ?? new ArrayBuffer(0)))
+    ).toEqual(Array.from(pngBytes));
+    expect(capturedRequests).toHaveLength(0);
+  });
+
+  it('submits without the screenshot once its chip is removed', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await act(async () => {
+      ipc.toggleCallbacks[0]?.({
+        open: true,
+        screenshot: {
+          name: 'Screenshot.png',
+          mimeType: 'image/png',
+          size: pngBytes.byteLength,
+          data: pngBytes.buffer,
+        },
+      });
+    });
+    await screen.findByTestId('launcher-attachment-chip');
+
+    await user.click(screen.getByRole('button', { name: 'Remove Screenshot.png' }));
+    expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText('Enter any desire'), 'no screenshot');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('no screenshot');
+    expect(payload.attachments).toBeUndefined();
+  });
 });

@@ -10,6 +10,7 @@
  *   [drag_over] --drop--> [has_files]
  *   [has_files] --remove--> [has_files|idle]
  *   [has_files|idle] --toggle open--> [idle] (cleared)
+ *     --screenshot captured--> [has_files] (caller's screen held like a drop)
  */
 
 import { useCallback, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
@@ -30,7 +31,8 @@ export interface LauncherAttachmentsHandle {
   };
   addFiles: (files: FileList | File[]) => void;
   remove: (id: string) => void;
-  clear: () => void;
+  /** Drop every held file; on open, then hold the screenshot main captured. */
+  reset: (screenshot?: QuickQueryAttachment) => void;
   serializeForSubmit: () => Promise<QuickQueryAttachment[]>;
 }
 
@@ -54,11 +56,18 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
-  const clear = useCallback(() => {
-    setAttachError(null);
-    setIsDragOver(false);
-    setAttachments([]);
-  }, []);
+  const reset = useCallback(
+    (screenshot?: QuickQueryAttachment) => {
+      // addFiles size-checks against the ref, which must not count the files
+      // being dropped here.
+      attachmentsRef.current = [];
+      setAttachError(null);
+      setIsDragOver(false);
+      setAttachments([]);
+      if (screenshot !== undefined) addFiles([attachmentToFile(screenshot)]);
+    },
+    [addFiles]
+  );
 
   const serializeForSubmit = useCallback(async (): Promise<QuickQueryAttachment[]> => {
     return Promise.all(
@@ -80,7 +89,7 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
     dragHandlers,
     addFiles,
     remove,
-    clear,
+    reset,
     serializeForSubmit,
   };
 }
@@ -160,6 +169,11 @@ function useFileDragHandlers(
   );
 
   return { onDragOver, onDragLeave, onDrop };
+}
+
+/** Rebuild a main-process attachment (the open-time screenshot) as a held File. */
+function attachmentToFile(attachment: QuickQueryAttachment): File {
+  return new File([attachment.data], attachment.name, { type: attachment.mimeType });
 }
 
 /** jsdom's File lacks `arrayBuffer()`; FileReader covers that path in tests + older engines. */

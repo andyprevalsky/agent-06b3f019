@@ -2,10 +2,16 @@ import { app, BrowserWindow, globalShortcut, ipcMain, type WebContents } from 'e
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
-import type { QuickQueryHeldSubmit, QuickQueryPayload } from '../../shared/types/ipc';
+import type {
+  QuickQueryAttachment,
+  QuickQueryHeldSubmit,
+  QuickQueryPayload,
+  QuickQueryToggleState,
+} from '../../shared/types/ipc';
 import { HeldQuickQuerySubmits } from './quickQueryHeldSubmits';
 import { normalizeQuickQueryPayload } from './quickQueryPayload';
 import { scheduleQuickQueryFocusAttempts } from './quickQueryFocus';
+import { QuickQueryScreenshots } from './quickQueryScreenshot';
 import {
   LAUNCHER_WINDOW_HEIGHT,
   LAUNCHER_WINDOW_MAX_HEIGHT,
@@ -42,6 +48,7 @@ export class QuickQueryController {
   private focusTimeouts: NodeJS.Timeout[] = [];
   private shortcutsEnabled = false;
   private readonly heldSubmits = new HeldQuickQuerySubmits();
+  private readonly screenshots = new QuickQueryScreenshots();
 
   constructor(private readonly options: QuickQueryControllerOptions) {}
 
@@ -151,8 +158,9 @@ export class QuickQueryController {
 
       if (quickWindow.isVisible()) {
         this.hideWindow({ focusMain: true });
-      } else {
-        this.showWindow();
+      } else if (this.canShowWindow()) {
+        // Capture while the launcher is still hidden so the pill is not in the shot.
+        void this.screenshots.captureThen((screenshot) => this.showWindow(screenshot));
       }
     };
 
@@ -295,18 +303,20 @@ export class QuickQueryController {
     this.blurHideTimer = null;
   }
 
-  private showWindow(): void {
-    const quickWindow = this.quickQueryWindow;
-    if (quickWindow === null) return;
+  private canShowWindow(): boolean {
+    if (this.quickQueryWindow === null) return false;
 
     if (this.options.getOnboardingComplete() !== true) {
       console.log('[QuickQuery] Blocked show - onboarding not complete');
-      return;
+      return false;
     }
 
-    if (Date.now() - this.lastHiddenAt < 2000) {
-      return;
-    }
+    return Date.now() - this.lastHiddenAt >= 2000;
+  }
+
+  private showWindow(screenshot: QuickQueryAttachment | null): void {
+    const quickWindow = this.quickQueryWindow;
+    if (quickWindow === null || !this.canShowWindow()) return;
 
     this.cancelBlurHide();
     this.fileDragActive = false;
@@ -320,7 +330,7 @@ export class QuickQueryController {
     quickWindow.focusOnWebView();
     this.clearFocusTimeouts();
     scheduleQuickQueryFocusAttempts(quickWindow, this.focusTimeouts);
-    this.emitToggle(true);
+    this.emitToggle(screenshot === null ? { open: true } : { open: true, screenshot });
 
     setTimeout(() => {
       this.blurEnabled = true;
@@ -342,7 +352,7 @@ export class QuickQueryController {
     this.lastHiddenAt = Date.now();
     if (!quickWindow.isDestroyed()) {
       quickWindow.hide();
-      this.emitToggle(false);
+      this.emitToggle({ open: false });
     }
 
     const mainWindow = this.options.getMainWindow();
@@ -352,10 +362,10 @@ export class QuickQueryController {
     }
   }
 
-  private emitToggle(open: boolean): void {
+  private emitToggle(state: QuickQueryToggleState): void {
     const quickWindow = this.quickQueryWindow;
     if (quickWindow === null || quickWindow.isDestroyed()) return;
-    const send = () => quickWindow.webContents.send('quick-query:toggle', { open });
+    const send = () => quickWindow.webContents.send('quick-query:toggle', state);
 
     if (quickWindow.webContents.isLoading()) {
       quickWindow.webContents.once('did-finish-load', send);
