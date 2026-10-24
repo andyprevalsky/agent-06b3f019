@@ -772,8 +772,7 @@ def build_browser_authentication_contract(available_actions: List[str]) -> str:
         return contract
     return (
         "This authentication ladder applies to targetKind=browser. For targetKind=iphone, "
-        "use the native criticalReason contract: request help only for a blocking password "
-        "or user-only verification; ordinary phone navigation stays autonomous.\n"
+        "follow the Cloud iPhone skill's authentication rules instead.\n"
         + contract
     )
 
