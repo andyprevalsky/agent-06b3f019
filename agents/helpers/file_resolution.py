@@ -27,7 +27,7 @@ to full FilePointer objects (with storage URLs).
 
 import copy
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
@@ -355,7 +355,7 @@ async def _resolve_file_pointer_value(
             size_bytes=len(content),
         )
 
-        return asdict(fp), [fp]
+        return fp.to_dict(), [fp]
 
     except Exception as e:
         logger.error(

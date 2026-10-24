@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from typing import Any, AsyncIterator, Dict, Tuple
 
 import httpx
@@ -52,7 +51,7 @@ async def fetch_parent_attachments(
             file_pointers = extract_attachments_from_context(parent_messages)
 
             for fp in file_pointers:
-                fp_dict = asdict(fp)
+                fp_dict = fp.to_dict()
                 filename_to_pointer[fp.original_filename] = fp_dict
                 if fp.id:
                     all_pointers_by_id[fp.id] = fp_dict

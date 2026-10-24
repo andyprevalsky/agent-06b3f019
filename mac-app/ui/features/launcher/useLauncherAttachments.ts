@@ -10,6 +10,7 @@
  *   [drag_over] --drop--> [has_files]
  *   [has_files] --remove--> [has_files|idle]
  *   [has_files|idle] --toggle open--> [idle] (cleared)
+ *     --screenshot captured--> [has_files] (caller's screen held like a drop)
  */
 
 import { useCallback, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
@@ -30,7 +31,8 @@ export interface LauncherAttachmentsHandle {
   };
   addFiles: (files: FileList | File[]) => void;
   remove: (id: string) => void;
-  clear: () => void;
+  /** Drop every held file; on open, then hold the screenshot main captured. */
+  reset: (screenshot?: QuickQueryAttachment) => void;
   serializeForSubmit: () => Promise<QuickQueryAttachment[]>;
 }
 
@@ -41,24 +43,36 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
 
-  const addFiles = useCallback((files: FileList | File[]) => {
-    const { accepted, error } = acceptIncomingFiles(Array.from(files), attachmentsRef.current);
+  const hold = useCallback((files: File[], autoCaptured: boolean) => {
+    const { accepted, error } = acceptIncomingFiles(files, attachmentsRef.current, autoCaptured);
     setAttachError(error);
     if (accepted.length > 0) {
       setAttachments((prev) => [...prev, ...accepted]);
     }
   }, []);
 
+  const addFiles = useCallback(
+    (files: FileList | File[]) => hold(Array.from(files), false),
+    [hold]
+  );
+
   const remove = useCallback((id: string) => {
     setAttachError(null);
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
-  const clear = useCallback(() => {
-    setAttachError(null);
-    setIsDragOver(false);
-    setAttachments([]);
-  }, []);
+  const reset = useCallback(
+    (screenshot?: QuickQueryAttachment) => {
+      // hold() size-checks against the ref, which must not count the files
+      // being dropped here.
+      attachmentsRef.current = [];
+      setAttachError(null);
+      setIsDragOver(false);
+      setAttachments([]);
+      if (screenshot !== undefined) hold([attachmentToFile(screenshot)], true);
+    },
+    [hold]
+  );
 
   const serializeForSubmit = useCallback(async (): Promise<QuickQueryAttachment[]> => {
     return Promise.all(
@@ -67,6 +81,7 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
         mimeType: a.file.type || 'application/octet-stream',
         size: a.file.size,
         data: await readFileBytes(a.file),
+        ...(a.autoCaptured === true ? { autoCaptured: true } : {}),
       }))
     );
   }, []);
@@ -80,14 +95,15 @@ export function useLauncherAttachments(): LauncherAttachmentsHandle {
     dragHandlers,
     addFiles,
     remove,
-    clear,
+    reset,
     serializeForSubmit,
   };
 }
 
 function acceptIncomingFiles(
   incoming: File[],
-  current: LauncherLocalAttachment[]
+  current: LauncherLocalAttachment[],
+  autoCaptured: boolean
 ): { accepted: LauncherLocalAttachment[]; error: string | null } {
   let total = current.reduce((sum, a) => sum + a.file.size, 0);
   const accepted: LauncherLocalAttachment[] = [];
@@ -102,7 +118,7 @@ function acceptIncomingFiles(
       break;
     }
     total += file.size;
-    accepted.push({ id: crypto.randomUUID(), file });
+    accepted.push({ id: crypto.randomUUID(), file, ...(autoCaptured ? { autoCaptured } : {}) });
   }
   return { accepted, error };
 }
@@ -160,6 +176,11 @@ function useFileDragHandlers(
   );
 
   return { onDragOver, onDragLeave, onDrop };
+}
+
+/** Rebuild a main-process attachment (the open-time screenshot) as a held File. */
+function attachmentToFile(attachment: QuickQueryAttachment): File {
+  return new File([attachment.data], attachment.name, { type: attachment.mimeType });
 }
 
 /** jsdom's File lacks `arrayBuffer()`; FileReader covers that path in tests + older engines. */

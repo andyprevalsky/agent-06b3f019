@@ -246,7 +246,10 @@ async function uploadQuickLauncherAttachments(
   for (const attachment of pending) {
     try {
       const file = fileFromQuickLauncherAttachment(attachment);
-      pointers.push(await uploadAttachment(file));
+      const pointer = await uploadAttachment(file);
+      pointers.push(
+        attachment.autoCaptured === true ? { ...pointer, auto_captured: true } : pointer,
+      );
     } catch (error: unknown) {
       toast({
         title: 'Attachment upload failed',

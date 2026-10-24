@@ -40,6 +40,12 @@ TEXT_MIME_TYPES = {
 # Size threshold for inline content sent to LLM (20MB)
 INLINE_THRESHOLD = 20 * 1024 * 1024
 
+# Same wording as AUTO_CAPTURED_SCREENSHOT_NOTE in back-end/src/providers/chat/chatMultimodal.ts.
+AUTO_CAPTURED_SCREENSHOT_NOTE = (
+    "Rose captured this screenshot of the user's screen automatically when they opened the "
+    "quick launcher; the user did not choose to attach it, and it may not be relevant to their request."
+)
+
 
 @dataclass
 class FilePointer:
@@ -51,6 +57,8 @@ class FilePointer:
     mime_type: str
     size_bytes: int
     created_at: str
+    # Set by the Mac quick launcher on the screenshot it attaches automatically.
+    auto_captured: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FilePointer":
@@ -61,7 +69,15 @@ class FilePointer:
             mime_type=data.get("mime_type", ""),
             size_bytes=data.get("size_bytes", 0),
             created_at=data.get("created_at", ""),
+            auto_captured=data.get("auto_captured") is True,
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Backend FilePointer shape; ``auto_captured`` only when set."""
+        data = asdict(self)
+        if not self.auto_captured:
+            del data["auto_captured"]
+        return data
 
     def is_image(self) -> bool:
         return self.mime_type in IMAGE_MIME_TYPES
@@ -298,13 +314,16 @@ def build_attachment_metadata_text(
             "download and use it when given this original_filename."
         )
 
-    return (
+    text = (
         "file_pointer:\n"
         f"  original_filename: {file_pointer.original_filename}\n"
         f"  mime_type: {file_pointer.mime_type}\n"
         f"  size: {size_str}\n"
         f"  note: {note}"
     )
+    if file_pointer.auto_captured:
+        text += f"\n  auto_captured: {AUTO_CAPTURED_SCREENSHOT_NOTE}"
+    return text
 
 
 def build_file_pointer_label(original_filename: str) -> str:
@@ -526,7 +545,7 @@ async def fetch_parent_attachments_activity(parent_agent_id: str) -> Dict[str, D
 
             file_pointers = extract_attachments_from_context(parent_messages)
             for fp in file_pointers:
-                fp_dict = asdict(fp)
+                fp_dict = fp.to_dict()
                 filename_to_pointer[fp.original_filename] = fp_dict
                 if fp.id:
                     all_pointers_by_id[fp.id] = fp_dict

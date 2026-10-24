@@ -39,6 +39,7 @@ function normalizeAttachments(value: unknown): QuickQueryAttachment[] {
       mimeType,
       size: size > 0 ? size : data.byteLength,
       data,
+      ...(record.autoCaptured === true ? { autoCaptured: true } : {}),
     });
   }
   return attachments;

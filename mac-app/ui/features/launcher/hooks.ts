@@ -12,10 +12,11 @@
  *     [submitting] --err--> [has_text|has_files]
  *   [any] --Escape--> hideQuickQuery()
  *   toggle({open:true}) --> reset to [idle]
+ *   toggle({open:true, screenshot}) --> reset to [has_files] (screenshot held)
  *
  * System context (file attach):
- *   Desktop drag / paperclip → Launcher (hold File[]) → IPC bytes → Main window
- *     → uploadAttachment → createAgent(attachments)
+ *   Desktop drag / paperclip / Alt+Space screenshot → Launcher (hold File[])
+ *     → IPC bytes → Main window → uploadAttachment → createAgent(attachments)
  */
 
 import {
@@ -74,7 +75,8 @@ export interface LauncherHandle {
  * Orchestrates the launcher's lifecycle:
  *   - Subscribes to toggle + focus-input events on mount.
  *   - Resets the query/attachments and focuses the input when the main
- *     process re-opens the launcher ({ open: true }).
+ *     process re-opens the launcher ({ open: true }), holding the screenshot
+ *     of the caller's screen when main captured one.
  *   - Handles Escape → `hideQuickQuery()` at the window level.
  *   - Serializes held files into the submit IPC payload (no fetch here).
  */
@@ -83,8 +85,8 @@ export const useLauncher = (): LauncherHandle => {
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const attachments = useLauncherAttachments();
-  const clearAttachmentsRef = useRef(attachments.clear);
-  clearAttachmentsRef.current = attachments.clear;
+  const resetAttachmentsRef = useRef(attachments.reset);
+  resetAttachmentsRef.current = attachments.reset;
   const serializeAttachmentsRef = useRef(attachments.serializeForSubmit);
   serializeAttachmentsRef.current = attachments.serializeForSubmit;
   const attachmentCountRef = useRef(attachments.attachments.length);
@@ -95,7 +97,7 @@ export const useLauncher = (): LauncherHandle => {
       if (state.open) {
         setQuery('');
         setSubmitting(false);
-        clearAttachmentsRef.current();
+        resetAttachmentsRef.current(state.screenshot);
         setTimeout(() => inputRef.current?.focus(), LAUNCHER_FOCUS_DELAY_MS);
       }
     };

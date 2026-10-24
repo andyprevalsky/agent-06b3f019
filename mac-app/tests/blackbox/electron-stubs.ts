@@ -121,9 +121,17 @@ export function stubElectron(): void {
       unregisterAll: vi.fn(),
       isRegistered: vi.fn(() => false),
     },
+    desktopCapturer: {
+      getSources: vi.fn(() => Promise.resolve([])),
+    },
+    systemPreferences: {
+      getMediaAccessStatus: vi.fn(() => 'granted'),
+    },
     screen: {
       getCursorScreenPoint: vi.fn(() => ({ x: 0, y: 0 })),
       getDisplayNearestPoint: vi.fn(() => ({
+        id: 1,
+        size: { width: 1920, height: 1080 },
         workArea: { x: 0, y: 0, width: 1920, height: 1080 },
         bounds: { x: 0, y: 0, width: 1920, height: 1080 },
       })),
