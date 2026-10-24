@@ -678,6 +678,154 @@ def test_build_code_event_context_uses_json_and_extracted_files():
     assert '"extracted_output_files"' in context
 
 
+# ── handoff JSON contract (R3b, Andy 2026-10-24) ─────────────────────
+
+# The output_schema the parent declared for claude-code-agent 31f51d25
+# (descend-full69 j0026), verbatim.
+COLLATZ_OUTPUT_SCHEMA = {
+    "fields": [
+        {"name": "source_code", "type": "str", "required": True, "nullable": False, "properties": [],
+         "description": "Full Python source code of the program"},
+        {"name": "stdout", "type": "str", "required": True, "nullable": False, "properties": [],
+         "description": "Complete verbatim stdout of running the program"},
+        {"name": "collatz_sequence", "type": "list[int]", "required": True, "nullable": False, "properties": [],
+         "description": "Every number in the sequence from 27 to 1 in order"},
+        {"name": "total_steps", "type": "int", "required": True, "nullable": False, "properties": [],
+         "description": "Total steps from 27 to 1"},
+    ]
+}
+
+
+def _collatz_27() -> list[int]:
+    seq = [27]
+    while seq[-1] != 1:
+        n = seq[-1]
+        seq.append(n // 2 if n % 2 == 0 else 3 * n + 1)
+    return seq
+
+
+def _collatz_stream_events() -> list[dict]:
+    """Replay the 31f51d25 SDK stream shape: cumulative partial snapshots, then the final message."""
+    seq = _collatz_27()
+    final = (
+        "Program runs correctly, producing 112 numbers and 111 steps as expected.\n\n"
+        "**Verbatim stdout:**\n```\n" + ",".join(map(str, seq)) + "\nSteps: 111\n```\n\n"
+        "**Sequence as a list of integers** (112 numbers):\n```python\n" + repr(seq) + "\n```"
+    )
+    step = max(1, len(final) // 125)
+    partials = [
+        {"type": "agent_message", "item_id": "msg_1:0", "seq": i, "text": final[:end], "delta": "x", "partial": True}
+        for i, end in enumerate(range(step, len(final), step))
+    ]
+    return [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "python3 collatz.py"}},
+        *partials,
+        {"type": "agent_message", "item_id": "msg_1:0", "raw_type": "assistant", "text": final},
+        {"type": "result", "status": "completed"},
+    ]
+
+
+def _collatz_handoff() -> dict:
+    seq = _collatz_27()
+    return {
+        "source_code": "n = 27\n...",
+        "stdout": ",".join(map(str, seq)) + "\nSteps: 111\n",
+        "collatz_sequence": seq,
+        "total_steps": 111,
+    }
+
+
+async def _run_verifier_with_handoff(handoff, *, events=None, output_schema=None, output_files=None):
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=200, rows=50)
+    terminal.feed("[Claude] Program runs correctly, producing 112 numbers and 111 steps as expected.")
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=AssertionError("no verifier")),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        return await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="g",
+            model="rose-labs/rose-1-flash",
+            terminal=terminal,
+            action_summary=["ran collatz.py"],
+            output_schema=output_schema or COLLATZ_OUTPUT_SCHEMA,
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            output_files=output_files or [],
+            code_events=_collatz_stream_events() if events is None else events,
+            handoff=handoff,
+        )
+
+
+def test_handoff_json_schema_is_fixed_by_output_schema():
+    """The declared output_schema fixes the handoff JSON structure; file fields are sandbox paths."""
+    from domains.spawn_claude_code_agent.service import CODE_AGENT_HANDOFF_PATH, handoff_json_schema, handoff_task_text
+
+    schema = handoff_json_schema(
+        {
+            "fields": [
+                *COLLATZ_OUTPUT_SCHEMA["fields"],
+                {"name": "report", "type": "file_pointer", "required": False},
+            ]
+        }
+    )
+    assert schema["type"] == "object" and schema["additionalProperties"] is False
+    assert schema["required"] == ["source_code", "stdout", "collatz_sequence", "total_steps"]
+    assert schema["properties"]["collatz_sequence"] == {"type": "array", "items": {"type": "integer"}}
+    assert schema["properties"]["report"]["properties"]["path"]["type"] == "string"
+
+    text = handoff_task_text("Compute Collatz from 27.", COLLATZ_OUTPUT_SCHEMA)
+    assert text.startswith("Compute Collatz from 27.")
+    assert CODE_AGENT_HANDOFF_PATH == "/home/user/.rose/handoff.json"
+    assert CODE_AGENT_HANDOFF_PATH in text
+    assert json.dumps(handoff_json_schema(COLLATZ_OUTPUT_SCHEMA), sort_keys=True) in text
+
+
+async def test_handoff_valid_json_is_the_tool_result():
+    """A schema-valid handoff is returned as the structured response and the tool result; no event log."""
+    handoff = _collatz_handoff()
+    score, reasoning, struct, _i, _o = await _run_verifier_with_handoff(
+        {"status": "present", "content": json.dumps(handoff)}
+    )
+    assert struct == handoff, struct
+    assert score == 1.0, reasoning
+    assert json.dumps(handoff, ensure_ascii=False, indent=2) in reasoning, reasoning
+    assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
+
+
+async def test_handoff_missing_or_invalid_is_reported_truthfully():
+    """No handoff, unparseable JSON or a schema violation is stated plainly; nothing is inferred."""
+    cases = [
+        ({"status": "missing"}, "no handoff file"),
+        ({"status": "present", "content": "{not json"}, "not valid json"),
+        ({"status": "present", "content": json.dumps({**_collatz_handoff(), "total_steps": "111"})}, "total_steps"),
+        (None, "no handoff file"),
+    ]
+    for handoff, expected in cases:
+        score, reasoning, struct, _i, _o = await _run_verifier_with_handoff(handoff)
+        assert struct is None, (handoff, struct)
+        assert score < 1.0, (handoff, score)
+        assert "/home/user/.rose/handoff.json" in reasoning, reasoning
+        assert expected in reasoning.lower(), (expected, reasoning)
+        assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
+
+
+async def test_handoff_replay_31f51d25_result_is_bounded():
+    """Replay of j0026/31f51d25: the 125-snapshot stream used to make a 180k-char result."""
+    events = _collatz_stream_events()
+    raw = json.dumps(events, indent=2)
+    assert len(raw) > 80_000, len(raw)  # the replay reproduces the quadratic stream
+    for handoff in ({"status": "present", "content": json.dumps(_collatz_handoff())}, {"status": "missing"}):
+        _score, reasoning, _s, _i, _o = await _run_verifier_with_handoff(handoff, events=events)
+        assert len(reasoning) < 5_000, len(reasoning)
+
+
 # ── build_usage_items ────────────────────────────────────────────────
 
 
@@ -3832,6 +3980,10 @@ async def _run_all_tests():
     # _run_verifier
     await r.record_async("run_verifier_happy", _with_verifier_opt_in(test_run_verifier_happy_path))
     await r.record_async("run_verifier_off_by_default", test_run_verifier_off_by_default)
+    r.record("handoff_json_schema_fixed_by_output_schema", test_handoff_json_schema_is_fixed_by_output_schema)
+    await r.record_async("handoff_valid_json_is_tool_result", test_handoff_valid_json_is_the_tool_result)
+    await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
+    await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)
     await r.record_async(
         "run_verifier_disabled_schema_incomplete",
         test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
