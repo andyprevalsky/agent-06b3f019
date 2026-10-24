@@ -68,6 +68,7 @@ export {
   extractUpdatePayload,
   extractDeletePayload,
   extractInsertDeferredPayload,
+  extractInsertEncodedPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -96,6 +97,7 @@ import {
   extractUpdatePayload,
   extractDeletePayload,
   extractInsertDeferredPayload,
+  extractInsertEncodedPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -223,7 +225,7 @@ export async function subscribeToChannel(
  */
 export interface AgentHandlers {
   onInsert?: (payload: InsertMessagePayload) => void;
-  /** A committed message whose INSERT frame was refused; fetch it by ID. */
+  /** A committed message that could not be streamed live; show its reason, fetch it by ID. */
   onInsertDeferred?: (payload: InsertDeferredPayload) => void;
   onUpdate?: (payload: UpdateAgentPayload) => void;
   onDelete?: (payload: DeleteMessagePayload) => void;
@@ -258,6 +260,11 @@ export async function subscribeToAgent(
   if (handlers.onInsert) {
     eventHandlers['INSERT'] = (wrapper: unknown) => {
       const record = extractInsertPayload(wrapper);
+      if (record) handlers.onInsert!(record);
+    };
+    // The same committed record, re-sent base64-encoded after a refused frame.
+    eventHandlers['INSERT_ENCODED'] = (wrapper: unknown) => {
+      const record = extractInsertEncodedPayload(wrapper);
       if (record) handlers.onInsert!(record);
     };
   }

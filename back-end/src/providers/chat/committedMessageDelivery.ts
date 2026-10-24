@@ -226,11 +226,29 @@ export class CommittedMessageDelivery<
     private readonly resend: (values: T[]) => Promise<BroadcastOutcome>,
     private readonly batchLimit: number,
     private readonly firstBudget: (topic: string) => { messages: number; bytes: number },
-    /** Content-free notice that a committed row exists and must be fetched. */
-    private readonly deferredNotice: (value: T) => T
+    /**
+     * Ordered substitutes for a deterministically refused INSERT, one send each:
+     * the same record in another encoding, then a bounded notice to fetch it.
+     */
+    private readonly rejectionFallbacks: ReadonlyArray<{ name: string; map: (value: T) => T }>,
+    /** Bounded stand-in for one record larger than a whole agent lane. */
+    private readonly oversizeSubstitute: (value: T) => T
   ) {}
 
-  enqueue(value: T, bytes: number): void {
+  enqueue(original: T, originalBytes: number): void {
+    let value = original;
+    let bytes = originalBytes;
+    if (bytes > MAX_AGENT_BYTES) {
+      log.error('Committed INSERT delivery rejected', {
+        topic: value.topic,
+        message_id: value.payload.id,
+        reason: 'oversize',
+        bytes,
+        substitute: 'INSERT_DEFERRED',
+      });
+      value = this.oversizeSubstitute(value);
+      bytes = Buffer.byteLength(JSON.stringify(value.payload)) + Buffer.byteLength(value.topic);
+    }
     const shard = this.shards[topicShardIndex(value.topic)];
     let lane = shard.lanes.get(value.topic);
     if (
@@ -316,20 +334,23 @@ export class CommittedMessageDelivery<
       );
       if (!result.ok && isContentRejection(result)) {
         // Resending identical bytes cannot pass a deterministic rejection such
-        // as an edge WAF rule. Tell subscribers which committed row to fetch.
-        const notice = await this.resendBounded(
-          shard,
-          cohort.map((member) => ({ ...member, value: this.deferredNotice(member.value) }))
-        );
-        for (const member of cohort) {
-          log.warn('Committed INSERT content rejected; sent deferred notice', {
-            topic: member.value.topic,
-            message_id: member.value.payload.id,
-            status: result.status,
-            notice_status: notice.status,
-          });
+        // as an edge WAF rule. Try each substitute frame once, in order.
+        for (const fallback of this.rejectionFallbacks) {
+          const outcome = await this.resendBounded(
+            shard,
+            cohort.map((member) => ({ ...member, value: fallback.map(member.value) }))
+          );
+          for (const member of cohort) {
+            log.warn('Committed INSERT content rejected; sent substitute frame', {
+              topic: member.value.topic,
+              message_id: member.value.payload.id,
+              status: result.status,
+              substitute: fallback.name,
+              substitute_status: outcome.status,
+            });
+          }
+          if (outcome.ok) return;
         }
-        if (notice.ok) return;
       }
       if (!result.ok) {
         for (const member of cohort) {

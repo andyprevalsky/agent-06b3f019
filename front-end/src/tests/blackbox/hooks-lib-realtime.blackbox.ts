@@ -152,13 +152,61 @@ describe('lib/realtime', () => {
     );
     const onInsertDeferred = vi.fn();
     await real.subscribeToAgent('a-deferred', { onInsertDeferred });
-    // Exactly the identifier-only record the backend sends after a 403/4xx.
-    const record = { agentId: 'a-deferred', id: '75e5af12-8b66-4b72-b061-3be30ce4308d' };
+    // Exactly the content-free record the backend sends when a row cannot stream.
+    const record = {
+      agentId: 'a-deferred',
+      id: '75e5af12-8b66-4b72-b061-3be30ce4308d',
+      timestamp: '2026-10-23T23:18:43.499Z',
+      role: 'TOOL',
+      reason: 'This message contained content that was blocked from live streaming to the app.',
+      metadata: { toolName: 'spawn_claude_code_agent', toolStatus: 'FINISHED', success: true },
+    };
     eventMap['INSERT_DEFERRED']?.({ payload: { record } });
-    eventMap['INSERT_DEFERRED']?.({ payload: { record: { agentId: 'a-deferred', id: '' } } });
-    eventMap['INSERT_DEFERRED']?.({ payload: { record: { id: record.id } } });
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: { ...record, id: '' } } });
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: { ...record, reason: undefined } } });
     expect(onInsertDeferred).toHaveBeenCalledTimes(1);
     expect(onInsertDeferred).toHaveBeenCalledWith(record);
+  });
+
+  it('subscribeToAgent: decodes an INSERT_ENCODED frame into the normal INSERT callback', async () => {
+    const stub = setupChannelStub(['SUBSCRIBED']);
+    const eventMap: Record<string, (w: unknown) => void> = {};
+    stub.channel.on.mockImplementation(
+      (_type: string, cfg: { event: string }, handler: (w: unknown) => void) => {
+        eventMap[cfg.event] = handler;
+        return stub.channel;
+      },
+    );
+    const onInsert = vi.fn();
+    await real.subscribeToAgent('a-encoded', { onInsert });
+    const content = {
+      text: 'ran `curl -L --fail --silent https://x -o /tmp/a` — café ✓',
+      metadata: { toolName: 'spawn_claude_code_agent', toolStatus: 'FINISHED', toolCallId: 'c1' },
+      filePointer: null,
+    };
+    // Node's Buffer is the backend encoder; the browser decoder must match it.
+    const data = Buffer.from(JSON.stringify(content), 'utf8').toString('base64');
+    const identity = {
+      agentId: 'a-encoded',
+      id: 'row-1',
+      timestamp: '2026-10-23T23:18:43.499Z',
+      role: 'TOOL',
+    };
+    eventMap['INSERT_ENCODED']?.({
+      payload: { record: { ...identity, encoding: 'base64', data } },
+    });
+    eventMap['INSERT_ENCODED']?.({
+      payload: { record: { ...identity, encoding: 'base64', data: '%%' } },
+    });
+    eventMap['INSERT_ENCODED']?.({ payload: { record: { ...identity, data } } });
+    expect(onInsert).toHaveBeenCalledTimes(1);
+    expect(onInsert).toHaveBeenCalledWith({
+      ...identity,
+      text: content.text,
+      metadata: content.metadata,
+      filePointer: null,
+      file_pointer: null,
+    });
   });
 
   it('subscribeToAgent: rejects on CHANNEL_ERROR before resolve', async () => {

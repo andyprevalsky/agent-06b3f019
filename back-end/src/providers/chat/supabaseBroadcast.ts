@@ -10,6 +10,11 @@
  *   Router DONE + clear_on_done -> frontend removes bubble
  *   Generator RESPONSE -> ATTENTION_STREAM accumulated frames -> keyed TOOL INSERT
  *   Python worker stream payloads -> unchanged; drain priority is never serialized
+ *   Committed INSERT refused with a non-retryable 4xx (e.g. edge WAF 403)
+ *     -> INSERT_ENCODED (same record, base64 content) -> INSERT_DEFERRED
+ *        (ids + tool lifecycle + visible reason; client reads the row by id)
+ *   Committed INSERT larger than one agent lane -> INSERT_DEFERRED with the
+ *        oversize reason instead of being dropped
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -75,12 +80,45 @@ const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
   (items) => sendBroadcastBatch(items),
   BROADCAST_BATCH_SIZE,
   (topic) => initialDispatcher.admissionBudget(topic),
-  (item) => ({
+  [
+    { name: 'INSERT_ENCODED', map: encodedInsert },
+    { name: 'INSERT_DEFERRED', map: (item) => deferredInsert(item, BLOCKED_STREAM_REASON) },
+  ],
+  (item) => deferredInsert(item, OVERSIZE_STREAM_REASON)
+);
+
+/** Shown in place of a row whose live frame was refused, until the client reads it. */
+export const BLOCKED_STREAM_REASON =
+  'This message contained content that was blocked from live streaming to the app.';
+export const OVERSIZE_STREAM_REASON =
+  'This message is too large to stream live; loading it from the server.';
+
+/** The identical record with its content fields as one base64 JSON blob. */
+function encodedInsert(item: QueuedBroadcast): QueuedBroadcast {
+  const { agentId, id, timestamp, role, text, metadata, filePointer } = item.payload;
+  const data = Buffer.from(JSON.stringify({ text, metadata, filePointer }), 'utf8');
+  return {
+    ...item,
+    event: 'INSERT_ENCODED',
+    payload: { agentId, id, timestamp, role, encoding: 'base64', data: data.toString('base64') },
+  };
+}
+
+/** Identifiers, tool lifecycle scalars and a visible reason; no row content. */
+function deferredInsert(item: QueuedBroadcast, reason: string): QueuedBroadcast {
+  const { agentId, id, timestamp, role, metadata } = item.payload;
+  const source = (metadata ?? {}) as Record<string, unknown>;
+  const lifecycle: Record<string, unknown> = {};
+  for (const key of ['toolName', 'toolStatus', 'toolCallId']) {
+    if (typeof source[key] === 'string') lifecycle[key] = source[key];
+  }
+  if (typeof source.success === 'boolean') lifecycle.success = source.success;
+  return {
     ...item,
     event: 'INSERT_DEFERRED',
-    payload: { agentId: item.payload.agentId, id: item.payload.id },
-  })
-);
+    payload: { agentId, id, timestamp, role, reason, metadata: lifecycle },
+  };
+}
 
 interface AssistantStreamOptions {
   /** Remove a purely ephemeral stream at its terminal event. */

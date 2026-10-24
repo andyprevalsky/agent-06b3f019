@@ -1,14 +1,16 @@
 /**
  * INSERT handling for the selected agent's realtime channel.
  *
- *   INSERT {row}
+ *   INSERT {row} | INSERT_ENCODED {row, base64 content; decoded in the extractor}
  *     -> other agent / scope inactive / id already claimed -> ignore
  *     -> claim id -> cloud-mode, stream and message updates -> activity notice
- *   INSERT_DEFERRED {agentId, id}   (the transport refused the row's full frame)
+ *   INSERT_DEFERRED {ids, tool lifecycle, reason}   (row could not stream live)
  *     -> other agent / scope inactive / id already claimed -> ignore
+ *     -> INSERT path above with a placeholder row whose body is the reason
+ *        (closes the tool card, keeps ordering)
  *     -> GET /agents/:agentId/messages/:id (bounded by a request timeout)
- *          -> ok      -> the INSERT path above with the canonical row
- *          -> failure -> warn; the next subscribe reconcile reads the snapshot
+ *          -> ok      -> replace the placeholder with the canonical row
+ *          -> failure -> warn; the placeholder and its reason stay visible
  */
 import type { InsertDeferredPayload, InsertMessagePayload } from '@/lib/realtime';
 import { notifyOpenAgentActivity } from '@/lib/openAgentActivity';
@@ -56,24 +58,27 @@ export function createInsertHandlers(
     notifyOpenAgentActivity({ agentId, kind: 'message' });
   };
 
-  /** Read only the refused row, then apply it exactly as a delivered INSERT. */
+  /** Show the reason in place of the row, then read only that row and swap it in. */
   const onInsertDeferred = (deferred: InsertDeferredPayload) => {
     if (!active() || deferred.agentId !== agentId) return;
     if (receivedRef.current.ids.has(deferred.id)) return;
+    onInsert({
+      agentId,
+      id: deferred.id,
+      timestamp: deferred.timestamp,
+      text: deferred.reason,
+      role: deferred.role,
+      metadata: { ...deferred.metadata, liveStreamBlocked: true },
+    });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS);
     void fetchAgentMessage(agentId, deferred.id, controller.signal)
-      .then((message) =>
-        onInsert({
-          agentId,
-          id: message.message_id,
-          timestamp: message.timestamp,
-          text: message.text,
-          role: message.role,
-          metadata: (message.metadata as InsertMessagePayload['metadata']) ?? null,
-          file_pointer: message.file_pointer ?? null,
-        }),
-      )
+      .then((row) => {
+        if (!active()) return;
+        setters.setMessages((previous) =>
+          previous.map((message) => (message.message_id === row.message_id ? row : message)),
+        );
+      })
       .catch((error: unknown) => {
         if (active()) console.warn('AgentContext: deferred INSERT hydration failed', error);
       })

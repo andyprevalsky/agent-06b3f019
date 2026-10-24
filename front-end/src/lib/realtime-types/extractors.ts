@@ -105,8 +105,37 @@ export function extractInsertDeferredPayload(wrapper: unknown): InsertDeferredPa
     const record = p as Record<string, unknown>;
     if (typeof record.agentId !== 'string') return 'Missing or invalid agentId';
     if (typeof record.id !== 'string' || record.id === '') return 'Missing or invalid id';
+    if (typeof record.timestamp !== 'string') return 'Missing or invalid timestamp';
+    if (!['SYSTEM', 'ASSISTANT', 'USER', 'TOOL'].includes(record.role as string)) {
+      return 'Missing or invalid role';
+    }
+    if (typeof record.reason !== 'string' || record.reason === '') return 'Missing reason';
     return null;
   });
+}
+
+/**
+ * Extract an INSERT_ENCODED frame: the same committed record with its content
+ * fields as one base64 JSON blob (sent when the plain frame was refused).
+ * Decodes it, then applies the normal INSERT validation and transforms.
+ */
+export function extractInsertEncodedPayload(wrapper: unknown): InsertMessagePayload | null {
+  const record = (wrapper as { payload?: { record?: Record<string, unknown> } } | null)?.payload
+    ?.record;
+  if (record?.encoding !== 'base64' || typeof record.data !== 'string') {
+    console.error('❌ [Realtime] Unknown Message Type for INSERT_ENCODED: bad encoding', record);
+    return null;
+  }
+  let content: Record<string, unknown>;
+  try {
+    const bytes = Uint8Array.from(atob(record.data), (char) => char.charCodeAt(0));
+    content = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+  } catch (error) {
+    console.error('❌ [Realtime] Undecodable INSERT_ENCODED payload', error);
+    return null;
+  }
+  const { encoding: _encoding, data: _data, ...identity } = record;
+  return extractInsertPayload({ payload: { record: { ...identity, ...content } } });
 }
 
 /**

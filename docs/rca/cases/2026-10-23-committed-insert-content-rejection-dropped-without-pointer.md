@@ -73,46 +73,65 @@ waf-blocked exists`, RESULTS 10/11.
 
 ## Solution
 
-Back end: after a non-retryable 4xx for a committed INSERT cohort,
-`CommittedMessageDelivery` sends one `INSERT_DEFERRED` frame per member
-carrying only `{agentId, id}`. It goes through the existing bounded retry path,
-so it is retried only on transient statuses. The full record is never resent.
-If the notice is also refused, the existing "delivery exhausted" receipt is
-kept. A new `GET /api/agents/:id/messages/:messageId` reads one row by primary
-key with the agent-detail access rules (owner, internal, admin inspection).
+The DB write succeeded (Message create 23:18:43.498Z, POST 201 at .504Z); only
+the realtime push was refused (.536Z). After a non-retryable 4xx on a committed
+INSERT, `CommittedMessageDelivery` now tries ordered substitutes, one send each,
+and never resends the plain record:
 
-Front end: `subscribeToAgent` validates `INSERT_DEFERRED`. The selected-agent
-handler fetches only that row (with the existing 10 s backfill request timeout),
-then replays it through the unchanged INSERT path: id claim, stream/plan/tool
-settlement, cloud-mode transitions, dispatch. A failed read keeps the existing
-reconnect reconcile as the backstop.
+1. `INSERT_ENCODED`: the identical record, with text/metadata/filePointer as one
+   base64 JSON blob (`encoding: "base64"`). The FE extractor decodes it into the
+   normal INSERT path.
+2. If that is also refused, `INSERT_DEFERRED`: ids, timestamp, role, the tool
+   lifecycle scalars (toolName/toolStatus/toolCallId/success) and a visible
+   reason. The UI shows the reason as the message body at once, which also
+   closes the tool card. It then reads only that row with
+   `GET /api/agents/:id/messages/:messageId` and swaps it in. If the read fails,
+   the reason stays visible.
 
-10k agents: no new channel, subscription or fan-in. Per refused row: one extra
-broadcast (~100 bytes) and one PK lookup per viewing client. Nothing happens on
-the healthy path. A full agent-detail refetch was rejected because it costs
-O(messages) per notice on long agents.
+A record larger than one agent lane (256 KB) used to be dropped at enqueue
+(`delivery rejected reason=capacity`; sibling R6, Display HTML of 285-311 KB in
+r001-j0014 and r005-j0070). It now gets the same `INSERT_DEFERRED` placeholder
+with the reason "too large to stream live; loading it from the server."
 
-Also prevents: innocent rows sharing a refused batch (each cohort gets its own
-notice), and any other deterministic 4xx from the broker (400/413).
+Live proof on the real path (`COMMITTED_BROADCAST_LIVE=1 npx tsx
+src/tests/blackbox/committed-message-broadcast.blackbox.ts`, our Supabase
+project, real publisher, real subscriber, 158 KB record carrying the recorded
+command): wire `[INSERT 403, INSERT_ENCODED 202]`, and the subscriber received
+INSERT_ENCODED and decoded the full text and metadata intact. Supabase's
+websocket send path was not used: the backend has no realtime socket client,
+and one would add a connection per process.
+
+10k agents: no new channel, subscription or shared structure. Per refused row:
+one extra frame of ~1.33x the size on the agent's own topic. Only when that is
+also refused: one ~400-byte placeholder plus one PK read per viewing client.
+The healthy path is unchanged.
 
 Golden reference: `claude-code-src/src/cli/transports/SerialBatchEventUploader.ts:12`
 drops a batch that cannot be sent but counts it. `claude-code-src/src/bridge/replBridge.ts:217`
 then has the reader resume from the durable store (`from_sequence_num`) rather
-than trusting push delivery. This fix converges on that model: the push frame
+than trusting push delivery. The placeholder path converges on that model: push
 is a hint, the DB row is authoritative, and the reader pulls what it missed.
-It uses a per-row pointer instead of a sequence cursor.
 
 Related case: 2026-10-13-committed-broadcast-discarded-after-timeout (same queue, transient
 failures; its non-retryable 403 branch is where this gap lived).
 
 ## Human feedback
 
-The parent coordinator required rehydrating only the deferred row by ID rather
-than refetching the whole agent detail (10k-agent rule). It also required
-flagging the new realtime payload type as an approval-gated schema change.
+- The parent coordinator required rehydrating only the deferred row by ID
+  rather than refetching the whole agent detail (10k-agent rule). It also
+  required flagging the new realtime payload type as an approval-gated schema
+  change.
+- Andy (2026-10-24): "if its just a ui stream issue, can we force the push
+  somehow, if we do default to a smaller msg, the message should include a
+  reason we truncated the fe UI (which is honestly ok) ... along w the successs
+  thing". This produced the base64 force-push first and the reason placeholder
+  carrying the tool success status second.
+- The parent asked that the oversize capacity drop (R6) use the same
+  placeholder with its own reason.
 
 ## Reusable lesson
 
-When a broker deterministically refuses a committed record's bytes, send a
-content-free pointer and let the client read the row from the source of truth;
-never resend the content or drop the row silently.
+When a broker deterministically refuses a committed record's bytes, re-send it
+once in a different encoding, then fall back to a visible content-free
+placeholder that the client fills from the source of truth; never drop the row
+silently.

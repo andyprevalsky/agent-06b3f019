@@ -3,19 +3,35 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { blockedRecord, decodeEncoded } from './committed-message-broadcast.fixtures';
 
-// Exercise the public publisher against an ambiguous broker result, rather
-// than importing a retry helper or modifying the production request deadline.
-process.env.SUPABASE_URL = 'https://broadcast.blackbox.invalid';
-process.env.SUPABASE_SERVICE_ROLE_KEY = 'blackbox-service-key';
+import { config as loadEnv } from 'dotenv';
+
+// COMMITTED_BROADCAST_LIVE=1 sends a known WAF-blocked record through the real
+// publisher to the configured Supabase project and observes it with a real
+// subscriber. The default offline mode replays recorded broker responses.
+const LIVE = process.env.COMMITTED_BROADCAST_LIVE === '1';
+if (LIVE) {
+  loadEnv({ path: join(__dirname, '../../../.env') });
+} else {
+  // Exercise the public publisher against an ambiguous broker result, rather
+  // than importing a retry helper or modifying the production request deadline.
+  process.env.SUPABASE_URL = 'https://broadcast.blackbox.invalid';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'blackbox-service-key';
+}
 process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '0';
 process.env.SUPABASE_BROADCAST_TIMEOUT_MS = '2000';
 process.env.SUPABASE_BROADCAST_BATCH_SIZE = '1';
 async function main() {
+  if (LIVE) return (await import('./committed-message-broadcast.live')).liveMain();
   const publisher = await import('../../providers/chat/supabaseBroadcast');
   const originalFetch = globalThis.fetch;
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-  type WireMessage = { topic: string; event: string; payload: { record: { id?: string } } };
+  type WireMessage = {
+    topic: string;
+    event: string;
+    payload: { record: Record<string, unknown> & { id?: string } };
+  };
   const bodyMessages = (init?: RequestInit): WireMessage[] =>
     (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
   const message = (id: string) => ({
@@ -149,8 +165,8 @@ async function main() {
         await publisher.__flushBroadcastQueueForTests();
         assert.deepEqual(
           events,
-          ['INSERT', 'INSERT_DEFERRED'],
-          'permission failures must not resend the record; one content-free notice is the only follow-up'
+          ['INSERT', 'INSERT_ENCODED', 'INSERT_DEFERRED'],
+          'permission failures never resend the plain record; each substitute is sent once'
         );
         assert(
           receipts.some(
@@ -163,55 +179,73 @@ async function main() {
       }
     });
 
-    await test('a content-rejected committed INSERT still tells the client which row to fetch', async () => {
+    await test('a content-rejected committed INSERT is forced through once in base64', async () => {
       // Replays descend-full69 r004-j0049: Supabase's edge WAF returned this
       // 403 page for every INSERT whose record carried the codex shell command.
       const wafPage = readFileSync(
         join(__dirname, '../fixtures/supabase-broadcast-waf-403-a4f47669fe39d6d3.html'),
         'utf8'
       );
-      const blockedCommand =
-        "/bin/bash -lc \"rg --files -g 'AGENTS.md' -g 'report-display-format.md' -g 'index.css' /home/user 2>/dev/null | head -80; mkdir -p /home/user/output; curl -L --fail --silent https://raw.githubusercontent.com/Rose-Ai-Labs/rose/main/.claude/shared/report-display-format.md -o /tmp/rose-report-format.md; curl -L --fail --silent https://raw.githubusercontent.com/Rose-Ai-Labs/rose/main/front-end/src/index.css -o /tmp/rose-index.css; sed -n '1,240p' /tmp/rose-report-format.md; sed -n '1,240p' /tmp/rose-index.css\"";
-      const sent: WireMessage[][] = [];
+      const sent: WireMessage[] = [];
       const delivered: WireMessage[] = [];
       globalThis.fetch = (async (_url, init) => {
         const rows = bodyMessages(init);
-        sent.push(rows);
+        sent.push(...rows);
         if (String(init?.body).includes('curl -L --fail --silent')) {
           return new Response(wafPage, { status: 403, headers: { 'content-type': 'text/html' } });
         }
         delivered.push(...rows);
         return new Response('', { status: 202 });
       }) as typeof fetch;
-      await publisher.broadcastMessageInsert('waf-agent', {
-        id: 'waf-blocked',
-        timestamp: new Date('2026-10-23T23:18:43.499Z'),
-        text: `Code-agent SDK event JSON:\n${JSON.stringify({ command: blockedCommand })}`,
-        role: 'TOOL',
-        metadata: {
-          toolName: 'spawn_claude_code_agent',
-          toolStatus: 'FINISHED',
-          toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
-        },
-      });
+      const record = blockedRecord('waf-blocked');
+      await publisher.broadcastMessageInsert('waf-agent', record);
       await publisher.__flushBroadcastQueueForTests();
-      const fullSends = sent.filter((rows) =>
-        rows.some((row) => row.event === 'INSERT' && row.payload.record.id === 'waf-blocked')
-      );
-      assert.equal(
-        fullSends.length,
-        1,
-        'a deterministic content rejection must not resend the record'
-      );
-      const notice = delivered.find(
-        (row) => row.topic === 'agent:waf-agent' && row.payload.record.id === 'waf-blocked'
-      );
-      assert(notice, 'the subscribed client must learn that committed row waf-blocked exists');
-      assert.equal(notice.event, 'INSERT_DEFERRED');
       assert.deepEqual(
-        Object.keys(notice.payload.record).sort(),
-        ['agentId', 'id'],
-        'the notice carries identifiers only, never the rejected content'
+        sent.map((row) => row.event),
+        ['INSERT', 'INSERT_ENCODED'],
+        'one plain send, then exactly one forced send of the same record'
+      );
+      const forced = delivered.find((row) => row.payload.record.id === 'waf-blocked');
+      assert(forced, 'the subscribed client must receive committed row waf-blocked');
+      assert.equal(forced.topic, 'agent:waf-agent');
+      assert.equal(forced.event, 'INSERT_ENCODED');
+      const decoded = decodeEncoded(forced.payload.record);
+      assert.equal(decoded.text, record.text, 'the forced frame carries the full text');
+      assert.deepEqual(decoded.metadata, record.metadata);
+    });
+
+    await test('when the forced frame is also refused the client gets a visible reason and the id', async () => {
+      const sent: WireMessage[] = [];
+      const delivered: WireMessage[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        sent.push(...rows);
+        if (rows.some((row) => row.event !== 'INSERT_DEFERRED')) {
+          return new Response('blocked', { status: 403 });
+        }
+        delivered.push(...rows);
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      await publisher.broadcastMessageInsert('waf-agent', blockedRecord('waf-both-blocked'));
+      await publisher.__flushBroadcastQueueForTests();
+      assert.deepEqual(
+        sent.map((row) => row.event),
+        ['INSERT', 'INSERT_ENCODED', 'INSERT_DEFERRED']
+      );
+      const notice = delivered[0]?.payload.record as Record<string, unknown> | undefined;
+      assert(notice, 'the subscribed client must learn that committed row waf-both-blocked exists');
+      assert.equal(notice.id, 'waf-both-blocked');
+      assert.equal(notice.reason, publisher.BLOCKED_STREAM_REASON);
+      assert.deepEqual(notice.metadata, {
+        toolName: 'spawn_claude_code_agent',
+        toolStatus: 'FINISHED',
+        toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
+        success: true,
+      });
+      assert.deepEqual(
+        Object.keys(notice).sort(),
+        ['agentId', 'id', 'metadata', 'reason', 'role', 'timestamp'],
+        'the placeholder never carries the refused content'
       );
     });
 
@@ -227,7 +261,9 @@ async function main() {
         release = resolve;
       });
       const sent: string[] = [];
+      const frames: WireMessage[] = [];
       globalThis.fetch = (async (_url, init) => {
+        frames.push(...bodyMessages(init));
         sent.push(...bodyMessages(init).map((row) => row.payload.record.id!));
         await gate;
         return new Response('', { status: 202 });
@@ -247,11 +283,19 @@ async function main() {
           text: 'x'.repeat(256 * 1024),
         });
         await publisher.__flushBroadcastQueueForTests();
-        assert.equal(
-          sent.length,
-          before,
-          'an oversized notification must not bypass byte admission'
+        assert.deepEqual(
+          sent.slice(before),
+          ['oversized'],
+          'an oversized row must still be announced to the client'
         );
+        const substitute = frames.at(-1)!;
+        assert.equal(
+          substitute.event,
+          'INSERT_DEFERRED',
+          'its content must not bypass byte admission'
+        );
+        assert.equal(substitute.payload.record.reason, publisher.OVERSIZE_STREAM_REASON);
+        assert.equal(substitute.payload.record.text, undefined);
         assert(
           receipts.some((line) => line.includes('delivery rejected') && line.includes('oversized'))
         );
