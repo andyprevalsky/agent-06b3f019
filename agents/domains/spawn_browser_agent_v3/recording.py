@@ -282,6 +282,14 @@ def _kernel_api_base() -> str:
     return (os.getenv("KERNEL_API_BASE_URL") or "https://api.onkernel.com").rstrip("/")
 
 
+def _kernel_response_body(response: Any) -> str:
+    """Bounded provider error text for a failed Kernel replay request."""
+    content = getattr(response, "content", b"") or b""
+    if isinstance(content, bytes):
+        return content[:300].decode("utf-8", "replace")
+    return str(content)[:300]
+
+
 def _kernel_replay_headers() -> Optional[Dict[str, str]]:
     api_key = os.getenv("KERNEL_API_KEY", "").strip()
     if not api_key:
@@ -1358,12 +1366,23 @@ class BrowserAgentRecorder:
                             f"{base}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
                             headers=headers,
                         )
-                        stop_response.raise_for_status()
+                        if stop_response.status_code >= 400:
+                            # Keep Kernel's error body: the status line alone cannot
+                            # tell an already-stopped replay from a closed session.
+                            logger.warning(
+                                "Kernel replay stop failed; reading persisted replay anyway",
+                                agent_id=self.agent_id,
+                                task_id=self.task_id,
+                                replay_id=self._kernel_replay_id,
+                                status_code=stop_response.status_code,
+                                error=_kernel_response_body(stop_response),
+                            )
                     except Exception as exc:  # noqa: BLE001 — best-effort stop
                         logger.warning(
                             "Kernel replay stop failed; reading persisted replay anyway",
                             agent_id=self.agent_id,
                             task_id=self.task_id,
+                            replay_id=self._kernel_replay_id,
                             error=str(exc)[:300],
                         )
                 response = await client.get(f"{base}/browsers/{self.session_id}/replays", headers=headers)

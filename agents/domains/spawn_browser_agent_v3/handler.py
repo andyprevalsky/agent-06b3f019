@@ -4964,6 +4964,19 @@ def _recording_part_metadata(browser_recorder: Any) -> Dict[str, Any]:
     return {"recording_started_at": started_at} if isinstance(started_at, str) and started_at else {}
 
 
+async def _stop_kernel_replay_before_session_close(browser_recorder: Optional[Any]) -> None:
+    """Stop Kernel's native replay while its browser is still open.
+
+    Kernel rejects ``POST .../replays/{id}/stop`` with HTTP 400 once the session
+    is paused or closed, and every terminal path closes the session before the
+    background FE finalizer runs. Stopping here makes that finalizer's own stop a
+    no-op (``stop_kernel_replay`` is idempotent) while it still saves the replay.
+    """
+    if browser_recorder is None or not getattr(browser_recorder, "uses_kernel_replay", False):
+        return
+    await browser_recorder.stop_kernel_replay()
+
+
 async def _finalize_kernel_replay_for_fe(
     *,
     browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
@@ -7952,6 +7965,7 @@ async def _spawn_browser_agent_activity_v3_real(
         exact_session_id: str, pause: bool = False, current_url: str = ""
     ) -> None:
         nonlocal cleanup_failure
+        await _stop_kernel_replay_before_session_close(browser_recorder)
         try:
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
