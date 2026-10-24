@@ -392,7 +392,11 @@ cloudbench_outcome_ok() {  # sets OUTCOME_OK=1/0 from FINISHED TIMED_OUT BENCH_E
     # 410 catch-up, leaving FINISHED=0 / BENCH_EXIT=1 even when the collected run
     # JSON validates --require-pass. Prefer validated pass artifacts over the
     # terminal-lifecycle race — same evidence the hub already trusts.
-    if [ "$TIMED_OUT" = "0" ] \
+    # An observed exit (FINISHED=1) is authoritative: run.json is saved before
+    # post-run gates (cache/memory ratchets), so a nonzero exit with a passing
+    # artifact is a real gate failure, never a race to recover from.
+    if [ "$FINISHED" != "1" ] \
+        && [ "$TIMED_OUT" = "0" ] \
         && [ "$RUN_IDENTITY_OK" = "1" ] \
         && [ "$RUN_PASS_OK" = "1" ] \
         && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
