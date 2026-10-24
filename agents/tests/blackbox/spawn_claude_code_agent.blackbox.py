@@ -777,7 +777,11 @@ def test_handoff_json_schema_is_fixed_by_output_schema():
     )
     assert schema["type"] == "object" and schema["additionalProperties"] is False
     assert schema["required"] == ["source_code", "stdout", "collatz_sequence", "total_steps"]
-    assert schema["properties"]["collatz_sequence"] == {"type": "array", "items": {"type": "integer"}}
+    assert schema["properties"]["collatz_sequence"] == {
+        "type": "array",
+        "items": {"type": "integer"},
+        "description": "Every number in the sequence from 27 to 1 in order",
+    }
     assert schema["properties"]["report"]["properties"]["path"]["type"] == "string"
 
     text = handoff_task_text("Compute Collatz from 27.", COLLATZ_OUTPUT_SCHEMA)
@@ -785,6 +789,28 @@ def test_handoff_json_schema_is_fixed_by_output_schema():
     assert CODE_AGENT_HANDOFF_PATH == "/home/user/.rose/handoff.json"
     assert CODE_AGENT_HANDOFF_PATH in text
     assert json.dumps(handoff_json_schema(COLLATZ_OUTPUT_SCHEMA), sort_keys=True) in text
+
+
+def test_handoff_json_schema_carries_declared_field_descriptions():
+    """The code agent must see what each field means, not just its type.
+
+    R3c: a real Claude Code CLI filled an undescribed ``sentinel`` field with its
+    reply token instead of the file content; the worker schema dropped every
+    declared description (31f51d25's "Complete verbatim stdout ...").
+    """
+    from domains.spawn_claude_code_agent.service import handoff_json_schema
+
+    nested = {
+        "name": "receipt",
+        "type": "object",
+        "description": "Proof the task ran",
+        "properties": [{"name": "exit_code", "type": "int", "description": "Process exit code"}],
+    }
+    schema = handoff_json_schema({"fields": [*COLLATZ_OUTPUT_SCHEMA["fields"], nested]})
+    for field in COLLATZ_OUTPUT_SCHEMA["fields"]:
+        assert schema["properties"][field["name"]]["description"] == field["description"], field["name"]
+    assert schema["properties"]["receipt"]["description"] == "Proof the task ran"
+    assert schema["properties"]["receipt"]["properties"]["exit_code"]["description"] == "Process exit code"
 
 
 async def test_handoff_valid_json_is_the_tool_result():
@@ -4031,6 +4057,7 @@ async def _run_all_tests():
     await r.record_async("run_verifier_happy", _with_verifier_opt_in(test_run_verifier_happy_path))
     await r.record_async("run_verifier_off_by_default", test_run_verifier_off_by_default)
     r.record("handoff_json_schema_fixed_by_output_schema", test_handoff_json_schema_is_fixed_by_output_schema)
+    r.record("handoff_json_schema_field_descriptions", test_handoff_json_schema_carries_declared_field_descriptions)
     await r.record_async("handoff_valid_json_is_tool_result", test_handoff_valid_json_is_the_tool_result)
     await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
     await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)

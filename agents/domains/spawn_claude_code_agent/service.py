@@ -2048,6 +2048,22 @@ DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
 _NO_HANDOFF_CONTRACT = object()
 
 
+def _with_field_descriptions(schema: Dict[str, Any], field: Dict[str, Any]) -> Dict[str, Any]:
+    """Carry each declared field description into its JSON Schema, nested fields included."""
+    from helpers.llm import _nested_fields_for_object_field
+
+    description = field.get("description")
+    if isinstance(description, str) and description.strip() and "description" not in schema:
+        schema["description"] = description
+    target = schema.get("items") if isinstance(schema.get("items"), dict) else schema
+    nested_properties = target.get("properties") if isinstance(target, dict) else None
+    if isinstance(nested_properties, dict) and field.get("type") in ("object", "list[object]"):
+        for nested in _nested_fields_for_object_field(field):
+            if isinstance(nested_properties.get(nested.get("name")), dict):
+                _with_field_descriptions(nested_properties[nested["name"]], nested)
+    return schema
+
+
 def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """JSON Schema of the handoff file; file fields are ``{"path": ...}`` sandbox paths."""
     from helpers.llm import _json_schema_for_response_field
@@ -2059,7 +2075,8 @@ def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, An
         name = field.get("name") if isinstance(field, dict) else None
         if not isinstance(name, str) or not name:
             continue
-        properties[name], _open_shape = _json_schema_for_response_field(field)
+        field_schema, _open_shape = _json_schema_for_response_field(field)
+        properties[name] = _with_field_descriptions(field_schema, field)
         if field.get("required", True):
             required.append(name)
     if not properties:

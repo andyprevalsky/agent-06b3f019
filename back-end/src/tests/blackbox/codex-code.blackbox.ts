@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
+import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
@@ -207,6 +208,7 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  let closed = false;
   const sharedCooldown = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -233,7 +235,9 @@ async function testSmoke_codexCompletesE2bTask() {
       body: JSON.stringify({
         agent_id: agentId,
         user_id: DEV_USER_ID,
-        goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
+        goal: handoffSmokeGoal(
+          'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.'
+        ),
       }),
     });
     // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
@@ -350,8 +354,17 @@ async function testSmoke_codexCompletesE2bTask() {
       String(fileContent).trim() === 'CODEX_E2B_OK',
       `Expected output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    // The parent's result is the handoff file the real CLI wrote.
+    const closeRes = await request(`${BASE_URL}/api/codex-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    closed = true;
+    assertStatus(closeRes.status, 200, closeRes.data);
+    assertSmokeHandoff(closeRes.data, 'CODEX_E2B_OK', '/home/user/output/codex-smoke.txt');
   } finally {
-    if (taskId) {
+    if (taskId && !closed) {
       await request(`${BASE_URL}/api/codex-code-session/close`, {
         method: 'POST',
         headers: apiKeyHeaders(),

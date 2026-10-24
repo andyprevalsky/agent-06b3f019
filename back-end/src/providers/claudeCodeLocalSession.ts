@@ -25,7 +25,14 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs';
-import { join, relative, resolve, sep } from 'path';
+import { dirname, join, relative, resolve, sep } from 'path';
+import {
+  isCodeAgentHandoff,
+  localHandoffPath,
+  pointLaunchAtHome,
+  readLocalCodeAgentHandoff,
+  type CodeAgentHandoff,
+} from './codeAgentHandoff';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
@@ -83,6 +90,8 @@ type LocalSessionOwnership = {
   outputCandidates?: LocalOutputCandidate[];
   /** Persisted before the DB close so retries never upload the same files twice. */
   outputFiles?: FilePointer[];
+  /** The consumed handoff file, persisted so a retried close returns the same result. */
+  handoff?: CodeAgentHandoff;
 };
 
 type LocalOutputCandidate = {
@@ -98,7 +107,8 @@ type LocalSession = LocalSessionOwnership & {
 };
 
 const localSessions = new Map<string, LocalSession>();
-const closeOperations = new Map<string, Promise<{ outputFiles: FilePointer[] }>>();
+type LocalCloseResult = { outputFiles: FilePointer[]; handoff?: CodeAgentHandoff };
+const closeOperations = new Map<string, Promise<LocalCloseResult>>();
 
 export function resolveLocalSessionWorkDir(taskId: string): string {
   if (
@@ -131,6 +141,7 @@ function writeOwnership(ownership: LocalSessionOwnership): void {
       homeDir: ownership.homeDir,
       outputCandidates: ownership.outputCandidates,
       outputFiles: ownership.outputFiles,
+      handoff: ownership.handoff,
     };
     writeFileSync(temporaryPath, JSON.stringify(durable), { encoding: 'utf8', mode: 0o600 });
     renameSync(temporaryPath, path);
@@ -201,6 +212,7 @@ function readOwnership(taskId: string): LocalSessionOwnership | null {
         Array.isArray(parsed.outputFiles) && parsed.outputFiles.every(isFilePointer)
           ? parsed.outputFiles
           : undefined,
+      handoff: isCodeAgentHandoff(parsed.handoff) ? parsed.handoff : undefined,
     };
   } catch {
     return null;
@@ -460,7 +472,7 @@ export async function createLocalClaudeCodeSession(params: {
   uploadedFiles: string[];
   projectRestore?: ProjectRestoreReport | null;
 }> {
-  const { taskId, agentId, goal, envs } = params;
+  const { taskId, agentId } = params;
   const sandboxId = `${LOCAL_SANDBOX_PREFIX}${taskId}`;
   const taskDir = resolveLocalSessionWorkDir(taskId);
   if (params.homeDir !== undefined && !isPersistentLocalHome(params.homeDir)) {
@@ -468,10 +480,13 @@ export async function createLocalClaudeCodeSession(params: {
   }
   const persistentHome = params.homeDir !== undefined;
   const workDir = params.homeDir ?? taskDir;
+  // The E2B contract names /home/user/.rose/handoff.json; this CLI's HOME is workDir.
+  const { goal, envs } = pointLaunchAtHome(params.goal, params.envs, workDir);
   mkdirSync(taskDir, { recursive: true });
   mkdirSync(join(workDir, 'attachments'), { recursive: true });
   mkdirSync(join(workDir, 'output'), { recursive: true });
   mkdirSync(join(workDir, '.claude'), { recursive: true });
+  mkdirSync(dirname(localHandoffPath(workDir)), { recursive: true });
 
   const uploadedFiles: string[] = [];
   if (params.attachments && params.attachments.length > 0) {
@@ -627,10 +642,16 @@ async function runLocalClaudeCodeClose(
   taskId: string,
   userId?: string,
   additionalPaths?: string[]
-): Promise<{ outputFiles: FilePointer[] }> {
+): Promise<LocalCloseResult> {
   const live = localSessions.get(taskId);
   const ownership = live ?? readOwnership(taskId);
   let outputFiles = ownership?.outputFiles ?? [];
+
+  if (ownership && ownership.handoff === undefined) {
+    ownership.handoff = await readLocalCodeAgentHandoff(ownership.homeDir ?? ownership.workDir);
+    // Consumed once; persisted so a retried close returns the same result.
+    writeOwnership(ownership);
+  }
 
   if (ownership && ownership.outputFiles === undefined && userId) {
     outputFiles = await extractLocalFiles(ownership, userId, additionalPaths);
@@ -668,14 +689,17 @@ async function runLocalClaudeCodeClose(
     localSessions.set(taskId, { ...ownership, process: null });
   }
 
-  return { outputFiles };
+  return {
+    outputFiles,
+    ...(ownership?.handoff !== undefined ? { handoff: ownership.handoff } : {}),
+  };
 }
 
 export function closeLocalClaudeCodeSession(
   taskId: string,
   userId?: string,
   additionalPaths?: string[]
-): Promise<{ outputFiles: FilePointer[] }> {
+): Promise<LocalCloseResult> {
   const inFlight = closeOperations.get(taskId);
   if (inFlight) return inFlight;
 
