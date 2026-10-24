@@ -14202,6 +14202,15 @@ def _run_declared_static_check(
                     f"{len(failures)}/{len(gps)} failing)",
                 )
             continue
+        if check_type == "explore_spawn_count":
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            minimum = int(check.get("min", 1))
+            total = sum(
+                int(node.get("explore_spawn_count") or 0) for node in compact_tree.values() if isinstance(node, dict)
+            )
+            if total < minimum:
+                return False, f"Tree spawned {total} explore agent(s); expected at least {minimum}"
+            continue
         if check_type == "general_purpose_explore_spawn_limit":
             compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
             maximum = int(check.get("max", 3))

@@ -9266,6 +9266,94 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
+def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362308052156") -> dict:
+    """Saved-run shape of spawn-sub-agents agent 30434b44 (original600 run 1792738962466034914).
+
+    The root posts its general-purpose completions as ``spawn_agent`` FINISHED rows, so a
+    tree-wide ``spawn_agent`` count is 2 even when no explore ever ran.
+    """
+    root, tokyo, nyc = "30434b44-root", "450a67e0-tokyo", "c9c5cad6-nyc"
+
+    def tool(name: str, call_id: str, **extra) -> dict:
+        metadata = {"toolName": name, "toolStatus": "FINISHED", "toolCallId": call_id, **extra}
+        return {"role": "TOOL", "message": "", "metadata": metadata}
+
+    def gp_messages(call_id: str, child: str) -> list[dict]:
+        if not gp_explores:
+            return [tool("web_search", f"{call_id}-search")]
+        return [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "metadata": {"tool_calls": [{"tool": "spawn_agent", "type": "explore", "tool_call_id": call_id}]},
+            },
+            tool("spawn_agent", call_id, agentType="explore", taskId=child),
+            tool("spawn_agent", f"{call_id}-progress", agentType="explore", taskId=child),
+            tool("web_fetch", f"{call_id}-fetch"),
+        ]
+
+    root_messages = [
+        tool("spawn_agent", "da7db8fe"),
+        tool("spawn_agent", "230e1dd3"),
+        {
+            "role": "TOOL",
+            "message": "I verified both official figures and multiplied them.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "completionSummary": {
+                    "summary": "I verified both official figures and multiplied them.",
+                    "outputs": [
+                        {"key": "tokyo_population", "value": "14137164"},
+                        {"key": "nyc_population", "value": "8584629"},
+                        {"key": "product", "value": product},
+                    ],
+                },
+            },
+        },
+    ]
+    tree = {
+        root: {"status": "COMPLETED", "goal": "spawn-sub-agents", "messages": root_messages},
+        tokyo: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("call_55fc", "e88ee23d")},
+        nyc: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("toolu_01Ate", "706a812c")},
+    }
+    return {"agent": {"agent_id": root}, "messages": root_messages, "_benchmark": {"tree": tree}}
+
+
+async def test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product():
+    """spawn-sub-agents: >=2 explore spawns and the official figures with their exact product.
+
+    Repro: original600 run 1792738962466034914 failed 3/5 valid copies on the stale
+    ``min_tool_counts.web_search=2`` while the 2026-06-02 bulk eval_prompt removal (79fe5c19e)
+    left the final answer unchecked.
+    """
+    from benchmarks import run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("spawn-sub-agents")
+    assert not (task.min_tool_counts or {}).get("web_search")
+    assert task.enforce_declared_evaluators is True
+
+    async def run(record: dict) -> tuple[bool, str | None]:
+        ok, reason, _ = await rb._run_declared_evaluators(task, record, base_url=None)
+        return ok, reason
+
+    valid = _spawn_sub_agents_record()
+    assert await run(valid) == (True, None)
+
+    no_explore = _spawn_sub_agents_record(gp_explores=False)
+    tree_counts: dict[str, int] = {}
+    for node in no_explore["_benchmark"]["tree"].values():
+        for name, count in rb._count_logical_tool_calls_from_messages(node["messages"]).items():
+            tree_counts[name] = tree_counts.get(name, 0) + count
+    assert tree_counts.get("spawn_agent") == 2  # root GP rows: a spawn_agent tool count cannot prove explores
+    ok, reason = await run(no_explore)
+    assert not ok and "explore-research" in reason and "spawned 0 explore" in reason
+
+    ok, reason = await run(_spawn_sub_agents_record(product="121362308052000"))
+    assert not ok and "final-answer-population-product" in reason and "121362308052156" in reason
+
+
 def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
     """CUDA ranking bench requires coding-agent route with zero tool failures."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -20663,7 +20751,7 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
 
     task = get_task_by_name("spawn-sub-agents")
 
-    assert task.min_tool_counts == {"web_search": 2}
+    assert not task.min_tool_counts  # explore research is the declared explore_spawn_count check
     assert task.expected_tool_counts["spawn_general_purpose_agent"] == 2
     assert task.expected_tool_counts["spawn_browser_agent"] == 0
     assert task.expected_tool_counts["spawn_claude_code_agent"] == 0
@@ -26514,6 +26602,10 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
         test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
+    )
+    await r.record_async(
+        "spawn_sub_agents_catalog_checks_explore_spawns_and_final_product",
+        test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product,
     )
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",

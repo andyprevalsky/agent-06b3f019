@@ -609,9 +609,6 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
-    "min_tool_counts": {
-      "web_search": 2
-    },
     "expected_tool_counts": {
       "spawn_general_purpose_agent": 2,
       "spawn_browser_agent": 0,
@@ -620,7 +617,41 @@
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
     "deploy_category": "harness",
-    "demo_cache": "off"
+    "demo_cache": "off",
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "explore-research",
+        "method": "static_check",
+        "criteria": [
+          "The general-purpose agents spawned at least two explore agents for their web research"
+        ],
+        "checks": [
+          {
+            "type": "explore_spawn_count",
+            "min": 2
+          }
+        ]
+      },
+      {
+        "id": "final-answer-population-product",
+        "method": "static_check",
+        "criteria": [
+          "Collected both population numbers and multiplied them: the root's final answer states Tokyo's official total 14137164 (Basic Resident Register, August 1, 2026), New York City's official estimate 8584629 (QuickFacts, July 1, 2025) and their exact product 121362308052156"
+        ],
+        "checks": [
+          {
+            "type": "final_answer_figures",
+            "expected_values": [
+              "14137164",
+              "8584629",
+              "121362308052156"
+            ],
+            "tolerance": "0"
+          }
+        ]
+      }
+    ]
   },
   {
     "name": "parallel-tool-calls",

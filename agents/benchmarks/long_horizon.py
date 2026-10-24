@@ -72,6 +72,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "first_level_gp_july_trajectories",
     "fully_cached_agent",
     "general_purpose_explore_spawn_limit",
+    "explore_spawn_count",
     "google_oauth_demo_trace",
     "zero_live_spend",
     "no_nested_general_purpose",
