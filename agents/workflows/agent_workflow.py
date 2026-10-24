@@ -23,22 +23,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 
-# Loop-critical control-plane read (poll_new_messages), modelled on Claude
-# Code's session-transcript ingress client: 20 s per request
-# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
-# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
-# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
-# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
-# the agent FAILED with the real error. Permanent 4xx responses are raised
-# non-retryable by the activity itself.
-CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
-CONTROL_PLANE_POLL_RETRY = RetryPolicy(
-    initial_interval=timedelta(milliseconds=500),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(seconds=8),
-    maximum_attempts=10,
-)
-
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
@@ -168,6 +152,22 @@ with workflow.unsafe.imports_passed_through():
     from workflows.environment_context import EnvironmentContextMixin
 
 logger = structlog.get_logger()
+
+# Loop-critical control-plane read (poll_new_messages), modelled on Claude
+# Code's session-transcript ingress client: 20 s per request
+# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
+# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
+# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
+# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
+# the agent FAILED with the real error. Permanent 4xx responses are raised
+# non-retryable by the activity itself.
+CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
+CONTROL_PLANE_POLL_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=10,
+)
 
 # Consecutive transient parent-state read failures (while paused-by-parent) after
 # which a child treats its parent as gone and aborts. Backstop for when the parent
