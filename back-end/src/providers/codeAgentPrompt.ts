@@ -83,7 +83,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     `- Put every user-facing output file in ${CODE_AGENT_OUTPUT_DIR}. Files outside this directory are not returned to the user.`,
     `- Before finishing, verify each requested artifact exists in ${CODE_AGENT_OUTPUT_DIR} with its final filename.`,
     '- When transforming a user attachment, create a new file in the output directory. Do not return the original attachment path as the transformed output.',
-    '- In your final response, name the exact absolute paths of files you created for the user.',
+    '- In the result handoff, give the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
     '',
     'Result handoff:',

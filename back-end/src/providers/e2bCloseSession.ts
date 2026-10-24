@@ -74,7 +74,6 @@ export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
   return usage;
 }
 
-/** Facts the code-agent tool result reports about the persistent session. */
 /** The code agent's handoff file at close (absent for sessions that run outside E2B). */
 export type CodeAgentHandoff =
   | { status: 'present'; content: string }
@@ -105,6 +104,7 @@ export async function readCodeAgentHandoff(
   return { status: 'present', content };
 }
 
+/** Facts the code-agent tool result reports about the persistent session. */
 export interface CodeSessionCloseFacts {
   code_session_id: string;
   state: string;
