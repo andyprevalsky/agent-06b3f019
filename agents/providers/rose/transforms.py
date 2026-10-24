@@ -1121,6 +1121,10 @@ def transform_messages_for_openai(
         # transform from the caller's append-only history.
         rewritten = copy.deepcopy(message)
         if rewritten.get("role") == "assistant":
+            # Codex Responses items are history for the Responses transport
+            # (gpt_auth) only; Cerebras 400s on them as unsupported properties.
+            rewritten.pop("codex_reasoning_items", None)
+            rewritten.pop("codex_message_items", None)
             tool_calls = rewritten.get("tool_calls")
             if isinstance(tool_calls, list):
                 for call in tool_calls:

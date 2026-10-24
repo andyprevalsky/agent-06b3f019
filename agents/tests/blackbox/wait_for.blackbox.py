@@ -2038,7 +2038,7 @@ async def test_wait_for_wake_text_names_child_by_path_not_id():
         assert reads == []
 
         # A child known only by id (foreground spawn): one tree read names it.
-        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": "any"}, "tc-fg"))
+        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": ["any"]}, "tc-fg"))
         await _until(lambda: rows.for_call("tc-fg"))
         wf._note_wait_wake("child_completed", agent_id="agent-fg", status="completed")
         _status, result = await asyncio.wait_for(task, 2)
@@ -2046,7 +2046,7 @@ async def test_wait_for_wake_text_names_child_by_path_not_id():
         assert reads == [{"node": "agent-fg", "depth": "1"}], reads
 
         # Unknown everywhere: fall back to the id.
-        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": "any"}, "tc-unk"))
+        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": ["any"]}, "tc-unk"))
         await _until(lambda: rows.for_call("tc-unk"))
         wf._note_wait_wake("child_completed", agent_id="agent-gone", status="completed")
         _status, result = await asyncio.wait_for(task, 2)
@@ -2125,7 +2125,7 @@ async def test_wait_for_agents_any_and_user_message():
         wf._execute_tool = _gated_spawns(wf, gates)
         await _spawn_bg(wf, "draft_a", "toolu_a")
         await _spawn_bg(wf, "draft_b", "toolu_b")
-        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": "any"}, "tc-any"))
+        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": ["any"]}, "tc-any"))
         await _until(lambda: rows.for_call("tc-any"))
         gates["draft_b"].set()
         await asyncio.wait_for(task, 2)
@@ -2133,7 +2133,7 @@ async def test_wait_for_agents_any_and_user_message():
         assert final["text"].startswith("Woken by a background agent notification (/root/draft_b)"), final
         assert "- /root/draft_a: running" in final["text"] and "- /root/draft_b: completed" in final["text"], final
 
-        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": "any"}, "tc-any2"))
+        task = asyncio.create_task(wait_for(wf, {"description": "any", "agents": ["any"]}, "tc-any2"))
         await _until(lambda: rows.for_call("tc-any2"))
         await wf.receive_user_response("Change of plan.")
         await asyncio.wait_for(task, 2)
@@ -2144,7 +2144,7 @@ async def test_wait_for_agents_any_and_user_message():
         # Nothing running: "any" returns at once (tree-feedback-routing a1f51afd waited
         # 6 minutes after every drafter had finished and its answer was delivered).
         assert wf._pending_background_ids() == []
-        status, result = await asyncio.wait_for(wait_for(wf, {"description": "any", "agents": "any"}, "tc-any3"), 2)
+        status, result = await asyncio.wait_for(wait_for(wf, {"description": "any", "agents": ["any"]}, "tc-any3"), 2)
         assert result.startswith("None of your agents is running, so there is nothing to wait for."), result
         assert "- /root/draft_a: completed" in result and "- /root/draft_b: completed" in result, result
         assert rows.for_call("tc-any3")[-1]["metadata"]["wokenBy"] == "none_running"
@@ -2199,15 +2199,47 @@ async def test_wait_for_agents_mode_returns_at_once_for_finished_agent():
     assert clock.timeouts == []
 
 
+def test_wait_for_agents_schema_is_a_plain_string_array():
+    """agents is a plain string array; "any" is ["any"], never a string branch.
+
+    Captured descend-full69 r004-j0047 (2026-10-23): with agents typed
+    anyOf[array, const "any", null], claude-opus-5-5 sent
+    agents='["/root/buy_canvas_tote"]' (a string) and execute_loop re-generated
+    twice. Controlled live replay of that exact request: 5/5 strings with the
+    union, 5/5 real lists with a plain array. Codex wait_agent declares targets
+    as a plain string array (multi_agents_spec.rs wait_agent_tool_parameters_v1).
+    """
+    from pydantic import ValidationError
+    from providers.rose.schema import build_anthropic_tools_from_response_model
+    from utils.tool_schemas import WaitForTool, create_agent_action_model
+
+    (tool,) = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["wait_for"], tool_registry={"wait_for": WaitForTool})
+    )
+    agents = tool["input_schema"]["properties"]["agents"]
+    assert agents["anyOf"] == [{"type": "array", "items": {"type": "string"}}, {"type": "null"}], agents
+    assert '["any"]' in agents["description"], agents["description"]
+    assert WaitForTool(tool="wait_for", description="any agent", agents=["any"]).agents == ["any"]
+    for bad in ('["/root/buy_canvas_tote"]', "any", ["any", "/root/a"]):
+        try:
+            WaitForTool(tool="wait_for", description="drafts", agents=bad)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad!r}")
+
+
 def test_wait_for_schema_validates_agents_mode():
     from utils.tool_schemas import WaitForTool
 
     ok = WaitForTool(tool="wait_for", description="drafts", agents=["/root/a", "parent"])
     assert ok.timeout_seconds is None and ok.agents == ["/root/a", "parent"]
-    assert WaitForTool(tool="wait_for", description="any", agents="any", timeout_seconds=3600).timeout_seconds == 3600
+    assert WaitForTool(tool="wait_for", description="any", agents=["any"], timeout_seconds=3600).timeout_seconds == 3600
     # Codex wait floor: below the minimum is clamped up, not rejected.
     for low in (0, 1, 5, 9.5):
-        assert WaitForTool(tool="wait_for", description="any", agents="any", timeout_seconds=low).timeout_seconds == 10
+        assert (
+            WaitForTool(tool="wait_for", description="any", agents=["any"], timeout_seconds=low).timeout_seconds == 10
+        )
     for bad, needle in [
         (
             {"until_timestamp": "2026-10-19T17:00:00Z", "timeout_seconds": 60},
@@ -2215,10 +2247,10 @@ def test_wait_for_schema_validates_agents_mode():
         ),
         ({"condition": "Replies arrived", "timeout_seconds": 60}, "timeout_seconds is only valid with agents"),
         ({"agents": ["/root/a"], "condition": "A replied"}, "condition and agents are mutually exclusive"),
-        ({"agents": "any", "until_timestamp": "2026-10-19T17:00:00Z"}, "until_timestamp and agents are mutually"),
+        ({"agents": ["any"], "until_timestamp": "2026-10-19T17:00:00Z"}, "until_timestamp and agents are mutually"),
         ({"agents": ["/root/a"], "timeout_seconds": 3601}, "timeout_seconds must be at most 3600 (1 hour)"),
         ({"agents": ["/root/a"], "timeout_seconds": "soon"}, "timeout_seconds must be a number of seconds"),
-        ({"agents": []}, 'agents must list at least one address, or be "any"'),
+        ({"agents": []}, 'agents must list at least one address, or be ["any"]'),
         ({"agents": "all"}, "agents"),
     ]:
         try:
@@ -2666,6 +2698,7 @@ async def run_all_tests():
     )
     await r.record_async("agents_mode_already_finished", test_wait_for_agents_mode_returns_at_once_for_finished_agent)
     r.record("agents_mode_schema_validation", test_wait_for_schema_validates_agents_mode)
+    r.record("agents_schema_is_plain_string_array", test_wait_for_agents_schema_is_a_plain_string_array)
     await r.record_async(
         "agents_timeout_clamped_to_floor", test_wait_for_agents_timeout_below_minimum_is_clamped_and_noted
     )

@@ -345,10 +345,10 @@ class WaitForTool(BaseModel):
         default=None,
         description="Natural language condition for an explore agent to check on periodically.",
     )
-    agents: Optional[Union[List[str], Literal["any"]]] = Field(
+    agents: Optional[List[str]] = Field(
         default=None,
         description=(
-            'Agents to wait on: addresses like "/root/outreach/draft_a", "parent" or agent ids, or "any" '
+            'Agents to wait on: addresses like "/root/outreach/draft_a", "parent" or agent ids, or ["any"] '
             "for any agent you spawned. Wakes when one finishes or messages you. Mutually exclusive with "
             "until_timestamp and condition."
         ),
@@ -420,7 +420,9 @@ class WaitForTool(BaseModel):
                 "for condition polling use check_interval_seconds and max_checks."
             )
         if isinstance(self.agents, list) and not [agent for agent in self.agents if agent.strip()]:
-            raise ValueError('agents must list at least one address, or be "any".')
+            raise ValueError('agents must list at least one address, or be ["any"].')
+        if isinstance(self.agents, list) and "any" in self.agents and len(self.agents) > 1:
+            raise ValueError('["any"] waits on every agent you spawned; pass it alone, not with addresses.')
         return self
 
 

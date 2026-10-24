@@ -362,7 +362,11 @@ def test_cerebras_native_tools_enforce_representable_shapes():
     assert "minItems" not in params["properties"]["labels"]
     assert params["properties"]["count"]["minimum"] == 1
     assert params["properties"]["count"]["maximum"] == 5
-    assert params["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    # Omittable Optional: plain type (omission validates to None); see
+    # test_cerebras_tools_send_omittable_optionals_as_their_type.
+    assert params["properties"]["note"]["type"] == "string"
+    assert "anyOf" not in params["properties"]["note"]
+    assert "note" not in params["required"]
     assert body["tool_choice"] == "required"
     assert "response_format" not in body
     assert tools == original
@@ -379,6 +383,61 @@ def test_cerebras_native_tools_enforce_representable_shapes():
         else:
             raise AssertionError("Original local constraints were weakened")
     assert TypedTool.model_validate({"tool": "typed_lookup", "labels": ["a"], "count": 2}).note is None
+
+
+def test_cerebras_tools_send_omittable_optionals_as_their_type():
+    """An omittable Optional reaches Cerebras as its own type, not anyOf[X, null].
+
+    Captured descend-full69 r005-j0069 (2026-10-23): qwen-3.8-27b sent grep
+    sources='["agent_network"]' and head_limit='30' (strings) and the explore
+    turn re-generated. Controlled live replay of that exact request: with the
+    anyOf[X, null] encoding 9/9 grep calls were strings even with strict=True;
+    with the null branch dropped 7/7 strict and 7/7 non-strict were real lists
+    and integers. Omission already means None for these fields.
+    """
+    from copy import deepcopy
+
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import GrepTool, SpawnAgentTool, create_agent_action_model
+
+    tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["grep"], tool_registry={"grep": GrepTool})
+    )
+    original = deepcopy(tools)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )
+    props = body["tools"][0]["function"]["parameters"]["properties"]
+    for name, kind in (("sources", "array"), ("head_limit", "integer"), ("pattern", "string"), ("filters", "object")):
+        assert props[name].get("type") == kind, f"{name} must be a plain {kind}: {props[name]}"
+        assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
+    assert props["sources"]["items"]["enum"][0] == "messages"
+    assert tools == original, "caller tool schemas must not be mutated"
+    # The field's own description wins over a nested model's docstring.
+    spawn_tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["spawn_agent"], tool_registry={"spawn_agent": SpawnAgentTool})
+    )
+    field = spawn_tools[0]["input_schema"]["properties"]["output_schema"]
+    sent = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=spawn_tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )["tools"][0]["function"]["parameters"]["properties"]["output_schema"]
+    assert sent.get("description") == field["description"], sent.get("description")
+    assert "anyOf" not in sent
+    assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
 
 
 def test_cerebras_native_tools_keep_incompatible_schemas_visible():
@@ -796,6 +855,59 @@ async def test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted():
     assert len(requests) == 2, "a reply that used the whole output limit must be retried with room to finish"
     assert requests[1]["max_completion_tokens"] > 8192
     assert response.tool_calls[0].result == complete
+
+
+def test_chat_completions_bodies_drop_codex_history_items():
+    """Codex Responses items are Rose-internal history, never chat-completions fields.
+
+    Captured descend-full69 (2026-10-23, 8 explore_agent copies): a Foundry turn
+    stored codex_reasoning_items on an assistant message; the next rose-1-flash
+    call sent it to Cerebras, which answered 400 "messages.2.assistant.
+    codex_reasoning_items: property ... is unsupported" (live replay) and fell
+    through. Only the Responses transport (gpt_auth) reads these items.
+    """
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transforms import transform_messages_for_openai
+
+    history = [
+        {"role": "system", "content": "search"},
+        {"role": "user", "content": "find it"},
+        {
+            "role": "assistant",
+            "content": "looking",
+            "codex_reasoning_items": [{"id": "rs_1", "encrypted_content": "secret", "summary": []}],
+            "codex_message_items": [{"id": "msg_1", "type": "message"}],
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "grep", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "[]"},
+    ]
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=history,
+        tools=[
+            {
+                "name": "grep",
+                "description": "search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}},
+                    "required": ["pattern"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )
+    for outbound in (body["messages"], transform_messages_for_openai(history)):
+        assistant = next(m for m in outbound if m["role"] == "assistant")
+        assert not [k for k in assistant if k.startswith("codex_")], f"codex items leaked: {sorted(assistant)}"
+        assert assistant["tool_calls"][0]["id"] == "c1"
+        assert assistant["content"] == "looking"
+    assert history[2]["codex_reasoning_items"], "caller history must keep its Responses items"
 
 
 def test_build_cerebras_body_strips_cache_control():
@@ -10659,6 +10771,11 @@ async def run_all_tests():
         test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted,
     )
     r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
+    r.record("chat_completions_bodies_drop_codex_history_items", test_chat_completions_bodies_drop_codex_history_items)
+    r.record(
+        "cerebras_tools_send_omittable_optionals_as_their_type",
+        test_cerebras_tools_send_omittable_optionals_as_their_type,
+    )
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(

@@ -1845,7 +1845,7 @@ def convert_context_to_messages(
     - SYSTEM messages (blueprints): included if include_system=True
     - ASSISTANT messages: included if include_assistant=True (default False to prevent reward hacking)
     - ASSISTANT messages with tool_calls metadata: converted to proper OpenAI format
-    - TOOL messages with verifierMessage=True: converted to ASSISTANT role for conversation flow
+    - TOOL messages with verifierMessage=True: the tool result of their declared call, else ASSISTANT feedback
     - TOOL messages: converted to tool role only if preceded by matching ASSISTANT tool_call,
       otherwise converted to SYSTEM role
     - Skips IN_PROGRESS tool messages (only sends FINISHED results)
@@ -2073,16 +2073,18 @@ def convert_context_to_messages(
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
 
-            # Special handling for verifier messages: convert to ASSISTANT
-            # These need to be in the conversation flow for the agent to see them
-            if metadata.get("verifierMessage"):
+            tool_call_id = str(metadata.get("toolCallId") or "")
+
+            # Verifier rows without a declared call ride as ASSISTANT feedback.
+            # A verifier row that answers a declared attempt_completion is that
+            # call's tool result (as in build_llm_messages); converting it to
+            # assistant text would orphan the tool_use.
+            if metadata.get("verifierMessage") and tool_call_id not in declared_tool_calls:
                 assistant_content = content
                 if metadata.get("title"):
                     assistant_content = f"{metadata['title']}: {content}"
                 messages.append({"role": "assistant", "content": assistant_content})
                 continue
-
-            tool_call_id = str(metadata.get("toolCallId") or "")
 
             # Only use tool role if this tool_call_id was declared by a preceding ASSISTANT message
             if tool_call_id and tool_call_id in declared_tool_calls:
