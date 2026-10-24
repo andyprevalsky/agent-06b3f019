@@ -25,6 +25,7 @@ import {
   closeLocalClaudeCodeSession,
   createLocalClaudeCodeSession,
 } from '../../providers/claudeCodeLocalSession';
+import { CODE_AGENT_HANDOFF_PATH } from '../../providers/codeAgentPrompt';
 import { prisma } from '../../providers/database';
 
 const fixtureDir = mkdtempSync(join(tmpdir(), 'claude-local-close-blackbox-'));
@@ -33,6 +34,11 @@ writeFileSync(
   fakeWsServerPath,
   `
 import { createServer } from 'node:net';
+import { writeFileSync } from 'node:fs';
+writeFileSync('launch-env.json', JSON.stringify({
+  goal: process.env.CLAUDE_CODE_GOAL,
+  prompt: process.env.CODE_AGENT_SYSTEM_PROMPT,
+}));
 const port = Number(process.env.PORT);
 const server = createServer();
 server.listen(port, '127.0.0.1', () => {
@@ -78,12 +84,15 @@ after(async () => {
   await prisma.$disconnect();
 });
 
-async function createSession(taskId: string): Promise<string> {
+async function createSession(
+  taskId: string,
+  launch: { goal?: string; envs?: Record<string, string> } = {}
+): Promise<string> {
   await createLocalClaudeCodeSession({
     taskId,
     agentId: `agent-${taskId}`,
-    goal: 'exercise local close ownership',
-    envs: {},
+    goal: launch.goal ?? 'exercise local close ownership',
+    envs: launch.envs ?? {},
     claudeTokenSource: null,
     claudeTokenIntegrationId: null,
   });
@@ -300,4 +309,53 @@ test('a close without user identity leaves output extraction resumable', async (
     ['later.txt']
   );
   assert.equal(existsSync(join(workDir, 'session.json')), false);
+});
+
+test('local fallback points the handoff path at its session HOME', async () => {
+  const taskId = `handoff-launch-${Date.now()}`;
+  const workDir = await createSession(taskId, {
+    goal: `Do it.\n\nResult JSON Schema for ${CODE_AGENT_HANDOFF_PATH}:\n{}`,
+    envs: { CODE_AGENT_SYSTEM_PROMPT: `Your parent receives only ${CODE_AGENT_HANDOFF_PATH}.` },
+  });
+  try {
+    const localPath = join(workDir, '.rose', 'handoff.json');
+    const launched = JSON.parse(readFileSync(join(workDir, 'launch-env.json'), 'utf8')) as {
+      goal: string;
+      prompt: string;
+    };
+    // /home/user does not exist on the backend host; the CLI's HOME does.
+    assert.equal(launched.goal, `Do it.\n\nResult JSON Schema for ${localPath}:\n{}`);
+    assert.equal(launched.prompt, `Your parent receives only ${localPath}.`);
+    assert.equal(existsSync(join(workDir, '.rose')), true, 'the handoff directory exists');
+  } finally {
+    await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  }
+});
+
+test('local close returns and consumes the handoff, and a retry returns the same one', async () => {
+  const taskId = `handoff-close-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  const content = JSON.stringify({ sentinel: 'LOCAL_OK' });
+  let closed = false;
+  try {
+    mkdirSync(join(workDir, '.rose'), { recursive: true });
+    writeFileSync(join(workDir, '.rose', 'handoff.json'), content);
+    // An anonymous close cannot finish extraction, so the authorized retry must
+    // still report the handoff the first close consumed.
+    const anonymous = await closeLocalClaudeCodeSession(taskId);
+    assert.deepEqual(anonymous.handoff, { status: 'present', content });
+    assert.equal(existsSync(join(workDir, '.rose', 'handoff.json')), false, 'handoff is consumed');
+    const retried = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+    closed = true;
+    assert.deepEqual(retried.handoff, { status: 'present', content });
+  } finally {
+    if (!closed) await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  }
+});
+
+test('local close without a handoff file reports it missing', async () => {
+  const taskId = `handoff-missing-${Date.now()}`;
+  await createSession(taskId);
+  const closed = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  assert.deepEqual(closed.handoff, { status: 'missing' });
 });

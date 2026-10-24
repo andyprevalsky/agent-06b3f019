@@ -2,10 +2,13 @@ import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
 import { Sandbox } from 'e2b';
 import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
-import { CODE_AGENT_HANDOFF_PATH, CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
+import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
+import { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
 import { randomUUID } from './crypto';
 import { prisma } from './database';
 import { createLogger } from './logger';
+
+export { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
 import { type FilePointer, uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
@@ -72,36 +75,6 @@ export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
   }
 
   return usage;
-}
-
-/** The code agent's handoff file at close (absent for sessions that run outside E2B). */
-export type CodeAgentHandoff =
-  | { status: 'present'; content: string }
-  | { status: 'missing' }
-  | { status: 'unreadable'; error: string };
-
-/**
- * Read and consume the handoff file. A persistent sandbox outlives this spawn,
- * so the file is removed once read: the next spawn must write its own result.
- */
-export async function readCodeAgentHandoff(
-  files: Pick<Sandbox['files'], 'exists' | 'read' | 'remove'>
-): Promise<CodeAgentHandoff> {
-  let content: string;
-  try {
-    if (!(await files.exists(CODE_AGENT_HANDOFF_PATH))) return { status: 'missing' };
-    content = await files.read(CODE_AGENT_HANDOFF_PATH, { format: 'text' });
-  } catch (err) {
-    return { status: 'unreadable', error: err instanceof Error ? err.message : String(err) };
-  }
-  try {
-    await files.remove(CODE_AGENT_HANDOFF_PATH);
-  } catch (err) {
-    log.error('Failed to consume code-agent handoff file', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  return { status: 'present', content };
 }
 
 /** Facts the code-agent tool result reports about the persistent session. */
@@ -227,6 +200,7 @@ export async function closeClaudeCodeSession(
     if (codeSession !== null && ownsSandbox) await markPaused(codeSession.id);
     return {
       outputFiles: local.outputFiles,
+      ...(local.handoff !== undefined ? { handoff: local.handoff } : {}),
       ...(codeSession !== null
         ? {
             codeSession: await closeFacts(

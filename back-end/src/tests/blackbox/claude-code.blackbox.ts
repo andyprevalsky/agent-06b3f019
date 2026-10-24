@@ -58,6 +58,7 @@
  */
 
 import { config } from 'dotenv';
+import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
@@ -1414,7 +1415,9 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({
       agent_id: crypto.randomUUID(),
-      goal: 'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.',
+      goal: handoffSmokeGoal(
+        'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.'
+      ),
       user_id: DEV_USER_ID,
     }),
   });
@@ -1446,6 +1449,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
   assert(!!body.sandbox_id, 'Missing sandbox_id in create response');
 
   const taskId = body.task_id;
+  let closed = false;
 
   // 2. Connect to WebSocket and wait for Claude Code to answer
   let wsOutput = '';
@@ -1562,16 +1566,27 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       String(fileContent).trim() === 'CLAUDE_E2B_OK',
       `Expected Claude output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    // 3. Close: the parent's result is the handoff file the real CLI wrote.
+    const closeRes = await request(`${BASE_URL}/api/claude-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    closed = true;
+    assertStatus(closeRes.status, 200, closeRes.data);
+    assertSmokeHandoff(closeRes.data, 'CLAUDE_E2B_OK', '/home/user/output/claude-smoke.txt');
   } finally {
-    // 3. Clean up: close the session
-    try {
-      await request(`${BASE_URL}/api/claude-code-session/close`, {
-        method: 'POST',
-        headers: apiKeyHeaders(),
-        body: JSON.stringify({ task_id: taskId }),
-      });
-    } catch {
-      // Best-effort cleanup
+    // Clean up: close the session if the assertions above did not
+    if (!closed) {
+      try {
+        await request(`${BASE_URL}/api/claude-code-session/close`, {
+          method: 'POST',
+          headers: apiKeyHeaders(),
+          body: JSON.stringify({ task_id: taskId }),
+        });
+      } catch {
+        // Best-effort cleanup
+      }
     }
   }
 }
