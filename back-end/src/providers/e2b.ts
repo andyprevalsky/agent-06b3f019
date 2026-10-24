@@ -87,6 +87,7 @@ export {
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
+import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
 
 const log = createLogger('E2B');
 
@@ -105,7 +106,6 @@ const WS_PORT = 3000;
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
-const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
