@@ -2032,6 +2032,98 @@ def _structured_response_from_code_evidence(
     return structured or None
 
 
+# The code agent returns its result to the parent in one JSON file (Andy,
+# 2026-10-24); the declared output_schema fixes its structure. Keep in sync with
+# CODE_AGENT_HANDOFF_PATH in back-end/src/providers/codeAgentPrompt.ts.
+CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json"
+# Structure used when the parent declared no output fields.
+DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"summary": {"type": "string", "description": "What you did and the result."}},
+    "required": ["summary"],
+    "additionalProperties": False,
+}
+# Close responses without a ``handoff`` key come from sessions outside E2B (a
+# Mac folder or the local billing fallback); they keep the session-output result.
+_NO_HANDOFF_CONTRACT = object()
+
+
+def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """JSON Schema of the handoff file; file fields are ``{"path": ...}`` sandbox paths."""
+    from helpers.llm import _json_schema_for_response_field
+
+    remote_schema = transform_schema_for_remote_session(output_schema) or {}
+    properties: Dict[str, Any] = {}
+    required: list[str] = []
+    for field in remote_schema.get("fields", []):
+        name = field.get("name") if isinstance(field, dict) else None
+        if not isinstance(name, str) or not name:
+            continue
+        properties[name], _open_shape = _json_schema_for_response_field(field)
+        if field.get("required", True):
+            required.append(name)
+    if not properties:
+        return DEFAULT_HANDOFF_SCHEMA
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+
+
+def handoff_task_text(goal: str, output_schema: Optional[Dict[str, Any]]) -> str:
+    """The task sent to the code agent: the goal plus its result schema."""
+    schema = json.dumps(handoff_json_schema(output_schema), sort_keys=True)
+    return f"{goal}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+
+
+def _read_handoff(
+    handoff: Optional[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``."""
+    import jsonschema
+
+    status = handoff.get("status") if isinstance(handoff, dict) else "missing"
+    if status == "unreadable":
+        return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} could not be read: {handoff.get('error')}."
+    if status != "present" or not isinstance(handoff.get("content"), str):
+        return None, f"The code agent wrote no handoff file at {CODE_AGENT_HANDOFF_PATH}."
+    try:
+        result = json.loads(handoff["content"])
+    except json.JSONDecodeError as exc:
+        return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} is not valid JSON: {exc}."
+    validator = jsonschema.Draft202012Validator(handoff_json_schema(output_schema))
+    errors = sorted(validator.iter_errors(result), key=lambda error: list(error.absolute_path))
+    if errors:
+        problems = "; ".join(
+            f"{'/'.join(str(part) for part in error.absolute_path) or '(root)'}: {error.message}" for error in errors
+        )
+        return None, (
+            f"The handoff file at {CODE_AGENT_HANDOFF_PATH} does not match the declared output schema: {problems}."
+        )
+    return result, None
+
+
+def _latest_stream_snapshots(code_events: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Drop partial stream events superseded by a later event for the same item.
+
+    Partial ``agent_message``/``thinking`` events carry the cumulative text, so
+    every earlier snapshot is a prefix of the latest one (the same upsert-by-item
+    rule ``utils.code_transcript`` applies). The judge evidence would otherwise
+    grow quadratically with the streamed answer.
+    """
+    latest: Dict[tuple[Any, str], int] = {}
+    for index, event in enumerate(code_events):
+        item_id = event.get("item_id")
+        if isinstance(item_id, str):
+            latest[(event.get("type"), item_id)] = index
+    return [
+        event
+        for index, event in enumerate(code_events)
+        if not (
+            event.get("partial") is True
+            and isinstance(event.get("item_id"), str)
+            and latest[(event.get("type"), event["item_id"])] != index
+        )
+    ]
+
+
 def _build_code_event_context(
     *,
     code_events: list[Dict[str, Any]],
@@ -2039,7 +2131,7 @@ def _build_code_event_context(
     action_summary: list[str],
 ) -> str:
     evidence = {
-        "code_agent_events": code_events[-200:],
+        "code_agent_events": _latest_stream_snapshots(code_events)[-200:],
         "extracted_output_files": [
             {
                 "original_filename": fp.get("original_filename"),
@@ -2118,6 +2210,81 @@ async def _persist_code_agent_judge_evidence(
     )
 
 
+async def _handoff_result(
+    *,
+    agent_id: str,
+    task_id: str,
+    output_schema: Optional[Dict[str, Any]],
+    handoff: Optional[Dict[str, Any]],
+    attempt_completion: bool,
+    exit_code: Optional[int],
+    code_provider: str,
+    code_events: list[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+    action_summary: list[str],
+) -> tuple[float, str, Optional[Dict[str, Any]], int, int]:
+    """Verifier-off result: the code agent's handoff file, validated against its schema.
+
+    The handoff is the result the parent sees. Terminal output and SDK events are
+    evidence for judges only and never enter the tool result.
+    """
+    result, handoff_error = _read_handoff(handoff, output_schema)
+    has_fields = bool(isinstance(output_schema, dict) and output_schema.get("fields"))
+    structured = result if has_fields else None
+    outcome, outcome_fields = _disabled_verifier_outcome(
+        output_schema,
+        structured if result is not None else None,
+        attempt_completion=attempt_completion,
+        exit_code=exit_code,
+    )
+    complete = result is not None and outcome == "complete"
+    score = 1.0 if complete else 0.5
+    header = (
+        f"Code-agent verifier off (provider={code_provider}, exit_code={exit_code}, "
+        f"artifacts={len(output_files)})."
+    )
+    if outcome == "failed":
+        header += " The session ended without a success signal."
+    if result is not None:
+        reasoning = (
+            f"{header} Handoff from {CODE_AGENT_HANDOFF_PATH}, validated against the declared output schema:\n\n"
+            f"{json.dumps(result, ensure_ascii=False, indent=2)}"
+        )
+        if outcome == "incomplete":
+            reasoning += f"\n\nDeclared output files were not extracted: {', '.join(outcome_fields)}."
+    else:
+        reasoning = f"{header} {handoff_error}"
+    logger.info(
+        "[ClaudeCode] Verifier skipped; returning handoff",
+        agent_id=agent_id,
+        task_id=task_id,
+        code_provider=code_provider,
+        exit_code=exit_code,
+        handoff_status=handoff.get("status") if isinstance(handoff, dict) else None,
+        handoff_valid=result is not None,
+        outcome=outcome,
+        score=score,
+    )
+    if complete:
+        try:
+            await _persist_code_agent_judge_evidence(
+                agent_id=agent_id,
+                task_id=task_id,
+                code_provider=code_provider,
+                code_events=code_events,
+                output_files=output_files,
+                action_summary=action_summary,
+            )
+        except Exception as evidence_err:
+            logger.warning(
+                "[ClaudeCode] judge evidence persist failed; continuing verifier-disabled completion",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(evidence_err)[:200],
+            )
+    return score, reasoning, structured, 0, 0
+
+
 async def _run_verifier(
     *,
     agent_id: str,
@@ -2141,6 +2308,7 @@ async def _run_verifier(
     code_provider: str = "claude",
     code_events: Optional[list[Dict[str, Any]]] = None,
     output_files: Optional[list[Dict[str, Any]]] = None,
+    handoff: Any = _NO_HANDOFF_CONTRACT,
 ) -> tuple[float, str, Optional[Dict[str, Any]], int, int]:
     """Run the verifier to confirm completion.
 
@@ -2169,6 +2337,20 @@ async def _run_verifier(
     schema_complete = _structured_response_satisfies_declared_schema(
         output_schema, evidence_structured
     )
+
+    if not code_agent_verifier_enabled() and handoff is not _NO_HANDOFF_CONTRACT:
+        return await _handoff_result(
+            agent_id=agent_id,
+            task_id=task_id,
+            output_schema=output_schema,
+            handoff=handoff,
+            attempt_completion=attempt_completion,
+            exit_code=exit_code,
+            code_provider=code_provider,
+            code_events=code_events or [],
+            output_files=extracted_output_files,
+            action_summary=action_summary,
+        )
 
     if not code_agent_verifier_enabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
@@ -3010,7 +3192,8 @@ async def spawn_claude_code_activity(
 
             session_data = await create_e2b_session(
                 agent_id=agent_id,
-                goal=goal,
+                # A Mac folder has no sandbox handoff file; it keeps the session-output result.
+                goal=goal if target == "local" else handoff_task_text(goal, output_schema),
                 user_id=user_id,
                 attachments=attachments,
                 github_repo_url=github_repo_url,
@@ -3496,6 +3679,7 @@ async def spawn_claude_code_activity(
             code_provider=code_provider,
             code_events=code_events,
             output_files=output_files,
+            handoff=close_data["handoff"] if "handoff" in close_data else _NO_HANDOFF_CONTRACT,
         )
         total_input_tokens += v_input
         total_output_tokens += v_output

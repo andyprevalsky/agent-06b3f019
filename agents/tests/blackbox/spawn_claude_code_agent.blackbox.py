@@ -2858,6 +2858,56 @@ async def test_spawn_activity_happy_path_end_to_end():
     fake_collector.stop.assert_awaited()
 
 
+async def test_spawn_activity_returns_close_handoff_as_result():
+    """End to end: the task carries the handoff schema and the close response's handoff is the result."""
+    from domains.spawn_claude_code_agent import service
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    fake_collector = AsyncMock()
+    seen_create_session = {}
+    handoff = _collatz_handoff()
+
+    async def fake_create_session(**kwargs):
+        seen_create_session.update(kwargs)
+        return {"task_id": "task-h", "sandbox_id": "sb", "ws_url": "wss://x", "uploaded_files": []}
+
+    async def fake_loop(**kwargs):
+        return (0, True, [], 0, 0, _collatz_stream_events())
+
+    async def fake_close(**kwargs):
+        return {"output_files": [], "usage": {}, "handoff": {"status": "present", "content": json.dumps(handoff)}}
+
+    with (
+        patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+        patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
+        patch.object(service, "create_e2b_session", side_effect=fake_create_session),
+        patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
+        patch.object(service, "persist_terminal_output", AsyncMock(return_value=None)),
+        patch.object(service, "close_e2b_session", side_effect=fake_close),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value="tok")),
+        patch(
+            "helpers.model_pricing.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.2}),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        result = await service.spawn_claude_code_activity(
+            user_id="u",
+            agent_id="a",
+            goal="Compute Collatz from 27.",
+            tool_call_id="tc",
+            output_schema=COLLATZ_OUTPUT_SCHEMA,
+            model="rose-labs/rose-1-flash",
+        )
+    assert seen_create_session["goal"].startswith("Compute Collatz from 27.")
+    assert service.CODE_AGENT_HANDOFF_PATH in seen_create_session["goal"]
+    assert result["success"] is True, result["message"]
+    assert result["structured_response"] == handoff
+    assert json.dumps(handoff, ensure_ascii=False, indent=2) in result["message"]
+    assert "code_agent_events" not in result["message"]
+    assert len(result["message"]) < 5_000, len(result["message"])
+
+
 async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
     """A fast CLI 401 is re-checked after exit and never reaches the verifier."""
     from temporalio.exceptions import ApplicationError
@@ -3984,6 +4034,7 @@ async def _run_all_tests():
     await r.record_async("handoff_valid_json_is_tool_result", test_handoff_valid_json_is_the_tool_result)
     await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
     await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)
+    await r.record_async("handoff_spawn_activity_end_to_end", test_spawn_activity_returns_close_handoff_as_result)
     await r.record_async(
         "run_verifier_disabled_schema_incomplete",
         test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
