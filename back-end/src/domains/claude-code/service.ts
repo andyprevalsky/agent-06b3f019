@@ -230,6 +230,7 @@ export async function closeSession(params: CloseSessionParams) {
     output_files: result.outputFiles,
     usage: result.usage,
     code_session: result.codeSession ?? null,
+    ...(result.handoff !== undefined ? { handoff: result.handoff } : {}),
   };
 }
 

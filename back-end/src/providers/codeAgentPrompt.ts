@@ -2,13 +2,18 @@ import { isRoseRepoUrl } from './codePreview/preview';
 import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
 /** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-21.code-agent-rose-skills.v8';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-24.code-agent-rose-skills.v9';
 /** Every other account: the same contract with the stock skill set. */
-export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-21.code-agent-skills.v8';
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-24.code-agent-skills.v9';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
 export const CODE_AGENT_OUTPUT_DIR = '/home/user/output';
+/**
+ * The code agent's result for its parent: one JSON object whose structure is the
+ * JSON Schema given in the task. The close route reads and consumes it.
+ */
+export const CODE_AGENT_HANDOFF_PATH = '/home/user/.rose/handoff.json';
 
 interface BuildCodeAgentPromptArgs {
   githubRepoUrl?: string;
@@ -78,8 +83,13 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     `- Put every user-facing output file in ${CODE_AGENT_OUTPUT_DIR}. Files outside this directory are not returned to the user.`,
     `- Before finishing, verify each requested artifact exists in ${CODE_AGENT_OUTPUT_DIR} with its final filename.`,
     '- When transforming a user attachment, create a new file in the output directory. Do not return the original attachment path as the transformed output.',
-    '- In your final response, name the exact absolute paths of files you created for the user.',
+    '- In the result handoff, give the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',
+    '',
+    'Result handoff:',
+    `- Your parent receives only ${CODE_AGENT_HANDOFF_PATH}, not your terminal output or final message.`,
+    `- Before finishing, write your result there as one JSON object that validates against the result JSON Schema in your task. For a file field, give the absolute path of the file in ${CODE_AGENT_OUTPUT_DIR}.`,
+    '- If you could not complete the task, still write the handoff with the fields you can fill truthfully, and say what is missing in a string field.',
     '',
     ...codeAgentSkillLines(roseDesktop),
     'Execution contract:',
