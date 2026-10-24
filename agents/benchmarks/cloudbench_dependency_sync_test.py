@@ -1610,6 +1610,8 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
 def test_fleet_gives_a_long_catalog_task_its_own_default_budget() -> None:
     fleet = FLEET_SCRIPT.read_text()
     catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    # The batch classifier reads the fleet-level fan-out threshold.
+    catalog_fn = re.search(r"^FLEET_FANOUT_MIN_AGENT_COUNT=.*$", fleet, re.M).group() + "\n" + catalog_fn
     budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
     script = f"""set -euo pipefail
 ROOT_DIR={shlex.quote(str(ROOT))}
@@ -1632,7 +1634,7 @@ done
     hold_timeout = catalog["phone-call-hold-queue"]["timeout_seconds"]
     intake_timeout = catalog["phone-call-client-intake"]["timeout_seconds"]
     assert hold_timeout > 7200 > intake_timeout
-    assert lines[:2] == [f"real\tplain\t{hold_timeout}", f"real\tplain\t{intake_timeout}"]
+    assert lines[:2] == [f"real\tplain\t{hold_timeout}\tflat", f"real\tplain\t{intake_timeout}\tflat"]
     assert lines[2:] == [
         "budget 0 7200 12600 7200",
         "budget 0 300 12600 600",
@@ -1680,6 +1682,8 @@ def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
     catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    # The batch classifier reads the fleet-level fan-out threshold.
+    catalog_fn = re.search(r"^FLEET_FANOUT_MIN_AGENT_COUNT=.*$", fleet, re.M).group() + "\n" + catalog_fn
     benchmarks = tmp_path / "agents" / "benchmarks"
     benchmarks.mkdir(parents=True)
     shutil.copy(TASKS_JSON.with_name("polar_tasks.json"), benchmarks / "polar_tasks.json")
@@ -1702,7 +1706,7 @@ _catalog_modes_for_batch phone-call-hold-queue
 
     accepted = preflight(2**31 - 1)
     assert accepted.returncode == 0, accepted.stderr
-    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}"]
+    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}\tflat"]
     # Beyond Bash's integer range `-gt` errors out, and near it the barrier
     # allowance added to the budget wraps negative; neither may reach the shell.
     for timeout_seconds in (2**63, 2**63 - 1):
@@ -2791,6 +2795,7 @@ cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
 cloudbench_env_value() { return 0; }
+cloudbench_apply_compute_token_authority() { return 0; }
 """
     )
     (controls / "seed-budget.sh").write_text("stack_wait_budget_seconds() { printf '5\\n'; }\n")
@@ -3524,6 +3529,7 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
         _extract_fleet_function(boot, f"{name}() {{")
         for name in (
             "publish_driver_state",
+            "publish_prelaunch_seal",
             "publish_cleanup_ack",
             "seal_missing_injected_helper",
         )
@@ -3541,6 +3547,7 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
         CLOUDBENCH_RUN_TOKEN="current-token",
         DRIVER_STATE_FILE=str(tmp_path / "state"),
         CLEANUP_ACK_FILE=str(tmp_path / "ack"),
+        PRELAUNCH_SEAL_FILE=str(tmp_path / "prelaunch"),
         LOG=str(tmp_path / "boot.log"),
     )
     result = subprocess.run(
@@ -3562,6 +3569,9 @@ printf launched > {shlex.quote(str(tmp_path / "launched"))}
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "state").read_text() == "exited\n"
     assert (tmp_path / "ack").read_text() == "current-token\n"
+    # The no-launch seal lets the status server publish bench.log as the
+    # complete runtime evidence, so the fleet can retire this guest.
+    assert (tmp_path / "prelaunch").read_text() == "current-token\n"
     assert not (tmp_path / "launched").exists()
 
 
@@ -4172,6 +4182,7 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
     """
     boot = BOOT_SCRIPT.read_text()
     publish_state = _extract_fleet_function(boot, "publish_driver_state() {")
+    publish_seal = _extract_fleet_function(boot, "publish_prelaunch_seal() {")
     publish_ack = _extract_fleet_function(boot, "publish_cleanup_ack() {")
     seal_missing = _extract_fleet_function(boot, "seal_missing_injected_helper() {")
 
@@ -4186,6 +4197,7 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
     assert 'DRIVER="$REPO/scripts/cloudbench-run.sh"' not in boot
     assert 'bash "$REPO/scripts/cloudbench-fetch-ref.sh"' not in boot
     assert "refusing checked-out fallback" in seal_missing
+    assert seal_missing.index("publish_prelaunch_seal") < seal_missing.index("publish_cleanup_ack")
     assert seal_missing.index("publish_cleanup_ack") < seal_missing.index("publish_driver_state exited")
 
     for helper_name in ("driver", "fetch-ref-helper", "status-server"):
@@ -4196,13 +4208,16 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
             state = tmp_path / f"{helper_name}-{payload}.state"
             ack = tmp_path / f"{helper_name}-{payload}.ack"
             log = tmp_path / f"{helper_name}-{payload}.log"
+            seal = tmp_path / f"{helper_name}-{payload}.prelaunch"
             script = f"""set -uo pipefail
 {publish_state}
+{publish_seal}
 {publish_ack}
 {seal_missing}
 DRIVER_STATE_FILE="$1"
 CLEANUP_ACK_FILE="$2"
 LOG="$3"
+PRELAUNCH_SEAL_FILE="$6"
 CLOUDBENCH_RUN_TOKEN=token-no-launch
 seal_missing_injected_helper "$4" "$5"
 """
@@ -4217,6 +4232,7 @@ seal_missing_injected_helper "$4" "$5"
                     str(log),
                     helper_name,
                     str(injected),
+                    str(seal),
                 ],
                 text=True,
                 capture_output=True,
@@ -4226,6 +4242,7 @@ seal_missing_injected_helper "$4" "$5"
             assert result.returncode == 0, result.stderr
             assert state.read_text() == "exited\n"
             assert ack.read_text() == "token-no-launch\n"
+            assert seal.read_text() == "token-no-launch\n"
             assert f"controller-injected {helper_name} missing or empty" in log.read_text()
 
     # Even a malicious helper inside the requested ref cannot replace the
