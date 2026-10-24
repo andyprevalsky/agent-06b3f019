@@ -128,6 +128,74 @@ def test_snapshot_reconcile_reads_api_message_shape_for_child_artifacts():
     )
 
 
+def test_own_display_call_posting_its_page_is_not_a_turn():
+    """spawn-sub-agents 6f893e51: the root's own display call posts its page row
+    (46bef1c0) between that call's IN_PROGRESS (04:14:38) and FINISHED (04:15:00).
+
+    The page is the tool's output, shown to the user and excluded from the model;
+    the FINISHED result names it. Both the realtime and the DB snapshot shapes must
+    accept it, while an authored turn during the open display call still fails.
+    """
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    display_call = "a52c5f8c-151e-4410-b149-3fec062d3df0"
+    page = {"id": "46bef1c0-8a18-87b7-88a6-192dc92ae17d", "kind": "page", "mime_type": "text/html"}
+    caption = "The exact product is 121,362,308,052,156. The card shows both official population inputs and dates."
+    page_meta = {
+        "source": "display",
+        "display": {"kind": "media", "placement": "inline", "media_kind": "page", "conversation": "own"},
+        "excludeFromModel": True,
+    }
+    messages = [
+        {
+            "created_at": "2026-10-24T04:14:38.082Z",
+            "message": "Publish a concise Rose-styled HTML scorecard through display.",
+            "metadata": {"toolCallId": display_call, "toolName": "display", "toolStatus": "IN_PROGRESS"},
+            "role": "TOOL",
+        },
+        {
+            "created_at": "2026-10-24T04:15:00.555Z",
+            "message": caption,
+            "file_pointer": page,
+            "metadata": page_meta,
+            "role": "ASSISTANT",
+        },
+        {
+            "created_at": "2026-10-24T04:15:00.785Z",
+            "message": "Displayed 1 item(s) inline for the user; text/html.",
+            "metadata": {"toolCallId": display_call, "toolName": "display", "toolStatus": "FINISHED"},
+            "role": "TOOL",
+        },
+    ]
+    agent = "6f893e51-1e49-41d3-a70c-8e1ba2657a45"
+    assert NoHangingToolCallsInvariant(agent).reconcile_snapshot(messages) is None
+
+    live = NoHangingToolCallsInvariant(agent)
+    for message in messages:
+        record = {
+            "agentId": agent,
+            "id": message.get("file_pointer", {}).get("id", ""),
+            "timestamp": message["created_at"],
+            "role": message["role"],
+            "text": message["message"],
+            "metadata": message["metadata"],
+        }
+        if "file_pointer" in message:
+            record["filePointer"] = message["file_pointer"]
+        live.handle_insert(record)
+    assert live.failure_reason is None
+
+    authored = {
+        "created_at": "2026-10-24T04:14:50.000Z",
+        "message": "**Publishing the card**",
+        "metadata": {},
+        "role": "ASSISTANT",
+    }
+    assert "unresolved tool display" in (
+        NoHangingToolCallsInvariant(agent).reconcile_snapshot([messages[0], authored, *messages[1:]]) or ""
+    )
+
+
 def test_code_agent_display_mirror_during_open_tool_is_not_parent_turn():
     """r004-j0049: a running code agent's Display is mirrored into the parent.
 
@@ -380,6 +448,10 @@ async def run_all_tests():
     r.record(
         "code_agent_display_mirror_during_open_tool_is_not_parent_turn",
         test_code_agent_display_mirror_during_open_tool_is_not_parent_turn,
+    )
+    r.record(
+        "own_display_call_posting_its_page_is_not_a_turn",
+        test_own_display_call_posting_its_page_is_not_a_turn,
     )
     r.record("attachment_marker_cannot_hide_authored_assistant_turn", test_attachment_marker_cannot_hide_authored_assistant_turn)
     r.record(
