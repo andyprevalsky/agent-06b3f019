@@ -32070,6 +32070,158 @@ async def test_capability_validation_preserves_printable_key_batch():
     await check_printable_batch_contract()
 
 
+@_in_browser_activity_context
+async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
+    """Kernel rejects a replay stop once the browser is paused/closed.
+
+    descend-full69 r001-j0010 (agent ffa591f5): the worker POSTed
+    /api/browser-session/close (pause + close, CLOSED 23:17:09.244Z) and only
+    then did background cleanup POST .../replays/<id>/stop (23:17:09.6Z) -> 400
+    "Kernel replay stop failed; reading persisted replay anyway" on every
+    browser teardown. Teardown must issue exactly one stop while the session is
+    still open, then close it; the FE recording is still saved.
+    """
+    from contextlib import ExitStack
+
+    from tools.base import MessageStatus
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.handler import (
+        drain_background_browser_cleanups,
+        spawn_browser_agent_activity_v3,
+    )
+
+    calls: list = []
+    kernel = SimpleNamespace(closed=False)
+
+    class _ClosingAwareKernel(_FakeReplayClient):
+        async def post(self, url, headers=None, json=None):
+            if url.endswith("/stop"):
+                calls.append(("POST", url, "closed" if kernel.closed else "open"))
+                return _FakeReplayResponse({}, status=400 if kernel.closed else 200)
+            return await super().post(url, headers=headers, json=json)
+
+    async def close_session(_config, session_id, **_options):
+        calls.append(("CLOSE", session_id))
+        kernel.closed = True
+        return {}
+
+    fake_browser = SimpleNamespace(
+        contexts=[SimpleNamespace(pages=[SimpleNamespace()])],
+        close=AsyncMock(),
+    )
+    session_info = {
+        "session_id": "kernel-session-1",
+        "debug_url": "https://kernel.example/live/xyz",
+        "ws_url": "ws://kernel-session-1",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "kernel", "profile_id": "profile-1"},
+        "same_session_available": True,
+    }
+    save_mock = AsyncMock()
+    stop_failures: list = []
+    real_warning = recording_module.logger.warning
+
+    def record_warning(event, *args, **kwargs):
+        if "Kernel replay stop failed" in str(event):
+            stop_failures.append(kwargs.get("error"))
+        return real_warning(event, *args, **kwargs)
+
+    patch_targets = [
+        # Scope the fake to the recorder module: patching httpx globally breaks later SDK imports.
+        patch.object(recording_module, "httpx", SimpleNamespace(AsyncClient=lambda *a, **k: _ClosingAwareKernel(calls))),
+        patch.object(recording_module.logger, "warning", side_effect=record_warning),
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                return_value={
+                    "action": {
+                        "action": "attempt_completion",
+                        "thinking": "The heading is visible.",
+                        "params": {"reasoning": "Heading reads Example Domain"},
+                    },
+                    "usage": {},
+                    "mode": "waterfall",
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "Heading confirmed",
+                    "structured_response": {"result": "Example Domain"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock(side_effect=close_session)),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser)),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    restore = _kernel_replay_env()
+    try:
+        with ExitStack() as stack:
+            for patch_target in patch_targets:
+                stack.enter_context(patch_target)
+            result = await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Open example.com and report the main heading.",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+            )
+            await drain_background_browser_cleanups()
+    finally:
+        restore()
+
+    assert result["status"] == "completed"
+    stops = [call for call in calls if call[0] == "POST" and call[1].endswith("/replays/rep-1/stop")]
+    closes = [call for call in calls if call[0] == "CLOSE"]
+    assert closes == [("CLOSE", "kernel-session-1")], calls
+    assert stops == [
+        ("POST", "https://kernel.example/browsers/kernel-session-1/replays/rep-1/stop", "open")
+    ], f"exactly one replay stop, issued before the session close: {calls}"
+    assert calls.index(stops[0]) < calls.index(closes[0]), calls
+    assert stop_failures == [], stop_failures
+    recordings = [
+        call.kwargs
+        for call in save_mock.await_args_list
+        if call.kwargs.get("action_type") == "recording" and call.kwargs.get("status") == MessageStatus.FINISHED
+    ]
+    assert recordings, "the Kernel replay recording message must still be saved"
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -32079,6 +32231,10 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async(
+        "kernel replay stopped before browser session close",
+        test_kernel_replay_is_stopped_before_the_browser_session_is_closed,
+    )
     await r.record_async(
         "park proof requires completed capture and detach", test_parked_proof_requires_capture_and_disconnect
     )
