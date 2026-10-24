@@ -1167,9 +1167,9 @@ def test_rose_desktop_tool_schemas_add_only_new_ui_surfaces():
         assert flagged_tool["description"] == tools_stock[name]["description"]
 
     display = flagged["display"]["input_schema"]["properties"]
-    assert list(display) == ["paths", "urls", "html", "caption", "placement", "options", "allow_other"]
-    assert display["placement"]["anyOf"][0]["enum"] == ["inline", "pinned"]
-    assert "pin a question" in flagged["display"]["description"]
+    # display never asks a question: no pinned placement, options or free-text answer.
+    assert list(display) == ["paths", "urls", "html", "caption"], list(display)
+    assert "question" not in flagged["display"]["description"].lower()
 
     flagged_type = flagged["spawn_agent"]["input_schema"]["properties"]["type"]["description"]
     assert flagged_type == SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP
@@ -1248,7 +1248,7 @@ async def test_call_llm_activity_declares_tools_for_the_calling_account():
     by_site = {site: {tool["name"]: tool for tool in tools} for site, tools in declared.items()}
     flagged = by_site["rose-desktop"]
     assert "inline_view" in flagged["send_message_to_user_execute_phase"]["input_schema"]["properties"]
-    assert "placement" in flagged["display"]["input_schema"]["properties"]
+    assert "placement" not in flagged["display"]["input_schema"]["properties"], "display never asks"
     assert by_site["stock"] == by_site["rose-desktop"]
     for site in ("no-user",):
         blob = json.dumps(by_site[site])
@@ -1259,7 +1259,10 @@ async def test_call_llm_activity_declares_tools_for_the_calling_account():
 async def run_all_tests():
     print("tool-schemas blackbox tests:")
     r = BlackboxResult()
-    r.record("desktop_display_json_arrays_preserve_validation", test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation)
+    r.record(
+        "desktop_display_json_arrays_preserve_validation",
+        test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation,
+    )
     r.record("tool_models_has_all_tools", test_tool_models_has_all_tools)
     r.record("plan_phase_tools_subset", test_plan_phase_tools_subset)
     r.record("execute_phase_tools_subset", test_execute_phase_tools_subset)
@@ -1365,16 +1368,29 @@ async def run_all_tests():
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
 
+
 def test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation():
     from pydantic import ValidationError
     from utils.tool_schemas import DisplayTool, DisplayRoseDesktopTool
 
-    typed = DisplayRoseDesktopTool.model_validate({"tool": "display", "paths": '["game.html"]', "urls": '["https://example.com/game.html"]', "options": '[{"label":"Play"}]', "caption": '["literal caption"]'})
+    typed = DisplayRoseDesktopTool.model_validate(
+        {
+            "tool": "display",
+            "paths": '["game.html"]',
+            "urls": '["https://example.com/game.html"]',
+            "caption": '["literal caption"]',
+        }
+    )
     assert typed.paths == ["game.html"]
     assert typed.urls == ["https://example.com/game.html"]
-    assert typed.options[0].label == "Play"
     assert typed.caption == '["literal caption"]'
-    for field, value in (("paths", "[1]"), ("urls", "[{}]"), ("options", "[{}]"), ("paths", '{"path":"game.html"}'), ("paths", "[invalid]"), ("paths", '"game.html"')):
+    for field, value in (
+        ("paths", "[1]"),
+        ("urls", "[{}]"),
+        ("paths", '{"path":"game.html"}'),
+        ("paths", "[invalid]"),
+        ("paths", '"game.html"'),
+    ):
         with pytest.raises(ValidationError):
             DisplayRoseDesktopTool.model_validate({"tool": "display", field: value})
     with pytest.raises(ValidationError):

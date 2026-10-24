@@ -9,9 +9,8 @@
  *     │                      the CLI's next user turn, delivered once per id
  *     │          + child-scoped chip rows so the code agent's own timeline
  *     │            shows "<sender> → Codex" / "Codex → <target>"
- *     ├─ ask   → (agentGraphQuestionService) question routing by spawner (UI ledger 47b): a root-spawned
- *     │          code agent asks the user (root pins); any other code agent
- *     │          sends the question to the Rose agent that spawned it
+ *     ├─ route → (agentGraphQuestionService) read-only question-route decision;
+ *     │          code agents cannot ask (there is no ask route)
  *     └─ grep  → agent_trajectories, path pinned to agent_trajectories/<root>
  *
  * Scope: every target is resolved by walking ITS parent links to a root and

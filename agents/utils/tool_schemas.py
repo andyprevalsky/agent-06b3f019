@@ -888,14 +888,6 @@ class SendMessageToUserExecutePhaseRoseDesktopTool(SendMessageToUserExecutePhase
     inline_view: Optional[InlineViewArg] = Field(default=None, description=INLINE_VIEW_DESCRIPTION)
 
 
-class DisplayOptionArg(BaseModel):
-    """One numbered answer for a pinned question."""
-
-    label: str = Field(description="Short answer label.")
-    description: Optional[str] = Field(default=None, description="One line explaining the option.")
-    recommended: Optional[bool] = Field(default=None, description="True for the option you recommend.")
-
-
 class DisplayTool(BaseModel):
     """Show images, videos or HTML to the user inline."""
 
@@ -916,9 +908,9 @@ class DisplayTool(BaseModel):
 
 
 class DisplayRoseDesktopTool(DisplayTool):
-    """Show images, videos or HTML to the user inline, or pin a question with numbered options."""
+    """Show images, videos or HTML to the user inline."""
 
-    @field_validator("paths", "urls", "options", mode="before")
+    @field_validator("paths", "urls", mode="before")
     @classmethod
     def _decode_json_array(cls, value: Any) -> Any:
         if not isinstance(value, str):
@@ -928,21 +920,6 @@ class DisplayRoseDesktopTool(DisplayTool):
         except json.JSONDecodeError:
             return value
         return decoded if isinstance(decoded, list) else value
-
-    caption: Optional[str] = Field(
-        default=None,
-        description=user_facing_text_description('Caption shown with the media; for placement "pinned", the question.'),
-    )
-    placement: Optional[Literal["inline", "pinned"]] = Field(
-        default="inline",
-        description='"inline" posts in the trajectory; "pinned" asks a question (see the tool notes for who answers).',
-    )
-    options: Optional[List[DisplayOptionArg]] = Field(
-        default=None, description='Answers for placement "pinned", shown numbered (max 9).'
-    )
-    allow_other: Optional[bool] = Field(
-        default=None, description='For placement "pinned": offer a free-text "Other…" answer (default true).'
-    )
 
 
 class MessagePersonTool(BaseModel):

@@ -8,7 +8,7 @@
  *   POST /api/agent-graph/messages        A2A send (Rose agent | code agent)
  *   POST /api/agent-graph/grep            trajectory grep pinned to the tree
  *   GET  /api/agent-graph/question-route  { deliver_to, agent_id }
- *   POST /api/agent-graph/questions       route a code agent's question
+ *   POST /api/agent-graph/questions       removed: code agents cannot ask (404)
  *   POST /api/agent-graph/token           refresh a code-session token
  *
  * Fixture tree (user A):      R (root) ── C ── G      R2 (user B) ── S3
@@ -24,15 +24,14 @@
  *     cross-tree grep agent_id → 404
  *   - token: missing / expired / wrong scope / tampered / deleted session → 401;
  *     refresh keeps the claims; API-key callers cannot refresh
- *   - question routing: root-spawned → user (nothing sent); non-root-spawned
- *     → delivered to the spawning agent as a question in both transcripts
+ *   - code agents cannot ask: GET question-route is read-only and POST
+ *     /questions is gone (404), sending nothing
  *   - root → running code agent (the production Claude ws-server.mjs with a
  *     scripted CLI): delivered once to the CLI as a user turn across a
  *     retried send, answered before the CLI exits; a finished session → 409
- *   - adversarial scenarios (agent-graph-adversarial.cases.ts): blocked-spawner
- *     question handoff, sibling question cycles, deep-chain routing, finished /
- *     deleted spawners, duplicate message ids, flooding, cross-tree isolation,
- *     stale tokens and a cancelled parent
+ *   - adversarial scenarios (agent-graph-adversarial.cases.ts): sibling message
+ *     cycles, deep-chain routing, finished / deleted spawners, duplicate message
+ *     ids, flooding, cross-tree isolation and stale tokens
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-graph
  */
@@ -392,42 +391,30 @@ async function testQuestionRoutingBySpawner(): Promise<void> {
     `non-root-spawned → spawner: ${JSON.stringify(fromChildSpawned.data)}`
   );
 
-  const before = await prisma.message.count({ where: { agentId: ids.R } });
-  const pinned = await call('/api/agent-graph/questions', {
-    bearer: codeToken(ids.S2, ids.R),
-    body: { question: 'Which DB?', message_id: `q2-${RUN}` },
-  });
-  expectStatus(pinned, 200, 'S2 asks');
-  assert(pinned.data.status === 'pin_for_user', 'root-spawned question is pinned for the user');
-  assert((await prisma.message.count({ where: { agentId: ids.R } })) === before, 'nothing sent');
-  assert((await countRows(ids.R, `a2a:${ids.S2}:`)) === 0, 'no A2A rows for a pinned question');
-
-  const asked = await call('/api/agent-graph/questions', {
-    bearer: codeToken(ids.S1, ids.C),
-    body: {
-      question: `Postgres or SQLite ${RUN}?`,
-      options: [
-        { label: 'Postgres', description: 'matches prod', recommended: true },
-        { label: 'SQLite' },
-      ],
-      message_id: `q1-${RUN}`,
-    },
-  });
-  expectStatus(asked, 200, 'S1 asks');
-  assert(asked.data.deliver_to === 'agent' && asked.data.agent_id === ids.C, 'goes to spawner');
-  const key = `a2a:${ids.S1}:q1-${RUN}`;
-  const question = await prisma.message.findUnique({
-    where: { id: deterministicMessageId(ids.C, key) },
-  });
-  assert(question !== null && question.role === 'USER', 'spawner has the question as USER');
-  assert(question.text.startsWith('[Question from Codex'), `question framing: ${question.text}`);
-  assert(question.text.includes('1. Postgres (recommended) — matches prod'), 'options listed');
-  const meta = question.metadata as { a2a?: { kind?: string } };
-  assert(meta.a2a?.kind === 'question', 'a2a kind question');
-  const sentChip = await prisma.message.count({
-    where: { agentId: ids.C, metadata: { path: ['idempotencyKey'], equals: `${key}:sent` } },
-  });
-  assert(sentChip === 1, 'the question shows in the code agent timeline too');
+  // Code agents cannot ask: the questions route is gone, whoever spawned them.
+  const before = {
+    R: await prisma.message.count({ where: { agentId: ids.R } }),
+    C: await prisma.message.count({ where: { agentId: ids.C } }),
+  };
+  for (const [sessionId, owner] of [
+    [ids.S2, ids.R],
+    [ids.S1, ids.C],
+  ] as const) {
+    const asked = await call('/api/agent-graph/questions', {
+      bearer: codeToken(sessionId, owner),
+      body: { question: `Postgres or SQLite ${RUN}?`, message_id: `q-${sessionId}-${RUN}` },
+    });
+    // The route is gone: the request falls through to the generic API auth.
+    assert(
+      asked.status === 401 || asked.status === 404,
+      `${sessionId} cannot ask: ${asked.status}`
+    );
+  }
+  assert(
+    (await prisma.message.count({ where: { agentId: ids.R } })) === before.R &&
+      (await prisma.message.count({ where: { agentId: ids.C } })) === before.C,
+    'a refused question sends nothing'
+  );
 }
 
 async function testGrepIsPinnedToTheTree(): Promise<void> {
@@ -644,7 +631,7 @@ const cases: Array<[string, () => Promise<void>]> = [
   ],
   ['scope is the own tree (cross-tree 404)', testScopeIsTheOwnTree],
   ['token scope, expiry and refresh', testTokenScopeAndExpiry],
-  ['question routing by spawner', testQuestionRoutingBySpawner],
+  ['question route is read-only; code agents cannot ask', testQuestionRoutingBySpawner],
   ['grep is pinned to the tree', testGrepIsPinnedToTheTree],
   ['root messages a running code agent once', testRootMessagesRunningCodeAgentOnce],
   [

@@ -1,21 +1,11 @@
 #!/usr/bin/env tsx
 import { rendererCliCases } from './agent-tools-render-cli.cases';
 /**
- * Black-box tests for the blocking agent tools and the shipped `rose` CLI:
+ * Black-box tests for the agent tools and the shipped `rose` CLI:
  *
- *   - pinned routing (shared L-A2A decision): root-spawned callers pin for the
- *     user (UI contract metadata.display {placement, kind, question, options,
- *     allow_other, question_id}); a deeper caller gets route "agent" (its
- *     spawner) and nothing is stored — it asks through the agent graph; answers
- *     through POST /api/agents/:id/questions/:questionId/answer keep the first
- *     answer (identical replay → 200, different late answer → 409), number →
- *     option, dismiss → rejected
- *   - adversarial (agent-tools-requests-adversarial.cases.ts): racing answers,
- *     and a cancelled agent ends its code agent's in-flight wait (410)
- *   - approval round trip: pending (long-poll holds, returns pending) → the user
- *     responds via the existing attention endpoint → a waiting long-poll resumes
- *     with the answer; retry reuses the request; reject → rejected; the
- *     ApprovalChip row (labelled with the requesting agent) finishes
+ *   - no agent can ask a question: display placement "pinned" is refused (400)
+ *     for root, sub-agent and code-agent callers, code agents have no approval
+ *     route (404), and no attention request is stored
  *   - sandbox send_message_to_user pins a published inline view; unknown view → 400;
  *     a code session that pulls and publishes with rose-ui and runs `rose message
  *     --inline-view` lands that row in its own trajectory (C12)
@@ -23,7 +13,7 @@ import { rendererCliCases } from './agent-tools-render-cli.cases';
  *     plus only the files it references, a .glb → model viewer; a folder with no
  *     entry fails locally
  *   - the shipped `rose` CLI: display posts once then reports already displayed;
- *     `rose approve` blocks across long-polls until the user answers, then exits 0
+ *     there is no `rose approve`
  *   - Rose Desktop gate (agent-tools-rose-desktop.cases): a stock session gets no
  *     rose-ui, stock rose tools and the stock skills; a Rose Desktop session gets
  *     rose-ui, the new-UI tools and every skill; the prompts' table of contents
@@ -31,7 +21,6 @@ import { rendererCliCases } from './agent-tools-render-cli.cases';
  *
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools-requests
  */
-import { spawn } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -58,136 +47,28 @@ import {
   expectStatus,
   grandchildA,
   otherA,
-  pause,
   png,
-  questionOf,
-  respond,
   rootA,
   RUN,
   runSuite,
-  toolRows,
   uiVersion,
   userA,
-  userB,
   type Auth,
   type BlackboxTest,
 } from './agent-tools.support';
-import { adversarialRequestTests } from './agent-tools-requests-adversarial.cases';
 import { inlineViewPublishCases } from './agent-tools-inline-view.cases';
 import { roseDesktopGateCases } from './agent-tools-rose-desktop.cases';
 
 const tests: BlackboxTest[] = [
   {
-    name: 'pinned question from a root-spawned code agent pins for the user and returns the answer',
+    name: 'no agent can ask a question: pinned display is refused, approvals and graph questions have no route',
     fn: async () => {
-      const token = codeToken(rootA);
-      const body = {
-        items: [b64(png(), 'option-a.png')],
-        caption: 'Which layout?',
-        placement: 'pinned',
-        options: [
-          { label: 'Grid', description: 'Two columns', recommended: true },
-          { label: 'List', description: 'One column' },
-        ],
-        allow_other: true,
-        request_key: `layout-${RUN}`,
-      };
-      const res = await display(rootA, body, { bearer: token });
-      expectStatus(res, 201, 'pinned');
-      const question = questionOf(res);
-      assert(question.deliver_to === 'user' && question.agent_id === rootA, 'routed to the user');
-      assert(question.request_id !== null, 'stored');
-      assert(question.status === 'pending', 'pending');
-      const pins = await toolRows(rootA, `agent-tools:${question.request_id}`);
-      assert(pins.length === 1, `one pin row, got ${pins.length}`);
-      const meta = pins[0].metadata as Record<string, unknown>;
-      assert(
-        meta.toolStatus === 'IN_PROGRESS' && meta.isUserAttentionMessage === true,
-        'pinned row'
-      );
-      const pinned = meta.display as {
-        placement: string;
-        kind: string;
-        question: string;
-        options: { label: string; recommended?: boolean }[];
-        allow_other: boolean;
-        question_id: string;
-        items: { mime_type: string }[];
-      };
-      assert(
-        pinned.placement === 'pinned' && pinned.kind === 'question',
-        'UI contract: pinned question'
-      );
-      assert(
-        pinned.question === 'Which layout?' && pinned.question_id === question.request_id,
-        'ids'
-      );
-      assert(pinned.options.length === 2 && pinned.options[0].recommended === true, 'options kept');
-      assert(
-        pinned.allow_other === true && pinned.items[0].mime_type === 'image/png',
-        'media kept'
-      );
-      assert(meta.excludeFromModel === true, 'pin row stays out of the session agent context');
-      assert(
-        (await displayMessages(rootA)).every((row) => row.text !== 'Which layout?'),
-        'no inline post'
-      );
-
-      const retry = await display(rootA, body, { bearer: token });
-      expectStatus(retry, 201, 'retry');
-      assert(questionOf(retry).request_id === question.request_id, 'same request on retry');
-      assert((await toolRows(rootA, `agent-tools:${question.request_id}`)).length === 1, 'one pin');
-
-      const waitPath = `/api/agent-tools/${rootA}/requests/${question.request_id}`;
-      const pending = await call('GET', `${waitPath}?wait=1`, undefined, { bearer: token });
-      expectStatus(pending, 200, 'long-poll');
-      assert(pending.data.status === 'pending', 'still pending after a bounded wait');
-      const answerPath = `/api/agents/${rootA}/questions/${question.request_id}/answer`;
-      expectStatus(
-        await call(
-          'POST',
-          `/api/agents/${otherA}/questions/${question.request_id}/answer`,
-          { answer: 'List' },
-          {
-            apiKeyUser: userA,
-          }
-        ),
-        404,
-        'answer under the wrong agent'
-      );
-      expectStatus(
-        await call('POST', answerPath, { answer: 'List' }, { apiKeyUser: userB }),
-        403,
-        'answer from another account'
-      );
-      const answer = await call('POST', answerPath, { answer: 'List' }, { apiKeyUser: userA });
-      expectStatus(answer, 200, 'user answers');
-      const again = await call('POST', answerPath, { answer: 'List' }, { apiKeyUser: userA });
-      expectStatus(again, 200, 'idempotent identical re-answer');
-      assert(
-        (again.data.selected_option as { label: string }).label === 'List',
-        'replay returns the stored answer'
-      );
-      const late = await call('POST', answerPath, { answer: 'Grid' }, { apiKeyUser: userA });
-      expectStatus(late, 409, 'first answer wins; a different late answer conflicts');
-      const answered = await call('GET', waitPath, undefined, { bearer: token });
-      assert(answered.data.status === 'answered', `answered: ${JSON.stringify(answered.data)}`);
-      const picked = answered.data.selected_option as { index: number; label: string };
-      assert(picked.index === 1 && picked.label === 'List', 'selected option resolved');
-      assert(answered.data.answered_by === 'user', 'answered by the user');
-      const finished = (await toolRows(rootA, `agent-tools:${question.request_id}`))[0];
-      assert((finished.metadata as { toolStatus: string }).toolStatus === 'FINISHED', 'pin closes');
-      const foreign = await call('GET', waitPath, undefined, { bearer: codeToken(otherA) });
-      expectStatus(foreign, 403, "another agent's token cannot read the request");
-    },
-  },
-  {
-    name: 'routing by spawner (shared L-A2A decision): root-spawned callers pin; deeper callers route to their spawner',
-    fn: async () => {
+      const before = await prisma.agentAttentionRequest.count({ where: { userId: userA } });
       const ask = (agentId: string, auth: Auth, key: string) =>
         display(
           agentId,
           {
+            items: [b64(png(), `ask-${key}.png`)],
             caption: `Proceed? ${key}`,
             placement: 'pinned',
             options: [{ label: 'Yes' }, { label: 'No' }],
@@ -195,176 +76,34 @@ const tests: BlackboxTest[] = [
           },
           auth
         );
-      const root = await ask(rootA, { apiKeyUser: userA }, `root-${RUN}`);
-      expectStatus(root, 201, 'root agent');
-      assert(
-        questionOf(root).deliver_to === 'user' && questionOf(root).agent_id === rootA,
-        'root → user'
+      const callers: [string, string, Auth][] = [
+        ['root agent', rootA, { apiKeyUser: userA }],
+        ['depth-1 agent', childA, { apiKeyUser: userA }],
+        ['depth-2 agent', grandchildA, { apiKeyUser: userA }],
+        ['code agent spawned by root', rootA, { bearer: codeToken(rootA) }],
+        ['code agent spawned by a sub-agent', childA, { bearer: codeToken(childA) }],
+      ];
+      for (const [label, agentId, auth] of callers) {
+        const res = await ask(agentId, auth, `${label.replace(/\W+/g, '-')}-${RUN}`);
+        expectStatus(res, 400, label);
+        assert(
+          String(res.data.error).includes('display cannot ask questions'),
+          `${label}: truthful refusal: ${JSON.stringify(res.data)}`
+        );
+      }
+      const approval = await call(
+        'POST',
+        `/api/agent-tools/${otherA}/approvals`,
+        { question: `Deploy ${RUN} to prod?`, request_key: `deploy-${RUN}` },
+        { bearer: codeToken(otherA) }
       );
-      const child = await ask(childA, { apiKeyUser: userA }, `child-${RUN}`);
-      expectStatus(child, 201, 'depth-1 agent');
-      const childQ = questionOf(child);
+      // The route is gone: the request falls through to the generic API auth.
       assert(
-        childQ.deliver_to === 'user' && childQ.agent_id === rootA,
-        'spawned by root → user (root pins)'
+        approval.status === 401 || approval.status === 404,
+        `no approval route for code agents: ${approval.status} ${JSON.stringify(approval.data)}`
       );
-      assert(childQ.request_id !== null, 'a user-routed question is stored');
-
-      const before = await prisma.agentAttentionRequest.count({ where: { userId: userA } });
-      const grandchild = await ask(grandchildA, { apiKeyUser: userA }, `gc-${RUN}`);
-      expectStatus(grandchild, 201, 'depth-2 agent');
-      const routed = questionOf(grandchild);
-      assert(
-        routed.deliver_to === 'agent' && routed.agent_id === childA && routed.request_id === null,
-        `depth 2 → its spawning agent: ${JSON.stringify(routed)}`
-      );
-      assert(routed.status === 'route_to_agent', 'the caller asks via the agent graph');
-      const codeInChild = await ask(childA, { bearer: codeToken(childA) }, `code-child-${RUN}`);
-      expectStatus(codeInChild, 201, 'code agent spawned by a non-root agent');
-      const codeRoute = questionOf(codeInChild);
-      assert(
-        codeRoute.deliver_to === 'agent' && codeRoute.agent_id === childA,
-        'code agent → spawner'
-      );
-      const codeInRoot = await ask(rootA, { bearer: codeToken(rootA) }, `code-root-${RUN}`);
-      assert(questionOf(codeInRoot).deliver_to === 'user', 'code agent spawned by root → user');
       const after = await prisma.agentAttentionRequest.count({ where: { userId: userA } });
-      assert(
-        after === before + 1,
-        'agent-routed questions store nothing; the root-spawned code agent pins one'
-      );
-
-      const inbox = await call('GET', '/api/attention-requests', undefined, { apiKeyUser: userA });
-      const ids = (inbox.data.requests as { id: string }[]).map((r) => r.id);
-      assert(ids.includes(childQ.request_id ?? ''), 'user-routed question in the inbox');
-
-      const viaRoot = await call(
-        'POST',
-        `/api/agents/${rootA}/questions/${childQ.request_id}/answer`,
-        { answer: '1' },
-        { apiKeyUser: userA }
-      );
-      expectStatus(viaRoot, 200, 'the root view answers its sub-agent pin by number');
-      assert(
-        (viaRoot.data.selected_option as { label: string }).label === 'Yes',
-        'number → option'
-      );
-      assert(viaRoot.data.response === 'Yes', 'number stored as the option label');
-      assert(viaRoot.data.answered_by === 'user', 'answered by the user');
-      const rootQ = questionOf(root).request_id ?? '';
-      const dismissed = await call(
-        'POST',
-        `/api/agents/${rootA}/questions/${rootQ}/answer`,
-        { dismiss: true },
-        { apiKeyUser: userA }
-      );
-      expectStatus(dismissed, 200, 'user dismisses');
-      assert(dismissed.data.status === 'rejected', 'dismissed → rejected');
-      const strict = await display(
-        rootA,
-        {
-          caption: `Strict ${RUN}`,
-          placement: 'pinned',
-          options: [{ label: 'A' }],
-          allow_other: false,
-          request_key: `strict-${RUN}`,
-        },
-        { apiKeyUser: userA }
-      );
-      const strictPath = `/api/agents/${rootA}/questions/${questionOf(strict).request_id}/answer`;
-      expectStatus(
-        await call('POST', strictPath, { answer: 'free text' }, { apiKeyUser: userA }),
-        400,
-        'free text refused without allow_other'
-      );
-    },
-  },
-  {
-    name: 'approval round trip: pending, user responds, answered; retry reuses; reject',
-    fn: async () => {
-      const token = codeToken(otherA);
-      const path = `/api/agent-tools/${otherA}/approvals`;
-      const body = { question: `Deploy ${RUN} to prod?`, request_key: `deploy-${RUN}` };
-      const created = await call('POST', path, body, { bearer: token });
-      expectStatus(created, 201, 'approval');
-      const requestId = created.data.request_id as string;
-      const chip = await toolRows(otherA, `agent-tools:${requestId}`);
-      assert(chip.length === 1, 'one approval row');
-      const meta = chip[0].metadata as {
-        toolStatus: string;
-        isUserAttentionMessage: boolean;
-        requestUserApproval: {
-          attentionRequestId: string;
-          toolApproval: boolean;
-          requestingAgent: { label: string };
-        };
-      };
-      assert(
-        meta.toolStatus === 'IN_PROGRESS' &&
-          meta.isUserAttentionMessage &&
-          meta.requestUserApproval.toolApproval &&
-          meta.requestUserApproval.attentionRequestId === requestId,
-        'existing ApprovalChip contract'
-      );
-      assert(
-        meta.requestUserApproval.requestingAgent.label === 'Claude Code',
-        'labelled with the agent'
-      );
-      const retry = await call('POST', path, body, { bearer: token });
-      assert(retry.data.request_id === requestId, 'retry reuses the request');
-      assert((await toolRows(otherA, `agent-tools:${requestId}`)).length === 1, 'still one chip');
-
-      const waitPath = `/api/agent-tools/${otherA}/requests/${requestId}`;
-      const started = Date.now();
-      const pending = await call('GET', `${waitPath}?wait=2`, undefined, { bearer: token });
-      assert(pending.data.status === 'pending', 'blocks while unanswered');
-      assert(Date.now() - started >= 1500, 'long-poll held the request');
-
-      const waiter = call('GET', `${waitPath}?wait=20`, undefined, { bearer: token });
-      await pause(500);
-      expectStatus(await respond(requestId, userA, 'Approved'), 200, 'user approves');
-      const resumed = await waiter;
-      assert(
-        resumed.data.status === 'answered',
-        `resumes with the answer: ${JSON.stringify(resumed.data)}`
-      );
-      assert(resumed.data.response === 'Approved', 'answer text');
-      const closed = (await toolRows(otherA, `agent-tools:${requestId}`))[0];
-      assert(
-        (closed.metadata as { toolStatus: string }).toolStatus === 'FINISHED',
-        'chip finishes'
-      );
-
-      const second = await call(
-        'POST',
-        path,
-        { question: 'Delete the branch?' },
-        { bearer: token }
-      );
-      const secondId = second.data.request_id as string;
-      expectStatus(
-        await call(
-          'POST',
-          `/api/attention-requests/${secondId}/reject`,
-          { message: 'not yet' },
-          {
-            apiKeyUser: userA,
-          }
-        ),
-        200,
-        'reject'
-      );
-      const rejected = await call(
-        'GET',
-        `/api/agent-tools/${otherA}/requests/${secondId}`,
-        undefined,
-        {
-          bearer: token,
-        }
-      );
-      assert(rejected.data.status === 'rejected', 'rejected state');
-      const internal = await call('POST', path, { question: 'x' }, { apiKeyUser: userA });
-      expectStatus(internal, 400, 'Rose agents use their own request_user_approval');
+      assert(after === before, `nothing was stored for the user to answer (${before} → ${after})`);
     },
   },
   {
@@ -444,7 +183,7 @@ const tests: BlackboxTest[] = [
   ...rendererCliCases(),
 
   {
-    name: 'shipped rose CLI: display once, then already displayed; approve blocks until answered',
+    name: 'shipped rose CLI: display once, then already displayed; no approve command',
     fn: async () => {
       const home = mkdtempSync(join(tmpdir(), 'rose-tools-'));
       try {
@@ -484,7 +223,7 @@ const tests: BlackboxTest[] = [
         };
         assert(mcp.mcpServers.rose.args[0] === cli, 'MCP config points at the installed CLI');
         // Config comes from ~/.rose/tools.json alone (MCP servers may not inherit env).
-        const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, ROSE_TOOLS_WAIT_SECONDS: '2' };
+        const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
         delete env.ROSE_TOOLS_URL;
         delete env.ROSE_TOOLS_TOKEN;
         const shot = join(home, 'shot.png');
@@ -516,29 +255,18 @@ const tests: BlackboxTest[] = [
         );
         assert(tooMany !== null && tooMany.code === 1, 'CLI rejects > 20 items');
 
-        const question = `Merge CLI ${RUN}?`;
-        const child = spawn('node', [cli, 'approve', question], {
+        const approve = await execFileAsync('node', [cli, 'approve', `Merge CLI ${RUN}?`], {
           env,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        let stdout = '';
-        child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
-        const exited = new Promise<number | null>((resolve) => child.on('close', resolve));
-        let requestId: string | null = null;
-        for (let i = 0; i < 50 && requestId === null; i += 1) {
-          await pause(200);
-          const row = await prisma.agentAttentionRequest.findFirst({
-            where: { agentId: otherA, question },
-          });
-          requestId = row?.id ?? null;
-        }
-        assert(requestId !== null, 'CLI opened an approval request');
-        await pause(4500);
-        assert(child.exitCode === null, 'CLI still blocked across several long-polls');
-        expectStatus(await respond(requestId, userA, 'Approved'), 200, 'user approves');
-        const code = await exited;
-        assert(code === 0, `CLI exits 0 after approval (code ${code}, out ${stdout})`);
-        assert(stdout.includes('The user approved'), `CLI prints the answer: ${stdout}`);
+        }).then(
+          () => null,
+          (err: { code?: number; stderr?: string }) => err
+        );
+        assert(
+          approve !== null &&
+            approve.code === 1 &&
+            String(approve.stderr).includes('unknown command'),
+          'the CLI has no approve command'
+        );
       } finally {
         rmSync(home, { recursive: true, force: true });
       }
@@ -547,7 +275,7 @@ const tests: BlackboxTest[] = [
   ...roseDesktopGateCases,
 ];
 
-runSuite([...tests, ...adversarialRequestTests]).catch((err) => {
+runSuite(tests).catch((err) => {
   console.error('\nCrashed:', err);
   process.exit(1);
 });

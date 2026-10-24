@@ -109,12 +109,6 @@ export const messageRequestSchema = z.object({
   idempotency_key: z.string().min(1).max(200).optional(),
 });
 
-/** POST /api/agent-tools/:agentId/approvals */
-export const approvalRequestSchema = z.object({
-  question: z.string().trim().min(1).max(4000),
-  request_key: z.string().min(1).max(200).optional(),
-});
-
 /** POST /api/agents/:id/questions/:questionId/answer (the UI's pinned card) */
 export const answerQuestionSchema = z
   .object({
@@ -136,8 +130,6 @@ export type DisplayItemInput = z.infer<typeof displayItemSchema>;
 export type DisplayOption = z.infer<typeof displayOptionSchema>;
 export type DisplayRequestBody = z.infer<typeof displayRequestSchema>;
 export type MessageRequestBody = z.infer<typeof messageRequestSchema>;
-export type ApprovalRequestBody = z.infer<typeof approvalRequestSchema>;
-
 /**
  * POST /api/agent-tools/:agentId/environment/size — a code agent asks for
  * another sandbox size (C16). Either dimension alone keeps the other; the

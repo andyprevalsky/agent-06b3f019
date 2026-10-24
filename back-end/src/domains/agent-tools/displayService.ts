@@ -1,7 +1,7 @@
 /**
  * `display`: publish images, videos, web pages, multi-file sites, 3D models and
- * PDFs, and either post them inline in the caller's trajectory or pin them with
- * a question above the user's query box.
+ * PDFs and post them inline in the caller's trajectory. Pinned questions are
+ * refused: agents cannot ask the user questions through display.
  *
  *   items (url | file | content_base64 | bundle), caption, placement, options
  *     │ resolve bytes  (url: bounded SSRF-guarded fetch; file: tree pointer or
@@ -20,7 +20,7 @@
  *   inline ─► ASSISTANT message per unique item,
  *             id = deterministicMessageId(agentId, "display:<sha256 | bundle hash>")
  *             exists ─► duplicate (no post)                       (P2002-safe)
- *   pinned ─► questionService.openQuestion (routing: user pin | parent A2A)
+ *   pinned ─► 400 (agents cannot ask the user questions through display)
  *
  * Framed kinds carry `file_pointer.usercontent_url` + `kind`; the FE frames
  * them with DISPLAY_IFRAME_SANDBOX (providers/agentTools/displayCsp.ts).
@@ -47,7 +47,6 @@ import {
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { DISPLAY_MAX_FILE_BYTES, DISPLAY_MAX_TOTAL_BYTES } from './config';
 import type * as repo from './repo';
-import { openQuestion } from './questionService';
 import { AgentToolsError, type ToolContext } from './service';
 import type {
   DisplayItemInput,
@@ -58,7 +57,7 @@ import type {
 } from './types';
 import type { PreparedItem, ResolvedItem } from './displayTypes';
 import { itemLabel, resolveAll } from './displayResolution';
-import { canonicalScope, displayCanonicalId, itemResult, postInline } from './displayPosting';
+import { postInline } from './displayPosting';
 const TYPES_HELP =
   'allowed: image/*, video/*, an .html page, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder; SVG excluded';
 const extOf = (path: string) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
@@ -243,25 +242,11 @@ export async function displayMedia(
   const caption = body.caption?.trim() ?? '';
 
   if (body.placement === 'pinned') {
-    const question = await openQuestion(ctx, {
-      question: caption,
-      options: body.options ?? [],
-      allowOther: body.allow_other !== false,
-      media: prepared.map((entry) => entry.filePointer),
-      requestKey: body.request_key,
-      workflowId: body.workflow_id,
-    });
-    return {
-      agent_id: ctx.agent.id,
-      placement: 'pinned',
-      posted_count: 0,
-      duplicate_count: 0,
-      items: prepared.map((entry) => ({
-        ...itemResult(entry, 'attached', question.message_id, entry.filePointer),
-        canonical_id: displayCanonicalId(canonicalScope(ctx), entry.sha256),
-      })),
-      question,
-    };
+    // Agents cannot ask the user questions through display; it only shows media.
+    throw new AgentToolsError(
+      400,
+      'display cannot ask questions: placement "pinned" is disabled, use placement "inline"'
+    );
   }
 
   const results: DisplayItemResult[] = [];

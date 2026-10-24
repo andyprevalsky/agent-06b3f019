@@ -1,4 +1,4 @@
-"""Agent graph from the agents worker: message agents and code agents, route questions.
+"""Agent graph from the agents worker: message agents and code agents.
 
 The backend owns tree scoping, delivery and transcript rows
 (``back-end/src/domains/agents/agentGraphService.ts``); these activities are
@@ -12,15 +12,9 @@ the worker's thin, retry-safe client::
              ├─ Rose agent target → idempotent USER message
              └─ code agent target → deliverUserTurnToCodeSession → the CLI's
                                     next user turn, once per message id
-      └─ ask_code_agent_question_activity(AgentGraphQuestionRequest)
-           POST /api/agent-graph/questions  → question routing by spawner
 
-Question routing by spawner (UI ledger 47b): a code agent started by the root
-agent asks the user (the root pins it); one started by any other agent sends
-the question to that agent, which answers from its context or escalates up
-the tree. ``question_route_for_spawner`` is the same rule as the backend's
-``questionRouteForSpawner``, for callers that already hold the spawner's
-parent link (e.g. the spawning workflow).
+Code agents cannot ask the user (or their spawner) questions: there is no
+question activity or route.
 
 Idempotency (CLAUDE.md rule 20): ``message_id`` must be stable across
 Temporal retries. ``a2a_message_id`` derives it from the workflow id and the
@@ -33,9 +27,9 @@ annotations``): Temporal decodes them inside the workflow sandbox.
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, Optional
 
 import httpx
 import structlog
@@ -54,18 +48,6 @@ _MAX_MESSAGE_ID_CHARS = 200
 # Definite answers that a retry cannot change: wrong scope, bad input, or a
 # finished code session.
 _NON_RETRYABLE_STATUSES = frozenset({400, 401, 403, 404, 409})
-
-
-class QuestionRoute(TypedDict):
-    deliver_to: Literal["user", "agent"]
-    agent_id: str
-
-
-def question_route_for_spawner(spawner_agent_id: str, spawner_parent_agent_id: Optional[str]) -> QuestionRoute:
-    """Root-spawned code agent → ``user`` (root pins); otherwise → its spawning ``agent``."""
-    if spawner_parent_agent_id is None or spawner_parent_agent_id == "":
-        return {"deliver_to": "user", "agent_id": spawner_agent_id}
-    return {"deliver_to": "agent", "agent_id": spawner_agent_id}
 
 
 def a2a_message_id(workflow_id: str, tool_call_id: str) -> str:
@@ -87,26 +69,6 @@ class AgentGraphSendRequest:
     message_id: str
     code_session_id: Optional[str] = None
     code_provider: Optional[str] = None
-
-
-@dataclass
-class AgentGraphQuestionOption:
-    label: str
-    description: Optional[str] = None
-    recommended: Optional[bool] = None
-
-
-@dataclass
-class AgentGraphQuestionRequest:
-    """A code session owned by ``agent_id`` asks a question, routed by its spawner."""
-
-    agent_id: str
-    code_session_id: str
-    question: str
-    message_id: str
-    code_provider: Optional[str] = None
-    options: List[AgentGraphQuestionOption] = field(default_factory=list)
-    allow_other: Optional[bool] = None
 
 
 def _headers(agent_id: str, code_session_id: Optional[str], code_provider: Optional[str]) -> Dict[str, str]:
@@ -167,32 +129,6 @@ async def send_agent_graph_message_activity(request: AgentGraphSendRequest) -> D
         code_session_id=request.code_session_id,
         to=request.to,
         message_id=request.message_id,
-        status=result.get("status"),
-    )
-    return result
-
-
-@activity.defn
-async def ask_code_agent_question_activity(request: AgentGraphQuestionRequest) -> Dict[str, Any]:
-    """Route a code agent's question by spawner; returns the backend's route + delivery."""
-    body: Dict[str, Any] = {"question": request.question, "message_id": request.message_id}
-    if request.options:
-        body["options"] = [
-            {key: value for key, value in vars(option).items() if value is not None} for option in request.options
-        ]
-    if request.allow_other is not None:
-        body["allow_other"] = request.allow_other
-    result = await _post(
-        "/questions",
-        _headers(request.agent_id, request.code_session_id, request.code_provider),
-        body,
-    )
-    logger.info(
-        "[AgentGraph] Code agent question routed",
-        agent_id=request.agent_id,
-        code_session_id=request.code_session_id,
-        deliver_to=result.get("deliver_to"),
-        route_agent_id=result.get("agent_id"),
         status=result.get("status"),
     )
     return result

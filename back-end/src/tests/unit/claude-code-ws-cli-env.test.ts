@@ -12,6 +12,11 @@
  * session with zero output until our outer timeout (agent 28b8f555 stalled
  * 233s inside its second streaming request). The CLI's own idle timeout
  * default (90s) is kept, so CLAUDE_STREAM_IDLE_TIMEOUT_MS must not be set.
+ *
+ * Invariant: code agents cannot ask the user questions. The CLI is launched
+ * with AskUserQuestion, EnterPlanMode and ExitPlanMode (the tools whose
+ * requiresUserInteraction() asks the user) on --disallowedTools, which removes
+ * them from the model's tool list. --allowedTools alone only pre-approves.
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -73,6 +78,7 @@ process.stdin.on('data', (chunk) => {
     streamWatchdog: process.env.CLAUDE_ENABLE_STREAM_WATCHDOG ?? null,
     streamIdleTimeoutMs: process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS ?? null,
     oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
+    argv: process.argv.slice(2),
     stdin: line,
   }));
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
@@ -91,6 +97,7 @@ type CliEnvCapture = {
   streamWatchdog: string | null;
   streamIdleTimeoutMs: string | null;
   oauthToken: string | null;
+  argv: string[];
   stdin: string;
 };
 
@@ -175,6 +182,41 @@ test('ws-server launches the Claude Code CLI with its stream idle watchdog enabl
     null,
     'CLAUDE_STREAM_IDLE_TIMEOUT_MS must stay unset so the CLI keeps its own 90s default.'
   );
+});
+
+/** Every tool name passed to --disallowedTools (comma or space separated, repeatable). */
+function disallowedTools(argv: string[]): string[] {
+  const names: string[] = [];
+  argv.forEach((arg, index) => {
+    if (arg === '--disallowedTools' || arg === '--disallowed-tools') {
+      names.push(...(argv[index + 1] ?? '').split(/[\s,]+/).filter(Boolean));
+    }
+  });
+  return names;
+}
+
+const QUESTION_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+
+test('ws-server launches Claude Code with every ask-the-user tool disallowed', async () => {
+  const env = await captureCliEnv('no-questions', {});
+  const denied = disallowedTools(env.argv);
+  for (const tool of QUESTION_TOOLS) {
+    assert.ok(
+      denied.includes(tool),
+      `REGRESSION: Claude Code launched without ${tool} on --disallowedTools; code agents ` +
+        `must not be able to ask the user questions. argv: ${JSON.stringify(env.argv)}`
+    );
+  }
+});
+
+test('the rose MCP server does not re-enable a question tool for Claude Code', async () => {
+  const home = join(fixtureDir, 'home-rose-mcp');
+  mkdirSync(join(home, '.rose'), { recursive: true });
+  writeFileSync(join(home, '.rose', 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const env = await captureCliEnv('rose-mcp', {});
+  assert.ok(env.argv.includes('--mcp-config'), 'fixture must exercise the rose MCP launch');
+  const denied = disallowedTools(env.argv);
+  for (const tool of QUESTION_TOOLS) assert.ok(denied.includes(tool), `${tool} re-enabled`);
 });
 
 test('ws-server forces the watchdog on even when the sandbox env disables it', async () => {

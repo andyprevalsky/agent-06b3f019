@@ -19,7 +19,6 @@ import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { getTemporalClient } from '../../providers/temporal';
 import { blackboxTemporalSignals } from '../../providers/temporalBlackboxFake';
-import { askQuestion } from '../../domains/agents/agentGraphQuestionService';
 import { sendGraphMessage } from '../../domains/agents/agentGraphSendService';
 import type { GraphCaller } from '../../domains/agents/agentGraphService';
 
@@ -41,7 +40,6 @@ import {
   cliHome,
   cliEnv,
   runCli,
-  testQuestionToBlockedSpawnerIsHandedOver,
 } from './agent-graph-adversarial.support';
 export { seedAdversarial, cleanupAdversarial } from './agent-graph-adversarial.support';
 async function testMutualQuestionsBetweenSiblingsNeverDeadlock(
@@ -77,14 +75,12 @@ async function testMutualQuestionsBetweenSiblingsNeverDeadlock(
     (await a2aRowsFrom(ids.A1, ids.B1)).length === rounds + 1,
     'A1 holds each of B1’s messages exactly once'
   );
-  // A code agent cannot be pointed at a sibling as its question target: the
-  // route is always its spawner, whatever the body says.
+  // A code agent cannot ask a question at all: there is no questions route.
   const sibling = await call(ctx, '/api/agent-graph/questions', {
     bearer: graphToken(ids.SX, ids.A1),
     body: { question: `cycle? ${RUN}`, message_id: `sx-q-${RUN}`, to: ids.B1 },
   });
-  expectStatus(sibling, 200, 'SX asks');
-  assert(sibling.data.agent_id === ids.A1, 'a code agent question goes to its spawner only');
+  assert(sibling.status === 401 || sibling.status === 404, `SX cannot ask: ${sibling.status}`);
 
   // Corrupt parent-link cycle: every walk is bounded and nothing hangs.
   const list = await call(ctx, '/api/agent-graph/agents', { agentId: ids.L1 });
@@ -125,20 +121,22 @@ async function testDeepChainRoutesEachLevelToItsSpawner(ctx: AdversarialContext)
     G: await a2aRowCount(ids.G),
   });
   const base = await counts();
-  const ask = (sessionId: string, owner: string, key: string) =>
-    call(ctx, '/api/agent-graph/questions', {
+  // No level can ask a question: the questions route is gone for every code agent.
+  for (const [sessionId, owner] of [
+    [ids.SG, ids.G],
+    [ids.SR, ids.R],
+  ] as const) {
+    const asked = await call(ctx, '/api/agent-graph/questions', {
       bearer: graphToken(sessionId, owner),
-      body: { question: `deep ${key} ${RUN}?`, message_id: `deep-${key}-${RUN}` },
+      body: { question: `deep ${sessionId} ${RUN}?`, message_id: `deep-${sessionId}-${RUN}` },
     });
-  const fromSG = await ask(ids.SG, ids.G, 'sg');
-  expectStatus(fromSG, 200, 'SG asks');
-  assert(fromSG.data.deliver_to === 'agent' && fromSG.data.agent_id === ids.G, 'SG → G');
+    assert(
+      asked.status === 401 || asked.status === 404,
+      `${sessionId} cannot ask: ${asked.status}`
+    );
+  }
   let now = await counts();
-  assert(now.G === base.G + 1 && now.C === base.C && now.R === base.R, 'only G got SG’s question');
-  const fromSR = await ask(ids.SR, ids.R, 'sr');
-  assert(fromSR.data.status === 'pin_for_user', 'root-spawned question pins for the user');
-  now = await counts();
-  assert(now.R === base.R, 'a pinned question sends nothing to the root');
+  assert(JSON.stringify(now) === JSON.stringify(base), 'a refused question delivers nothing');
 
   // Escalation up the chain with the `parent` alias lands one level up each time.
   const escalate = async (from: string, expected: string, key: string) => {
@@ -158,51 +156,51 @@ async function testDeepChainRoutesEachLevelToItsSpawner(ctx: AdversarialContext)
   expectStatus(fromRoot, 400, 'the root has no parent');
   now = await counts();
   assert(
-    now.G === base.G + 1 && now.C === base.C + 1 && now.R === base.R + 1,
+    now.G === base.G && now.C === base.C + 1 && now.R === base.R + 1,
     `each escalation landed exactly one level up: ${JSON.stringify({ base, now })}`
   );
 
-  // The pinned display tool applies the same rule to Rose agents.
-  const pin = (agentId: string, key: string) =>
-    call(ctx, `/api/agent-tools/${agentId}/display`, {
+  // Rose agents at every depth cannot pin a question either.
+  for (const agentId of [ids.G, ids.C, ids.R]) {
+    const pin = await call(ctx, `/api/agent-tools/${agentId}/display`, {
       userId: userX,
       body: {
-        caption: `pinned ${key} ${RUN}?`,
+        caption: `pinned ${agentId} ${RUN}?`,
         placement: 'pinned',
         options: [{ label: 'Yes' }, { label: 'No' }],
-        request_key: `deep-pin-${key}-${RUN}`,
+        request_key: `deep-pin-${agentId}-${RUN}`,
       },
     });
-  const gPin = (await pin(ids.G, 'g')).data.question as { deliver_to: string; agent_id: string };
-  assert(gPin.deliver_to === 'agent' && gPin.agent_id === ids.C, 'depth-2 Rose agent → C');
-  const cPin = (await pin(ids.C, 'c')).data.question as { deliver_to: string; agent_id: string };
-  assert(cPin.deliver_to === 'user' && cPin.agent_id === ids.R, 'depth-1 Rose agent → user');
+    expectStatus(pin, 400, `${agentId} cannot pin a question`);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // 4. Question to a spawner that already finished or was deleted
 // ---------------------------------------------------------------------------
 
-async function testQuestionToFinishedOrDeletedSpawnerFailsClearly(
+async function testCodeAgentsUnderFinishedOrDeletedSpawnersCannotAsk(
   ctx: AdversarialContext
 ): Promise<void> {
   const before = await prisma.agent.findUnique({
     where: { id: ids.F },
     select: { status: true, temporalWorkflowId: true },
   });
-  const finished = await call(ctx, '/api/agent-graph/questions', {
-    bearer: graphToken(ids.SF, ids.F),
-    body: { question: `still there ${RUN}?`, message_id: `fin-${RUN}` },
-  });
-  expectStatus(finished, 409, 'question to a finished spawner');
-  assert(
-    /finished/i.test(String(finished.data.error)),
-    `clear error: ${String(finished.data.error)}`
-  );
-  assert(
-    (await a2aRowsFrom(ids.F, ids.SF)).length === 0,
-    'nothing delivered to the finished agent'
-  );
+  for (const [sessionId, owner] of [
+    [ids.SF, ids.F],
+    [ids.SD, ids.D],
+  ] as const) {
+    const asked = await call(ctx, '/api/agent-graph/questions', {
+      bearer: graphToken(sessionId, owner),
+      body: { question: `still there ${RUN}?`, message_id: `ask-${sessionId}-${RUN}` },
+    });
+    assert(
+      asked.status === 401 || asked.status === 404,
+      `${sessionId} cannot ask: ${asked.status}`
+    );
+    assert((await a2aRowsFrom(owner, sessionId)).length === 0, 'nothing delivered');
+    assert((await awaitingParent(sessionId)) === null, 'no handoff mark');
+  }
   const after = await prisma.agent.findUnique({
     where: { id: ids.F },
     select: { status: true, temporalWorkflowId: true },
@@ -211,16 +209,6 @@ async function testQuestionToFinishedOrDeletedSpawnerFailsClearly(
     after?.status === before?.status && after?.temporalWorkflowId === before?.temporalWorkflowId,
     `the finished agent is not revived: ${JSON.stringify({ before, after })}`
   );
-  assert((await awaitingParent(ids.SF)) === null, 'no handoff mark for an unanswerable question');
-
-  const deleted = await call(ctx, '/api/agent-graph/questions', {
-    bearer: graphToken(ids.SD, ids.D),
-    body: { question: `anyone ${RUN}?`, message_id: `del-${RUN}` },
-  });
-  expectStatus(deleted, 404, 'question to a deleted spawner');
-  assert(typeof deleted.data.error === 'string' && deleted.data.error !== '', 'error text');
-  assert((await a2aRowsFrom(ids.D, ids.SD)).length === 0, 'nothing delivered to the deleted agent');
-  assert((await awaitingParent(ids.SD)) === null, 'no handoff mark');
   const parentGone = await call(ctx, '/api/agent-graph/messages', {
     bearer: graphToken(ids.SD, ids.D),
     body: { to: 'parent', text: 'hello?', message_id: `del-msg-${RUN}` },
@@ -485,7 +473,6 @@ async function testEndedTaskTokenIsRefused(ctx: AdversarialContext): Promise<voi
   const ended = graphToken(ids.SCold, ids.C);
   for (const [path, body] of [
     ['/api/agent-graph/agents', undefined],
-    ['/api/agent-graph/questions', { question: 'stale?', message_id: `ended-q-${RUN}` }],
     ['/api/agent-graph/token', {}],
   ] as const) {
     const res = await call(ctx, path, { bearer: ended, body });
@@ -522,8 +509,8 @@ async function testStaleTokenOnDiskLosesToTheSpawnMintedToken(
     }
   }
 
-  // The shipped `rose` CLI picks the same token, so a question from the live
-  // task reaches the blocked spawn instead of marking the ended task.
+  // The shipped `rose` CLI cannot ask: a pinned question is an unknown option
+  // and marks no task for a spawn.
   const cli = cliHome();
   try {
     writeFileSync(join(cli.home, '.rose', 'agents-token'), `${cases[0][1]}\n`, { mode: 0o600 });
@@ -539,13 +526,13 @@ async function testStaleTokenOnDiskLosesToTheSpawnMintedToken(
       }).token,
       ROSE_AGENTS_TOKEN: minted,
     });
-    const question = `after resume ${RUN}?`;
-    const asked = await runCli(cli.rose, ['display', '--pinned', '--caption', question], env);
-    assert(asked.code === 0, `rose display exits 0: ${asked.stderr}`);
-    assert(
-      (await awaitingParent(ids.SC))?.question === question,
-      'the live task is marked for its blocked spawn'
+    const asked = await runCli(
+      cli.rose,
+      ['display', '--pinned', '--caption', `after ${RUN}?`],
+      env
     );
+    assert(asked.code === 1 && asked.stderr.includes('unknown option --pinned'), asked.stderr);
+    assert((await awaitingParent(ids.SC)) === null, 'no task is marked for a spawn');
   } finally {
     cli.cleanup();
   }
@@ -570,48 +557,8 @@ async function testStaleTokenOnDiskLosesToTheSpawnMintedToken(
 // 10. The parent is cancelled (paused by the user) while the child asks
 // ---------------------------------------------------------------------------
 
-async function testCancelledParentStaysCancelledWhenItsChildAsks(
-  ctx: AdversarialContext
-): Promise<void> {
-  const paused = await call(ctx, `/api/agents/${ids.P}/pause`, { userId: userX, body: {} });
-  expectStatus(paused, 200, 'user pauses P');
-  // P's workflow is live in this process's in-memory Temporal client, so a
-  // resume attempt would really succeed (the HTTP backend has no workflow).
-  const temporal = await getTemporalClient();
-  await temporal.workflow.start('agentWorkflow', {
-    workflowId: ids.P,
-    taskQueue: 'a2a-adversarial',
-    args: [],
-  });
-  const caller: GraphCaller = {
-    userId: userX,
-    rootAgentId: ids.R,
-    self: { kind: 'code', id: ids.SP, ownerAgentId: ids.P, provider: 'claude' },
-  };
-  const asked = await askQuestion(caller, {
-    question: `continue ${RUN}?`,
-    message_id: `paused-q-${RUN}`,
-  });
-  assert(asked.deliver_to === 'agent' && asked.agent_id === ids.P, 'routed to the paused spawner');
-  assert((await a2aRowsFrom(ids.P, ids.SP)).length === 1, 'the question is durable for the resume');
-  const parent = await prisma.agent.findUnique({ where: { id: ids.P }, select: { status: true } });
-  const signals = blackboxTemporalSignals(temporal, ids.P).map((signal) => signal.name);
-  assert(
-    parent?.status === 'PAUSED' && !signals.includes('resume'),
-    `a child's question must not lift the user's pause (status ${parent?.status}, signals ${JSON.stringify(signals)})`
-  );
-  assert(
-    signals.filter((name) => name === 'receive_user_response').length === 1,
-    `the question reaches the paused workflow once: ${JSON.stringify(signals)}`
-  );
-}
-
 export function adversarialCases(ctx: AdversarialContext): Array<[string, () => Promise<void>]> {
   return [
-    [
-      'adversarial: a question to a blocked spawner is handed over once',
-      () => testQuestionToBlockedSpawnerIsHandedOver(ctx),
-    ],
     [
       'adversarial: mutual questions between siblings never deadlock',
       () => testMutualQuestionsBetweenSiblingsNeverDeadlock(ctx),
@@ -621,8 +568,8 @@ export function adversarialCases(ctx: AdversarialContext): Array<[string, () => 
       () => testDeepChainRoutesEachLevelToItsSpawner(ctx),
     ],
     [
-      'adversarial: a question to a finished or deleted spawner fails clearly',
-      () => testQuestionToFinishedOrDeletedSpawnerFailsClearly(ctx),
+      'adversarial: code agents under finished or deleted spawners cannot ask',
+      () => testCodeAgentsUnderFinishedOrDeletedSpawnersCannotAsk(ctx),
     ],
     [
       'adversarial: a duplicate message id delivers exactly once',
@@ -640,10 +587,6 @@ export function adversarialCases(ctx: AdversarialContext): Array<[string, () => 
     [
       'adversarial: a stale token on disk loses to the spawn-minted token',
       () => testStaleTokenOnDiskLosesToTheSpawnMintedToken(ctx),
-    ],
-    [
-      'adversarial: a cancelled parent stays cancelled when its child asks',
-      () => testCancelledParentStaysCancelledWhenItsChildAsks(ctx),
     ],
   ];
 }

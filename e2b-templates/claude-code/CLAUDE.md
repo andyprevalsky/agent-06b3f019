@@ -19,7 +19,7 @@ Rose skills (read ~/.rose/skills/<name>/SKILL.md before using one):
 - change-environment-size: Use when real work needs more or less CPU or memory (repeated OOM kills, heavy swap, slow CPU-bound builds or tests). Not for runaway processes.
 - code-session: Use when you work in a repository (branches, commits, merges) and to know what survives a pause, a retry or a usage limit.
 - deploy: Use to publish changes through a repository's deploy workflow, or create a missing repo-local deploy skill.
-- talk-to-user: Use whenever the user should see something or decide something (updates, results, files, approvals). They never read your terminal.
+- talk-to-user: Use whenever the user should see something (updates, results, files, visuals). They never read your terminal.
 
 ## Environment
 

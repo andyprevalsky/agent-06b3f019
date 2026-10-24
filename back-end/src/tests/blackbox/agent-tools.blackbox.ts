@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Black-box tests for /api/agent-tools/:agentId/display (inline media) and the
- * sandbox token. Pinned questions, approvals, messages and the `rose` CLI are in
+ * sandbox token. The no-questions rule, messages and the `rose` CLI are in
  * agent-tools-requests.blackbox.ts.
  *
  * Invariants covered:
@@ -261,13 +261,13 @@ const tests: BlackboxTest[] = [
       assert((metadata.requestingAgent as { label: string }).label === 'Claude Code', 'labelled');
       const wrongAgent = await display(rootA, { items: [b64(png())] }, { bearer: token });
       expectStatus(wrongAgent, 403, 'token on a different agent');
-      const approvalElsewhere = await call(
+      const messageElsewhere = await call(
         'POST',
-        `/api/agent-tools/${rootA}/approvals`,
-        { question: 'x' },
+        `/api/agent-tools/${rootA}/messages`,
+        { message: 'x' },
         { bearer: token }
       );
-      expectStatus(approvalElsewhere, 403, 'approval on a different agent');
+      expectStatus(messageElsewhere, 403, 'message on a different agent');
       const forged = codeToken(rootA, userB);
       expectStatus(
         await display(rootA, { items: [b64(png())] }, { bearer: forged }),

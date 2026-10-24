@@ -16,26 +16,16 @@ async def display_media_activity(payload: DisplayActivityInput) -> DisplayActivi
     """POST /api/agent-tools/:agentId/display.
 
     Idempotent (CLAUDE.md rule 20): inline media dedupes per (agent, content
-    hash) and a pinned question's attention row id derives from
-    (agent, tool_call_id), so a retried attempt returns the same rows. 4xx
+    hash), so a retried attempt returns the same rows. 4xx
     answers are definitive and returned as data; transport errors and 5xx
     raise so the Temporal retry policy applies.
     """
     config = load_config()
     body = {
         "items": payload["items"],
-        "placement": payload["placement"],
+        "placement": "inline",
         **({"caption": payload["caption"]} if payload["caption"] else {}),
     }
-    if payload["placement"] == "pinned":
-        body.update(
-            {
-                "options": payload["options"],
-                "allow_other": payload["allow_other"],
-                "request_key": payload["tool_call_id"],
-                "workflow_id": payload["workflow_id"],
-            }
-        )
     url = f"{config.backend.api_url}/api/agent-tools/{payload['agent_id']}/display"
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -53,7 +43,6 @@ async def display_media_activity(payload: DisplayActivityInput) -> DisplayActivi
     logger.info(
         "[Display] backend responded",
         agent_id=payload["agent_id"],
-        placement=payload["placement"],
         status=response.status_code,
         item_count=len(payload["items"]),
     )

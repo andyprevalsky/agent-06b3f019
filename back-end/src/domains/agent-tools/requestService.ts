@@ -1,9 +1,7 @@
 /**
- * Blocking agent tools, shared state: approvals and the answer long-poll.
+ * Agent-tools request state and the answer long-poll. Agents cannot open new
+ * questions or approvals through agent-tools (no approval route, no pinned display).
  *
- *   createApproval(ctx)  [code agents] → attention row (id from request_key, retry → same
- *                         row) + the existing ApprovalChip row in the session agent's
- *                         trajectory, labelled with the requesting agent
  *   answers              existing POST /api/attention-requests/:id/respond | /reject
  *                         (approvals) or questionService.answerQuestion (questions)
  *   waitForRequest       one PK read per REQUEST_WAIT_POLL_MS for ≤ `wait` seconds,
@@ -13,21 +11,10 @@
  * Code-agent rows carry metadata.sandboxTool, so resolveAndSignal never signals
  * a workflow for them: the sandbox long-polls instead.
  */
-import { randomUUID } from '../../providers/crypto';
-import { createLogger } from '../../providers/logger';
-import { createMessage } from '../../providers/messages';
 import { REJECTED_RESPONSE, REQUEST_WAIT_POLL_MS } from './config';
 import * as repo from './repo';
-import {
-  AgentToolsError,
-  agentCancelledError,
-  requestIdFor,
-  sandboxRowMetadata,
-  type ToolContext,
-} from './service';
+import { AgentToolsError, agentCancelledError, type ToolContext } from './service';
 import type { DisplayFilePointer, DisplayOption, RequestState } from './types';
-
-const log = createLogger('AgentToolsRequests');
 
 export type AttentionRow = NonNullable<Awaited<ReturnType<typeof repo.findAttentionRequest>>>;
 
@@ -71,85 +58,6 @@ export function storedQuestion(row: AttentionRow): StoredQuestion {
     allowOther: question.allowOther !== false,
     items: Array.isArray(question.items) ? question.items : [],
   };
-}
-
-export async function workflowIdFor(
-  ctx: ToolContext,
-  requested: string | undefined
-): Promise<string> {
-  const workflowId =
-    ctx.caller.kind === 'agent' && requested !== undefined
-      ? requested
-      : (ctx.agent.temporalWorkflowId ?? ctx.agent.id);
-  try {
-    await repo.assertWorkflowTarget(ctx.agent.userId, ctx.agent.id, workflowId);
-  } catch {
-    throw new AgentToolsError(403, 'workflow_id does not belong to this agent');
-  }
-  return workflowId;
-}
-
-/** request_user_approval from a code-agent sandbox: the existing ApprovalChip. */
-export async function createApproval(
-  ctx: ToolContext,
-  input: { question: string; requestKey?: string }
-): Promise<{ request_id: string; status: RequestState['status']; message_id: string | null }> {
-  if (ctx.caller.kind !== 'code_agent') {
-    throw new AgentToolsError(
-      400,
-      'Rose agents request approval with their own request_user_approval tool'
-    );
-  }
-  const workflowId = await workflowIdFor(ctx, undefined);
-  const id = requestIdFor(ctx.agent.id, 'approval', input.requestKey ?? randomUUID());
-  const agentTools: AgentToolsMarker = {
-    kind: 'approval',
-    deliverTo: 'user',
-    routedAgentId: ctx.agent.id,
-  };
-  const { row, created } = await repo.createAttentionRequestOnce({
-    id,
-    userId: ctx.agent.userId,
-    agentId: ctx.agent.id,
-    workflowId,
-    question: input.question,
-    metadata: {
-      agentTools,
-      toolApproval: true,
-      requestingAgent: ctx.requesting,
-      sandboxTool: { provider: ctx.requesting.provider, taskId: ctx.requesting.task_id ?? null },
-    },
-  });
-  if (row.userResponse !== null) {
-    return { request_id: row.id, status: stateOf(row, null).status, message_id: null };
-  }
-  const message = await createMessage({
-    agentId: ctx.agent.id,
-    text: row.question,
-    role: 'TOOL',
-    metadata: {
-      toolCallId: `agent-tools:${row.id}`,
-      toolName: 'request_user_approval',
-      toolStatus: 'IN_PROGRESS',
-      title: `🔐 ${ctx.requesting.label} requests approval`,
-      workflowGeneration: ctx.workflowGeneration,
-      isUserAttentionMessage: true,
-      attentionMessage: row.question,
-      requestUserApproval: {
-        attentionRequestId: row.id,
-        toolApproval: true,
-        requestingAgent: ctx.requesting,
-      },
-      requestingAgent: ctx.requesting,
-      ...sandboxRowMetadata(ctx),
-    },
-  });
-  log.info(created ? 'Opened sandbox approval' : 'Reused sandbox approval', {
-    agent_id: ctx.agent.id,
-    request_id: row.id,
-    provider: ctx.requesting.provider,
-  });
-  return { request_id: row.id, status: stateOf(row, null).status, message_id: message.id };
 }
 
 export function stateOf(row: AttentionRow, userMessage: string | null): RequestState {
