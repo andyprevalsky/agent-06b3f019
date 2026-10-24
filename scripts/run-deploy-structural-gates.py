@@ -223,6 +223,10 @@ GATES = (
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate(
+        "cloudbench-prelaunch-cancel",
+        ("python3", "scripts/tests/cloudbench-prelaunch-cancel.test.py"),
+    ),
+    Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
     ),

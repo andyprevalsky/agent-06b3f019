@@ -79,10 +79,17 @@ def identity(registry, output, machine, token, *, preconfig=False):
             previous = json.loads(read(run / "_batch/lifecycle.json", 1048576))
             if previous.get("status") != "failed" or previous.get("controller_exit_code") != lifecycle["controller_exit_code"]:
                 raise ValueError("pre-config rejection conflicts with original lifecycle")
-    for name in ("post-config-start.accepted", "cloudbench-run.json", "worker-runtime-evidence"):
+    # A start the provider accepted but the owner cancelled (TERM, 143) before
+    # the guest launched anything leaves the same pre-service originals as a
+    # rejected start; verify() then requires that pre-service phase.
+    finished = read(output / "benchmark-child.finished", 32).strip()
+    cancelled_accepted = (not preconfig and finished == b"143"
+                          and read(output / "post-config-start.accepted", 256).strip() == machine.encode())
+    for name in ("cloudbench-run.json", "worker-runtime-evidence",
+                 *(() if cancelled_accepted else ("post-config-start.accepted",))):
         if (output / name).exists() or (output / name).is_symlink():
             raise ValueError("accepted execution cannot use rejected startup cleanup")
-    if read(output / "benchmark-child.finished", 32).strip() != b"125":
+    if finished != b"125" and not cancelled_accepted:
         raise ValueError("startup archive requires the original startup rejection")
     expected = {"version": 1, "machine_id": machine, "run_token": token}
     if json.loads(read(output / "runtime-evidence.owner.json", 1048576)) != expected or json.loads(read(output / "runtime-evidence.pending", 1048576)) != expected:
@@ -1760,6 +1767,9 @@ def verify(registry, output, machine, token, archive_path, config_path, after_co
         or set(files) & set(manifest["missing"])):
         raise ValueError("startup original archive manifest differs")
     phase = terminal_files(files, manifest["missing"], token)
+    accepted = (Path(output) / "post-config-start.accepted").exists()
+    if accepted and phase != "pre-service":
+        raise ValueError("a cancelled accepted start must not have launched its stack")
     if phase == "pre-service":
         forensic = runpy.run_path(str(Path(__file__).with_name("cloudbench-forensic-retirement.py")))
         capture_manifest = {**manifest, "source_machine_id": machine, "source_volume_id": original["volume_id"],
@@ -1806,7 +1816,8 @@ def verify(registry, output, machine, token, archive_path, config_path, after_co
             "bench": Path(output).name, "machine_id": machine, "volume_id": original["volume_id"],
             "run_token": token, "phase": phase, "archive_sha256": digest(raw),
             "config_sha256": digest(config_bytes), "archive_path": str(archive_path),
-            "config_path": str(config_path), "proof_credit": 0, "execution_rejected": True,
+            "config_path": str(config_path), "proof_credit": 0, "execution_rejected": not accepted,
+            "execution_cancelled_before_launch": accepted,
             "source_ref": source_ref, "recipe_sha256": recipe_sha256,
             "source_fingerprint": source_fingerprint, "native_release_verified": False}
 

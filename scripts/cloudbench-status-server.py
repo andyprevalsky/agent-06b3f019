@@ -91,13 +91,42 @@ def runtime_evidence_context_paths(context: Path, run_token: str, cleanup_state:
     return paths
 
 
+def prelaunch_sealed(root: Path, run_token: str) -> bool:
+    """The boot supervisor stopped before launching any driver, stack or browser.
+
+    cloudbench-boot.sh writes this token-bound seal only on its no-launch paths,
+    before the cleanup ACK, so the only runtime evidence is the exact bench.log.
+    """
+    seal = root / f"cloudbench-prelaunch-{run_token}.sealed"
+    try:
+        info = seal.lstat()
+        return (stat.S_ISREG(info.st_mode)
+                and read_runtime_metadata(seal, MAX_RECOVERY_RECEIPT_BYTES) == f"{run_token}\n".encode()
+                and not os.path.lexists(root / "cloudbench-driver.pid"))
+    except (OSError, ValueError):
+        return False
+
+
 def runtime_evidence_manifest(root: Path, run_token: str, machine: str, cleanup_state: str = "clean") -> dict:
+    if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
+        manifest = runtime_evidence_files_manifest({"bench.log": root / "bench.log"}, run_token, machine)
+        manifest["prelaunch"] = True
+        return manifest
     return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine, cleanup_state)
 
 
 def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str,
                                       cleanup_state: str = "clean") -> dict:
     paths = runtime_evidence_context_paths(context, run_token, cleanup_state)
+    manifest = runtime_evidence_files_manifest(paths, run_token, machine)
+    if runtime_evidence_context_paths(context, run_token, cleanup_state) != paths:
+        raise ValueError("runtime inventory changed")
+    if cleanup_state != "clean":
+        manifest["stack_cleanup_state"] = cleanup_state
+    return manifest
+
+
+def runtime_evidence_files_manifest(paths: dict[str, Path], run_token: str, machine: str) -> dict:
     files = {}
     for name, path in paths.items():
         before = path.stat()
@@ -118,12 +147,7 @@ def runtime_evidence_context_manifest(context: Path, run_token: str, machine: st
             if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                 raise ValueError("runtime evidence changed during read")
         files[name] = {"bytes": opened.st_size, "sha256": digest.hexdigest()}
-    if runtime_evidence_context_paths(context, run_token, cleanup_state) != paths:
-        raise ValueError("runtime inventory changed")
-    manifest = {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
-    if cleanup_state != "clean":
-        manifest["stack_cleanup_state"] = cleanup_state
-    return manifest
+    return {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
 
 
 def parse_args() -> argparse.Namespace:
@@ -351,7 +375,10 @@ def main() -> int:
                     if parameters:
                         if set(parameters) != {"file"} or len(parameters["file"]) != 1:
                             raise ValueError("invalid runtime evidence request")
-                        paths = runtime_evidence_paths(root, run_token, cleanup_state)
+                        if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
+                            paths = {"bench.log": root / "bench.log"}
+                        else:
+                            paths = runtime_evidence_paths(root, run_token, cleanup_state)
                         target = paths[parameters["file"][0]]
                         self._serve_recovery_evidence(target, MAX_RECOVERY_RUN_BYTES)
                     else:
