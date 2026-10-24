@@ -7023,24 +7023,20 @@ def test_declared_evaluator_evidence_includes_structured_output_first():
     assert "org/r100" in text
 
 
-def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
+def test_declared_evaluator_evidence_keeps_code_agent_grounding_rows():
     """Fat Claude Code transcripts must not collapse judge evidence to completion-only.
 
     Regression (cuda-kernel-github-top100-code-agent k=3 r24 agent b977534d):
     root had 100+ messages including multi-100KB spawn_claude_code_agent /
-    code_agent_sdk_events / claude_code_history rows. build_single_turn_evidence
-    serialized to ~392k (>320k cap), so _declared_evaluator_evidence fell through
-    to compact_only (structured_output + final_completion + metadata) and the
-    declared judge correctly scored 0 for missing coding-agent grounding.
+    code_agent_sdk_events / claude_code_history rows. A grader-only budget fell
+    through to compact_only (structured_output + final_completion + metadata)
+    and the declared judge correctly scored 0 for missing coding-agent grounding.
 
-    Expected: within SINGLE_TURN_CHAR_BUDGET, still retain at least one capped
-    code-agent grounding row (sdk events / history / spawn_claude_code_agent).
+    Expected: every code-agent grounding row is in the evidence, whole while it
+    is under the runtime tool-result cap. A bundle too big for one judge call
+    goes to the agentic judge instead of being cut.
     """
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     repos = [
         {
@@ -7052,8 +7048,6 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
         }
         for i in range(1, 101)
     ]
-    # ~40 messages × ~12k capped bodies → >320k when naively kept, forcing the
-    # compact_only cascade on current code.
     fat_cc = "GitHub API search results for CUDA kernels:\n" + "\n".join(
         f"{i}. ggml-org/repo-{i} stars={100000 - i} "
         f"https://github.com/ggml-org/repo-{i} desc=CUDA kernel library {i} " + ("x" * 200)
@@ -7120,9 +7114,9 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
             },
         }
     )
-    dumped = json.dumps(evidence, default=str)
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
+    assert [
+        row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "spawn_claude_code_agent"
+    ] == [fat_cc] * 35
     tool_names = {
         (row.get("metadata") or {}).get("toolName")
         for row in evidence
@@ -7141,65 +7135,136 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
     assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
 
 
-def test_declared_evaluator_evidence_keeps_whole_rows_within_budget():
-    """A judge sees a whole tool result whenever the bundle fits its budget.
+def test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap():
+    """The grader cuts a tool result exactly where the runtime does, and nowhere else.
 
-    grep-agent-trajectories-code-tool-status: a 17,075-char grep result was cut
-    at 12,000 with no marker, 986 chars before the Status line its judge had to
-    cite, and the run failed on evidence the agent had actually produced.
-
-    When the bundle does not fit, a shortened row keeps both ends and says how
-    much is missing, so the judge never mistakes a cut for the whole result.
+    Andy (2026-10-24): the benchmark grader's cutoff must be the runtime's, never
+    its own. A grader-only 12k row cap dropped the fact a judge had to ground on
+    (grep-agent-trajectories-cross-surface, agent b140bb71). Tool rows must equal
+    ``hard_cap_tool_result_text`` (what agents apply before a tool result enters
+    their context); other rows are whole; the evidence module defines no caps or
+    budgets of its own. This fails if the two ever diverge.
     """
+    import benchmarks.semantic_evaluator_evidence as evidence_module
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        SINGLE_TURN_TEXT_CAP,
-        single_turn_evidence_exceeds_budget,
-    )
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS, hard_cap_tool_result_text
 
     status_line = "tool_status: FAILED"
+    at_cap = "x" * (TOOL_RESULT_HARD_CAP_CHARS - len(status_line)) + status_line
+    over_cap = "y" * TOOL_RESULT_HARD_CAP_CHARS + status_line
+    long_answer = "z" * (2 * TOOL_RESULT_HARD_CAP_CHARS)
+    data = {
+        "agent": {"agent_id": "root"},
+        "messages": [
+            {"role": "TOOL", "message": at_cap, "metadata": {"toolName": "grep"}},
+            {"role": "TOOL", "message": over_cap, "metadata": {"toolName": "grep"}},
+            {"role": "ASSISTANT", "message": long_answer, "metadata": {}},
+        ],
+    }
+    for rows in (_declared_evaluator_evidence(data), build_agentic_evidence(data)["messages"]):
+        tool_texts = [row["text"] for row in rows if row.get("role") == "TOOL"]
+        assert tool_texts == [at_cap, hard_cap_tool_result_text(over_cap)]
+        assert hard_cap_tool_result_text(over_cap) != over_cap
+        assert [row["text"] for row in rows if row.get("role") == "ASSISTANT"] == [long_answer]
 
-    def run_with_grep_result(padding: int) -> dict:
-        return {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": "x" * padding + status_line,
-                    "metadata": {"toolName": "grep", "toolStatus": "FINISHED"},
-                }
-            ]
-        }
+    assert evidence_module.hard_cap_tool_result_text is hard_cap_tool_result_text
+    grader_caps = [
+        name
+        for name, value in vars(evidence_module).items()
+        if isinstance(value, int) and ("CAP" in name or "BUDGET" in name)
+    ]
+    assert grader_caps == []
 
-    def grep_rows(evidence: list[dict]) -> list[str]:
-        return [
-            str(row.get("text") or "")
-            for row in evidence
-            if isinstance(row, dict) and (row.get("metadata") or {}).get("toolName") == "grep"
-        ]
 
-    within_budget = _declared_evaluator_evidence(run_with_grep_result(SINGLE_TURN_TEXT_CAP + 986))
-    assert [status_line in text for text in grep_rows(within_budget)] == [True]
+async def test_declared_judge_overflow_uses_runtime_compaction_trigger():
+    """A judge prompt overflows exactly where the agent loop would compact.
 
-    # A bundle too large for the judge still falls back to capped rows.
-    padding = SINGLE_TURN_CHAR_BUDGET
-    over_budget = _declared_evaluator_evidence(run_with_grep_result(padding))
-    assert not single_turn_evidence_exceeds_budget(over_budget)
-    (shortened,) = grep_rows(over_budget)
-    assert len(shortened) <= SINGLE_TURN_TEXT_CAP
-    assert shortened.startswith("x") and shortened.endswith(status_line)
-    kept = len(shortened.replace("x", "")) - len(status_line)  # the marker itself
-    omitted = padding + len(status_line) - (len(shortened) - kept)
-    assert f"[... {omitted} characters omitted ...]" in shortened
+    The threshold is ``run_agent.compaction_trigger_tokens`` over the verifier
+    model's window, measured with the runtime estimator. Moving the runtime
+    output reservation moves the grader's threshold with it.
+    """
+    import loop.run_agent as run_agent
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+    from helpers.llm import VERIFIER_MODEL
+    from helpers.model_info import get_model_context_window
+
+    window = await get_model_context_window(VERIFIER_MODEL)
+    trigger = run_agent.compaction_trigger_tokens(window)
+    assert trigger == window - run_agent.EFFECTIVE_OUTPUT_RESERVATION - run_agent.AUTOCOMPACT_BUFFER_TOKENS
+    # ~4 / 1.4 chars per estimated token (helpers.summarize estimator).
+    near_trigger = "e" * int((trigger - 2_000) * 4 / 1.4)
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger) is False
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger + "e" * 10_000) is True
+    original = run_agent.EFFECTIVE_OUTPUT_RESERVATION
+    try:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original + 10_000
+        assert await _declared_judge_context_overflows("judge prompt", near_trigger) is True
+    finally:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original
+
+
+def _b140bb71_shaped_run() -> dict:
+    """Synthetic replay of grep-agent-trajectories-cross-surface r001-j0003 (agent b140bb71).
+
+    Same root transcript shape as the captured fleet bundle
+    (.context/fleet/runs/20261023-194039-1982682): explore grep rows of 33,116,
+    13,867 and 304,941 chars, and the prior run's step count at char 6,339 of
+    the largest one. Filler replaces the production trajectory text.
+    """
+    fact = "It printed 112 numbers and counted 111 steps."
+    big_grep = "g" * 6_339 + fact
+    big_grep += "g" * (304_941 - len(big_grep))
+    explore = {"agentType": "explore", "subAgentId": "143a50ca"}
+
+    def tool(name: str, text: str, **metadata: str) -> dict:
+        return {"role": "TOOL", "message": text, "metadata": {"toolName": name, "toolStatus": "FINISHED", **metadata}}
+
+    messages = [
+        {"role": "USER", "message": "u" * 153, "metadata": {}},
+        tool("agent_init", "i" * 70),
+        tool("spawn_agent", "s" * 200, agentType="explore"),
+        tool("list_agents", "l" * 646, **explore),
+        tool("grep", "a" * 33_116, **explore),
+        tool("grep", "b" * 13_867, **explore),
+        tool("grep", big_grep, **explore),
+        tool("spawn_agent", "Explore summary: counted 111 steps. " + "c" * 7_950, agentType="explore"),
+        tool("attempt_completion", "Example Domain; 111 steps. " + "d" * 1_350),
+    ]
+    return {
+        "agent": {
+            "agent_id": "b140bb71-f957-4b3f-a394-e1f74efbfc26",
+            "status": "COMPLETED",
+            "structured_output": {"collatz_step_count": 111, "example_com_page_title": "Example Domain"},
+        },
+        "messages": messages,
+        "_benchmark": {},
+    }
+
+
+async def test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay():
+    """The judge sees the grounding fact the runtime kept, on the single-turn path.
+
+    b140bb71's explore LLM saw the 305k grep result fit to the 50k runtime cap,
+    which includes "counted 111 steps" at char 6,339. The grader cut that row to
+    12k (~6k head) and the judge failed a correct answer. With the runtime cap
+    the fact survives and the bundle fits one judge call (no agentic fallback).
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    evidence = _declared_evaluator_evidence(_b140bb71_shaped_run())
+    grep_rows = [row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "grep"]
+    assert len(grep_rows) == 3
+    assert "counted 111 steps" in grep_rows[2], len(grep_rows[2])
+
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+
+    assert await _declared_judge_context_overflows("judge prompt", json.dumps(evidence, default=str)) is False
 
 
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
     tree = {
@@ -7273,12 +7338,9 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
             },
         }
     )
-    dumped = json.dumps(evidence)
-    assert len(dumped) < 200_000
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
-    assert huge not in dumped
     state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
+    # Transcripts appear once as rows; the typed state never repeats child bodies.
+    assert huge not in json.dumps(state)
     assert state["tree"]["gp-0"]["research_tool_count"] >= 1
     assert state["tree"]["gp-0"]["explore_spawn_count"] >= 1
     assert state["tree"]["gp-0"]["message_count"] == 2
@@ -7294,9 +7356,15 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     assert state["usage"]["cost_cents"] == 0
 
 
-async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
-    """Hydrated 50-GP trees must stay on single_turn — agentic Codex token fetch is a fail-closed flake."""
+async def test_overflowing_single_turn_judge_falls_back_to_agentic():
+    """A judge prompt that overflows the model goes to the agentic judge, uncut.
+
+    Andy (2026-10-24): "if context overflows we fallback to an agentic verifier".
+    A hydrated 50-GP tree plus 130 fat root rows is far over the runtime
+    compaction trigger, so no single-turn call (or credential lease) is made.
+    """
     import benchmarks.run_benchmark as bench
+    import helpers.llm as llm
     from benchmarks.benchmark_tasks import BenchmarkTask
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
@@ -7379,35 +7447,29 @@ async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
         "_benchmark": {"tree": tree, "all_agents": all_agents},
     }
     agentic_calls = []
-    single_calls = []
-
-    async def fake_single(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
-        single_calls.append(evaluator_arg["id"])
-        assert evidence is not None
-        from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
-
-        assert not single_turn_evidence_exceeds_budget(evidence)
-        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
     async def fake_agentic(task_arg, evaluator_arg, data_arg, **_kwargs):
-        agentic_calls.append(evaluator_arg["id"])
-        raise AssertionError("mass-agent single_turn must not upgrade to agentic")
+        agentic_calls.append((evaluator_arg["id"], data_arg is data))
+        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
-    original_single = bench._call_declared_llm_judge
+    async def no_single_turn(*_args, **_kwargs):
+        raise AssertionError("an overflowing judge prompt must not reach the single-turn verifier")
+
     original_agentic = bench._call_declared_agentic_llm_judge
+    original_check_progress = llm.check_progress
     try:
-        bench._call_declared_llm_judge = fake_single
         bench._call_declared_agentic_llm_judge = fake_agentic
+        llm.check_progress = no_single_turn
         passed, reason, results = await bench._run_declared_evaluators(task, data)
     finally:
-        bench._call_declared_llm_judge = original_single
         bench._call_declared_agentic_llm_judge = original_agentic
+        llm.check_progress = original_check_progress
 
     assert passed is True
     assert reason is None
-    assert single_calls == ["t1-andy-only"]
-    assert agentic_calls == []
+    assert agentic_calls == [("t1-andy-only", True)]
     assert results[0]["passed"] is True
+    assert results[0]["evidence_mode"] == "agentic_llm_judge"
 
 
 def test_first_level_gp_count_static_uses_collected_transcripts():
@@ -26344,20 +26406,28 @@ async def run_all_tests():
         test_declared_evaluator_evidence_includes_structured_output_first,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
-        test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
+        "declared_evaluator_evidence_keeps_code_agent_grounding_rows",
+        test_declared_evaluator_evidence_keeps_code_agent_grounding_rows,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_whole_rows_within_budget",
-        test_declared_evaluator_evidence_keeps_whole_rows_within_budget,
+        "declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap",
+        test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap,
+    )
+    await r.record_async(
+        "declared_judge_overflow_uses_runtime_compaction_trigger",
+        test_declared_judge_overflow_uses_runtime_compaction_trigger,
+    )
+    await r.record_async(
+        "declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay",
+        test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     await r.record_async(
-        "mass_agent_single_turn_judge_does_not_upgrade_to_agentic",
-        test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic,
+        "overflowing_single_turn_judge_falls_back_to_agentic",
+        test_overflowing_single_turn_judge_falls_back_to_agentic,
     )
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",

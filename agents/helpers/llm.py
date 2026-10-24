@@ -1150,29 +1150,13 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            #
-            # Declared-evaluator evidence is pre-bounded (~320k) and often carries
-            # the full structured deliverable (e.g. top-100 repos). Applying the
-            # generic 12k tool cap here head+tails that card and fails the judge
-            # even when the agent completed correctly.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
             if str(call_site or "") == "benchmark_declared_evaluator":
-                # Evidence builders already bound content (~320k), but
-                # json.dumps(tool_payload) re-serializes and can exceed that.
-                # Cap across ALL declared-evaluator TOOL rows (e.g. DoorDash
-                # supplemental cart evidence) so the combined prompt stays
-                # inside the single-turn budget (CodeRabbit #1260).
-                _declared_total_cap = 320_000
-                _marker = "...[declared-evaluator truncated]"
-                _remaining = _declared_total_cap - _tool_result_chars_used
-                if _remaining <= 0:
-                    tool_text, truncated = "", True
-                elif len(dumped) > _remaining:
-                    _keep = max(0, _remaining - len(_marker))
-                    tool_text = dumped[:_keep] + _marker
-                    truncated = True
-                else:
-                    tool_text, truncated = dumped, False
+                # Declared-evaluator evidence carries the runtime per-tool-result
+                # cap, and the caller sends any prompt that would overflow the
+                # model to the agentic judge. A second, grader-only cut here
+                # would drift from the runtime (grep-agent-trajectories-cross-surface).
+                tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
                     dumped,

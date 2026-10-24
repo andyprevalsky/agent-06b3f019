@@ -1,8 +1,11 @@
 """Tree-aware evidence builders for declared benchmark semantic evaluators.
 
-Single-turn judges receive root plus every sub-agent transcript. When the
-serialized bundle exceeds the single-turn char budget, the harness auto-falls
-back to the agentic Codex judge (see run_benchmark._run_declared_evaluators).
+Single-turn judges receive root plus every sub-agent transcript. The grader
+has no cutoffs of its own: each tool result is bounded by the runtime's
+``hard_cap_tool_result_text`` (the cap agents apply before a tool result enters
+their context), and a judge prompt that would overflow the runtime compaction
+trigger falls back to the agentic judge (see
+run_benchmark._call_declared_llm_judge).
 """
 
 from __future__ import annotations
@@ -10,13 +13,9 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-# Match wait_for's evidence budget — single-turn judges share one context window.
-SINGLE_TURN_CHAR_BUDGET = 320_000
+from helpers.summarize import hard_cap_tool_result_text
 
-ROOT_MESSAGE_TAIL = 120
 SUBAGENT_MESSAGE_TAIL = 500
-SINGLE_TURN_TEXT_CAP = 12_000
-AGENTIC_TEXT_CAP = 50_000
 AGENTIC_ROOT_MESSAGE_TAIL = 500
 
 DECLARED_JUDGE_METADATA_KEYS = (
@@ -36,9 +35,7 @@ DECLARED_JUDGE_METADATA_KEYS = (
     "agentType",
 )
 
-# Lower rank = pack first when the full/slim evidence exceeds SINGLE_TURN_CHAR_BUDGET.
-# web_* stay lowest so mass-agent root GP spam cannot crowd out coding-agent rows
-# or re-inflate the compact_only bundle toward the old 35MB tree path.
+# Coding-agent tool rows whose Claude Code sessions are hydrated for judges.
 _GROUNDING_TOOL_RANK: dict[str, int] = {
     "code_agent_sdk_events": 0,
     "claude_code_history": 1,
@@ -46,8 +43,6 @@ _GROUNDING_TOOL_RANK: dict[str, int] = {
     "web_search": 4,
     "web_fetch": 5,
 }
-_LOW_PRIORITY_GROUNDING_TEXT_CAP = 2_000
-_LOW_PRIORITY_GROUNDING_MAX_ROWS = 10
 _EXPLORE_GROUNDING_RANK = 3
 
 
@@ -56,35 +51,12 @@ def _root_agent_id(data: dict) -> str:
     return str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "")
 
 
-_OMISSION_MARKER = "\n[... {omitted} characters omitted ...]\n"
-
-
-def _cap_text(text: str, text_cap: int | None) -> str:
-    """Shorten ``text`` to ``text_cap`` chars: keep both ends, say what was dropped.
-
-    A judge must be able to tell that evidence is missing, and the end of a
-    tool result (status lines, totals, errors) is as likely to matter as its
-    start. This is the shape the reference harnesses use for an LLM reader:
-    Codex's transcript reviewer keeps a prefix and suffix around
-    ``<truncated omitted_approx_tokens="N" />`` (codex-rs/guardian-context
-    truncation.rs), and OpenClaw keeps head and tail around a
-    "N more characters truncated" notice (tool-result-truncation.ts).
-    """
-    if text_cap is None or len(text) <= text_cap:
-        return text
-    # Sized for the widest count the marker could carry, so the result fits.
-    keep = max(text_cap - len(_OMISSION_MARKER.format(omitted=len(text))), 0)
-    head = keep // 2
-    tail = keep - head
-    marker = _OMISSION_MARKER.format(omitted=len(text) - keep)
-    return text[:head] + marker + (text[-tail:] if tail else "")
-
-
-def _message_text(message: dict, text_cap: int | None) -> str:
+def _message_text(message: dict, role: str) -> str:
+    """Row text, with tool results bounded exactly as the runtime bounds them."""
     text_value = message.get("text", message.get("message", message.get("content", "")))
     if not isinstance(text_value, str):
         text_value = json.dumps(text_value, default=str)
-    return _cap_text(text_value, text_cap)
+    return hard_cap_tool_result_text(text_value) if role == "TOOL" else text_value
 
 
 def _message_metadata(message: dict) -> dict[str, Any]:
@@ -98,13 +70,14 @@ def _evidence_rows_from_messages(
     agent_id: str,
     parent_agent_id: str | None,
     goal: str,
-    text_cap: int | None,
     skip_user_system: bool,
-    message_tail: int,
+    message_tail: int | None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     message_list = [message for message in messages if isinstance(message, dict)]
-    for message in message_list[-message_tail:]:
+    if message_tail is not None:
+        message_list = message_list[-message_tail:]
+    for message in message_list:
         role = str(message.get("role") or "").upper()
         if skip_user_system and role in {"USER", "SYSTEM"}:
             continue
@@ -118,7 +91,7 @@ def _evidence_rows_from_messages(
         rows.append(
             {
                 "role": role or "UNKNOWN",
-                "text": _message_text(message, text_cap),
+                "text": _message_text(message, role),
                 "metadata": row_metadata,
             }
         )
@@ -151,16 +124,14 @@ def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
     return ordered
 
 
-def _append_completion_card(
-    rows: list[dict[str, Any]], data: dict, text_cap: int | None
-) -> None:
+def _append_completion_card(rows: list[dict[str, Any]], data: dict) -> None:
     summaries = _final_completion_summaries(data)
     if not summaries:
         return
     completion = summaries[-1]
     outputs = completion.get("outputs")
     payload = {
-        "summary": _cap_text(str(completion.get("summary") or ""), text_cap),
+        "summary": str(completion.get("summary") or ""),
         "outputs": outputs[:200] if isinstance(outputs, list) else [],
     }
     rows.append(
@@ -190,13 +161,11 @@ def _final_completion_summaries(data: dict) -> list[dict]:
     return summaries
 
 
-def build_single_turn_evidence(
-    data: dict, *, text_cap: int | None = SINGLE_TURN_TEXT_CAP
-) -> list[dict[str, Any]]:
+def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
     """Build single-turn judge evidence from root and optional tree transcripts.
 
-    ``text_cap`` cuts each row's text; ``None`` keeps every row whole. The
-    caller owns the overall budget and picks the cap that fits it.
+    Every message is kept. Tool results carry the runtime per-result cap; the
+    caller falls back to the agentic judge when the prompt would overflow.
     """
     root_id = _root_agent_id(data)
     rows = _evidence_rows_from_messages(
@@ -204,9 +173,8 @@ def build_single_turn_evidence(
         agent_id=root_id,
         parent_agent_id=None,
         goal="",
-        text_cap=text_cap,
         skip_user_system=True,
-        message_tail=ROOT_MESSAGE_TAIL,
+        message_tail=None,
     )
 
     tree = data.get("_semantic_evaluator_tree")
@@ -221,13 +189,12 @@ def build_single_turn_evidence(
                     agent_id=agent_id,
                     parent_agent_id=str(info.get("parent_agent_id") or "") or None,
                     goal=str(info.get("goal") or ""),
-                    text_cap=text_cap,
                     skip_user_system=True,
-                    message_tail=SUBAGENT_MESSAGE_TAIL,
+                    message_tail=None,
                 )
             )
 
-    _append_completion_card(rows, data, text_cap)
+    _append_completion_card(rows, data)
     rows.append({"benchmark_state": data.get("_benchmark", {})})
     return rows
 
@@ -240,7 +207,6 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
         agent_id=root_id,
         parent_agent_id=None,
         goal="",
-        text_cap=AGENTIC_TEXT_CAP,
         skip_user_system=False,
         message_tail=AGENTIC_ROOT_MESSAGE_TAIL,
     )
@@ -255,7 +221,6 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
                 agent_id=agent_id,
                 parent_agent_id=str(info.get("parent_agent_id") or "") or None,
                 goal=str(info.get("goal") or ""),
-                text_cap=AGENTIC_TEXT_CAP,
                 skip_user_system=False,
                 message_tail=SUBAGENT_MESSAGE_TAIL,
             )
@@ -278,7 +243,7 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
         outputs = completion.get("outputs")
         completion_cards.append(
             {
-                "summary": _cap_text(str(completion.get("summary") or ""), AGENTIC_TEXT_CAP),
+                "summary": str(completion.get("summary") or ""),
                 "outputs": outputs[:200] if isinstance(outputs, list) else [],
             }
         )
@@ -297,16 +262,8 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
     }
 
 
-def single_turn_evidence_char_count(evidence: list[dict[str, Any]]) -> int:
-    return len(json.dumps(evidence, default=str))
-
-
-def single_turn_evidence_exceeds_budget(evidence: list[dict[str, Any]]) -> bool:
-    return single_turn_evidence_char_count(evidence) > SINGLE_TURN_CHAR_BUDGET
-
-
 def _grounding_tool_rank(metadata: dict[str, Any]) -> int | None:
-    """Return pack priority for a tool row, or None when it is not grounding."""
+    """Return the grounding rank of a tool row, or None when it is not grounding."""
     tool_name = str(metadata.get("toolName") or "")
     if tool_name in _GROUNDING_TOOL_RANK:
         return _GROUNDING_TOOL_RANK[tool_name]
@@ -330,55 +287,3 @@ def messages_have_code_agent_grounding(data: dict) -> bool:
         if rank is not None and rank <= _GROUNDING_TOOL_RANK["spawn_claude_code_agent"]:
             return True
     return False
-
-
-def pack_grounding_priority_rows(
-    data: dict,
-    *,
-    base_rows: list[dict[str, Any]],
-    budget: int = SINGLE_TURN_CHAR_BUDGET,
-) -> list[dict[str, Any]]:
-    """Greedily pack high-value grounding tool rows under the single-turn budget.
-
-    Used when full/slim transcripts exceed ``SINGLE_TURN_CHAR_BUDGET`` so
-    compact_only keeps coding-agent / explore / search evidence instead of
-    collapsing to completion + structured_output only.
-    """
-    root_id = _root_agent_id(data)
-    candidates: list[tuple[int, int, dict[str, Any]]] = []
-    low_priority_kept = 0
-    messages = [m for m in (data.get("messages") or []) if isinstance(m, dict)]
-    for index, message in enumerate(messages):
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        rank = _grounding_tool_rank(metadata)
-        if rank is None:
-            continue
-        tool_name = str(metadata.get("toolName") or "")
-        text_cap = SINGLE_TURN_TEXT_CAP
-        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
-            text_cap = _LOW_PRIORITY_GROUNDING_TEXT_CAP
-        row_metadata = _message_metadata(message)
-        if root_id:
-            row_metadata["source_agent_id"] = root_id
-        role = str(message.get("role") or "TOOL").upper()
-        row = {
-            "role": role or "TOOL",
-            "text": _message_text(message, text_cap),
-            "metadata": row_metadata,
-        }
-        # Negate index so more recent rows sort first within the same rank.
-        candidates.append((rank, -index, row))
-
-    candidates.sort(key=lambda item: (item[0], item[1]))
-    packed = list(base_rows)
-    for rank, _neg_index, row in candidates:
-        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
-            if low_priority_kept >= _LOW_PRIORITY_GROUNDING_MAX_ROWS:
-                continue
-        trial = [*packed, row]
-        if single_turn_evidence_char_count(trial) > budget:
-            continue
-        packed.append(row)
-        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
-            low_priority_kept += 1
-    return packed

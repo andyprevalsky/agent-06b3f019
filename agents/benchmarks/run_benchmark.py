@@ -11915,54 +11915,44 @@ def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list
 
 
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
-    """Build a bounded evidence-only context for a declared LLM judge.
+    """Build the evidence-only context for a declared LLM judge.
 
-    Rows are whole whenever the bundle fits the single-turn budget; only a
-    bundle that does not fit has each row cut to ``SINGLE_TURN_TEXT_CAP``.
-
-    Payment-approval metadata and root transcripts come from the tree-aware
-    single-turn builder. ``benchmark_state`` is the compact T-row view so
-    mass-agent trees cannot 413 the judge with 35MB child bodies. When the
-    hydrated child transcripts still blow the single-turn budget, drop them.
-    When the remaining root tail (120 × 12k GP rows) is still over budget,
-    keep completion + structured_output + compact typed state, then pack
-    coding-agent / explore / search grounding rows by priority under the
-    single-turn budget (never drop all tool evidence for fat Claude Code runs).
+    Root and sub-agent transcripts come whole from the tree-aware single-turn
+    builder, with each tool result bounded by the runtime per-result cap.
+    ``benchmark_state`` is the compact T-row view so mass-agent trees do not
+    carry 35MB child bodies twice. There is no grader-only budget: a prompt
+    that would overflow the judge model is sent to the agentic judge instead
+    (``_call_declared_llm_judge``).
     """
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_TEXT_CAP,
-        _append_completion_card,
-        build_single_turn_evidence,
-        pack_grounding_priority_rows,
-        single_turn_evidence_exceeds_budget,
-    )
+    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
 
     compact_state = _compact_benchmark_state_for_judge(data)
-    # Whole rows first. The per-row cap exists only to fit the budget, and it
-    # cuts without a marker: a 17k grep result lost the one line its judge had
-    # to ground on (grep-agent-trajectories-code-tool-status).
-    for text_cap in (None, SINGLE_TURN_TEXT_CAP):
-        evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data, text_cap=text_cap), compact_state)
-        evidence = _append_structured_output_evidence(evidence, data)
-        if not single_turn_evidence_exceeds_budget(evidence):
-            return evidence
-    slim = dict(data)
-    slim["_semantic_evaluator_tree"] = None
-    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
-    evidence = _append_structured_output_evidence(evidence, data)
-    if not single_turn_evidence_exceeds_budget(evidence):
-        return evidence
-    # Full/slim transcripts blew the budget. Keep completion + structured_output
-    # + compact typed state, then pack coding-agent / explore / search grounding
-    # by priority instead of dropping every tool row (cuda-kernel judge regression).
-    compact_only: list[dict] = []
-    _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
-    evidence = _apply_compact_benchmark_state(compact_only, compact_state)
-    evidence = _append_structured_output_evidence(evidence, data)
-    evidence = pack_grounding_priority_rows(data, base_rows=evidence)
-    if not single_turn_evidence_exceeds_budget(evidence):
-        return evidence
-    return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
+    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
+    return _append_structured_output_evidence(evidence, data)
+
+
+_DECLARED_JUDGE_USER_TEXT = "Evaluate the supplied run evidence against the benchmark requirements."
+
+
+async def _declared_judge_context_overflows(verifier_prompt: str, evidence_text: str) -> bool:
+    """True when the single-turn judge prompt would overflow its model.
+
+    Same window, estimator and trigger the agent loop uses before every LLM
+    call (``run_agent.compaction_trigger_tokens``). The evidence is measured
+    as ``check_progress`` re-serializes it into its TOOL_RESULT line.
+    """
+    from helpers.llm import VERIFIER_MODEL
+    from helpers.model_info import get_model_context_window
+    from helpers.summarize import estimate_context_tokens
+    from loop.run_agent import compaction_trigger_tokens
+
+    context = [
+        {"role": "SYSTEM", "text": verifier_prompt},
+        {"role": "USER", "text": _DECLARED_JUDGE_USER_TEXT},
+        {"role": "TOOL", "text": "TOOL_RESULT " + json.dumps(evidence_text, ensure_ascii=False)},
+    ]
+    window = await get_model_context_window(VERIFIER_MODEL)
+    return estimate_context_tokens(context) >= compaction_trigger_tokens(window)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -12391,18 +12381,23 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                     "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
                 }
             )
+    evidence_text = json.dumps(evidence, default=str)
+    if await _declared_judge_context_overflows(verifier_prompt, evidence_text):
+        # Context overflow: the agentic judge reads the whole trajectory from
+        # a file instead of a truncated single-turn prompt.
+        judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
+        return {**judged, "evidence_mode": "agentic_llm_judge"}
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     judge_user_id = agent.get("userId") or agent.get("user_id") or _current_benchmark_user_id()
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
-    evidence_text = json.dumps(evidence, default=str)
 
     async def judge() -> dict:
         return await check_progress(
             context=[
                 {
                     "role": "USER",
-                    "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+                    "text": _DECLARED_JUDGE_USER_TEXT,
                 },
                 {
                     "role": "TOOL",
@@ -14481,21 +14476,14 @@ async def _run_declared_evaluators(
                 passed, reasoning = _run_declared_static_check(task, evaluator, data)
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
-                from benchmarks.semantic_evaluator_evidence import (
-                    single_turn_evidence_exceeds_budget,
-                )
-
                 if getattr(task, "process_spec", None) is not None:
                     from benchmarks.process_bench import process_evidence
 
                     evidence = process_evidence(data)
                 else:
                     evidence = _declared_evaluator_evidence(data)
-                if single_turn_evidence_exceeds_budget(evidence):
-                    judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
-                    evidence_mode = "agentic_llm_judge"
-                else:
-                    judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
+                judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
+                evidence_mode = judged.get("evidence_mode", method)
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
