@@ -1676,6 +1676,40 @@ def test_benchmark_context_path_treats_root_context_as_repo_local():
             os.environ["BENCHMARK_CONTEXT_DIR"] = previous
 
 
+def test_local_port_run_binds_judge_backend_to_the_stack_under_test():
+    """descend-full69 MA: an isolated --port stack's declared judge leased tokens from localhost:3001.
+
+    agents/.env pins BACKEND_API_URL to the default dev stack; the run's judge
+    then failed "All connection attempts failed" with nothing listening there.
+    """
+    import os
+
+    from benchmarks import run_benchmark
+    from config import load_config
+
+    previous = os.environ.get("BACKEND_API_URL")
+    try:
+        os.environ["BACKEND_API_URL"] = "http://localhost:3001"
+        run_benchmark._bind_backend_api_url("http://localhost:3201/")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ.pop("BACKEND_API_URL")
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ["BACKEND_API_URL"] = "https://guest-tunnel.example.com"
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "https://guest-tunnel.example.com"
+    finally:
+        if previous is None:
+            os.environ.pop("BACKEND_API_URL", None)
+        else:
+            os.environ["BACKEND_API_URL"] = previous
+    main_source = Path(run_benchmark.__file__).read_text()
+    resolve = main_source.index('base_url = f"http://localhost:{args.port}"')
+    assert "_bind_backend_api_url(base_url)" in main_source[resolve : resolve + 1500]
+
+
 def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
     """Queue preflight must not require killing sibling benchmark workers."""
     import os
@@ -25171,6 +25205,10 @@ async def run_all_tests():
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
+    r.record(
+        "local_port_run_binds_judge_backend_to_the_stack_under_test",
+        test_local_port_run_binds_judge_backend_to_the_stack_under_test,
+    )
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async(
