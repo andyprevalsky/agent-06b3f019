@@ -986,6 +986,42 @@ def test_list_agents_marks_deep_caller_and_renders_search_breadcrumbs():
     assert tree_query_params({"depth": "deep"})[1]
 
 
+def test_explore_list_agents_on_finished_browser_task_lists_it_completed():
+    """list_agents(node=<browser task>) from an explore shows the task's truthful status (no error)."""
+    from domains.agent_messaging.service import explore_tree_view, render_agent_view
+
+    root = _view_node("id-root", "/root", None, 0, "Decline the member-number request")
+    task = {
+        **_view_node(
+            "/root/member_number", "/root/member_number", "id-root", 1, "Read the member number", "completed"
+        ),
+        "type": "browser",
+        "task_id": "bg_member",
+    }
+    # GET /:id/tree?node=/root/member_number (owner's view of one of its finished tasks).
+    view = {
+        "root_agent_id": "id-root",
+        "caller_path": [root],
+        "node_path": [root, {k: task[k] for k in ("agent_id", "path", "goal", "status", "depth")}],
+        "nodes": [task],
+        "next_cursor": None,
+        "sibling_next_cursor": None,
+    }
+    view = explore_tree_view(
+        view,
+        owner_agent_id="id-root",
+        explore_address="/root/read_trace",
+        explore_path="/root/read_trace",
+        explore_goal="Read the member_number trace",
+        default_view=False,
+    )
+    lines = render_agent_view(view, self_agent_id="/root/read_trace", query={"node": "/root/member_number"})
+    assert lines.splitlines()[2:] == [
+        "Viewing /root/member_number: /root › /root/member_number",
+        "- /root/member_number [task of your parent] browser completed: Read the member number",
+    ], lines
+
+
 def test_task_paths_and_names():
     from helpers.agent_addressing import (
         TASK_NAME_PATTERN,
@@ -2306,6 +2342,10 @@ async def run_all_tests():
     r.record("list_agents_default_view_toc", test_list_agents_renders_default_view_as_table_of_contents)
     r.record("list_agents_drill_down_pagination", test_list_agents_renders_drill_down_and_pagination_hints)
     r.record("list_agents_you_marker_search", test_list_agents_marks_deep_caller_and_renders_search_breadcrumbs)
+    r.record(
+        "explore_list_agents_finished_browser_task",
+        test_explore_list_agents_on_finished_browser_task_lists_it_completed,
+    )
     r.record("task_paths_and_names", test_task_paths_and_names)
     await r.record_async(
         "bg_tasks_persist_and_names_unique", test_background_tasks_persist_in_tree_state_and_names_stay_unique
