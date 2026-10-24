@@ -2186,6 +2186,33 @@ def test_parent_prompts_route_browser_approval_through_commit_click():
         )
 
 
+
+# ============================================================================
+# 24. Browser sign-up identity facts
+# ----------------------------------------------------------------------------
+# WHY: the spawn_agent goal description said spawned agents get no context and
+# to include names/addresses, so the root restated the user's email in a
+# browser goal; the browser signed up with an inbox it cannot read and later
+# handed the unreadable code to a human (run e0c401c1). Browser agents receive
+# the profile and Auth Options themselves, and sign-up identities come from
+# Auth Options.
+# ============================================================================
+
+
+def test_browser_identity_facts_in_spawn_goal_and_auth_contract():
+    from utils.browser_auth_contract import build_authentication_contract
+    from utils.tool_schemas import SpawnAgentTool, SpawnAgentToolNoGP, SpawnExploreAgentTool
+
+    note = "a browser agent also receives the user's profile"
+    for tool in (SpawnAgentTool, SpawnAgentToolNoGP):
+        goal = tool.model_json_schema()["properties"]["goal"]["description"]
+        assert note in goal and "do not restate the user's profile" in goal, tool.__name__
+    explore_goal = SpawnExploreAgentTool.model_json_schema()["properties"]["goal"]["description"]
+    assert note not in explore_goal
+    rule = "Sign in or sign up only with identities listed in Auth Options."
+    for recover in (True, False):
+        assert rule in build_authentication_contract(recover_enabled=recover)
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -2452,6 +2479,11 @@ async def run_all_tests():
     await r.record_async(
         "planner_tools_description_follows_the_workflow_account",
         test_planner_tools_description_follows_the_workflow_account,
+    )
+    # 24. Browser sign-up identity facts (RCA Q3b, run e0c401c1)
+    r.record(
+        "browser_identity_facts_in_spawn_goal_and_auth_contract",
+        test_browser_identity_facts_in_spawn_goal_and_auth_contract,
     )
     teardown_mock()
     return r.all_passed
