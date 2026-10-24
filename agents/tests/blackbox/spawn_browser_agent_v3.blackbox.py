@@ -9822,6 +9822,8 @@ def test_browser_usage_preserves_repeatable_cache_calls():
         "cache_read_input_tokens": 29_435,
         "cache_creation_input_tokens": 938,
         "cache_hit_pct": 96.9,
+        "sequenced_call_count": 4,
+        "repeatable_call_count": 4,
     }
 
 
