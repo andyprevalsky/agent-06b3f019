@@ -18,8 +18,11 @@ tags:
 sources:
   - commit cf7ada83b
   - task codex-code blackbox run 1792861461-3767703-5065 (sandbox i2byq8pckjxtjt2lkmq0o retained paused)
+  - commit cc2fcd368 (versioned codex-code-v0159 default + contract)
+  - commit 61774b2c8 (native outputSchema handoff)
+  - commit 0fc2ee64c (smoke completes on turn/completed)
 repro: back-end/src/tests/blackbox/codex-code.blackbox.ts (BLACKBOX_SMOKE=1) smoke and template cases
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -42,11 +45,25 @@ ever started.
 
 ## Solution
 
-Not fixed. The fix is to rebuild and publish the codex-code templates (all sizes via
-build-sized-templates.mjs) from the 0.159.0 Dockerfile and update the template-pin
-assertion to 0.159.0. Those template names are shared with production, so publishing
-needs the deploy coordinator's go. Then rerun the Codex smoke, which now also asserts
-the handoff.
+The shared `codex-code` alias is left untouched, because prod's backend (main) still overlays the 0.144
+ws-server onto it. A NEW template `codex-code-v0159` (id vm08m76z4xzp9s91u24x, build
+b147d81a-d6bf-48ed-a5b7-563f276c65f6, codex-cli 0.159.0, 2 vCPU / 1024 MB) was built from
+this branch's Dockerfile by the new `e2b-templates/build-template-version.mjs`. That script
+uses E2B_API_KEY, refuses the shared alias and existing names, and writes a receipt.
+`back-end/src/providers/codexTemplate.ts` is the single default used by e2b.ts, sandboxSize.ts
+and inspect.ts. Deploying the branch therefore switches Codex sessions atomically with the code
+that needs them. The template contract now fails when the code default, the Dockerfile pin and the
+versioned alias disagree, or when a provider re-declares a literal default. It was red for both
+mutations and green 5x. Render and Fly set no E2B_CODEX_CODE_TEMPLATE_ID.
+
+On the new template a real Codex turn completed but ignored the instruction-only handoff. The
+overlay now ports `codex exec --output-schema/--output-last-message`
+(codex-rs exec/src/event_processor.rs:33-42): the goal turn sends the handoff schema as a
+strict turn/start outputSchema (client_common.rs:52 strict default). Optional fields become
+nullable, and those nulls are pruned. The final message is written to /home/user/.rose/handoff.json.
+Schemas with open objects, which strict mode cannot express, keep the instruction-only contract.
+The smoke helper now ends on turn/completed, the worker's contract, instead of a process exit
+that the app-server transport never sends. Real Codex E2B smoke: PASS, with the handoff asserted.
 
 ## Human feedback
 
@@ -54,4 +71,4 @@ None recorded.
 
 ## Reusable lesson
 
-When a runtime overlay ships newer code onto a prebuilt image, pin and check the image's binary version at session start so skew fails loudly instead of hanging silently.
+Version a prebuilt image with the code that targets it (new alias + one code default + a contract test); never rebuild a shared alias that older deploys still resolve.
