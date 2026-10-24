@@ -2,6 +2,7 @@ import type { FilePointer } from '../api';
 import type { RealtimeBroadcastWrapper } from './wrapper';
 import type {
   DeleteMessagePayload,
+  InsertDeferredPayload,
   InsertMessagePayload,
   UpdateAgentPayload,
 } from './message-payloads';
@@ -93,6 +94,19 @@ export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | n
  */
 export function extractUpdatePayload(wrapper: unknown): UpdateAgentPayload | null {
   return extractAndValidate<UpdateAgentPayload>(wrapper, 'UPDATE', validateUpdateAgentPayload);
+}
+
+/**
+ * Extract and validate INSERT_DEFERRED payload.
+ */
+export function extractInsertDeferredPayload(wrapper: unknown): InsertDeferredPayload | null {
+  return extractAndValidate<InsertDeferredPayload>(wrapper, 'INSERT_DEFERRED', (p) => {
+    if (typeof p !== 'object' || p === null) return 'Payload is not an object';
+    const record = p as Record<string, unknown>;
+    if (typeof record.agentId !== 'string') return 'Missing or invalid agentId';
+    if (typeof record.id !== 'string' || record.id === '') return 'Missing or invalid id';
+    return null;
+  });
 }
 
 /**

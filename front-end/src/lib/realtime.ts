@@ -19,6 +19,7 @@ export {
   type InsertMessagePayload,
   type UpdateAgentPayload,
   type DeleteMessagePayload,
+  type InsertDeferredPayload,
   type AssistantStreamPayload,
   type PlanStreamPayload,
   type ToolStreamPayload,
@@ -66,6 +67,7 @@ export {
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
+  extractInsertDeferredPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -85,6 +87,7 @@ import {
   type InsertMessagePayload,
   type UpdateAgentPayload,
   type DeleteMessagePayload,
+  type InsertDeferredPayload,
   type AgentStateChangedPayload,
   type AgentModeStartedPayload,
   type BrowserSessionBindingPayload,
@@ -92,6 +95,7 @@ import {
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
+  extractInsertDeferredPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -219,6 +223,8 @@ export async function subscribeToChannel(
  */
 export interface AgentHandlers {
   onInsert?: (payload: InsertMessagePayload) => void;
+  /** A committed message whose INSERT frame was refused; fetch it by ID. */
+  onInsertDeferred?: (payload: InsertDeferredPayload) => void;
   onUpdate?: (payload: UpdateAgentPayload) => void;
   onDelete?: (payload: DeleteMessagePayload) => void;
   onAssistantStream?: (payload: AssistantStreamPayload) => void;
@@ -253,6 +259,12 @@ export async function subscribeToAgent(
     eventHandlers['INSERT'] = (wrapper: unknown) => {
       const record = extractInsertPayload(wrapper);
       if (record) handlers.onInsert!(record);
+    };
+  }
+  if (handlers.onInsertDeferred) {
+    eventHandlers['INSERT_DEFERRED'] = (wrapper: unknown) => {
+      const record = extractInsertDeferredPayload(wrapper);
+      if (record) handlers.onInsertDeferred!(record);
     };
   }
   if (handlers.onUpdate) {

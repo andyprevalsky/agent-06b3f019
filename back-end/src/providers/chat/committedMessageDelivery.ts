@@ -188,6 +188,16 @@ export class InitialBroadcastDispatcher<
   }
 }
 
+/** A definite HTTP refusal of these bytes; transient statuses are retried instead. */
+function isContentRejection(outcome: BroadcastOutcome): boolean {
+  return (
+    typeof outcome.status === 'number' &&
+    outcome.status >= 400 &&
+    outcome.status < 500 &&
+    !outcome.retryable
+  );
+}
+
 function topicShardIndex(topic: string): number {
   let hash = 0;
   for (let index = 0; index < topic.length; index += 1) {
@@ -215,7 +225,9 @@ export class CommittedMessageDelivery<
     ) => void,
     private readonly resend: (values: T[]) => Promise<BroadcastOutcome>,
     private readonly batchLimit: number,
-    private readonly firstBudget: (topic: string) => { messages: number; bytes: number }
+    private readonly firstBudget: (topic: string) => { messages: number; bytes: number },
+    /** Content-free notice that a committed row exists and must be fetched. */
+    private readonly deferredNotice: (value: T) => T
   ) {}
 
   enqueue(value: T, bytes: number): void {
@@ -302,6 +314,23 @@ export class CommittedMessageDelivery<
           component: 'CommittedMessageDelivery',
         }
       );
+      if (!result.ok && isContentRejection(result)) {
+        // Resending identical bytes cannot pass a deterministic rejection such
+        // as an edge WAF rule. Tell subscribers which committed row to fetch.
+        const notice = await this.resendBounded(
+          shard,
+          cohort.map((member) => ({ ...member, value: this.deferredNotice(member.value) }))
+        );
+        for (const member of cohort) {
+          log.warn('Committed INSERT content rejected; sent deferred notice', {
+            topic: member.value.topic,
+            message_id: member.value.payload.id,
+            status: result.status,
+            notice_status: notice.status,
+          });
+        }
+        if (notice.ok) return;
+      }
       if (!result.ok) {
         for (const member of cohort) {
           log.error('Committed INSERT delivery exhausted', {

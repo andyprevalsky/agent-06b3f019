@@ -63,6 +63,16 @@ export interface UpdateAgentPayload {
   temporalWorkflowId?: string | null;
 }
 
+/**
+ * INSERT_DEFERRED event payload - a committed message whose full INSERT frame
+ * the broadcast transport refused (e.g. an edge WAF rule matched its content).
+ * Identifiers only: the client reads the row by ID from the API.
+ */
+export interface InsertDeferredPayload {
+  agentId: string;
+  id: string;
+}
+
 // -----------------------------------------------------------------------------
 // DELETE Event - Message deleted
 // -----------------------------------------------------------------------------

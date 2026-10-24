@@ -141,6 +141,26 @@ describe('lib/realtime', () => {
     expect(onBrowserSession).toHaveBeenCalledWith(record);
   });
 
+  it('subscribeToAgent: delivers an INSERT_DEFERRED notice and drops malformed ones', async () => {
+    const stub = setupChannelStub(['SUBSCRIBED']);
+    const eventMap: Record<string, (w: unknown) => void> = {};
+    stub.channel.on.mockImplementation(
+      (_type: string, cfg: { event: string }, handler: (w: unknown) => void) => {
+        eventMap[cfg.event] = handler;
+        return stub.channel;
+      },
+    );
+    const onInsertDeferred = vi.fn();
+    await real.subscribeToAgent('a-deferred', { onInsertDeferred });
+    // Exactly the identifier-only record the backend sends after a 403/4xx.
+    const record = { agentId: 'a-deferred', id: '75e5af12-8b66-4b72-b061-3be30ce4308d' };
+    eventMap['INSERT_DEFERRED']?.({ payload: { record } });
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: { agentId: 'a-deferred', id: '' } } });
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: { id: record.id } } });
+    expect(onInsertDeferred).toHaveBeenCalledTimes(1);
+    expect(onInsertDeferred).toHaveBeenCalledWith(record);
+  });
+
   it('subscribeToAgent: rejects on CHANNEL_ERROR before resolve', async () => {
     setupChannelStub(['CHANNEL_ERROR']);
     await expect(real.subscribeToAgent('a-2', {})).rejects.toThrow(/error/i);

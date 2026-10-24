@@ -327,6 +327,20 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
   };
 }
 
+/** One committed row in the agent-detail message shape, e.g. for a deferred realtime INSERT. */
+export async function getAgentMessage(agentId: string, messageId: string, userId?: string) {
+  const msg = await repo.findAgentMessage(agentId, messageId, userId);
+  if (msg === null) return null;
+  return {
+    message_id: msg.id,
+    timestamp: msg.timestamp,
+    text: msg.text,
+    role: msg.role,
+    metadata: msg.metadata,
+    file_pointer: msg.filePointer,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Get ancestors
 // ---------------------------------------------------------------------------

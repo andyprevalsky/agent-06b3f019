@@ -74,7 +74,12 @@ const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
   },
   (items) => sendBroadcastBatch(items),
   BROADCAST_BATCH_SIZE,
-  (topic) => initialDispatcher.admissionBudget(topic)
+  (topic) => initialDispatcher.admissionBudget(topic),
+  (item) => ({
+    ...item,
+    event: 'INSERT_DEFERRED',
+    payload: { agentId: item.payload.agentId, id: item.payload.id },
+  })
 );
 
 interface AssistantStreamOptions {

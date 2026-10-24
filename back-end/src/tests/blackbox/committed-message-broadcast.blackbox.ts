@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // Exercise the public publisher against an ambiguous broker result, rather
 // than importing a retry helper or modifying the production request deadline.
@@ -138,17 +140,79 @@ async function main() {
             (line) => line.includes('delivery exhausted') && line.includes('exhausted-id')
           )
         );
-        calls = 0;
-        globalThis.fetch = (async () => {
-          calls += 1;
+        const events: string[] = [];
+        globalThis.fetch = (async (_url, init) => {
+          events.push(...bodyMessages(init).map((row) => row.event));
           return new Response('', { status: 403 });
         }) as typeof fetch;
         await publisher.broadcastMessageInsert('exhaustion-agent', message('denied-id'));
         await publisher.__flushBroadcastQueueForTests();
-        assert.equal(calls, 1, 'permission failures must not be retried');
+        assert.deepEqual(
+          events,
+          ['INSERT', 'INSERT_DEFERRED'],
+          'permission failures must not resend the record; one content-free notice is the only follow-up'
+        );
+        assert(
+          receipts.some(
+            (line) => line.includes('delivery exhausted') && line.includes('denied-id')
+          ),
+          'a refused notice still leaves an attributed exhaustion receipt'
+        );
       } finally {
         process.stderr.write = write;
       }
+    });
+
+    await test('a content-rejected committed INSERT still tells the client which row to fetch', async () => {
+      // Replays descend-full69 r004-j0049: Supabase's edge WAF returned this
+      // 403 page for every INSERT whose record carried the codex shell command.
+      const wafPage = readFileSync(
+        join(__dirname, '../fixtures/supabase-broadcast-waf-403-a4f47669fe39d6d3.html'),
+        'utf8'
+      );
+      const blockedCommand =
+        "/bin/bash -lc \"rg --files -g 'AGENTS.md' -g 'report-display-format.md' -g 'index.css' /home/user 2>/dev/null | head -80; mkdir -p /home/user/output; curl -L --fail --silent https://raw.githubusercontent.com/Rose-Ai-Labs/rose/main/.claude/shared/report-display-format.md -o /tmp/rose-report-format.md; curl -L --fail --silent https://raw.githubusercontent.com/Rose-Ai-Labs/rose/main/front-end/src/index.css -o /tmp/rose-index.css; sed -n '1,240p' /tmp/rose-report-format.md; sed -n '1,240p' /tmp/rose-index.css\"";
+      const sent: WireMessage[][] = [];
+      const delivered: WireMessage[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        sent.push(rows);
+        if (String(init?.body).includes('curl -L --fail --silent')) {
+          return new Response(wafPage, { status: 403, headers: { 'content-type': 'text/html' } });
+        }
+        delivered.push(...rows);
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      await publisher.broadcastMessageInsert('waf-agent', {
+        id: 'waf-blocked',
+        timestamp: new Date('2026-10-23T23:18:43.499Z'),
+        text: `Code-agent SDK event JSON:\n${JSON.stringify({ command: blockedCommand })}`,
+        role: 'TOOL',
+        metadata: {
+          toolName: 'spawn_claude_code_agent',
+          toolStatus: 'FINISHED',
+          toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
+        },
+      });
+      await publisher.__flushBroadcastQueueForTests();
+      const fullSends = sent.filter((rows) =>
+        rows.some((row) => row.event === 'INSERT' && row.payload.record.id === 'waf-blocked')
+      );
+      assert.equal(
+        fullSends.length,
+        1,
+        'a deterministic content rejection must not resend the record'
+      );
+      const notice = delivered.find(
+        (row) => row.topic === 'agent:waf-agent' && row.payload.record.id === 'waf-blocked'
+      );
+      assert(notice, 'the subscribed client must learn that committed row waf-blocked exists');
+      assert.equal(notice.event, 'INSERT_DEFERRED');
+      assert.deepEqual(
+        Object.keys(notice.payload.record).sort(),
+        ['agentId', 'id'],
+        'the notice carries identifiers only, never the rejected content'
+      );
     });
 
     await test('pending message and byte caps reject visibly and release capacity after completion', async () => {
