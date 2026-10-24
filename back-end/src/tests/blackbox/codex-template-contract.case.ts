@@ -86,13 +86,44 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
 }
 
 export async function testTemplate_pinsCodexCliForGpt56() {
-  const dockerfile = readFileSync(join(resolveGptCodeE2bTemplateDir(), 'e2b.Dockerfile'), 'utf8');
+  const { CODEX_CODE_TEMPLATE, DEFAULT_CODEX_CODE_TEMPLATE_ID } =
+    await import('../../providers/codexTemplate');
+  const templateDir = resolveGptCodeE2bTemplateDir();
+  const dockerfile = readFileSync(join(templateDir, 'e2b.Dockerfile'), 'utf8');
+  const pin = dockerfile.match(/^ARG CODEX_VERSION=(\S+)$/m)?.[1];
   assert(
-    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
+    pin !== undefined &&
       dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
       !dockerfile.includes('ubuntu.mirror.constant.com'),
-    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
+    'Codex E2B template must pin the Codex CLI and use reliable Ubuntu sources'
   );
+  // The overlaid ws-server speaks one Codex app-server protocol: the code default
+  // must name a template built from exactly this pin (R3c: 0.159 overlay vs 0.144 image).
+  assert(
+    CODEX_CODE_TEMPLATE.codexVersion === pin,
+    `codexTemplate.ts codexVersion ${CODEX_CODE_TEMPLATE.codexVersion} != Dockerfile pin ${pin}; build a new template`
+  );
+  const [major, minor] = pin.split('.');
+  assert(
+    CODEX_CODE_TEMPLATE.alias === `codex-code-v${major}${minor}` &&
+      DEFAULT_CODEX_CODE_TEMPLATE_ID === CODEX_CODE_TEMPLATE.alias,
+    `Codex template alias ${CODEX_CODE_TEMPLATE.alias} must be the versioned codex-code-v${major}${minor}`
+  );
+  const sharedAlias = readFileSync(join(templateDir, 'e2b.toml'), 'utf8').match(
+    /^template_name\s*=\s*"([^"]+)"/m
+  )?.[1];
+  assert(
+    sharedAlias !== undefined && CODEX_CODE_TEMPLATE.alias !== sharedAlias,
+    'the code default must never be the shared, unversioned template alias'
+  );
+  // Every default resolves through codexTemplate.ts; no provider re-declares one.
+  for (const file of ['e2b.ts', 'codeSessions/sandboxSize.ts', 'codeSessions/inspect.ts']) {
+    const source = readFileSync(join(process.cwd(), 'src', 'providers', file), 'utf8');
+    assert(
+      source.includes('DEFAULT_CODEX_CODE_TEMPLATE_ID') && !/=\s*'codex-code'/.test(source),
+      `${file} must default the Codex template through codexTemplate.ts`
+    );
+  }
 }
 
 export async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {

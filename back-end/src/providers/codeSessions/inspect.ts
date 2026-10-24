@@ -63,6 +63,7 @@ import {
   type InspectCitation,
   type InspectProvider,
 } from './inspectSandbox';
+import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
 
 const log = createLogger('CodeInspect');
 
@@ -70,7 +71,6 @@ export const MAX_INSPECT_QUESTION_CHARS = 8000;
 /** Hard backstop: E2B kills (never pauses) an inspection sandbox after this. */
 const INSPECT_SANDBOX_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_CLI_TIMEOUT_S = 480;
-const DEFAULT_CODEX_TEMPLATE = 'codex-code';
 
 export class CodeInspectError extends Error {
   constructor(
@@ -108,7 +108,7 @@ export function inspectTemplateId(provider: InspectProvider): string | null {
     return (
       process.env.E2B_CODE_INSPECT_CODEX_TEMPLATE_ID?.trim() ||
       process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim() ||
-      DEFAULT_CODEX_TEMPLATE
+      DEFAULT_CODEX_CODE_TEMPLATE_ID
     );
   }
   return (

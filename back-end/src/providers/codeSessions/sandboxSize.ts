@@ -37,6 +37,7 @@ import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
 import type { CodeSessionRow } from './store';
+import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
 
 const log = createLogger('CodeSandboxSize');
 
@@ -62,7 +63,6 @@ export const DEFAULT_SANDBOX_GRID: { cpu: number[]; memoryGb: number[] } = {
 /** A configured grid larger than this (per provider) is refused. */
 export const MAX_GRID_POINTS = 9;
 
-const DEFAULT_CODEX_TEMPLATE = 'codex-code';
 const DEFAULT_COOLDOWN_MIN = 10;
 const DEFAULT_REVERSE_WINDOW_MIN = 30;
 /** A RUNNING claim older than this was abandoned (backend restart mid-resize). */
@@ -205,7 +205,7 @@ function configuredTemplates(): TemplateMap | 'grid' {
 
 function currentTemplate(provider: SandboxProvider): string | null {
   if (provider === 'claude') return process.env.E2B_CLAUDE_CODE_TEMPLATE_ID?.trim() || null;
-  return process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim() || DEFAULT_CODEX_TEMPLATE;
+  return process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim() || DEFAULT_CODEX_CODE_TEMPLATE_ID;
 }
 
 /**

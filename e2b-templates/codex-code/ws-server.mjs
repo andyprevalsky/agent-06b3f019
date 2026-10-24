@@ -15,7 +15,7 @@ import { spawn, execFileSync } from "child_process";
 import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
 const LOG_FILE = "/tmp/codex-ws-server.log";
 function log(level, message, data = {}) {
@@ -1037,10 +1037,15 @@ function runCodex(args) {
 // Native Codex app-server transport. JSON-RPC is newline-delimited on stdio;
 // the process stays alive between turns so Send can steer the active turn.
 class CodexAppServer {
-  constructor(child, emit, defaults) {
+  constructor(child, emit, defaults, handoff = null) {
     this.child = child;
     this.emit = emit;
     this.settings = defaults;
+    // { schema, write }: the goal turn's final message becomes the handoff file.
+    this.handoff = handoff;
+    this.handoffSchema = handoff ? strictOutputSchema(handoff.schema) : null;
+    this.handoffTurnId = null;
+    this.handoffText = null;
     this.pending = new Map();
     this.nextId = 1;
     this.activeTurnId = null;
@@ -1163,6 +1168,24 @@ class CodexAppServer {
       this.endedTurnIds.add(p.turn.id);
       if (this.activeTurnId === p.turn.id) this.activeTurnId = null;
       const outcome = p.turn.status;
+      if (p.turn.id === this.handoffTurnId) {
+        // `codex exec --output-last-message`: the schema-constrained final
+        // message is the handoff; nothing is written for an unusable one.
+        this.handoffTurnId = null;
+        const handoffJson =
+          outcome === "completed"
+            ? handoffFromFinalMessage(this.handoffText, this.handoff.schema)
+            : null;
+        if (handoffJson !== null) {
+          try {
+            this.handoff.write(handoffJson);
+          } catch (error) {
+            log("warn", "Could not write the handoff file", {
+              error: error.message,
+            });
+          }
+        }
+      }
       this.emit({
         ...common,
         type: "turn_ended",
@@ -1226,9 +1249,10 @@ class CodexAppServer {
         status: completed ? "completed" : "started",
         partial: !completed,
       };
-      if (item.type === "agentMessage" && completed)
+      if (item.type === "agentMessage" && completed) {
+        if (p.turnId === this.handoffTurnId) this.handoffText = item.text || "";
         this.emit({ ...base, type: "agent_message", text: item.text || "" });
-      else if (item.type === "commandExecution")
+      } else if (item.type === "commandExecution")
         this.emit({
           ...base,
           type: "command",
@@ -1365,10 +1389,13 @@ class CodexAppServer {
       effort: response.reasoningEffort ?? this.settings.effort,
       speed: response.serviceTier || "standard",
     };
-    await this.start(
+    const goalTurnId = await this.start(
       [{ type: "text", text: goal, text_elements: [] }],
       this.settings,
+      undefined,
+      this.handoffSchema,
     );
+    if (this.handoffSchema) this.handoffTurnId = goalTurnId;
     this.ready = true;
     this.emit({
       type: "session",
@@ -1395,7 +1422,7 @@ class CodexAppServer {
       throw new Error("unsupported_speed");
     return next;
   }
-  async start(input, settings, clientId) {
+  async start(input, settings, clientId, outputSchema = null) {
     const settingsVersion = this.settingsVersion;
     const response = await this.request("turn/start", {
       threadId: this.threadId,
@@ -1404,6 +1431,7 @@ class CodexAppServer {
       effort: settings.effort,
       serviceTier: settings.speed === "standard" ? null : settings.speed,
       ...(clientId ? { clientUserMessageId: clientId } : {}),
+      ...(outputSchema ? { outputSchema } : {}),
     });
     this.activeTurnId = this.endedTurnIds.has(response.turn.id)
       ? null
@@ -1443,6 +1471,84 @@ class CodexAppServer {
       this.controlBusy = false;
     }
   }
+}
+
+// The worker appends this block to the goal (agents/domains/spawn_claude_code_agent/
+// service.py:handoff_task_text); back-end CODE_AGENT_HANDOFF_PATH names the file.
+const CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json";
+const HANDOFF_SCHEMA_MARKER = `\n\nResult JSON Schema for ${CODE_AGENT_HANDOFF_PATH}:\n`;
+
+function handoffSchemaFromGoal(goal) {
+  const at =
+    typeof goal === "string" ? goal.lastIndexOf(HANDOFF_SCHEMA_MARKER) : -1;
+  if (at < 0) return null;
+  try {
+    const schema = JSON.parse(goal.slice(at + HANDOFF_SCHEMA_MARKER.length));
+    return schema && typeof schema === "object" && !Array.isArray(schema)
+      ? schema
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// Codex validates outputSchema strictly (codex-rs core/src/client_common.rs:52):
+// every property required, no open objects. Optional fields become nullable;
+// a schema strict mode cannot express returns null (instruction-only handoff).
+function strictOutputSchema(schema) {
+  if (!schema || typeof schema !== "object") return null;
+  if (
+    schema.type === "array" ||
+    (Array.isArray(schema.type) && schema.type.includes("array"))
+  ) {
+    const items = strictOutputSchema(schema.items);
+    return items === null ? null : { ...schema, items };
+  }
+  const isObject =
+    schema.type === "object" ||
+    (Array.isArray(schema.type) && schema.type.includes("object"));
+  if (!isObject) return { ...schema };
+  if (schema.additionalProperties !== false || !schema.properties) return null;
+  const required = new Set(schema.required || []);
+  const properties = {};
+  for (const [name, child] of Object.entries(schema.properties)) {
+    const strict = strictOutputSchema(child);
+    if (strict === null) return null;
+    if (!required.has(name)) {
+      const types = Array.isArray(strict.type) ? strict.type : [strict.type];
+      strict.type = types.includes("null") ? types : [...types, "null"];
+    }
+    properties[name] = strict;
+  }
+  return { ...schema, properties, required: Object.keys(properties) };
+}
+
+// Drop the nulls strict mode forced onto optional, non-nullable fields so the
+// handoff has the declared shape; return the file text, or null if not JSON.
+function handoffFromFinalMessage(text, schema) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const prune = (node, nodeSchema) => {
+    if (Array.isArray(node))
+      return node.map((item) => prune(item, nodeSchema?.items));
+    if (!node || typeof node !== "object" || !nodeSchema?.properties)
+      return node;
+    const required = new Set(nodeSchema.required || []);
+    const out = {};
+    for (const [key, item] of Object.entries(node)) {
+      const child = nodeSchema.properties[key];
+      const nullable =
+        Array.isArray(child?.type) && child.type.includes("null");
+      if (item === null && !required.has(key) && !nullable) continue;
+      out[key] = prune(item, child);
+    }
+    return out;
+  };
+  return `${JSON.stringify(prune(value, schema), null, 2)}\n`;
 }
 
 function stageDirectAttachments(id, attachments = []) {
@@ -1507,11 +1613,25 @@ async function runCodexAppServer() {
     },
   });
   child.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
-  nativeCodex = new CodexAppServer(child, appendEvent, {
-    model: CODEX_MODEL,
-    effort: process.env.CODEX_REASONING_EFFORT || null,
-    speed: process.env.CODEX_SPEED || null,
-  });
+  const handoffSchema = handoffSchemaFromGoal(GOAL);
+  nativeCodex = new CodexAppServer(
+    child,
+    appendEvent,
+    {
+      model: CODEX_MODEL,
+      effort: process.env.CODEX_REASONING_EFFORT || null,
+      speed: process.env.CODEX_SPEED || null,
+    },
+    handoffSchema
+      ? {
+          schema: handoffSchema,
+          write: (text) => {
+            mkdirSync(dirname(CODE_AGENT_HANDOFF_PATH), { recursive: true });
+            writeFileSync(CODE_AGENT_HANDOFF_PATH, text);
+          },
+        }
+      : null,
+  );
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => resolve({ code: code ?? 1, signal })),
   );

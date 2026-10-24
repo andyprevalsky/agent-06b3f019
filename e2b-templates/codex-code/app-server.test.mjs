@@ -27,12 +27,23 @@ const block = source.slice(
   source.indexOf("class CodexAppServer {"),
   source.indexOf("function stageDirectAttachments("),
 );
-const Native = vm.runInNewContext(block + "\nCodexAppServer", {
+const sandbox = {
   log: () => {},
   workDir: "/work",
   codexUsageLimit: () => null,
-});
+};
+const {
+  Native,
+  strictOutputSchema,
+  handoffFromFinalMessage,
+  handoffSchemaFromGoal,
+} = vm.runInNewContext(
+  block +
+    "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
+  sandbox,
+);
 function fixture(options = {}) {
+  const handoffWrites = [];
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   const calls = [];
@@ -85,10 +96,17 @@ function fixture(options = {}) {
         effort: "high",
         speed: "standard",
       },
+      options.handoffSchema
+        ? {
+            schema: options.handoffSchema,
+            write: (text) => handoffWrites.push(text),
+          }
+        : null,
     ),
     child,
     calls,
     events,
+    handoffWrites,
   };
 }
 test("native initialization, active steer and idle start preserve settings and turn identity", async () => {
@@ -569,4 +587,103 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     await new Promise((resolve) => child.once("close", resolve));
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+// R3c: Codex completed its turn and replied without writing the instruction-only
+// handoff file. Port `codex exec --output-schema` + `--output-last-message`
+// (codex-rs exec/src/event_processor.rs:33-42): the first turn carries the
+// handoff schema as turn/start outputSchema and its final message becomes the file.
+// Helpers run in the VM realm; compare their values as plain JSON.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+const HANDOFF_SCHEMA = {
+  type: "object",
+  properties: {
+    sentinel: { type: "string", description: "The file text." },
+    note: { type: "string" },
+  },
+  required: ["sentinel"],
+  additionalProperties: false,
+};
+
+test("handoff schema rides the goal's first turn as a strict outputSchema", async () => {
+  const goal = `Do it.\n\nResult JSON Schema for /home/user/.rose/handoff.json:\n${JSON.stringify(HANDOFF_SCHEMA)}`;
+  assert.deepEqual(plain(handoffSchemaFromGoal(goal)), HANDOFF_SCHEMA);
+  assert.equal(handoffSchemaFromGoal("Do it."), null);
+  const { native, calls } = fixture({ handoffSchema: HANDOFF_SCHEMA });
+  await native.initialize(null, goal);
+  const turns = calls.filter((c) => c.method === "turn/start");
+  assert.equal(turns.length, 1);
+  assert.deepEqual(
+    turns[0].params.outputSchema,
+    plain(strictOutputSchema(HANDOFF_SCHEMA)),
+  );
+  assert.deepEqual(turns[0].params.outputSchema.required, ["sentinel", "note"]);
+  assert.deepEqual(turns[0].params.outputSchema.properties.note.type, [
+    "string",
+    "null",
+  ]);
+  // A later user turn is ordinary conversation, not the handoff.
+  await native.start(
+    [{ type: "text", text: "more", text_elements: [] }],
+    native.settings,
+  );
+  assert.equal(
+    calls.filter((c) => c.method === "turn/start")[1].params.outputSchema,
+    undefined,
+  );
+});
+
+test("the handoff turn's final message is written as the handoff file", async () => {
+  const { native, child, handoffWrites } = fixture({
+    handoffSchema: HANDOFF_SCHEMA,
+  });
+  await native.initialize(null, "goal");
+  const send = (method, params) =>
+    child.stdout.write(JSON.stringify({ method, params }) + "\n");
+  send("item/completed", {
+    threadId: "thread",
+    turnId: "turn-1",
+    item: {
+      type: "agentMessage",
+      id: "a",
+      text: '{"sentinel":"OK","note":null}',
+    },
+  });
+  send("turn/completed", {
+    threadId: "thread",
+    turn: { id: "turn-1", status: "completed" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  // Strict-mode nulls for optional fields are dropped: the file has the declared shape.
+  assert.deepEqual(plain(handoffWrites), ['{\n  "sentinel": "OK"\n}\n']);
+});
+
+test("open-object schemas cannot be strict: no outputSchema, no written handoff", async () => {
+  const open = {
+    type: "object",
+    properties: { data: { type: "object", additionalProperties: true } },
+    required: ["data"],
+    additionalProperties: false,
+  };
+  assert.equal(strictOutputSchema(open), null);
+  const { native, calls, child, handoffWrites } = fixture({
+    handoffSchema: open,
+  });
+  await native.initialize(null, "goal");
+  assert.equal(
+    calls.find((c) => c.method === "turn/start").params.outputSchema,
+    undefined,
+  );
+  child.stdout.write(
+    JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread",
+        turn: { id: "turn-1", status: "completed" },
+      },
+    }) + "\n",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(plain(handoffWrites), []);
+  assert.equal(handoffFromFinalMessage("not json", HANDOFF_SCHEMA), null);
 });
