@@ -1679,6 +1679,12 @@ def terminal_files(files, missing, token):
     return "stopped-stack"
 
 
+def require_cancelled_before_launch(files, phase):
+    """An accepted start qualifies only when no driver created any run context."""
+    if phase != "pre-service" or any(name.startswith("repo/.context/cloudbench/") for name in files):
+        raise ValueError("a cancelled accepted start must not have launched its driver")
+
+
 def fields_bytes(data):
     pairs = [line.split("=", 1) for line in data.decode().splitlines()]
     if any(len(pair) != 2 for pair in pairs) or len(dict(pairs)) != len(pairs):
@@ -1768,8 +1774,8 @@ def verify(registry, output, machine, token, archive_path, config_path, after_co
         raise ValueError("startup original archive manifest differs")
     phase = terminal_files(files, manifest["missing"], token)
     accepted = (Path(output) / "post-config-start.accepted").exists()
-    if accepted and phase != "pre-service":
-        raise ValueError("a cancelled accepted start must not have launched its stack")
+    if accepted:
+        require_cancelled_before_launch(files, phase)
     if phase == "pre-service":
         forensic = runpy.run_path(str(Path(__file__).with_name("cloudbench-forensic-retirement.py")))
         capture_manifest = {**manifest, "source_machine_id": machine, "source_volume_id": original["volume_id"],

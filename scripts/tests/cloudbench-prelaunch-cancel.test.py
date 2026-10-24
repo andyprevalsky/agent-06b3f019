@@ -283,6 +283,17 @@ class CancelledAcceptedStartEligibility(unittest.TestCase):
     def test_term_cancelled_accepted_start_is_eligible(self) -> None:
         self.assertEqual(self.eligible(), 0)
 
+    def test_accepted_start_requires_no_driver_context(self) -> None:
+        import runpy
+        helper = runpy.run_path(str(SCRIPTS / "cloudbench-startup-failure-archive.py"))
+        require = helper["require_cancelled_before_launch"]
+        require({"bench.log": b"", "cloudbench-driver.state": b"exited\n"}, "pre-service")
+        for files, phase in (({"repo/.context/cloudbench/stack.log": b"x"}, "pre-service"),
+                             ({"repo/.context/cloudbench/run.json": b"{}"}, "pre-service"),
+                             ({}, "stopped-stack")):
+            with self.assertRaises(ValueError):
+                require(files, phase)
+
     def test_completed_or_unaccepted_starts_stay_ineligible(self) -> None:
         (self.out / "benchmark-child.finished").write_text("1\n")
         self.assertNotEqual(self.eligible(), 0)

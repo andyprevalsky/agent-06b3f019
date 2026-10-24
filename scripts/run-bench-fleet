@@ -10857,10 +10857,20 @@ PY
                     "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}" --driver-log; then
                 # A guest cancelled before launch by an older status server
                 # cannot seal a bundle; preserve its pre-service originals.
-                if [ -e "$output/post-config-start.accepted" ] \
-                    && fleet_recovery_capture_startup_failure "$registry" "$output" \
+                if [ -e "$output/post-config-start.accepted" ]; then
+                    if fleet_recovery_capture_startup_failure "$registry" "$output" \
                         "${recovery_machine_ids[$recovery_index]}" "${recovery_guest_tokens[$recovery_index]}"; then
-                    continue
+                        continue
+                    fi
+                    # A launched guest is not pre-service. Keep its rejected
+                    # capture as evidence, outside the path whose presence
+                    # marks a verified startup archive to later recovery plans.
+                    if [ -d "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -L "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -e "$output/failed-startup-runtime-archive/verified.json" ]; then
+                        mv "$output/failed-startup-runtime-archive" \
+                            "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
+                    fi
                 fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
