@@ -9,9 +9,9 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/helpers/llm.py — convert_context_to_messages emitted one `role: tool` message per terminal TOOL row without deduping by toolCallId or pairing orphan tool_use, neither of which build_llm_messages omits
 symptoms:
   - "each tool_use must have a single result. Found multiple `tool_result` blocks with id"
-  - "rose.claude_auth.invalid_request"
   - "RoseAllFailed: All 2 waterfall models failed for pool rose-1-ultra"
   - "tool_use ids were found without tool_result blocks"
+  - "tool_result_pairing.repaired original_count=12 repaired_count=12 (completion_summary)"
   - agent finishes its work but call_site=completion_summary produces no summary
 tags:
   - completion-summary
@@ -21,6 +21,7 @@ tags:
   - rose-waterfall
   - blackbox-false-green
 sources:
+  - agent 5cce9d33-72bb-4d85-9dee-70c6b1482507 (descend-full69-20261023 r004-j0055, recurrence 2026-10-23, 59/70 copies)
   - agent 1d7e1fb9-2604-45c6-906e-b6da1f12d4b7 (smoke task browser-biometrics-webdecoy)
   - agent 2a94f607-86e6-486d-aaf0-eca9d669f0af (smoke task browser-smoke, same 400, task still passed)
   - commit 3646fde6f (branch under test — proven NOT the cause)
@@ -294,6 +295,39 @@ overclaims about "identical view" and the -27-line count to be walked back.
 The reviewer's remaining open objection — that the browser double-write may
 itself be the thing to delete — is recorded in the Diagnosis as an unsettled
 follow-up rather than silently resolved.
+
+## Recurrence 2026-10-23 — the orphan guard hid a pairing bug
+
+**Evidence.** In /descend run descend-full69-20261023, 59 of 70 completed roots logged
+`tool_result_pairing.repaired` exactly once, on `call_site=completion_summary`
+(first: r004-j0055, 23:16:19.59Z, `original_count=12 repaired_count=12`). The
+decoded completion_summary dump showed the root's final assistant turn with its
+`attempt_completion` tool_call already removed and the verifier verdict
+(`⚖️ Progress: 100%: …`) as a separate assistant message. The count did not
+change because stripping a tool_call removes no message.
+
+**First-bad boundary.** `convert_context_to_messages` turned every
+`verifierMessage=True` TOOL row into assistant text. `run_agent` posts the
+verifier verdict as the `attempt_completion` call's FINISHED row with
+`toolCallId` = the declared call id, so that conversion left the declared
+tool_use without a result, and `_ensure_tool_result_pairing` stripped it.
+`build_llm_messages` has no such branch and pairs the same row as a tool result.
+The 2026-08-04 fixture (`test_convert_context_to_messages_strips_orphan_tool_use`)
+used a verifier row with no `toolCallId`, which is why the guard looked correct.
+The guard was masking a converter disagreement, not repairing a real missing row.
+
+**Fix.** A verifier row whose `toolCallId` is declared is that call's tool
+result in both converters; verifier rows with no declared call keep the
+assistant-feedback rendering. Stale comments in `run_agent.run_verifier` that
+said the feedback reaches the model as assistant text are corrected. The guard
+stays as a tripwire: it firing is a bug (`claude-code-src/src/utils/messages.ts:5120-5133`
+logs every activation "to help identify the root cause" and throws in strict mode).
+
+**Repro (red→green).** `agents/tests/blackbox/llm.blackbox.py::test_completion_summary_context_pairs_verifier_result_with_attempt_completion`
+(registered in `run_all_tests`). Pre-fix: `guard fired: [call('tool_result_pairing.repaired',
+original_count=3, repaired_count=3)]`. Post-fix: passes; the `llm` domain is green 5/5.
+
+**10k agents.** No change in cost: one conditional per TOOL row in an existing O(messages) pass.
 
 ## Human feedback
 

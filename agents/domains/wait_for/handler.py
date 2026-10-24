@@ -786,7 +786,7 @@ class WaitForManager(ToolManager):
         background agents report status from workflow state; other agents
         from one backend tree read each.
         """
-        any_agent = agents == "any"
+        any_agent = agents == "any" or agents == ["any"]
         addresses: list[str] = []
         if not any_agent:
             if isinstance(agents, str):
@@ -796,11 +796,11 @@ class WaitForManager(ToolManager):
             addresses = list(dict.fromkeys(str(a).strip() for a in agents if isinstance(a, str) and a.strip()))
         if not any_agent and not addresses:
             yield _wait_for_error(
-                'agents must list at least one address (a path, "parent" or an agent id), or be "any".'
+                'agents must list at least one address (a path, "parent" or an agent id), or be ["any"].'
             )
             return
         if len(addresses) > MAX_WAIT_AGENTS:
-            yield _wait_for_error(f'agents can list at most {MAX_WAIT_AGENTS} addresses; use "any" for more.')
+            yield _wait_for_error(f'agents can list at most {MAX_WAIT_AGENTS} addresses; use ["any"] for more.')
             return
         try:
             # Codex floor: below the minimum is clamped (and noted), above the maximum rejected.

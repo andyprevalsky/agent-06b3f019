@@ -1050,6 +1050,62 @@ def test_convert_context_to_messages_strips_orphan_tool_use():
     assert not any(m.get("tool_call_id") == call_id for m in messages)
 
 
+def test_completion_summary_context_pairs_verifier_result_with_attempt_completion():
+    """The verifier's FINISHED row is the attempt_completion call's tool result.
+
+    Captured descend-full69 r004-j0055 (2026-10-23): every completed root's
+    completion_summary logged tool_result_pairing.repaired (12 -> 12 messages).
+    run_agent posts the verifier verdict as the attempt_completion terminal row
+    (toolCallId = the declared call, verifierMessage=True). The summary converter
+    turned it into assistant text, so the declared tool_use had no result and the
+    pairing guard stripped it. build_llm_messages pairs the same row as a tool
+    result; both converters must agree and the guard must not fire.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    call_id = "2539f237-6bf4-4196-b2e9-d366b787051c"
+    context = [
+        {"role": "USER", "text": "Did my coding agent's tool report success?", "timestamp": "2026-10-23T23:15:58.472Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-10-23T23:16:16.917Z",
+            "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Running verifier to check completion...",
+            "timestamp": "2026-10-23T23:16:16.993Z",
+            "metadata": {"toolCallId": call_id, "toolName": "attempt_completion", "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            "role": "TOOL",
+            "text": "The explore agent's FINAL_ANSWER cites tool_status FAILED.",
+            "timestamp": "2026-10-23T23:16:19.200Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+                "title": "\u2696\ufe0f Progress: 100%",
+                "verifierMessage": True,
+            },
+        },
+    ]
+
+    with patch("helpers.llm.logger") as mock_logger:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    repaired = [c for c in mock_logger.warning.call_args_list if c.args and c.args[0] == "tool_result_pairing.repaired"]
+    assert repaired == [], f"persisted order must already be paired, guard fired: {repaired}"
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id], f"attempt_completion tool_use was dropped: {tool_use_ids}"
+    assert [rid for rid, _ in tool_result_ids] == [call_id]
+    result = next(m for m in messages if m.get("tool_call_id") == call_id)
+    assert result["role"] == "tool"
+    assert "tool_status FAILED" in result["content"]
+    assert "Progress: 100%" in result["content"]
+
+
 def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
     """A row that is never sent to the model must not win the terminal dedup.
 
@@ -10091,6 +10147,10 @@ async def run_all_tests():
     r.record(
         "convert_context_to_messages_strips_orphan_tool_use",
         test_convert_context_to_messages_strips_orphan_tool_use,
+    )
+    r.record(
+        "completion_summary_context_pairs_verifier_result_with_attempt_completion",
+        test_completion_summary_context_pairs_verifier_result_with_attempt_completion,
     )
     r.record(
         "convert_context_to_messages_subagent_row_cannot_win_the_dedup",

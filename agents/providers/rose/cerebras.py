@@ -20,7 +20,7 @@ import httpx
 import structlog
 
 from config import load_config
-from providers.rose.cerebras_schema import project_cerebras_tool_schema
+from providers.rose.cerebras_schema import collapse_omittable_nulls, project_cerebras_tool_schema
 from providers.rose.errors import RoseError, RoseRateLimitError
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
@@ -202,6 +202,8 @@ def build_cerebras_body(
     effort: Optional[str],
 ) -> Dict[str, Any]:
     openrouter_tools = _openrouter_tools(tools)
+    for tool in openrouter_tools or []:
+        tool["function"]["parameters"] = collapse_omittable_nulls(tool["function"].get("parameters"))
     projections = [project_cerebras_tool_schema(tool["function"].get("parameters")) for tool in openrouter_tools or []]
     strict_toolset = all(projected is not None for projected, _ in projections)
     for tool, (projected, reason) in zip(openrouter_tools or [], projections, strict=True):

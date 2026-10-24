@@ -3019,8 +3019,7 @@ async def _run_verifier(
 
     # Post IN_PROGRESS
     # Post the in-progress verifier row as the active attempt_completion tool
-    # result. The finished feedback row below is tagged as verifierMessage so
-    # the next LLM turn receives it as ordinary assistant feedback.
+    # result. The finished feedback row below is that call's terminal result.
     if post_message:
         await post_message(
             "",
@@ -3226,10 +3225,9 @@ async def _run_verifier(
             )
         message_text = f"Verifier score: {score:.0%}\n\nReasoning: {message_text}\n\n{guidance}"
 
-    # Post FINISHED. Surface verifier feedback as the completed
-    # attempt_completion result for UI continuity, and mark it with
-    # verifierMessage so the next LLM turn receives the feedback as assistant
-    # conversation instead of as an opaque tool output.
+    # Post FINISHED. The verifier feedback is the attempt_completion call's
+    # tool result: both converters pair it with the declared tool_use.
+    # verifierMessage marks it for UI and tool-count filtering.
     if post_message:
         await post_message(
             message_text,
