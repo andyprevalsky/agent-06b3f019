@@ -14,7 +14,7 @@ import { MarkdownText } from '../MarkdownText';
 import { buildAgentToolData } from '../message-bubble/agentToolData';
 import { ToolMessageHeader } from '../message-bubble/ToolMessageHeader';
 import { AgentTreeListing } from './AgentTreeListing';
-import { buildAgentListing } from './agentTreeListing';
+import { buildAgentListing } from './agentTreeListingModel';
 
 export function ListAgentsChip({
   message,
