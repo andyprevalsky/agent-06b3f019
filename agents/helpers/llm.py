@@ -1736,12 +1736,107 @@ def collapse_duplicate_tool_results(context: List[Dict[str, Any]]) -> List[Dict[
     return [msg for index, msg in enumerate(context) if _terminal_tool_call_id(msg) is None or index in kept]
 
 
+async def resolve_message_attachments(
+    msg: Dict[str, Any],
+    pre_resolved_ids: Optional[set] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Resolve one context row's file attachments into LLM content.
+
+    Returns (multimodal blocks for images/PDFs, text parts for inline text files
+    and metadata fallbacks). Attachments live on the top-level ``file_pointer`` /
+    ``filePointer`` (one file per row) and legacy ``metadata.attachments``.
+    Resolution order: module cache, live download inside an activity, metadata.
+    """
+    metadata = msg.get("metadata", {}) or {}
+    file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+    attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
+    if file_pointer and isinstance(file_pointer, dict):
+        attachments_data = [file_pointer] + list(attachments_data)
+
+    content: List[Dict[str, Any]] = []  # multimodal content blocks (images, PDFs)
+    metadata_texts: List[str] = []  # text-based content (inline text files, metadata fallbacks)
+    for att_data in attachments_data:
+        fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+        if not fp:
+            continue
+
+        # Large files or binary files -> metadata only
+        if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+            metadata_texts.append(build_attachment_metadata_text(fp))
+            continue
+
+        # Resolve file content: cache first, then live download, then metadata fallback
+        file_content = None
+        cached = get_cached_file(fp.id) if (pre_resolved_ids and fp.id in pre_resolved_ids) else None
+        if cached:
+            file_content = cached[0]
+        elif activity.in_activity():
+            # Live download (activity context — e.g., reasoning, param_populator)
+            try:
+                file_content, _ = await get_file_from_pointer(fp)
+            except Exception as e:
+                logger.warning(f"Failed to download attachment {fp.original_filename}: {e}")
+        else:
+            logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
+
+        if file_content is None:
+            metadata_texts.append(build_attachment_metadata_text(fp))
+            continue
+
+        try:
+            base64_data = base64.b64encode(file_content).decode("utf-8")
+
+            if fp.is_image():
+                content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
+                )
+                # Filename must travel with the inline image — spawn_agent
+                # attachments match on exact original_filename only.
+                metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
+            elif fp.is_pdf():
+                content.append(
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": fp.original_filename,
+                            "file_data": f"data:{fp.mime_type};base64,{base64_data}",
+                        },
+                    }
+                )
+            elif fp.is_text():
+                try:
+                    text_content = file_content.decode("utf-8")
+                    metadata_texts.append(build_attachment_text_content(fp, text_content))
+                except UnicodeDecodeError:
+                    metadata_texts.append(build_attachment_metadata_text(fp))
+        except Exception as e:
+            logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
+            metadata_texts.append(build_attachment_metadata_text(fp))
+    return content, metadata_texts
+
+
+async def resolve_context_attachments(
+    context: List[Dict[str, Any]],
+    pre_resolved_ids: Optional[set] = None,
+) -> Dict[str, Tuple[List[Dict[str, Any]], List[str]]]:
+    """Resolve every row's attachments, keyed for ``convert_context_to_messages``."""
+    resolved: Dict[str, Tuple[List[Dict[str, Any]], List[str]]] = {}
+    for msg in context:
+        if not isinstance(msg, dict):
+            continue
+        blocks, texts = await resolve_message_attachments(msg, pre_resolved_ids)
+        if blocks or texts:
+            resolved[_verifier_file_evidence_key(msg)] = (blocks, texts)
+    return resolved
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
     # Default False: including assistant messages is prone to reward hacking
     # (agent can bias verifier with its own reasoning)
     include_assistant: bool = False,
+    attachments: Optional[Dict[str, Tuple[List[Dict[str, Any]], List[str]]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Convert workflow context to OpenAI/OpenRouter message format.
@@ -1762,6 +1857,8 @@ def convert_context_to_messages(
         context: List of message dicts with role/text/metadata
         include_system: Whether to include SYSTEM messages (e.g. blueprints)
         include_assistant: Whether to include ASSISTANT messages (default False to prevent reward hacking)
+        attachments: ``resolve_context_attachments`` output; USER/ASSISTANT rows carry
+            their attachment blocks and text exactly as build_llm_messages sends them
 
     Returns:
         List of OpenAI-formatted messages in chronological order
@@ -1873,10 +1970,20 @@ def convert_context_to_messages(
 
     # Excluded / sub-agent-internal / cloud-lifecycle rows were already removed by
     # drop_rows_never_sent_to_model above — do not re-filter them here.
+    def _with_attachments(msg: Dict[str, Any], text: Any) -> Any:
+        parts = (attachments or {}).get(_verifier_file_evidence_key(msg))
+        if not parts:
+            return text
+        blocks, texts = parts
+        full_text = text + "\n\n" + "\n\n".join(texts) if texts else text
+        return [{"type": "text", "text": full_text}, *blocks] if blocks else full_text
+
     for msg in sorted_context:
         role = msg.get("role", "ASSISTANT")
         content = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
+        if role in ("USER", "ASSISTANT"):
+            content = _with_attachments(msg, content)
 
         if role == "SYSTEM":
             if include_system:
@@ -1887,6 +1994,10 @@ def convert_context_to_messages(
             if agent_text is not None:
                 # Agent-to-agent content is assistant-role (Codex); the pairing
                 # pass below keeps it after the tool results of its turn.
+                # Attachment text travels with it, as in build_llm_messages.
+                _blocks, texts = (attachments or {}).get(_verifier_file_evidence_key(msg), ([], []))
+                if texts:
+                    agent_text = agent_text + "\n\n" + "\n\n".join(texts)
                 messages.append(inter_agent_message(agent_text))
                 continue
             messages.append({"role": "user", "content": content})
@@ -2129,77 +2240,10 @@ async def build_llm_messages(
         text = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}
 
-        # Check for file attachments in multiple places:
-        # 1. file_pointer / filePointer - top-level field from DB (OAI-style: each file is a separate message)
-        # 2. metadata.attachments - legacy format
         file_pointer = msg.get("file_pointer") or msg.get("filePointer")
-        attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
-
-        # If this message has a file_pointer, treat it as an attachment
-        if file_pointer and isinstance(file_pointer, dict):
-            attachments_data = [file_pointer] + list(attachments_data)
 
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
-        content = []  # multimodal content blocks (images, PDFs)
-        metadata_texts = []  # text-based content (inline text files, metadata fallbacks)
-
-        for att_data in attachments_data:
-            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
-            if not fp:
-                continue
-
-            # Large files or binary files -> metadata only
-            if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
-                metadata_texts.append(build_attachment_metadata_text(fp))
-                continue
-
-            # Resolve file content: cache first, then live download, then metadata fallback
-            file_content = None
-            cached = get_cached_file(fp.id) if (pre_resolved_ids and fp.id in pre_resolved_ids) else None
-            if cached:
-                file_content = cached[0]
-            elif activity.in_activity():
-                # Live download (activity context — e.g., reasoning, param_populator)
-                try:
-                    file_content, _ = await get_file_from_pointer(fp)
-                except Exception as e:
-                    logger.warning(f"Failed to download attachment {fp.original_filename}: {e}")
-            else:
-                logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
-
-            if file_content is None:
-                metadata_texts.append(build_attachment_metadata_text(fp))
-                continue
-
-            try:
-                base64_data = base64.b64encode(file_content).decode("utf-8")
-
-                if fp.is_image():
-                    content.append(
-                        {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
-                    )
-                    # Filename must travel with the inline image — spawn_agent
-                    # attachments match on exact original_filename only.
-                    metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
-                elif fp.is_pdf():
-                    content.append(
-                        {
-                            "type": "file",
-                            "file": {
-                                "filename": fp.original_filename,
-                                "file_data": f"data:{fp.mime_type};base64,{base64_data}",
-                            },
-                        }
-                    )
-                elif fp.is_text():
-                    try:
-                        text_content = file_content.decode("utf-8")
-                        metadata_texts.append(build_attachment_text_content(fp, text_content))
-                    except UnicodeDecodeError:
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-            except Exception as e:
-                logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
-                metadata_texts.append(build_attachment_metadata_text(fp))
+        content, metadata_texts = await resolve_message_attachments(msg, pre_resolved_ids)
 
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)

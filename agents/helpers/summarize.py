@@ -1034,7 +1034,7 @@ async def generate_completion_summary(
         activity.heartbeat("Generating completion summary")
 
         # Import here to avoid circular dependency
-        from helpers.llm import call_llm, convert_context_to_messages
+        from helpers.llm import call_llm, convert_context_to_messages, resolve_context_attachments
         from providers.demo_cache.context import (
             DemoCacheContext,
             write_through_enabled_for_user,
@@ -1074,7 +1074,14 @@ Just write plain text describing what was done."""
         # Convert context to messages (exclude system messages like blueprints)
         # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
+        messages.extend(
+            convert_context_to_messages(
+                context,
+                include_system=False,
+                include_assistant=True,
+                attachments=await resolve_context_attachments(context),
+            )
+        )
         messages.append(
             {
                 "role": "user",

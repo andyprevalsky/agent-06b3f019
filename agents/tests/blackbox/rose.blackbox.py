@@ -2917,6 +2917,47 @@ async def test_parse_anthropic_sse_empty_stream_raises_stall():
     assert raised
 
 
+async def test_parse_anthropic_sse_thinking_only_max_tokens_reports_length():
+    """Thinking that exhausts max_tokens is a reported truncation, not a stall (descend R4).
+
+    completion_summary (max_tokens 1024, xhigh effort) on the j0056 context with its CSV
+    attachment ended stop_reason=max_tokens before any text; the stall raise skipped the
+    caller's 1024->4096 length retry and dropped the call off Claude.
+    """
+    lines = _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9}}})
+    lines += _ev(
+        "content_block_start",
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+    )
+    # Captured event sequence: omitted thinking text, then only its signature.
+    lines += _ev(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": ""}},
+    )
+    lines += _ev(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}},
+    )
+    lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    lines += _ev(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 1024}},
+    )
+    chunks = await _drain(
+        parse_anthropic_sse(
+            _FakeStream(lines),
+            actual_model="claude-test",
+            pool_name="claude-token",
+            request_id="r-thinking-length",
+        )
+    )
+    assert not [c for c in chunks if c.kind in ("content", "tool_call")]
+    usage = next(c for c in chunks if c.kind == "usage").data
+    assert usage["finish_reason"] == "length"
+    assert usage["completion_tokens"] == 1024
+    assert chunks[-1].kind == "done"
+
+
 async def test_parse_anthropic_sse_refusal_raises_refusal():
     lines = _ev(
         "message_start",
@@ -10754,6 +10795,10 @@ async def run_all_tests():
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
     await r.record_async("anth_sse_tool_use", test_parse_anthropic_sse_tool_use_block)
     await r.record_async("anth_sse_empty_stalls", test_parse_anthropic_sse_empty_stream_raises_stall)
+    await r.record_async(
+        "anth_sse_thinking_only_max_tokens_length",
+        test_parse_anthropic_sse_thinking_only_max_tokens_reports_length,
+    )
     await r.record_async("anth_sse_refusal_raises", test_parse_anthropic_sse_refusal_raises_refusal)
     await r.record_async("anth_sse_thinking_emitted", test_parse_anthropic_sse_thinking_delta_counts_as_emitted)
     await r.record_async("anth_sse_skip_bad_json", test_parse_anthropic_sse_skips_event_lines_and_bad_json)

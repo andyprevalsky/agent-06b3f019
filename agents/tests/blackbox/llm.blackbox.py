@@ -935,6 +935,86 @@ def _anthropic_tool_block_ids(messages):
     return tool_use_ids, tool_result_ids
 
 
+async def test_completion_summary_carries_attachments_to_claude():
+    """completion_summary must send attachment rows' content, not empty text (descend R4).
+
+    agent-display-revenue-chart's attached CSV reached completion_summary as two
+    empty user rows; Claude 400'd ("text content blocks must be non-empty").
+    Andy 2026-10-24: "File attachments should work and ok filter empty".
+    """
+    import base64
+
+    import helpers.llm as llm_mod
+    from helpers import summarize
+    from providers.rose import get_pool
+    from providers.rose.claude_auth import build_anthropic_body
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    csv = b"order_id,status,amount_usd\nA1,completed,10.00\n"
+    files = {"img-1": png, "csv-1": csv}
+
+    def pointer(file_id, name, mime, size):
+        return {
+            "id": file_id,
+            "storage_path": f"user/{name}",
+            "original_filename": name,
+            "mime_type": mime,
+            "size_bytes": size,
+            "created_at": "2026-10-23T23:15:00Z",
+        }
+
+    context = [
+        {"id": "m1", "role": "USER", "text": "Chart revenue from the attached files.",
+         "timestamp": "2026-10-23T23:15:00Z", "metadata": {}},
+        {"id": "m2", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:01Z", "metadata": {},
+         "file_pointer": pointer("img-1", "logo.png", "image/png", len(png))},
+        {"id": "m3", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:02Z", "metadata": {},
+         "file_pointer": pointer("csv-1", "orders.csv", "text/csv", len(csv))},
+        {"id": "m4", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:03Z", "metadata": {}},
+        {"id": "m5", "role": "ASSISTANT", "text": "Charted completed-order revenue.",
+         "timestamp": "2026-10-23T23:16:00Z", "metadata": {}},
+    ]
+    captured = []
+
+    async def fake_llm(messages, **kwargs):
+        captured.append(messages)
+        return {"content": "Charted revenue.", "usage": {}}
+
+    async def fake_download(fp, cache=None):
+        return files[fp.id], {}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.object(llm_mod.activity, "in_activity", return_value=True),
+        patch.object(llm_mod, "call_llm", fake_llm),
+        patch.object(llm_mod, "get_file_from_pointer", fake_download),
+    ):
+        await summarize.generate_completion_summary(context=context, goal="Chart revenue", model="m")
+
+    assert len(captured) == 1
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=captured[0],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=1024,
+        skip_cache_write=True,
+    )
+    blocks = []
+    for message in body["messages"]:
+        content = message["content"]
+        blocks.extend(content if isinstance(content, list) else [{"type": "text", "text": content}])
+    images = [block for block in blocks if block.get("type") == "image"]
+    png_source = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png).decode()}
+    assert images == [{"type": "image", "source": png_source}], blocks
+    text = "\n".join(block["text"] for block in blocks if block.get("type") == "text")
+    assert "A1,completed,10.00" in text and "orders.csv" in text and "logo.png" in text, text
+    assert all(block["text"].strip() for block in blocks if block.get("type") == "text"), blocks
+
+
 def test_convert_context_to_messages_one_tool_result_per_tool_use():
     """Two terminal TOOL rows sharing a toolCallId must yield ONE tool_result.
 
@@ -10087,6 +10167,10 @@ async def run_all_tests():
     r.record(
         "convert_context_to_messages_one_tool_result_per_tool_use",
         test_convert_context_to_messages_one_tool_result_per_tool_use,
+    )
+    await r.record_async(
+        "completion_summary_carries_attachments_to_claude",
+        test_completion_summary_carries_attachments_to_claude,
     )
     r.record(
         "convert_context_to_messages_strips_orphan_tool_use",

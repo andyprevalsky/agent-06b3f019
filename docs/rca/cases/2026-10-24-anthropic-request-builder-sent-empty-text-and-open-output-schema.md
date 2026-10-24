@@ -23,7 +23,7 @@ sources:
   - fleet run descend-full69-20261023 cluster R4 (r001-j0014 r002-j0028 r003-j0042 r004-j0056 r005-j0070; verifier_browser r004-j0045 r005-j0061)
   - agent 81c45d8f-c055-4e07-ab82-137398f314a9 (completion_summary dump llm/9996070e0664)
   - agent 1a29f3ea-b03c-4e5d-b50f-529844eec56a (verifier_browser dump llm/053f97dbadd0)
-repro: agents/tests/blackbox/rose.blackbox.py::test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows, ::test_build_anthropic_body_closes_non_strict_output_format_objects, ::test_claude_auth_400_logs_provider_message
+repro: agents/tests/blackbox/rose.blackbox.py::test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows, ::test_build_anthropic_body_closes_non_strict_output_format_objects, ::test_claude_auth_400_logs_provider_message, ::test_parse_anthropic_sse_thinking_only_max_tokens_reports_length; agents/tests/blackbox/llm.blackbox.py::test_completion_summary_carries_attachments_to_claude
 status: fixed
 ---
 
@@ -59,6 +59,18 @@ production `claude_auth_complete` with a leased Claude token reproduced both
    explicit dict or `true` to `false`; it never adds the key when it is
    missing.
 
+3. Why the attachment rows were empty: `convert_context_to_messages`, used only
+   by completion_summary, never resolved `file_pointer` /
+   `metadata.attachments`. `build_llm_messages` (the main loop) resolves
+   them inline into image/PDF blocks plus inline text-file content. So the
+   summary never saw the user's attached CSV.
+4. With the CSV restored, the summary call (max_tokens 1024, xhigh effort)
+   spent the whole budget on omitted thinking and ended with
+   `stop_reason=max_tokens` and no text. `parse_anthropic_sse` raised
+   `RoseStallError` instead of reporting `finish_reason=length`, which
+   skipped completion_summary's designed 1024→4096 retry and dropped the call
+   off Claude. Live replay: 1024 gave a stall; 4096 answered.
+
 Deepest owned cause: the Anthropic adapter is the single place that must
 satisfy Anthropic's request invariants, and it trusted provider-neutral inputs
 to already satisfy them. It is a relative of
@@ -79,13 +91,24 @@ The fix is in the adapter, so it covers every caller:
   This converges on claude-code-src/src/utils/sessionTitle.ts:98.
 - `rose.claude_auth.invalid_request` now logs `provider_message` (Anthropic's
   validation message, capped at 200 chars).
+- Attachments (2026-10-24 rework): the per-row resolver is now one shared
+  `resolve_message_attachments()`, used by `build_llm_messages`. A new
+  `resolve_context_attachments()` feeds `convert_context_to_messages`
+  (`attachments=`), so completion_summary sends the same image/PDF blocks and
+  inline text-file content as the main loop. The empty-text filter stays as
+  the guard for genuinely empty rows.
+- `parse_anthropic_sse` reports a provider `max_tokens` stop with no visible
+  text as `finish_reason=length` instead of a stall. A genuinely empty stream
+  still stalls. Callers already escalate on `length`.
 
 At 10k agents: pure per-request transforms, O(message blocks + schema
 nodes). No shared state, no extra calls.
 
 ## Human feedback
 
-None recorded.
+Andy, 2026-10-24: "File attachments should work and ok filter empty". He
+approved the empty-text filter and required the attachment rows to carry their
+content instead of being dropped.
 
 ## Reusable lesson
 
