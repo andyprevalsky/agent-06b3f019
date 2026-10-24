@@ -703,7 +703,7 @@ async def test_generate_completion_summary_happy():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": m.get("text", "")} for m in context]
 
     context = [
@@ -741,7 +741,7 @@ async def test_generate_completion_summary_forwards_compute_auth():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -787,7 +787,7 @@ async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
             "usage": {"total_tokens": 10, "prompt_tokens": 0, "completion_tokens": 10},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": "done"}]
 
     async def fail_outer_cache(*args, **kwargs):
@@ -826,7 +826,7 @@ async def test_generate_completion_summary_on_error():
     async def boom(*a, **kw):
         raise RuntimeError("LLM boom")
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -850,7 +850,7 @@ async def test_generate_completion_summary_no_structured_response():
     async def fake_llm(messages, **kwargs):
         return {"content": "Summary.", "usage": {"total_tokens": 10}}
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -891,7 +891,7 @@ async def test_generate_completion_summary_retries_length_truncation():
             "usage": {"total_tokens": 80, "prompt_tokens": 40, "completion_tokens": 40},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):

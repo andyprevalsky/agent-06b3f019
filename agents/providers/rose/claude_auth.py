@@ -74,6 +74,16 @@ def _anthropic_400_message(error_body: str) -> str:
     return f"Anthropic 400 ({code})" if code else "Anthropic 400"
 
 
+def _anthropic_error_message(error_body: str) -> Optional[str]:
+    """Anthropic's validation message (names the rejected field), capped at 200 chars."""
+    try:
+        error = json.loads(error_body).get("error")
+    except (ValueError, AttributeError):
+        return None
+    message = error.get("message") if isinstance(error, dict) else None
+    return message[:200] if isinstance(message, str) else None
+
+
 _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
 _DEFAULT_TTFT_TIMEOUT_S = 60.0
@@ -812,6 +822,7 @@ async def _attempt_with_token(
                         agent_id=agent_id,
                         call_site=call_site,
                         body_len=len(error_body),
+                        provider_message=_anthropic_error_message(error_body),
                     )
                     raise RoseInvalidRequest(
                         _anthropic_400_message(error_body),

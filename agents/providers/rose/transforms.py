@@ -150,6 +150,12 @@ def transform_content_block_for_anthropic(block: Any) -> Any:
     return block
 
 
+def _is_blank_text_block(block: Any) -> bool:
+    if isinstance(block, str):
+        return not block.strip()
+    return isinstance(block, dict) and block.get("type") == "text" and not str(block.get("text") or "").strip()
+
+
 def transform_messages_for_anthropic(
     messages: List[Dict[str, Any]],
 ) -> Tuple[Optional[str], Optional[str], List[Dict[str, Any]]]:
@@ -213,10 +219,10 @@ def transform_messages_for_anthropic(
 
             if isinstance(content, list):
                 content_blocks.extend(
-                    transform_content_block_for_anthropic(b) for b in content
+                    transform_content_block_for_anthropic(b) for b in content if not _is_blank_text_block(b)
                 )
             elif isinstance(content, str):
-                if len(content) > 0:
+                if content.strip():
                     content_blocks.append({"type": "text", "text": content})
             elif content is not None:
                 content_blocks.append({"type": "text", "text": json.dumps(content)})
@@ -309,12 +315,21 @@ def transform_messages_for_anthropic(
             })
             continue
 
+        # Anthropic rejects empty text ("messages: text content blocks must be
+        # non-empty"). Context rows such as attachment placeholders and
+        # tool-call-only assistant turns can render as "", so blank text is
+        # dropped and a message left with no content is omitted, as Claude Code
+        # does (claude-code-src/src/utils/messages.ts:4869).
         content = msg.get("content")
         if isinstance(content, list):
-            transformed = [transform_content_block_for_anthropic(b) for b in content]
+            transformed = [transform_content_block_for_anthropic(b) for b in content if not _is_blank_text_block(b)]
+            if not transformed:
+                continue
             new_msg = dict(msg)
             new_msg["content"] = transformed
             anthropic_messages.append(new_msg)
+        elif content is None or (isinstance(content, str) and not content.strip()):
+            continue
         else:
             anthropic_messages.append(msg)
 
@@ -473,6 +488,32 @@ def transform_schema_for_anthropic(schema: Any) -> Any:
             ]
 
     return transformed
+
+
+def _close_output_format_objects(schema: Any) -> Any:
+    """Set ``additionalProperties: false`` on every object of a structured-output schema.
+
+    Anthropic's ``output_config.format`` rejects an object without it ("For
+    'object' type, 'additionalProperties' must be explicitly set to false").
+    Non-strict OpenAI schemas omit it; Claude Code always sets it
+    (claude-code-src/src/utils/sessionTitle.ts:98). Tool input schemas are
+    unaffected.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    closed = dict(schema)
+    for keyword in ("properties", "$defs"):
+        if isinstance(schema.get(keyword), dict):
+            closed[keyword] = {key: _close_output_format_objects(value) for key, value in schema[keyword].items()}
+    if "items" in schema:
+        closed["items"] = _close_output_format_objects(schema["items"])
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        if isinstance(schema.get(keyword), list):
+            closed[keyword] = [_close_output_format_objects(item) for item in schema[keyword]]
+    schema_type = schema.get("type")
+    if schema_type == "object" or (isinstance(schema_type, list) and "object" in schema_type):
+        closed["additionalProperties"] = False
+    return closed
 
 
 def _extract_tools_from_response_format(
@@ -654,7 +695,7 @@ def apply_anthropic_tool_config(
                     return True
 
 
-            transformed_schema = transform_schema_for_anthropic(schema)
+            transformed_schema = _close_output_format_objects(transform_schema_for_anthropic(schema))
             if use_native_tools:
                 body["output_config"] = {
                     "format": {"type": "json_schema", "schema": transformed_schema},

@@ -345,7 +345,10 @@ async def parse_anthropic_sse(
     if finish_reason == "refusal":
         raise RoseRefusalError(f"Anthropic stream ended with refusal (request_id={request_id})")
 
-    if not emitted_content_or_tool:
+    # Thinking can spend the whole budget before any visible text. The provider
+    # reported that truncation (stop_reason=max_tokens), so surface it as
+    # finish_reason=length for the caller's max_tokens escalation, not as a stall.
+    if not emitted_content_or_tool and finish_reason != "length":
         raise RoseStallError(f"Anthropic stream closed without content or tool_call (request_id={request_id})")
 
     yield StreamChunk(
