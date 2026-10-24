@@ -182,6 +182,67 @@ def test_runner_enforces_repeatable_fields_and_missing_metrics_fail_closed():
     assert "enforce_cache_ratchets(run.task_results)" in inspect.getsource(main_async)
 
 
+# claude-code-agent 18748b72 (R3c, 2026-10-24): a valid code-agent handoff ended the
+# root after one execute_loop call, so no cache sequence repeated. Nothing could be
+# reused, yet the ratchet reported "0.0% < 35.0%".
+SINGLE_PASS_CLAUDE_CODE_AGENT_USAGE = [
+    {
+        "type": "llm",
+        "_benchmark_agent_id": "root",
+        "call_site": "execute_loop",
+        "cache_sequence_id": "agent:root:call:execute_loop",
+        "model": "claude-opus-5-5-claude",
+        "cache_read_input_tokens": 13768,
+        "cache_creation_input_tokens": 5755,
+    },
+    {
+        "type": "llm",
+        "_benchmark_agent_id": "root",
+        "call_site": "completion_summary",
+        "cache_sequence_id": "agent:root:call:completion_summary",
+        "model": "claude-opus-5-5-claude",
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 1836,
+    },
+]
+
+
+def test_no_repeated_sequence_is_not_missing_telemetry():
+    """0/0 fails only when repeated sequences ran uncached or no call carried sequence telemetry."""
+    from benchmarks.llm_usage import aggregate_repeatable_cache_usage
+    from benchmarks.run_benchmark import enforce_cache_ratchets
+
+    metrics = aggregate_repeatable_cache_usage(SINGLE_PASS_CLAUDE_CODE_AGENT_USAGE)
+    assert metrics["cache_read_input_tokens"] == 0 and metrics["cache_creation_input_tokens"] == 0
+    assert metrics["sequenced_call_count"] == 2, metrics
+    assert metrics["repeatable_call_count"] == 0, metrics
+
+    single_pass = _task_result(
+        "claude-code-agent",
+        repeatable_cache_sequenced_call_count=2,
+        repeatable_cache_call_count=0,
+    )
+    enforce_cache_ratchets([single_pass])  # nothing repeated, nothing to reuse
+
+    repeated_uncached = _task_result(
+        "claude-code-agent",
+        repeatable_cache_sequenced_call_count=2,
+        repeatable_cache_call_count=2,
+    )
+    unsequenced = _task_result(
+        "claude-code-agent",
+        llm_call_count=2,
+        repeatable_cache_sequenced_call_count=0,
+        repeatable_cache_call_count=0,
+    )
+    for result in (repeated_uncached, unsequenced):
+        try:
+            enforce_cache_ratchets([result])
+            raise AssertionError("0/0 cache telemetry failed open")
+        except SystemExit as exc:
+            assert exc.code == 1
+
+
 def test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled():
     """Deploy smoke may warn on Claude Code cache telemetry without weakening other ratchets."""
     from benchmarks.run_benchmark import CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, enforce_cache_ratchets
@@ -355,6 +416,10 @@ async def run_all_tests():
     result.record(
         "runner_repeatable_fields_fail_closed",
         test_runner_enforces_repeatable_fields_and_missing_metrics_fail_closed,
+    )
+    result.record(
+        "no_repeated_sequence_not_missing_telemetry",
+        test_no_repeated_sequence_is_not_missing_telemetry,
     )
     result.record(
         "claude_code_cache_ratchet_deploy_warn_only",
