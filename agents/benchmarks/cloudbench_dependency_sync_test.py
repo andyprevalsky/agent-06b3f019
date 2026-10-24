@@ -4430,6 +4430,7 @@ sleep() {{ :; }}
 {pool_count}
 {reap}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -4763,6 +4764,7 @@ controller_github_token_b64() {{ return 1; }}
 reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -5036,6 +5038,7 @@ controller_github_token_b64() {{ printf token; }}
 reap_machine() {{ printf '%s\n' "$1" > {shlex.quote(str(reaped))}; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -6388,6 +6391,7 @@ FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 FLEET_WORKER_VM_SIZE=shared-cpu-2x
 FLEET_WORKER_VM_MEMORY=4096
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision_worker}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -6455,7 +6459,10 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert 'FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"' in worker
-    assert 'CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"' in worker
+    assert (
+        'CLOUDBENCH_APP_USER="$APP_USER" CLOUDBENCH_SOURCE_SCOPE=worker-runtime \\\n'
+        '        bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"'
+    ) in worker
     assert 'git -C "$REPO_DIR" fetch origin "$REF"' not in worker
     assert worker.index("unset CLOUDBENCH_GITHUB_TOKEN_B64") < worker.index("bash ./scripts/run_local_worker.sh")
     assert "rm -f /tmp/rbw.env" in worker
@@ -6557,6 +6564,7 @@ fly_with_timeout() {{
 }}
 sleep() {{ :; }}
 {token_helper}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -36126,9 +36134,11 @@ def test_worker_reuse_gap_refuses_before_reservation_or_provider_work(tmp_path: 
     if terminal:(tmp_path/'benchmark-child.finished').write_text('143\n')
     calls=tmp_path/'forbidden'
     result=subprocess.run(['bash','-c',f'''set -uo pipefail
+ROOT_DIR={shlex.quote(str(ROOT))}
 reserve_worker_machine_slot() {{ printf reserve >> {shlex.quote(str(calls))}; return 0; }}
 machine_volume_size_gb() {{ printf lookup >> {shlex.quote(str(calls))}; return 99; }}
 clone_machine_target() {{ printf create >> {shlex.quote(str(calls))}; return 99; }}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {functions}
 provision_worker task workspace aaaaaaaaaaaaaa 127.0.0.1 0 "$1" token
 ''','actual-worker-entry',str(tmp_path)],capture_output=True,text=True,timeout=5)
