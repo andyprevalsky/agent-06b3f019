@@ -23,6 +23,22 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 
+# Loop-critical control-plane read (poll_new_messages), modelled on Claude
+# Code's session-transcript ingress client: 20 s per request
+# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
+# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
+# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
+# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
+# the agent FAILED with the real error. Permanent 4xx responses are raised
+# non-retryable by the activity itself.
+CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
+CONTROL_PLANE_POLL_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=10,
+)
+
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
@@ -2425,8 +2441,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             startup_execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
@@ -2652,8 +2668,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             execute_context = filter_internal_subagent_messages(execute_context)
 
@@ -2910,8 +2926,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             context = filter_internal_subagent_messages(context)
 
@@ -3004,8 +3020,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             return {
                 "score": 0.0,
@@ -3069,8 +3085,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             persisted_messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
         except Exception as e:
             if any(
@@ -3969,8 +3985,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         messages = await workflow.execute_activity(
             poll_new_messages,
             args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+            retry_policy=CONTROL_PLANE_POLL_RETRY,
         )
 
         terminal_tool_call_ids = set()
@@ -4109,8 +4125,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, last_checked],  # Use run_agent's timestamp, not self.last_message_check
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             note_context_snapshot(self, snapshot_mark)
 

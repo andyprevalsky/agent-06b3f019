@@ -5454,13 +5454,13 @@ async def test_explore_timeout_during_threshold_drain_preserves_fe_posts():
 
 
 async def test_explore_hung_fe_post_cannot_pin_activity():
-    # Either bound alone must release the activity: the per-post timeout, and
-    # the overall drain deadline as a backstop for long per-chip chains.
-    for post_timeout_s, drain_timeout_s in ((0.5, 120.0), (120.0, 0.5)):
-        await _assert_hung_fe_post_cannot_pin_activity(post_timeout_s, drain_timeout_s)
+    # Each bound alone must release the activity: the per-attempt timeout, the
+    # per-post budget backstop, and the drain deadline for long per-chip chains.
+    for attempt_s, budget_s, drain_s in ((0.5, 120.0, 120.0), (120.0, 0.5, 120.0), (120.0, 120.0, 0.5)):
+        await _assert_hung_fe_post_cannot_pin_activity(attempt_s, budget_s, drain_s)
 
 
-async def _assert_hung_fe_post_cannot_pin_activity(post_timeout_s: float, drain_timeout_s: float):
+async def _assert_hung_fe_post_cannot_pin_activity(attempt_s: float, budget_s: float, drain_s: float):
     """One FE post that never returns must not pin the explore activity (RCA P9).
 
     The final drain runs after the heartbeat stops, so neither cancellation nor
@@ -5499,8 +5499,9 @@ async def _assert_hung_fe_post_cannot_pin_activity(post_timeout_s: float, drain_
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch("domains.spawn_agent.service.save_explore_message", new=save_or_hang),
         patch.object(service, "explore_limits_for_depth", return_value=(5, timedelta(seconds=30))),
-        patch.object(service, "EXPLORE_FE_POST_TIMEOUT_S", post_timeout_s),
-        patch.object(service, "EXPLORE_FE_DRAIN_TIMEOUT_S", drain_timeout_s),
+        patch.object(service, "EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S", attempt_s),
+        patch.object(service, "EXPLORE_FE_POST_BUDGET_S", budget_s),
+        patch.object(service, "EXPLORE_FE_DRAIN_TIMEOUT_S", drain_s),
     ):
         try:
             await asyncio.wait_for(
@@ -5512,10 +5513,67 @@ async def _assert_hung_fe_post_cannot_pin_activity(post_timeout_s: float, drain_
         except asyncio.TimeoutError:
             raise AssertionError(
                 f"a hung FE post pinned spawn_explore_agent_activity past 5s "
-                f"(post_timeout={post_timeout_s}s, drain_timeout={drain_timeout_s}s)"
+                f"(attempt={attempt_s}s, budget={budget_s}s, drain={drain_s}s)"
             ) from None
 
     assert sorted(delivered) == ["chip-ok-1", "chip-ok-2"]
+
+
+async def test_explore_tool_post_retries_past_hung_attempt():
+    """A tool-manager FE post whose first attempt hangs is retried, not lost.
+
+    Golden-ref uploader semantics (HybridTransport.ts): a stuck attempt is cut
+    at the per-attempt bound and retried with backoff; the post is delivered
+    once the backend recovers, and the activity is not pinned.
+    """
+    from datetime import timedelta
+
+    from domains.spawn_agent import service
+    from helpers.messages import post_agent_message
+
+    attempts: list[str] = []
+    leaked_lock = asyncio.Lock()
+    await leaked_lock.acquire()
+
+    async def post_or_hang_once(agent_id, text, role="ASSISTANT", metadata=None, file_pointer=None):
+        attempts.append(metadata["toolCallId"])
+        if len(attempts) == 1:
+            async with leaked_lock:
+                pass
+        return {"id": "m1"}
+
+    post_or_hang_once.__name__ = post_agent_message.__name__
+
+    class PostingSearch:
+        async def execute_tool(self, *, execute_activity, **_kwargs):
+            await execute_activity(
+                post_or_hang_once,
+                args=["agent-x", "Evidence", "TOOL", {"toolCallId": "chip-1", "toolName": "web_search"}],
+            )
+            return {"result": "hits"}
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "q"}, "chip-1")
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=PostingSearch()),
+        patch.object(service, "explore_limits_for_depth", return_value=(5, timedelta(seconds=30))),
+        patch.object(service, "EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S", 0.5),
+    ):
+        try:
+            await asyncio.wait_for(
+                service.spawn_explore_agent_activity(
+                    agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+                ),
+                timeout=5,
+            )
+        except asyncio.TimeoutError:
+            raise AssertionError("a hung FE post attempt pinned spawn_explore_agent_activity past 5s") from None
+
+    assert attempts == ["chip-1", "chip-1"]
 
 
 def test_three_sibling_explores_get_stable_isolated_cache_sequences():
@@ -6386,6 +6444,7 @@ async def run_all_tests():
     )
     await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
     await r.record_async("explore_hung_fe_post_cannot_pin_activity", test_explore_hung_fe_post_cannot_pin_activity)
+    await r.record_async("explore_tool_post_retries_past_hung_attempt", test_explore_tool_post_retries_past_hung_attempt)
     await r.record_async(
         "explore_timeout_preserves_inflight_fe_posts",
         test_explore_timeout_during_threshold_drain_preserves_fe_posts,

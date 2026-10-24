@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 import structlog.contextvars
 from temporalio import activity
+from temporalio.common import RetryPolicy
 
 from domains.grep.service import fit_grep_result_to_budget
 from domains.spawn_agent.config import (
@@ -51,12 +52,26 @@ logger = structlog.get_logger()
 # Return gathered tool evidence just before the depth's activity timeout.
 # Leave room to drain pending FE posts and persist the final explore chip.
 LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
-# One background FE progress post may not outlive these bounds (RCA P9). The
-# whole post is bounded, including httpx pool/connection-lock acquisition, which
-# httpx's own timeouts do not cover; a leaked lock otherwise pinned the explore
-# activity after its heartbeat stopped, and with it the worker shutdown drain.
-EXPLORE_FE_POST_TIMEOUT_S = 60.0
-EXPLORE_FE_DRAIN_TIMEOUT_S = 120.0
+# Background FE progress posts are best-effort UI writes, treated like Claude
+# Code's event uploader (claude-code-src/src/cli/transports/HybridTransport.ts):
+# each attempt is bounded at 15 s (:13-15), retried with a 500 ms delay
+# doubling to an 8 s cap (:86-87), and dropped once its attempts run out
+# (SerialBatchEventUploader.ts:172-177) rather than retried forever. Three
+# attempts is the existing in-activity default (loop/activity_helper.py:76).
+# The attempt bound wraps the whole post, including httpx pool/connection-lock
+# acquisition, which httpx's own timeouts do not cover (RCA P9: a leaked lock
+# pinned the explore activity and the worker shutdown drain). A drain waits at
+# most one post's full schedule, then drops what is left; delivery is not
+# guaranteed under a degraded backend (HybridTransport.ts:16-17).
+EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S = 15.0
+EXPLORE_FE_POST_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=3,
+)
+EXPLORE_FE_POST_BUDGET_S = 3 * EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S + 0.5 + 1.0
+EXPLORE_FE_DRAIN_TIMEOUT_S = EXPLORE_FE_POST_BUDGET_S
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -679,7 +694,7 @@ async def spawn_explore_agent_activity(
             if previous is not None:
                 # Order only; a failed predecessor must not cancel its successor.
                 await asyncio.gather(previous, return_exceptions=True)
-            return await asyncio.wait_for(coro_factory(), timeout=EXPLORE_FE_POST_TIMEOUT_S)
+            return await asyncio.wait_for(coro_factory(), timeout=EXPLORE_FE_POST_BUDGET_S)
 
         task = asyncio.create_task(_ordered())
         if chain_key:
@@ -706,7 +721,15 @@ async def spawn_explore_agent_activity(
                 chain_key = str(chain_id) if chain_id else None
             _dispatch_fe_post(
                 chain_key,
-                lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
+                lambda: call_temporal_activity_from_activity(
+                    activity_fn,
+                    args=args,
+                    **{
+                        **kwargs,
+                        "start_to_close_timeout": timedelta(seconds=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S),
+                        "retry_policy": EXPLORE_FE_POST_RETRY,
+                    },
+                ),
             )
             return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
@@ -996,15 +1019,18 @@ async def spawn_explore_agent_activity(
             async def _post_and_stash_inbox() -> None:
                 # Fire-and-forget like every FE post; its piggybacked inbox read
                 # is delivered at the next step.
-                pending = await save_explore_message(
-                    agent_id=agent_id,
-                    title=title,
-                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                    status=message_status,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                    inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                pending = await asyncio.wait_for(
+                    save_explore_message(
+                        agent_id=agent_id,
+                        title=title,
+                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                        status=message_status,
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                    ),
+                    timeout=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S,
                 )
                 if agent_inbox is not None:
                     agent_inbox.stash(pending)
