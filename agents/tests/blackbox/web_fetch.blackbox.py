@@ -1068,6 +1068,39 @@ async def test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_e
     assert set_cache.await_count == 1
 
 
+async def test_web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape():
+    """descend-full69 MA: a DEMO row can record a fetch that failed.
+
+    test-mass-agent-run-0's Justin Welsh GP fetches a page whose scrape fails
+    (Firecrawl 500 / Parallel connect_error). Failures had no cache shape, so
+    every replay scraped live. A ``provider_error`` row replays the same
+    non-retryable WebFetchProvidersFailed tool error with no scrape.
+    """
+    from temporalio.exceptions import ApplicationError
+
+    from domains.web_fetch.handler import CACHED_PROVIDER_ERROR_FIELD, web_fetch_activity
+
+    recorded = "web_fetch failed with Firecrawl and Parallel Extract. Firecrawl error: 500"
+    cached = {CACHED_PROVIDER_ERROR_FIELD: recorded}
+    with patch("providers.demo_cache.client.cache_get", new=AsyncMock(return_value=cached)):
+        with patch("domains.web_fetch.handler.scrape_url", new=AsyncMock()) as scrape:
+            try:
+                await web_fetch_activity(
+                    url="https://example.com/a",
+                    fast_mode_cache_enabled=True,
+                    fast_mode_goal="goal",
+                )
+            except ApplicationError as error:
+                raised = error
+            else:
+                raise AssertionError("a recorded provider error must replay as a tool error")
+
+    scrape.assert_not_awaited()
+    assert raised.message == recorded
+    assert raised.type == "WebFetchProvidersFailed"
+    assert raised.non_retryable is True
+
+
 async def test_handler_skips_download_when_haiku_returns_no_files():
     """When the Haiku filter returns an empty files_to_download list, the download activity is not invoked."""
     from domains.web_fetch.handler import WebFetchManager
@@ -1252,6 +1285,10 @@ async def run_all_tests() -> bool:
     await r.record_async(
         "activity_demo_cache_ignores_unavailable",
         test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled,
+    )
+    await r.record_async(
+        "web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape",
+        test_web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape,
     )
     await r.record_async(
         "handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files

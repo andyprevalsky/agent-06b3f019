@@ -29,6 +29,7 @@ Failures are logged loudly and ignored — the inbox never kills an agent.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
@@ -57,10 +58,15 @@ async def fetch_agent_inbox(owner_agent_id: str, inbox_address: str, since: Opti
     params = {"task_id": inbox_address}
     if since:
         params["since"] = since
-    response = await get_http_client().get(
-        f"{config.backend.api_url.rstrip('/')}/api/agents/{owner_agent_id}/agent-inbox",
-        params=params,
-        headers={"X-API-Key": backend_api_key},
+    # httpx's timeout is per phase; waiting inside the shared pool is not
+    # covered (a completion-time read hung 558s there), so bound the whole GET.
+    response = await asyncio.wait_for(
+        get_http_client().get(
+            f"{config.backend.api_url.rstrip('/')}/api/agents/{owner_agent_id}/agent-inbox",
+            params=params,
+            headers={"X-API-Key": backend_api_key},
+            timeout=AGENT_INBOX_TIMEOUT_SECONDS,
+        ),
         timeout=AGENT_INBOX_TIMEOUT_SECONDS,
     )
     response.raise_for_status()

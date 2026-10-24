@@ -401,6 +401,11 @@ async def web_fetch(
     )
 
 
+# A DEMO web_fetch row holding this field records a scrape that failed; its
+# value is the WebFetchProvidersFailed message the agent saw.
+CACHED_PROVIDER_ERROR_FIELD = "provider_error"
+
+
 # ── Temporal activities ──
 
 
@@ -432,6 +437,12 @@ async def web_fetch_activity(
     cache_key = demo_cache_normalize.web_fetch_key(fast_mode_goal, url) if write_cache else None
     if cache_key is not None and read_cache:
         stored = await demo_cache_client.cache_get(cache_key)
+        if isinstance(stored, dict) and CACHED_PROVIDER_ERROR_FIELD in stored:
+            # A recorded failed fetch replays as the same tool error, not a live retry.
+            logger.info("demo_cache.web_fetch_error_hit", key=cache_key, url=url)
+            raise ApplicationError(
+                str(stored[CACHED_PROVIDER_ERROR_FIELD]), type="WebFetchProvidersFailed", non_retryable=True
+            )
         if stored is not None:
             if wmh_fallback_on_unavailable_enabled() and wmh_result_unavailable(stored):
                 logger.info("demo_cache.web_fetch_unavailable_ignored", key=cache_key, url=url)
