@@ -171,6 +171,9 @@ def aggregate_repeatable_cache_usage(items: Iterable[dict[str, Any]]) -> dict[st
         "cache_read_input_tokens": cache_read,
         "cache_creation_input_tokens": cache_write,
         "cache_hit_pct": round(cache_read / total * 100, 1) if total else 0.0,
+        # Lets the ratchet tell "no sequence repeated" from missing telemetry.
+        "sequenced_call_count": len(llm_items),
+        "repeatable_call_count": len(repeatable_items),
     }
 
 

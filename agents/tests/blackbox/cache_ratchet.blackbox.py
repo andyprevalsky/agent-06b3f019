@@ -66,6 +66,8 @@ def test_cache_ratchet_measures_repeatable_call_groups():
         "cache_read_input_tokens": 7936,
         "cache_creation_input_tokens": 8787,
         "cache_hit_pct": 47.5,
+        "sequenced_call_count": 4,
+        "repeatable_call_count": 2,
     }
 
 
@@ -100,6 +102,8 @@ def test_different_cache_namespaces_do_not_form_a_repeatable_group():
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "cache_hit_pct": 0.0,
+        "sequenced_call_count": 2,
+        "repeatable_call_count": 0,
     }
 
 
@@ -126,6 +130,8 @@ def test_independent_web_summaries_are_not_repeatable():
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "cache_hit_pct": 0.0,
+        "sequenced_call_count": 9,
+        "repeatable_call_count": 0,
     }
 
 
@@ -314,6 +320,8 @@ async def test_collector_identity_is_authoritative_and_separates_agents():
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "cache_hit_pct": 0.0,
+        "sequenced_call_count": 2,
+        "repeatable_call_count": 0,
     }
 
 

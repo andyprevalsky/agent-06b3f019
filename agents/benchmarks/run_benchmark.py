@@ -15501,6 +15501,8 @@ async def _run_single_task_as_run_user(
             repeatable_cache_read_input_tokens=int(repeatable_cache_usage["cache_read_input_tokens"]),
             repeatable_cache_creation_input_tokens=int(repeatable_cache_usage["cache_creation_input_tokens"]),
             repeatable_cache_hit_pct=float(repeatable_cache_usage["cache_hit_pct"]),
+            repeatable_cache_sequenced_call_count=int(repeatable_cache_usage["sequenced_call_count"]),
+            repeatable_cache_call_count=int(repeatable_cache_usage["repeatable_call_count"]),
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
             tokens_in=tokens_in,
@@ -16545,7 +16547,12 @@ def cache_ratchet_failures(
             continue
         total = result.repeatable_cache_read_input_tokens + result.repeatable_cache_creation_input_tokens
         if total <= 0:
-            if floor > 0:
+            # Nothing to reuse is not a regression: sequence telemetry arrived and
+            # no sequence repeated (e.g. a root finished in one planner call).
+            # Repeated sequences without cache usage, or no sequenced call at all
+            # (missing telemetry), still fail closed.
+            no_repeat = result.repeatable_cache_sequenced_call_count > 0 and result.repeatable_cache_call_count == 0
+            if floor > 0 and not no_repeat:
                 failures.append((result.name, result.agent_id, 0.0, floor))
             continue
         hit_pct = round(result.repeatable_cache_read_input_tokens / total * 100, 1)
