@@ -1050,6 +1050,38 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'cloudbench_require_agentcard_org_oauth back-end/.env' \
   "run-bench-cloud must refuse to stage a BACKEND_ENV_B64 without AgentCard org OAuth"
 
+# Guests restore their own DB, so a guest-local lease store gives each copy its
+# own semaphore on the same real token (proof 2: ~80 live leases against the
+# shared capacity of 16, 429 burst). The decoded guest back-end/.env must point
+# compute-token requests at the single production authority.
+authority_env="$TMP_ROOT/authority-backend.env"
+printf 'BACKEND_API_KEY=guest-internal-key-0123456789\nOTHER=1' > "$authority_env"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null ||
+  fail "a guest backend env with BACKEND_API_KEY must gain the compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" = https://navi-j9a9.onrender.com ] ||
+  fail "guests must default to the production compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_API_KEY)" = guest-internal-key-0123456789 ] ||
+  fail "the authority must be authenticated with the guest's internal BACKEND_API_KEY"
+[ "$(cloudbench_env_value "$authority_env" OTHER)" = 1 ] ||
+  fail "appending the authority must not corrupt an unterminated last line"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ "$(grep -c '^COMPUTE_TOKEN_AUTHORITY_URL=' "$authority_env")" = 1 ] ||
+  fail "an env file that already names an authority must be left unchanged"
+printf 'BACKEND_API_KEY=k\n' > "$authority_env"
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ -z "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" ] ||
+  fail "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off must keep guest-local leases"
+if CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=http://example.test cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a non-https compute-token authority must fail closed"
+fi
+printf 'OTHER=1\n' > "$authority_env"
+if cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a guest backend env without BACKEND_API_KEY must fail closed"
+fi
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env"' \
+  "cloudbench-run must point the guest backend at the shared compute-token authority"
+
 retry_attempts=0
 fail_twice_then_succeed() {
   retry_attempts=$((retry_attempts + 1))
