@@ -21,8 +21,9 @@ tags:
   - user-profile
 sources:
   - agent b27a099b-6510-411d-9cea-63f3222dc28f (sharded run original600-1792795636260090257, job r001-j0008, source 7eb275b1b)
-repro: .context/descend/descend-full69-20261023/rca-Q3/ab.sh (local exact-call replay A/B; not yet a checked-in test — fix is approval-gated)
-status: open
+  - agent e0c401c1-3d19-4933-a43d-61448f9b9779 (local outcome run 2026-10-24, source 2a7a0479e)
+repro: scripts/tests/canonical-seed-whatsapp-content.test.sh
+status: mitigated
 ---
 
 ## Problem
@@ -73,25 +74,52 @@ user's profile lacks facts that tasks need.
 
 ## Solution
 
-Proposed, approval-gated (benchmark fixture/environment): restore the bench
-user's prod profile name in the canonical base. Republish the reviewed PG15
-fixture with `User.name` set, per CLAUDE.md's seed procedure. Extend
-`scripts/validate-canonical-seed-dump.sh` in the same change so that a
-nameless bench user fails publication and restore. Adding that invariant alone
-would fail every guest restore of the current dump, so the two must ship
-together. Alternative narrower option: a task `db_fixtures` delta setting the
-name for auth_test_site tasks (30 tasks use that service). No harness/prompt
-change is proposed: asking the user for a genuinely missing fact is correct
-behaviour (see the golden reference: claude-code-src/cli.js:1700, the
-AskUserQuestion tool). 10k-agent behaviour: fixture data only, neutral.
+Shipped (2026-10-24, directed by Andy: "the fixture should be providing my
+name" / "the base fixture should have this data"). Provenance: not a producer
+scrub. `seed-local-helpers.ts` REMOTE_USER_SELECT copies name and address. The
+reviewed canonical fixture is the ~Aug-5 prod snapshot, migrated forward. Prod's
+User row for 1f85ff25 was then `3d946550` (created 2026-07-28, blank). Prod
+replaced it on 2026-09-01 with `50db24c7` (name, email, address, recipient,
+systemName). The frozen fixture kept the blank row, and the validator never
+checked the profile.
 
-Open observability gap: a root awaiting human auth assistance without a bus
-keeps DB status ACTIVE. The fleet stall classifier therefore reports "tree
-stalled" instead of "awaiting user authentication assistance".
+1. Patched only that User row in isolated restores of both current objects. The
+   pg15 object used a `pgvector/pgvector:pg15` container and the pg16 object the
+   local PG16 server. Both went through `scripts/restore-seed-dump.sh` and
+   `scripts/save-seed-dump.sh`. The patched fields are name, email,
+   deliveryRecipientName, addressLine1/2, city, state, postalCode, country and
+   systemName, copied from prod read-only. Every agent-read profile field now
+   equals prod. 91/92 tables have identical row count and content md5, the other
+   204 User rows are identical, and the bench row's other columns are identical.
+2. Republished under the same keys, following the 2026-10-19 precedent, with no
+   controllers running. Read-back hashes match.
+   `ab877…-pg15-victoria-prod-sync-v1-whatsapp-v2`: 6172ffc1… → e17d9b76…
+   `ab877…-pg16-victoria-prod-sync-v1-whatsapp-v2`: 387cc044… → bfafdc09…
+   The originals and receipt are retained under
+   `.context/descend/descend-full69-20261023/rca-Q3/seed/`.
+3. `scripts/validate-canonical-seed-dump.sh` now requires a non-blank name,
+   email and addressLine1 on the bench User row. It exits 1 on both old objects
+   and 0 on both new round-trips. `scripts/tests/canonical-seed-whatsapp-content.test.sh`
+   (deploy structural gates) gained blank-profile, whitespace-name, missing-email
+   and missing-address cases: red before the validator change, 11/11 green after.
+
+Step-8 replay against the new fixture context: 5/5 `input_text(index=53)`.
+Before: 0/11. The local exact run then typed the name. A separate follow-on
+failure is recorded as open below.
+
+10k-agent behaviour: fixture data only, neutral.
+
+Open follow-on (2026-10-24 local run, agent e0c401c1): with the profile email
+present, the browser first signed up with the user's own inbox, although
+Auth Options says that inbox's codes are unavailable. The code was withheld. It
+then succeeded with the minted email (member page showed the name and member
+number), but switched back to the abandoned verify tab and called
+request_user_assistance_for_authentication. The exact local run still FAILED
+(tree stalled, 512s), now for this new reason. Separate model-decision RCA needed.
 
 ## Human feedback
 
-None recorded.
+Andy (2026-10-24): "the fixture should be providing my name, what's the issue" and "the base fixture should have this data, ensure it does, u can update the fixture as needed". He directed fixing the fixture at its source and bringing every agent-read profile field up to prod, instead of the earlier proposal (a task-level db_fixtures delta or awaiting approval).
 
 ## Reusable lesson
 
