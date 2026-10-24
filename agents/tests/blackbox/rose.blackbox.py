@@ -4514,8 +4514,10 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         tools=[],
         tool_choice="auto",
     )
-    assert dump["reasoning_effort"] == "xhigh"
-    assert dump["effective_params"]["reasoning_effort"] == "xhigh"
+    # The browser pool's OpenRouter waterfall sends its pinned effort, not the default.
+    assert browser_pool.waterfall_reasoning_effort == "low"
+    assert dump["reasoning_effort"] == "low"
+    assert dump["effective_params"]["reasoning_effort"] == "low"
     assert dump["requested_params"]["reasoning_effort"] is None
 
     # Inventory: every agents-side body builder stamps non-empty effort.
@@ -6831,6 +6833,72 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert attempted == ["foundry", "openrouter"]
     assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
+    """The browser-use dump must record what the Foundry route actually sent (descend R13).
+
+    rose-1-browser-use pins waterfall_reasoning_effort=low for its Foundry fallback,
+    and the Responses body carries no temperature; the dump said xhigh / 0.3.
+    """
+    from helpers import observability
+
+    sent = []
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call",'
+            '"id":"fc_1","call_id":"call_1","name":"wait","arguments":""}}',
+            'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1",'
+            '"delta":"{\\"time_ms\\":1}"}',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call",'
+            '"id":"fc_1","call_id":"call_1","name":"wait","arguments":"{\\"time_ms\\":1}"}}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request):
+        if request.url.host.endswith("openai.azure.com"):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    dumps = []
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "AZURE_FOUNDRY_API_KEY": "test-key",
+                "CEREBRAS_API_KEY": "",
+                "GPT_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
+            },
+        ),
+        patch.object(observability, "dump_llm_context", side_effect=lambda **kw: dumps.append(kw)),
+    ):
+        await RoseClient(openrouter_key="ork-x").complete_browser_use(
+            task="Wait briefly",
+            browser_state={"url": "https://example.com", "title": "Example", "dom_tree": "[1] button"},
+            action_history=[],
+            available_actions=["wait"],
+            include_screenshot=False,
+            call_site="test-browser-dump-wire-effort",
+            deadline_s=30,
+            skip_cache_write=True,
+        )
+    teardown_mock()
+    assert len(sent) == 1, sent
+    wire = sent[0]
+    assert len(dumps) == 1, dumps
+    config = dumps[0]["config"]
+    assert config["pool_name"] == "foundry"
+    assert config["effective_params"]["reasoning_effort"] == wire["reasoning"]["effort"] == "low"
+    assert config["reasoning_effort"] == wire["reasoning"]["effort"]
+    assert config["effective_params"]["temperature"] == wire.get("temperature")
+    assert config["temperature"] == wire.get("temperature")
 
 
 async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
@@ -10526,6 +10594,10 @@ async def run_all_tests():
         "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
     )
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
+    await r.record_async(
+        "browser_use_dump_records_foundry_wire_effort",
+        test_browser_use_dump_records_foundry_wire_effort_and_temperature,
+    )
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
     await r.record_async(

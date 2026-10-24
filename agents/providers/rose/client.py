@@ -44,7 +44,7 @@ from providers.rose.browser_use import (
     normalize_browser_use_tool_call,
     normalize_browser_use_tool_calls,
 )
-from providers.rose.cerebras import cerebras_complete
+from providers.rose.cerebras import CEREBRAS_DIRECT_POOL, cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
@@ -62,8 +62,8 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.foundry import foundry_candidates, foundry_complete, foundry_configured
-from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
+from providers.rose.foundry import _NO_REASONING_MODELS, foundry_candidates, foundry_complete, foundry_configured
+from providers.rose.gpt_auth import _normalize_reasoning_effort, gpt_auth_complete, openai_api_key_complete
 from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
@@ -508,9 +508,24 @@ def _browser_use_dump_config(
     """Capture behavior-shaping values for a browser-use LLM call dump."""
     actual_model = response.actual_model or ""
     effective_model = _dump_display_model(actual_model)
-    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh).
-    # Record the effective wire value so dumps match what was actually sent.
-    effective_effort = DEFAULT_REASONING_EFFORT
+    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh) on
+    # direct auth. Pool-pinned routes override it; record the value the serving
+    # route actually sent so the dump matches the wire.
+    effective_effort: Optional[str] = DEFAULT_REASONING_EFFORT
+    wire_temperature: Optional[float] = temperature
+    if mode not in ("gpt", "claude"):
+        if response.pool_name == CEREBRAS_DIRECT_POOL:
+            effective_effort = pool_spec.cerebras_reasoning_effort
+        elif response.pool_name == "foundry":
+            # The Responses body carries no temperature; no-reasoning models drop effort.
+            wire_temperature = None
+            effective_effort = (
+                None
+                if effective_model in _NO_REASONING_MODELS
+                else _normalize_reasoning_effort(pool_spec.waterfall_reasoning_effort)
+            )
+        else:
+            effective_effort = pool_spec.waterfall_reasoning_effort or DEFAULT_REASONING_EFFORT
     if mode == "gpt":
         effective_params = {
             "model": pool_spec.gpt_auth_model,
@@ -533,7 +548,7 @@ def _browser_use_dump_config(
     else:
         effective_params = {
             "model": effective_model,
-            "temperature": temperature,
+            "temperature": wire_temperature,
             "max_tokens": max_tokens,
             "reasoning_effort": effective_effort,
             "stream": True,
