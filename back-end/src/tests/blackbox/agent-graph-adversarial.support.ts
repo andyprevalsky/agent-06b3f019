@@ -10,13 +10,11 @@ import { AGENT_GRAPH_CLI_SCRIPT } from '../../providers/agentGraph/cli';
 
 import { mintAgentGraphToken } from '../../providers/agentGraph/token';
 
-import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { agentToolsCliScript } from '../../providers/agentTools/workspace';
-import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 
 /**
- * Adversarial agent-graph scenarios (L-A2A-ADV, Rose-builds-Rose): question
- * routing and A2A delivery under deadlock, retry, flood and isolation pressure.
+ * Adversarial agent-graph scenarios (L-A2A-ADV, Rose-builds-Rose): no question
+ * route, and A2A delivery under deadlock, retry, flood and isolation pressure.
  * Runs inside agent-graph.blackbox.ts with its own fixture (no LLM calls; the
  * shipped `rose` / `rose-agents` CLIs run as real node processes).
  *
@@ -301,7 +299,6 @@ export function cliEnv(ctx: AdversarialContext, home: string, extra: Record<stri
     HOME: home,
     ROSE_AGENTS_URL: `${ctx.baseUrl}/api/agent-graph`,
     ROSE_TOOLS_WAIT_SECONDS: '2',
-    // These cases exercise pinned questions in a Rose Desktop session.
     ROSE_TOOLS_ROSE_DESKTOP: '1',
     ...extra,
   };
@@ -327,89 +324,6 @@ export async function runCli(
       stdout: failed.stdout ?? '',
       stderr: failed.stderr ?? '',
     };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 1. A code agent asks its spawning sub-agent, which is blocked on its spawn
-// ---------------------------------------------------------------------------
-
-export async function testQuestionToBlockedSpawnerIsHandedOver(
-  ctx: AdversarialContext
-): Promise<void> {
-  const cli = cliHome();
-  try {
-    const env = cliEnv(ctx, cli.home, {
-      ROSE_TOOLS_URL: `${ctx.baseUrl}/api/agent-tools/${ids.C}`,
-      ROSE_TOOLS_TOKEN: mintAgentToolsToken(userX, ids.C, {
-        provider: 'claude',
-        taskId: ids.SC,
-      }).token,
-      ROSE_AGENTS_TOKEN: graphToken(ids.SC, ids.C),
-    });
-    const question = `Postgres or SQLite ${RUN}?`;
-    const args = [
-      'display',
-      '--pinned',
-      '--caption',
-      question,
-      '--option',
-      'Postgres | matches prod',
-      '--option',
-      'SQLite',
-    ];
-    const before = {
-      R: await a2aRowCount(ids.R),
-      G: await a2aRowCount(ids.G),
-      attention: await prisma.agentAttentionRequest.count({ where: { agentId: ids.C } }),
-    };
-    const started = Date.now();
-    const first = await runCli(cli.rose, args, env);
-    assert(first.code === 0, `rose display exits 0: ${first.stderr} ${first.stdout}`);
-    assert(Date.now() - started < 20_000, 'the CLI never blocks on the blocked spawner');
-    assert(first.stdout.includes(`Asked agent ${ids.C}`), `asked the spawner: ${first.stdout}`);
-
-    const rows = await a2aRowsFrom(ids.C, ids.SC);
-    assert(rows.length === 1, `one question on the spawner, got ${rows.length}`);
-    const a2a = (rows[0].metadata as { a2a: { kind: string; message_id: string } }).a2a;
-    assert(a2a.kind === 'question', 'delivered as a question');
-    assert(
-      (await a2aRowCount(ids.R)) === before.R && (await a2aRowCount(ids.G)) === before.G,
-      'nothing leaks to other levels of the tree'
-    );
-    assert(
-      (await prisma.agentAttentionRequest.count({ where: { agentId: ids.C } })) ===
-        before.attention,
-      'an agent-routed question stores no user pin'
-    );
-    const marked = await awaitingParent(ids.SC);
-    assert(
-      marked?.message_id === a2a.message_id && marked.question === question,
-      `the code session is marked for the blocked spawn: ${JSON.stringify(marked)}`
-    );
-    // The spawn blocked on SC sees the question on its next keepalive.
-    const extended: string[] = [];
-    const keepalive = await keepAliveCodeTask(ids.SC, async (sandboxId) => {
-      extended.push(sandboxId);
-    });
-    assert(keepalive.alive, 'the attached spawn keeps the session');
-    assert(
-      keepalive.awaiting_parent?.message_id === a2a.message_id &&
-        keepalive.awaiting_parent.question === question,
-      `keepalive hands the question to the spawn: ${JSON.stringify(keepalive)}`
-    );
-    assert(extended.length === 1, 'one sandbox keepalive per call');
-
-    // Re-running the same question (an interrupted CLI) never asks twice.
-    const again = await runCli(cli.rose, args, env);
-    assert(again.code === 0, `re-run exits 0: ${again.stderr}`);
-    assert((await a2aRowsFrom(ids.C, ids.SC)).length === 1, 'still one question after a re-run');
-    assert(
-      (await awaitingParent(ids.SC))?.message_id === a2a.message_id,
-      'the mark keeps the same message id'
-    );
-  } finally {
-    cli.cleanup();
   }
 }
 

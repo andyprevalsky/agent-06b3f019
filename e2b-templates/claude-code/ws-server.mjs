@@ -1550,6 +1550,13 @@ async function runClaudeCli(startupReport = null) {
     "bypassPermissions",
     "--allowedTools",
     "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,TodoWrite",
+    // Code agents cannot ask the user questions. These are the CLI tools whose
+    // requiresUserInteraction() asks the user (claude-code-src
+    // AskUserQuestionTool.tsx:155, ExitPlanModeV2Tool.ts:185; EnterPlanMode leads
+    // to ExitPlanMode). --disallowedTools removes them from the model's tool list
+    // (tools.ts filterToolsByDenyRules); --allowedTools only pre-approves.
+    "--disallowedTools",
+    "AskUserQuestion,EnterPlanMode,ExitPlanMode",
   ];
   if (CLAUDE_CODE_FAST_MODE) {
     args.push("--settings", JSON.stringify({ fastMode: true }));
@@ -1557,9 +1564,8 @@ async function runClaudeCli(startupReport = null) {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
-  // Rose agent tools (display / send_message_to_user / request_user_approval)
-  // as an MCP server. The backend writes ~/.rose/mcp.json at session create;
-  // MCP calls have no Bash 2-minute limit, so blocking approvals can wait.
+  // Rose agent tools (display / send_message_to_user / change_environment_size)
+  // as an MCP server. The backend writes ~/.rose/mcp.json at session create.
   const roseMcpConfig = join(home, ".rose", "mcp.json");
   if (existsSync(roseMcpConfig)) {
     args.push("--mcp-config", roseMcpConfig);

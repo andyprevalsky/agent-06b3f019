@@ -948,6 +948,11 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     "--ignore-user-config",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
+    // Code agents cannot ask the user questions: keep request_user_input out of
+    // Default mode (codex-rs/tools/src/tool_config.rs:6; feature key
+    // codex-rs/features/src/lib.rs:1761). runCodexAppServer copies every -c.
+    "-c",
+    "features.default_mode_request_user_input=false",
     "--json",
     "--cd",
     workDir,
@@ -963,8 +968,8 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
   ];
   // Rose agent tools as an MCP server (the backend writes ~/.rose/bin/rose at
   // session create). --ignore-user-config skips config.toml, so register it
-  // with -c. Approvals and pinned questions block until answered; the tool
-  // call deadline is set past any real wait (C11: no code-agent timeouts).
+  // with -c. The tool call deadline is set past any real upload (C11: no
+  // code-agent timeouts).
   const roseCli = join(home, ".rose", "bin", "rose");
   if (existsSync(roseCli)) {
     args.splice(

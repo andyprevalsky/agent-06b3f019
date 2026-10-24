@@ -47,6 +47,7 @@ from domains.agent_messaging.service import (
 )
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
+from domains.display.repo import display_media_activity
 from domains.gate.repo import (
     create_gate_request_activity,
     has_message_corpus_activity,
@@ -97,7 +98,6 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agents_batch_activity,
 )
 from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
-from domains.display.repo import display_media_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -135,11 +135,11 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
-from helpers.jev_progress import predict_jev_progress
-from helpers.agent_graph import ask_code_agent_question_activity, send_agent_graph_message_activity
+from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
+from helpers.jev_progress import predict_jev_progress
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -163,8 +163,8 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.summarize import summarize_and_filter_links
-from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
@@ -1597,7 +1597,6 @@ async def main():
         resolve_user_tools_activity,
         run_user_tool_activity,
         send_agent_graph_message_activity,
-        ask_code_agent_question_activity,
         save_tool_usage,
         read_message_history_activity,
         generate_message_activity,

@@ -9,8 +9,10 @@
  *       ~/.claude/skills and ~/.agents/skills
  *   prepareCodeSessionWorkspace(..., roseDesktop = true)
  *     → rose-ui + publish/bundle env (no pre-materialized UI folder: `rose-ui pull`),
- *       ROSE_TOOLS_ROSE_DESKTOP=1, tools.json rose_desktop → pinned questions and
- *       inline views offered; every skill, talk-to-user with its Rose Desktop text
+ *       ROSE_TOOLS_ROSE_DESKTOP=1, tools.json rose_desktop → inline views offered;
+ *       every skill, talk-to-user with its Rose Desktop text
+ *   neither session can ask a question: no approval, pinned question or wait in
+ *   the CLI, the MCP tools or the talk-to-user skill
  *   the prompt's table of contents (sandbox and Mac) = exactly the installed skills
  *
  * Registered by agent-tools-requests.blackbox.ts.
@@ -89,7 +91,14 @@ async function installedCli(workspace: UserUiWorkspace, home: string, agentId: s
   return { help, listed, props };
 }
 
-const STOCK_SKILLS = ['agent-graph', 'change-environment-size', 'code-session', 'talk-to-user'];
+const STOCK_SKILLS = [
+  'agent-graph',
+  'branch-join',
+  'change-environment-size',
+  'code-session',
+  'deploy',
+  'talk-to-user',
+];
 const ROSE_DESKTOP_SKILLS = ['apps-preview', 'rose-ui'];
 
 /** The skill names a workspace installs under ~/.rose/skills (from its SKILL.md files). */
@@ -146,10 +155,14 @@ async function assertSkills(
   const talk = skillMd('talk-to-user');
   assert(!talk.includes('<!-- rose-desktop'), 'markers never ship');
   assert(
-    roseDesktop === (talk.includes('--pinned') && talk.includes('--inline-view')),
-    `talk-to-user pinned/inline-view text only for Rose Desktop (roseDesktop=${roseDesktop})`
+    roseDesktop === talk.includes('--inline-view'),
+    `talk-to-user inline-view text only for Rose Desktop (roseDesktop=${roseDesktop})`
   );
-  assert(/rose wait <request-id>/.test(talk), 'talk-to-user carries the long-wait rule');
+  assert(
+    !/--pinned|rose approve|rose wait|request_user_approval/.test(talk),
+    'talk-to-user offers no way to ask the user a question'
+  );
+  assert(talk.includes('You cannot ask the user questions'), 'talk-to-user states the rule');
 
   for (const prompt of [
     buildCodeAgentSystemPrompt({ githubRepoUrl: 'https://github.com/acme/app', roseDesktop }),
@@ -220,12 +233,12 @@ async function assertStockSession(): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'rose-tools-gate-stock-'));
   try {
     const { help, listed, props } = await installedCli(stock, home, otherA);
-    assert(!/--pinned|--inline-view/.test(help), `stock CLI help: ${help}`);
+    assert(!/--pinned|--inline-view|approve|wait/.test(help), `stock CLI help: ${help}`);
     assert(help.includes('rose env size'), 'stock CLI advertises environment resizing');
     assert(props.change_environment_size.includes('cpu'), 'stock MCP can resize CPU');
     assert(props.change_environment_size.includes('memory_gb'), 'stock MCP can resize memory');
     assert(
-      JSON.stringify(props.display) === JSON.stringify(['paths', 'urls', 'caption']),
+      JSON.stringify(props.display) === JSON.stringify(['paths', 'urls', 'html', 'caption']),
       `stock MCP display: ${JSON.stringify(props.display)}`
     );
     assert(
@@ -233,6 +246,7 @@ async function assertStockSession(): Promise<void> {
       `stock MCP message: ${JSON.stringify(props.send_message_to_user)}`
     );
     assert(!/pinned|inline_view/.test(listed), 'stock MCP list mentions no new-UI tool');
+    assert(!listed.includes('request_user_approval'), 'stock MCP has no approval tool');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -258,9 +272,13 @@ async function assertRoseDesktopSession(): Promise<void> {
 
   const home = mkdtempSync(join(tmpdir(), 'rose-tools-gate-flagged-'));
   try {
-    const { help, props } = await installedCli(flagged, home, agentB);
-    assert(/--pinned/.test(help) && /--inline-view/.test(help), `flagged CLI help: ${help}`);
-    assert(props.display.includes('placement'), 'flagged MCP display has placement');
+    const { help, listed, props } = await installedCli(flagged, home, agentB);
+    assert(/--inline-view/.test(help), `flagged CLI help: ${help}`);
+    assert(!/--pinned|approve|wait/.test(help), `flagged CLI cannot ask: ${help}`);
+    for (const argument of ['placement', 'options', 'allow_other']) {
+      assert(!props.display.includes(argument), `flagged MCP display has no ${argument}`);
+    }
+    assert(!listed.includes('request_user_approval'), 'flagged MCP has no approval tool');
     assert(props.send_message_to_user.includes('inline_view'), 'flagged MCP inline_view');
   } finally {
     rmSync(home, { recursive: true, force: true });

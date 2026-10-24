@@ -17,12 +17,11 @@ import { readEnvironment, requestEnvironmentSize } from './environmentService';
 import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import { sendMessageToUser } from './messageService';
 import { answerQuestion } from './questionService';
-import { createApproval, waitForRequest } from './requestService';
+import { waitForRequest } from './requestService';
 import { AgentToolsError, resolveContext } from './service';
 import {
   agentToolsAgentIdSchema,
   answerQuestionSchema,
-  approvalRequestSchema,
   displayRequestSchema,
   environmentSizeSchema,
   messageRequestSchema,
@@ -147,26 +146,6 @@ router.post(
     if (!parsed.success) return invalidBody(res, parsed.error.issues);
     try {
       res.status(201).json(await sendMessageToUser(await resolveContext(caller), parsed.data));
-    } catch (err) {
-      sendError(res, err);
-    }
-  })
-);
-
-router.post(
-  '/:agentId/approvals',
-  agentToolsAuth,
-  asyncHandler<AgentToolsRequest>(async (req, res) => {
-    const caller = callerFor(req, res);
-    if (caller === null) return;
-    const parsed = approvalRequestSchema.safeParse(req.body);
-    if (!parsed.success) return invalidBody(res, parsed.error.issues);
-    try {
-      const result = await createApproval(await resolveContext(caller), {
-        question: parsed.data.question,
-        requestKey: parsed.data.request_key,
-      });
-      res.status(201).json(result);
     } catch (err) {
       sendError(res, err);
     }

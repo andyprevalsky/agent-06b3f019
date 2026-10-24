@@ -495,7 +495,8 @@ def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
     assert len(stock_lines) == len(flagged_lines)
     changed = [(a, b) for a, b in zip(stock_lines, flagged_lines) if a != b]
     assert len(changed) == 1 and changed[0][0] == STOCK_SPAWN_CODE_LINE, changed
-    assert DISPLAY_PROMPT_ROSE_DESKTOP.startswith(DISPLAY_PROMPT + '\n- placement "pinned"')
+    assert DISPLAY_PROMPT_ROSE_DESKTOP.startswith(DISPLAY_PROMPT + "\n- The tool is named display")
+    assert "pinned" not in DISPLAY_PROMPT_ROSE_DESKTOP, "display never asks a question"
 
     flagged = get_planner_tools_description(rose_desktop=True)
     assert flagged != stock
@@ -503,7 +504,9 @@ def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
     assert "inline_view" in flagged
     # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is one,
     # so the flagged planner text carries its Rose Desktop prompt and the stock one does not.
-    assert 'placement "pinned"' in flagged and 'placement "pinned"' not in stock
+    # Neither offers a pinned question.
+    assert "Agent Display" in flagged and "Agent Display" not in stock
+    assert 'placement "pinned"' not in flagged and 'placement "pinned"' not in stock
 
 
 async def test_planner_tools_description_follows_the_workflow_account():

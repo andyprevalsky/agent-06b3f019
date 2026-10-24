@@ -12,22 +12,16 @@ from domains.display.config import (
     DISPLAY_HTML_FILENAME,
     DISPLAY_MAX_HTML_BYTES,
     DISPLAY_MAX_ITEMS,
-    DISPLAY_MAX_OPTIONS,
-    PINNED_ONLY_ARGUMENTS,
-    PLACEMENTS,
-    REJECTED_RESPONSE,
+    QUESTION_ARGUMENTS,
 )
 from domains.display.repo import display_media_activity
-from domains.display.types import DisplayOptionInput, DisplayValidation
-from utils.rose_desktop import is_rose_desktop_user
+from domains.display.types import DisplayValidation
 
 # The handler schedules the activity through this layer (handler → service → repo).
 __all__ = [
-    "describe_answer",
     "describe_error",
     "describe_inline",
     "display_media_activity",
-    "format_question_text",
     "validate_tool_call",
 ]
 
@@ -44,27 +38,6 @@ def _string_list(raw: Any, name: str) -> tuple[List[str], Optional[str]]:
     return [v.strip() for v in raw], None
 
 
-def _options(raw: Any) -> tuple[List[DisplayOptionInput], Optional[str]]:
-    if raw is None:
-        return [], None
-    if not isinstance(raw, list):
-        return [], "`options` must be a list of {label, description, recommended}."
-    options: List[DisplayOptionInput] = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict) or not isinstance(item.get("label"), str) or not item["label"].strip():
-            return [], f"option {index + 1} needs a non-empty `label`."
-        option: DisplayOptionInput = {"label": item["label"].strip()}
-        description = item.get("description")
-        if isinstance(description, str) and description.strip():
-            option["description"] = description.strip()
-        if item.get("recommended") is True:
-            option["recommended"] = True
-        options.append(option)
-    if len(options) > DISPLAY_MAX_OPTIONS:
-        return [], f"At most {DISPLAY_MAX_OPTIONS} options (got {len(options)})."
-    return options, None
-
-
 def validate_tool_call(
     tool_call: Dict[str, Any],
     *,
@@ -75,11 +48,16 @@ def validate_tool_call(
 ) -> DisplayValidation:
     """Normalise the LLM's arguments into one backend request, or explain the error.
 
-    Accounts without Rose Desktop get inline media only: pinned-question
-    arguments are dropped, as the stock display schema has none.
+    display only shows media inline; a pinned question (placement / options /
+    allow_other) is refused, since agents cannot ask the user through display.
     """
-    if not is_rose_desktop_user(user_id):
-        tool_call = {key: value for key, value in tool_call.items() if key not in PINNED_ONLY_ARGUMENTS}
+    asked = [key for key in QUESTION_ARGUMENTS if tool_call.get(key) not in (None, "inline")]
+    if asked:
+        return {
+            "ok": False,
+            "error": "display cannot ask questions: it only shows media inline "
+            f"(remove {', '.join(f'`{key}`' for key in asked)}).",
+        }
     paths, error = _string_list(tool_call.get("paths"), "paths")
     if error:
         return {"ok": False, "error": error}
@@ -99,32 +77,15 @@ def validate_tool_call(
             "ok": False,
             "error": f"`html` is {html_bytes} bytes (max {DISPLAY_MAX_HTML_BYTES}). Use `paths` for larger pages.",
         }
-    placement = tool_call.get("placement") or "inline"
-    if placement not in PLACEMENTS:
-        return {"ok": False, "error": '`placement` must be "inline" or "pinned".'}
     caption = tool_call.get("caption") or ""
     if not isinstance(caption, str):
         return {"ok": False, "error": "`caption` must be a string."}
     caption = caption.strip()
-    options, error = _options(tool_call.get("options"))
-    if error:
-        return {"ok": False, "error": error}
-    allow_other = tool_call.get("allow_other")
-    if allow_other is not None and not isinstance(allow_other, bool):
-        return {"ok": False, "error": "`allow_other` must be a boolean."}
     count = len(paths) + len(urls) + (1 if html else 0)
     if count > DISPLAY_MAX_ITEMS:
         return {"ok": False, "error": f"At most {DISPLAY_MAX_ITEMS} items per call (got {count})."}
-    if placement == "inline":
-        if count == 0:
-            return {"ok": False, "error": "display needs `html` or at least one entry in `paths` or `urls`."}
-        if options or allow_other is not None:
-            return {"ok": False, "error": '`options` and `allow_other` need placement "pinned".'}
-    else:
-        if not caption:
-            return {"ok": False, "error": "A pinned question needs a `caption` (the question text)."}
-        if not options and allow_other is False:
-            return {"ok": False, "error": "A pinned question needs `options` or allow_other."}
+    if count == 0:
+        return {"ok": False, "error": "display needs `html` or at least one entry in `paths` or `urls`."}
     items = [{"file": p} for p in paths] + [{"url": u} for u in urls]
     if html:
         encoded = base64.b64encode(html.encode("utf-8")).decode("ascii")
@@ -138,9 +99,6 @@ def validate_tool_call(
             "tool_call_id": tool_call_id,
             "items": items,
             "caption": caption,
-            "placement": placement,
-            "options": options,
-            "allow_other": allow_other is not False,
         },
     }
 
@@ -161,31 +119,3 @@ def describe_inline(body: Dict[str, Any]) -> str:
     if kinds:
         parts.append(", ".join(kinds))
     return "; ".join(parts) + "."
-
-
-def format_question_text(question: str, options: List[DisplayOptionInput], allow_other: bool) -> str:
-    """Numbered question text for the agent graph (mirrors back-end formatQuestionText)."""
-    if not options:
-        return question
-    lines = []
-    for index, option in enumerate(options, start=1):
-        recommended = " (recommended)" if option.get("recommended") else ""
-        description = f" — {option['description']}" if option.get("description") else ""
-        lines.append(f"{index}. {option['label']}{recommended}{description}")
-    if allow_other:
-        lines.append(f"{len(options) + 1}. Other (free text)")
-    return question + "\n\nOptions:\n" + "\n".join(lines)
-
-
-def describe_answer(response: str, question: Dict[str, Any], options: List[DisplayOptionInput]) -> str:
-    """The tool result the caller's model sees once the user answers the pin."""
-    who = "The user"
-    text = (response or "").strip()
-    if text == REJECTED_RESPONSE:
-        return f"{who} dismissed the question without choosing an option."
-    labels = [o["label"] for o in options]
-    if text in labels:
-        return f"{who} chose option {labels.index(text) + 1}: {text}"
-    if text.isdigit() and 1 <= int(text) <= len(labels):
-        return f"{who} chose option {text}: {labels[int(text) - 1]}"
-    return f"{who} answered: {text}"

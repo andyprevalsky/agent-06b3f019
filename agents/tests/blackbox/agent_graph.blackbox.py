@@ -1,15 +1,13 @@
 """Blackbox tests for the agents worker's agent-graph client (helpers/agent_graph.py).
 
-Rose-builds-Rose C6 + question routing by spawner (UI ledger 47b). The backend
+Rose-builds-Rose C6. The backend
 (`/api/agent-graph/*`, covered end to end by the backend `agent-graph`
 blackbox) is faked through the httpx capture harness: these tests pin the
 worker-side contract the backend relies on.
 
 Invariants covered:
-  - question routing: a root-spawned code agent asks the user; one spawned by
-    any other agent asks that agent (same rule as questionRouteForSpawner)
-  - the code agent's question is posted AS that code session (X-Agent-Id of
-    the owning Rose agent + X-Code-Session-Id), with options and message id
+  - code agents cannot ask questions: the only agent-graph activity is send
+    (no question activity, payload or route)
   - send is retry-safe: the message id derives from (workflow, tool call), so
     a retried activity posts the same id; definite scope errors (404/409) are
     non-retryable, transient 5xx are retryable
@@ -17,8 +15,7 @@ Invariants covered:
     sandbox resolves no string annotations)
   - adversarial (L-A2A-ADV): a response lost after the backend delivered is
     retried with the same id and lands once; a 429 from the per-sender cap is
-    retryable no sooner than its Retry-After; a question to a finished or
-    deleted spawner is final (one request, no retry loop)
+    retryable no sooner than its Retry-After
 """
 
 import asyncio
@@ -76,49 +73,18 @@ def _backend() -> FakeGraphBackend:
     return backend
 
 
-def test_root_spawned_code_agent_question_goes_to_user():
-    from helpers.agent_graph import question_route_for_spawner
+def test_code_agents_have_no_question_activity():
+    """The worker's agent-graph client only sends: nothing routes a code agent's question."""
+    from helpers import agent_graph
 
-    assert question_route_for_spawner("root-1", None) == {"deliver_to": "user", "agent_id": "root-1"}
-    assert question_route_for_spawner("root-1", "") == {"deliver_to": "user", "agent_id": "root-1"}
-
-
-def test_non_root_spawned_code_agent_question_goes_to_its_parent_agent():
-    from helpers.agent_graph import question_route_for_spawner
-
-    assert question_route_for_spawner("child-1", "root-1") == {"deliver_to": "agent", "agent_id": "child-1"}
-
-
-async def test_code_agent_question_is_posted_as_the_code_session():
-    from helpers.agent_graph import (
-        AgentGraphQuestionOption,
-        AgentGraphQuestionRequest,
-        ask_code_agent_question_activity,
+    activities = sorted(
+        name
+        for name, value in vars(agent_graph).items()
+        if callable(value) and hasattr(value, "__temporal_activity_definition")
     )
-
-    backend = _backend()
-    with patch("helpers.agent_graph.load_config", _config):
-        result = await ask_code_agent_question_activity(
-            AgentGraphQuestionRequest(
-                agent_id="parent-1",
-                code_session_id="code-1",
-                code_provider="codex",
-                question="Postgres or SQLite?",
-                message_id="q-1",
-                options=[AgentGraphQuestionOption(label="Postgres", description="matches prod", recommended=True)],
-            )
-        )
-    assert result == {"deliver_to": "agent", "agent_id": "parent-1", "status": "delivered", "message_id": "q-1"}
-    [sent] = backend.requests
-    assert sent["path"] == "/api/agent-graph/questions", sent
-    headers = sent["headers"]
-    assert headers["x-api-key"] == "test-api-key" and headers["x-agent-id"] == "parent-1", headers
-    assert headers["x-code-session-id"] == "code-1" and headers["x-code-provider"] == "codex", headers
-    assert sent["body"] == {
-        "question": "Postgres or SQLite?",
-        "message_id": "q-1",
-        "options": [{"label": "Postgres", "description": "matches prod", "recommended": True}],
-    }, sent["body"]
+    assert activities == ["send_agent_graph_message_activity"], activities
+    question_names = [name for name in vars(agent_graph) if "question" in name.lower()]
+    assert question_names == [], f"code-agent question path re-added: {question_names}"
 
 
 async def test_send_is_retry_safe_with_a_stable_message_id():
@@ -219,61 +185,20 @@ async def test_rate_limited_send_retries_no_sooner_than_retry_after():
             raise AssertionError("HTTP 429 must raise")
 
 
-async def test_question_to_finished_or_deleted_spawner_is_final():
-    """No retry loop against a spawner that can never answer."""
-    from helpers.agent_graph import AgentGraphQuestionRequest, ask_code_agent_question_activity
-
-    for status, error in (
-        (409, "The agent that started you has finished; it cannot answer this question"),
-        (404, "Agent not found"),
-    ):
-        seen: List[str] = []
-
-        def handler(request: httpx.Request, status: int = status, error: str = error) -> httpx.Response:
-            seen.append(request.url.path)
-            return httpx.Response(status, json={"error": error})
-
-        setup_mock_fn(handler)
-        request = AgentGraphQuestionRequest(
-            agent_id="finished-1", code_session_id="code-9", question="still there?", message_id=f"q-{status}"
-        )
-        with patch("helpers.agent_graph.load_config", _config):
-            try:
-                await ask_code_agent_question_activity(request)
-            except ApplicationError as err:
-                assert err.non_retryable, f"HTTP {status} is final"
-                assert error[:40] in str(err), err
-            else:
-                raise AssertionError(f"HTTP {status} must raise")
-        assert seen == ["/api/agent-graph/questions"], seen
-
-
 def test_payload_dataclasses_have_real_annotations():
     from helpers import agent_graph
 
-    for cls in (
-        agent_graph.AgentGraphSendRequest,
-        agent_graph.AgentGraphQuestionRequest,
-        agent_graph.AgentGraphQuestionOption,
-    ):
+    for cls in (agent_graph.AgentGraphSendRequest,):
         assert dataclasses.is_dataclass(cls)
         lazy = [name for name, value in cls.__annotations__.items() if isinstance(value, (str, typing.ForwardRef))]
         assert not lazy, f"{cls.__name__} has string annotations: {lazy}"
-    assert not any(isinstance(v, str) for v in agent_graph.QuestionRoute.__annotations__.values())
 
 
 async def run_all_tests():
     print("agent-graph blackbox tests:")
     r = BlackboxResult()
     try:
-        r.record("root_spawned_question_goes_to_user", test_root_spawned_code_agent_question_goes_to_user)
-        r.record(
-            "non_root_spawned_question_goes_to_parent",
-            test_non_root_spawned_code_agent_question_goes_to_its_parent_agent,
-        )
-        await r.record_async(
-            "code_agent_question_posted_as_code_session", test_code_agent_question_is_posted_as_the_code_session
-        )
+        r.record("code_agents_have_no_question_activity", test_code_agents_have_no_question_activity)
         await r.record_async("send_is_retry_safe_with_stable_id", test_send_is_retry_safe_with_a_stable_message_id)
         await r.record_async(
             "scope_errors_final_transient_retry", test_scope_errors_are_final_and_transient_errors_retry
@@ -282,9 +207,6 @@ async def run_all_tests():
         await r.record_async("lost_response_retried_once", test_lost_response_after_delivery_is_retried_once)
         await r.record_async(
             "rate_limited_send_retries_after_retry_after", test_rate_limited_send_retries_no_sooner_than_retry_after
-        )
-        await r.record_async(
-            "question_to_finished_or_deleted_spawner_final", test_question_to_finished_or_deleted_spawner_is_final
         )
     finally:
         teardown_mock()

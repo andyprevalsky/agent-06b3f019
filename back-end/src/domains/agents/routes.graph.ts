@@ -8,7 +8,6 @@
  *                         message never does)
  *   POST /grep            { pattern, agent_id?, role?, head_limit?, case_insensitive? }
  *   GET  /question-route  code agents: { deliver_to: "user" | "agent", agent_id }
- *   POST /questions       code agents: route a question by spawner (UI ledger 47b)
  *   POST /token           code agents: swap a still-valid token for a fresh one
  *
  * Auth (scope comes from the credential, never from the body):
@@ -43,22 +42,6 @@ const sendSchema = z.object({
     .min(1)
     .max(200)
     .regex(/^[A-Za-z0-9._:-]+$/),
-});
-
-const questionSchema = z.object({
-  question: z.string().min(1).max(10_000),
-  options: z
-    .array(
-      z.object({
-        label: z.string().min(1).max(200),
-        description: z.string().max(500).optional(),
-        recommended: z.boolean().optional(),
-      })
-    )
-    .max(10)
-    .optional(),
-  allow_other: z.boolean().optional(),
-  message_id: sendSchema.shape.message_id,
 });
 
 const grepSchema = z.object({
@@ -231,23 +214,6 @@ router.get(
     }
     try {
       res.json(await questionService.questionRouteForCodeSession(self.id));
-    } catch (err) {
-      sendError(res, err);
-    }
-  })
-);
-
-router.post(
-  '/questions',
-  graphAuth,
-  asyncHandler<GraphRequest>(async (req, res) => {
-    const parsed = questionSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Invalid request body', details: parsed.error.issues });
-      return;
-    }
-    try {
-      res.json(await questionService.askQuestion(caller(req), parsed.data));
     } catch (err) {
       sendError(res, err);
     }

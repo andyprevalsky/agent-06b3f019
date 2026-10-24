@@ -8,14 +8,6 @@ annotations (structural guard test_activity_payload_types_need_no_module_globals
 from typing import Any, Dict, List, TypedDict
 
 
-class DisplayOptionInput(TypedDict, total=False):
-    """One numbered answer for a pinned question."""
-
-    label: str
-    description: str
-    recommended: bool
-
-
 class DisplayActivityInput(TypedDict):
     """Everything the backend call needs; small and JSON-serialisable."""
 
@@ -25,9 +17,6 @@ class DisplayActivityInput(TypedDict):
     tool_call_id: str
     items: List[Dict[str, str]]
     caption: str
-    placement: str
-    options: List[DisplayOptionInput]
-    allow_other: bool
 
 
 class DisplayActivityResult(TypedDict, total=False):

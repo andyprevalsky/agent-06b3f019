@@ -5,12 +5,14 @@ back-end/src/domains/agent-tools; its own suites run against a real DB):
 
 1. ``domains/display`` — the ``display`` tool for root and sub-agents. The
    backend is mocked through the httpx capture harness; the handler runs its
-   real validation, activity and wait. One case runs the pinned path inside a
-   real Temporal production workflow sandbox (payload decode + block/resume).
+   real validation and activity. One case runs it inside a real Temporal
+   production workflow sandbox (payload decode).
 2. ``rose`` (back-end/src/assets/rose-tools/rose.cjs) — the CLI and MCP stdio
    server a code agent uses. Real ``node`` subprocesses talk to an in-process
-   fake of the agent-tools HTTP API that dedupes by content hash, routes pinned
-   questions, and long-polls answers.
+   fake of the agent-tools HTTP API that dedupes by content hash.
+
+Neither surface can ask the user (or a spawning agent) a question: display is
+inline only, and there is no approval, pinned question or wait.
 """
 
 import asyncio
@@ -20,7 +22,6 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import tempfile
 import threading
 import time
@@ -31,7 +32,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from _test_utils import BlackboxResult, get_captured_requests, setup_mock_fn, teardown_mock
@@ -39,16 +40,14 @@ from _test_utils import BlackboxResult, get_captured_requests, setup_mock_fn, te
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 ROSE_CLI = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-tools" / "rose.cjs"
 TOKEN = "rtt.test-token"
-# A long-lived agent-graph token (exp far ahead → no refresh call).
-AGENTS_TOKEN = "rag." + base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=") + ".sig"
 PNG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + b"pixels"
 CARD_HTML = "<!doctype html><html><body><h1>Revenue</h1><p>$2,342.78</p></body></html>"
 
 # ── 1. display tool (root / sub-agents) ──
 
 
-# Pinned questions are a Rose Desktop surface (utils.rose_desktop); the fake
-# agents belong to the flagged account unless a test says otherwise.
+# The fake agents belong to the Rose Desktop account (utils.rose_desktop) unless
+# a test says otherwise.
 ROSE_DESKTOP_USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 STOCK_USER = "user-stock-3333"
 
@@ -60,7 +59,6 @@ class _FakeAgent:
         self.agent_id = agent_id
         self.user_id = user_id
         self.depth = depth
-        self._signal_responses: Dict[str, str] = {}
         self.events: List[Dict[str, Any]] = []
 
     async def _handle_tool_event(self, event: Any, tool_call_id: str, tool_name: str) -> None:
@@ -83,69 +81,11 @@ class _Backend:
         self.headers: List[Dict[str, str]] = []
         self.urls: List[str] = []
 
-        self.graph: List[Dict[str, Any]] = []
-
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if "/api/agent-graph/" in str(request.url):
-            body = json.loads(request.content or b"{}")
-            self.graph.append({"url": str(request.url), "headers": dict(request.headers), "body": body})
-            return httpx.Response(200, json={"status": "delivered", "message_id": body.get("message_id")})
         self.urls.append(str(request.url))
         self.headers.append(dict(request.headers))
         self.bodies.append(json.loads(request.content or b"{}"))
         return self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
-
-
-def _agent_route_response() -> httpx.Response:
-    return httpx.Response(
-        201,
-        json={
-            "placement": "pinned",
-            "items": [],
-            "question": {
-                "request_id": None,
-                "status": "route_to_agent",
-                "deliver_to": "agent",
-                "agent_id": "agent-child",
-                "message_id": None,
-                "response": None,
-                "message_metadata": {},
-            },
-        },
-    )
-
-
-def _pinned_response(request_id: str, deliver_to: str, *, status: str = "pending", response: Optional[str] = None):
-    return httpx.Response(
-        201,
-        json={
-            "agent_id": "agent-root",
-            "placement": "pinned",
-            "posted_count": 0,
-            "duplicate_count": 0,
-            "items": [],
-            "question": {
-                "request_id": request_id,
-                "status": status,
-                "deliver_to": deliver_to,
-                "agent_id": "agent-parent" if deliver_to == "parent" else "agent-root",
-                "message_id": None,
-                "response": response,
-                "message_metadata": {
-                    "isUserAttentionMessage": deliver_to == "user",
-                    "attentionRequestId": request_id,
-                    "display": {
-                        "placement": "pinned",
-                        "kind": "question",
-                        "question": "Which layout?",
-                        "options": [{"label": "Grid"}, {"label": "List"}],
-                        "allow_other": True,
-                        "question_id": request_id,
-                    },
-                },
-            },
-        },
-    )
 
 
 @contextlib.contextmanager
@@ -156,17 +96,9 @@ def _workflow_runtime():
     async def _execute_activity(fn: Any, *, args: List[Any], **_kwargs: Any) -> Any:
         return await fn(*args)
 
-    async def _wait_condition(predicate: Any, timeout: Any = None) -> None:
-        deadline = time.monotonic() + (timeout.total_seconds() if isinstance(timeout, timedelta) else 3600)
-        while not predicate():
-            if time.monotonic() > deadline:
-                raise asyncio.TimeoutError()
-            await asyncio.sleep(0.01)
-
     with (
         patch.object(handler_mod.workflow, "execute_activity", new=AsyncMock(side_effect=_execute_activity)),
         patch.object(handler_mod.workflow, "info", return_value=SimpleNamespace(workflow_id="wf-root")),
-        patch.object(handler_mod.workflow, "wait_condition", new=_wait_condition),
     ):
         yield
 
@@ -206,40 +138,29 @@ async def test_validation_errors_never_reach_the_backend():
     assert backend.bodies == [], f"validation must not call the backend: {backend.bodies}"
 
 
-@patch("utils.rose_desktop.ROSE_DESKTOP_ENABLED_BY_DEFAULT", False)
-async def test_stock_account_gets_inline_media_only():
-    """A stock account's display call never pins a question: pinned arguments are dropped.
+async def test_display_refuses_questions_for_every_agent_and_account():
+    """display never asks a question: pinned arguments are a tool error and never reach the backend.
 
-    With media, the call is plain inline media (the backend body has no pinned
-    fields); without media, it is the stock "nothing to show" tool error and
-    never reaches the backend.
+    Root and sub-agents, Rose Desktop and stock accounts, with or without media.
     """
-    backend = _Backend(
-        [httpx.Response(201, json={"placement": "inline", "items": [{"status": "posted", "message_id": "m1"}]})]
-    )
+    backend = _Backend([httpx.Response(201, json={})])
     setup_mock_fn(backend.handler)
-    agent = _FakeAgent(user_id=STOCK_USER)
-    await _run_tool(
-        agent,
-        {
-            "tool": "display",
-            "paths": ["shot.png"],
-            "caption": "Which layout?",
-            "placement": "pinned",
-            "options": [{"label": "Grid"}],
-            "allow_other": False,
-        },
-    )
-    assert backend.bodies == [{"items": [{"file": "shot.png"}], "placement": "inline", "caption": "Which layout?"}]
-    assert [e["status"] for e in agent.events] == ["FINISHED"], agent.events
-
-    question_only = _FakeAgent(user_id=STOCK_USER)
-    await _run_tool(
-        question_only, {"tool": "display", "caption": "Which?", "placement": "pinned", "options": [{"label": "A"}]}
-    )
-    assert [e["status"] for e in question_only.events] == ["ERROR"], question_only.events
-    assert "at least one entry" in question_only.events[0]["message"]
-    assert len(backend.bodies) == 1, "a stock question never reaches the backend"
+    question = {"caption": "Which layout?", "placement": "pinned", "options": [{"label": "Grid"}, {"label": "List"}]}
+    calls = [
+        question,
+        {**question, "paths": ["shot.png"]},
+        {"paths": ["shot.png"], "options": [{"label": "Grid"}]},
+        {"paths": ["shot.png"], "allow_other": True},
+    ]
+    for user_id in (ROSE_DESKTOP_USER, STOCK_USER):
+        for depth in (0, 1, 2):
+            for call in calls:
+                agent = _FakeAgent(f"agent-{depth}", depth=depth, user_id=user_id)
+                await asyncio.wait_for(_run_tool(agent, {"tool": "display", **call}), timeout=5)
+                [event] = agent.events
+                assert event["status"] == "ERROR", (user_id, depth, call, agent.events)
+                assert "display cannot ask questions" in event["message"], event
+    assert backend.bodies == [], f"a question must never reach the backend: {backend.bodies}"
 
 
 async def test_inline_display_sends_items_and_reports_duplicates():
@@ -286,11 +207,19 @@ async def test_root_inline_html_is_displayed_as_one_page():
         [
             httpx.Response(
                 201,
-                json={"placement": "inline", "posted_count": 1, "items": [{"status": "posted", "mime_type": "text/html"}]},
+                json={
+                    "placement": "inline",
+                    "posted_count": 1,
+                    "items": [{"status": "posted", "mime_type": "text/html"}],
+                },
             ),
             httpx.Response(
                 200,
-                json={"placement": "inline", "duplicate_count": 1, "items": [{"status": "duplicate", "mime_type": "text/html"}]},
+                json={
+                    "placement": "inline",
+                    "duplicate_count": 1,
+                    "items": [{"status": "duplicate", "mime_type": "text/html"}],
+                },
             ),
         ]
     )
@@ -330,81 +259,9 @@ async def test_backend_type_errors_surface_as_tool_errors():
     assert len(backend.bodies) == 1, "a 4xx answer is never retried"
 
 
-async def test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes():
-    """Route user: IN_PROGRESS carries the UI pin metadata, blocks, resumes with the user's choice."""
-    backend = _Backend([_pinned_response("atq_layout", "user")])
-    setup_mock_fn(backend.handler)
-    agent = _FakeAgent("agent-child", depth=1)
-    call = {
-        "tool": "display",
-        "caption": "Which layout?",
-        "placement": "pinned",
-        "options": [{"label": "Grid", "recommended": True}, {"label": "List"}],
-    }
-    task = asyncio.create_task(_run_tool(agent, call, "call-pinned"))
-    for _ in range(200):
-        if agent.events:
-            break
-        await asyncio.sleep(0.01)
-    assert [e["status"] for e in agent.events] == ["IN_PROGRESS"], agent.events
-    await asyncio.sleep(0.2)
-    assert not task.done() and len(agent.events) == 1, "pinned display blocks until answered"
-    body = backend.bodies[0]
-    assert body["request_key"] == "call-pinned" and body["workflow_id"] == "wf-root", body
-    assert body["options"][0] == {"label": "Grid", "recommended": True}, body
-    agent._signal_responses["atq_layout"] = "List"
-    await asyncio.wait_for(task, timeout=5)
-    opening, closing = agent.events
-    pin = opening["metadata"]["display"]
-    assert pin["placement"] == "pinned" and pin["kind"] == "question" and pin["question_id"] == "atq_layout", pin
-    assert opening["metadata"]["isUserAttentionMessage"] is True
-    assert opening["title"] == "Asking the user"
-    assert closing["status"] == "FINISHED", closing
-    assert "The user chose option 2: List" in closing["message"], closing
-    assert backend.graph == [], "a user-routed question never goes through the agent graph"
-
-
-async def test_pinned_question_from_deeper_caller_asks_spawning_agent():
-    """Route agent: the question goes to the spawner through L-A2A and the tool returns at once."""
-    backend = _Backend([_agent_route_response()])
-    setup_mock_fn(backend.handler)
-    agent = _FakeAgent("agent-grandchild", depth=2)
-    call = {
-        "tool": "display",
-        "caption": "Proceed with migration?",
-        "placement": "pinned",
-        "options": [{"label": "Yes", "recommended": True}, {"label": "No", "description": "Keep the old schema"}],
-    }
-    await asyncio.wait_for(_run_tool(agent, call, "call-ask"), timeout=5)
-    [event] = agent.events
-    assert event["status"] == "FINISHED" and "Asked agent agent-child" in event["message"], event
-    assert event["metadata"]["display"]["deliver_to"] == "agent", event
-    [sent] = backend.graph
-    assert sent["url"].endswith("/api/agent-graph/messages"), sent
-    assert sent["headers"].get("x-agent-id") == "agent-grandchild", sent["headers"]
-    assert sent["body"]["to"] == "agent-child", sent
-    assert sent["body"]["message_id"] == "wf-root:call-ask", sent
-    text = sent["body"]["text"]
-    assert text.startswith("Proceed with migration?") and "1. Yes (recommended)" in text, text
-    assert "2. No — Keep the old schema" in text and "3. Other (free text)" in text, text
-
-
-async def test_pinned_retry_after_answer_returns_stored_answer():
-    """A retried call whose question is already answered returns the stored answer without waiting."""
-    backend = _Backend([_pinned_response("atq_done", "user", status="answered", response="Grid")])
-    setup_mock_fn(backend.handler)
-    agent = _FakeAgent()
-    await asyncio.wait_for(
-        _run_tool(agent, {"tool": "display", "caption": "Which layout?", "placement": "pinned", "options": [{"label": "Grid"}, {"label": "List"}]}),
-        timeout=5,
-    )
-    assert [e["status"] for e in agent.events] == ["IN_PROGRESS", "FINISHED"], agent.events
-    assert "option 1: Grid" in agent.events[1]["message"]
-
-
-async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
-    """The pinned path decodes its payloads and parks/resumes inside the real workflow sandbox."""
-    from _display_sandbox_wf import DisplayPinnedRepro
+async def test_inline_display_runs_in_production_sandbox():
+    """The display payloads decode inside the real workflow sandbox and the tool finishes at once."""
+    from _display_sandbox_wf import DisplaySandboxRepro
     from temporalio import activity
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
@@ -413,7 +270,7 @@ async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
     from helpers.workflow_sandbox import production_workflow_runner
 
     seen: List[DisplayActivityInput] = []
-    body = _pinned_response("atq_sandbox", "user").json()
+    body = {"placement": "inline", "posted_count": 1, "items": [{"status": "posted", "mime_type": "image/png"}]}
 
     @activity.defn(name="display_media_activity")
     async def display_fixture(payload: DisplayActivityInput) -> DisplayActivityResult:
@@ -424,39 +281,20 @@ async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
         async with Worker(
             env.client,
             task_queue="display-sandbox",
-            workflows=[DisplayPinnedRepro],
+            workflows=[DisplaySandboxRepro],
             activities=[display_fixture],
             workflow_runner=production_workflow_runner(),
         ):
-            handle = await env.client.start_workflow(
-                DisplayPinnedRepro.run,
-                args=[
-                    "agent-root",
-                    ROSE_DESKTOP_USER,
-                    {"tool": "display", "caption": "Which layout?", "placement": "pinned", "options": [{"label": "Grid"}, {"label": "List"}]},
-                ],
+            events = await env.client.execute_workflow(
+                DisplaySandboxRepro.run,
+                args=["agent-root", ROSE_DESKTOP_USER, {"tool": "display", "paths": ["shot.png"], "caption": "Layout"}],
                 id=f"display-sandbox-{uuid.uuid4()}",
                 task_queue="display-sandbox",
                 execution_timeout=timedelta(seconds=60),
             )
-            statuses: List[str] = []
-            for _ in range(100):
-                statuses = await handle.query(DisplayPinnedRepro.statuses)
-                if statuses:
-                    break
-                await asyncio.sleep(0.05)
-            assert statuses == ["IN_PROGRESS"], statuses
-            await asyncio.sleep(0.3)
-            assert await handle.query(DisplayPinnedRepro.statuses) == ["IN_PROGRESS"], "blocks until answered"
-            await handle.signal(
-                DisplayPinnedRepro.receive_user_response,
-                json.dumps({"request_id": "atq_sandbox", "response": "Grid"}),
-            )
-            events = await handle.result()
-    assert [e["status"] for e in events] == ["IN_PROGRESS", "FINISHED"], events
-    assert "option 1: Grid" in events[1]["message"], events
-    assert seen and seen[0]["tool_call_id"] == "call-pinned-1"
-    assert seen[0]["placement"] == "pinned" and seen[0]["workflow_id"], seen
+    assert [e["status"] for e in events] == ["FINISHED"], events
+    assert "Displayed 1 item(s)" in events[0]["message"], events
+    assert seen and seen[0]["tool_call_id"] == "call-display-1" and seen[0]["items"] == [{"file": "shot.png"}], seen
 
 
 # ── 2. rose CLI + MCP server (code-agent sandbox) ──
@@ -465,13 +303,9 @@ async def test_pinned_question_blocks_and_resumes_in_production_sandbox():
 class FakeAgentTools:
     """In-process fake of /api/agent-tools/:agentId for the sandbox client."""
 
-    def __init__(self, deliver_to: str = "user") -> None:
-        self.deliver_to = deliver_to
+    def __init__(self) -> None:
         self.seen_hashes: set[str] = set()
-        self.requests: Dict[str, Dict[str, Any]] = {}
-        self.creations: Dict[str, int] = {}
         self.calls: List[Dict[str, Any]] = []
-        self.graph_questions: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
         fake = self
 
@@ -488,11 +322,10 @@ class FakeAgentTools:
                     self.end_headers()
                     self.wfile.write(data)
                 except (BrokenPipeError, ConnectionResetError):
-                    # A CLI killed mid long-poll (the interrupt case) closed its socket.
                     return
 
             def _authorized(self) -> bool:
-                if self.headers.get("Authorization") in (f"Bearer {TOKEN}", f"Bearer {AGENTS_TOKEN}"):
+                if self.headers.get("Authorization") == f"Bearer {TOKEN}":
                     return True
                 self._send(401, {"error": "Invalid agent tools token (signature)"})
                 return False
@@ -511,20 +344,9 @@ class FakeAgentTools:
             def do_GET(self) -> None:  # noqa: N802 - http.server API
                 if not self._authorized():
                     return
-                parsed = urlparse(self.path)
-                request_id = parsed.path.rsplit("/", 1)[-1]
-                wait = float(parse_qs(parsed.query).get("wait", ["0"])[0])
                 with fake.lock:
-                    fake.calls.append({"method": "GET", "path": parsed.path})
-                    entry = fake.requests.get(request_id)
-                    if entry is not None:
-                        entry["polls"] += 1
-                if entry is None:
-                    return self._send(404, {"error": "Request not found"})
-                deadline = time.monotonic() + min(wait, 0.3)
-                while entry["answer"] is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self._send(200, fake.state(request_id))
+                    fake.calls.append({"method": "GET", "path": urlparse(self.path).path})
+                self._send(404, {"error": "no route"})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -533,27 +355,7 @@ class FakeAgentTools:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/api/agent-tools/agent-1"
 
-    @property
-    def agents_url(self) -> str:
-        return f"http://127.0.0.1:{self.server.server_address[1]}/api/agent-graph"
-
     def post(self, path: str, body: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
-        if path.endswith("/agent-graph/questions"):
-            self.graph_questions.append(body)
-            return 200, {"deliver_to": "agent", "agent_id": "agent-parent", "status": "delivered", "message_id": body["message_id"]}
-        if path.endswith("/display") and body.get("placement") == "pinned" and self.deliver_to == "agent":
-            return 201, {
-                "placement": "pinned",
-                "items": [],
-                "question": {"request_id": None, "status": "route_to_agent", "deliver_to": "agent", "agent_id": "agent-parent"},
-            }
-        if path.endswith("/display") and body.get("placement") == "pinned":
-            request_id = self._open("question", body["request_key"], body)
-            return 201, {
-                "placement": "pinned",
-                "items": [],
-                "question": {"request_id": request_id, "status": "pending", "deliver_to": self.deliver_to},
-            }
         if path.endswith("/display"):
             results = []
             for item in body["items"]:
@@ -565,44 +367,13 @@ class FakeAgentTools:
                 sha = hashlib.sha256(base64.b64decode(item["content_base64"])).hexdigest()
                 status = "duplicate" if sha in self.seen_hashes else "posted"
                 self.seen_hashes.add(sha)
-                results.append({"status": status, "mime_type": "image/png", "message_id": f"m-{sha[:8]}", "sha256": sha})
+                results.append(
+                    {"status": status, "mime_type": "image/png", "message_id": f"m-{sha[:8]}", "sha256": sha}
+                )
             return 201, {"items": results, "posted_count": sum(r["status"] == "posted" for r in results)}
-        if path.endswith("/approvals"):
-            return 201, {"request_id": self._open("approval", body["request_key"], body), "status": "pending"}
         if path.endswith("/messages"):
             return 201, {"message_id": f"msg-{body['idempotency_key'][:8]}"}
         return 404, {"error": "no route"}
-
-    def _open(self, kind: str, key: str, body: Dict[str, Any]) -> str:
-        request_id = f"atq_{hashlib.sha256(f'{kind}:{key}'.encode()).hexdigest()[:10]}"
-        if request_id not in self.requests:
-            self.requests[request_id] = {"kind": kind, "answer": None, "polls": 0, "body": body}
-        self.creations[request_id] = self.creations.get(request_id, 0) + 1
-        return request_id
-
-    def answer(self, request_id: str, answer: str) -> None:
-        with self.lock:
-            self.requests[request_id]["answer"] = answer
-
-    def state(self, request_id: str) -> Dict[str, Any]:
-        entry = self.requests[request_id]
-        answer = entry["answer"]
-        if answer is None:
-            return {"id": request_id, "kind": entry["kind"], "status": "pending"}
-        options = [o["label"] for o in entry["body"].get("options", [])]
-        selected = None
-        if answer in options:
-            selected = {"index": options.index(answer), "label": answer}
-        elif answer.isdigit() and 1 <= int(answer) <= len(options):
-            selected = {"index": int(answer) - 1, "label": options[int(answer) - 1]}
-        return {
-            "id": request_id,
-            "kind": entry["kind"],
-            "status": "rejected" if answer == "__REJECTED__" else "answered",
-            "response": selected["label"] if selected else answer,
-            "selected_option": selected,
-            "answered_by": "user",
-        }
 
     def __enter__(self) -> "FakeAgentTools":
         self.thread.start()
@@ -614,9 +385,9 @@ class FakeAgentTools:
 
 
 def _cli_env(fake: FakeAgentTools, home: str, rose_desktop: bool = True) -> Dict[str, str]:
-    """Session env; Rose Desktop by default (pinned questions and inline views on)."""
+    """Session env; Rose Desktop by default (inline views on)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ROSE_TOOLS")}
-    env.update({"HOME": home, "ROSE_TOOLS_URL": fake.url, "ROSE_TOOLS_TOKEN": TOKEN, "ROSE_TOOLS_WAIT_SECONDS": "1"})
+    env.update({"HOME": home, "ROSE_TOOLS_URL": fake.url, "ROSE_TOOLS_TOKEN": TOKEN})
     if rose_desktop:
         env["ROSE_TOOLS_ROSE_DESKTOP"] = "1"
     return env
@@ -643,7 +414,6 @@ class _Mcp:
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
         self.proc = proc
         self.next_id = 0
-        self.notifications: List[Dict[str, Any]] = []
 
     async def send(self, method: str, params: Optional[Dict[str, Any]] = None) -> int:
         self.next_id += 1
@@ -663,7 +433,6 @@ class _Mcp:
             message = json.loads(line)
             if message.get("id") == request_id:
                 return message
-            self.notifications.append(message)
         raise AssertionError(f"no MCP response for {request_id}")
 
 
@@ -675,7 +444,7 @@ async def _mcp_server(fake: FakeAgentTools, home: str, rose_desktop: bool = True
         env.pop(key)
     rose_dir = Path(home) / ".rose"
     rose_dir.mkdir(parents=True, exist_ok=True)
-    saved = {"url": fake.url, "token": TOKEN, "agents_url": fake.agents_url, "agents_token": AGENTS_TOKEN}
+    saved: Dict[str, Any] = {"url": fake.url, "token": TOKEN}
     if rose_desktop:
         saved["rose_desktop"] = True
     (rose_dir / "tools.json").write_text(json.dumps(saved))
@@ -708,67 +477,51 @@ def _home():
         shutil.rmtree(home, ignore_errors=True)
 
 
-async def _wait_for(predicate: Any, timeout: float = 10) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not reached")
-        await asyncio.sleep(0.05)
-
-
-async def test_mcp_server_lists_the_four_rose_tools():
+async def test_mcp_server_lists_the_three_rose_tools():
     with FakeAgentTools() as fake, _home() as home:
         async with _mcp_server(fake, home) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             names = sorted(tool["name"] for tool in listed["result"]["tools"])
-            assert names == ["change_environment_size", "display", "request_user_approval", "send_message_to_user"], names
+            assert names == ["change_environment_size", "display", "send_message_to_user"], names
             unknown = await mcp.response(await mcp.send("tools/call", {"name": "nope", "arguments": {}}))
             assert "error" in unknown, unknown
 
 
-async def test_mcp_approval_blocks_across_long_polls_then_resumes():
-    """request_user_approval waits with no deadline (progress per poll) and returns the answer."""
+async def test_code_agent_cannot_ask_a_question():
+    """No approval, pinned question or wait: nothing asks the user or the spawning agent."""
     with FakeAgentTools() as fake, _home() as home:
-        async with _mcp_server(fake, home) as mcp:
-            call_id = await mcp.send(
-                "tools/call",
-                {"name": "request_user_approval", "arguments": {"question": "Deploy to prod?"}, "_meta": {"progressToken": "p1"}},
+        for rose_desktop in (True, False):
+            async with _mcp_server(fake, home, rose_desktop=rose_desktop) as mcp:
+                listed = await mcp.response(await mcp.send("tools/list"))
+                blob = json.dumps(listed)
+                assert "pinned" not in blob and "request_user_approval" not in blob, blob
+                approval = await mcp.response(
+                    await mcp.send(
+                        "tools/call", {"name": "request_user_approval", "arguments": {"question": "Deploy?"}}
+                    )
+                )
+                assert "unknown tool request_user_approval" in approval["error"]["message"], approval
+                pinned = await mcp.response(
+                    await mcp.send(
+                        "tools/call",
+                        {
+                            "name": "display",
+                            "arguments": {"caption": "Proceed?", "placement": "pinned", "options": [{"label": "Yes"}]},
+                        },
+                    )
+                )
+                assert pinned["result"]["isError"] is True, pinned
+                assert "at least one path or url" in pinned["result"]["content"][0]["text"], pinned
+            for args in (["approve", "Delete the staging branch?"], ["wait", "atq_1"]):
+                code, out, err = await _cli(fake, home, *args, rose_desktop=rose_desktop)
+                assert code == 1 and f"unknown command {args[0]}" in err, (args, code, out, err)
+            code, out, err = await _cli(
+                fake, home, "display", "--pinned", "--caption", "Which?", "--option", "A", rose_desktop=rose_desktop
             )
-            await _wait_for(lambda: fake.requests and next(iter(fake.requests.values()))["polls"] >= 3)
-            [request_id] = list(fake.requests)
-            assert fake.requests[request_id]["kind"] == "approval"
-            fake.answer(request_id, "Approved")
-            result = await mcp.response(call_id)
-            content = result["result"]["content"][0]["text"]
-            assert result["result"]["isError"] is False and "The user approved" in content, result
-            progress = [n for n in mcp.notifications if n.get("method") == "notifications/progress"]
-            assert len(progress) >= 2, f"each pending poll is a liveness heartbeat: {mcp.notifications}"
-
-
-async def test_mcp_pinned_question_from_non_root_spawn_asks_spawning_agent():
-    """Route agent: the MCP tool asks via POST /api/agent-graph/questions and returns at once."""
-    with FakeAgentTools(deliver_to="agent") as fake, _home() as home:
-        async with _mcp_server(fake, home) as mcp:
-            call_id = await mcp.send(
-                "tools/call",
-                {
-                    "name": "display",
-                    "arguments": {
-                        "caption": "Proceed with migration?",
-                        "placement": "pinned",
-                        "options": [{"label": "Yes", "recommended": True}, {"label": "No"}],
-                    },
-                },
-            )
-            result = await mcp.response(call_id)
-            text = result["result"]["content"][0]["text"]
-            assert result["result"]["isError"] is False, result
-            assert "Asked agent agent-parent" in text and "next message" in text, text
-            [asked] = fake.graph_questions
-            assert asked["question"] == "Proceed with migration?" and asked["allow_other"] is True, asked
-            assert asked["options"][0] == {"label": "Yes", "recommended": True}, asked
-            assert asked["message_id"].startswith("q-"), asked
-            assert fake.requests == {}, "nothing pinned for the user"
+            assert code == 1 and "unknown option --pinned" in err, (code, out, err)
+            code, out, err = await _cli(fake, home, "--help", rose_desktop=rose_desktop)
+            assert code == 0 and not any(word in out for word in ("approve", "wait", "--pinned", "--option")), out
+        assert fake.calls == [], f"no question request reached Rose: {fake.calls}"
 
 
 async def test_cli_display_dedupes_by_content_hash():
@@ -826,32 +579,6 @@ async def test_cli_type_and_limit_errors():
         assert code == 1 and "logo.svg: is not an image" in err, (code, err)
 
 
-async def test_cli_approve_resumes_same_request_after_interrupt():
-    """A Bash-timeout kill mid-wait does not re-ask: re-running resumes the same request."""
-    with FakeAgentTools() as fake, _home() as home:
-        proc = await asyncio.create_subprocess_exec(
-            shutil.which("node") or "node",
-            str(ROSE_CLI),
-            "approve",
-            "Delete the staging branch?",
-            env=_cli_env(fake, home),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await _wait_for(lambda: fake.requests and next(iter(fake.requests.values()))["polls"] >= 1)
-        proc.send_signal(signal.SIGTERM)
-        await proc.wait()
-        [request_id] = list(fake.requests)
-        rerun = asyncio.create_task(_cli(fake, home, "approve", "Delete the staging branch?"))
-        await _wait_for(lambda: fake.creations[request_id] >= 2)
-        await asyncio.sleep(0.3)
-        assert not rerun.done(), "re-run blocks on the same request"
-        fake.answer(request_id, "__REJECTED__")
-        code, out, _err = await rerun
-        assert list(fake.requests) == [request_id], "no second approval request"
-        assert code == 2 and "rejected" in out, (code, out)
-
-
 async def test_cli_message_sends_inline_view():
     with FakeAgentTools() as fake, _home() as home:
         code, out, err = await _cli(
@@ -869,7 +596,7 @@ async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
         async with _mcp_server(fake, home, rose_desktop=False) as mcp:
             listed = await mcp.response(await mcp.send("tools/list"))
             tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
-            assert sorted(tools) == ["change_environment_size", "display", "request_user_approval", "send_message_to_user"], tools
+            assert sorted(tools) == ["change_environment_size", "display", "send_message_to_user"], tools
             assert set(tools["change_environment_size"]["inputSchema"]["properties"]) == {"cpu", "memory_gb", "reason"}
             assert list(tools["display"]["inputSchema"]["properties"]) == ["paths", "urls", "html", "caption"]
             assert list(tools["send_message_to_user"]["inputSchema"]["properties"]) == ["message"]
@@ -889,7 +616,7 @@ async def test_stock_session_tools_have_no_pinned_questions_or_inline_views():
         code, out, err = await _cli(
             fake, home, "display", "--pinned", "--caption", "Which?", "--option", "A", rose_desktop=False
         )
-        assert code == 1 and "at least one path or url" in err, (code, out, err)
+        assert code == 1 and "unknown option --pinned" in err, (code, out, err)
         assert not [c for c in fake.calls if c["path"].endswith("/display")], fake.calls
 
 
@@ -897,40 +624,30 @@ async def run_all_tests():
     print("display blackbox tests:")
     r = BlackboxResult()
     try:
-        await r.record_async("validation_errors_never_reach_the_backend", test_validation_errors_never_reach_the_backend)
-        await r.record_async("stock_account_gets_inline_media_only", test_stock_account_gets_inline_media_only)
+        await r.record_async(
+            "validation_errors_never_reach_the_backend", test_validation_errors_never_reach_the_backend
+        )
+        await r.record_async(
+            "display_refuses_questions_for_every_agent_and_account",
+            test_display_refuses_questions_for_every_agent_and_account,
+        )
         await r.record_async(
             "inline_display_sends_items_and_reports_duplicates", test_inline_display_sends_items_and_reports_duplicates
         )
-        await r.record_async("root_inline_html_is_displayed_as_one_page", test_root_inline_html_is_displayed_as_one_page)
-        await r.record_async("backend_type_errors_surface_as_tool_errors", test_backend_type_errors_surface_as_tool_errors)
         await r.record_async(
-            "pinned_question_from_root_spawned_caller_goes_to_user_and_resumes",
-            test_pinned_question_from_root_spawned_caller_goes_to_user_and_resumes,
+            "root_inline_html_is_displayed_as_one_page", test_root_inline_html_is_displayed_as_one_page
         )
         await r.record_async(
-            "pinned_question_from_deeper_caller_asks_spawning_agent",
-            test_pinned_question_from_deeper_caller_asks_spawning_agent,
-        )
-        await r.record_async("pinned_retry_after_answer_returns_stored_answer", test_pinned_retry_after_answer_returns_stored_answer)
-        await r.record_async(
-            "pinned_question_blocks_and_resumes_in_production_sandbox",
-            test_pinned_question_blocks_and_resumes_in_production_sandbox,
-        )
-        await r.record_async("mcp_server_lists_the_four_rose_tools", test_mcp_server_lists_the_four_rose_tools)
-        await r.record_async(
-            "mcp_approval_blocks_across_long_polls_then_resumes", test_mcp_approval_blocks_across_long_polls_then_resumes
+            "backend_type_errors_surface_as_tool_errors", test_backend_type_errors_surface_as_tool_errors
         )
         await r.record_async(
-            "mcp_pinned_question_from_non_root_spawn_asks_spawning_agent",
-            test_mcp_pinned_question_from_non_root_spawn_asks_spawning_agent,
+            "inline_display_runs_in_production_sandbox", test_inline_display_runs_in_production_sandbox
         )
+        await r.record_async("mcp_server_lists_the_three_rose_tools", test_mcp_server_lists_the_three_rose_tools)
+        await r.record_async("code_agent_cannot_ask_a_question", test_code_agent_cannot_ask_a_question)
         await r.record_async("cli_display_dedupes_by_content_hash", test_cli_display_dedupes_by_content_hash)
         await r.record_async("cli_and_mcp_display_inline_html", test_cli_and_mcp_display_inline_html)
         await r.record_async("cli_type_and_limit_errors", test_cli_type_and_limit_errors)
-        await r.record_async(
-            "cli_approve_resumes_same_request_after_interrupt", test_cli_approve_resumes_same_request_after_interrupt
-        )
         await r.record_async("cli_message_sends_inline_view", test_cli_message_sends_inline_view)
         await r.record_async(
             "stock_session_tools_have_no_pinned_questions_or_inline_views",
