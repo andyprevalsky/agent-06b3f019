@@ -1,7 +1,9 @@
+import { deepStrictEqual } from 'node:assert';
 import {
   BASE_URL,
   PostMessageResponse,
   apiKeyHeaders,
+  authHeaders,
   request,
   assertStatus,
   assertSchema,
@@ -90,4 +92,58 @@ test('POST /:id/messages — NUL characters in tool output persist without a 500
   );
 
   await deleteTestAgent(agentId, session.user.id);
+});
+
+test('GET /:id/messages/:messageId — returns one committed row to its owner only', async () => {
+  // descend-full69 r004-j0049: Supabase's edge WAF refused the realtime frame
+  // for a stored 158 KB spawn_claude_code_agent result. Clients hydrate that
+  // row by ID instead of refetching the whole transcript.
+  const owner = await createAnonymousSession('msg-single-owner');
+  const stranger = await createAnonymousSession('msg-single-stranger');
+  const agentId = randomUUID();
+  const otherAgentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  trackedAgentIds.add(otherAgentId);
+  const metadata = {
+    toolName: 'spawn_claude_code_agent',
+    toolStatus: 'FINISHED',
+    toolCallId: 'call_530ea3ca9bf640358d491ade206558b2',
+    command:
+      'rg --files /home/user 2>/dev/null | head -80; curl -L --fail --silent https://x.invalid/a -o /tmp/a',
+  };
+  const text = `Code-agent SDK event JSON:\n${'x'.repeat(158_000)}`;
+  const row = await withTransientDbRetry('create-single-message-fixture', async () => {
+    for (const [id, userId] of [
+      [agentId, owner.user.id],
+      [otherAgentId, owner.user.id],
+    ]) {
+      await prisma.agent.create({
+        data: { id, userId, goal: 'Single message read test', status: 'ACTIVE' },
+      });
+    }
+    return prisma.message.create({ data: { agentId, role: 'TOOL', text, metadata } });
+  });
+  const read = (agent: string, token: string) =>
+    request(`${BASE_URL}/api/agents/${agent}/messages/${row.id}`, {
+      headers: authHeaders(token),
+    });
+
+  const own = await read(agentId, owner.session.access_token);
+  assertStatus(own.status, 200, own.data);
+  const message = (own.data as { message: Record<string, unknown> }).message;
+  assert(message.message_id === row.id, `wrong row: ${String(message.message_id)}`);
+  assert(message.role === 'TOOL' && message.text === text, 'text must be the full stored row');
+  deepStrictEqual(message.metadata, metadata, 'metadata must be the stored row');
+  assert(
+    new Date(message.timestamp as string).getTime() === row.timestamp.getTime(),
+    'timestamp must be the stored row timestamp'
+  );
+
+  const foreign = await read(agentId, stranger.session.access_token);
+  assertStatus(foreign.status, 404, foreign.data);
+  const wrongAgent = await read(otherAgentId, owner.session.access_token);
+  assertStatus(wrongAgent.status, 404, wrongAgent.data);
+
+  await deleteTestAgent(agentId, owner.user.id);
+  await deleteTestAgent(otherAgentId, owner.user.id);
 });

@@ -1,6 +1,7 @@
 import {
   benchmarkAgentPreviewEnabled,
   getAgent,
+  getAgentMessage,
   getBenchmarkAgentPreview,
   getBenchmarkSharedAgent,
   postMessage as postMessageAPI,
@@ -25,4 +26,9 @@ export async function fetchAgentDetail(agentId: string, signal?: AbortSignal) {
 /** Post a user message to the given agent. */
 export async function postAgentMessage(agentId: string, text: string) {
   return postMessageAPI(agentId, text);
+}
+
+/** Fetch one committed message of the selected agent by ID. */
+export async function fetchAgentMessage(agentId: string, messageId: string, signal?: AbortSignal) {
+  return getAgentMessage(agentId, messageId, signal);
 }

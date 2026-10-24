@@ -292,6 +292,17 @@ export async function findExploreToolEvidence(agentId: string, userId: string, t
   return [...new Map([...first, ...last.reverse()].map((row) => [row.id, row])).values()];
 }
 
+/** One message row of a live agent by primary key, with optional owner check. */
+export async function findAgentMessage(agentId: string, messageId: string, userId?: string) {
+  return prisma.message.findFirst({
+    where: {
+      id: messageId,
+      agentId,
+      agent: { deletedAt: null, ...(userId !== undefined ? { userId } : {}) },
+    },
+  });
+}
+
 /** Batch fetch messages by IDs, scoped to a user's agents. */
 export async function findMessagesByIds(ids: string[], userId: string) {
   return prisma.message.findMany({

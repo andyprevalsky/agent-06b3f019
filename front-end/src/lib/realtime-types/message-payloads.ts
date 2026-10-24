@@ -63,6 +63,23 @@ export interface UpdateAgentPayload {
   temporalWorkflowId?: string | null;
 }
 
+/**
+ * INSERT_DEFERRED event payload - a committed message that could not be streamed
+ * live (its frame was refused, e.g. by an edge WAF rule, or it was too large).
+ * It carries no message content: `reason` is shown in place of the body until
+ * the client reads the row by ID from the API.
+ */
+export interface InsertDeferredPayload {
+  agentId: string;
+  id: string;
+  timestamp: string;
+  role: MessageRole;
+  reason: string;
+  metadata?: Pick<MessageMetadata, 'toolName' | 'toolStatus' | 'toolCallId'> & {
+    success?: boolean;
+  };
+}
+
 // -----------------------------------------------------------------------------
 // DELETE Event - Message deleted
 // -----------------------------------------------------------------------------
