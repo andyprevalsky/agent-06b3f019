@@ -4205,6 +4205,35 @@ async def test_explore_reads_a_message_stored_before_its_final_answer():
     assert fetch.await_count == 2, "one inbox read per completion attempt, none per step"
 
 
+async def test_explore_completion_inbox_read_is_wall_clock_bounded():
+    """descend-full69 MA2 run 2: a completion-time inbox GET hung for 558s.
+
+    The explore leaf c53c4301 called attempt_completion_with_result; its one
+    ``unread_before_finish`` GET never reached the backend (stuck inside the
+    shared pooled client, where httpx's per-phase timeouts do not apply), so
+    the leaf went silent past the 510s stall threshold. The read must end
+    within its own deadline as a logged poll failure.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from helpers import agent_inbox
+
+    class StuckClient:
+        async def get(self, *_args, **_kwargs):
+            await asyncio.Event().wait()
+
+    inbox = agent_inbox.AgentInbox.create("gp-1", "task-1")
+    with (
+        patch.object(agent_inbox, "get_http_client", return_value=StuckClient()),
+        patch.object(agent_inbox, "AGENT_INBOX_TIMEOUT_SECONDS", 0.05),
+    ):
+        unread = await asyncio.wait_for(inbox.unread_before_finish(), timeout=2.0)
+
+    assert unread is False
+    assert inbox.failures == 1
+
+
 async def test_explore_without_inbox_address_has_no_inbox_hook():
     from unittest.mock import patch
 
@@ -6321,6 +6350,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_agent_inbox_delivers_once_tolerates_failures",
         test_explore_agent_inbox_delivers_each_message_once_and_tolerates_failures,
+    )
+    await r.record_async(
+        "explore_completion_inbox_read_is_wall_clock_bounded",
+        test_explore_completion_inbox_read_is_wall_clock_bounded,
     )
     await r.record_async(
         "explore_list_agents_renders_tree_from_explore_task",
