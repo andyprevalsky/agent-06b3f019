@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Validate that a restored database still carries the reviewed content promised
 # by BASE_IMAGE_CACHE_REVISION=victoria-prod-sync-v1-whatsapp-v2: the frozen
-# WhatsApp history and the archived prior agent trajectories indexed in
-# AgentTrajectorySearch. Each PG-major artifact is published separately, so a
-# publication that drops either row set must fail here, not in a benchmark.
+# WhatsApp history, the archived prior agent trajectories indexed in
+# AgentTrajectorySearch, and the bench user's prod profile (name, email and
+# delivery address line). Each PG-major artifact is published separately, so a
+# publication that drops any of them must fail here, not in a benchmark.
 #
 # Size alone cannot guard this: a custom-format (-Fc) archive of the good
 # fixture is ~31MiB, the same ballpark as a cold-sync dump with ZERO
@@ -51,7 +52,12 @@ SELECT
      JOIN "Person" p ON p.id = mr."personId"
     WHERE p."userId" = '${BENCH_USER_ID}' AND mr.channel::text = 'WHATSAPP'),
   (SELECT COUNT(*)::text FROM "Integration"
-    WHERE "userId" = '${BENCH_USER_ID}' AND name = 'whatsapp' AND status::text = 'CONNECTED');
+    WHERE "userId" = '${BENCH_USER_ID}' AND name = 'whatsapp' AND status::text = 'CONNECTED'),
+  (SELECT COUNT(*)::text FROM "User"
+    WHERE "userId" = '${BENCH_USER_ID}'
+      AND btrim(COALESCE(name, '')) <> ''
+      AND btrim(COALESCE(email, '')) <> ''
+      AND btrim(COALESCE("addressLine1", '')) <> '');
 SQL
 )"
 trajectory_counts="$(
@@ -62,8 +68,7 @@ SELECT "rootAgentId" || ':' || COUNT(*)::text FROM "AgentTrajectorySearch"
 SQL
 )"
 
-wa_count="${result%%|*}"
-wa_connected="${result##*|}"
+IFS='|' read -r wa_count wa_connected profile_rows <<<"$result"
 
 ok=1
 if ! [[ "$wa_count" =~ ^[0-9]+$ ]] || [ "$wa_count" -lt "$MIN_WHATSAPP_MESSAGES" ]; then
@@ -72,6 +77,13 @@ if ! [[ "$wa_count" =~ ^[0-9]+$ ]] || [ "$wa_count" -lt "$MIN_WHATSAPP_MESSAGES"
 fi
 if [ "${wa_connected:-0}" != "1" ]; then
   echo "canonical seed dump missing CONNECTED whatsapp Integration for ${BENCH_USER_ID} (got ${wa_connected:-?})" >&2
+  ok=0
+fi
+
+# The reviewed Aug-5 fixture froze an older, blank prod User row (prod replaced
+# it on 2026-09-01), so sign-up tasks had no name to type and asked a human.
+if [ "${profile_rows:-0}" != "1" ]; then
+  echo "canonical seed dump bench user ${BENCH_USER_ID} lacks the prod profile: need a non-blank name, email and addressLine1 on its User row" >&2
   ok=0
 fi
 
@@ -92,4 +104,4 @@ if [ "$ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "canonical seed dump ok: ${wa_count} WHATSAPP messages + CONNECTED whatsapp Integration + ${trajectory_rows} archived trajectory rows (${#TRAJECTORY_ROOTS[@]} runs) for ${BENCH_USER_ID}"
+echo "canonical seed dump ok: ${wa_count} WHATSAPP messages + CONNECTED whatsapp Integration + ${trajectory_rows} archived trajectory rows (${#TRAJECTORY_ROOTS[@]} runs) + named bench profile for ${BENCH_USER_ID}"
