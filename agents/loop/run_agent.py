@@ -104,6 +104,16 @@ CREDIT_CHECK_INTERVAL = 5
 EFFECTIVE_OUTPUT_RESERVATION = 20_000  # matches MAX_OUTPUT_TOKENS_FOR_SUMMARY
 AUTOCOMPACT_BUFFER_TOKENS = 13_000  # matches Claude Code's AUTOCOMPACT_BUFFER
 
+
+def compaction_trigger_tokens(max_context_tokens: int) -> int:
+    """Estimated context size at which a context overflows ``max_context_tokens``.
+
+    For Sonnet 200k → effective=180k → trigger=167k. The benchmark grader uses
+    this same trigger to decide when judge evidence no longer fits one call.
+    """
+    return max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION - AUTOCOMPACT_BUFFER_TOKENS
+
+
 # _estimate_tokens is a chars-÷-4 heuristic that under-counts JSON-heavy tool
 # results (observed 308k actual Anthropic tokens reported as <80k). Multiply
 # by this safety factor so the trigger fires before we hit the real ceiling.
@@ -931,7 +941,7 @@ async def run_agent(
         #   compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
         # For Sonnet 200k → effective=180k → trigger=167k.
         effective_window = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
-        compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
+        compaction_trigger = compaction_trigger_tokens(max_context_tokens)
         async with span(
             "run_loop.context_token_estimate",
             agent_id=agent_id,

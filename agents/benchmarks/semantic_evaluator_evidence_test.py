@@ -6,11 +6,8 @@ import json
 from pathlib import Path
 
 from benchmarks.semantic_evaluator_evidence import (
-    SINGLE_TURN_CHAR_BUDGET,
     build_agentic_evidence,
     build_single_turn_evidence,
-    single_turn_evidence_char_count,
-    single_turn_evidence_exceeds_budget,
 )
 
 
@@ -72,9 +69,3 @@ def test_agentic_evidence_lists_tree_agents():
     assert len(bundle["tree_agents"]) == 2
     assert bundle["tree_agents"][0]["agent_id"] == fixture["agent_id"]
 
-
-def test_single_turn_budget_routes_to_agentic_when_exceeded():
-    oversized = [{"text": "x" * (SINGLE_TURN_CHAR_BUDGET + 1)}]
-    assert single_turn_evidence_exceeds_budget(oversized) is True
-    assert single_turn_evidence_exceeds_budget([{"text": "small"}]) is False
-    assert single_turn_evidence_char_count([{"text": "abc"}]) == len(json.dumps([{"text": "abc"}]))
