@@ -166,23 +166,32 @@ def browser_replay_inputs(data: dict[str, Any]) -> dict[str, Any]:
 REPLAY_USER_ID = os.environ.get("REPLAY_USER_ID", "1f85ff25-6e29-4c1b-8739-f917bd101a30")
 
 
-async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
-    """Lease a fresh GPT compute token when the dumped call used gptAuth.
+async def direct_auth_from_dump(data: dict[str, Any]) -> dict[str, Any]:
+    """Lease a fresh compute token of the type the dumped call used.
 
     Dumps record only the lease identity (type/source/pool id), never the
     credential, so the replay leases through the supported compute-token path.
+    Returns the RoseClient kwarg (``gpt_auth`` or ``claude_auth``), or {} when
+    the call used no direct auth. Replaying a claudeAuth call without a Claude
+    lease silently serves another model and cannot reproduce its decision.
     """
     from helpers.llm import _build_compute_auth_context, fetch_compute_token_activity
 
     output = data.get("output") if isinstance(data.get("output"), dict) else {}
     usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
     token_used = usage.get("compute_token_used") if isinstance(usage.get("compute_token_used"), dict) else {}
-    if token_used.get("type") != "gpt":
-        return None
-    lease = await fetch_compute_token_activity(REPLAY_USER_ID, token_type="gpt")
+    token_type = token_used.get("type")
+    if token_type not in ("gpt", "claude"):
+        return {}
+    lease = await fetch_compute_token_activity(REPLAY_USER_ID, token_type=token_type)
     if not lease:
-        raise SystemExit("Dump used gptAuth but no GPT compute token could be leased for the replay")
-    return _build_compute_auth_context(lease, REPLAY_USER_ID, max_rotations=0)
+        raise SystemExit(f"Dump used {token_type}Auth but no {token_type} compute token could be leased for the replay")
+    return {f"{token_type}_auth": _build_compute_auth_context(lease, REPLAY_USER_ID, max_rotations=0)}
+
+
+async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
+    """The leased GPT auth for a gptAuth dump (paths that only take gpt_auth)."""
+    return (await direct_auth_from_dump(data)).get("gpt_auth")
 
 
 def _pool_from_dump(data: dict[str, Any]) -> str:
@@ -399,9 +408,7 @@ async def _collect_recorded_call(
         "dump_extra": dump_extra,
         "skip_cache_write": True,
     }
-    gpt_auth = gpt_auth_from_dump(data)
-    if gpt_auth is not None:
-        kwargs["gpt_auth"] = gpt_auth
+    kwargs.update(await direct_auth_from_dump(data))
     effort = config.get("reasoning_effort") or requested.get("reasoning_effort")
     if effort:
         kwargs["effort"] = effort
@@ -506,9 +513,7 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     # Replay on the transport the dump actually used. Falling through to the
     # OpenRouter waterfall silently swaps the provider, so a direct-auth
     # (claudeAuth/gptAuth) divergence cannot be reproduced at all.
-    gpt_auth = await gpt_auth_from_dump(data)
-    if gpt_auth is not None:
-        kwargs["gpt_auth"] = gpt_auth
+    kwargs.update(await direct_auth_from_dump(data))
     # Reasoning effort materially changes tool choice, so a replay that drops it
     # is not the same call. `collect()` cannot express it — it forwards a fixed
     # arg list to `complete()` — so stream `complete()` directly and accumulate

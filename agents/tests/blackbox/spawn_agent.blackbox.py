@@ -3802,7 +3802,7 @@ async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_fail
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
         # No progress posts here: every step is past the GET fallback window.
-        patch("helpers.agent_inbox.INBOX_FALLBACK_POLL_SECONDS", 0.0),
+        patch("helpers.agent_inbox.INBOX_READ_INFLIGHT_SECONDS", 0.0),
     ):
         result = await spawn_explore_agent_activity(
             agent_id="parent-1",
@@ -4079,13 +4079,13 @@ async def test_explore_list_agents_alone_is_not_completion_evidence():
     assert any(item.startswith("[list_agents] ") for item in result["tool_call_results"]), result["tool_call_results"]
 
 
-async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback():
-    """At 10k explore agents the per-step inbox GET is gone: the progress post carries the read.
+async def test_explore_inbox_rides_the_progress_post_and_reads_alongside_each_turn():
+    """The progress post carries a read, and each turn starts one background GET.
 
     Each fire-and-forget post sends {inbox: {task_id, since}}; its pending_inbox
     rows are delivered at the next step (one step late), deduped by id with the
-    cursor advanced. No GET runs while posts answer; after 30s without an
-    answered read, one GET runs.
+    cursor advanced. The post read predates the turn's tools, so every turn
+    also starts one background GET from the delivered cursor (never awaited).
     """
     from unittest.mock import AsyncMock, patch
 
@@ -4124,8 +4124,10 @@ async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback()
                 await asyncio.sleep(0)  # the fire-and-forget post completes during the step
             clock["now"] += 5
             polled.append([row["text"] for row in await kwargs["poll_inbox"]()])
-        assert fetch.await_count == 0, "an inbox GET ran while progress posts answered"
-        clock["now"] += 31  # no answered read for 30s → one fallback GET
+        for _ in range(5):
+            await asyncio.sleep(0)  # the last turn's background read runs
+        assert fetch.await_count == 4, "each turn starts one background read"
+        clock["now"] += 31
         polled.append([row["text"] for row in await kwargs["poll_inbox"]()])
         return {"status": "completed", "final_response": "done"}
 
@@ -4149,7 +4151,8 @@ async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback()
     assert posted[0] == {"task_id": "tc-1"}, posted
     assert posted[1] == {"task_id": "tc-1", "since": m1["created_at"]}, posted
     assert posted[2] == {"task_id": "tc-1", "since": m2["created_at"]}, posted
-    assert [c.args for c in fetch.await_args_list] == [("parent-1", "tc-1", m2["created_at"])]
+    assert fetch.await_count == 5, fetch.await_args_list
+    assert fetch.await_args_list[-1].args == ("parent-1", "tc-1", m2["created_at"])
 
 
 async def test_explore_reads_a_message_stored_before_its_final_answer():
@@ -4221,6 +4224,108 @@ async def test_explore_reads_a_message_stored_before_its_final_answer():
     assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
     assert steps["after"] == [], "the message is delivered exactly once"
     assert result["undelivered_agent_messages"] == []
+
+
+async def test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn():
+    """descend-full69 BG: a message stored mid-tool-batch must reach the explore, not its parent.
+
+    Captured timeline (agent 6e3693b3, background-agent-message-smoke r001-j0008):
+    turn 1's progress post read the inbox at 02:02:56 (empty); the root's
+    message was stored at 02:03:03 while web_fetch ran; turn 2 (the final one)
+    started at 02:03:17, 21s after the last read, so no read ran alongside it;
+    the completion did not see the message and it went to the parent at
+    finish. Every model turn must start a background read alongside its model
+    call so a message stored before the turn defers the completion.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import helpers.agent_inbox as agent_inbox_module
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    forwarded = {
+        "id": "m-forwarded",
+        "text": "Every document note must contain the exact phrase 'Forwarded marker: HTTP core document'.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-25T02:03:03.035Z",
+    }
+    stored: list = []
+
+    async def fetch(*_args, **_kwargs):
+        return list(stored)
+
+    async def fake_save(**_kwargs):
+        return list(stored)  # the piggybacked read sees whatever is stored now
+
+    clock = {"now": 1000.0}
+    fake_fetch = MagicMock()
+    fake_fetch.execute_tool = MagicMock()
+    steps: dict = {}
+
+    async def model_call():
+        for _ in range(20):  # background reads and posts answer during the model call
+            await asyncio.sleep(0)
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await kwargs["poll_inbox"]()
+        await model_call()
+        await kwargs["post_message"]("Fetching both RFC pages.", "ASSISTANT", {"title": "thinking"})
+        for _ in range(5):
+            await asyncio.sleep(0)  # turn 1's post read answers: inbox still empty
+        await execute_tool("web_search", {"query": "RFC 9110"}, "tc-fetch")
+        stored.append(forwarded)  # the root forwards while the tool batch runs
+        clock["now"] += 21
+        steps["turn2"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        await model_call()
+        steps["first"] = await execute_tool("attempt_completion_with_result", {"result": "2 RFCs"}, "tc-done-1")
+        steps["delivered"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        await model_call()
+        steps["second"] = await execute_tool("attempt_completion_with_result", {"result": "2 RFCs + marker"}, "tc-2")
+        return {"status": "completed", "final_response": "2 RFCs + marker"}
+
+    from unittest.mock import AsyncMock
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "RFC 9110 HTTP Semantics, June 2022."})
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+        patch.object(agent_inbox_module.time, "monotonic", lambda: clock["now"]),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="root-1",
+            user_id="u",
+            goal="Inspect RFC 9110 and RFC 9111",
+            model="m",
+            task_id="task-1",
+            inbox_address="call_bg",
+        )
+
+    assert result["status"] != "failed", result
+    assert steps["turn2"] == [], "the read runs alongside the turn; it is never awaited"
+    assert steps["first"].get("error") is True, "the final answer must not be accepted over a stored message"
+    assert steps["delivered"] == [forwarded["text"]], steps
+    assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
+    assert result["undelivered_agent_messages"] == [], "the message reached the explore, not its parent"
+
+
+async def test_run_in_background_guidance_names_only_execute_phase_tools():
+    """The foreground/background guidance must point at tools the spawning agent actually has.
+
+    descend-full69 BG: Opus set run_in_background=false for a task that said
+    "wait for it to finish" (5/5 replays); the guidance now says to wait with
+    wait_for and forward follow-ups with send_message_to_agent.
+    """
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, RUN_IN_BACKGROUND_DESCRIPTION, SpawnAgentTool
+
+    field = SpawnAgentTool.model_fields["run_in_background"]
+    assert field.default is True and field.description == RUN_IN_BACKGROUND_DESCRIPTION
+    for tool in ("wait_for", "send_message_to_agent"):
+        assert tool in RUN_IN_BACKGROUND_DESCRIPTION and tool in EXECUTE_PHASE_TOOLS, tool
 
 
 async def test_explore_message_landing_after_the_final_answer_reaches_the_parent():
@@ -4363,6 +4468,37 @@ async def test_agent_inbox_abandoned_read_does_not_advance_the_cursor():
     assert resumed.state()["since"] == "2026-10-25T01:00:00.000Z" and resumed.state()["seen_ids"] == ["m1"]
 
 
+async def test_agent_inbox_turn_read_is_not_suppressed_by_an_earlier_in_flight_read():
+    """A read still in flight from before the tool batch must not stand in for the turn's read."""
+    from helpers.agent_inbox import AgentInbox
+
+    m1 = {"id": "m1", "text": "forwarded", "created_at": "2026-10-25T02:03:03.035Z"}
+    stalled = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await stalled.wait()  # started before the message was stored; still in flight
+            return []
+        return [m1]
+
+    from unittest.mock import patch
+
+    inbox = AgentInbox.create("parent-1", "task-1")
+    with patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch):
+        inbox.start_read()  # e.g. a completion or earlier read, still pending
+        await asyncio.sleep(0)
+        assert await inbox.next_step_messages() == []  # the turn starts its own read
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert await inbox.unread_before_finish() is True, "the turn's read fetched the message"
+        stalled.set()
+        assert [m["id"] for m in await inbox.next_step_messages()] == ["m1"]
+        await inbox.finish()
+    assert calls["n"] >= 2
+
+
 async def test_agent_inbox_overlapping_readers_deliver_each_message_exactly_once():
     """A piggybacked post read and a background GET overlap: no double delivery, no drop."""
     from unittest.mock import AsyncMock, patch
@@ -4381,9 +4517,9 @@ async def test_agent_inbox_overlapping_readers_deliver_each_message_exactly_once
         first = await inbox.next_step_messages()
         inbox.stash([m2, m3])  # a late duplicate read
         second = await inbox.next_step_messages()
+        assert await inbox.finish() == []
     assert [m["id"] for m in first] == ["m1", "m2", "m3"]
     assert second == []
-    assert await inbox.finish() == []
 
 
 async def test_explore_without_inbox_address_has_no_inbox_hook():
@@ -6528,12 +6664,24 @@ async def run_all_tests():
         test_explore_list_agents_alone_is_not_completion_evidence,
     )
     await r.record_async(
-        "explore_inbox_rides_progress_post_get_only_fallback",
-        test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback,
+        "explore_inbox_rides_progress_post_reads_each_turn",
+        test_explore_inbox_rides_the_progress_post_and_reads_alongside_each_turn,
     )
     await r.record_async(
         "explore_reads_message_stored_before_final_answer",
         test_explore_reads_a_message_stored_before_its_final_answer,
+    )
+    await r.record_async(
+        "explore_message_stored_during_tool_batch_reaches_final_turn",
+        test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn,
+    )
+    await r.record_async(
+        "agent_inbox_turn_read_not_suppressed_by_in_flight_read",
+        test_agent_inbox_turn_read_is_not_suppressed_by_an_earlier_in_flight_read,
+    )
+    await r.record_async(
+        "run_in_background_guidance_names_only_execute_phase_tools",
+        test_run_in_background_guidance_names_only_execute_phase_tools,
     )
     await r.record_async(
         "explore_without_inbox_address_has_no_inbox_hook", test_explore_without_inbox_address_has_no_inbox_hook

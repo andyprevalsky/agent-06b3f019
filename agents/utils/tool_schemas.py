@@ -58,8 +58,10 @@ SPAWN_TASK_NAME_DESCRIPTION = (
 )
 RUN_IN_BACKGROUND_DESCRIPTION = (
     "Default true: the call returns immediately with the agent's address and the agent keeps "
-    "working while you continue. Set false only when you need this agent's result before you can "
-    "do anything else."
+    "working while you continue. Needing its result is not a reason to set false: call wait_for with "
+    "its address to wait, and the wait also ends when the user sends a new message, so you can reply "
+    "or pass it to the agent with send_message_to_agent. A foreground agent (false) holds your turn, "
+    "so messages the user sends meanwhile are read only after it returns."
 )
 
 # Tools available during PLAN phase (research + create execution plan)
