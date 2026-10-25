@@ -77,6 +77,7 @@ export async function searchAgentNetworkGrepRows(params: {
   pathRole?: string;
   pathMessageId?: string;
   role?: string;
+  oldestFirst?: boolean;
 }): Promise<AgentMessageGrepRow[]> {
   if (params.agentIds.length === 0) return [];
   const expression = Prisma.sql`(
@@ -101,7 +102,7 @@ export async function searchAgentNetworkGrepRows(params: {
     WHERE m."agentId" IN (${Prisma.join(params.agentIds)})
       AND ${predicate}
       ${agentNetworkPathFilters(params)}
-    ORDER BY m."createdAt" DESC, m.id DESC
+    ORDER BY ${params.oldestFirst === true ? Prisma.sql`m."createdAt" ASC, m.id ASC` : Prisma.sql`m."createdAt" DESC, m.id DESC`}
     LIMIT ${pageSize(params.limit, params.offset)}
   `;
 }

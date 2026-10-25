@@ -1,16 +1,16 @@
 ---
 id: 2026-10-25-agent-network-grep-rejected-advertised-record-kind
 date: 2026-10-25
-title: grep rejected record_kind on agent_network with an opaque 400, so an explore could not read a sibling's trajectory
+title: grep rejected trajectory selectors (record_kind, order) on agent_network with an opaque 400, so an explore could not read a sibling's trajectory
 surface: back-end
 component: data-grep-validation
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: back-end/src/domains/data/validate.ts validateAgentSourceSelection — any record_kind without agent_trajectories threw InvalidGrepParamError('agent_trajectories source'), although GrepTool advertises record_kind and every agent_network row is a stored message
+first_bad_boundary: back-end/src/domains/data/validate.ts validateAgentSourceSelection — any record_kind/order/surface/until/page_after without agent_trajectories threw InvalidGrepParamError('agent_trajectories source'), although GrepTool advertises them and every agent_network row is a stored message
 symptoms:
   - "Unsupported grep parameter: 'agent_trajectories source'."
   - "grep source=agent_network record_kind=all trace_path=/root/member_number → 400 INVALID_GREP_PARAM"
-  - "Completion rejected: no evidence tool has succeeded yet. Call web_search, people_search, web_fetch, or grep successfully before completing."
+  - "grep sources=[agent_network] order=oldest_first → Unsupported grep parameter: 'agent_trajectories source'."
   - "explore spawn_agent ERROR Reached max iterations (5)"
   - "browser-auth-assistance-declined assistance-declined-runtime: Observed tool failure: attempt_completion_with_result status=ERROR"
 tags:
@@ -55,19 +55,24 @@ offending parameter. agent_network searches only `Message` rows
 (`agentNetworkGrepRepo.ts`), so `message` and `all` are exactly satisfied by
 it; only model-record kinds are genuinely unavailable there. The same task
 passed in earlier runs because the model happened not to pass `record_kind`.
+The first local post-fix pass (agent 3467c479-b951-47a3-801f-3238ff21dd7f)
+showed the same class through `order=oldest_first` on agent_network; that run
+recovered through agent_trajectories, but the fix was widened to the class.
 Relative of 2026-08-04-grep-emits-pointers-no-tool-can-dereference (same
 contract-inconsistency class, different boundary).
 
-Repro: `cd back-end && ROSE_USE_SYSTEM_PG=true bash scripts/run-blackbox-tests.sh data`
+Repro (record_kind red on 4bb71d90f; order red on d2cfa2c90): `cd back-end && ROSE_USE_SYSTEM_PG=true bash scripts/run-blackbox-tests.sh data`
 failed pre-fix with
 `agent_network record_kind=all reads the stored messages, got 400 {"error":"INVALID_GREP_PARAM","message":"Unsupported grep parameter: 'agent_trajectories source'."}`.
 
 ## Solution
 
-`validateAgentSourceSelection` now accepts `record_kind` message/all when
-agent_network is selected (they select every stored-message row) and rejects
-llm_output/llm_context/code_event with `InvalidGrepParamError('record_kind')`,
-naming the parameter. Other trajectories-only params keep their behavior. No
+For agent_network-only selections, `validateAgentNetworkSelectors` accepts
+`record_kind` message/all (they select every stored-message row) and `order`
+(the repo and display order now honor oldest_first/newest_first), and rejects
+llm_output/llm_context/code_event, surface, until, page_after and a non-task
+trace_path with `InvalidGrepParamError('<that parameter>')`. Selections
+without agent sources keep the old behavior. No
 prompt, schema or harness change. Golden reference: Claude Code's Grep accepts
 selectors that do not apply in the chosen mode and ignores them rather than
 failing the call (`claude-code-src/src/tools/GrepTool/GrepTool.ts:59`,
