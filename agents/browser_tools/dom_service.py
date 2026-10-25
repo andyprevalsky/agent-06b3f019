@@ -683,6 +683,10 @@ class ActionHistory:
             value = result.get(key)
             if isinstance(value, str) and value:
                 self._entries[-1].result[key] = value
+        # The harness-observed sign-in options are what made the agent's chosen
+        # identity the user's own; the verifier grades from this receipt alone.
+        if isinstance(result.get("auth_context"), dict):
+            self._entries[-1].result["auth_context"] = self.model_visible_value(result["auth_context"])
 
         # Retain only the normalized observation actually delivered by the
         # native state reader. A failed coherence check withdraws its snapshot.
