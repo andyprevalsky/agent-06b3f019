@@ -25,6 +25,7 @@ sources:
   - fleet run 20261024-221904-485227
   - agent 1f3da847-09e6-4a7c-9f70-e93df8cd4caa
   - commit 373825135
+  - commit 789b1df60
   - memory:mass-agent-stall-pins-worker-drain
 repro: agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_completion_inbox_read_is_wall_clock_bounded; agents/tests/blackbox/web_fetch.blackbox.py::test_web_fetch_activity_replays_a_cached_provider_error_without_a_live_scrape
 status: fixed
@@ -68,6 +69,28 @@ for a failed fetch, so the recording has no row and every replay scraped live.
 
 ## Solution
 
+Superseded 2026-10-25 (789b1df60, Andy's direction; see Human feedback). The 5s blocking
+bound from 373825135 is replaced by non-blocking reads with ack-after-use delivery:
+
+- `AgentInbox.since`/`seen_ids` are the delivered cursor. Reads (the progress-post
+  piggyback, the 30s fallback GET, the completion GET) only fill `_fetched` (by id) and run
+  as background tasks the agent never awaits.
+- `next_step_messages` delivers everything fetched to the next model turn and acknowledges
+  it. `unread_before_finish` defers the completion one step only when a message is already
+  fetched; otherwise it starts a background read and returns immediately.
+- `finish()` runs at the activity hand-off: reads still in flight get up to 5s, and any
+  message they land after the last turn is appended to the explore result for the parent
+  (`undelivered_agent_messages`). An abandoned read acknowledges nothing, and overlapping
+  readers dedupe by id.
+- Backend unchanged: rows are never consumed server-side, and the read mark only feeds the
+  20-unread send throttle.
+- Golden reference: `claude-code-src/src/query.ts:1570` snapshots queued commands,
+  `:1630-1642` removes only the commands actually consumed as attachments, and `:1595-1612`
+  consumes a prefetch only once settled (zero-wait).
+
+Original MA3 fix, superseded:
+
+
 - `fetch_agent_inbox` wraps the GET in `asyncio.wait_for(..., AGENT_INBOX_TIMEOUT_SECONDS)`.
   A stuck read becomes the existing logged poll failure ("[AgentInbox] poll failed; continuing
   without new agent messages") and returns [], so completion proceeds. The 510s stall threshold
@@ -91,6 +114,9 @@ for a failed fetch, so the recording has no row and every replay scraped live.
 
 ## Human feedback
 
+Andy (2026-10-25): "inbox checks should be done in parallel as much as possible and never block" and "just make sure we don't lose messages / consume them and throw them away in a race"; this replaced the 5s blocking bound.
+
+
 The parent relayed Andy's rules: mass-agent must be fully DEMO cached (zero live calls; cache
 misses are bugs; the task's cache may be changed directly). Do not raise the 510s stall
 threshold or any timeout; a hang past a tool's own deadline is a real bug that needs a
@@ -98,4 +124,4 @@ bounded, truthful error.
 
 ## Reusable lesson
 
-Bound every await on the shared HTTP client with an overall wall-clock deadline, because httpx per-phase timeouts do not cover pool waits; and give each cache a shape for recorded failures so replay never retries live.
+Never await an inbox read on the agent's critical path: read in the background, advance the cursor only for messages actually delivered, and give each cache a shape for recorded failures so replay never retries live.

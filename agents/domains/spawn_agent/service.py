@@ -552,7 +552,7 @@ async def spawn_explore_agent_activity(
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
-    from helpers.agent_inbox import AgentInbox, agent_message_metadata
+    from helpers.agent_inbox import AgentInbox, agent_message_metadata, format_agent_message
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
     from providers.demo_cache.client import resolve_agent_fast_mode
@@ -1165,6 +1165,17 @@ async def spawn_explore_agent_activity(
         tool_call_results,
     )
 
+    # Messages that reached this explore after its last model turn (a background
+    # read landing late) were never acknowledged; hand them to the parent with
+    # the result instead of dropping them.
+    undelivered_agent_messages = await agent_inbox.finish() if agent_inbox is not None else []
+    if undelivered_agent_messages:
+        late = "\n".join(f"- {format_agent_message(message)}" for message in undelivered_agent_messages)
+        final_response = (
+            f"{(final_response or '').rstrip()}\n\n"
+            f"Agent messages sent to this explore agent that arrived after it finished:\n{late}"
+        )
+
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
     # keep the explore's own completion status so the user-visible result is
@@ -1206,6 +1217,7 @@ async def spawn_explore_agent_activity(
             else (None if run_completed else (result.get("message") or result.get("status")))
         ),
         "unavailable_sources": unavailable_sources_collected,
+        "undelivered_agent_messages": undelivered_agent_messages,
         "partial_structured_response": result.get("partial_structured_response"),
         "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),
