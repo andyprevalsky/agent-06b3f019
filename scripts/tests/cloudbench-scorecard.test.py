@@ -601,8 +601,9 @@ class Scorecard(unittest.TestCase):
 
     def test_blocking_agent_moves_section_above_history(self):
         agents = [{"name": "rca-timeout", "work": "480s cutoff", "blocking": True, "status": "⛔", "tokens": 1250000,
-                   "warming_s": 420, "started_at": NOW - 3000, "blocker": "needs approval", "action": "parent delivers packet"},
-                  {"name": "monitor", "status": "🔄", "tokens": None, "life_s": 600}]
+                   "warming_s": 420, "started_at": NOW - 3000, "blocker": "needs approval", "action": "parent delivers packet",
+                   "observed_at": NOW},
+                  {"name": "monitor", "status": "🔄", "tokens": None, "life_s": 600, "observed_at": NOW}]
         document = self.valid(render(self.f.fleet(), self.f, agents=agents))
         self.assertLess(document.index('data-section="agents"'), document.index('data-section="history"'))
         self.assertIn("warming 7m00s", document)
@@ -610,6 +611,44 @@ class Scorecard(unittest.TestCase):
         self.assertIn("UNMETERED", document)
         relaxed = self.valid(render(self.f.fleet(), self.f, agents=[dict(agents[1])]))
         self.assertGreater(relaxed.index('data-section="agents"'), relaxed.index('data-section="history"'))
+
+    def test_stale_overlay_rows_are_refused(self):
+        """2026-10-25 descend-full69: a card published 9m after the run ended still showed the
+        parent "shards launching (1:09 AM)" and pre-run cluster statuses from a hand-kept state
+        file. Overlay rows are claims; each must say when it was observed, after the run's
+        latest evidence and within the 15-minute checkpoint, or the card is not rendered."""
+        run = self.f.fleet()  # ended at T0 + 960; NOW = T0 + 3600
+        fresh_issue = {"text": "mass-agent T7 RCA", "owner": "ma", "action": "fix", "observed_at": NOW - 60}
+        fresh_agent = {"name": "parent", "work": "/descend", "status": "🔄", "observed_at": NOW - 60}
+        cases = {
+            "issue without observed_at": {"issues": [{"text": "shards launching", "owner": "parent"}]},
+            "agent without observed_at": {"agents": [{"name": "parent", "work": "shards launching"}]},
+            "issue observed before the run ended": {"issues": [dict(fresh_issue, observed_at=T0 + 900)]},
+            "agent older than 15 minutes": {"agents": [dict(fresh_agent, observed_at=NOW - 16 * 60)]},
+            "unparseable observed_at": {"issues": [dict(fresh_issue, observed_at="yesterday")]},
+        }
+        for name, overlay in cases.items():
+            with self.subTest(name), self.assertRaises(CARD["StaleOverlay"]) as raised:
+                render(run, self.f, **overlay)
+            self.assertIn("observed", str(raised.exception))
+        card = render(run, self.f, agents=[fresh_agent], issues=[fresh_issue])
+        self.valid(card)
+        self.assertIn("mass-agent T7 RCA", json.dumps(card["issues"]))
+        self.valid(render(run, self.f, agents=[], issues=[]))
+
+    def test_cli_refuses_stale_overlay_without_writing_the_card(self):
+        run = self.f.fleet()
+        out = self.tmp / "card/stale.html"
+        issues = write(self.tmp / "issues.json", json.dumps([{"text": "shards launching (1:09 AM)", "owner": "parent",
+                                                              "observed_at": T0 + 10}]))
+        env = dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.f.ledger))
+        made = subprocess.run(["bash", str(ROOT / "scripts/run-bench"), "scorecard", str(run), "--html", str(out),
+                               "--issues", str(issues), "--now", str(NOW)],
+                              capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(made.returncode, 1, made.stdout)
+        self.assertIn("shards launching", made.stderr)
+        self.assertIn("before the run's latest evidence", made.stderr)
+        self.assertFalse(out.exists(), "a stale card must not be written")
 
     def test_cli_html_text_json_and_validate(self):
         run = self.f.fleet()

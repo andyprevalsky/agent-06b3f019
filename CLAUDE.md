@@ -91,6 +91,12 @@ links. A file pointer never substitutes for the diff.
   local gates, coordinate supported reuse, and report the remaining allocation gap.
 - Refresh native running/stopped counts after material cleanup before presenting
   them as current; keep older snapshots clearly dated and separate from live facts.
+- **Never show stale data** (user, October 25, 2026). Rebuild every scorecard
+  status, parent/worker row and issue from the live run, worker results and
+  merged HEAD at render time. Each `--agents`/`--issues` row carries
+  `observed_at`. The renderer refuses rows that are unstamped, older than 15
+  minutes, or older than the run's end. Before publishing, cross-check the card
+  against the run's own result.
 - Infra stop means **5% of the original scheduled total: 30 of 600**. Display
   `infra jobs / scheduled jobs`; never use finished attempts as denominator.
   Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.

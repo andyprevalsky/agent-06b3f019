@@ -807,6 +807,48 @@ def load(run_dir: Path, deep: bool = True) -> dict:
 
 # ------------------------------------------------------------- whole card
 
+OVERLAY_MAX_AGE_S = 15 * 60
+
+
+class StaleOverlay(ValueError):
+    """Hand-supplied --agents/--issues rows that cannot be shown as current."""
+
+
+def _observed_epoch(value) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: float | None) -> list[str]:
+    """Overlay rows are claims made outside the run's artifacts, so each carries ``observed_at``.
+
+    A claim older than the 15-minute checkpoint, or made before the run's latest
+    evidence (its end), may describe a world that no longer exists; it is refused
+    rather than shown as current.
+    """
+    problems = []
+    for row in rows:
+        label = str(row.get("name") or row.get("text") or "?")[:80]
+        at = _observed_epoch(row.get("observed_at"))
+        if at is None:
+            problems.append(f"{kind} row {label!r}: no parseable observed_at")
+            continue
+        reasons = []
+        if now - at > OVERLAY_MAX_AGE_S:
+            reasons.append(f"observed {duration(now - at)} ago (max {duration(OVERLAY_MAX_AGE_S)})")
+        if evidence_at is not None and at < evidence_at:
+            reasons.append(f"observed {duration(evidence_at - at)} before the run's latest evidence")
+        if reasons:
+            problems.append(f"{kind} row {label!r}: " + "; ".join(reasons))
+    return problems
+
+
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, agents=None, issues=None,
           now: float | None = None, deep: bool = True) -> dict:
     now = time.time() if now is None else now
@@ -847,8 +889,14 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
         since = {"state": "ENDED", "label": label, "at": at, "age": now - at}
     elif exp.get("ended_at") is None:
         since = {"state": "END UNRECORDED"}
-    exp_issues = _issues(exp) + [i for i in (issues or []) if isinstance(i, dict) and i.get("text")]
+    overlay_issues = [i for i in (issues or []) if isinstance(i, dict) and i.get("text")]
     agents = [a for a in (agents or []) if isinstance(a, dict) and a.get("name")]
+    stale = (stale_overlay_rows(agents, "agent", now=now, evidence_at=exp.get("ended_at"))
+             + stale_overlay_rows(overlay_issues, "issue", now=now, evidence_at=exp.get("ended_at")))
+    if stale:
+        raise StaleOverlay("stale overlay; refresh these rows from current evidence before rendering:\n  "
+                           + "\n  ".join(stale))
+    exp_issues = _issues(exp) + overlay_issues
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
             "since": since, "experiment": exp, "history": history, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
@@ -1415,9 +1463,13 @@ def main(argv=None) -> int:
         parser.error("an existing <run-dir> is required")
     agents = read_json(args.agents) if args.agents else None
     issues = read_json(args.issues) if args.issues else None
-    card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
-                 agents=agents if isinstance(agents, list) else None,
-                 issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
+    try:
+        card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
+                     agents=agents if isinstance(agents, list) else None,
+                     issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
+    except StaleOverlay as error:
+        print(f"scorecard refused: {error}", file=sys.stderr)
+        return 1
     if args.html:
         document = render_html(card)
         problems = validate_html(document)

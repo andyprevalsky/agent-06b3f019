@@ -15,6 +15,12 @@ Communication contract (mandatory)
   issues with `--issues <issues.json>`; every other value comes from recorded
   run artifacts and the git-common experiments ledger. If a value is wrong or
   missing, fix its producer or artifact; never patch the rendered card.
+- Never show stale data. Every `--agents`/`--issues` row carries `observed_at`,
+  the instant its claim was last checked against current evidence. Rebuild
+  rows from the live run, the worker results and the merged HEAD at render
+  time; never carry over a saved summary. The renderer refuses the card (exit 1,
+  no HTML) when a row lacks `observed_at`, is older than 15 minutes, or predates
+  the run's end. Re-observe and re-render; never backdate or omit the field.
 - Apply `.claude/shared/report-display-format.md` to this card and every other
   skill display: 12-hour America/Los_Angeles timestamps (PDT/PST by date), one
   status emoji, current-assignment tokens and rolling 15-minute tokens/min, with
