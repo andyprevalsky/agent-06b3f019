@@ -69,6 +69,8 @@ class TaskResult:
     prompt_cache_uncached_input_tokens: int = 0
     prompt_cache_share_pct: float = 0.0
     prompt_cache_call_count: int = 0
+    # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
+    prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0

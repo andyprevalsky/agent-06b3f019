@@ -14672,6 +14672,30 @@ def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Option
     return run_user_id_override
 
 
+async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask) -> Optional[dict]:
+    """Prime the root's static prompt prefix for a cache-gated task (benchmarks.cache_warmup).
+
+    Recorded on the result only; the measured prompt-cache share never includes it.
+    """
+    if PER_TASK_CACHE_HIT_RATCHET.get(task.name, 0) <= 0:
+        return None
+    from benchmarks.cache_warmup import warm_root_static_prefix
+
+    user_id = _current_benchmark_user_id()
+    model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
+    model = model_override if model_override and task.demo_cache != "on" else task.model
+    warmup = await warm_root_static_prefix(
+        base_url=base_url,
+        headers={"X-API-Key": API_KEY or "", "X-User-Id": user_id},
+        user_id=user_id,
+        goal=_benchmark_goal_for_task(task, base_url),
+        start_phase=task.start_phase,
+        model=model or None,
+    )
+    print(f"    🔥 prompt-cache warmup for {task.name}: {json.dumps(warmup, sort_keys=True)[:400]}")
+    return warmup
+
+
 async def _run_single_task_as_run_user(
     base_url: str,
     task: BenchmarkTask,
@@ -14949,6 +14973,7 @@ async def _run_single_task_as_run_user(
         custody = _task_root_custody.get()
         if custody is not None:
             custody["graded_creation"] = "unknown"
+        prompt_cache_warmup = await _warm_cache_gated_root(base_url, task)
         agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")
         execution_started_at = asyncio.get_running_loop().time()
@@ -15504,6 +15529,7 @@ async def _run_single_task_as_run_user(
             prompt_cache_uncached_input_tokens=int(prompt_cache["uncached_input_tokens"]),
             prompt_cache_share_pct=float(prompt_cache["cache_share_pct"]),
             prompt_cache_call_count=int(prompt_cache["call_count"]),
+            prompt_cache_warmup=prompt_cache_warmup,
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
             tokens_in=tokens_in,
@@ -15547,6 +15573,14 @@ async def _run_single_task_as_run_user(
         if total_input > 0:
             print(
                 f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
+            )
+        if result.prompt_cache_warmup is not None:
+            warm = result.prompt_cache_warmup
+            print(
+                "       Prompt-cache warmup (not scored): "
+                f"route={warm.get('token_type')} read={warm.get('cache_read_input_tokens')} "
+                f"write={warm.get('cache_creation_input_tokens')} uncached={warm.get('uncached_input_tokens')}"
+                + (f" error={warm['error']}" if warm.get("error") else "")
             )
         if result.prompt_cache_call_count > 0:
             print(
