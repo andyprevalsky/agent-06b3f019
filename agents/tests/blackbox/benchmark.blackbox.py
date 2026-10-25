@@ -5550,6 +5550,90 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         )
 
 
+async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
+    """RCA 2026-10-25 judge Codex token unavailable: under a 70-copy cloud fleet the only
+    Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
+    asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
+    Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    import importlib.util
+    from dataclasses import replace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    class _NoToken404:
+        status_code = 404
+
+        def json(self):
+            return {"error": "NO_TOKENS_AVAILABLE"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return _NoToken404()
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
+    judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            judge_error = error
+        else:
+            raise AssertionError("judge must not succeed without a compute token")
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+
+    logs = {"failure_evidence": {"errors": []}}
+    with contextlib.ExitStack() as stack:
+        for name in (
+            "_apply_live_fixtures",
+            "_apply_memory_fixtures",
+            "_apply_auth_test_site",
+            "_restore_live_fixture_scenarios_async",
+            "_release_auth_test_site",
+        ):
+            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+        for name, replacement in {
+            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+            "delete_agent": AsyncMock(return_value=None),
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
+        result = await bench._run_single_task_as_run_user(
+            "https://fixture.invalid", task, False, None, "", None, None, None
+        )
+    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+    assert result.failure_reason.startswith(
+        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+        "failed: Codex compute token unavailable for agentic benchmark judge"
+    ), result.failure_reason
+    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+    spec = importlib.util.spec_from_file_location(
+        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+    )
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+
+
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
     """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
     from benchmarks.results import TaskResult
@@ -25358,6 +25442,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
+    )
+    await r.record_async(
+        "judge_compute_token_unavailable_skips",
+        test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
     )
     await r.record_async(
         "agentcard_release_skip_execution_cleanup",

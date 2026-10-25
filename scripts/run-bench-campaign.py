@@ -689,7 +689,8 @@ def task_verdict(task: dict) -> dict[str, object]:
     return {"task_status": status,
             "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
             "terminal_task": isinstance(task.get("passed"), bool) and status in {
-                "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"}}
+                "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED",
+                "SKIPPED"}}
 
 
 def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
