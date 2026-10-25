@@ -574,11 +574,24 @@ def _schema_field_types(schema: Optional[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
+def _may_fill(current: Dict[str, Any], name: str, value: Any, field_type: str) -> bool:
+    """Whether a transcript-derived value may fill ``name``.
+
+    An absent key is filled as before (a demo root's report text is materialized
+    into files later). A key the verifier returned empty ([] / "") was judged
+    ungrounded; only a value of the field's own type may replace it.
+    """
+    if value in (None, "", [], {}):
+        return False
+    if name not in current or current[name] is None:
+        return True
+    return current[name] in ("", [], {}) and _fits_field_type(value, field_type)
+
+
 def _fits_field_type(value: Any, field_type: str) -> bool:
     """True when a transcript-derived value has the field's declared response_schema type."""
-    if not field_type or field_type == "file_pointer":
-        # Untyped legacy field, or report text that completion materializes into a file.
-        return True
+    if not field_type:
+        return True  # untyped legacy schema field
     if field_type == "str":
         return isinstance(value, str)
     if field_type == "int":
@@ -587,7 +600,7 @@ def _fits_field_type(value: Any, field_type: str) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if field_type == "bool":
         return isinstance(value, bool)
-    if field_type == "object":
+    if field_type in ("object", "file_pointer"):
         return isinstance(value, dict)
     if field_type.startswith("list["):
         if not isinstance(value, list):
@@ -607,7 +620,7 @@ def _fill_from_row_and_sections(
     types = types or {}
 
     def fits(name: str, value: Any) -> bool:
-        return _fits_field_type(value, types.get(name, ""))
+        return _may_fill(merged, name, value, types.get(name, ""))
 
     def missing() -> List[str]:
         return [name for name in names if name not in merged or merged[name] in empty]
@@ -715,9 +728,7 @@ def coalesce_structured_response(
         if not extracted:
             continue
         for key, value in extracted.items():
-            if (key not in merged or merged[key] in (None, "", [], {})) and _fits_field_type(
-                value, field_types.get(key, "")
-            ):
+            if _may_fill(merged, key, value, field_types.get(key, "")):
                 merged[key] = value
         if not _missing(merged):
             break

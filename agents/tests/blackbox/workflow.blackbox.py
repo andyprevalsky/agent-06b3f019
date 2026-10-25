@@ -2933,7 +2933,7 @@ def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
             {"name": "core_content_pillars", "type": "list[str]"},
             {"name": "audience_persona", "type": "str"},
             {"name": "legacy_note"},
-            {"name": "positioning_statement", "type": "file_pointer"},
+            {"name": "positioning_statement", "type": "list[object]"},
         ]
     }
     row_item = {
@@ -2960,7 +2960,7 @@ def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
     assert merged["core_content_pillars"] == ["fitness experiments", "nutrition"]
     assert merged["audience_persona"].startswith("Ambitious 25-40")
     assert merged["legacy_note"] == "kept"
-    # Report text for a file_pointer field is materialized into a file at completion.
+    # An absent key still takes report text: a demo root materializes it into a file.
     assert merged["positioning_statement"].startswith("Ambitious 25-40")
 
 
