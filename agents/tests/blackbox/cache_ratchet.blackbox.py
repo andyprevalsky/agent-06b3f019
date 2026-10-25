@@ -75,6 +75,7 @@ def test_prompt_cache_share_is_the_golden_reference_hit_rate():
         "uncached_input_tokens": 40,
         "cache_share_pct": 38.3,
         "call_count": 4,
+        "routes": ["gpt_auth", "unclassified"],
     }, metrics
 
 
@@ -104,6 +105,7 @@ def test_one_shot_sequences_and_sibling_namespaces_are_measured():
         "uncached_input_tokens": 0,
         "cache_share_pct": 0.0,
         "call_count": 9,
+        "routes": ["gpt_auth"],
     }, metrics
 
 
@@ -134,6 +136,7 @@ def _share_result(name: str, usage: list[dict]) -> object:
         prompt_cache_uncached_input_tokens=metrics["uncached_input_tokens"],
         prompt_cache_share_pct=metrics["cache_share_pct"],
         prompt_cache_call_count=metrics["call_count"],
+        prompt_cache_routes=metrics["routes"],
     )
 
 
@@ -285,6 +288,74 @@ def test_warmup_is_recorded_apart_from_the_measured_share():
     enforce_cache_ratchets([warm_measured])
 
 
+def _gpt_call(read: int, write: int, uncached: int) -> dict:
+    return dict(_call(read, write, uncached), model="gpt-6-sol-gpt")
+
+
+def test_cache_route_is_recorded_from_the_served_model():
+    """The share records which route served its sequenced calls."""
+    from benchmarks.llm_usage import aggregate_prompt_cache_share
+
+    assert aggregate_prompt_cache_share([_call(10, 10, 1)])["routes"] == ["claude_auth"]
+    assert aggregate_prompt_cache_share([_gpt_call(10, 0, 30)])["routes"] == ["gpt_auth"]
+    assert aggregate_prompt_cache_share([_call(10, 10, 1), _gpt_call(10, 0, 30)])["routes"] == ["claude_auth", "gpt_auth"]
+    unknown = dict(_call(10, 10, 1), model="mystery-model")
+    assert aggregate_prompt_cache_share([unknown])["routes"] == ["unclassified"]
+
+
+def test_gpt_route_floor_is_derived_by_one_rule_from_measured_history():
+    """One uniform rule (median of pure-route passing samples x 0.9, as OpenClaw's stable lane
+    0.996 -> 0.90), capped at the task floor; under 3 samples falls back to the task floor."""
+    from benchmarks.run_benchmark import (
+        CACHE_FLOOR_ROUTE_SAMPLES,
+        PER_TASK_CACHE_HIT_RATCHET,
+        derive_route_cache_floor,
+        route_cache_floor,
+    )
+
+    assert derive_route_cache_floor([16.0, 20.3, 26.2], cap=25.0) == 18.3
+    assert derive_route_cache_floor([72.6, 75.3, 75.9], cap=40.0) == 40.0
+    assert derive_route_cache_floor([37.3, 46.3], cap=35.0) == 35.0
+    for (task, route), samples in CACHE_FLOOR_ROUTE_SAMPLES.items():
+        assert route_cache_floor(task, [route]) == derive_route_cache_floor(
+            samples, cap=PER_TASK_CACHE_HIT_RATCHET[task]
+        ), (task, route)
+    for task, floor in PER_TASK_CACHE_HIT_RATCHET.items():
+        assert route_cache_floor(task, ["claude_auth"]) == floor
+        assert route_cache_floor(task, ["other"]) == floor
+
+
+def _routed_result(name: str, usage: list[dict]) -> object:
+    return _share_result(name, usage)
+
+
+def test_gpt_route_run_at_24_percent_passes_only_under_the_derived_floor():
+    """spawn-sub-agents on GPT at 24%: passes against the derived GPT floor, fails against Claude's 25%."""
+    from benchmarks.run_benchmark import enforce_cache_ratchets, route_cache_floor
+
+    gpt_run = _routed_result("spawn-sub-agents", [_gpt_call(2400, 0, 7600)])
+    assert gpt_run.prompt_cache_share_pct == 24.0
+    assert route_cache_floor("spawn-sub-agents", ["gpt_auth"]) < 24.0
+    enforce_cache_ratchets([gpt_run])
+
+    claude_run = _routed_result("spawn-sub-agents", [_call(2400, 7596, 4)])
+    assert claude_run.prompt_cache_share_pct == 24.0
+    assert route_cache_floor("spawn-sub-agents", ["claude_auth"]) == 25.0
+    _assert_ratchet_fails(claude_run)
+
+    mixed = _routed_result("spawn-sub-agents", [_gpt_call(1200, 0, 3800), _call(1200, 3796, 4)])
+    _assert_ratchet_fails(mixed)  # mixed routes take the strictest floor
+
+
+def test_missing_route_telemetry_fails_closed():
+    """No recorded route, or an unclassified one, cannot select a lenient floor."""
+    good_share = _share_result("spawn-sub-agents", [_gpt_call(9000, 0, 1000)])
+    good_share.prompt_cache_routes = []
+    _assert_ratchet_fails(good_share)
+    good_share.prompt_cache_routes = ["unclassified"]
+    _assert_ratchet_fails(good_share)
+
+
 def test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled():
     """Deploy smoke may warn on Claude Code cache telemetry without weakening other ratchets."""
     from benchmarks.run_benchmark import CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, enforce_cache_ratchets
@@ -350,6 +421,7 @@ async def test_collector_identity_is_authoritative_and_separates_agents():
         "uncached_input_tokens": 0,
         "cache_share_pct": 50.0,
         "call_count": 2,
+        "routes": ["gpt_auth"],
     }
 
 
@@ -446,6 +518,10 @@ async def run_all_tests():
     result.record("warmup_primes_root_prefix_both_routes", test_warmup_primes_the_root_static_prefix_on_both_routes)
     result.record("warmup_does_not_mask_run_specific_prefix", test_warmup_does_not_mask_a_run_specific_static_prefix)
     result.record("warmup_recorded_apart_from_share", test_warmup_is_recorded_apart_from_the_measured_share)
+    result.record("cache_route_recorded", test_cache_route_is_recorded_from_the_served_model)
+    result.record("gpt_floor_uniform_rule", test_gpt_route_floor_is_derived_by_one_rule_from_measured_history)
+    result.record("gpt_run_24_derived_floor", test_gpt_route_run_at_24_percent_passes_only_under_the_derived_floor)
+    result.record("missing_route_fails_closed", test_missing_route_telemetry_fails_closed)
     result.record(
         "claude_code_cache_ratchet_deploy_warn_only",
         test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled,

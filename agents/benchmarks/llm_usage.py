@@ -160,7 +160,22 @@ def aggregate_prompt_cache_share(items: Iterable[dict[str, Any]]) -> dict[str, i
         "uncached_input_tokens": uncached,
         "cache_share_pct": round(cache_read / total * 100, 1) if total else 0.0,
         "call_count": len(calls),
+        "routes": sorted({cache_route(classify_usage_item(item)[0]) for item in calls}),
     }
+
+
+# Prompt-cache lanes. Claude auth honours explicit cache breakpoints; the ChatGPT
+# OAuth route rejects them and serves cross-sequence reuse opportunistically
+# (case 2026-10-25-chatgpt-oauth-backend-rejects-cache-breakpoints-...), so it is
+# gated as its own lane, as OpenClaw gates each cache lane separately.
+_CACHE_ROUTES = {"claude_oauth_token": "claude_auth", "codex_token": "gpt_auth"}
+
+
+def cache_route(provider: str) -> str:
+    """Cache lane of a usage provider: claude_auth, gpt_auth, other or unclassified."""
+    if provider == "unclassified":
+        return "unclassified"
+    return _CACHE_ROUTES.get(provider, "other")
 
 
 def merge_usage_breakdowns(
