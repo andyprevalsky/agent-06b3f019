@@ -1710,6 +1710,75 @@ def test_local_port_run_binds_judge_backend_to_the_stack_under_test():
     assert "_bind_backend_api_url(base_url)" in main_source[resolve : resolve + 1500]
 
 
+def test_mass_agent_completion_outputs_must_satisfy_their_response_schema():
+    """descend-full69 MA5: 44 of 50 first-level GPs finished with schema-incomplete output.
+
+    Their replayed verifier rows predated the output contract, so a GP completed
+    holding only fields coalesced from its transcript (Tim Ferriss: 5 of 14,
+    hook_formulas a str). Only the T7 judge looked, and it passed that evidence
+    some of the time. The static check validates the root and every first-level
+    GP with the verifier's own completion contract.
+    """
+    from benchmarks import run_benchmark
+
+    gp_fields = [
+        ("creator_name", "str"),
+        ("rank_from_initial_list", "int"),
+        ("platform_handles_and_urls", "str"),
+        ("posting_cadence_by_platform", "str"),
+        ("hook_formulas", "list[str]"),
+        ("top_5_performing_pieces_last_90_days", "list[object]"),
+        ("core_content_pillars", "list[str]"),
+        ("audience_persona", "str"),
+        ("monetization_funnels", "str"),
+        ("content_gaps", "list[str]"),
+        ("opportunities_for_aman", "str"),
+        ("engagement_approach", "str"),
+        ("citations_sources", "list[str]"),
+        ("confidence_level", "str"),
+    ]
+    gp_schema = {"fields": [{"name": n, "type": t, "required": True} for n, t in gp_fields]}
+    complete = {
+        n: (7 if t == "int" else ["x"] if t == "list[str]" else [{"title": "x"}] if t == "list[object]" else "x")
+        for n, t in gp_fields
+    }
+    file_pointer = {
+        "id": "dc45f44f-a4ed-55ff-b334-02674f6973f2",
+        "created_at": "2026-10-25T08:37:33.678222Z",
+        "mime_type": "text/html",
+        "original_filename": "hook-tested-script-openings.html",
+        "size_bytes": 10597,
+        "storage_path": "1f85ff25/dc45f44f_hook-tested-script-openings.html",
+    }
+    root_schema = {"fields": [{"name": "report", "type": "file_pointer", "required": True}]}
+    explore = {"parent_agent_id": "gp-tim", "goal": "Explore Tim", "agent_type": "explore"}
+
+    def run(tim_output):
+        tree = {
+            "root-1": {"response_schema": root_schema, "structured_output": {"report": file_pointer}},
+            "gp-molly": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": complete},
+            "gp-tim": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": tim_output},
+            "ex-1": explore,
+        }
+        data = {"agent": {"agent_id": "root-1"}, "logs": {"tree": tree}}
+        return run_benchmark._completion_structured_output_schema_check(data, {"include_first_level_gps": True})
+
+    # Tim's replayed output: 5 of 14 fields, hook_formulas a string.
+    ok, reason = run(
+        {
+            "creator_name": "Tim Ferriss",
+            "rank_from_initial_list": 3,
+            "platform_handles_and_urls": "YouTube @timferriss",
+            "monetization_funnels": "sponsors",
+            "hook_formulas": "- **Title formulas:** guest name + epithet",
+        }
+    )
+    assert ok is False
+    assert reason.startswith("T7: 1 of 3 completion outputs") and "gp-tim" in reason, reason
+    assert "hook_formulas:list_type" in reason and "posting_cadence_by_platform:missing" in reason, reason
+    assert run(dict(complete)) == (True, "")
+
+
 def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
     """Queue preflight must not require killing sibling benchmark workers."""
     import os
@@ -25377,6 +25446,10 @@ async def run_all_tests():
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
+    r.record(
+        "mass_agent_completion_outputs_must_satisfy_their_response_schema",
+        test_mass_agent_completion_outputs_must_satisfy_their_response_schema,
+    )
     r.record(
         "local_port_run_binds_judge_backend_to_the_stack_under_test",
         test_local_port_run_binds_judge_backend_to_the_stack_under_test,

@@ -2916,6 +2916,54 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     assert outputs[0]["value"] == "Aman as the founder-operator."
 
 
+def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
+    """descend-full69 MA5: transcript fills turned list fields into markdown strings.
+
+    The verifier left ungrounded list fields empty ([]); the completion fill then
+    took a row item's / heading's markdown text for ``hook_formulas`` (list[str]),
+    so the finished output no longer satisfied its response_schema. A fill must
+    match the field's declared type; untyped fields keep the old behaviour.
+    """
+    import json as _json
+
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "hook_formulas", "type": "list[str]"},
+            {"name": "core_content_pillars", "type": "list[str]"},
+            {"name": "audience_persona", "type": "str"},
+            {"name": "legacy_note"},
+            {"name": "positioning_statement", "type": "list[object]"},
+        ]
+    }
+    row_item = {
+        "hook_formulas": "- First-person self-experiment framing\n- 30-day challenge titles",
+        "core_content_pillars": ["fitness experiments", "nutrition"],
+        "legacy_note": "kept",
+    }
+    persona = "Ambitious 25-40 knowledge workers who want practical, evidence-led health routines. " * 3
+    context = [
+        {
+            "role": "TOOL",
+            "text": f"Row item report: {_json.dumps(row_item)}",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": f"# audience_persona\n\n{persona}\n\n# positioning_statement\n\n{persona}",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+    ]
+    merged = wf._coalesce_structured_response(context, {"hook_formulas": [], "audience_persona": ""})
+
+    assert merged["hook_formulas"] == [], "a markdown string must not fill a list[str] field"
+    assert merged["core_content_pillars"] == ["fitness experiments", "nutrition"]
+    assert merged["audience_persona"].startswith("Ambitious 25-40")
+    assert merged["legacy_note"] == "kept"
+    # An absent key still takes report text: a demo root materializes it into a file.
+    assert merged["positioning_statement"].startswith("Ambitious 25-40")
+
+
 def test_workflow_coalesce_for_each_items_fills_top_creators_analysis():
     wf = _bare_workflow_instance()
     wf.output_schema = {
@@ -12231,6 +12279,10 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_structured_response_from_headings",
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
+    r.record(
+        "wf_coalesce_fills_only_values_of_the_schema_field_type",
+        test_workflow_coalesce_fills_only_values_of_the_schema_field_type,
     )
     r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",
