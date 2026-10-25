@@ -1782,6 +1782,24 @@ CODEX_HARNESS_CREDENTIAL_SKIP_REASON = (
 )
 
 
+COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON = "Compute token pool exhausted or cooling down"
+
+
+class ComputeTokenUnavailable(RuntimeError):
+    """No shared compute token is leasable for a benchmark-owned consumer right now.
+
+    The shared token pool is exhausted or every token is in a provider cooldown.
+    That is a skipped test under the standing user decision, not an infra failure
+    or a task verdict: it counts toward neither the infra stop nor pass/fail.
+    """
+
+
+def _is_permitted_compute_token_skip(result: TaskResult) -> bool:
+    return result.status == "SKIPPED" and (result.failure_reason or "").startswith(
+        COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON
+    )
+
+
 def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
     return TaskResult(
         name=task.name,
@@ -1846,7 +1864,11 @@ def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None)
         return True
     skipped_results = [result for result in task_results if result.status == "SKIPPED"]
     return any(
-        not (_is_permitted_claude_code_skip(result) or _is_permitted_agentcard_release_skip(result))
+        not (
+            _is_permitted_claude_code_skip(result)
+            or _is_permitted_agentcard_release_skip(result)
+            or _is_permitted_compute_token_skip(result)
+        )
         for result in skipped_results
     )
 
@@ -12132,7 +12154,7 @@ async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dic
                     "poolTokenId": data.get("poolTokenId"),
                 }
 
-    raise RuntimeError("Codex compute token unavailable for agentic benchmark judge")
+    raise ComputeTokenUnavailable("Codex compute token unavailable for agentic benchmark judge")
 
 
 async def _parse_agentic_judge_verdict(result: dict) -> tuple[float, str]:
@@ -14545,7 +14567,8 @@ async def _run_declared_evaluators(
             else:
                 raise ValueError(f"Unsupported enforced evaluator method: {method}")
         except Exception as exc:
-            raise RuntimeError(f"Declared evaluator {evaluator_id} execution failed: {exc}") from exc
+            error_type = ComputeTokenUnavailable if isinstance(exc, ComputeTokenUnavailable) else RuntimeError
+            raise error_type(f"Declared evaluator {evaluator_id} execution failed: {exc}") from exc
         result = {
             "id": evaluator_id,
             "method": method,
@@ -15703,20 +15726,23 @@ async def _run_single_task_as_run_user(
             and _agentcard_release_skip_enabled()
         )
         release_skip = release_stall and evaluated_failure_reason is None
+        token_skip = isinstance(e, ComputeTokenUnavailable) and evaluated_failure_reason is None
         # The two-run auth tasks' first agent failing its goal is a task verdict,
         # exactly as the graded run scores it; every other exception is untrusted.
         first_run_failed = isinstance(e, auth_test_site.AuthTestSiteFirstRunFailed)
-        error_status = "SKIPPED" if release_skip else "FAILED" if first_run_failed else "ERROR"
+        error_status = "SKIPPED" if release_skip or token_skip else "FAILED" if first_run_failed else "ERROR"
         agent_id = _recover_owned_native_admission_root(task, agent_id)
         try:
             await _retire_owned_native_world(task, agent_id)
         except Exception:
             pass  # Evidence/archive/agent cleanup must continue after an unproven native join.
         if getattr(task, "_wmh_retirement_error", None) is not None:
-            release_skip = False
+            release_skip = token_skip = False
             error_status = "ERROR"
         if release_skip:
             _warn_agentcard_release_skip(task.name, str(e))
+        elif token_skip:
+            print(f"\n    ⚠️ SKIPPED {task.name}: {COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: {e}")
         else:
             print(f"\n    ❌ {task.name}: {error_status} - {type(e).__name__}: {e}")
         if realtime_monitor:
@@ -15757,6 +15783,7 @@ async def _run_single_task_as_run_user(
             message_count=len(data.get("messages", [])),
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
+                + (f"{COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: " if token_skip else "")
                 + f"{e}"
                 + _native_world_retirement_failure_reason(task)
                 + (f" | Prior task failure: {evaluated_failure_reason}" if evaluated_failure_reason else "")
