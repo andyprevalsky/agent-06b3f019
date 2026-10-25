@@ -4313,6 +4313,21 @@ async def test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn
     assert result["undelivered_agent_messages"] == [], "the message reached the explore, not its parent"
 
 
+async def test_run_in_background_guidance_names_only_execute_phase_tools():
+    """The foreground/background guidance must point at tools the spawning agent actually has.
+
+    descend-full69 BG: Opus set run_in_background=false for a task that said
+    "wait for it to finish" (5/5 replays); the guidance now says to wait with
+    wait_for and forward follow-ups with send_message_to_agent.
+    """
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, RUN_IN_BACKGROUND_DESCRIPTION, SpawnAgentTool
+
+    field = SpawnAgentTool.model_fields["run_in_background"]
+    assert field.default is True and field.description == RUN_IN_BACKGROUND_DESCRIPTION
+    for tool in ("wait_for", "send_message_to_agent"):
+        assert tool in RUN_IN_BACKGROUND_DESCRIPTION and tool in EXECUTE_PHASE_TOOLS, tool
+
+
 async def test_explore_message_landing_after_the_final_answer_reaches_the_parent():
     """A message fetched by the completion-time read after the explore ended is not lost.
 
@@ -6663,6 +6678,10 @@ async def run_all_tests():
     await r.record_async(
         "agent_inbox_turn_read_not_suppressed_by_in_flight_read",
         test_agent_inbox_turn_read_is_not_suppressed_by_an_earlier_in_flight_read,
+    )
+    await r.record_async(
+        "run_in_background_guidance_names_only_execute_phase_tools",
+        test_run_in_background_guidance_names_only_execute_phase_tools,
     )
     await r.record_async(
         "explore_without_inbox_address_has_no_inbox_hook", test_explore_without_inbox_address_has_no_inbox_hook
