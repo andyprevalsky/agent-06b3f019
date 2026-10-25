@@ -2916,6 +2916,46 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     assert outputs[0]["value"] == "Aman as the founder-operator."
 
 
+async def test_workflow_verifier_schema_survives_a_failed_startup_config_fetch():
+    """descend-full69 MA6: 14 of 50 cloud GPs verified without their response_schema.
+
+    On the load-starved guest, each one's startup ``fetch_agent_config`` timed
+    out ("Failed to fetch agent config for response_schema"), so the workflow ran
+    with no output schema: the verifier parsed the cached verdict as a plain
+    ProgressScore and dropped its output, and only completion re-fetched the
+    schema. Verification must load the task's schema first; an agent whose
+    config fetch succeeded with no schema pays no extra fetch.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True}]}
+
+    failed = _bare_workflow_instance()
+    failed.agent_id = "gp-khe-hy"
+    failed.output_schema = None
+    failed._agent_config_unavailable = True
+    fetch = AsyncMock(return_value={"response_schema": schema})
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        getter = failed._make_response_schema_getter()
+        assert await getter() == schema
+        assert await getter() == schema
+    assert fetch.await_count == 1, "the schema is fetched once, then kept"
+
+    healthy = _bare_workflow_instance()
+    healthy.agent_id = "agent-without-schema"
+    healthy.output_schema = None
+    untouched = AsyncMock(return_value={"response_schema": schema})
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=untouched),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        assert await healthy._make_response_schema_getter()() is None
+    assert untouched.await_count == 0
+
+
 def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
     """descend-full69 MA5: transcript fills turned list fields into markdown strings.
 
@@ -12283,6 +12323,10 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_fills_only_values_of_the_schema_field_type",
         test_workflow_coalesce_fills_only_values_of_the_schema_field_type,
+    )
+    await r.record_async(
+        "wf_verifier_schema_survives_a_failed_startup_config_fetch",
+        test_workflow_verifier_schema_survives_a_failed_startup_config_fetch,
     )
     r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",
