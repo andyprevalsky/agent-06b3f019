@@ -7,6 +7,8 @@
  *   results carry the agent's task path (location.agent_path; `agent_path:` in content)
  *   a background-task path narrows to its owner; an unknown path → 404 AGENT_PATH_NOT_FOUND
  *   a path is resolved only inside the caller's tree; a missing agent_id → 400
+ *   agent_network rows are stored messages, so record_kind message/all reads them;
+ *   a model-record kind (llm_output, llm_context, code_event) → 400 naming record_kind
  *
  * Registered by data.blackbox.ts.
  */
@@ -234,6 +236,45 @@ async function proveTrajectoryScope(headers: Record<string, string>, tree: Tree)
 }
 
 /**
+ * Reading a sibling's trajectory the way list_agents advertises it, with the
+ * schema's record_kind selector. agent_network holds only stored messages, so
+ * message and all select every row; model-record kinds live only in
+ * agent_trajectories and are rejected by name.
+ */
+async function proveAgentNetworkRecordKind(
+  headers: Record<string, string>,
+  tree: Tree
+): Promise<void> {
+  for (const recordKind of ['all', 'message']) {
+    const res = await grep(headers, {
+      source: 'agent_network',
+      record_kind: recordKind,
+      trace_path: '/root/outreach/napa',
+      agent_id: tree.siblingId,
+    });
+    assert(
+      res.status === 200,
+      `agent_network record_kind=${recordKind} reads the stored messages, got ${res.status} ${JSON.stringify(res.data)}`
+    );
+    assert(
+      JSON.stringify(agentIds(res.data)) === JSON.stringify([tree.grandchildId]) &&
+        res.data.matches.some((m) => m.content.includes(tree.marker)),
+      `agent_network record_kind=${recordKind} keeps the trace_path scope, got ${JSON.stringify(res.data)}`
+    );
+  }
+  const modelKind = await grep(headers, {
+    sources: ['agent_network'],
+    record_kind: 'llm_output',
+    trace_path: '/root/outreach/napa',
+    agent_id: tree.siblingId,
+  });
+  assert(
+    modelKind.status === 400 && JSON.stringify(modelKind.data).includes("'record_kind'"),
+    `agent_network has no llm_output records, got ${modelKind.status} ${JSON.stringify(modelKind.data)}`
+  );
+}
+
+/**
  * Task paths are unique only among live agents, so an archived agent can share
  * /root/outreach with the live one. A path scope must resolve to live agents.
  */
@@ -291,6 +332,7 @@ export async function testGrepAgentTaskPaths(
   try {
     await proveAgentNetworkScope(headers, tree);
     await proveTrajectoryScope(headers, tree);
+    await proveAgentNetworkRecordKind(headers, tree);
     await proveArchivedPathHolderExcluded(userId, headers, tree);
   } finally {
     await deleteTree(tree);

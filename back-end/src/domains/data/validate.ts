@@ -96,15 +96,24 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+/** agent_network rows are stored messages, so these kinds select all of them. */
+const AGENT_NETWORK_RECORD_KINDS = new Set(['message', 'all']);
+
 function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
   const hasTrajectories = sources.includes('agent_trajectories');
+  const hasAgentNetwork = sources.includes('agent_network');
   // An agent task path (/root/...) also scopes agent_network.
-  const networkTracePath =
-    sources.includes('agent_network') && agentTaskPathParam(params.trace_path) !== undefined;
+  const networkTracePath = hasAgentNetwork && agentTaskPathParam(params.trace_path) !== undefined;
+  if (!hasTrajectories && hasAgentNetwork && params.record_kind !== undefined) {
+    if (!AGENT_NETWORK_RECORD_KINDS.has(String(params.record_kind).toLowerCase())) {
+      throw new InvalidGrepParamError('record_kind');
+    }
+  } else if (!hasTrajectories && params.record_kind !== undefined) {
+    throw new InvalidGrepParamError('agent_trajectories source');
+  }
   if (
     !hasTrajectories &&
     [
-      params.record_kind,
       params.surface,
       networkTracePath ? undefined : params.trace_path,
       params.until,
