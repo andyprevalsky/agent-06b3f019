@@ -1,6 +1,7 @@
 """Blackbox regressions for benchmark prompt-cache ratchets."""
 
 import asyncio
+import json
 import inspect
 import os
 
@@ -191,6 +192,99 @@ def test_missing_cache_telemetry_fails_closed():
     assert "enforce_cache_ratchets(run.task_results)" in inspect.getsource(main_async)
 
 
+ROOT_GOAL = "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27."
+
+
+def _root_first_call(static_noise: str = "") -> tuple[list[dict], object]:
+    """The root's first EXECUTE planner request as AgentWorkflow builds it, with per-run context."""
+    from tools.prompts import TOOL_PROMPTS
+    from utils.prompts import build_system_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, create_agent_action_model, get_tool_models
+
+    system = build_system_prompt(
+        phase="EXECUTE",
+        enabled_tools=EXECUTE_PHASE_TOOLS,
+        user_context_section="Name: Andy Prevalsky\nPhone: +19729777432",
+        response_schema={"fields": [{"name": "total_steps", "type": "int", "required": True}]},
+        tool_prompts=TOOL_PROMPTS,
+    )
+    system = static_noise + system
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": ROOT_GOAL}]
+    return messages, create_agent_action_model(EXECUTE_PHASE_TOOLS, tool_registry=get_tool_models(rose_desktop=False))
+
+
+def _claude_cached_prefix(messages: list[dict], response_model: object) -> str:
+    """Tools plus system blocks through the first cache marker: what a later call can read."""
+    from providers.rose.claude_auth import build_anthropic_body
+    from providers.rose.pools import get_pool
+    from providers.rose.schema import build_openai_response_format
+
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=build_openai_response_format(response_model),
+        max_tokens=1024,
+    )
+    system = body.get("system") or []
+    marked = next(index for index, block in enumerate(system) if "cache_control" in block)
+    return json.dumps({"tools": body.get("tools"), "system": system[: marked + 1]}, sort_keys=True)
+
+
+def _gpt_static_scope(messages: list[dict]) -> str:
+    from providers.rose.gpt_auth import _build_static_cache_scope
+
+    return _build_static_cache_scope(messages)
+
+
+def test_warmup_primes_the_root_static_prefix_on_both_routes():
+    """The warmup writes the exact prefix the root's first call reads (Claude and GPT routes).
+
+    OpenClaw live-cache-regression-policy.ts:116-178 warms a lane before the measured run.
+    """
+    from benchmarks.cache_warmup import root_phase, warmup_request
+
+    assert root_phase("execute") == "EXECUTE" and root_phase(None) == "PLAN"
+    warm = warmup_request(phase="EXECUTE", goal=ROOT_GOAL, rose_desktop=False)
+    root_messages, root_model = _root_first_call()
+    assert _claude_cached_prefix(warm["messages"], warm["response_model"]) == _claude_cached_prefix(
+        root_messages, root_model
+    )
+    assert _gpt_static_scope(warm["messages"]) == _gpt_static_scope(root_messages)
+
+
+def test_warmup_does_not_mask_a_run_specific_static_prefix():
+    """A root prefix with run-specific bytes differs from the warmup, so it still reads cold."""
+    from benchmarks.cache_warmup import warmup_request
+
+    warm = warmup_request(phase="EXECUTE", goal=ROOT_GOAL, rose_desktop=False)
+    root_messages, root_model = _root_first_call(static_noise="Run started 2026-10-25T01:02:03Z\n")
+    assert _claude_cached_prefix(warm["messages"], warm["response_model"]) != _claude_cached_prefix(
+        root_messages, root_model
+    )
+    assert _gpt_static_scope(warm["messages"]) != _gpt_static_scope(root_messages)
+
+
+def test_warmup_is_recorded_apart_from_the_measured_share():
+    """A warmup's own cache tokens never count; a cold measured call still fails the floor."""
+    cold_after_warmup = _share_result("claude-code-agent", [_call(0, 19544, 4)])
+    cold_after_warmup.prompt_cache_warmup = {
+        "call_site": "cache_warmup",
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 19544,
+        "uncached_input_tokens": 4,
+    }
+    assert cold_after_warmup.prompt_cache_share_pct == 0.0
+    _assert_ratchet_fails(cold_after_warmup)
+    warm_measured = _share_result("claude-code-agent", [_call(18736, 822, 4)])
+    warm_measured.prompt_cache_warmup = {"call_site": "cache_warmup", "cache_creation_input_tokens": 19544}
+    from benchmarks.run_benchmark import enforce_cache_ratchets
+
+    assert warm_measured.prompt_cache_share_pct == 95.8
+    enforce_cache_ratchets([warm_measured])
+
+
 def test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled():
     """Deploy smoke may warn on Claude Code cache telemetry without weakening other ratchets."""
     from benchmarks.run_benchmark import CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, enforce_cache_ratchets
@@ -349,6 +443,9 @@ async def run_all_tests():
     result.record("one_call_poor_share_fails", test_one_call_run_with_poor_cache_share_fails)
     result.record("repeated_no_cache_fails", test_repeated_run_with_no_cache_use_fails)
     result.record("missing_telemetry_fails_closed", test_missing_cache_telemetry_fails_closed)
+    result.record("warmup_primes_root_prefix_both_routes", test_warmup_primes_the_root_static_prefix_on_both_routes)
+    result.record("warmup_does_not_mask_run_specific_prefix", test_warmup_does_not_mask_a_run_specific_static_prefix)
+    result.record("warmup_recorded_apart_from_share", test_warmup_is_recorded_apart_from_the_measured_share)
     result.record(
         "claude_code_cache_ratchet_deploy_warn_only",
         test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled,
