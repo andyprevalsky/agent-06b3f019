@@ -11,8 +11,10 @@ No step pays an extra request to read it:
     explore ── its per-step progress post (POST /api/agents/<owner>/messages
                {inbox: {task_id, since}}) returns ``pending_inbox`` ──▶ stash(...)
                (fire-and-forget; delivered at the next step = one step late)
-               no post answered for INBOX_FALLBACK_POLL_SECONDS ──▶ one background
-               GET /api/agents/<owner>/agent-inbox?task_id=&since= (start_read)
+               every model turn ──▶ one background GET alongside the model call
+               /api/agents/<owner>/agent-inbox?task_id=&since= (start_read): the
+               post read predates the turn's tools, so this read sees messages
+               stored during a tool batch
                attempt_completion_with_result ──▶ a fetched, undelivered message
                defers the completion one step; otherwise a background GET starts
                and the completion proceeds without waiting
@@ -27,9 +29,9 @@ No step pays an extra request to read it:
 
 Scale (10k explore agents, one step ≈ 5s): before, every step paid one POST and
 one inbox GET (2k + 2k req/s); now the POST carries the inbox read (2k req/s,
-one bounded indexed ``(agentId, timestamp > since)`` read each) and a GET runs
-only when an agent has not posted for 30s (≤ 10k / 30 ≈ 333 req/s worst case,
-≈ 0 while agents are posting).
+one bounded indexed ``(agentId, timestamp > since)`` read each) plus one
+background GET per model turn (≤ 2k req/s, the same indexed read, never
+awaited; a turn is at least one LLM call, so real rates are lower).
 Failures are logged loudly and ignored — the inbox never kills an agent.
 """
 
@@ -49,8 +51,8 @@ from helpers.http_client import get_http_client
 logger = structlog.get_logger()
 
 AGENT_INBOX_TIMEOUT_SECONDS = 5.0
-# Explore: GET the inbox only when no piggybacked read answered for this long.
-INBOX_FALLBACK_POLL_SECONDS = 30.0
+# A background GET still in flight for less than this is not started again.
+INBOX_READ_INFLIGHT_SECONDS = 30.0
 # Bounded dedupe ledger; ``since`` already excludes older rows.
 _MAX_SEEN_IDS = 200
 
@@ -158,8 +160,6 @@ class AgentInbox:
         self._fetched: Dict[str, Dict[str, Any]] = {}
         # Background GETs: task -> monotonic start time.
         self._reads: Dict["asyncio.Task[None]", float] = {}
-        # When a read last answered (monotonic seconds).
-        self._last_read_at = time.monotonic()
 
     @classmethod
     def create(
@@ -191,13 +191,12 @@ class AgentInbox:
                 error=f"{type(error).__name__}: {str(error)[:200]}",
             )
             return []
-        self._last_read_at = time.monotonic()
         return self._absorb(messages)
 
     def start_read(self) -> None:
         """Start a background GET unless a recent one is still in flight. Never awaited by the agent."""
         now = time.monotonic()
-        if any(now - started < INBOX_FALLBACK_POLL_SECONDS for task, started in self._reads.items() if not task.done()):
+        if any(now - started < INBOX_READ_INFLIGHT_SECONDS for task, started in self._reads.items() if not task.done()):
             return
         task = asyncio.get_running_loop().create_task(self._background_read())
         self._reads[task] = now
@@ -230,7 +229,6 @@ class AgentInbox:
         """Keep a piggybacked read's messages until they are delivered."""
         if not isinstance(messages, list):
             return
-        self._last_read_at = time.monotonic()
         self._absorb(message for message in messages if isinstance(message, dict))
 
     async def unread_before_finish(self) -> bool:
@@ -250,13 +248,15 @@ class AgentInbox:
     async def next_step_messages(self) -> List[Dict[str, Any]]:
         """Deliver every fetched message to this model turn; never waits on a read.
 
-        Progress posts carry the per-step read; when none answered for
-        ``INBOX_FALLBACK_POLL_SECONDS`` a background GET starts, alongside this
-        step's model call, and its messages are delivered at the next step.
+        Each turn also starts a background GET alongside its model call. The
+        progress-post read answers when the previous model turn ended, before
+        its tools ran, so a message stored during a tool batch is only seen by
+        this read: it is delivered at the next step, or, when this turn answers,
+        defers the completion (``unread_before_finish``) instead of reaching
+        the parent at ``finish``.
         """
         self._settle_reads()
-        if time.monotonic() - self._last_read_at >= INBOX_FALLBACK_POLL_SECONDS:
-            self.start_read()
+        self.start_read()
         return self._deliver(list(self._fetched.values()))
 
     async def finish(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
