@@ -134,8 +134,10 @@ def aggregate_prompt_cache_share(items: Iterable[dict[str, Any]]) -> dict[str, i
     rate the golden references compute over a query's total usage
     (claude-code-src utils/forkedAgent.ts:646-654, services/compact/compact.ts:1220-1226;
     openclaw src/agents/live-cache-test-support.ts:166-180). Uncached input is
-    ``tokens_in``, which usage rows store exclusive of cache tokens (as
-    ``aggregate_usage_items`` sums them). Only calls carrying the provider
+    ``tokens_in``: usage rows store it exclusive of cache tokens for every
+    provider (providers/rose/client.py:_normalize_usage_input_tokens rewrites
+    OpenAI's inclusive prompt_tokens; ``aggregate_usage_items`` sums the three
+    buckets). Only calls carrying the provider
     ``cache_sequence_id`` can reuse a cache, so only they are measured; a run
     with none has no cache telemetry and the ratchet fails it closed. Every
     sequenced call counts, including a sequence that ran once: its reads of the
