@@ -276,6 +276,19 @@
         ]
       },
       {
+        "id": "t7-schema-complete-outputs",
+        "method": "static_check",
+        "criteria": [
+          "T7: the root and every first-level GP finish with structured output that satisfies its response_schema"
+        ],
+        "checks": [
+          {
+            "type": "completion_structured_output_schema",
+            "include_first_level_gps": true
+          }
+        ]
+      },
+      {
         "id": "t7-schema-task-complete",
         "method": "single_turn_llm_judge",
         "criteria": [

@@ -11781,6 +11781,58 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
     return gps
 
 
+def _raw_benchmark_tree(data: dict) -> dict:
+    """The full per-agent tree (with structured_output), wherever this run record keeps it."""
+    for holder in (data.get("_benchmark"), data.get("logs")):
+        tree = holder.get("tree") if isinstance(holder, dict) else None
+        if isinstance(tree, dict) and tree:
+            return tree
+    return {}
+
+
+def _completion_structured_output_schema_check(data: dict, check: dict) -> tuple[bool, str]:
+    """The root and every first-level GP finished with output that satisfies its response_schema.
+
+    Uses the verifier's own completion contract (``_build_verifier_response_model``),
+    so a value is valid here exactly when the verifier would accept it as complete.
+    """
+    from helpers.llm import _build_verifier_response_model
+
+    tree = _raw_benchmark_tree(data)
+    root_id = _tree_root_id(tree, data)
+    if not root_id:
+        return False, "T7: no root agent in the benchmark tree"
+    agent_ids = [root_id]
+    if check.get("include_first_level_gps", True):
+        agent_ids += [
+            agent_id
+            for agent_id, node in tree.items()
+            if isinstance(node, dict)
+            and str(node.get("parent_agent_id") or "") == str(root_id)
+            and not _is_explore_tree_node(node)
+        ]
+    failures: list[str] = []
+    for agent_id in agent_ids:
+        node = tree.get(agent_id) or {}
+        schema = node.get("response_schema") or node.get("output_schema")
+        if not isinstance(schema, dict) or not schema.get("fields"):
+            continue
+        output_model = _build_verifier_response_model(schema).model_fields["output"].annotation
+        try:
+            output_model.model_validate(node.get("structured_output") or node.get("structured_response") or {})
+        except Exception as error:
+            problems = getattr(error, "errors", lambda: [])()
+            detail = ", ".join(f"{'.'.join(str(p) for p in item['loc'])}:{item['type']}" for item in problems[:4])
+            failures.append(f"{str(agent_id)[:8]} ({len(problems)} invalid: {detail})")
+    if failures:
+        return (
+            False,
+            f"T7: {len(failures)} of {len(agent_ids)} completion outputs do not satisfy their response_schema: "
+            + "; ".join(failures[:5]),
+        )
+    return True, ""
+
+
 def _first_level_gps_from_data(data: dict) -> list[dict]:
     return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
 
@@ -14086,6 +14138,11 @@ def _run_declared_static_check(
                 outputs = card.get("outputs")
                 if require_outputs and (not isinstance(outputs, list) or not outputs):
                     return False, f"T7: {label} Task Complete has no schema outputs"
+            continue
+        if check_type == "completion_structured_output_schema":
+            ok, reason = _completion_structured_output_schema_check(data, check)
+            if not ok:
+                return False, reason
             continue
         if check_type == "completion_summary_file_outputs":
             ok, reason = _completion_summary_file_outputs_check(data, check)
