@@ -25,6 +25,8 @@ sources:
   - agent 9a1eea7c-2523-49ee-b31f-914e0a7c1f86 (recurrence 2026-10-25, r002-j0043)
   - commit 2289dacef
   - commit b84939604
+  - commit bb56335d2
+  - agent 0aaec9af-e1db-4771-b788-4899bf782727 (local, foreground spawn on the Claude route)
 repro: agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_reads_a_message_stored_before_its_final_answer; agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn
 status: fixed
 ---
@@ -106,11 +108,35 @@ final explore_agent rose.complete.start at 02:03:10.79, the only explore
 progress posts at 02:02:56.45 and 02:03:24.58, and backend GET /agent-inbox
 at 02:03:24.60 followed by "[AgentInbox] delivered agent messages" at
 finish.
-The root's spawn choice is not a variable here: Rose spawns are always
-background (loop/dag_executor.py, "Planned spawns ... start in the
-background like LLM spawns"). Both copies used wait_for while the task ran.
-claude-code-src/src/tools/AgentTool/prompt.ts:263 makes background opt-in
-for its own blocking-default tool, so no prompt change applies.
+Second, independent cause found during verification (local run 4 on
+b84939604, agent 0aaec9af-e1db-4771-b788-4899bf782727, Claude route): the root
+passed `run_in_background: false`, so no background task existed and the
+runner failed with "Mid-run feedback was never posted". The two cloud copies
+ran on the GPT route and chose background. The guidance said "Set false only
+when you need this agent's result before you can do anything else". The task
+says "wait for it to finish before you answer", so blocking was a faithful
+reading. Nothing told the model that a foreground agent holds its turn, or
+that wait_for wakes on a new user message (helpers/wait_wake.py:41-43).
+Exact replay of that execute_loop dump on claude-opus-5-5-claude
+(scripts/replicate_llm_dump.py, now leasing the dump's token type) chose
+false 5/5. With the new RUN_IN_BACKGROUND_DESCRIPTION (bb56335d2, approval
+pending) it chose background 5/5, one of them by omitting the field, which
+defaults to true. A first draft that only added the cost line got 3/5.
+Golden references:
+- codex/codex-rs/core/src/tools/handlers/multi_agents_spec.rs:758-761:
+  spawns never block, "Call wait_agent very sparingly", and the agent works
+  while the sub-agent runs in the background.
+- claude-code-src/src/tools/AgentTool/prompt.ts:263-264: background agents
+  notify on completion ("respond to the user instead"), and foreground is
+  recommended when results are needed before proceeding.
+Rose already defaults to background with an explicit wait, which is the
+codex shape. The fix states that model and its responsiveness cost truthfully.
+Step 5b: the class stopped at is "a tool option's guidance names when to pick
+it but not its observable cost (the user can't reach the agent)". The
+next-deeper class tried was "remove the model's foreground choice entirely
+(codex: always background plus wait)". That is coherent technically but is a
+deliberate product decision: claude-code keeps foreground, and a foreground
+spawn saves a turn. The golden references disagree, so it is left to Andy.
 Golden reference: claude-code-src/src/tools/SendMessageTool/SendMessageTool.ts:809-819
 queues a message to a running agent "for delivery ... at its next tool
 round", and src/utils/attachments.ts:1084-1100 drains that queue into
@@ -129,7 +155,11 @@ cost of making each turn see messages stored before it.
 
 ## Human feedback
 
-None recorded for the original case. For the recurrence, Andy (MA4,
+None recorded for the original case. For this RCA Andy suggested (verbatim):
+"the background agents I thought had a prompt to specifically spawn in the
+background (or consider looking at golden refs for when to use bg vs blocking
+for prompting for the actual agent)". That led to the second fix. For the
+recurrence, Andy (MA4,
 2026-10-25) said "inbox checks should be done in parallel as much as possible
 and never block" and "don't lose messages / consume them and throw them away
 in a race". The fix keeps every read in the background.
