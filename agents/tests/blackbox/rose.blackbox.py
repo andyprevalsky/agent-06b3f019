@@ -7561,6 +7561,61 @@ def test_responses_body_marks_every_completed_user_message_without_caller_marker
     assert '"prompt_cache_breakpoint"' not in json.dumps(plain), "routes without breakpoint support are unchanged"
 
 
+async def test_chatgpt_oauth_route_never_sends_cache_breakpoints_and_keeps_its_cache_session():
+    """The leased-GPT (ChatGPT/Codex OAuth) backend rejects ``prompt_cache_breakpoint`` with HTTP 400.
+
+    Measured 2026-10-25 through the real transport with a leased token on gpt-6-sol:
+    the same body returned 200 without breakpoints and ``Codex 400`` with them, and the
+    call then fell through to Foundry. That backend already caches by prefix: a grown
+    planner-shaped request read 10,496 of ~11.2k prompt tokens with no breakpoint.
+    So the planner, dag_reasoning, verifier and dag_param bodies on this route must stay
+    breakpoint-free while their cache session stays stable across calls.
+    """
+    import providers.rose.gpt_auth as gpt_auth_mod
+    from providers.rose.pools import get_pool
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    captured_bodies = []
+
+    async def _capture_attempt(**kwargs):
+        captured_bodies.append(kwargs["body"])
+        if False:
+            yield None
+
+    marker = {"type": "ephemeral"}
+    first = [
+        {"role": "system", "content": "stable planner rules" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "user context"},
+        {"role": "user", "content": [{"type": "text", "text": "goal", "cache_control": marker}]},
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": "tool result"},
+    ]
+    grown = [*first, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "next step"}]
+    auth = GptAuthContext(token="test-token", source="user", user_id="test-user", max_rotations=0)
+    pool = get_pool("rose-1-ultra")
+    with patch.object(gpt_auth_mod, "_attempt_with_token", _capture_attempt):
+        for call_site in ("planner", "dag_reasoning", "verifier_execute", "dag_param_populator"):
+            for messages in (first, grown):
+                async for _ in gpt_auth_complete(
+                    pool_spec=pool,
+                    messages=messages,
+                    auth=auth,
+                    request_id="r",
+                    agent_id="agent-a",
+                    call_site=call_site,
+                ):
+                    pass
+
+    assert gpt_auth_mod.supports_prompt_cache_breakpoints(pool.gpt_auth_model), "fixture must use a GPT-5.6+ model"
+    for body in captured_bodies:
+        assert '"prompt_cache_breakpoint"' not in json.dumps(body), "the ChatGPT OAuth backend returns 400 for it"
+        assert '"cache_control"' not in json.dumps(body["input"])
+    for index in range(0, len(captured_bodies), 2):
+        before, after = captured_bodies[index], captured_bodies[index + 1]
+        assert before["prompt_cache_key"] == after["prompt_cache_key"], "a growing call keeps its cache session"
+        assert before["instructions"] == after["instructions"]
+        assert after["input"][: len(before["input"])] == before["input"], "the earlier request is a byte-stable prefix"
+
+
 def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
     from providers.rose.gpt_auth import build_codex_responses_body
     from providers.rose.pools import get_pool
@@ -11180,6 +11235,10 @@ async def run_all_tests():
     r.record(
         "responses_body_marks_completed_user_messages",
         test_responses_body_marks_every_completed_user_message_without_caller_markers,
+    )
+    await r.record_async(
+        "chatgpt_oauth_route_never_sends_cache_breakpoints",
+        test_chatgpt_oauth_route_never_sends_cache_breakpoints_and_keeps_its_cache_session,
     )
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
