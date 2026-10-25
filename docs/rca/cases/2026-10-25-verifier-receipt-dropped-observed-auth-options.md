@@ -83,6 +83,12 @@ after), and the root re-spawns on that result (1/5). Roughly 2%/run before and
 cause (an approval-gated prompt question), and outcome proof (exact task failing
 on the buggy revision) was not reproduced at that rate.
 
+Local `scripts/run-bench --local browser-auth-stale-session-password` on the fixed
+revision: run 1 PASS (agent e5726b1e), run 2 FAIL from an independent cause
+(agent 066bfdef: Opus direct_auth:claude browser_use_step_1-5 all RoseRefusalError,
+reported as "Max iterations (250) reached", root re-spawned; handed to the
+/descend parent as its own cluster), runs 3 and 4 PASS (agents f7c5948a, d6531390).
+
 ## Human feedback
 
 None recorded.
