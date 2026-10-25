@@ -21,7 +21,7 @@ sources:
   - agent 0c3d6aa4-ddfa-4eca-9ba9-e3365b54d4cf (descend-full69-20261023 r002-j0050 on 016fca859)
   - commit dddce7ad8 (branch rca/STALE-double-browser)
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_observed_sign_in_options_reach_verifier_receipt
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -61,11 +61,13 @@ Replay of the root's follow-up call with the bad result: 1/5 re-spawn.
 ## Solution
 
 `attach_observed_result` now copies the observed `auth_context` (through
-`model_visible_value`) onto the exact receipt, so the verifier's action log shows
-the same sign-in options the agent saw. No prompt or tool text changed. Also
-fixes the same omission for resumed browsers that restore receipts. 10k-agent
-behaviour: per-browser in-memory receipt field, attached only when the URL
-changes; no shared state.
+`model_visible_value`) onto the exact receipt, storing it only when it differs
+from the latest recorded inventory, so the verifier's action log shows the same
+sign-in options the agent saw without repeating ~1.2 KB on every read. No prompt
+or tool text changed. Also fixes the same omission for resumed browsers that
+restore receipts. 10k-agent behaviour: per-browser in-memory receipt field; no
+shared state. Known edge: an inventory recorded more than 30 receipts earlier
+ages out of the verifier's window.
 
 Golden reference: claude-code-src/src/tools/AgentTool/built-in/verificationAgent.ts:132
 passes the verifier the original task and the approach taken, so it grades with
@@ -73,9 +75,13 @@ the implementer's context; this fix converges on that. Respawn vs continue:
 claude-code-src/src/tools/AgentTool/prompt.ts:267 (continue a spawned agent via
 SendMessage); not changed here because the respawn followed a false negative.
 
-Residual: 2/15 verifier replays still withhold the number when the root restates
-the profile email; exact local benchmark outcome on the buggy revision was not
-reproduced (failure rate ~2%/run by replay arithmetic).
+Status is `mitigated`, not `fixed`. The failure needs three links together: the
+root restates the profile email in the browser goal (2/10 replays, despite
+BROWSER_GOAL_PROFILE_NOTE), the verifier withholds the number (8/15 before, 2/15
+after), and the root re-spawns on that result (1/5). Roughly 2%/run before and
+0.5%/run after; 8/15 vs 2/15 is p~0.05. The root's restatement is a separate open
+cause (an approval-gated prompt question), and outcome proof (exact task failing
+on the buggy revision) was not reproduced at that rate.
 
 ## Human feedback
 

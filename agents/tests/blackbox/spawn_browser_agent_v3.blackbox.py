@@ -13856,6 +13856,18 @@ async def test_observed_sign_in_options_reach_verifier_receipt():
     assert "Auth Options for rose-shop-a1b2" in wire and f"| {site_identity} |" in wire, (
         "verifier graded without the sign-in options the browser agent observed"
     )
+    # An unchanged inventory is not repeated on every later read; a changed one is recorded.
+    await execute_action(
+        dom, history, {"action": "read_browser_state", "params": {}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value=auth_context),
+    )
+    assert "auth_context" not in history.get_entries()[-1]["result"]
+    changed = {**auth_context, "inventory_status": "unknown"}
+    await execute_action(
+        dom, history, {"action": "read_browser_state", "params": {}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value=changed),
+    )
+    assert history.get_entries()[-1]["result"].get("auth_context") == changed
 
 
 async def test_execute_action_wait():
