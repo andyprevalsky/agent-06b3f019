@@ -257,7 +257,8 @@ export function renderAccountPage(
   site: AuthTestSite,
   session: SiteSession,
   memberNumber: string | null,
-  memberName: string | null
+  memberName: string | null,
+  orderHistory = ''
 ): string {
   const shop = site.behavior.shop ? `<p><a href="${siteUrl(site)}">Back to the shop</a></p>` : '';
   return layout(
@@ -279,6 +280,7 @@ export function renderAccountPage(
       <dt>Status</dt>
       <dd>Active</dd>
     </dl>
+    ${orderHistory}
     ${shop}
     <form method="post" action="${siteUrl(site, '/logout')}">
       <button type="submit">Sign out</button>
