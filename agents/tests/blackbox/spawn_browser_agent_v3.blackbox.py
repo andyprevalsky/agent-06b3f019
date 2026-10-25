@@ -9786,7 +9786,7 @@ def test_build_usage_items_carries_browser_pool_model():
 
 def test_browser_usage_preserves_repeatable_cache_calls():
     """Browser aggregation must not erase a healthy provider cache sequence."""
-    from benchmarks.llm_usage import aggregate_prompt_cache_share
+    from benchmarks.llm_usage import aggregate_prompt_cache_share, cache_route, classify_usage_item
     from domains.spawn_browser_agent_v3.service import (
         accumulate_model_usage,
         browser_usage_items_to_tool_usage,
@@ -9848,7 +9848,9 @@ def test_browser_usage_preserves_repeatable_cache_calls():
         "uncached_input_tokens": sequenced_uncached,
         "cache_share_pct": round(29_435 / (29_435 + 938 + sequenced_uncached) * 100, 1),
         "call_count": 4,
+        "routes": sorted({cache_route(classify_usage_item(row)[0]) for row in sequenced_rows}),
     }, share
+    assert "unclassified" not in share["routes"], share
 
 
 def test_build_usage_items_emits_one_row_per_actual_model():

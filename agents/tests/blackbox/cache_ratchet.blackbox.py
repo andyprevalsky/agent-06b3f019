@@ -75,6 +75,7 @@ def test_prompt_cache_share_is_the_golden_reference_hit_rate():
         "uncached_input_tokens": 40,
         "cache_share_pct": 38.3,
         "call_count": 4,
+        "routes": ["gpt_auth", "unclassified"],
     }, metrics
 
 
@@ -104,6 +105,7 @@ def test_one_shot_sequences_and_sibling_namespaces_are_measured():
         "uncached_input_tokens": 0,
         "cache_share_pct": 0.0,
         "call_count": 9,
+        "routes": ["gpt_auth"],
     }, metrics
 
 
@@ -134,6 +136,7 @@ def _share_result(name: str, usage: list[dict]) -> object:
         prompt_cache_uncached_input_tokens=metrics["uncached_input_tokens"],
         prompt_cache_share_pct=metrics["cache_share_pct"],
         prompt_cache_call_count=metrics["call_count"],
+        prompt_cache_routes=metrics["routes"],
     )
 
 
@@ -323,11 +326,7 @@ def test_gpt_route_floor_is_derived_by_one_rule_from_measured_history():
 
 
 def _routed_result(name: str, usage: list[dict]) -> object:
-    from benchmarks.llm_usage import aggregate_prompt_cache_share
-
-    result = _share_result(name, usage)
-    result.prompt_cache_routes = aggregate_prompt_cache_share(usage)["routes"]
-    return result
+    return _share_result(name, usage)
 
 
 def test_gpt_route_run_at_24_percent_passes_only_under_the_derived_floor():
@@ -422,6 +421,7 @@ async def test_collector_identity_is_authoritative_and_separates_agents():
         "uncached_input_tokens": 0,
         "cache_share_pct": 50.0,
         "call_count": 2,
+        "routes": ["gpt_auth"],
     }
 
 

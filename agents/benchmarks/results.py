@@ -69,6 +69,8 @@ class TaskResult:
     prompt_cache_uncached_input_tokens: int = 0
     prompt_cache_share_pct: float = 0.0
     prompt_cache_call_count: int = 0
+    # Cache lanes that served the sequenced calls (llm_usage.cache_route); selects the floor.
+    prompt_cache_routes: list[str] = field(default_factory=list)
     # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
     prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0

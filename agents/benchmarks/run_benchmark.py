@@ -478,6 +478,56 @@ PER_TASK_CACHE_HIT_RATCHET = {
     "claude-code-agent": 35.0,
     "browser-smoke": 40.0,
 }
+# Per-lane floors (OpenClaw gates each cache lane against its own measured
+# baseline: src/agents/live-cache-regression-policy.ts:166, baseline
+# src/agents/live-cache-regression-baseline.ts:46-53). The floors above are the
+# claude_auth lane. Every other lane uses ONE rule: median of the lane's
+# pure-route passing samples x 0.9 (the stable lane's 0.90 / 0.996), capped at
+# the task floor; fewer than 3 samples falls back to the task floor. Mixed-route
+# runs take the strictest lane floor; unclassified route telemetry fails closed.
+#
+# Samples: prompt-cache share of passing runs whose sequenced calls all used that
+# route, recomputed from saved run records (llm.cache worker events) of proofs
+# original600-1792707721330944531, -1792710242163761176, -1792711291636839185,
+# -1792722242636117810, -1792738962466034914, -1792795636260090257 and the
+# launch-d4fa4238cd31 reruns (2026-10-25).
+CACHE_FLOOR_ROUTE_SAMPLES: dict[tuple[str, str], list[float]] = {
+    # 4dfb9c60, 2a77030f, d373168f (44.3 4bc084fb was mixed-route, excluded)
+    ("spawn-sub-agents", "gpt_auth"): [16.0, 20.3, 26.2],
+    # 558c2bec, d4e3bbe1, 720c6179
+    ("browser-smoke", "gpt_auth"): [72.6, 75.3, 75.9],
+    # 8ba99d40, d5def233
+    ("claude-code-agent", "gpt_auth"): [37.3, 46.3],
+}
+MIN_ROUTE_FLOOR_SAMPLES = 3
+ROUTE_FLOOR_BASELINE_RATIO = 0.9
+
+
+def derive_route_cache_floor(samples: list[float], cap: float) -> float:
+    """The uniform lane rule: median x 0.9, capped at the task floor; too few samples keeps the cap."""
+    if len(samples) < MIN_ROUTE_FLOOR_SAMPLES:
+        return cap
+    ordered = sorted(samples)
+    middle = len(ordered) // 2
+    median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+    return min(cap, round(median * ROUTE_FLOOR_BASELINE_RATIO, 1))
+
+
+def route_cache_floor(task_name: str, routes: list[str]) -> Optional[float]:
+    """Floor for a run's served cache lanes; None when route telemetry is missing."""
+    task_floor = PER_TASK_CACHE_HIT_RATCHET.get(task_name)
+    if task_floor is None:
+        return None
+    if not routes or "unclassified" in routes:
+        return None
+    return max(
+        derive_route_cache_floor(CACHE_FLOOR_ROUTE_SAMPLES.get((task_name, route), []), cap=task_floor)
+        if route != "claude_auth"
+        else task_floor
+        for route in routes
+    )
+
+
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
@@ -15552,6 +15602,7 @@ async def _run_single_task_as_run_user(
             prompt_cache_uncached_input_tokens=int(prompt_cache["uncached_input_tokens"]),
             prompt_cache_share_pct=float(prompt_cache["cache_share_pct"]),
             prompt_cache_call_count=int(prompt_cache["call_count"]),
+            prompt_cache_routes=list(prompt_cache["routes"]),
             prompt_cache_warmup=prompt_cache_warmup,
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
@@ -15611,7 +15662,9 @@ async def _run_single_task_as_run_user(
                 f"read={result.prompt_cache_read_input_tokens} "
                 f"write={result.prompt_cache_creation_input_tokens} "
                 f"uncached={result.prompt_cache_uncached_input_tokens} "
-                f"share={result.prompt_cache_share_pct}% over {result.prompt_cache_call_count} sequenced calls"
+                f"share={result.prompt_cache_share_pct}% over {result.prompt_cache_call_count} sequenced calls "
+                f"routes={','.join(result.prompt_cache_routes) or 'none'} "
+                f"floor={route_cache_floor(task.name, result.prompt_cache_routes)}"
             )
 
         # Clean up: delete the agent now that we've collected all data, unless
@@ -16609,15 +16662,17 @@ def cache_ratchet_failures(
     for result in task_results:
         if result.status == "SKIPPED":
             continue
-        floor = floors.get(result.name)
-        if floor is None or floor <= 0:
+        task_floor = floors.get(result.name)
+        if task_floor is None or task_floor <= 0:
             continue
+        lane_floor = route_cache_floor(result.name, result.prompt_cache_routes)
+        floor = task_floor if lane_floor is None else lane_floor
         total = (
             result.prompt_cache_read_input_tokens
             + result.prompt_cache_creation_input_tokens
             + result.prompt_cache_uncached_input_tokens
         )
-        if result.prompt_cache_call_count <= 0 or total <= 0:
+        if result.prompt_cache_call_count <= 0 or total <= 0 or lane_floor is None:
             failures.append((result.name, result.agent_id, 0.0, floor))
             continue
         share_pct = round(result.prompt_cache_read_input_tokens / total * 100, 1)
