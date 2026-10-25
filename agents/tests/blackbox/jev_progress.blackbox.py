@@ -98,6 +98,25 @@ async def test_background_lifecycle():
         close.assert_called_once()
 
 
+async def test_demo_replay_runs_without_jev():
+    """descend-full69 MA8: a fully demo-cached mass-agent run made a live
+    api.typesafe.ai estimate and a full-history snapshot every turn of 100 agents
+    on one 2-CPU guest worker; its posts starved past their activity deadlines.
+    A DEMO replay (fast_mode_cache_enabled) gets no session; a live run keeps one.
+    """
+    seen = {}
+
+    @jev.with_jev_session
+    async def run(agent_id, fast_mode_cache_enabled=False, _jev_session=None):
+        seen[fast_mode_cache_enabled] = _jev_session
+        return "done"
+
+    assert await run("gp-1", fast_mode_cache_enabled=True) == "done"
+    assert await run("root-1") == "done"
+    assert seen[True] is None
+    assert isinstance(seen[False], jev.JEVSession) and seen[False].closed
+
+
 async def test_http_contract():
     client = AsyncMock()
     response = client.post.return_value
@@ -230,6 +249,7 @@ async def run_all_tests():
     await r.record_async("global HTTP concurrency bound", test_http_concurrency_bound)
     await r.record_async("nonblocking bounded lifecycle", test_background_lifecycle)
     await r.record_async("HTTP and pinned prompt", test_http_contract)
+    await r.record_async("DEMO replay runs without JEV", test_demo_replay_runs_without_jev)
     return r.all_passed
 
 

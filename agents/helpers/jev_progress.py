@@ -285,6 +285,10 @@ def with_jev_session(fn):
     @functools.wraps(fn)
     async def wrapped(*args, **kwargs):
         opts = signature.bind(*args, **kwargs).arguments
+        if opts.get("fast_mode_cache_enabled"):
+            # A DEMO replay makes no live calls: no remote JEV estimate, and no
+            # per-turn history snapshot competing with the replay for the worker.
+            return await fn(*args, **kwargs, _jev_session=None)
         kind = opts.get("jev_agent_kind") or ("explore" if opts.get("call_site_override") == "explore_agent" else "normal_root")
         session = JEVSession(opts["agent_id"], opts.get("task_id"), kind)
         try:
