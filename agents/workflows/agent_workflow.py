@@ -576,8 +576,9 @@ def _schema_field_types(schema: Optional[Dict[str, Any]]) -> Dict[str, str]:
 
 def _fits_field_type(value: Any, field_type: str) -> bool:
     """True when a transcript-derived value has the field's declared response_schema type."""
-    if not field_type:
-        return True  # untyped legacy schema field
+    if not field_type or field_type == "file_pointer":
+        # Untyped legacy field, or report text that completion materializes into a file.
+        return True
     if field_type == "str":
         return isinstance(value, str)
     if field_type == "int":
@@ -586,7 +587,7 @@ def _fits_field_type(value: Any, field_type: str) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if field_type == "bool":
         return isinstance(value, bool)
-    if field_type in ("object", "file_pointer"):
+    if field_type == "object":
         return isinstance(value, dict)
     if field_type.startswith("list["):
         if not isinstance(value, list):

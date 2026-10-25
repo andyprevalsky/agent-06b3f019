@@ -2933,6 +2933,7 @@ def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
             {"name": "core_content_pillars", "type": "list[str]"},
             {"name": "audience_persona", "type": "str"},
             {"name": "legacy_note"},
+            {"name": "positioning_statement", "type": "file_pointer"},
         ]
     }
     row_item = {
@@ -2949,7 +2950,7 @@ def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
         },
         {
             "role": "TOOL",
-            "text": f"# audience_persona\n\n{persona}",
+            "text": f"# audience_persona\n\n{persona}\n\n# positioning_statement\n\n{persona}",
             "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
         },
     ]
@@ -2959,6 +2960,8 @@ def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
     assert merged["core_content_pillars"] == ["fitness experiments", "nutrition"]
     assert merged["audience_persona"].startswith("Ambitious 25-40")
     assert merged["legacy_note"] == "kept"
+    # Report text for a file_pointer field is materialized into a file at completion.
+    assert merged["positioning_statement"].startswith("Ambitious 25-40")
 
 
 def test_workflow_coalesce_for_each_items_fills_top_creators_analysis():
