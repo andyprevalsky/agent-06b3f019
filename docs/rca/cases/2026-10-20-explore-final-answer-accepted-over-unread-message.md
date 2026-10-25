@@ -24,6 +24,7 @@ sources:
   - agent 6e3693b3-23b0-4c3d-b38a-453e835599d6 (recurrence 2026-10-25, background-agent-message-smoke r001-j0008)
   - agent 9a1eea7c-2523-49ee-b31f-914e0a7c1f86 (recurrence 2026-10-25, r002-j0043)
   - commit 2289dacef
+  - commit b84939604
 repro: agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_reads_a_message_stored_before_its_final_answer; agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn
 status: fixed
 ---
@@ -93,8 +94,23 @@ Fix (2289dacef, non-blocking): every model turn starts one background GET
 alongside its model call (`AgentInbox.next_step_messages`), so a message
 stored before the turn starts is fetched while the model runs and defers the
 completion through the existing path. The 30s fallback and `_last_read_at`
-are deleted. Messages stored during the final model call still go to the
-parent at finish(), which keeps them from being lost.
+are deleted. b84939604 (adversarial review) makes the per-turn read
+`fresh`. Previously, a read still in flight from before the tool batch (each
+read is bounded to 5s) could suppress the turn's read.
+Messages stored during the final model call still go to the parent at
+finish(), which keeps them from being lost. The explore does not act on
+them. That window can also widen if the turn's own read is slower than the
+final model call.
+Copy-2 evidence (9a1eea7c worker.log): send_message_to_agent at 02:03:00.39,
+final explore_agent rose.complete.start at 02:03:10.79, the only explore
+progress posts at 02:02:56.45 and 02:03:24.58, and backend GET /agent-inbox
+at 02:03:24.60 followed by "[AgentInbox] delivered agent messages" at
+finish.
+The root's spawn choice is not a variable here: Rose spawns are always
+background (loop/dag_executor.py, "Planned spawns ... start in the
+background like LLM spawns"). Both copies used wait_for while the task ran.
+claude-code-src/src/tools/AgentTool/prompt.ts:263 makes background opt-in
+for its own blocking-default tool, so no prompt change applies.
 Golden reference: claude-code-src/src/tools/SendMessageTool/SendMessageTool.ts:809-819
 queues a message to a running agent "for delivery ... at its next tool
 round", and src/utils/attachments.ts:1084-1100 drains that queue into
@@ -105,8 +121,11 @@ regression failed on 016fca859 with "the final answer must not be accepted
 over a stored message". Green: it passes on 2289dacef, and the spawn-agent
 domain passes.
 At 10k agents: at most one extra bounded indexed (agentId, timestamp > since)
-GET per explore model turn, never awaited (2k req/s worst case at one turn
-per 5s).
+GET per explore model turn, never awaited. That is up to 2k req/s at one
+turn per 5s, versus about 333 req/s from MA4's 30s fallback, so inbox read
+load is about double MA4's. Each read is the same per-agent indexed range
+(about 8ms in the captured runs) with no shared row or lock. The rate is the
+cost of making each turn see messages stored before it.
 
 ## Human feedback
 
