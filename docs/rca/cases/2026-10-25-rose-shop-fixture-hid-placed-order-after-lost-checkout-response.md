@@ -22,7 +22,7 @@ sources:
   - agent 805d9aaf-5348-4b41-86df-3fcb5436e8a9 (descend-full69-20261023, shard-00 job r002-j0048, run 20261025-015409-23867, source 016fca859)
   - commit a9fc78d11 (branch rca/SIGNUP-slow)
 repro: back-end/src/tests/blackbox/auth-test-site.signup-shop.cases.ts (signup_purchase and member-price guest cases: cart/account pages must link the placed order)
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -61,6 +61,21 @@ frontend :3002 → backend `routesShop.ts` POST /checkout → 303 `/orders/:n`.
    through order history on the account and cart pages. Without that surface,
    any transport loss after the order turned into a guaranteed timeout.
 
+Owned contributor, not changed here: Rose routes every Kernel browser session,
+including our own test site, through the Kernel managed residential proxy
+(`proxySource=kernel_residential_city` at 02:03:14Z). That routing added the hop
+that dropped the response. Exempting our own fixture origin would make
+benchmark traffic diverge from production browsing, which also crosses proxies,
+so the fixture is made recoverable instead. Proxy egress policy remains an open
+product question.
+
+Open sibling (harness, approval-gated, not fixed here): with the outcome
+unknowable, the browser agent called `attempt_completion` at verifier 50% for
+about 17 minutes. The run then ended at the 1200s backstop as PAUSED rather than
+returning an honest blocked result. Any unrecoverable ambiguity therefore turns
+into a timeout. The 502 step was a FINISHED browser step whose page content was
+the proxy error, not a tool ERROR row.
+
 Sibling failures prevented: every Rose Shop scenario with checkout
 (signup_purchase, member/guest, paid membership, expiring session), on any
 browser provider or proxy that can drop a response after the write (Kernel
@@ -89,7 +104,11 @@ the pre-fix exact-benchmark failure is recorded from the cloud run only.
 receipt. Both the cart page (member by session, guest by paying cart cookie)
 and the account page (member) show it. Strangers see nothing. No evaluator,
 prompt, timeout or task definition changed. The blackbox runner went green 5/5
-on a9fc78d11.
+on a9fc78d11. Status is `mitigated`. The causal proof is local, but the outcome proof
+(the unchanged agent finding the order through the new list after a lost
+response) is still pending. A dropped response can't be injected into the
+unchanged benchmark, so the outcome evidence will be the next cloud occurrence
+plus local passes of the unchanged task.
 
 Golden reference: searched `claude-code-src/` and `codex/` for idempotent or
 ambiguous-outcome handling. There's no analog, because this is a fixture-site
