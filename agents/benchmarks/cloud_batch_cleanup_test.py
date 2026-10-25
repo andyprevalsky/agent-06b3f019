@@ -109,16 +109,7 @@ async def _assert_evaluated_before_teardown(
     monkeypatch.setattr(
         bench,
         "get_llm_usage_details",
-        AsyncMock(
-            return_value=(
-                {},
-                {
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_hit_pct": 0,
-                },
-            )
-        ),
+        AsyncMock(return_value=({}, bench.aggregate_prompt_cache_share([]))),
     )
 
     def evaluate(*_args):
@@ -2274,7 +2265,7 @@ async def test_actual_task_runner_exports_fixture_custody_without_graded_root():
             patch.object(bench,"post_world_model_update_events",empty),patch.object(bench,"archive_agent_start",empty),
             patch.object(bench,"_poll_agent",AsyncMock(return_value=({"agent":{"id":CHILD,"status":"COMPLETED"},"messages":[]},0,0,None))),
             patch.object(bench,"_get_settled_tool_usage",AsyncMock(return_value={})),patch.object(bench,"_fetch_tree_stats",AsyncMock(return_value={})),
-            patch.object(bench,"get_llm_usage_details",AsyncMock(return_value=({},{"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_hit_pct":0}))),patch.object(bench,"evaluate_task",return_value=(True,None)),
+            patch.object(bench,"get_llm_usage_details",AsyncMock(return_value=({},bench.aggregate_prompt_cache_share([])))),patch.object(bench,"evaluate_task",return_value=(True,None)),
             patch.object(bench,"ensure_payment_lifecycle_cleanup",AsyncMock(return_value=None)),
             patch.object(bench,"collect_logs",AsyncMock(return_value={"messages":[]})),
             patch.object(bench,"finalize_archive_and_score_world_model",AsyncMock(return_value=("archive",None))),
