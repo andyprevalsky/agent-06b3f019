@@ -127,53 +127,39 @@ def aggregate_usage_items(items: Iterable[dict[str, Any]]) -> dict[str, dict[str
     return _round_costs(breakdown)
 
 
-def aggregate_repeatable_cache_usage(items: Iterable[dict[str, Any]]) -> dict[str, int | float]:
-    """Return cache reuse for call groups that repeat within one agent run.
+def aggregate_prompt_cache_share(items: Iterable[dict[str, Any]]) -> dict[str, int | float]:
+    """Return the prompt-cache share of every cache-sequenced LLM call in a run.
 
-    A one-shot verifier or summary call has no same-run reuse opportunity, so
-    mixing it into a prefix-reuse ratchet makes the result depend on unrelated
-    output size. Only usage carrying the exact provider ``cache_sequence_id``
-    is eligible. Retain every call from sequences with at least two calls so the
-    first write and later reads stay accountable. Missing sequence telemetry is
-    deliberately excluded; positive task floors fail closed on the resulting
-    zero-token metric.
+    share = cache_read / (cache_read + cache_creation + uncached input), the hit
+    rate the golden references compute over a query's total usage
+    (claude-code-src utils/forkedAgent.ts:646-654, services/compact/compact.ts:1220-1226;
+    openclaw src/agents/live-cache-test-support.ts:166-180). Uncached input is
+    ``tokens_in``: usage rows store it exclusive of cache tokens for every
+    provider (providers/rose/client.py:_normalize_usage_input_tokens rewrites
+    OpenAI's inclusive prompt_tokens; ``aggregate_usage_items`` sums the three
+    buckets). Only calls carrying the provider
+    ``cache_sequence_id`` can reuse a cache, so only they are measured; a run
+    with none has no cache telemetry and the ratchet fails it closed. Every
+    sequenced call counts, including a sequence that ran once: its reads of the
+    shared prefix and its writes are real cache effectiveness.
     """
-    llm_items = [
+    calls = [
         item
         for item in items
         if item.get("type") == "llm"
         and isinstance(item.get("cache_sequence_id"), str)
         and item["cache_sequence_id"].strip()
     ]
-
-    def cache_group(item: dict[str, Any]) -> tuple[str, str, str, str]:
-        provider, model = classify_usage_item(item)
-        return (
-            str(item.get("_benchmark_agent_id") or item.get("agent_id") or "unknown"),
-            item["cache_sequence_id"].strip(),
-            provider,
-            model,
-        )
-
-    group_counts: dict[tuple[str, str, str, str], int] = {}
-    for item in llm_items:
-        group = cache_group(item)
-        group_counts[group] = group_counts.get(group, 0) + 1
-    repeatable_items = [
-        item
-        for item in llm_items
-        if group_counts[cache_group(item)] >= 2
-    ]
-    cache_read = sum(int(item.get("cache_read_input_tokens") or 0) for item in repeatable_items)
-    cache_write = sum(int(item.get("cache_creation_input_tokens") or 0) for item in repeatable_items)
-    total = cache_read + cache_write
+    cache_read = sum(int(item.get("cache_read_input_tokens") or 0) for item in calls)
+    cache_write = sum(int(item.get("cache_creation_input_tokens") or 0) for item in calls)
+    uncached = sum(int(item.get("tokens_in") or 0) for item in calls)
+    total = cache_read + cache_write + uncached
     return {
         "cache_read_input_tokens": cache_read,
         "cache_creation_input_tokens": cache_write,
-        "cache_hit_pct": round(cache_read / total * 100, 1) if total else 0.0,
-        # Lets the ratchet tell "no sequence repeated" from missing telemetry.
-        "sequenced_call_count": len(llm_items),
-        "repeatable_call_count": len(repeatable_items),
+        "uncached_input_tokens": uncached,
+        "cache_share_pct": round(cache_read / total * 100, 1) if total else 0.0,
+        "call_count": len(calls),
     }
 
 

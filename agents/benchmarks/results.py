@@ -63,12 +63,14 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
-    repeatable_cache_read_input_tokens: int = 0
-    repeatable_cache_creation_input_tokens: int = 0
-    repeatable_cache_hit_pct: float = 0.0
-    # LLM calls carrying a cache sequence id, and those in a repeated sequence.
-    repeatable_cache_sequenced_call_count: int = 0
-    repeatable_cache_call_count: int = 0
+    # Prompt-cache share over cache-sequenced calls (llm_usage.aggregate_prompt_cache_share).
+    prompt_cache_read_input_tokens: int = 0
+    prompt_cache_creation_input_tokens: int = 0
+    prompt_cache_uncached_input_tokens: int = 0
+    prompt_cache_share_pct: float = 0.0
+    prompt_cache_call_count: int = 0
+    # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
+    prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0
