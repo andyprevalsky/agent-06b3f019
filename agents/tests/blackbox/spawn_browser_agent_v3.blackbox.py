@@ -13807,6 +13807,69 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
         )
 
 
+async def test_observed_sign_in_options_reach_verifier_receipt():
+    """The verifier must see the Auth Options that made the agent's sign-in identity the user's own.
+
+    browser-auth-stale-session-password r002-j0050 (2026-10-25): the browser signed in with the
+    site's saved password, but its read receipts lacked the observed auth_context, so the verifier
+    judged the member number to belong to "a different email" and the root spawned a second browser.
+    """
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+    from helpers.llm import build_verifier_context_messages
+
+    url = "https://shop.example/account"
+    site_identity = "member.a1b2@example.com"
+    auth_context = {
+        "auth_realm": "rose-shop-a1b2",
+        "inventory_status": "available",
+        "auth_options": (
+            "# Auth Options for rose-shop-a1b2\n- Accounts for this site:\n  - Passwords:\n"
+            f"    - https://shop.example/ | {site_identity} | ref: {{{{secret:pwd:{site_identity}}}}} | enabled"
+        ),
+    }
+    dom = DOMService("ws://unused-sign-in-options")
+    dom._session = _fake_session_with_event_bus()
+    dom.get_browser_state = AsyncMock(
+        return_value={"url": url, "title": "Account", "timestamp": "2026-10-25T00:00:00Z",
+                      "dom_tree": f"Signed in as {site_identity} Member number RS-1"}
+    )
+    dom.get_page_identity = AsyncMock(return_value={"url": url})
+    history = ActionHistory()
+    result = await execute_action(
+        dom, history, {"action": "read_browser_state", "params": {}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value=auth_context),
+    )
+    assert result["auth_context"]["auth_options"] == auth_context["auth_options"]
+    assert history.get_entries()[-1]["result"].get("auth_context") == auth_context, (
+        "observed sign-in options disappeared at their receipt owner"
+    )
+    final_state = {"url": url, "dom_tree": f"Signed in as {site_identity} Member number RS-1"}
+    with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+        context = await build_browser_verifier_context(
+            "Tell me my member number", url, final_state, history, _fake_config(), "session-1"
+        )
+    context = _model_visible_browser_verifier_context(context, dom, final_state)
+    wire = json.dumps(build_verifier_context_messages(context, "Existing verifier policy", call_site="verifier_browser"))
+    assert "Auth Options for rose-shop-a1b2" in wire and f"| {site_identity} |" in wire, (
+        "verifier graded without the sign-in options the browser agent observed"
+    )
+    # An unchanged inventory is not repeated on every later read; a changed one is recorded.
+    await execute_action(
+        dom, history, {"action": "read_browser_state", "params": {}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value=auth_context),
+    )
+    assert "auth_context" not in history.get_entries()[-1]["result"]
+    changed = {**auth_context, "inventory_status": "unknown"}
+    await execute_action(
+        dom, history, {"action": "read_browser_state", "params": {}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value=changed),
+    )
+    assert history.get_entries()[-1]["result"].get("auth_context") == changed
+
+
 async def test_execute_action_wait():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -33509,6 +33572,9 @@ async def run_all_tests():
     )
     await r.record_async(
         "delivered_observation_reaches_real_verifier", test_delivered_observation_reaches_verifier_through_owned_receipt
+    )
+    await r.record_async(
+        "observed_sign_in_options_reach_verifier_receipt", test_observed_sign_in_options_reach_verifier_receipt
     )
     await r.record_async(
         "execute_action_wait_coerces_numeric_string",
