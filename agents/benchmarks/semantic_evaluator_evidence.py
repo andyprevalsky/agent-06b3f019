@@ -82,6 +82,9 @@ def _evidence_rows_from_messages(
         if skip_user_system and role in {"USER", "SYSTEM"}:
             continue
         row_metadata = _message_metadata(message)
+        card = _completion_card_payload(message)
+        if card is not None:
+            row_metadata["evidence_type"] = "final_completion"
         if agent_id:
             row_metadata["source_agent_id"] = agent_id
         if parent_agent_id:
@@ -91,11 +94,33 @@ def _evidence_rows_from_messages(
         rows.append(
             {
                 "role": role or "UNKNOWN",
-                "text": _message_text(message, role),
+                "text": json.dumps(card, default=str) if card is not None else _message_text(message, role),
                 "metadata": row_metadata,
             }
         )
     return rows
+
+
+def _completion_card_payload(message: dict) -> dict[str, Any] | None:
+    """The Task Complete card a FINISHED completion_summary row shows: its summary and outputs.
+
+    The row's own text is empty; the card lives in metadata.completionSummary,
+    which the metadata allowlist drops. Render it for every agent, so a judge
+    reading a sub-agent's transcript sees the outputs that agent displayed.
+    """
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    completion = metadata.get("completionSummary")
+    if (
+        metadata.get("toolName") != "completion_summary"
+        or str(metadata.get("toolStatus") or "").upper() != "FINISHED"
+        or not isinstance(completion, dict)
+    ):
+        return None
+    outputs = completion.get("outputs")
+    return {
+        "summary": str(completion.get("summary") or ""),
+        "outputs": outputs[:200] if isinstance(outputs, list) else [],
+    }
 
 
 def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:

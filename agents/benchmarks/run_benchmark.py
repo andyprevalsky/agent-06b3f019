@@ -12119,10 +12119,18 @@ _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
-    """Build a full trajectory bundle for an agentic Codex judge."""
+    """Build a full trajectory bundle for an agentic Codex judge.
+
+    ``benchmark_state`` is the same compact typed view the single-turn judge
+    gets (``completion_outputs_count`` etc. per first-level GP), which T7's
+    judge prompt tells it to use; the raw state would carry every child body
+    a second time and none of those typed fields.
+    """
     from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
 
-    return build_agentic_evidence(data)
+    evidence = build_agentic_evidence(data)
+    evidence["benchmark_state"] = _compact_benchmark_state_for_judge(data)
+    return evidence
 
 
 async def _hydrate_semantic_evaluator_tree(data: dict, base_url: str) -> None:
@@ -12353,7 +12361,24 @@ async def _call_declared_agentic_llm_judge(
     score, reasoning = await _parse_agentic_judge_verdict(result)
     usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
     usage = aggregate_usage_items(usage_items) if usage_items else None
-    return {"score": score, "reasoning": reasoning, "usage": usage}
+    return {
+        "score": score,
+        "reasoning": reasoning,
+        "usage": usage,
+        "judge_audit": _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes),
+    }
+
+
+def _agentic_judge_audit(judge_agent_id: str, attachment: Any, evidence_bytes: bytes) -> dict[str, Any]:
+    """What a verdict was based on: the exact evidence file and the judge session that read it."""
+    pointer = attachment if isinstance(attachment, dict) else {}
+    return {
+        "judge_agent_id": judge_agent_id,
+        "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+        "evidence_bytes": len(evidence_bytes),
+        "evidence_file_id": pointer.get("id"),
+        "evidence_storage_path": pointer.get("storage_path"),
+    }
 
 
 async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dict:
@@ -14687,6 +14712,9 @@ async def _run_declared_evaluators(
             result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
+        judge_audit = (locals().get("judged") or {}).get("judge_audit") if method != "static_check" else None
+        if judge_audit:
+            result["judge_audit"] = judge_audit
         if method == "polar":
             # Surface per-rubric detail for hub / run JSON without affecting other methods.
             polar_results = locals().get("judged")
