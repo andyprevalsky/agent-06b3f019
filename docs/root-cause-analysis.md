@@ -191,9 +191,11 @@ surface that a repository rule explicitly says requires user approval.
   verification steps below, write and validate the RCA case, and invoke
   `/deploy` without an intermediate user handoff. Own the deploy through every
   test, review, merge, rollout, and production verification loop.
-- If the correct fix is approval-gated, stop at the narrowest approval boundary
-  and request approval using `.claude/shared/approval-format.md`. After approval,
-  resume the same fix-and-deploy flow without another discretionary pause.
+- If the correct fix is approval-gated, run the Golden-reference adversarial
+  review in `.claude/shared/approval-format.md`; a `GROUNDED` verdict clears the
+  gate. Otherwise stop at the narrowest approval boundary and request approval
+  using that format. After approval, resume the same fix-and-deploy flow without
+  another discretionary pause.
 - Never choose a weaker point fix, fallback, test change, or wrong-layer
   workaround merely to keep the diff approval-free. Approval status determines
   whether to pause, not which technical solution is correct.
@@ -419,6 +421,8 @@ Before settling on a fix, find how they handle the same problem:
    moves away from all of them needs a stated reason their approach does not fit.
 4. Put the citations in the case file and in any approval request (the
    `**Golden reference:**` Evidence field in `.claude/shared/approval-format.md`).
+   Well-grounded citations let an approval-gated fix clear its human gate
+   through that file's Golden-reference adversarial review.
 
 Do this before designing the fix, so the references shape it rather than
 decorate it. When no reference repo has an analog, say which repos you searched

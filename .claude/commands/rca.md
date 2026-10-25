@@ -38,10 +38,12 @@ other surface that a repository rule explicitly says requires user approval.
   write and validate the RCA case, then invoke `/deploy` without returning to
   the user. Own every deploy test, review, merge, rollout, and production
   verification loop until completion.
-- If the fix **does** require an approval-gated change: stop at the narrowest
-  approval boundary and use the canonical human-approval format above. After
-  approval, resume the same fix-and-deploy flow without another discretionary
-  pause.
+- If the fix **does** require an approval-gated change: draft the canonical
+  packet and run its Golden-reference adversarial review. A `GROUNDED` verdict
+  clears the boundary; continue the fix-and-deploy flow. Otherwise stop at the
+  narrowest approval boundary and use the canonical human-approval format
+  above. After approval, resume the same fix-and-deploy flow without another
+  discretionary pause.
 - Never choose a weaker point fix, fallback, test change, or wrong-layer
   workaround merely to keep the diff approval-free. Approval status selects
   whether to pause; it does not select the technical solution.

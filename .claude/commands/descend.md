@@ -890,11 +890,15 @@ Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
 incomplete, keep that cluster in RCA_HARNESS_FAILURES_IN_PARALLEL and gather
 its missing proof autonomously. Other ready clusters proceed. The exact
 post-fix benchmark outcome
-remains explicitly pending until after Andy approves the harness fix. An
+remains explicitly pending until the harness fix is approved (by Andy or a
+`GROUNDED` golden review). An
 exhausted external blocker follows Hard rule 7; it does not become a
 user-response gate.
 
-Main delivers the canonical request with Causal proof; outcome pending, then
+Main first runs the shared Golden-reference adversarial review on the
+packet. `GROUNDED` sets Approval to Fix approved (golden review) and follows
+**approve** below without asking Andy. Otherwise main delivers the canonical
+request with Causal proof; outcome pending and the `Golden review:` verdict, then
 continues independent work. Andy responds with the request ID and approve,
 edit, or reject. Infra rows use Not required. Workers never open their own
 human approval request. A pending decision gates only its candidate.
@@ -1026,7 +1030,9 @@ recovery/terminal-behavior guards.
 
 - If neither guard requires approval, preserve Fix approved for accepted HARNESS
   rows or set Not required for INFRA rows, then continue without stopping.
-- If a guard requires approval, set all affected rows to
+- If a guard requires approval, run the shared Golden-reference adversarial
+  review. `GROUNDED` sets the rows to Deploy approved (golden review) and the
+  deploy continues. Otherwise set all affected rows to
   Deploy approval, return the full packet to the main thread to show the exact
   snapshot-scoped diff, and pause only
   that deploy unit.
@@ -1089,7 +1095,7 @@ visible even when their failure is accepted for a separate infrastructure goal.
 
 All HARNESS_FIX_DECISION and DEPLOY_ADMIN_APPROVAL requests are emitted by the
 main thread using `.claude/shared/approval-format.md`, separate from progress
-cards. Read that file completely before composing a request. Use its seven
+cards, only after its Golden-reference adversarial review did not clear them. Read that file completely before composing a request. Use its seven
 sections (How: immediately before TL;DR:), exact inline diff, durable
 failing-run evidence, pre/post causal measurements, golden reference, full
 unchanged exemplar task prompt, required Links list and explicit decision
