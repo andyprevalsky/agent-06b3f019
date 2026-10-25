@@ -1197,11 +1197,22 @@ def catalog_ineligible_reason(root, runner, tasks, backend_env, task_ref=None, e
                'agents/providers/demo_cache/normalize.py', 'agents/utils/__init__.py',
                'agents/utils/oai_demo.py', 'agents/utils/oai_demo_july.py')
     with tempfile.TemporaryDirectory(prefix='manifest-catalog-') as scratch:
+        ref = task_ref or runner['TASK_REF']
         for member in members:
             target = Path(scratch, member)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
-                                                        (task_ref or runner['TASK_REF']) + ':' + member]))
+            # Task refs older than the DEMO-cache rename keep the same module at its legacy path.
+            sources = [member] + (['agents/providers/fast_cache/normalize.py']
+                                  if member == 'agents/providers/demo_cache/normalize.py' else [])
+            for index, source in enumerate(sources):
+                try:
+                    target.write_bytes(subprocess.check_output(
+                        ['git', '--no-replace-objects', '-C', str(root), 'show', ref + ':' + source],
+                        stderr=subprocess.DEVNULL if index < len(sources) - 1 else None))
+                    break
+                except subprocess.CalledProcessError:
+                    if index == len(sources) - 1:
+                        raise
         # Phone-callee assignments come from the selected backend env, as the benchmark reads them.
         Path(scratch, 'back-end').mkdir()
         Path(scratch, 'back-end/.env').symlink_to(Path(backend_env).absolute())

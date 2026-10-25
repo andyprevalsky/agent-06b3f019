@@ -1664,6 +1664,95 @@ class Portable(unittest.TestCase):
             self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
             self.assertEqual(terminal['release']['machine_id'],mid)
 
+    def _stopped_controller_run(self,native,recover=True):
+        # descend-full69 shard-00: the gate joined with GATE_EXPORT_PENDING after a devbox
+        # suspension lost the export download, then the controller stopped (restart 'no').
+        # Every probe failed; the runner wrote supervisor-read-pending files forever.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700);root=base/'source';(root/'scripts').mkdir(parents=True)
+            state=base/'native.json';calls=base/'native-calls.jsonl';state.write_text(json.dumps(native))
+            (root/'scripts/cloudbench-original-volume-capture.py').write_text(
+                "import json\ndef resolve_token(scope):return 'fixture'\nclass Fly:\n def __init__(self,app,token):pass\n"
+                " def api(self,method,path,body=None,timeout=60):\n"
+                "  open("+repr(str(calls))+",'a').write(json.dumps([method,path])+'\\n')\n"
+                "  return json.loads(open("+repr(str(state))+").read())\n")
+            cleanup_calls=base/'cleanup-calls.jsonl'
+            (root/'scripts/cloudbench-disposable-controller.py').write_text(
+                "import json,os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:];directory=Path(args[args.index('--directory')+1])\n"
+                "with open("+repr(str(cleanup_calls))+",'a')as f:f.write(json.dumps(args)+'\\n')\n"
+                "record=json.loads((directory/'disposable-controller.ownership.json').read_bytes())\n"
+                "fd=os.open(directory/'disposable-controller.release.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+                "os.write(fd,json.dumps(dict(machine_id=record['machine']['id'],volume_id=record['volume']['id'],volume_disposition='pending_destroy',machine_deleted=True)).encode());os.close(fd)\n")
+            tasks=private(base/'tasks.json',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            inventory=private(base/'inventory.json','{}')
+            config=private(base/'config.private.json',dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(root),source_ref='a'*40,
+                source_files={'cloudbench-original600-runner.py':'f'*64,'cloudbench-original600-supervisor.py':'d'*64},tasks_path=str(tasks),started_at_epoch=time.time(),authority_template=str(template),
+                host_operator_provenance=dict(fixture=True),gate_env=dict(CLOUDBENCH_GATE_TIMEOUT_S='7200'),
+                remote_files=[dict(relative_path=RUNNER['WARM_INVENTORY_RELATIVE'],source_path=str(inventory),sha256=hashlib.sha256(inventory.read_bytes()).hexdigest())]))
+            out=base/'run';mid='0123456789abcd';probes=[];digest=[None]
+            class JoinedGate:
+                pid=os.getpid();returncode=1
+                def poll(self):return 1
+                def wait(self):return 1
+            def spawn(command,source,env,stream,output,config_path,config_sha,authority):
+                export=output/'export';export.mkdir(mode=0o700)
+                workspace=private(export/'workspace-volume.ownership.json',dict(volume_id='vol_fixture123'))
+                digest[0]=hashlib.sha256(authority.read_bytes()).hexdigest()
+                private(export/'disposable-controller.ownership.json',dict(authority_sha256=digest[0],workspace_sha256=hashlib.sha256(workspace.read_bytes()).hexdigest(),
+                        machine=dict(id=mid,instance_id='fixture-instance'),volume=dict(id='vol_fixture123')))
+                return JoinedGate()
+            def control(api,machine,payload):
+                probes.append(payload['action']);raise RUNNER['Deadline']('exec on a stopped controller')
+            real_sleep=time.sleep;slept=[0];seen=dict(receipt_before_verified=False)
+            def bounded_sleep(seconds):
+                slept[0]+=1
+                receipt=out/'export-recovery-required.json'
+                if recover and receipt.exists() and not (out/'export/disposable-export.verified.json').exists():
+                    # The documented retained-export recovery publishes the canonical marker.
+                    seen['receipt_before_verified']=True
+                    private(out/'export/disposable-export.verified.json',dict(authority_sha256=digest[0],machine_id=mid))
+                if slept[0]>400:raise TimeoutError('runner spun on a stopped controller')
+                real_sleep(.01)
+            stubs=dict(validate_source_members=lambda *unused:None,pin_warm_snapshot=lambda *unused:None,host_gate=lambda *unused:root/'gate',
+                       launch_handoff=lambda output,remote:(output/'payload.gz','e'*64,['true']),spawn_gate=spawn,machine_control=control,
+                       transfer_sidecars=lambda *unused,**kw:None,STOPPED_PROBE_GRACE_S=0)
+            result=dict(probes=probes,seen=seen)
+            with patch.dict(RUNNER['run'].__globals__,stubs),patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'),patch.object(RUNNER['time'],'sleep',bounded_sleep):
+                try:result['code']=RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                except TimeoutError as error:result['error']=str(error)
+            for key,path in (('receipt',out/'export-recovery-required.json'),('terminal',out/'terminal.json'),('intent',out/'cleanup-call.intent.json')):
+                result[key]=json.loads(path.read_bytes()) if path.exists() else None
+            result['cleanup_calls']=cleanup_calls.read_text().splitlines() if cleanup_calls.exists() else []
+            result['native_calls']=[json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return result
+
+    def test_stopped_controller_with_unverified_export_publishes_recovery_then_releases(self):
+        r=self._stopped_controller_run(dict(id='0123456789abcd',instance_id='fixture-instance',state='stopped'))
+        self.assertNotIn('error',r,'runner must not spin forever on a stopped controller')
+        self.assertTrue(r['seen']['receipt_before_verified'])
+        receipt=r['receipt']
+        self.assertEqual((receipt['status'],receipt['native_state'],receipt['export_verified'],receipt['workspace_volume']),
+                         ('EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED','stopped',False,'vol_fixture123'))
+        self.assertIn('recover-a-stopped-controllers-retained-export',receipt['recovery'])
+        self.assertTrue(Path(ROOT/'docs/original600-operator-cli.md').read_text().count('### Recover a stopped controller\'s retained export')==1)
+        self.assertEqual(len(r['cleanup_calls']),1);self.assertEqual(json.loads(r['cleanup_calls'][0])[0],'cleanup')
+        self.assertEqual({m for m,unused in r['native_calls']},{'GET'},'runner itself never mutates the controller')
+        self.assertEqual((r['intent']['supervisor_state'],r['intent']['supervisor_joined'],r['intent']['probed_after_join']),('CONTROLLER_STOPPED',False,True))
+        self.assertEqual((r['code'],r['terminal']['status'],r['terminal']['benchmark_success_inferred']),(1,'CONTROLLER_STOPPED_RELEASE_VERIFIED',False))
+
+    def test_stopped_controller_without_recovered_export_stays_owner_and_never_releases(self):
+        r=self._stopped_controller_run(dict(id='0123456789abcd',instance_id='fixture-instance',state='stopped'),recover=False)
+        self.assertEqual(r['receipt']['status'],'EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED')
+        self.assertIn('error',r);self.assertEqual(r['cleanup_calls'],[]);self.assertIsNone(r['terminal'])
+
+    def test_started_or_replaced_controller_never_counts_as_stopped(self):
+        for native in (dict(id='0123456789abcd',instance_id='fixture-instance',state='started'),
+                       dict(id='0123456789abcd',instance_id='other-instance',state='stopped')):
+            r=self._stopped_controller_run(native)
+            self.assertIn('error',r);self.assertIsNone(r['receipt']);self.assertEqual(r['cleanup_calls'],[]);self.assertIsNone(r['terminal'])
+
     def test_actual_gate_typed_preallocation_refusal_terminates_only_joined_no_effect(self):
         source=Path(os.environ.get('ORIGINAL600_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
         message=source.index('echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)"')
