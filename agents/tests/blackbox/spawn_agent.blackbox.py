@@ -3785,14 +3785,16 @@ async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_fail
         "from_goal": "",
         "created_at": "2026-10-19T10:00:05.000Z",
     }
-    fetch = AsyncMock(side_effect=[[m1], [m1, m2], RuntimeError("backend down"), []])
+    fetch = AsyncMock(side_effect=[[m1], [m1, m2], RuntimeError("backend down"), [], []])
     polled: list = []
     captured: dict = {}
 
     async def fake_run_agent(**kwargs):
         captured.update(kwargs)
-        for _ in range(4):
+        for _ in range(5):
             polled.append(await kwargs["poll_inbox"]())
+            for _ in range(3):  # the step's model call: background reads land meanwhile
+                await asyncio.sleep(0)
         return {"status": "completed", "final_response": "done"}
 
     with (
@@ -3811,8 +3813,10 @@ async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_fail
             inbox_address="bg-tc-1",
         )
     assert result["status"] != "failed", result
-    assert [len(rows) for rows in polled] == [1, 1, 0, 0]
-    first, second = polled[0][0], polled[1][0]
+    # Reads never block a step: each lands during the step's model call and is
+    # delivered at the next step, once (m1 re-read by the second GET is deduped).
+    assert [len(rows) for rows in polled] == [0, 1, 1, 0, 0]
+    first, second = polled[1][0], polled[2][0]
     assert first["role"] == "USER" and second["role"] == "USER"
     # Stored like a backend agent-message row: raw payload + metadata; the
     # model context renders it (assistant role, Codex body).
@@ -3870,9 +3874,11 @@ async def test_explore_agent_inbox_delivers_each_message_once_and_tolerates_fail
     assert [m["role"] for m in later][-2:] == ["assistant", "assistant"] and is_inter_agent_message(later[-2])
     assert later[-1]["content"].endswith("Denver only."), "never merged into the model's turn"
     assert settle_trailing_inter_agent_messages(later) is later
+    # Every read starts from the DELIVERED cursor: it moves only after a step used the rows.
     assert [c.args for c in fetch.await_args_list] == [
         ("parent-1", "bg-tc-1", None),
         ("parent-1", "bg-tc-1", m1["created_at"]),
+        ("parent-1", "bg-tc-1", m2["created_at"]),
         ("parent-1", "bg-tc-1", m2["created_at"]),
         ("parent-1", "bg-tc-1", m2["created_at"]),
     ]
@@ -4147,14 +4153,12 @@ async def test_explore_inbox_rides_the_progress_post_and_gets_only_as_fallback()
 
 
 async def test_explore_reads_a_message_stored_before_its_final_answer():
-    """A message stored while the final LLM call runs is read before the answer is accepted.
+    """A message already fetched when the explore answers defers the answer one step.
 
-    Regression for explore-agent-mid-run-message 7166707a: the root stored
-    "include who led the round" 4s into the explore's final call; the
-    progress-post read would only deliver it at the next step, so the explore
-    finished without it and the root could no longer reach the task. Completion
-    now does one inbox read (once per completion, not per step); unread
-    messages defer it and arrive at the next step, exactly once.
+    Regression for explore-agent-mid-run-message 7166707a, now without any
+    blocking read: the step's progress post carries the read alongside the
+    model call; at completion an undelivered fetched message rejects the
+    answer and reaches the next turn exactly once.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -4167,19 +4171,97 @@ async def test_explore_reads_a_message_stored_before_its_final_answer():
         "from_agent_path": "/root",
         "created_at": "2026-10-20T02:18:31.952Z",
     }
-    fetch = AsyncMock(side_effect=[[late], []])
+    fetch = AsyncMock(return_value=[])
+    post_answers = [[late]]
+
+    async def fake_save(**_kwargs):
+        return post_answers.pop(0) if post_answers else []
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "Ringg AI raised $5.5M (Jan 23, 2026)."})
+    steps: dict = {}
+
+    async def model_call():
+        for _ in range(20):  # the fire-and-forget progress post answers during the call
+            await asyncio.sleep(0)
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        steps["start"] = await kwargs["poll_inbox"]()
+        await kwargs["post_message"]("Searching funding rounds.", "ASSISTANT", {"title": "thinking"})
+        await model_call()
+        await execute_tool("web_search", {"query": "AI agent funding rounds"}, "tc-search")
+        steps["first"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done-1")
+        steps["delivered"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        await model_call()
+        steps["second"] = await execute_tool("attempt_completion_with_result", {"result": "8 led"}, "tc-done-2")
+        steps["after"] = [row["text"] for row in await kwargs["poll_inbox"]()]
+        return {"status": "completed", "final_response": "8 led"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="root-1",
+            user_id="u",
+            goal="Compile 8 funding rounds",
+            model="m",
+            task_id="task-1",
+            inbox_address="call_bg",
+        )
+
+    assert result["status"] != "failed", result
+    assert steps["start"] == []
+    assert steps["first"].get("error") is True, "a final answer must not be accepted over a fetched message"
+    assert steps["delivered"] == ["Also say who led each round."], steps
+    assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
+    assert steps["after"] == [], "the message is delivered exactly once"
+    assert result["undelivered_agent_messages"] == []
+
+
+async def test_explore_message_landing_after_the_final_answer_reaches_the_parent():
+    """A message fetched by the completion-time read after the explore ended is not lost.
+
+    The completion does not wait for its read; when that read lands after the
+    last model turn, the message was never acknowledged and is handed to the
+    parent with the explore result.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    late = {
+        "id": "m-late",
+        "text": "Also say who led each round.",
+        "from_agent_id": "root-1",
+        "from_agent_path": "/root",
+        "created_at": "2026-10-20T02:18:31.952Z",
+    }
+    release = asyncio.Event()
+    reads = {"n": 0}
+
+    async def fetch(*_args, **_kwargs):
+        reads["n"] += 1
+        await release.wait()  # the completion-time read is still in flight at finish
+        return [late]
+
     fake_ws = MagicMock()
     fake_ws.execute_tool = AsyncMock(return_value={"result": "Ringg AI raised $5.5M (Jan 23, 2026)."})
     steps: dict = {}
 
     async def fake_run_agent(**kwargs):
         execute_tool = kwargs["execute_tool"]
+        await kwargs["poll_inbox"]()
+        for _ in range(3):
+            await asyncio.sleep(0)
         await execute_tool("web_search", {"query": "AI agent funding rounds"}, "tc-search")
-        steps["first"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done-1")
-        steps["delivered"] = [row["text"] for row in await kwargs["poll_inbox"]()]
-        steps["second"] = await execute_tool("attempt_completion_with_result", {"result": "8 led"}, "tc-done-2")
-        steps["after"] = [row["text"] for row in await kwargs["poll_inbox"]()]
-        return {"status": "completed", "final_response": "8 led"}
+        steps["final"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done")
+        release.set()  # the message arrives while the agent is finishing
+        return {"status": "completed", "final_response": "8 rounds"}
 
     with (
         patch("temporalio.activity.heartbeat"),
@@ -4197,41 +4279,111 @@ async def test_explore_reads_a_message_stored_before_its_final_answer():
             inbox_address="call_bg",
         )
 
-    assert result["status"] != "failed", result
-    assert steps["first"].get("error") is True, "a final answer must not be accepted over an unread message"
-    assert steps["delivered"] == ["Also say who led each round."], steps
-    assert steps["second"] == {"success": True, "message": "Completion accepted"}, steps
-    assert steps["after"] == [], "the message is delivered exactly once"
-    assert fetch.await_count == 2, "one inbox read per completion attempt, none per step"
+    assert steps["final"] == {"success": True, "message": "Completion accepted"}, "completion never waits on a read"
+    assert [m["id"] for m in result["undelivered_agent_messages"]] == ["m-late"]
+    assert "Also say who led each round." in result["final_response"]
+    assert reads["n"] == 1, "one completion-time read, started in the background"
 
 
-async def test_explore_completion_inbox_read_is_wall_clock_bounded():
+async def test_explore_hung_inbox_read_never_delays_completion():
     """descend-full69 MA2 run 2: a completion-time inbox GET hung for 558s.
 
-    The explore leaf c53c4301 called attempt_completion_with_result; its one
-    ``unread_before_finish`` GET never reached the backend (stuck inside the
-    shared pooled client, where httpx's per-phase timeouts do not apply), so
-    the leaf went silent past the 510s stall threshold. The read must end
-    within its own deadline as a logged poll failure.
+    Reads now run in the background: a read that never returns delays neither
+    a step nor the final answer, and at hand-off it is cancelled with nothing
+    acknowledged.
     """
-    import asyncio
-    from unittest.mock import patch
+    import time
+    from unittest.mock import AsyncMock, MagicMock, patch
 
-    from helpers import agent_inbox
+    from domains.spawn_agent.service import spawn_explore_agent_activity
 
-    class StuckClient:
-        async def get(self, *_args, **_kwargs):
-            await asyncio.Event().wait()
+    async def hung_fetch(*_args, **_kwargs):
+        await asyncio.Event().wait()
 
-    inbox = agent_inbox.AgentInbox.create("gp-1", "task-1")
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "Ringg AI raised $5.5M (Jan 23, 2026)."})
+    steps: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        started = time.monotonic()
+        steps["polled"] = await kwargs["poll_inbox"]()
+        await execute_tool("web_search", {"query": "AI agent funding rounds"}, "tc-search")
+        steps["final"] = await execute_tool("attempt_completion_with_result", {"result": "8 rounds"}, "tc-done")
+        steps["agent_s"] = time.monotonic() - started
+        return {"status": "completed", "final_response": "8 rounds"}
+
     with (
-        patch.object(agent_inbox, "get_http_client", return_value=StuckClient()),
-        patch.object(agent_inbox, "AGENT_INBOX_TIMEOUT_SECONDS", 0.05),
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=AsyncMock(return_value=None)),
+        patch("helpers.agent_inbox.fetch_agent_inbox", new=hung_fetch),
+        patch("helpers.agent_inbox.AGENT_INBOX_TIMEOUT_SECONDS", 0.05),
     ):
-        unread = await asyncio.wait_for(inbox.unread_before_finish(), timeout=2.0)
+        result = await asyncio.wait_for(
+            spawn_explore_agent_activity(
+                agent_id="root-1",
+                user_id="u",
+                goal="Compile 8 funding rounds",
+                model="m",
+                task_id="task-1",
+                inbox_address="call_bg",
+            ),
+            timeout=5.0,
+        )
 
-    assert unread is False
-    assert inbox.failures == 1
+    assert steps["polled"] == []
+    assert steps["final"] == {"success": True, "message": "Completion accepted"}
+    assert steps["agent_s"] < 0.5, steps
+    assert result["status"] == "completed" and result["undelivered_agent_messages"] == []
+
+
+async def test_agent_inbox_abandoned_read_does_not_advance_the_cursor():
+    """Fetched-but-undelivered messages acknowledge nothing; the next reader gets them."""
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.agent_inbox import AgentInbox
+
+    m1 = {"id": "m1", "text": "Focus on Denver.", "created_at": "2026-10-25T01:00:00.000Z"}
+    fetch = AsyncMock(return_value=[m1])
+    inbox = AgentInbox.create("parent-1", "task-1", {"since": "2026-10-25T00:00:00.000Z"})
+    with patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch):
+        inbox.start_read()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # The agent ended (or was cancelled) before a step used the read.
+        state = inbox.state()
+        assert state["since"] == "2026-10-25T00:00:00.000Z" and state["seen_ids"] == []
+
+        resumed = AgentInbox.create("parent-1", "task-1", state)
+        await resumed.poll()
+        assert [m["id"] for m in await resumed.next_step_messages()] == ["m1"]
+    assert fetch.await_args_list[1].args[2] == "2026-10-25T00:00:00.000Z"
+    assert resumed.state()["since"] == "2026-10-25T01:00:00.000Z" and resumed.state()["seen_ids"] == ["m1"]
+
+
+async def test_agent_inbox_overlapping_readers_deliver_each_message_exactly_once():
+    """A piggybacked post read and a background GET overlap: no double delivery, no drop."""
+    from unittest.mock import AsyncMock, patch
+
+    from helpers.agent_inbox import AgentInbox
+
+    m1 = {"id": "m1", "text": "one", "created_at": "2026-10-25T01:00:00.000Z"}
+    m2 = {"id": "m2", "text": "two", "created_at": "2026-10-25T01:00:01.000Z"}
+    m3 = {"id": "m3", "text": "three", "created_at": "2026-10-25T01:00:02.000Z"}
+    inbox = AgentInbox.create("parent-1", "task-1")
+    with patch("helpers.agent_inbox.fetch_agent_inbox", new=AsyncMock(return_value=[m2, m3])):
+        inbox.start_read()
+        inbox.stash([m1, m2])  # the post read answers while the GET is in flight
+        for _ in range(3):
+            await asyncio.sleep(0)
+        first = await inbox.next_step_messages()
+        inbox.stash([m2, m3])  # a late duplicate read
+        second = await inbox.next_step_messages()
+    assert [m["id"] for m in first] == ["m1", "m2", "m3"]
+    assert second == []
+    assert await inbox.finish() == []
 
 
 async def test_explore_without_inbox_address_has_no_inbox_hook():
@@ -6352,8 +6504,20 @@ async def run_all_tests():
         test_explore_agent_inbox_delivers_each_message_once_and_tolerates_failures,
     )
     await r.record_async(
-        "explore_completion_inbox_read_is_wall_clock_bounded",
-        test_explore_completion_inbox_read_is_wall_clock_bounded,
+        "explore_hung_inbox_read_never_delays_completion",
+        test_explore_hung_inbox_read_never_delays_completion,
+    )
+    await r.record_async(
+        "explore_message_landing_after_the_final_answer_reaches_the_parent",
+        test_explore_message_landing_after_the_final_answer_reaches_the_parent,
+    )
+    await r.record_async(
+        "agent_inbox_abandoned_read_does_not_advance_the_cursor",
+        test_agent_inbox_abandoned_read_does_not_advance_the_cursor,
+    )
+    await r.record_async(
+        "agent_inbox_overlapping_readers_deliver_each_message_exactly_once",
+        test_agent_inbox_overlapping_readers_deliver_each_message_exactly_once,
     )
     await r.record_async(
         "explore_list_agents_renders_tree_from_explore_task",
@@ -6477,7 +6641,9 @@ async def run_all_tests():
     )
     await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
     await r.record_async("explore_hung_fe_post_cannot_pin_activity", test_explore_hung_fe_post_cannot_pin_activity)
-    await r.record_async("explore_tool_post_retries_past_hung_attempt", test_explore_tool_post_retries_past_hung_attempt)
+    await r.record_async(
+        "explore_tool_post_retries_past_hung_attempt", test_explore_tool_post_retries_past_hung_attempt
+    )
     await r.record_async(
         "explore_timeout_preserves_inflight_fe_posts",
         test_explore_timeout_during_threshold_drain_preserves_fe_posts,
