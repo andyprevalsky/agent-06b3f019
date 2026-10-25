@@ -2896,16 +2896,24 @@ async def test_phone_setup_actual_provider_observation():
 
 
 def test_phone_off_matches_prephone_bytes():
-    """Golden SHA256s captured from canonical c28f801be before the Phone proposal."""
+    """Phone-off tools/system/messages must equal the pre-Phone prompt, byte for byte.
+
+    Golden SHA256s were captured from canonical c28f801be before the Phone proposal.
+    Re-pinned at 042d82196 for exactly one deliberate, mode-independent change:
+    a05e1beb7 (Q3b, approved) added the shared browser_auth_contract line "Sign in or
+    sign up only with identities listed in Auth Options. ..." to both modes. The tools
+    hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
+    reviewed text that also reaches phone-on mode, and record the commit here.
+    """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('ad32df749a6a2d7bd52cdd71beba6847813e3f65de4b9e121f0af2d159f10ec5', '79d2a3bef187200237b57e3642b9e6e2db1ee914898b195b25b9301a29978a84', 'c774b266c93218b485827983751946a1dce0398a42547de586f30ea7666ed874'), '1': ('9bd995b7f5e4d24462806f7e2f34db7a1330fcd80b3c9b6fbef79dfe6a69ef84', '7a52d6efc71c2ff23d64501cb2307b7d4e2a535b1de66d6fb1f67174422f81ce', 'ee3a58c5d3e76718484a482fab8be0b58974d506bddd1d24c7db82b9efa8c4e1')}
+    expected = {'0': ('ad32df749a6a2d7bd52cdd71beba6847813e3f65de4b9e121f0af2d159f10ec5', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('9bd995b7f5e4d24462806f7e2f34db7a1330fcd80b3c9b6fbef79dfe6a69ef84', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
 
 
 async def test_phone_off_actual_rose_request():
