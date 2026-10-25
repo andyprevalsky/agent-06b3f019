@@ -11,6 +11,8 @@ symptoms:
   - "Message sent to /root/<task>. (but the explore finished without reading it)"
   - "Background explore task ... has completed; explore/browser/code tasks cannot be continued"
   - "Forbidden tool 'spawn_browser_agent' was called"
+  - "Agent messages sent to this explore agent that arrived after it finished:"
+  - "Declared evaluator smoke_rfc_semantics failed: ... The routing requirement is not met"
 tags:
   - background-agents
   - explore
@@ -19,7 +21,10 @@ tags:
 sources:
   - agent 7166707a-a447-4cbe-bef1-41f45ac95ac3 (FAIL, forbidden spawn_browser_agent)
   - commit df9d863e7
-repro: agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_reads_a_message_stored_before_its_final_answer
+  - agent 6e3693b3-23b0-4c3d-b38a-453e835599d6 (recurrence 2026-10-25, background-agent-message-smoke r001-j0008)
+  - agent 9a1eea7c-2523-49ee-b31f-914e0a7c1f86 (recurrence 2026-10-25, r002-j0043)
+  - commit 2289dacef
+repro: agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_reads_a_message_stored_before_its_final_answer; agents/tests/blackbox/spawn_agent.blackbox.py::test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn
 status: fixed
 ---
 
@@ -63,11 +68,56 @@ asserts exactly one GET per completion attempt.
 At 10k agents: there is one extra bounded indexed inbox GET per explore
 completion attempt, and none per step.
 
+### Recurrence 2026-10-25 (descend-full69 BG)
+
+Both copies of background-agent-message-smoke on 016fca859 failed the LLM
+judge: the explore never acted on the forwarded marker, and its result said
+"Agent messages sent to this explore agent that arrived after it finished".
+The root spawned the explore in the background both times (wait_for showed it
+"running" when the follow-up arrived) and forwarded with
+send_message_to_agent to the same task, so the root's spawn choice and prompts
+were not the cause.
+
+Why the earlier fix stopped holding: MA4 (aa25bf7aa, Andy: inbox reads must
+never block) turned the completion read into a background read that the
+completion does not wait for. The only other reads were the progress-post
+piggyback, which answers when a model turn ends and before its tools run,
+and a 30s fallback GET. In 6e3693b3 the post read ran at 02:02:56, the
+message was stored at 02:03:03 during a 21s web_fetch batch, and the final
+turn started at 02:03:17 with no read since. The completion at 02:03:42 found
+nothing fetched, was accepted, and finish() handed the message to the root
+(GET /agent-inbox at 02:03:42.29). 9a1eea7c: message at 02:03:00, final turn
+02:03:10, same path. The root then added the marker itself.
+
+Fix (2289dacef, non-blocking): every model turn starts one background GET
+alongside its model call (`AgentInbox.next_step_messages`), so a message
+stored before the turn starts is fetched while the model runs and defers the
+completion through the existing path. The 30s fallback and `_last_read_at`
+are deleted. Messages stored during the final model call still go to the
+parent at finish(), which keeps them from being lost.
+Golden reference: claude-code-src/src/tools/SendMessageTool/SendMessageTool.ts:809-819
+queues a message to a running agent "for delivery ... at its next tool
+round", and src/utils/attachments.ts:1084-1100 drains that queue into
+every turn. claude-code-src/src/tools/SendMessageTool/SendMessageTool.ts:822-835
+auto-resumes a stopped agent with the message. Rose now matches next-round
+delivery. It does not yet auto-resume a finished explore. Red: the new
+regression failed on 016fca859 with "the final answer must not be accepted
+over a stored message". Green: it passes on 2289dacef, and the spawn-agent
+domain passes.
+At 10k agents: at most one extra bounded indexed (agentId, timestamp > since)
+GET per explore model turn, never awaited (2k req/s worst case at one turn
+per 5s).
+
 ## Human feedback
 
-None recorded.
+None recorded for the original case. For the recurrence, Andy (MA4,
+2026-10-25) said "inbox checks should be done in parallel as much as possible
+and never block" and "don't lose messages / consume them and throw them away
+in a race". The fix keeps every read in the background.
 
 ## Reusable lesson
 
-When reads are batched one step late, a terminal transition must flush the
-batch first. Otherwise a message that arrives during the last step is lost.
+When reads are batched one step late, every turn, the terminal one included,
+must see messages stored before it started. With non-blocking reads, start
+one read alongside each model turn rather than relying on a read that
+predates the turn's tools.
