@@ -26,8 +26,9 @@ DECLARED_JUDGE_METADATA_KEYS = (
     "title",
     "browser_session_metadata",
     "requestUserApproval",
-    # completionSummary is normalized into a final_completion ASSISTANT row;
-    # keep it out of raw tool metadata so judges see one rendered answer card.
+    # completionSummary is rendered as each agent's final_completion ASSISTANT row
+    # (_completion_card_payload); keep it out of raw tool metadata so judges see
+    # one rendered answer card per completion.
     "toolCallId",
     "subAgentId",
     "task_id",
@@ -82,6 +83,9 @@ def _evidence_rows_from_messages(
         if skip_user_system and role in {"USER", "SYSTEM"}:
             continue
         row_metadata = _message_metadata(message)
+        card = _completion_card_payload(message)
+        if card is not None:
+            row_metadata["evidence_type"] = "final_completion"
         if agent_id:
             row_metadata["source_agent_id"] = agent_id
         if parent_agent_id:
@@ -90,12 +94,35 @@ def _evidence_rows_from_messages(
             row_metadata["source_goal"] = goal[:200]
         rows.append(
             {
-                "role": role or "UNKNOWN",
-                "text": _message_text(message, role),
+                # The rendered Task Complete card is the agent's answer, shown as assistant evidence.
+                "role": "ASSISTANT" if card is not None else (role or "UNKNOWN"),
+                "text": json.dumps(card, default=str) if card is not None else _message_text(message, role),
                 "metadata": row_metadata,
             }
         )
     return rows
+
+
+def _completion_card_payload(message: dict) -> dict[str, Any] | None:
+    """The Task Complete card a FINISHED completion_summary row shows: its summary and outputs.
+
+    The row's own text is empty; the card lives in metadata.completionSummary,
+    which the metadata allowlist drops. Render it for every agent, so a judge
+    reading a sub-agent's transcript sees the outputs that agent displayed.
+    """
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    completion = metadata.get("completionSummary")
+    if (
+        metadata.get("toolName") != "completion_summary"
+        or str(metadata.get("toolStatus") or "").upper() != "FINISHED"
+        or not isinstance(completion, dict)
+    ):
+        return None
+    outputs = completion.get("outputs")
+    return {
+        "summary": str(completion.get("summary") or ""),
+        "outputs": outputs[:200] if isinstance(outputs, list) else [],
+    }
 
 
 def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
@@ -122,25 +149,6 @@ def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
         if agent_id not in ordered:
             ordered.append(agent_id)
     return ordered
-
-
-def _append_completion_card(rows: list[dict[str, Any]], data: dict) -> None:
-    summaries = _final_completion_summaries(data)
-    if not summaries:
-        return
-    completion = summaries[-1]
-    outputs = completion.get("outputs")
-    payload = {
-        "summary": str(completion.get("summary") or ""),
-        "outputs": outputs[:200] if isinstance(outputs, list) else [],
-    }
-    rows.append(
-        {
-            "role": "ASSISTANT",
-            "text": json.dumps(payload, default=str),
-            "metadata": {"evidence_type": "final_completion"},
-        }
-    )
 
 
 def _final_completion_summaries(data: dict) -> list[dict]:
@@ -194,7 +202,6 @@ def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
                 )
             )
 
-    _append_completion_card(rows, data)
     rows.append({"benchmark_state": data.get("_benchmark", {})})
     return rows
 

@@ -1710,6 +1710,74 @@ def test_local_port_run_binds_judge_backend_to_the_stack_under_test():
     assert "_bind_backend_api_url(base_url)" in main_source[resolve : resolve + 1500]
 
 
+def test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card():
+    """descend-full69 MA7: the T7 agentic judge read every GP card as empty.
+
+    The agentic bundle kept each first-level GP's "Task Complete" row with empty
+    text and dropped metadata.completionSummary (only the root card was
+    re-rendered), and its benchmark_state lacked the typed
+    completion_outputs_count the T7 prompt tells the judge to use. The judge
+    failed a run whose 50 GP cards each showed 14 outputs.
+    """
+    import hashlib as _hashlib
+
+    from benchmarks import run_benchmark
+
+    outputs = [
+        {"key": "creator_name", "label": "Creator Name", "value": "Michael Lustgarten"},
+        {"key": "rank_from_initial_list", "label": "Rank", "value": 31},
+    ]
+    gp_card = {
+        "role": "TOOL",
+        "message": "",
+        "metadata": {
+            "toolName": "completion_summary",
+            "toolStatus": "FINISHED",
+            "title": "\u2705 Task Complete",
+            "completionSummary": {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs},
+        },
+    }
+    gp = {
+        "parent_agent_id": "root-1",
+        "goal": "You are analyzing ONE creator for Andy Prevalsky",
+        "status": "COMPLETED",
+        "messages": [{"role": "USER", "message": "analyze"}, gp_card],
+        "response_schema": {"fields": [{"name": "creator_name", "type": "str"}, {"name": "rank_from_initial_list", "type": "int"}]},
+        "structured_output": {"creator_name": "Michael Lustgarten", "rank_from_initial_list": 31},
+    }
+    root = {"goal": "Analyze the top creators", "status": "COMPLETED", "messages": []}
+    tree = {"root-1": root, "gp-db85901b": gp}
+    data = {
+        "agent": {"agent_id": "root-1", "status": "COMPLETED"},
+        "messages": [],
+        "_semantic_evaluator_tree": tree,
+        "_benchmark": {"tree": tree},
+    }
+
+    evidence = run_benchmark._declared_agentic_evaluator_evidence(data)
+
+    cards = [
+        row
+        for row in evidence["messages"]
+        if row["metadata"].get("source_agent_id") == "gp-db85901b"
+        and row["metadata"].get("evidence_type") == "final_completion"
+    ]
+    assert len(cards) == 1, evidence["messages"]
+    assert json.loads(cards[0]["text"]) == {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs}
+    (typed,) = [g for g in evidence["benchmark_state"]["first_level_gps"] if g["agent_id"] == "gp-db85901b"]
+    assert typed["completion_outputs_count"] == 2
+    assert typed["completion_is_ablated"] is False
+
+    audit = run_benchmark._agentic_judge_audit("judge-1", {"id": "f1", "storage_path": "u/f1.json"}, b"{}")
+    assert audit == {
+        "judge_agent_id": "judge-1",
+        "evidence_sha256": _hashlib.sha256(b"{}").hexdigest(),
+        "evidence_bytes": 2,
+        "evidence_file_id": "f1",
+        "evidence_storage_path": "u/f1.json",
+    }
+
+
 def test_mass_agent_completion_outputs_must_satisfy_their_response_schema():
     """descend-full69 MA5: 44 of 50 first-level GPs finished with schema-incomplete output.
 
@@ -21931,6 +21999,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-meaningful-task-title",
         "t7-readable-report-files",
+        "t7-schema-complete-outputs",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -21962,6 +22031,7 @@ def test_unified_catalog_delineates_bench_axes():
             "completion_summary_file_outputs",
             "completion_summary_file_outputs",
         ],
+        "t7-schema-complete-outputs": ["completion_structured_output_schema"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }
@@ -25449,6 +25519,10 @@ async def run_all_tests():
     r.record(
         "mass_agent_completion_outputs_must_satisfy_their_response_schema",
         test_mass_agent_completion_outputs_must_satisfy_their_response_schema,
+    )
+    r.record(
+        "agentic_judge_evidence_shows_each_sub_agent_task_complete_card",
+        test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card,
     )
     r.record(
         "local_port_run_binds_judge_backend_to_the_stack_under_test",
