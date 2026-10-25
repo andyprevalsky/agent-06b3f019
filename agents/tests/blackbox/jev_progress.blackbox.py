@@ -47,7 +47,8 @@ def test_prefix_and_decode():
             pass
         else:
             raise AssertionError("Invalid probability accepted")
-    raw = answer(); raw["model"] = "wrong"
+    raw = answer()
+    raw["model"] = "wrong"
     try:
         jev.decode(raw, snap, "a" * 64)
     except ValueError:
