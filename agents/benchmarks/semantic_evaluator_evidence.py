@@ -26,8 +26,9 @@ DECLARED_JUDGE_METADATA_KEYS = (
     "title",
     "browser_session_metadata",
     "requestUserApproval",
-    # completionSummary is normalized into a final_completion ASSISTANT row;
-    # keep it out of raw tool metadata so judges see one rendered answer card.
+    # completionSummary is rendered as each agent's final_completion ASSISTANT row
+    # (_completion_card_payload); keep it out of raw tool metadata so judges see
+    # one rendered answer card per completion.
     "toolCallId",
     "subAgentId",
     "task_id",
@@ -93,7 +94,8 @@ def _evidence_rows_from_messages(
             row_metadata["source_goal"] = goal[:200]
         rows.append(
             {
-                "role": role or "UNKNOWN",
+                # The rendered Task Complete card is the agent's answer, shown as assistant evidence.
+                "role": "ASSISTANT" if card is not None else (role or "UNKNOWN"),
                 "text": json.dumps(card, default=str) if card is not None else _message_text(message, role),
                 "metadata": row_metadata,
             }
@@ -149,25 +151,6 @@ def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
     return ordered
 
 
-def _append_completion_card(rows: list[dict[str, Any]], data: dict) -> None:
-    summaries = _final_completion_summaries(data)
-    if not summaries:
-        return
-    completion = summaries[-1]
-    outputs = completion.get("outputs")
-    payload = {
-        "summary": str(completion.get("summary") or ""),
-        "outputs": outputs[:200] if isinstance(outputs, list) else [],
-    }
-    rows.append(
-        {
-            "role": "ASSISTANT",
-            "text": json.dumps(payload, default=str),
-            "metadata": {"evidence_type": "final_completion"},
-        }
-    )
-
-
 def _final_completion_summaries(data: dict) -> list[dict]:
     summaries: list[dict] = []
     for message in data.get("messages", []) or []:
@@ -219,7 +202,6 @@ def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
                 )
             )
 
-    _append_completion_card(rows, data)
     rows.append({"benchmark_state": data.get("_benchmark", {})})
     return rows
 

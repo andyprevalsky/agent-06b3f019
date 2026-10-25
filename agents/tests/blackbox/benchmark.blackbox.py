@@ -21999,6 +21999,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-meaningful-task-title",
         "t7-readable-report-files",
+        "t7-schema-complete-outputs",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -22030,6 +22031,7 @@ def test_unified_catalog_delineates_bench_axes():
             "completion_summary_file_outputs",
             "completion_summary_file_outputs",
         ],
+        "t7-schema-complete-outputs": ["completion_structured_output_schema"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }
