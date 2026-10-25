@@ -6962,6 +6962,99 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     assert metadata.data.get("claude_token_error") == "auth_error"
 
 
+async def test_collect_refusal_after_partial_tool_call_moves_to_next_model():
+    """066bfdef: Opus streamed a partial `goto`, then stop_reason=refusal.
+
+    The collected tool call was never returned, so the refused attempt must be
+    abandoned (restart) and the call served by the pool's next model, exactly as
+    for a refusal before the first chunk. Before the fix the RoseRefusalError
+    escaped to the browser loop, which retried the identical request five times.
+    """
+    url = "https://shop.example/api/rose-shop/abc/?authRealm=rose-shop-abc"
+    anthropic_sse = []
+    anthropic_sse += _ev(
+        "message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9, "output_tokens": 1}}}
+    )
+    anthropic_sse += _ev(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_refused", "name": "goto", "input": {}},
+        },
+    )
+    anthropic_sse += _ev(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"url": "https://shop.example/api'},
+        },
+    )
+    anthropic_sse += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    anthropic_sse += _ev(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 12}},
+    )
+    anthropic_sse += _ev("message_stop", {"type": "message_stop"})
+    waterfall_sse = "\n".join(
+        _openai_sse(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_next",
+                                        "function": {"name": "goto", "arguments": json.dumps({"url": url})},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14}},
+            ]
+        )
+    )
+    hosts: list[str] = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        if req.url.host == "api.anthropic.com":
+            return httpx.Response(200, text="\n".join(anthropic_sse), headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, text=waterfall_sse, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    tools = [
+        {
+            "name": "goto",
+            "description": "Navigate",
+            "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        }
+    ]
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-ultra",
+        messages=[{"role": "user", "content": f"Open {url}"}],
+        tools=tools,
+        tool_choice="auto",
+        max_tokens=2048,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-refusal-after-partial-tool-call",
+    )
+
+    assert hosts[0] == "api.anthropic.com" and hosts.count("api.anthropic.com") == 1, hosts
+    assert [(c.get("name"), json.loads(c.get("arguments") or "{}")) for c in response.tool_calls] == [
+        ("goto", {"url": url})
+    ], response.tool_calls
+    assert not response.actual_model.endswith("-claude"), response.actual_model
+    abandoned = response.usage.get("abandoned_attempts") or []
+    assert [a.get("error_type") for a in abandoned] == ["RoseRefusalError"], response.usage
+
+
 async def test_client_foundry_stream_exit_closes_http_owner():
     """Public close/cancellation joins the real Foundry HTTP context before returning."""
     from types import SimpleNamespace
@@ -10972,6 +11065,10 @@ async def run_all_tests():
         test_parse_anthropic_sse_thinking_only_max_tokens_reports_length,
     )
     await r.record_async("anth_sse_refusal_raises", test_parse_anthropic_sse_refusal_raises_refusal)
+    await r.record_async(
+        "collect_refusal_after_partial_tool_call_next_model",
+        test_collect_refusal_after_partial_tool_call_moves_to_next_model,
+    )
     await r.record_async("anth_sse_thinking_emitted", test_parse_anthropic_sse_thinking_delta_counts_as_emitted)
     await r.record_async("anth_sse_skip_bad_json", test_parse_anthropic_sse_skips_event_lines_and_bad_json)
     await r.record_async("anth_sse_in_band_rate_limit_raises", test_parse_anthropic_sse_in_band_rate_limit_raises)

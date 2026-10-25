@@ -8993,6 +8993,9 @@ async def _spawn_browser_agent_activity_v3_real(
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
+        # Set when the loop stops early on repeated model-call failures, so the
+        # terminal result names that cause instead of a step-budget exhaustion.
+        loop_abort_reason: Optional[str] = None
         user_instruction_messages = _append_browser_user_instructions(write_lock_resume_state, browser_turn_messages)
         user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor")
         user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
@@ -9875,6 +9878,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     await asyncio.sleep(1)
                     continue
                 if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                    loop_abort_reason = (
+                        f"Browser model failed {MAX_CONSECUTIVE_API_FAILURES} consecutive steps "
+                        f"(decision timeout after {BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s)"
+                    )
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
@@ -9943,6 +9950,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     iteration=iteration,
                 )
                 if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                    loop_abort_reason = (
+                        f"Browser model failed {MAX_CONSECUTIVE_API_FAILURES} consecutive steps "
+                        f"({type(e).__name__}: {extract_error_message(e)})"
+                    )
                     logger.error(
                         f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive Rose API failures",
                         last_error=str(e),
@@ -12057,8 +12068,9 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.mark("post_action_bookkeeping")
 
         step_timer.finish()
-        # Max iterations reached
-        logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
+        # Step budget exhausted, or the loop stopped early on repeated model failures.
+        terminal_reason = loop_abort_reason or f"Max iterations ({MAX_ITERATIONS}) reached"
+        logger.warning(terminal_reason if loop_abort_reason else f"Max iterations reached: {MAX_ITERATIONS}")
 
         # Final synthesis pass — mirror run_agent's max-iterations handling
         # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
@@ -12185,7 +12197,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         context_message = build_context_summary(
             success=False,
-            close_reasoning=f"Max iterations ({MAX_ITERATIONS}) reached",
+            close_reasoning=terminal_reason,
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,
@@ -12194,10 +12206,10 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await _save_browser_action_message(
             agent_id=agent_id,
-            title="Task Incomplete - Max Steps Reached",
+            title="Task Failed - Browser Model Errors" if loop_abort_reason else "Task Incomplete - Max Steps Reached",
             task_id=task_id,
             message=context_message,
-            status=MessageStatus.FINISHED,
+            status=MessageStatus.ERROR if loop_abort_reason else MessageStatus.FINISHED,
             browser_url=browser_url,
             action_type="task_complete",
             tool_call_id=tool_call_id,
@@ -12223,7 +12235,7 @@ Based on this feedback, I need to continue working on the task and address the i
             agent_id=agent_id,
             task_id=task_id,
             browser_url=browser_url,
-            status="max_iterations",
+            status="error" if loop_abort_reason else "max_iterations",
             success=False,
             message=context_message,
         )
@@ -12240,7 +12252,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         return _visible_activity_result(
             {
-                "status": "max_iterations",
+                "status": "failed" if loop_abort_reason else "max_iterations",
                 "success": False,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": context_message,

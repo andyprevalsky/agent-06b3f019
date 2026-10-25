@@ -1173,7 +1173,7 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
 
 
 async def test_completed_invalid_browser_output_is_fed_to_next_real_decision(
-    _mixed_transport=False, _transport_only=False, _native_only=False
+    _mixed_transport=False, _transport_only=False, _native_only=False, _refusal_only=False
 ):
     """Actual client + full activity must tell the next call its output was invalid."""
     from domains.spawn_browser_agent_v3 import handler
@@ -1187,6 +1187,10 @@ async def test_completed_invalid_browser_output_is_fed_to_next_real_decision(
 
     async def collect(**kwargs):
         requests.append(copy.deepcopy(kwargs))
+        if _refusal_only:
+            from providers.rose.errors import RoseRefusalError
+
+            raise RoseRefusalError("Anthropic stream ended with refusal (request_id=offline)")
         if _transport_only or (_mixed_transport and len(requests) == 2):
             from providers.rose.errors import RoseStallError
 
@@ -1243,7 +1247,7 @@ async def test_completed_invalid_browser_output_is_fed_to_next_real_decision(
 
     fixture = Adapt().visit(fixture)
     fixture.body = [node for node in fixture.body if not isinstance(node, ast.Assert)]
-    fixture.body.append(ast.Return(value=ast.Name(id="result", ctx=ast.Load())))
+    fixture.body.append(ast.Return(value=ast.parse("(result, save_mock)", mode="eval").body))
     namespace = dict(globals(), real_model=real_model)
     exec(
         compile(
@@ -1256,16 +1260,29 @@ async def test_completed_invalid_browser_output_is_fed_to_next_real_decision(
     setup_mock({})
     with (
         patch.object(RoseClient, "collect", side_effect=collect),
-        patch.object(handler, "MAX_ITERATIONS", 10 if (_mixed_transport or _transport_only) else 2),
+        patch.object(handler, "MAX_ITERATIONS", 10 if (_mixed_transport or _transport_only or _refusal_only) else 2),
         patch("helpers.observability.dump_llm_context", side_effect=lambda **kw: dumps.append(copy.deepcopy(kw))),
         patch.object(handler, "accumulate_model_usage", wraps=handler.accumulate_model_usage) as accounting,
     ):
-        result = await namespace[fixture.name]()
+        result, saved = await namespace[fixture.name]()
         await handler.drain_background_browser_cleanups()
-    if _transport_only:
+    if _transport_only or _refusal_only:
         assert len(requests) == 5 and result["success"] is False
         assert all(x["messages"] == requests[0]["messages"] for x in requests)
         assert len(dumps) == 5 and all("error" in x["output"] for x in dumps)
+        # Five model-call failures inside a ten-step budget are not a step-budget
+        # exhaustion: the terminal result and completion card must say why it stopped.
+        error_type = "RoseRefusalError" if _refusal_only else "RoseStallError"
+        completion = [
+            c.kwargs
+            for c in saved.call_args_list
+            if c.kwargs.get("is_completion_message") and "output_schema" in c.kwargs
+        ]
+        assert result["status"] == "failed", result["status"]
+        assert "Max iterations" not in result["message"] and error_type in result["message"], result["message"]
+        assert "5 consecutive" in result["message"], result["message"]
+        assert len(completion) == 1 and "Max Steps" not in completion[0]["title"], completion
+        assert completion[0]["status"] == handler.MessageStatus.ERROR
         return
     assert len(requests) == (6 if _mixed_transport else 2)
     assert all(x["tool_choice"] == "auto" for x in requests)
@@ -1313,6 +1330,11 @@ async def test_mixed_invalid_outputs_reset_transport_failure_counter():
 
 async def test_genuine_transport_stalls_still_abort_after_five():
     await test_completed_invalid_browser_output_is_fed_to_next_real_decision(_transport_only=True)
+
+
+async def test_consecutive_model_refusals_report_truthful_terminal_reason():
+    """066bfdef: five Opus refusals reported "Max iterations (250) reached"."""
+    await test_completed_invalid_browser_output_is_fed_to_next_real_decision(_refusal_only=True)
 
 
 def test_output_validation_feedback_is_private_nonexecuted_runtime_context():
@@ -32430,6 +32452,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "genuine_transport_stalls_still_abort_after_five", test_genuine_transport_stalls_still_abort_after_five
+    )
+    await r.record_async(
+        "consecutive_model_refusals_report_truthful_terminal_reason",
+        test_consecutive_model_refusals_report_truthful_terminal_reason,
     )
     r.record(
         "output_validation_feedback_is_private_nonexecuted_runtime_context",
