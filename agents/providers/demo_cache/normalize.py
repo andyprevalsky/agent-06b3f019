@@ -272,8 +272,14 @@ def _looks_like_volatile_id(value: Any) -> bool:
     )
 
 
+@functools.lru_cache(maxsize=4096)
 def _normalize_volatile_text(text: str) -> str:
-    """Remove run-local wrappers from provider-visible text without changing user prose."""
+    """Remove run-local wrappers from provider-visible text without changing user prose.
+
+    Pure in ``text``, and every LLM call re-normalizes its whole history, so a
+    trajectory of N turns would run these ~45 passes O(N^2) times. The bounded
+    cache keeps each distinct message to one normalization per worker.
+    """
     text = _CLOCK_PREFIX_RE.sub("[timestamp] ", text)
     text = _COMMAND_CHUNK_ID_RE.sub("Chunk ID: <chunk_id>", text)
     text = _COMMAND_WALL_TIME_RE.sub("Wall time: <duration>", text)

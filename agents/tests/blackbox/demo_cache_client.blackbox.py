@@ -462,11 +462,38 @@ async def test_workflow_start_reads_the_goal_a_wake_persisted():
         cache_client._backend, cache_client._shared_client = orig_backend, orig_shared
 
 
+def test_history_normalization_runs_once_per_distinct_message():
+    """descend-full69 MA8: every replayed LLM call re-normalized its whole history.
+
+    The ~45-pass volatile-text normalization was 21% of a single guest worker's
+    CPU during the mass-agent fan-out (O(turns^2) per trajectory). Keys must be
+    byte-identical, and a repeated history must not normalize a message twice.
+    """
+    from providers.demo_cache import normalize
+
+    history = [
+        {"role": "user", "content": "Research Andrew Huberman. [STATE: now=2026-10-25T13:38:56Z]"},
+        {"role": "tool", "content": "Timestamp: 2026-10-25T13:39:01Z result id 3f1c2a4e-1b2c-4d5e-8f90-123456789abc"},
+    ]
+    normalize._normalize_volatile_text.cache_clear()
+    first = normalize.canonical_messages(history)
+    misses = normalize._normalize_volatile_text.cache_info().misses
+    for _turn in range(5):  # every later call carries the same history again
+        assert normalize.canonical_messages(history) == first, "normalization must stay byte-identical"
+    info = normalize._normalize_volatile_text.cache_info()
+    assert info.misses == misses, f"a seen message was normalized again: {info}"
+    assert info.hits >= 5 * misses, info
+
+
 async def run_all_tests():
     print("demo-cache-client blackbox tests:")
     r = BlackboxResult()
     await r.record_async(
         "excluded_cached_candidate_not_replayed", test_excluded_cached_actual_candidate_is_not_replayed
+    )
+    r.record(
+        "history_normalization_runs_once_per_distinct_message",
+        test_history_normalization_runs_once_per_distinct_message,
     )
     r.record("candidate_exclusions_cache_material", test_candidate_exclusions_shape_cache_request_material)
     await r.record_async(
