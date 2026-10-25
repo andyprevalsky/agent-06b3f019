@@ -566,12 +566,47 @@ def _section_matches_field(title: str, field_name: str) -> bool:
     return False
 
 
+def _schema_field_types(schema: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    return {
+        str(field.get("name")): str(field.get("type") or "")
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    }
+
+
+def _fits_field_type(value: Any, field_type: str) -> bool:
+    """True when a transcript-derived value has the field's declared response_schema type."""
+    if not field_type:
+        return True  # untyped legacy schema field
+    if field_type == "str":
+        return isinstance(value, str)
+    if field_type == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if field_type == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if field_type == "bool":
+        return isinstance(value, bool)
+    if field_type in ("object", "file_pointer"):
+        return isinstance(value, dict)
+    if field_type.startswith("list["):
+        if not isinstance(value, list):
+            return False
+        item_type = field_type[len("list[") : -1]
+        return all(_fits_field_type(item, item_type) for item in value)
+    return True
+
+
 def _fill_from_row_and_sections(
     merged: Dict[str, Any],
     names: List[str],
     context: List[Dict[str, Any]],
+    types: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     empty = (None, "", [], {})
+    types = types or {}
+
+    def fits(name: str, value: Any) -> bool:
+        return _fits_field_type(value, types.get(name, ""))
 
     def missing() -> List[str]:
         return [name for name in names if name not in merged or merged[name] in empty]
@@ -583,10 +618,15 @@ def _fill_from_row_and_sections(
             for raw_key, value in obj.items():
                 target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
                 if target and target in names and merged.get(target) in empty + (None,):
-                    if value not in empty:
+                    if value not in empty and fits(target, value):
                         merged[target] = value
             for name in names:
-                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                if (
+                    name in obj
+                    and obj[name] not in empty
+                    and merged.get(name) in empty + (None,)
+                    and fits(name, obj[name])
+                ):
                     merged[name] = obj[name]
             items = obj.get("items")
             if (
@@ -622,7 +662,7 @@ def _fill_from_row_and_sections(
             if title in used_titles:
                 continue
             for name in missing():
-                if not _section_matches_field(title, name):
+                if not _section_matches_field(title, name) or not fits(name, body):
                     continue
                 merged[name] = body
                 used_titles.add(title)
@@ -659,6 +699,8 @@ def coalesce_structured_response(
         empty = (None, "", [], {})
         return [name for name in names if name not in current or current[name] in empty]
 
+    field_types = _schema_field_types(schema)
+
     if not _missing(merged):
         return merged
     for message in reversed(context or []):
@@ -672,7 +714,9 @@ def coalesce_structured_response(
         if not extracted:
             continue
         for key, value in extracted.items():
-            if key not in merged or merged[key] in (None, "", [], {}):
+            if (key not in merged or merged[key] in (None, "", [], {})) and _fits_field_type(
+                value, field_types.get(key, "")
+            ):
                 merged[key] = value
         if not _missing(merged):
             break
@@ -693,7 +737,7 @@ def structured_response_from_evidence(
         if isinstance(field, dict) and field.get("name")
     ]
     if names:
-        merged = _fill_from_row_and_sections(merged, names, context)
+        merged = _fill_from_row_and_sections(merged, names, context, _schema_field_types(schema))
     return merged or structured_response
 
 

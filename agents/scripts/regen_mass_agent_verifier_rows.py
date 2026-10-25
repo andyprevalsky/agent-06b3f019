@@ -16,6 +16,7 @@ prod /api/fast-cache/set, with a backup and a provenance receipt.
 import argparse
 import asyncio
 import base64
+import contextvars
 import datetime
 import gzip
 import json
@@ -57,6 +58,54 @@ class dc:  # the supported prod DEMO-cache endpoints (/api/fast-cache/get|set)
     @staticmethod
     def h(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+# One tee for every concurrent call: each task records into its own accumulator.
+_CURRENT_ACC: contextvars.ContextVar = contextvars.ContextVar("regen_acc", default=None)
+_ORIGINAL_COMPLETE = RoseClient.complete
+
+
+_REPLAY: contextvars.ContextVar = contextvars.ContextVar("regen_replay", default=None)
+
+
+async def _tee_complete(self, *args, **kwargs):
+    replay = _REPLAY.get()
+    if replay is not None:
+        from providers.demo_cache.rose_cache import replay_with_context
+
+        record, key = replay
+        async for chunk in replay_with_context(
+            record, call_site="verifier_execute", complete_kwargs=kwargs, cache_key=key, hit_key=key, reason="cache_hit"
+        ):
+            yield chunk
+        return
+    async for chunk in _ORIGINAL_COMPLETE(self, *args, **kwargs):
+        acc = _CURRENT_ACC.get()
+        if acc is not None:
+            accumulate_chunk(acc, chunk)
+        yield chunk
+
+
+RoseClient.complete = _tee_complete
+
+
+async def _replay_parse(record, schema, key):
+    """Parse ``record`` exactly as a replay would; None when it does not parse."""
+    token = _REPLAY.set((record, key))
+    try:
+        with patch("temporalio.activity.heartbeat"):
+            result, _usage = await llm._call_llm_verifier(
+                [{"role": "user", "content": "replay"}],
+                "rose-labs/rose-1-ultra",
+                load_config(),
+                response_schema=schema,
+                call_site="verifier_execute",
+            )
+        return result
+    except Exception:
+        return None
+    finally:
+        _REPLAY.reset(token)
 
 
 def load_targets(run_json, worker_log, only):
@@ -105,15 +154,9 @@ async def regen_one(aid, node, dump, write):
     with patch("temporalio.activity.heartbeat"):
         lease = await llm.fetch_compute_token_activity(USER, lineage_key=lineage, token_type="claude")
     acc = empty_response()
-    orig = RoseClient.complete
-
-    async def tee(self, *args, **kwargs):
-        async for chunk in orig(self, *args, **kwargs):
-            accumulate_chunk(acc, chunk)
-            yield chunk
-
+    token = _CURRENT_ACC.set(acc)
     try:
-        with patch.object(RoseClient, "complete", tee), patch("temporalio.activity.heartbeat"):
+        with patch("temporalio.activity.heartbeat"):
             result, usage = await llm._call_llm_verifier(
                 dump["messages"],
                 "rose-labs/rose-1-ultra",
@@ -128,8 +171,14 @@ async def regen_one(aid, node, dump, write):
                 agent_id=aid,
             )
     finally:
+        _CURRENT_ACC.reset(token)
         with patch("temporalio.activity.heartbeat"):
             await llm.release_compute_token_lineage_activity(lineage)
+    # Validate what will be STORED: replay the record through the same parse path.
+    replayed = await _replay_parse(acc, schema, hit_key)
+    if replayed is None:
+        return {"agent_id": aid, "error": "stored record does not replay-parse", "hit_key": hit_key}
+    result = replayed
     errors = output_errors(schema, result.get("output"))
     rec = {
         "agent_id": aid,
