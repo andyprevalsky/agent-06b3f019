@@ -193,10 +193,17 @@ class AgentInbox:
             return []
         return self._absorb(messages)
 
-    def start_read(self) -> None:
-        """Start a background GET unless a recent one is still in flight. Never awaited by the agent."""
+    def start_read(self, *, fresh: bool = False) -> None:
+        """Start a background GET, never awaited by the agent.
+
+        Skipped while a recent one is in flight, unless ``fresh``: a turn's read
+        must start after the turn's tools, and an earlier in-flight read may
+        predate a message stored during them.
+        """
         now = time.monotonic()
-        if any(now - started < INBOX_READ_INFLIGHT_SECONDS for task, started in self._reads.items() if not task.done()):
+        if not fresh and any(
+            now - started < INBOX_READ_INFLIGHT_SECONDS for task, started in self._reads.items() if not task.done()
+        ):
             return
         task = asyncio.get_running_loop().create_task(self._background_read())
         self._reads[task] = now
@@ -256,7 +263,7 @@ class AgentInbox:
         the parent at ``finish``.
         """
         self._settle_reads()
-        self.start_read()
+        self.start_read(fresh=True)
         return self._deliver(list(self._fetched.values()))
 
     async def finish(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:

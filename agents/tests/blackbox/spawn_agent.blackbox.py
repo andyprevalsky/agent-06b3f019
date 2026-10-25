@@ -4453,6 +4453,37 @@ async def test_agent_inbox_abandoned_read_does_not_advance_the_cursor():
     assert resumed.state()["since"] == "2026-10-25T01:00:00.000Z" and resumed.state()["seen_ids"] == ["m1"]
 
 
+async def test_agent_inbox_turn_read_is_not_suppressed_by_an_earlier_in_flight_read():
+    """A read still in flight from before the tool batch must not stand in for the turn's read."""
+    from helpers.agent_inbox import AgentInbox
+
+    m1 = {"id": "m1", "text": "forwarded", "created_at": "2026-10-25T02:03:03.035Z"}
+    stalled = asyncio.Event()
+    calls = {"n": 0}
+
+    async def fetch(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await stalled.wait()  # started before the message was stored; still in flight
+            return []
+        return [m1]
+
+    from unittest.mock import patch
+
+    inbox = AgentInbox.create("parent-1", "task-1")
+    with patch("helpers.agent_inbox.fetch_agent_inbox", new=fetch):
+        inbox.start_read()  # e.g. a completion or earlier read, still pending
+        await asyncio.sleep(0)
+        assert await inbox.next_step_messages() == []  # the turn starts its own read
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert await inbox.unread_before_finish() is True, "the turn's read fetched the message"
+        stalled.set()
+        assert [m["id"] for m in await inbox.next_step_messages()] == ["m1"]
+        await inbox.finish()
+    assert calls["n"] >= 2
+
+
 async def test_agent_inbox_overlapping_readers_deliver_each_message_exactly_once():
     """A piggybacked post read and a background GET overlap: no double delivery, no drop."""
     from unittest.mock import AsyncMock, patch
@@ -6628,6 +6659,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_message_stored_during_tool_batch_reaches_final_turn",
         test_explore_message_stored_during_a_tool_batch_reaches_the_final_turn,
+    )
+    await r.record_async(
+        "agent_inbox_turn_read_not_suppressed_by_in_flight_read",
+        test_agent_inbox_turn_read_is_not_suppressed_by_an_earlier_in_flight_read,
     )
     await r.record_async(
         "explore_without_inbox_address_has_no_inbox_hook", test_explore_without_inbox_address_has_no_inbox_hook
