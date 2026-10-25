@@ -894,6 +894,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
+        # The startup agent-config read failed, so output_schema is unknown
+        # (not known-absent) until a later read succeeds.
+        self._agent_config_unavailable: bool = False
         self._response_schema_applied_revision: int = 0
         self._response_schema_accepted_revision: int = 0
         self._response_schema_initialized: bool = False
@@ -2420,6 +2423,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 )
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                self._agent_config_unavailable = True
                 return {}
 
         (
@@ -3100,6 +3104,39 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
         return generate
 
+    async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
+        """Read output_schema from the agent row while it is missing.
+
+        ``poll_until_present`` keeps polling a successful read that returns no
+        schema yet (async schema generation at completion); otherwise the first
+        successful read is final: no schema then means the task has none.
+        """
+        attempt = 0
+        while self.output_schema is None and attempt < max_attempts:
+            attempt += 1
+            try:
+                agent_config = await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[self.agent_id],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch output_schema (attempt {attempt}): {e}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                continue
+            self._agent_config_unavailable = False
+            self.output_schema = agent_config.get("response_schema")
+            workflow.logger.info(
+                f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
+            )
+            if self.output_schema is not None or not poll_until_present:
+                return
+            if attempt < max_attempts:
+                workflow.logger.info("Schema not ready, waiting 1s...")
+                await asyncio.sleep(1)
+
     def _make_response_schema_getter(self):
         """Create a getter that returns the current output_schema.
 
@@ -3110,6 +3147,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         async def get_schema() -> Optional[Dict]:
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
+            if self.output_schema is None and self._agent_config_unavailable:
+                await self._load_output_schema(poll_until_present=False)
             return self.output_schema
 
         return get_schema
@@ -6318,29 +6357,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._persist_tree_cost()
 
         # Poll for output_schema if missing (handles race condition with async schema generation)
-        max_schema_attempts = 5
-        schema_attempt = 0
-        while self.output_schema is None and schema_attempt < max_schema_attempts:
-            schema_attempt += 1
-            try:
-                agent_config = await workflow.execute_activity(
-                    fetch_agent_config,
-                    args=[self.agent_id],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                self.output_schema = agent_config.get("response_schema")
-                workflow.logger.info(
-                    f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}"
-                )
-
-                if self.output_schema is None and schema_attempt < max_schema_attempts:
-                    workflow.logger.info("Schema not ready, waiting 1s...")
-                    await asyncio.sleep(1)
-            except Exception as e:
-                workflow.logger.warning(f"Failed to fetch output_schema (attempt {schema_attempt}): {e}")
-                if schema_attempt < max_schema_attempts:
-                    await asyncio.sleep(1)
+        await self._load_output_schema(poll_until_present=True)
 
         tool_counts = {}
         summary = ""
