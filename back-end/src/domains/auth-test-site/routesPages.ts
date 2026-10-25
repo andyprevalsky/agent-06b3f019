@@ -9,7 +9,7 @@
  *   GET  /login/methods   every sign-in method for that email
  *   POST /login           ok ? cookie, 303 landing : second factor ? 303 /login/verify : form + error
  *   GET  /login/verify    second-factor code form;  POST verifies, POST /resend re-sends
- *   GET  /account         signed in ? member details : 303 /login
+ *   GET  /account         signed in ? member details and orders : 303 /login
  *   GET  /guest           guest page on sites that have one
  *   POST /logout          end session, 303 /
  *
@@ -39,8 +39,8 @@ import {
   nextQuery,
 } from './servicePages';
 import { renderCodeEntryPage } from './servicePagesCodes';
-import { renderShopPage } from './servicePagesShop';
-import { cartLines } from './serviceShop';
+import { renderOrderHistory, renderShopPage } from './servicePagesShop';
+import { cartLines, ordersFor } from './serviceShop';
 import {
   cartToken,
   completeSignIn,
@@ -232,9 +232,16 @@ pagesRouter.get('/:siteId/account', (req: Request, res: Response) => {
     return;
   }
   const account = findAccount(site, session.email);
+  const orders = site.behavior.shop ? ordersFor(site, { session, cartToken: null }) : [];
   sendPage(
     res,
-    renderAccountPage(site, session, memberNumberFor(site, session.email), account?.name ?? null)
+    renderAccountPage(
+      site,
+      session,
+      memberNumberFor(site, session.email),
+      account?.name ?? null,
+      renderOrderHistory(site, orders)
+    )
   );
 });
 

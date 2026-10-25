@@ -3,7 +3,7 @@
  *
  *   GET  /products/:itemId   product page
  *   POST /cart/add | /cart/remove   edit the cookie-keyed cart, 303 /cart
- *   GET  /cart               cart
+ *   GET  /cart               cart, plus the orders this browser may read
  *   GET  /checkout           signed in or guest cart ? payment form : sign-in gate
  *   POST /checkout/guest     mark this cart as a guest checkout (sites that allow it)
  *   POST /checkout           place the order: 303 /orders/:n | gate | form + error
@@ -29,6 +29,7 @@ import {
   findOrder,
   isGuestCart,
   markGuestCart,
+  ordersFor,
   placeOrder,
   removeFromCart,
   type CartTotals,
@@ -93,7 +94,9 @@ shopRouter.post('/:siteId/cart/remove', (req: Request, res: Response) => {
 
 shopRouter.get('/:siteId/cart', (req: Request, res: Response) => {
   const site = siteOf(req);
-  sendPage(res, renderCartPage(site, totalsFor(req, site), sessionOf(req).session));
+  const { session } = sessionOf(req);
+  const orders = ordersFor(site, { session, cartToken: cartToken(req) });
+  sendPage(res, renderCartPage(site, totalsFor(req, site), session, orders));
 });
 
 shopRouter.get('/:siteId/checkout', (req: Request, res: Response) => {
