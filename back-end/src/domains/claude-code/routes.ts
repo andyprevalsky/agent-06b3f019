@@ -16,7 +16,8 @@
  */
 
 import { type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
+import { callerCanAccessAgent, callerCanAccessCodeTask } from '../../providers/agentAccess';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
@@ -94,7 +95,7 @@ async function createSessionForTarget(body: unknown) {
  */
 router.post(
   '/create',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const result = await createSessionForTarget(req.body);
@@ -154,7 +155,7 @@ router.post(
  */
 router.post(
   '/close',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
@@ -195,7 +196,9 @@ router.get(
     try {
       const { taskId } = req.params;
 
-      const session = await service.getSession(taskId);
+      const session = (await callerCanAccessCodeTask(req, taskId))
+        ? await service.getSession(taskId)
+        : null;
 
       if (session === null) {
         res.status(404).json({ error: 'Session not found' });
@@ -225,6 +228,10 @@ router.get(
     try {
       const { agentId } = req.params;
 
+      if (!(await callerCanAccessAgent(req, agentId))) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
       const sessions = await service.getAgentSessions(agentId);
 
       res.json({ sessions });
@@ -244,7 +251,7 @@ router.get(
  */
 router.post(
   '/:taskId/output',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { taskId } = req.params;
@@ -278,7 +285,7 @@ router.post(
  */
 router.get(
   '/:sandboxId/health',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { sandboxId } = req.params;
 
