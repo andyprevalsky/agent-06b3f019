@@ -24,7 +24,8 @@ sources:
   - agent 9a3a8e6d-00bb-48f5-b645-b38594e73cba (fail, shard-01 r002-j0043, fleet run 20261026-044407-21856, source ae2f7366c)
   - agent e25463c6-bceb-43c2-9f09-3ba558d3807e (pass, 75.3s, fleet run 20261026-044408-21803)
   - commit 6d1dfa66d (introduced the URL-based scorecard guidance)
-  - agents 66239187-4e88-418c-9c62-791d75ebacff, a093adae-02f5-49d1-87c4-7d106c7bf5d5 (local run-bench passes on the fix)
+  - agent 66239187-4e88-418c-9c62-791d75ebacff (local run-bench pass 1 on the fix)
+  - agent a093adae-02f5-49d1-87c4-7d106c7bf5d5 (local run-bench pass 2 on the fix)
 repro: agents/tests/blackbox/prompts.blackbox.py::test_result_scorecards_are_in_both_root_prompt_phases
 status: fixed
 ---
