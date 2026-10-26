@@ -419,7 +419,8 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     assert.equal(retried.session.task_id, result.session.task_id);
     assert.equal(templates.length, 1, 'no duplicate sandbox on retry');
     assert.equal(
-      (await keepAliveCodeTask(retried.session.task_id, async () => undefined, NO_CODE_RESOURCES)).resize_requested,
+      (await keepAliveCodeTask(retried.session.task_id, async () => undefined, NO_CODE_RESOURCES))
+        .resize_requested,
       undefined
     );
   } finally {

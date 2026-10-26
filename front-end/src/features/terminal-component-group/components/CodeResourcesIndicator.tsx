@@ -61,7 +61,7 @@ function byteRow(
   };
 }
 
-export function resourceRows(sample: CodeResourceSample): ResourceRow[] {
+function resourceRows(sample: CodeResourceSample): ResourceRow[] {
   const cpuPct = sample.cpu ? Math.round(sample.cpu.used_pct) : null;
   const cores = sample.cpu?.cores ?? 0;
   return [

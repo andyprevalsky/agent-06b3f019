@@ -80,17 +80,13 @@ async function e2bTask(sandboxId: string) {
 }
 
 function keepalive(taskId: string, read: MetricsReader, calls: string[] = []) {
-  return keepAliveCodeTask(
-    taskId,
-    async () => undefined,
-    {
-      sample: (sandboxId) => {
-        calls.push(sandboxId);
-        return sampleSandboxResources(sandboxId, read, now);
-      },
-      publish: broadcastCodeResources,
-    }
-  );
+  return keepAliveCodeTask(taskId, async () => undefined, {
+    sample: (sandboxId) => {
+      calls.push(sandboxId);
+      return sampleSandboxResources(sandboxId, read, now);
+    },
+    publish: broadcastCodeResources,
+  });
 }
 
 async function codeResourceEvents() {

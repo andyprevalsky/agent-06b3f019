@@ -27,7 +27,11 @@ import {
 import { switchCodeSessionProvider } from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
-import { codeResourceDeps, type CodeResourceDeps, type CodeResourceSample } from './sandboxResources';
+import {
+  codeResourceDeps,
+  type CodeResourceDeps,
+  type CodeResourceSample,
+} from './sandboxResources';
 
 const log = createLogger('CodeSessionSpawn');
 
