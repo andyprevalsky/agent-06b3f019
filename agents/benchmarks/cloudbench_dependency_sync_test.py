@@ -1549,7 +1549,9 @@ boot_config_failed_child
         check=False,
     )
     assert failed.returncode == 0
-    assert failed.stdout.strip() == "bench-1"
+    # The barrier receives the child slot so it can replace a host-unresponsive
+    # clone in place before deciding to abort.
+    assert failed.stdout.strip() == "0"
 
     (barrier / "ready" / "machine-1").touch()
     ready = subprocess.run(
@@ -32118,7 +32120,10 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
         + "\n"
     )
     launch = source.split("# ── Phase 2: launch each provisioned bench", 1)[1]
-    launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    # The per-bench launch body lives in launch_fleet_bench_child; splice it
+    # into this fixture's own bench loop.
+    launch = launch.split('    local i="$1" bench="$2" slot="${3:-}"\n', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    launch = launch.rsplit("    if [ -z \"$slot\" ]; then", 1)[0]
     supervisor = "\n".join(
         _extract_fleet_function(source, name + "() {")
         for name in (

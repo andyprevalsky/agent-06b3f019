@@ -15121,6 +15121,7 @@ CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
 CHILD_RUN_TOKEN=()
+CHILD_BENCH_INDEX=()
 
 
 fleet_billing_stop_retained_idle() {  # <positive-owned-joins>; billing only, never evidence/claim release
@@ -19032,8 +19033,13 @@ fi
 BOOT_CONFIG_BARRIER="$FLEET_DIR/.boot-config-barrier"
 rm -rf "$BOOT_CONFIG_BARRIER" 2>/dev/null || true
 mkdir -p "$BOOT_CONFIG_BARRIER/ready"
-i=0
-for bench in "${BENCHES[@]}"; do
+# One bench's run-bench-cloud child (and its mandatory autoscaler) for the
+# Machine recorded in <out>/.cid. Appends a new child slot, or reuses an
+# existing slot (same bench, port and run token; new PID and Machine) when a
+# host-unresponsive primary is replaced before the boot-config barrier
+# releases. Bash 3.2 portable: no namerefs.
+launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
+    local i="$1" bench="$2" slot="${3:-}"
     # Default from the batch's preflighted catalog snapshot; --sim-on is an
     # explicit override. No mutable catalog read happens after provisioning.
     catalog_wmm="${CATALOG_MODES[$i]}"
@@ -19052,7 +19058,7 @@ for bench in "${BENCHES[@]}"; do
     echo ""
     if [ -z "$cid" ]; then
         echo "❌ [$bench] provisioning failed (no machine) — skipping"
-        i=$((i + 1)); continue
+        return 1
     fi
     cold_primary=0
     if [ "$src" = archived-reuse ]; then cold_primary=1; fi
@@ -19154,6 +19160,7 @@ for bench in "${BENCHES[@]}"; do
             --ref "$BENCH_REF" \
             --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
+    if [ -z "$slot" ]; then
     CHILD_PIDS+=("$!")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
@@ -19161,6 +19168,11 @@ for bench in "${BENCHES[@]}"; do
     CHILD_PORT+=("$port")
     CHILD_MACHINE+=("$cid")
     CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
+    CHILD_BENCH_INDEX+=("$i")
+    else
+    CHILD_PIDS[$slot]="$!"
+    CHILD_MACHINE[$slot]="$cid"
+    fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
     # into that parallel bring-up at four launches/second, so all 30 are submitted
@@ -19195,7 +19207,11 @@ for bench in "${BENCHES[@]}"; do
         rm -f "$out/autoscaler.pid" "$out/autoscaler.acceptance-failed"
         ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" "$FLEET_OWNER_TOKEN-$i" ) >> "$out/autoscaler.log" 2>&1 &
         autoscaler_pid="$!"
-        AUTOSCALER_PIDS+=("$autoscaler_pid")
+        if [ -z "$slot" ]; then
+            AUTOSCALER_PIDS+=("$autoscaler_pid")
+        else
+            AUTOSCALER_PIDS[$slot]="$autoscaler_pid"
+        fi
         autoscaler_pid_tmp="$out/autoscaler.pid.tmp.$$"
         autoscaler_started=""
         for _ in $(seq 1 50); do
@@ -19210,6 +19226,11 @@ for bench in "${BENCHES[@]}"; do
             rm -f "$autoscaler_pid_tmp"
         fi
     fi
+    return 0
+}
+i=0
+for bench in "${BENCHES[@]}"; do
+    launch_fleet_bench_child "$i" "$bench" || true
     i=$((i + 1))
 done
 
@@ -19250,26 +19271,110 @@ wait_for_mandatory_autoscaler_startup() {
 # width made later config-only updates hit cpu_overcommit_exceeded even though
 # the final 37-machine shape fit. Each child publishes its completed update and
 # waits here; one release then lets every explicit start proceed concurrently.
-boot_config_failed_child() {
+boot_config_failed_child() {  # prints the failed child slot
     local j out mid
     for j in "${!CHILD_OUT[@]}"; do
         out="${CHILD_OUT[$j]}"
         mid="${CHILD_MACHINE[$j]}"
         if [ -f "$out/benchmark-child.finished" ] \
             && [ ! -f "$BOOT_CONFIG_BARRIER/ready/$mid" ]; then
-            printf '%s\n' "${CHILD_BENCH[$j]}"
+            printf '%s\n' "$j"
             return 0
         fi
     done
     return 1
+}
+# A Fly Machine never leaves its host. When run-bench-cloud proves that host
+# stopped answering same-ID boot-config updates (consecutive 408s), replace
+# that one disposable clone instead of aborting every copy in the fleet. The
+# old Machine stays in this fleet's exact registry and per-bench ledger, so the
+# normal exact-owner teardown destroys it; nothing is guessed or reclaimed.
+# Each child slot gets one replacement, inside the unchanged barrier deadline;
+# pool claims, archived reuse and a second failure keep the strict abort.
+fleet_replace_host_unresponsive_child() {  # <child-slot> <barrier-deadline>
+    local j="$1" deadline="$2" out bench mid src cid archive name pcid
+    local -a moved=()
+    out="${CHILD_OUT[$j]}"
+    bench="${CHILD_BENCH[$j]}"
+    mid="${CHILD_MACHINE[$j]}"
+    [ -f "$out/boot-config-host-unresponsive" ] \
+        && [ "$(head -1 "$out/boot-config-host-unresponsive" 2>/dev/null)" = "$mid" ] || return 1
+    if [ -e "$out/boot-config-host-replaced" ]; then
+        echo "❌ [$bench] replacement Machine $mid also hit an unresponsive Fly host; no second replacement" >&2
+        return 1
+    fi
+    src=""; cid=""
+    read -r src cid < "$out/.cid" 2>/dev/null || true
+    if [ "$src" != clone ] || [ "$cid" != "$mid" ]; then
+        echo "❌ [$bench] host-unresponsive Machine $mid is not this run's disposable clone ($src); no replacement" >&2
+        return 1
+    fi
+    # The mandatory autoscaler observes the same finished marker and exits. A
+    # replacement must not inherit its workers or race its completion proof.
+    while [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && fleet_job_running "${AUTOSCALER_PIDS[$j]}"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ [$bench] autoscaler for $mid did not exit before the boot-config deadline; no replacement" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
+    if [ -s "$out/worker-clones.ids" ]; then
+        echo "❌ [$bench] autoscaler for $mid owns worker clones; no replacement" >&2
+        return 1
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    # Both processes already exited (finished marker / loop above); reap them
+    # before their slots are reused so no stale PID remains owned.
+    wait "${CHILD_PIDS[$j]}" 2>/dev/null || true
+    [ -z "${AUTOSCALER_PIDS[$j]:-}" ] || wait "${AUTOSCALER_PIDS[$j]}" 2>/dev/null || true
+    # Everything the failed child and autoscaler left that names the old
+    # Machine moves aside, including the pre-boot runtime-evidence ownership
+    # the relaunched child would otherwise refuse to reuse.
+    archive="$out/host-replaced-$mid"
+    mkdir "$archive" || return 1
+    for name in .cid .startup-state.json fleet-child.log benchmark-child.finished \
+        boot-config-unapplied boot-config-host-unresponsive cloudbench-boot-update.log \
+        runtime-evidence.pending runtime-evidence.owner.json remote-logs \
+        autoscaler.log autoscaler.pid autoscaler.ready autoscaler.failed \
+        autoscaler.completed-after-child desired-worker-count; do
+        if [ -e "$out/$name" ] || [ -L "$out/$name" ]; then
+            mv "$out/$name" "$archive/$name" || return 1
+            moved+=("$name")
+        fi
+    done
+    echo "🔁 [$bench] Fly host for Machine $mid stopped answering boot-config updates; cloning a replacement (old Machine retained for exact-owner teardown)" >&2
+    # Always a fresh clone: a pool claim or archived reuse cannot be taken
+    # here and then abandoned. A failed clone restores the exact failed state
+    # so the strict abort and startup-failure archive see the original owner.
+    if pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" \
+        "$(primary_vm_size_for_bench "$bench")" "$(primary_vm_memory_for_bench "$bench")" \
+        "$SNAP_ID" "$(primary_clone_storage_mode "$bench")")" \
+        && [ -n "$pcid" ] && [ "$pcid" != "$mid" ]; then
+        printf 'clone %s\n' "$pcid" > "$out/.cid" || return 1
+    else
+        echo "❌ [$bench] replacement clone for $mid failed; keeping the original failure" >&2
+        for name in "${moved[@]}"; do mv "$archive/$name" "$out/$name" || true; done
+        rmdir "$archive" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$mid" > "$out/boot-config-host-replaced" || return 1
+    launch_fleet_bench_child "${CHILD_BENCH_INDEX[$j]}" "$bench" "$j" || return 1
+    if [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
+        && [ "${SKIP_AUTOSCALER:-0}" != 1 ]; then
+        wait_for_mandatory_autoscaler_startup "$j" || return 1
+    fi
+    return 0
 }
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
     boot_config_deadline=$((SECONDS + BOOT_CONFIG_BARRIER_WAIT_SECONDS))
     while :; do
         boot_config_ready="$(find "$BOOT_CONFIG_BARRIER/ready" -type f 2>/dev/null | wc -l | tr -d ' ')"
         [ "$boot_config_ready" = "${#CHILD_PIDS[@]}" ] && break
-        if boot_config_failed_bench="$(boot_config_failed_child)"; then
-            echo "❌ boot config failed before barrier release: $boot_config_failed_bench exited without a ready marker (${boot_config_ready:-0}/${#CHILD_PIDS[@]} ready)" >&2
+        if boot_config_failed_slot="$(boot_config_failed_child)"; then
+            if fleet_replace_host_unresponsive_child "$boot_config_failed_slot" "$boot_config_deadline"; then
+                continue
+            fi
+            echo "❌ boot config failed before barrier release: ${CHILD_BENCH[$boot_config_failed_slot]} exited without a ready marker (${boot_config_ready:-0}/${#CHILD_PIDS[@]} ready)" >&2
             exit 1
         fi
         if [ "$SECONDS" -ge "$boot_config_deadline" ]; then
