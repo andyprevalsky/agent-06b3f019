@@ -361,10 +361,22 @@ function evaluateBudgets(result, budgets = DEFAULT_BUDGETS) {
       if (stats.p50 < budgets.fpsP50Min) violations.push({ rule: 'fps-p50', message: `${label} p50 ${stats.p50} fps (min ${budgets.fpsP50Min})`, value: stats.p50, limit: budgets.fpsP50Min });
       if (stats.p5 < budgets.fpsP5Min) violations.push({ rule: 'fps-p5', message: `${label} p5 ${stats.p5} fps (min ${budgets.fpsP5Min}); worst frame ${stats.worstFrameMs} ms`, value: stats.p5, limit: budgets.fpsP5Min });
     }
-    const steady = (normal.longTasks || []).filter((t) => t.phase === 'steady' && t.duration > budgets.longTaskMaxMs);
-    if (steady.length > 0) {
-      const max = Math.max(...steady.map((t) => t.duration));
-      violations.push({ rule: 'long-task', message: `${steady.length} main-thread task(s) over ${budgets.longTaskMaxMs} ms while running (max ${round(max)} ms)`, value: max, limit: budgets.longTaskMaxMs });
+    // A steady task over budget in CPU time is the page's work. One over budget only in wall
+    // time may be the host stalling the renderer, or the page blocking on a wait (GPU readback,
+    // sync XHR); it fails unless a second window (longTaskRecheck) has no long task at all.
+    const limit = budgets.longTaskMaxMs;
+    const steady = (normal.longTasks || []).filter((t) => t.phase === 'steady' && t.duration > limit);
+    const heavy = steady.filter((t) => !(typeof t.cpu === 'number' && t.cpu <= limit));
+    const waits = steady.filter((t) => typeof t.cpu === 'number' && t.cpu <= limit);
+    const recheck = Array.isArray(normal.longTaskRecheck) ? normal.longTaskRecheck.filter((t) => t.duration > limit) : null;
+    if (heavy.length > 0) {
+      const max = Math.max(...heavy.map((t) => (typeof t.cpu === 'number' ? t.cpu : t.duration)));
+      violations.push({ rule: 'long-task', message: `${heavy.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms CPU)`, value: max, limit });
+    } else if (waits.length > 0 && (recheck === null || recheck.length > 0)) {
+      const max = Math.max(...waits.map((t) => t.duration), ...(recheck || []).map((t) => t.duration));
+      violations.push({ rule: 'long-task', message: `${waits.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms), ${recheck === null ? 'not re-measured' : 'again in a second window'}`, value: max, limit });
+    } else if (waits.length > 0) {
+      warnings.push({ rule: 'long-task-stall', message: `${waits.length} task(s) took over ${limit} ms of wall time but under ${limit} ms of CPU (max ${round(Math.max(...waits.map((t) => t.duration)))} ms) and did not recur in a second window: a host stall, not judged` });
     }
     const loading = (normal.longTasks || []).filter((t) => t.phase === 'load' && t.duration > budgets.longTaskMaxMs);
     if (loading.length > 0) warnings.push({ rule: 'load-long-task', message: `${loading.length} task(s) over ${budgets.longTaskMaxMs} ms during load (max ${round(Math.max(...loading.map((t) => t.duration)))} ms)` });
@@ -828,6 +840,37 @@ async function hostBaseline(browser, preview, viewport) {
   }
 }
 
+/**
+ * Renderer main-thread tasks longer than minMs (wall) in a Chromium trace, with the CPU time
+ * the thread spent in each. A task stalled by the host (preempted, page faults, a blocked IPC)
+ * has wall time but little CPU; a busy page burns CPU for the whole task.
+ */
+function traceMainThreadTasks(buf, minMs) {
+  const events = JSON.parse(buf.toString('utf8')).traceEvents || [];
+  const main = new Set(events.filter((e) => e.ph === 'M' && e.name === 'thread_name' && e.args && e.args.name === 'CrRendererMain').map((e) => `${e.pid}:${e.tid}`));
+  const tasks = events.filter((e) => e.ph === 'X' && e.name === 'ThreadControllerImpl::RunTask' && main.has(`${e.pid}:${e.tid}`));
+  if (tasks.length === 0) throw new Error('trace recorded no renderer main-thread tasks');
+  return tasks
+    .filter((e) => e.dur > minMs * 1000)
+    .map((e) => {
+      if (typeof e.tdur !== 'number') throw new Error('trace has no thread CPU time for main-thread tasks');
+      return { phase: 'steady', duration: round(e.dur / 1000), cpu: round(e.tdur / 1000) };
+    });
+}
+
+/** measureWindow under a Chromium trace; adds the window's long main-thread tasks with CPU time. */
+async function tracedWindow(browser, page, preview, workers, ms) {
+  await browser.startTracing(undefined, { categories: ['-*', 'toplevel'] });
+  let win;
+  let trace;
+  try {
+    win = await measureWindow(page, preview, workers, ms);
+  } finally {
+    trace = await browser.stopTracing();
+  }
+  return { ...win, tasks: traceMainThreadTasks(trace, DEFAULT_BUDGETS.longTaskMaxMs) };
+}
+
 /** Normal + hidden + reduced-motion measurements of one route (one user frame). */
 async function measureRoute(browser, preview, route, opts) {
   const viewport = opts.viewport;
@@ -835,9 +878,15 @@ async function measureRoute(browser, preview, route, opts) {
   const run = await openHost(browser, preview, route, { viewport, probe: true });
   try {
     await sleep(opts.settleMs);
-    const normal = await measureWindow(run.page, preview, run.workers, opts.seconds * 1000);
+    const normal = await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000);
     const snap = normal.snaps.find(Boolean);
     if (!snap) throw new Error(`no user frame measured on ${route}`);
+    let longTaskRecheck;
+    const limit = DEFAULT_BUDGETS.longTaskMaxMs;
+    if (opts.recheckLongTasks && normal.tasks.length > 0 && normal.tasks.every((t) => t.cpu <= limit)) {
+      // Long only in wall time: a one-off host stall does not recur, a page's blocking wait does.
+      longTaskRecheck = (await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000)).tasks;
+    }
     let fps = frameStats(snap.frames);
     let workers = normal.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
     const missesFps = (s) => s.frames >= 10 && s.p50 !== null && (s.p50 < DEFAULT_BUDGETS.fpsP50Min || s.p5 < DEFAULT_BUDGETS.fpsP5Min);
@@ -860,7 +909,8 @@ async function measureRoute(browser, preview, route, opts) {
       fps,
       fpsWindows,
       workers,
-      longTasks: snap.longTasks.map((t) => ({ phase: t.phase, duration: round(t.duration) })),
+      longTasks: [...snap.longTasks.filter((t) => t.phase === 'load').map((t) => ({ phase: t.phase, duration: round(t.duration) })), ...normal.tasks],
+      ...(longTaskRecheck ? { longTaskRecheck } : {}),
       cls: round(cumulativeLayoutShift(snap.shifts), 4),
       errors: snap.errors,
       animations: snap.animations,
@@ -1165,7 +1215,7 @@ async function cmdCheck(opts) {
         const entryResult = { ...t, static: auditEntryFiles(t.entry, files), hostBaseline: baseline };
         entryResult.host = hostLoad();
         try {
-          Object.assign(entryResult, await measureRoute(browser, preview, fileRoute(t.entry), { ...p, retryFps: true }));
+          Object.assign(entryResult, await measureRoute(browser, preview, fileRoute(t.entry), { ...p, retryFps: true, recheckLongTasks: true }));
         } catch (err) {
           entryResult.static.violations.push({ rule: 'measure-failed', message: err.message.split('\n')[0] });
         }
@@ -1344,5 +1394,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS, USAGE,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };
