@@ -237,8 +237,6 @@ class JEVSession:
         if self.closed:
             return
         try:
-            if workflow.in_workflow() and not workflow.patched("jev-progress-v1"):
-                return
             for index, event in enumerate(events):
                 ids = tuple(c.get("tool_call_id") or c.get("id") or str(index) for c in event.get("calls", []))
                 identity = (event["role"], ids if ids else event.get("call_id", str(index)))

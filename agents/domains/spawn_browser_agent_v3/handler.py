@@ -44,7 +44,6 @@ from browser_tools.secret_refs import (
 from config import load_config
 from domains.spawn_browser_agent_v3.service_activity_queue import (
     await_owned_browser_cleanup,
-    browser_activity_queue_enabled,
     browser_activity_turn,
     cancel_and_join_browser_activity,
 )
@@ -238,25 +237,9 @@ AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
-def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
-    """Allocate the browser ownership ID before its cancellable activity starts."""
-    return str(
-        uuid_module.uuid5(
-            uuid_module.NAMESPACE_URL,
-            f"rose-browser-task:{agent_id}:{tool_call_id}",
-        )
-    )
-
-
 def _logical_browser_task_id(agent_id: str) -> str:
     """One browser identity per GP; activity/tool IDs remain separate."""
     return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
-
-
-def _owned_browser_task_id(agent_id: str, tool_call_id: str) -> str:
-    if not workflow.in_workflow() or workflow.patched("persistent-browser-owner-v1"):
-        return _logical_browser_task_id(agent_id)
-    return _stable_browser_task_id(agent_id, tool_call_id)
 
 
 def _browser_task_terminal_metadata(
@@ -12688,19 +12671,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
     async def execute_tool(
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
-        serialized = browser_activity_queue_enabled()
-        async with browser_activity_turn(workflow_instance, serialized):
-            if serialized and getattr(workflow_instance, "_browser_activity_cleanup_unknown", False):
+        async with browser_activity_turn(workflow_instance):
+            if getattr(workflow_instance, "_browser_activity_cleanup_unknown", False):
                 raise RuntimeError("Previous browser activity cleanup is unconfirmed")
             async with contextlib.aclosing(self._execute_tool(
-                workflow_instance, tool_call, tool_call_id, serialized=serialized
+                workflow_instance, tool_call, tool_call_id
             )) as events:
                 async for event in events:
                     yield event
 
     async def _execute_tool(
-        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str,
-        *, serialized: bool,
+        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
         start_url = tool_call.get("start_url", "")
@@ -12867,12 +12848,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # (approval / auth wait) without running the activity again.
                     result, parked_result = parked_result, None
                     was_cancelled = False
-                    known_task_id = result.get("task_id") or _owned_browser_task_id(agent_id, tool_call_id)
+                    known_task_id = result.get("task_id") or _logical_browser_task_id(agent_id)
                     activity_task_id = known_task_id
                 else:
                     known_task_id = (
                         write_lock_resume_state.get("task_id") if isinstance(write_lock_resume_state, dict) else None
-                    ) or _owned_browser_task_id(agent_id, tool_call_id)
+                    ) or _logical_browser_task_id(agent_id)
                     activity_args = [
                         user_id,
                         agent_id,
@@ -12898,10 +12879,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
-                    if inbox_address or serialized:
-                        activity_args.append(inbox_address)
-                    if serialized:
-                        activity_args.append(True)
+                    activity_args.append(inbox_address)
+                    activity_args.append(True)
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,
@@ -12922,17 +12901,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             args=activity_args,
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                            cancellation_type=(
-                                workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
-                                if serialized else workflow.ActivityCancellationType.TRY_CANCEL
-                            ),
+                            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                             retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
                         )
                         activity_task_id = known_task_id
 
                         was_cancelled = False
                         # The workflow allocates task_id before starting the activity,
-                        # so TRY_CANCEL cannot erase the ownership key along with the
+                        # so cancellation cannot erase the ownership key along with the
                         # activity return value.
                         # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
                         try:
@@ -12942,8 +12918,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 )
                             )
                         except asyncio.CancelledError:
-                            if serialized:
-                                await cancel_and_join_browser_activity(activity_handle)
+                            await cancel_and_join_browser_activity(activity_handle)
                             raise
                         # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
                         if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
@@ -13965,7 +13940,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
             raise
         except Exception as e:
-            if serialized and isinstance(e, ActivityError) and isinstance(e.cause, TemporalTimeoutError):
+            if isinstance(e, ActivityError) and isinstance(e.cause, TemporalTimeoutError):
                 # A server timeout does not acknowledge the worker's cleanup.
                 # Fail later same-GP turns closed until workflow reconciliation.
                 workflow_instance._browser_activity_cleanup_unknown = True

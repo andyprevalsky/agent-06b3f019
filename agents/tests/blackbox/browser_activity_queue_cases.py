@@ -13,12 +13,11 @@ async def _tick_until(predicate):
     assert predicate(), "expected local coroutine boundary was never reached"
 
 
-async def run_browser_activity_queue_case(*, patched=True, cancel=False, timedout=False):
+async def run_browser_activity_queue_case(*, cancel=False, timedout=False):
     from temporalio import workflow
     from domains.spawn_browser_agent_v3.handler import (
         SpawnBrowserAgentManagerV3,
         _logical_browser_task_id,
-        _stable_browser_task_id,
     )
 
     owner = SimpleNamespace(user_id="queue-user", agent_id="queue-gp", is_paused=False)
@@ -67,7 +66,6 @@ async def run_browser_activity_queue_case(*, patched=True, cancel=False, timedou
     tasks = []
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=patched),
         patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=start),
         patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", side_effect=wait_condition),
     ):
@@ -79,17 +77,13 @@ async def run_browser_activity_queue_case(*, patched=True, cancel=False, timedou
             unrelated = asyncio.create_task(consume(other, "other"))
             tasks.extend([second, unrelated])
             await _tick_until(lambda: "other" in started)
-            if patched:
-                assert "second" not in started, "same-GP second browser activity started concurrently"
-            else:
-                await _tick_until(lambda: "second" in started)
+            assert "second" not in started, "same-GP second browser activity started concurrently"
             if cancel:
                 first.cancel()
             else:
                 work.set()
             await cleaning.wait()
-            if patched:
-                assert "second" not in started, "browser turn was released before worker cleanup"
+            assert "second" not in started, "browser turn was released before worker cleanup"
             cleanup.set()
             results = await asyncio.gather(*tasks, return_exceptions=cancel or timedout)
             if timedout:
@@ -98,15 +92,10 @@ async def run_browser_activity_queue_case(*, patched=True, cancel=False, timedou
                 assert "cleanup is unconfirmed" in str(results[1])
                 return
             assert "second" in completed
-            if patched:
-                assert completed.index("first") < completed.index("second")
-                assert calls[0]["args"][4] == _logical_browser_task_id(owner.agent_id)
-                assert calls[0]["args"][-1] is True
-                assert calls[0]["cancellation_type"] == workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
-            else:
-                assert calls[0]["args"][4] == _stable_browser_task_id(owner.agent_id, "first")
-                assert len(calls[0]["args"]) == 22, "old replay activity payload shape changed"
-                assert calls[0]["cancellation_type"] == workflow.ActivityCancellationType.TRY_CANCEL
+            assert completed.index("first") < completed.index("second")
+            assert calls[0]["args"][4] == _logical_browser_task_id(owner.agent_id)
+            assert calls[0]["args"][-1] is True
+            assert calls[0]["cancellation_type"] == workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
         finally:
             work.set()
             cleanup.set()
@@ -122,7 +111,6 @@ async def test_browser_activity_queue_lifecycle():
     await run_browser_activity_queue_case()
     await run_browser_activity_queue_case(cancel=True)
     await run_browser_activity_queue_case(timedout=True)
-    await run_browser_activity_queue_case(patched=False)
 
     release = asyncio.Event()
     cleanup = asyncio.create_task(release.wait())
