@@ -364,7 +364,7 @@ describe('paused background browser (root pause)', () => {
         backgroundTaskId: 'call_br',
         sessionId: 'kernel-sess-1',
       },
-      'Message Type: FAILED\nTask name: /root\nSender: /root/order_breakfast_dd\nPayload:\nUser paused the browser agent',
+      'Message Type: FAILED\nTask name: /root\nSender: /root/order_breakfast_dd\nPayload:\nUser paused the browser agent\n\nSession ID: kernel-sess-1',
       'USER',
     ),
   ];
@@ -374,6 +374,8 @@ describe('paused background browser (root pause)', () => {
       state: 'paused',
       rawStatus: 'paused',
       agentType: 'browser',
+      // The session id is for continuation, not the user-facing summary.
+      resultSummary: 'User paused the browser agent',
     });
   });
 

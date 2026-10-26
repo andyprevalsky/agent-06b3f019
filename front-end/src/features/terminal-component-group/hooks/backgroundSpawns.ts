@@ -95,7 +95,7 @@ export function agentPathShortName(path: string | null | undefined): string | nu
 export function notificationSummary(body: string): string | null {
   const sections = body
     .split(/\n{2,}/)
-    .filter((section) => !/^(Structured Response|File):\s/.test(section.trim()));
+    .filter((section) => !/^(Structured Response|File|Session ID):\s/.test(section.trim()));
   const text = sections.join('\n\n').trim();
   return text || null;
 }
