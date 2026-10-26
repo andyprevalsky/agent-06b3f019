@@ -8,11 +8,11 @@
  *                 edges align, the panel extends rightward, shifted left only
  *                 as far as needed to stay inside the viewport.
  *
- * Recomputes whenever `open` flips to true, reading the trigger's client rect
+ * Recomputes before paint whenever `open` flips to true, reading the trigger's rect
  * and returning bottom/left/right values suitable for `position: fixed`.
  */
 
-import { useEffect, useState, type RefObject } from 'react';
+import { useLayoutEffect, useState, type RefObject } from 'react';
 import type { ModalAlign, ModalPosition } from './types';
 
 /** Panel width; the dialog also caps it at PANEL_MAX_WIDTH_VW of the viewport. */
@@ -29,7 +29,7 @@ export function useModalPosition(
 ): ModalPosition {
   const [position, setPosition] = useState<ModalPosition>(DEFAULT_POSITION);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open || !triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     const bottom = window.innerHeight - rect.top + GAP_PX;
