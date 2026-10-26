@@ -1,4 +1,4 @@
-import { phoneFixtureNumber } from './phone-fixture-users';
+import { ineligiblePhoneFixtureNumber, phoneFixtureNumber } from './phone-fixture-users';
 /** Real init/resume assemblers with real local Prisma; provider IO replaced only. */
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
@@ -101,7 +101,10 @@ async function main() {
       delete rest.iphoneCapability;
       assert.deepEqual(rest, off[key], 'Existing response bytes changed beyond marker');
     }
-    await prisma.user.update({ where: { userId }, data: { phone: '+15555550123' } });
+    await prisma.user.update({
+      where: { userId },
+      data: { phone: ineligiblePhoneFixtureNumber() },
+    });
     const ineligible = await snapshot();
     process.env.CLOUD_IPHONE_ENABLED = '0';
     assert.deepEqual(await snapshot(), ineligible, 'Ineligible browser payload changed');
