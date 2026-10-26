@@ -21,6 +21,7 @@ from tools.prompts.kill_agent import PROMPT as kill_agent_prompt
 from tools.prompts.list_agents import PROMPT as list_agents_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
+from tools.prompts.read_tool_output import PROMPT as read_tool_output_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
 from tools.prompts.send_message_to_agent import PROMPT as send_message_to_agent_prompt
 from tools.prompts.send_message_to_user import PROMPT as send_message_to_user_prompt
@@ -47,7 +48,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "list_agents": list_agents_prompt,
     "send_message_to_agent": send_message_to_agent_prompt,
     "kill_agent": kill_agent_prompt,
-    "read_tool_output": "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; follow next_offset or search with query. Only outputs from this agent/session can be read.",
+    "read_tool_output": read_tool_output_prompt,
     # Research
     "grep": grep_prompt,
     "inspect_code": inspect_code_prompt,

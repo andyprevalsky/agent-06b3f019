@@ -195,6 +195,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Open a new browser tab, optionally navigating to a URL",
         "params": {"url": {"type": "string", "description": "URL to open in new tab (defaults to about:blank)"}},
     },
+    "read_tool_output": {
+        "description": (
+            "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; "
+            "follow next_offset or search with query. Only outputs from this agent/session can be read."
+        ),
+        "params": {
+            "output_id": {"type": "string", "description": "Opaque ID from a tool result preview.", "required": True},
+            "offset": {"type": "integer", "description": "Character offset; use next_offset to continue."},
+            "limit": {"type": "integer", "description": "Maximum number of Unicode characters to read (default: 20000, max: 20000)."},
+            "query": {"type": "string", "description": "Optional literal substring to find at or after offset."},
+        },
+    },
     "upload_file": {
         "description": (
             "Upload a file to a file input element. The file must be available in the session's available_files "
@@ -1275,6 +1287,7 @@ _VALID_ACTIONS = frozenset(
         "switch_tab",
         "close_tab",
         "open_new_tab",
+        "read_tool_output",
         "attempt_completion",
         "request_user_assistance_for_authentication",
         "request_payment_card",
