@@ -143,7 +143,7 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
             world_model_mode='simulate',
             resume_state={'version':1,'kind':'continuation','runtime_state':{
                 'fast_mode_cache_enabled':True,'provider_fast_mode':False,
-                'demo_cache_goal':demo}}))
+                'fast_cache_goal':demo}}))  # stored runtime key (wire name kept)
     assert state.world_model_mode == 'simulate'
     # Observe actual restored DEMO state after the durable-resolution boundary.
     assert (state.fast_mode_cache_enabled, state.provider_fast_mode) == expected

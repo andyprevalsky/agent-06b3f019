@@ -145,7 +145,7 @@ def test_is_demo_cache_task_reads_restored_demo_cache_goal(monkeypatch):
                 resume_state={
                     "version": 1,
                     "kind": "continuation",
-                    "runtime_state": {"demo_cache_goal": alpha["prompt"]},
+                    "runtime_state": {"fast_cache_goal": alpha["prompt"]},  # stored runtime key (wire name kept)
                 },
             )
         )
