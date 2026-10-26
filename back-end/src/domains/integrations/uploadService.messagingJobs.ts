@@ -8,8 +8,10 @@
  *                                                       │
  *                                parse part ──► processed (payload cleared)
  *                                    │ error ──► retry with backoff ──► failed after MAX_ATTEMPTS
+ *                                    │ crash ──► lease expires; each claim counts an attempt
  *                                    ▼
- *                     last pending part of the upload ──► integration CONNECTED
+ *                     latest client sync fully processed, none failed ──► CONNECTED
+ *                     (+ cursor only once its final request arrived)
  *
  * Parts are bounded (PART_MAX_WEIGHT messages), so each parse holds a bounded
  * payload in memory and an old client's single large body becomes many parts.
@@ -33,6 +35,7 @@ export const PART_MAX_WEIGHT = 5_000;
 const CLAIM_LEASE_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 5;
 const CLAIM_BATCH = 10;
+const RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 export type MessagingPlatform = 'imessage' | 'whatsapp' | 'telegram';
 
@@ -119,32 +122,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Mark the integration synced once every part of an upload is processed. */
-async function finalizeUpload(
-  job: NonNullable<Awaited<ReturnType<typeof jobsRepo.findMessagingUploadJob>>>
-) {
-  if ((await jobsRepo.countPendingMessagingUploadParts(job.uploadId)) > 0) return;
-  const integration = await repo.findIntegrationByUserAndName(job.userId, job.platform);
-  if (integration === null) return;
-  const config = (integration.config as Record<string, unknown> | null) ?? {};
-  await repo.updateIntegration(integration.id, {
-    status: IntegrationStatus.CONNECTED,
-    isActive: true,
+async function markIntegrationFailed(integrationId: string, message: string) {
+  await repo.updateIntegrationStatus(integrationId, IntegrationStatus.SYNC_FAILED, {
     lastSyncAt: new Date(),
-    lastSuccessfulSyncAt: new Date(),
-    config: {
-      ...config,
-      contacts: job.contacts,
-      messages: job.messages,
-      lastJobId: job.uploadId,
-      lastUploadedAt: new Date().toISOString(),
-      // Only a client's final request may advance its incremental-read cursor;
-      // earlier requests of the same sync keep the previous cursor so a failed
-      // sync resumes instead of skipping the unsent history.
-      ...(job.syncComplete && job.accessedAt !== null
-        ? { lastFrontendAccessAt: job.accessedAt }
-        : {}),
-    } as Prisma.InputJsonValue,
+    lastFailedSyncAt: new Date(),
+    failureReason: message,
   });
 }
 
@@ -157,12 +139,26 @@ async function recordFailure(id: string, attempts: number, error: unknown, integ
     return;
   }
   await jobsRepo.markMessagingUploadJobFailed(id, message);
-  await repo.updateIntegrationStatus(integrationId, IntegrationStatus.SYNC_FAILED, {
-    lastSyncAt: new Date(),
-    lastFailedSyncAt: new Date(),
-    failureReason: message,
-  });
+  await markIntegrationFailed(integrationId, message);
   log.error('Messaging upload part failed permanently', { jobId: id, attempts, error: message });
+}
+
+/**
+ * Dead-letter parts that used every attempt without recording a result: a
+ * parse that killed the process (OOM, deploy) never reaches recordFailure.
+ */
+async function failExhaustedParts(): Promise<void> {
+  const exhausted = await jobsRepo.findExhaustedMessagingUploadJobs(
+    new Date(),
+    MAX_ATTEMPTS,
+    CLAIM_BATCH
+  );
+  for (const part of exhausted) {
+    const message = part.lastError ?? `no result after ${MAX_ATTEMPTS} attempts (process lost)`;
+    await jobsRepo.markMessagingUploadJobFailed(part.id, message);
+    await markIntegrationFailed(part.integrationId, message);
+    log.error('Messaging upload part exhausted its attempts', { jobId: part.id });
+  }
 }
 
 async function processClaimedPart(id: string): Promise<void> {
@@ -176,27 +172,74 @@ async function processClaimedPart(id: string): Promise<void> {
     await jobsRepo.markMessagingUploadJobProcessed(id);
   } catch (error: unknown) {
     await recordFailure(id, job.attempts, error, job.integrationId);
-    return;
   }
-  await finalizeUpload(job);
+}
+
+/**
+ * Mark an integration synced once its latest client sync is fully processed.
+ * A sync with any failed part stays SYNC_FAILED and keeps the previous cursor,
+ * so the client re-sends that history. Only a sync whose final request has
+ * arrived (`syncComplete`) advances the incremental-read cursor. Runs from
+ * every drain, so a finalization interrupted by a crash is retried.
+ */
+async function finalizeIntegration(integration: { id: string; config: unknown }): Promise<void> {
+  if ((await jobsRepo.countPendingMessagingUploadParts(integration.id)) > 0) return;
+  const latest = await jobsRepo.findLatestMessagingUploadPart(integration.id);
+  if (latest === null) return;
+  const parts = await jobsRepo.findMessagingSyncParts(integration.id, latest);
+  if (parts.some((part) => part.failedAt !== null || part.processedAt === null)) return;
+  const complete = parts.some((part) => part.syncComplete);
+  const config = (integration.config as Record<string, unknown> | null) ?? {};
+  await repo.updateIntegration(integration.id, {
+    status: IntegrationStatus.CONNECTED,
+    isActive: true,
+    lastSyncAt: new Date(),
+    lastSuccessfulSyncAt: new Date(),
+    config: {
+      ...config,
+      contacts: latest.contacts,
+      messages: latest.messages,
+      lastJobId: latest.uploadId,
+      lastUploadedAt: new Date().toISOString(),
+      ...(complete
+        ? { lastFrontendAccessAt: latest.accessedAt ?? latest.createdAt.toISOString() }
+        : {}),
+    } as Prisma.InputJsonValue,
+  });
+}
+
+async function finalizeSyncedIntegrations(): Promise<void> {
+  const syncing = await jobsRepo.findSyncingMessagingIntegrations(Object.keys(PARSERS), 100);
+  for (const integration of syncing) {
+    try {
+      await finalizeIntegration(integration);
+    } catch (error: unknown) {
+      log.error('Messaging upload finalization failed; retried next drain', {
+        integrationId: integration.id,
+        error: errorMessage(error),
+      });
+    }
+  }
 }
 
 async function drain(): Promise<void> {
+  await failExhaustedParts();
   for (;;) {
-    const ids = await jobsRepo.findClaimableMessagingUploadJobIds(new Date(), CLAIM_BATCH);
-    if (ids.length === 0) return;
+    const ids = await jobsRepo.findClaimableMessagingUploadJobIds(
+      new Date(),
+      CLAIM_BATCH,
+      MAX_ATTEMPTS
+    );
+    if (ids.length === 0) break;
     for (const id of ids) {
       const now = new Date();
-      if (
-        !(await jobsRepo.claimMessagingUploadJob(id, now, new Date(now.getTime() + CLAIM_LEASE_MS)))
-      ) {
-        continue;
-      }
+      const until = new Date(now.getTime() + CLAIM_LEASE_MS);
+      if (!(await jobsRepo.claimMessagingUploadJob(id, now, until, MAX_ATTEMPTS))) continue;
       try {
         await processClaimedPart(id);
       } catch (error: unknown) {
-        // Bookkeeping failed (e.g. the integration was deleted meanwhile). The
-        // lease expires and the part is retried; keep draining the others.
+        // Recording the outcome failed. The lease expires and the part is
+        // claimed again (counting an attempt); keep draining the others.
         log.error('Messaging upload part bookkeeping failed', {
           jobId: id,
           error: errorMessage(error),
@@ -204,6 +247,8 @@ async function drain(): Promise<void> {
       }
     }
   }
+  await finalizeSyncedIntegrations();
+  await jobsRepo.deleteFinishedMessagingUploadJobs(new Date(Date.now() - RETENTION_MS));
 }
 
 let draining: Promise<void> | null = null;

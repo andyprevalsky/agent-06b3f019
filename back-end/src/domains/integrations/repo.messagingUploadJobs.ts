@@ -27,12 +27,17 @@ export async function insertMessagingUploadParts(rows: MessagingUploadPartInput[
   await prisma.messagingUploadJob.createMany({ data: rows, skipDuplicates: true });
 }
 
-/** Oldest parts that are neither finished nor held by a live claim. */
-export async function findClaimableMessagingUploadJobIds(now: Date, take: number) {
+/** Oldest unfinished parts with attempts left and no live claim. */
+export async function findClaimableMessagingUploadJobIds(
+  now: Date,
+  take: number,
+  maxAttempts: number
+) {
   const rows = await prisma.messagingUploadJob.findMany({
     where: {
       processedAt: null,
       failedAt: null,
+      attempts: { lt: maxAttempts },
       OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }],
     },
     orderBy: { createdAt: 'asc' },
@@ -42,18 +47,46 @@ export async function findClaimableMessagingUploadJobIds(now: Date, take: number
   return rows.map((row) => row.id);
 }
 
-/** Claim one part until `until`; returns false when another drain holds it. */
-export async function claimMessagingUploadJob(id: string, now: Date, until: Date) {
+/**
+ * Claim one part until `until`; false when another drain holds it or it has no
+ * attempts left. Every claim counts as an attempt, so a part whose parse kills
+ * the process is not reclaimed forever.
+ */
+export async function claimMessagingUploadJob(
+  id: string,
+  now: Date,
+  until: Date,
+  maxAttempts: number
+) {
   const claimed = await prisma.messagingUploadJob.updateMany({
     where: {
       id,
       processedAt: null,
       failedAt: null,
+      attempts: { lt: maxAttempts },
       OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }],
     },
     data: { claimedUntil: until, attempts: { increment: 1 } },
   });
   return claimed.count === 1;
+}
+
+/** Unfinished parts that used every attempt and hold no live claim (e.g. crashed mid-parse). */
+export async function findExhaustedMessagingUploadJobs(
+  now: Date,
+  maxAttempts: number,
+  take: number
+) {
+  return prisma.messagingUploadJob.findMany({
+    where: {
+      processedAt: null,
+      failedAt: null,
+      attempts: { gte: maxAttempts },
+      OR: [{ claimedUntil: null }, { claimedUntil: { lt: now } }],
+    },
+    select: { id: true, integrationId: true, lastError: true },
+    take,
+  });
 }
 
 export async function findMessagingUploadJob(id: string) {
@@ -90,9 +123,57 @@ export async function markMessagingUploadJobFailed(id: string, error: string): P
   });
 }
 
-/** Parts of one upload that are still pending (not processed, not failed). */
-export async function countPendingMessagingUploadParts(uploadId: string): Promise<number> {
-  return prisma.messagingUploadJob.count({
-    where: { uploadId, processedAt: null, failedAt: null },
+/** Messaging integrations still marked SYNCING: the candidates for finalization. */
+export async function findSyncingMessagingIntegrations(platforms: string[], take: number) {
+  return prisma.integration.findMany({
+    where: { name: { in: platforms }, accountId: '', status: 'SYNCING' },
+    select: { id: true, config: true },
+    take,
   });
+}
+
+/** Parts of an integration that can still run (not processed, not failed). */
+export async function countPendingMessagingUploadParts(integrationId: string): Promise<number> {
+  return prisma.messagingUploadJob.count({
+    where: { integrationId, processedAt: null, failedAt: null },
+  });
+}
+
+export async function findLatestMessagingUploadPart(integrationId: string) {
+  return prisma.messagingUploadJob.findFirst({
+    where: { integrationId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      uploadId: true,
+      accessedAt: true,
+      contacts: true,
+      messages: true,
+      createdAt: true,
+    },
+  });
+}
+
+/**
+ * Every part of one client sync: the requests sharing its `accessedAt` (a
+ * chunked client sends its sync start on each), or one upload when absent.
+ */
+export async function findMessagingSyncParts(
+  integrationId: string,
+  sync: { accessedAt: string | null; uploadId: string }
+) {
+  return prisma.messagingUploadJob.findMany({
+    where: {
+      integrationId,
+      ...(sync.accessedAt !== null ? { accessedAt: sync.accessedAt } : { uploadId: sync.uploadId }),
+    },
+    select: { processedAt: true, failedAt: true, syncComplete: true },
+  });
+}
+
+/** Drop finished parts (payloads already cleared) after the retention window. */
+export async function deleteFinishedMessagingUploadJobs(before: Date): Promise<number> {
+  const { count } = await prisma.messagingUploadJob.deleteMany({
+    where: { OR: [{ processedAt: { lt: before } }, { failedAt: { lt: before } }] },
+  });
+  return count;
 }

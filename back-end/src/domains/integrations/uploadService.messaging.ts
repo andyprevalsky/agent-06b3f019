@@ -45,7 +45,8 @@ async function acceptMessagingUpload(
 
   const existing = await repo.findIntegrationByUserAndName(userId, platform);
   const existingConfig = (existing?.config as Prisma.JsonObject | null) ?? {};
-  const cursor = syncComplete ? (accessedAt ?? new Date().toISOString()) : undefined;
+  // The cursor (lastFrontendAccessAt) is not touched here: it advances only
+  // once every part of the client's sync is processed (see finalizeIntegration).
   const integration = await repo.upsertIntegrationForUpload({
     userId,
     name: platform,
@@ -54,7 +55,6 @@ async function acceptMessagingUpload(
       contacts: contacts.length,
       messages: totalMessages,
       uploadedAt: new Date().toISOString(),
-      ...(cursor !== undefined ? { lastFrontendAccessAt: cursor } : {}),
     },
   });
 
@@ -64,7 +64,7 @@ async function acceptMessagingUpload(
     platform,
     contacts,
     totalMessages,
-    accessedAt: cursor ?? null,
+    accessedAt: accessedAt ?? null,
     syncComplete,
   });
   return { integration, jobId };

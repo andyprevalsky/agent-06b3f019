@@ -53,20 +53,38 @@ async function storedMessages(userId: string): Promise<number> {
   return prisma.messageRecord.count({ where: { person: { userId } } });
 }
 
-/** Drain (as the cron does) until the expected messages are stored (~60s budget). */
-async function drainUntilStored(userId: string, expected: number): Promise<number> {
+/**
+ * Drain (as the cron does) until `done` holds (~60s budget). The test backend
+ * drains the same queue concurrently, so every observation re-runs the drain.
+ */
+async function drainUntil<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
   return retryWithBackoff(
     async () => {
       await runMessagingUploadJobs();
-      return storedMessages(userId);
+      return read();
     },
     {
       maxRetries: 120,
       fixedDelays: Array.from({ length: 120 }, () => 500),
-      shouldRetryResult: (stored) => stored < expected,
+      shouldRetryResult: (value) => !done(value),
       component: 'MessagingIngestionTest',
     }
   );
+}
+
+async function drainUntilStored(userId: string, expected: number): Promise<number> {
+  return drainUntil(
+    () => storedMessages(userId),
+    (stored) => stored >= expected
+  );
+}
+
+function imessageIntegration(userId: string) {
+  return prisma.integration.findFirst({ where: { userId, name: 'imessage' } });
+}
+
+function cursorOf(integration: { config: unknown } | null): unknown {
+  return (integration?.config as Record<string, unknown> | null)?.lastFrontendAccessAt;
 }
 
 async function cleanupUser(userId: string): Promise<void> {
@@ -143,9 +161,10 @@ export async function testMessagingUpload_largeLegacyBodyIngestsInBoundedParts()
       heavy?.messagesExchanged === 12_000,
       `a contact split across parts counts its whole history (got ${heavy?.messagesExchanged})`
     );
-    const integration = await prisma.integration.findFirst({
-      where: { userId: session.userId, name: 'imessage' },
-    });
+    const integration = await drainUntil(
+      () => imessageIntegration(session.userId),
+      (row) => row?.status === 'CONNECTED'
+    );
     assert(integration?.status === 'CONNECTED', 'integration connected after its last part');
     assert(PART_MAX_WEIGHT <= 5_000, 'parts stay bounded');
   } finally {
@@ -171,25 +190,116 @@ export async function testMessagingUpload_nonFinalChunkKeepsCursor() {
     });
     assertStatus(first.status, 200, first.data);
     await drainUntilStored(session.userId, 3);
-    const mid = await prisma.integration.findFirst({
-      where: { userId: session.userId, name: 'imessage' },
-    });
-    const midCursor = (mid?.config as Record<string, unknown> | null)?.lastFrontendAccessAt;
+    const mid = await drainUntil(
+      () => imessageIntegration(session.userId),
+      (row) => row?.status === 'CONNECTED'
+    );
+    const midCursor = cursorOf(mid);
     assert(midCursor === undefined, `cursor unchanged mid-sync (got ${String(midCursor)})`);
 
     const last = await post({ contacts: syntheticContacts('5554', [2]), accessedAt: syncStart });
     assertStatus(last.status, 200, last.data);
     await drainUntilStored(session.userId, 5);
-    const done = await prisma.integration.findFirst({
-      where: { userId: session.userId, name: 'imessage' },
-    });
-    const cursor = (done?.config as Record<string, unknown> | null)?.lastFrontendAccessAt;
+    const done = await drainUntil(
+      () => imessageIntegration(session.userId),
+      (row) => cursorOf(row) !== undefined
+    );
+    const cursor = cursorOf(done);
     assert(
       cursor === syncStart,
       `final request advances the cursor to the sync start (${String(cursor)})`
     );
   } finally {
     await cleanupUser(session.userId);
+  }
+}
+
+/** Seed accepted parts directly, as a previous web process left them. */
+async function seedParts(
+  userId: string,
+  parts: Array<{ part: number; contacts: SyntheticContact[]; attempts?: number }>,
+  accessedAt: string
+) {
+  const integration = await prisma.integration.upsert({
+    where: { userId_name_accountId: { userId, name: 'imessage', accountId: '' } },
+    create: { userId, name: 'imessage', type: 'DATA_SOURCE', status: 'SYNCING', config: {} },
+    update: { status: 'SYNCING' },
+  });
+  const uploadId = `imessage-upload-${userId}-seeded`;
+  await prisma.messagingUploadJob.createMany({
+    data: parts.map((p) => ({
+      userId,
+      integrationId: integration.id,
+      platform: 'imessage',
+      uploadId,
+      part: p.part,
+      parts: parts.length,
+      payload: p.contacts as unknown as object,
+      accessedAt,
+      syncComplete: true,
+      contacts: 1,
+      messages: 1,
+      attempts: p.attempts ?? 0,
+      claimedUntil: p.attempts !== undefined ? new Date(Date.now() - 60_000) : null,
+    })),
+  });
+  return { uploadId };
+}
+
+/**
+ * A part that crash-looped through every attempt is dead-lettered. Its sync
+ * then ends SYNC_FAILED: a successful sibling must not mark the integration
+ * CONNECTED or advance the incremental cursor past the unsent history.
+ */
+export async function testMessagingUpload_exhaustedPartFailsSyncAndKeepsCursor() {
+  const { userId } = await createAnonSession();
+  try {
+    const { uploadId } = await seedParts(
+      userId,
+      [
+        { part: 0, contacts: syntheticContacts('5555', [2]), attempts: 5 },
+        { part: 1, contacts: syntheticContacts('5556', [3]) },
+      ],
+      '2026-02-01T00:00:00.000Z'
+    );
+    const parts = await drainUntil(
+      () => prisma.messagingUploadJob.findMany({ where: { uploadId }, orderBy: { part: 'asc' } }),
+      (rows) => rows[0]?.failedAt !== null && rows[1]?.processedAt !== null
+    );
+    assert(parts[0].failedAt !== null && parts[0].payload === null, 'exhausted part dead-lettered');
+    assert(parts[1].processedAt !== null, 'sibling part processed');
+    await runMessagingUploadJobs();
+    const integration = await imessageIntegration(userId);
+    assert(integration?.status === 'SYNC_FAILED', `sync failed (got ${integration?.status})`);
+    assert(cursorOf(integration) === undefined, 'cursor not advanced past a failed part');
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
+  }
+}
+
+/** A storage failure inside a part fails the part (retried), not marks it processed. */
+export async function testMessagingUpload_chunkStoreFailureLeavesPartRetryable() {
+  const { userId } = await createAnonSession();
+  try {
+    const contacts = syntheticContacts('5557', [2]);
+    // Stores fine as JSON, but converts to an invalid Date that the insert rejects.
+    contacts[0].messages[0].date = 1e30;
+    const { uploadId } = await seedParts(
+      userId,
+      [{ part: 0, contacts }],
+      '2026-03-01T00:00:00.000Z'
+    );
+    const [part] = await drainUntil(
+      () => prisma.messagingUploadJob.findMany({ where: { uploadId } }),
+      (rows) => (rows[0]?.attempts ?? 0) >= 1 && rows[0]?.lastError !== null
+    );
+    assert(part.processedAt === null, 'a part with unstored messages is not processed');
+    assert(part.failedAt === null && part.payload !== null, 'payload retained for the retry');
+    assert(/contact chunk/.test(part.lastError ?? ''), `chunk failure recorded: ${part.lastError}`);
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
   }
 }
 
