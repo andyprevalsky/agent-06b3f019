@@ -234,6 +234,7 @@ export async function upsertPersonAndMessageRecords(
           await createMessageBatch(
             batch.map((msg) => ({
               personId,
+              userId,
               channel: msg.channel,
               from: msg.from,
               to: msg.to,
