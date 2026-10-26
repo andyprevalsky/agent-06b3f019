@@ -2297,6 +2297,9 @@ async def _render_llm_messages(
         metadata = msg.get("metadata", {}) or {}
 
         file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+        attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
+        if file_pointer and isinstance(file_pointer, dict):
+            attachments_data = [file_pointer] + list(attachments_data)
 
         # Empty attachment-only assistant rows are hidden by the converter.
         # Skip before downloads and admission so they consume no file budget.
