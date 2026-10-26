@@ -11,7 +11,9 @@ import unittest
 root = pathlib.Path(sys.argv.pop(1))
 source = pathlib.Path(sys.argv.pop(1))
 text = source.read_text()
-start = text.index('echo "Starting isolated backend for black-box tests on port $PORT"')
+# The launch is a function so a lost bind race can relaunch; exercise the whole
+# definition and its first call.
+start = text.index("launch_backend() {")
 end = text.index("\nREADY=0", start)
 # Cleanup is installed before port reservation. Keep that actual owner setup
 # when exercising the later launch/PID handoff with a pre-owned fixture lock.
@@ -84,6 +86,10 @@ child.wait()
                     "BACKEND_LOG": str(p / "backend.log"),
                     "ARTIFACT_DIR": str(p),
                     "PORT_LOCK_DIR": str(port_lock),
+                    "MANIFEST_PATH": str(p / "manifest.json"),
+                    "RUN_ID": "blackbox-owned-cleanup",
+                    "TEST_BASE_URL": "http://localhost:0",
+                    "RUNNER_LOG": str(p / "runner.log"),
                     "SCRIPT_DIR": str(root / "back-end/scripts"),
                 }
                 # Exercise the unchanged owning launch/trap block; no DB/provider startup.
