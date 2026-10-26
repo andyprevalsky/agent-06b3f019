@@ -64,6 +64,8 @@ export function isTaskNodeId(agentId: string): boolean {
 
 function taskStatus(status: string): TreeNode['status'] {
   const normalized = status.toLowerCase();
+  // A user pause ended the run: resumable, not running and not failed.
+  if (normalized === 'paused') return 'PAUSED';
   if (FAILED_TASK.has(normalized)) return 'FAILED';
   if (DONE_TASK.has(normalized)) return 'COMPLETED';
   return 'ACTIVE';
@@ -81,7 +83,9 @@ export function taskTreeNode(args: {
 }): TreeNode {
   const label = agentPathShortName(args.path) ?? singleLine(args.goal);
   return {
-    agentId: `${TASK_NODE_PREFIX}${args.address}`,
+    // A task's identity is its address (task path, else its id), as on the
+    // backend tree; Agent.backgroundTasks' `address` is the current run's inbox.
+    agentId: `${TASK_NODE_PREFIX}${args.path ?? args.address}`,
     parentAgentId: args.parentAgentId,
     goal: `${args.type} · ${label || args.address}`,
     status: args.status,
@@ -105,9 +109,15 @@ function fromTreeTask(task: TreeBackgroundTask, parentAgentId: string): TreeNode
   });
 }
 
+const SPAWN_NODE_STATUS: Record<BackgroundSpawn['state'], TreeNode['status']> = {
+  running: 'ACTIVE',
+  completed: 'COMPLETED',
+  failed: 'FAILED',
+  paused: 'PAUSED',
+};
+
 function fromSpawn(spawn: BackgroundSpawn, parentAgentId: string): TreeNode {
-  const status =
-    spawn.state === 'running' ? 'ACTIVE' : spawn.state === 'failed' ? 'FAILED' : 'COMPLETED';
+  const status = SPAWN_NODE_STATUS[spawn.state];
   return taskTreeNode({
     address: spawn.address ?? spawn.ownerToolCallId,
     parentAgentId,
@@ -193,13 +203,21 @@ export function buildAgentPanelModel({
 }: BuildArgs): AgentPanelModel {
   const childIndex = indexTreeChildren(nodes.values());
   const childCache = new Map<string, TreeNode[]>();
+  // The selected agent's own spawn rows list its tasks (with live activity);
+  // its persisted copy of the same task is not a second row.
+  const ownTaskIds = new Set(
+    spawns
+      .filter((spawn) => IN_ACTIVITY_TYPES.has(spawn.agentType))
+      .map((spawn) => fromSpawn(spawn, selectedAgentId).agentId),
+  );
   const getChildren = (parentId: string): TreeNode[] => {
     const cached = childCache.get(parentId);
     if (cached) return cached;
     const kids = childIndex.get(parentId) ?? [];
     const tasks = (nodes.get(parentId)?.backgroundTasks ?? [])
       .filter((task) => !nodes.has(task.address))
-      .map((task) => fromTreeTask(task, parentId));
+      .map((task) => fromTreeTask(task, parentId))
+      .filter((task) => parentId !== selectedAgentId || !ownTaskIds.has(task.agentId));
     const children = runningFirst([...kids, ...tasks]);
     childCache.set(parentId, children);
     return children;
