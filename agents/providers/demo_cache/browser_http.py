@@ -17,6 +17,7 @@ The decision core here is pure + unit-testable; the Playwright wiring is a thin 
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -102,17 +103,23 @@ class BrowserHttpCache:
         self.read_enabled = read_enabled
         self.write_enabled = write_enabled
         self.agent_id = agent_id
-        # Resolved once per run: a non-DEMO child under a DEMO tree root must not
-        # write the shared namespace other users' replays read.
-        self._tree_write_allowed: Optional[bool] = None
+        # Resolved once per run, shared by every concurrent response record: a
+        # non-DEMO child under a DEMO tree root must not write the shared
+        # namespace other users' replays read.
+        self._tree_write_check: Optional[asyncio.Future[bool]] = None
         self._fulfilled_keys: set[str] = set()
 
+    async def _resolve_tree_write_allowed(self) -> bool:
+        allowed = await cache_client.cache_write_allowed_for_agent(self.agent_id, self.goal)
+        if not allowed:
+            logger.info("demo_cache.browser_http_write_skipped", agent_id=self.agent_id, reason="demo_tree_root")
+        return allowed
+
     async def _write_allowed(self) -> bool:
-        if self._tree_write_allowed is None:
-            self._tree_write_allowed = await cache_client.cache_write_allowed_for_agent(self.agent_id, self.goal)
-            if not self._tree_write_allowed:
-                logger.info("demo_cache.browser_http_write_skipped", agent_id=self.agent_id, reason="demo_tree_root")
-        return self._tree_write_allowed
+        if self._tree_write_check is None:
+            self._tree_write_check = asyncio.ensure_future(self._resolve_tree_write_allowed())
+        # Shield: one cancelled record must not cancel the check the others share.
+        return await asyncio.shield(self._tree_write_check)
 
     async def lookup(
         self,
