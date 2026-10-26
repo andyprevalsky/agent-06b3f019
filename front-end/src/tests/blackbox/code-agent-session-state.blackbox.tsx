@@ -226,7 +226,7 @@ describe('W5b: paused code sessions', () => {
     expect(fetchSession).not.toHaveBeenCalled();
   });
 
-  it('a pending task id offers no Maximize; paused rows share the transcript inset (px-3.5)', () => {
+  it('a pending task id offers no Maximize', () => {
     renderChipWithView(
       [
         chipMessage({ provider: 'claude', task_id: 'pending' }),
@@ -236,7 +236,9 @@ describe('W5b: paused code sessions', () => {
         }),
       ],
       vi.fn(),
+      'pending',
     );
+    expect(screen.getByTestId('code-agent-chip')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Maximize Claude Code' })).toBeNull();
   });
 
