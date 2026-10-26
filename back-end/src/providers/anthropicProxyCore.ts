@@ -54,7 +54,7 @@ export interface ProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
-  /** False for a replay-only session: a live miss is served but never recorded. */
+  /** False: serve a live miss without recording it. The proxy routes pass false unless the request carries a verified recorder capability. */
   writeEnabled?: boolean;
 }
 
@@ -153,7 +153,10 @@ export async function resolveAnthropic(
 
     const upstream = await deps.fetchUpstream(upstreamBody, headers);
     let wrote = false;
-    if (traceContext.writeEnabled !== false && upstream.status >= 200 && upstream.status < 300) {
+    if (traceContext.writeEnabled === false && upstream.status >= 200 && upstream.status < 300) {
+      // A replay-only session still used this slot; keep later requests aligned.
+      consumedReservedOrdinal = true;
+    } else if (upstream.status >= 200 && upstream.status < 300) {
       const value: CachedAnthropicResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,

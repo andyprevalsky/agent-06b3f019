@@ -6,8 +6,8 @@
  * so any reader of a DEMO prompt replays what any writer stored there. These
  * cases pin that only recorder accounts write it, while any user still replays:
  *  - agent-flag writeEnabled is false for a non-recorder DEMO run
- *  - code-agent proxies route a non-recorder session replay-only and never
- *    record its live misses
+ *  - code-agent proxies record only with a server-signed recorder capability;
+ *    forged, unsigned or absent capabilities never store a live miss
  *
  * Usage: npx tsx src/tests/blackbox/demo-cache-isolation.blackbox.ts
  */
@@ -15,13 +15,20 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
-import { anthropicSlotKey, resolveAnthropic } from '../../providers/anthropicProxyCore';
-import { codeAgentSlotKey, resolveCodex } from '../../providers/codexProxyCore';
+import express from 'express';
+import http from 'node:http';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
+import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
+import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
 } from '../../providers/codeAgentFastModeEnv';
-import { resolveFastModeWriteEnabled } from '../../providers/demoCacheAccountPolicy';
+import {
+  demoCacheWriteCapability,
+  resolveFastModeWriteEnabled,
+} from '../../providers/demoCacheAccountPolicy';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -118,7 +125,9 @@ async function main(): Promise<void> {
     }
   });
 
-  await test('code-agent proxies replay but never record a non-recorder DEMO session', async () => {
+  await test('code-agent proxies record only with a server-signed recorder capability', async () => {
+    // Non-recorder sessions get the plain (replay-only) trace URL; recorders a
+    // signed `record.<sig>` segment bound to their exact trace.
     const nonRecorderWrite = resolveFastModeWriteEnabled(true, randomUUID());
     const codexUrl = buildFastModeCodexEnv(
       'demo goal',
@@ -126,81 +135,83 @@ async function main(): Promise<void> {
       'https://api.example.com/codex-proxy',
       nonRecorderWrite
     ).CODEX_FAST_MODE_PROXY_URL;
-    assert(/\/replay-only$/.test(codexUrl ?? ''), `codex non-recorder URL ${codexUrl}`);
+    assert(/\/codex-proxy\/[0-9a-f]{16}$/.test(codexUrl ?? ''), `codex non-recorder ${codexUrl}`);
     const anthropicUrl = buildFastModeAnthropicEnv(
       'demo goal',
       true,
       'https://api.example.com/anthropic-proxy',
       nonRecorderWrite
     ).ANTHROPIC_BASE_URL;
-    assert(/\/replay-only$/.test(anthropicUrl ?? ''), `anthropic non-recorder URL ${anthropicUrl}`);
+    assert(
+      /\/anthropic-proxy\/[0-9a-f]{16}$/.test(anthropicUrl ?? ''),
+      `anthropic ${anthropicUrl}`
+    );
     const recorderUrl = buildFastModeCodexEnv(
       'demo goal',
       true,
       'https://api.example.com/codex-proxy',
       resolveFastModeWriteEnabled(true, USER_ID)
     ).CODEX_FAST_MODE_PROXY_URL;
-    assert(/\/[0-9a-f]{16}$/.test(recorderUrl ?? ''), `codex recorder URL ${recorderUrl}`);
+    assert(/\/record\.[0-9a-f]{32}$/.test(recorderUrl ?? ''), `codex recorder ${recorderUrl}`);
 
-    // A live miss on the replay-only route is served but never stored.
-    const writes: string[] = [];
-    const deps = {
-      cacheGet: async () => ({ hit: false, value: null, blobPath: null }),
-      cacheSet: async (args: { key: string }) => {
-        writes.push(args.key);
-      },
-    };
-    const upstream = { status: 200, contentType: 'text/event-stream', body: 'data: {}\n\n' };
-    const missTrace = `${goalHash}:replay-only-miss`;
-    await resolveCodex(
-      missTrace,
-      'POST',
-      '/backend-api/codex/responses',
-      { model: 'gpt-5.4', input: [{ role: 'user', content: 'hi' }] },
-      {},
-      { ...deps, fetchUpstream: async () => upstream },
-      true,
-      { sessionId: 'non-recorder', writeEnabled: false }
-    );
-    await resolveAnthropic(
-      missTrace,
-      { model: 'claude-sonnet', messages: [{ role: 'user', content: 'hi' }] },
-      {},
-      { ...deps, fetchUpstream: async () => upstream },
-      true,
-      { sessionId: 'non-recorder', writeEnabled: false }
-    );
-    assert(writes.length === 0, `replay-only misses wrote ${writes.join(', ')}`);
-
-    // The live replay-only routes still serve the recording.
-    for (const [kind, key, url, body] of [
-      [
-        'codex',
-        codeAgentSlotKey('codex', `${goalHash}:replay-codex`, 0),
-        `${BASE_URL}/codex-proxy/${goalHash}:replay-codex/replay-only/backend-api/codex/responses`,
-        { model: 'gpt-5.4', input: [{ role: 'user', content: 'hi' }] },
-      ],
-      [
-        'anthropic',
-        anthropicSlotKey(`${goalHash}:replay-anthropic`, 0),
-        `${BASE_URL}/anthropic-proxy/${goalHash}:replay-anthropic/replay-only/v1/messages`,
-        { model: 'claude-sonnet', messages: [{ role: 'user', content: 'hi' }] },
-      ],
-    ] as const) {
-      await post('/api/fast-cache/set', {
-        key,
-        kind,
-        goalHash,
-        value: { status: 200, contentType: 'text/event-stream', body: 'data: {"cached":true}\n\n' },
-      });
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
-        body: JSON.stringify(body),
-      });
-      await res.text();
-      assert(res.status === 200, `${kind} replay-only status ${res.status}`);
-      assert(res.headers.get('x-fast-mode-cache') === 'hit', `${kind} replay-only must replay`);
+    // The real proxy routers against a 2xx fake upstream and the runner DB:
+    // a forged or absent capability must never store a slot; a signed one does.
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('data: {"live":true}\n\n');
+    });
+    upstream.listen(0, '127.0.0.1');
+    await once(upstream, 'listening');
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    process.env.FAST_MODE_ANTHROPIC_UPSTREAM = `http://127.0.0.1:${upstreamPort}`;
+    process.env.FAST_MODE_CODEX_UPSTREAM = `http://127.0.0.1:${upstreamPort}`;
+    const { anthropicProxyRouter, codexProxyRouter } =
+      await import('../../domains/demo-cache/routes.proxy');
+    const app = express();
+    app.use(express.json());
+    app.use('/anthropic-proxy', anthropicProxyRouter);
+    app.use('/codex-proxy', codexProxyRouter);
+    const proxy = app.listen(0, '127.0.0.1');
+    await once(proxy, 'listening');
+    const base = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    const prisma = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
+    const forged = '0'.repeat(32);
+    const cases = [
+      { name: 'plain', mode: '', stored: false },
+      { name: 'forged', mode: `record.${forged}/`, stored: false },
+      { name: 'forged-record-only', mode: `record-only.${forged}/`, stored: false },
+      { name: 'unsigned-record-only', mode: 'record-only/', stored: false },
+      { name: 'signed', mode: 'SIGNED', stored: true },
+    ];
+    try {
+      for (const c of cases) {
+        for (const kind of ['codex', 'anthropic'] as const) {
+          const trace = `${goalHash}${c.name.replace(/-/g, '')}${kind}`.slice(0, 40);
+          const capability = demoCacheWriteCapability(trace);
+          assert(capability !== null, 'SUPABASE_JWT_SECRET is required for the signed case');
+          const mode = c.mode === 'SIGNED' ? `record.${capability}/` : c.mode;
+          const url =
+            kind === 'codex'
+              ? `${base}/codex-proxy/${trace}/${mode}backend-api/codex/responses`
+              : `${base}/anthropic-proxy/${trace}/${mode}v1/messages`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
+            body: JSON.stringify({ model: 'm', input: [], messages: [] }),
+          });
+          await res.text();
+          assert(res.status === 200, `${kind} ${c.name} status ${res.status}`);
+          const key =
+            kind === 'codex' ? codeAgentSlotKey('codex', trace, 0) : anthropicSlotKey(trace, 0);
+          const row = await prisma.fastModeCacheEntry.findUnique({ where: { key } });
+          assert((row !== null) === c.stored, `${kind} ${c.name}: stored=${row !== null}`);
+          await prisma.fastModeCacheEntry.deleteMany({ where: { key } });
+        }
+      }
+    } finally {
+      await prisma.$disconnect();
+      proxy.close();
+      upstream.close();
     }
   });
 

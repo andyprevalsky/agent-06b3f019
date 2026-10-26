@@ -8,7 +8,11 @@
  */
 
 import { createHash } from './crypto';
-import { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled } from './demoCacheAccountPolicy';
+import {
+  demoCacheWriteCapability,
+  shouldWriteDemoCacheForUser,
+  resolveFastModeWriteEnabled,
+} from './demoCacheAccountPolicy';
 
 export { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled };
 
@@ -121,9 +125,15 @@ function proxyPath(
   const sessionId = options?.sessionId?.trim();
   const traceSegment =
     sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash;
-  if (!readEnabled) return `${traceSegment}/record-only`;
-  // The trace hash carries no owner, so only recorder sessions may add slots.
-  return writeEnabled ? traceSegment : `${traceSegment}/replay-only`;
+  // The trace hash carries no owner, so only recorder sessions may add slots,
+  // and only through a server-signed capability the proxy verifies.
+  const capability = writeEnabled ? demoCacheWriteCapability(traceSegment) : null;
+  if (!readEnabled) {
+    return capability === null
+      ? `${traceSegment}/record-only`
+      : `${traceSegment}/record-only.${capability}`;
+  }
+  return capability === null ? traceSegment : `${traceSegment}/record.${capability}`;
 }
 
 /**

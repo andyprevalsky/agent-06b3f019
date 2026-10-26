@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from './crypto';
 import { demoCacheEnv } from './demoCacheEnv';
 
 /**
@@ -40,4 +41,27 @@ export function resolveFastModeWriteEnabled(
     return false;
   }
   return shouldWriteDemoCacheForUser(userId);
+}
+
+const WRITE_CAPABILITY_CONTEXT = 'demo-cache-proxy-write:v1:';
+
+/**
+ * Server-signed write capability for one code-agent proxy trace segment. The
+ * proxy routes are unauthenticated and the sandbox controls its own base URL,
+ * so a URL prefix alone must never grant writes. SUPABASE_JWT_SECRET is a
+ * server-only signing secret that is never injected into a sandbox.
+ */
+export function demoCacheWriteCapability(traceSegment: string): string | null {
+  const secret = process.env.SUPABASE_JWT_SECRET?.trim();
+  if (secret === undefined || secret === '') return null;
+  return createHmac('sha256', secret)
+    .update(`${WRITE_CAPABILITY_CONTEXT}${traceSegment}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+export function verifyDemoCacheWriteCapability(traceSegment: string, presented: string): boolean {
+  const expected = demoCacheWriteCapability(traceSegment);
+  if (expected === null || presented.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
 }

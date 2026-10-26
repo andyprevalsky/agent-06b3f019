@@ -21,6 +21,7 @@ tags:
 sources:
   - memory:scalability-audit-100-seats-20261024.md
   - commit 410a1847d (DEMO-only cache reads, 2026-09-06)
+  - PR #1574
 repro: back-end/src/tests/blackbox/planner-memory.blackbox.ts ("an owned benchmark run never reaches another user; ownerless fixtures are shared") and back-end/src/tests/blackbox/demo-cache-isolation.blackbox.ts (recorder-only writes; replay-only code-agent proxy)
 status: fixed
 ---
@@ -91,10 +92,21 @@ be stored" and "codex non-recorder URL https://api.example.com/codex-proxy/0fcbe
   them. Python tool-level writers (web_search, web_fetch, browser_use) compute
   their own write bit but stay frozen on DEMO trees through
   `cache_write_allowed_for_agent`.
-- Code-agent proxies: a new `replay-only` route segment (read, never write).
-  `codeAgentFastModeEnv.proxyPath` selects it whenever replay is on and the
-  session is not a recorder; both proxy cores skip `cacheSet` when
-  `TraceReplayContext.writeEnabled === false`.
+- Code-agent proxies: the proxy routes are unauthenticated and the sandbox
+  controls its own base URL, so a URL prefix cannot grant writes (CodeRabbit,
+  PR #1574). The plain trace route is now replay-only. Writes require a
+  `record.<sig>` (read+write) or `record-only.<sig>` (write-only) segment, where
+  `<sig>` is an HMAC of the exact trace segment keyed by the server-only
+  `SUPABASE_JWT_SECRET` (`demoCacheWriteCapability`, verified with
+  `timingSafeEqual`). `codeAgentFastModeEnv.proxyPath` signs only recorder
+  sessions. Forged, unsigned or absent capabilities serve the live response
+  without storing it, and they still consume the trace ordinal so the session
+  stays aligned. The isolation blackbox mounts the real routers against a 2xx
+  fake upstream. On the previous commit it failed with
+  `codex plain: stored=true`.
+- Open follow-up: Codex rose-harness sandboxes receive `ROSE_API_KEY` (the
+  backend API key, `providers/e2b.ts`), which can call `/api/fast-cache/set`
+  directly; that route guard belongs to lane S1.
 - Open follow-up: `BrowserHttpCache.record` (`agents/providers/demo_cache/browser_http.py`)
   calls `cache_set` without `goal`/`root_goal`, so a non-DEMO browser child under
   a DEMO root on a resume/write-lock path could still write a shared

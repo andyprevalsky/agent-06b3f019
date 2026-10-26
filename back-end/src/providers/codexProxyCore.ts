@@ -45,7 +45,7 @@ export interface CodexProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
-  /** False for a replay-only session: a live miss is served but never recorded. */
+  /** False: serve a live miss without recording it. The proxy routes pass false unless the request carries a verified recorder capability. */
   writeEnabled?: boolean;
 }
 
@@ -414,10 +414,13 @@ export async function resolveCodex(
     let wrote = false;
     if (
       key !== null &&
-      traceContext.writeEnabled !== false &&
+      traceContext.writeEnabled === false &&
       upstream.status >= 200 &&
       upstream.status < 300
     ) {
+      // A replay-only session still used this slot; keep later requests aligned.
+      consumedReservedOrdinal = true;
+    } else if (key !== null && upstream.status >= 200 && upstream.status < 300) {
       const value: CachedCodexResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,
