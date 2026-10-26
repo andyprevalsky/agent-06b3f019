@@ -29,7 +29,9 @@ import {
 } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
 
-const avatar = (owner: string) => `https://avatars.githubusercontent.com/${owner}?size=64`;
+/** GitHub logins are case-insensitive: one lowercased URL per owner. */
+const avatar = (owner: string) =>
+  `https://avatars.githubusercontent.com/${owner.toLowerCase()}?size=64`;
 
 function projectIcon(projectId: string) {
   const row = screen.getByTestId(`rose-project-row-${projectId}`);
@@ -77,6 +79,7 @@ describe('Project icon: GitHub owner avatar instead of the folder (UI item 32)',
     const { img } = projectIcon('p-rose');
     expect(img).toHaveAttribute('loading', 'lazy');
     expect(img).toHaveAttribute('alt', '');
+    expect(img).toHaveAttribute('referrerpolicy', 'no-referrer');
     expect(img).toHaveClass('h-5', 'w-5', 'flex-none', 'rounded-[4px]', 'object-cover');
     expect(screen.getByTestId('rose-project-row-p-rose')).toHaveTextContent('Rose');
 
@@ -106,6 +109,8 @@ describe('Project icon: GitHub owner avatar instead of the folder (UI item 32)',
         repoUrl: 'ssh://git@github.com/acme-ssh/widgets.git',
       }),
       makeProject({ id: 'p-slash', name: 'Slash', repoUrl: 'https://www.github.com/slashy/repo/' }),
+      makeProject({ id: 'p-upper', name: 'Upper', repoUrl: 'https://github.com/ROSE-AI-LABS/web' }),
+      makeProject({ id: 'p-scp-nouser', name: 'ScpNoUser', repoUrl: 'github.com:bare/repo.git' }),
       makeProject({ id: 'p-none', name: 'None', repoUrl: null, githubConnected: false }),
       makeProject({ id: 'p-gitlab', name: 'Gitlab', repoUrl: 'https://gitlab.com/acme/repo' }),
       makeProject({
@@ -122,6 +127,9 @@ describe('Project icon: GitHub owner avatar instead of the folder (UI item 32)',
     expectAvatar('p-scp', 'acme');
     expectAvatar('p-ssh', 'acme-ssh');
     expectAvatar('p-slash', 'slashy');
+    expectAvatar('p-upper', 'Rose-Ai-Labs');
+    expect(projectIcon('p-upper').img?.src).toBe(projectIcon('p-https').img?.src);
+    expectAvatar('p-scp-nouser', 'bare');
     expectFolder('p-none');
     expectFolder('p-gitlab');
     expectFolder('p-lookalike');

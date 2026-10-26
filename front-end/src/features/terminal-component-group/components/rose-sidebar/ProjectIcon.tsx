@@ -26,6 +26,7 @@ function OwnerAvatar({ src }: { src: string }) {
       src={src}
       alt=""
       loading="lazy"
+      referrerPolicy="no-referrer"
       draggable={false}
       onError={() => {
         FAILED_AVATAR_URLS.add(src);

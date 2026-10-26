@@ -8,8 +8,8 @@
 
 /** GitHub login: 1-39 letters, digits or hyphens, not starting with a hyphen. */
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
-/** scp-style SSH remote, e.g. `git@github.com:owner/repo.git`. */
-const SCP_REMOTE = /^[\w.-]+@github\.com:(.+)$/i;
+/** scp-style SSH remote, e.g. `git@github.com:owner/repo.git` (user optional). */
+const SCP_REMOTE = /^(?:[\w.-]+@)?github\.com:(?!\d+(?:\/|$))(.+)$/i;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
 const REMOTE_PROTOCOLS = new Set(['https:', 'http:', 'ssh:', 'git:', 'git+ssh:']);
@@ -42,7 +42,10 @@ export function githubRepoOwner(repoUrl: string | null | undefined): string | nu
   return owner;
 }
 
-/** The owner's avatar: one stable, browser-cached URL per owner (20px icon, 64px source). */
+/**
+ * The owner's avatar: one stable, browser-cached URL per owner (20px icon, 64px
+ * source). Logins are case-insensitive, so the URL uses the lowercased login.
+ */
 export function githubOwnerAvatarUrl(owner: string): string {
-  return `https://avatars.githubusercontent.com/${owner}?size=64`;
+  return `https://avatars.githubusercontent.com/${owner.toLowerCase()}?size=64`;
 }
