@@ -257,7 +257,15 @@ export function collectCodeAgentEvents(
   taskId: string,
 ): CodeAgentTranscriptEvent[] {
   const events: Array<{ event: CodeAgentTranscriptEvent; at: number; order: number }> = [];
-  for (const entry of foldSessionTranscript(messages, taskId)) {
+  const records = foldSessionTranscript(messages, taskId);
+  // The backend's user_direct_turn row and the session's own user record are one
+  // turn (direct_turn_id = client_message_id); rows without an id match by text.
+  const personRecords = records.filter(
+    (r) => r.at !== null && r.type === 'message' && r.role === 'user' && r.sender === 'user',
+  );
+  const echoedTurnIds = new Set(personRecords.flatMap((r) => r.clientMessageId ?? []));
+  const echoedTexts = new Set(personRecords.map((r) => r.text));
+  for (const entry of records) {
     if (entry.at === null) continue;
     if (entry.type !== 'thinking' && entry.type !== 'message' && entry.type !== 'tool') continue;
     const at = entry.at ?? entry.firstSeenAt ?? 0;
@@ -289,6 +297,8 @@ export function collectCodeAgentEvents(
         });
       }
     } else if (actionType === 'user_direct_turn' && str(message.text)) {
+      const turnId = str(metadata.direct_turn_id);
+      if (turnId ? echoedTurnIds.has(turnId) : echoedTexts.has(message.text)) continue;
       events.push({
         event: { type: 'message', role: 'user', ts: message.timestamp, text: message.text },
         at,

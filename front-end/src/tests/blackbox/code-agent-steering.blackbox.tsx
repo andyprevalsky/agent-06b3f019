@@ -249,6 +249,38 @@ describe('row 45: transcript, terminal and direct steering', () => {
     expect(screen.getAllByText('You → Codex:')).toHaveLength(1);
   });
 
+  it('a direct turn the session echoed back (same client_message_id) renders once', () => {
+    // Prod shape (Codex, 2026-10-26): the backend's user_direct_turn row and the
+    // session's own user record share the turn id; Codex received it once.
+    const sessionEcho = {
+      id: 'turn:turn-1',
+      seq: 117,
+      rev: 1,
+      type: 'message',
+      role: 'user',
+      sender: 'user',
+      text: 'hurry up',
+      ts: '2026-10-20T12:00:30.000Z',
+      client_message_id: 'turn-1',
+    };
+    renderChip([
+      chipMessage(),
+      eventsMessage([...LIVE_EVENTS, sessionEcho]),
+      directTurnMessage('hurry up'),
+    ]);
+    const transcript = screen.getByTestId('code-agent-transcript');
+    expect(within(transcript).getAllByText('hurry up')).toHaveLength(1);
+    expect(within(transcript).getAllByText('You → Codex:')).toHaveLength(1);
+  });
+
+  it('two separate direct turns with the same text both render', () => {
+    const second = directTurnMessage('hurry up');
+    (second.metadata as Record<string, unknown>).direct_turn_id = 'turn-2';
+    renderChip([chipMessage(), directTurnMessage('hurry up'), second]);
+    const transcript = screen.getByTestId('code-agent-transcript');
+    expect(within(transcript).getAllByText('hurry up')).toHaveLength(2);
+  });
+
   it('a persisted direct turn renders as "You → <agent>" without a local echo', () => {
     renderChip([chipMessage(), directTurnMessage('Use the existing Zap icon')]);
     expect(screen.getByTestId('code-agent-transcript')).toHaveTextContent(
