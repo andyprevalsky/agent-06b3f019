@@ -182,9 +182,10 @@ def _render_matches(view: Dict[str, Any], rel: _Relations, query: Dict[str, Any]
     lines = [f"Matches for {what} (shallowest first):"]
     for match in matches:
         address = _address(match)
-        line = (
-            f"- {address} [{rel.of(str(match['agent_id']))}] agent {match.get('status')}: {_snippet(match.get('goal'))}"
-        )
+        kind = str(match.get("type") or "agent")
+        ancestors = [str(a) for a in match.get("ancestor_ids") or []]
+        relation = rel.of(str(match["agent_id"])) if kind == "agent" or not ancestors else rel.of_task(ancestors[-1])
+        line = f"- {address} [{relation}] {kind} {match.get('status')}: {_snippet(match.get('goal'))}"
         if not match.get("path"):
             line += f" (under {' › '.join(str(a) for a in match.get('ancestor_ids') or [])})"
         count = int(match.get("child_count") or 0)
