@@ -101,6 +101,43 @@ describe('useAgentList', () => {
     await act(async () => load);
   });
 
+  it('ending the session drops in-flight results, clears agents and resets hasLoadedAgents', async () => {
+    mockSession();
+    const finishRequests: Array<(agentId: string) => void> = [];
+    server.use(
+      http.get(
+        `${API_BASE}/agents`,
+        () =>
+          new Promise((resolve) => {
+            finishRequests.push((agentId) =>
+              resolve(HttpResponse.json({ agents: [{ agent_id: agentId }] })),
+            );
+          }),
+      ),
+    );
+
+    const { result, rerender } = renderHook(({ canLoad }) => useAgentList(canLoad), {
+      initialProps: { canLoad: true },
+    });
+    await waitFor(() => expect(finishRequests).toHaveLength(1));
+    act(() => finishRequests[0]('first-account-agent'));
+    await waitFor(() => expect(result.current.hasLoadedAgents).toBe(true));
+
+    let pending: Promise<void> | undefined;
+    act(() => {
+      pending = result.current.loadAgents();
+    });
+    await waitFor(() => expect(finishRequests).toHaveLength(2));
+    rerender({ canLoad: false });
+    expect(result.current.agents).toEqual([]);
+    expect(result.current.hasLoadedAgents).toBe(false);
+
+    finishRequests[1]('stale-agent');
+    await act(async () => pending);
+    expect(result.current.agents).toEqual([]);
+    expect(result.current.hasLoadedAgents).toBe(false);
+  });
+
   it('stays loading until every overlapping request settles', async () => {
     mockSession();
     const finishRequests: Array<() => void> = [];

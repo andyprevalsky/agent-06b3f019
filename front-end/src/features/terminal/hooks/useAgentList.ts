@@ -12,6 +12,10 @@ import { reconcileAgent } from '@/lib/progressEstimate';
  * failure), then true. Background polls keep isLoadingAgents's in-flight
  * meaning, so views that must not tear down on every poll gate their
  * first-load spinner on hasLoadedAgents instead.
+ *
+ * Session end (canSubmitGoals -> false) clears agents, resets hasLoadedAgents
+ * and drops every in-flight result, so a later session never sees the previous
+ * account's list or skips its own first-load spinner.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -29,14 +33,16 @@ export function useAgentList(canSubmitGoals: boolean) {
   const [hasLoadedAgents, setHasLoadedAgents] = useState(false);
   const latestLoad = useRef(0);
   const activeLoads = useRef(0);
+  const session = useRef(0);
 
   const loadAgents = useCallback(async () => {
     const loadId = ++latestLoad.current;
+    const loadSession = session.current;
     activeLoads.current += 1;
     setIsLoadingAgents(true);
     try {
       const fetched = await fetchAgents();
-      if (loadId === latestLoad.current)
+      if (loadId === latestLoad.current && loadSession === session.current)
         setAgents((previous) => {
           const byId = new Map(previous.map((agent) => [agent.agent_id, agent]));
           return fetched.map((agent) => reconcileAgent(byId.get(agent.agent_id), agent));
@@ -46,12 +52,18 @@ export function useAgentList(canSubmitGoals: boolean) {
     } finally {
       activeLoads.current -= 1;
       setIsLoadingAgents(activeLoads.current > 0);
-      setHasLoadedAgents(true);
+      if (loadSession === session.current) setHasLoadedAgents(true);
     }
   }, [toast]);
 
   useEffect(() => {
-    if (canSubmitGoals) void loadAgents();
+    if (canSubmitGoals) {
+      void loadAgents();
+      return;
+    }
+    session.current += 1;
+    setAgents([]);
+    setHasLoadedAgents(false);
   }, [canSubmitGoals, loadAgents]);
 
   useEffect(() => {

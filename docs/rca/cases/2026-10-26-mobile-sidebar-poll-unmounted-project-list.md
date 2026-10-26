@@ -80,6 +80,10 @@ input's `focusout`.
   `SidebarAgentList` rule. A search with no rows still shows the spinner.
 - After the first load, accounts with no agents no longer lose the input on
   every poll either.
+- When a session ends (`canSubmitGoals` goes false), the hook clears agents,
+  resets `hasLoadedAgents` and drops in-flight results. A later session can't
+  show the previous account's list or skip its own first-load spinner.
+  CodeRabbit raised this in review cycle 2.
 
 ## Verification
 
@@ -88,7 +92,8 @@ input's `focusout`.
     menu survive an `isLoading=true` refresh.
   - `mobile-agent-drawer.blackbox.tsx`: the first load shows the spinner, and
     a later poll on a zero-agent account keeps the inline input.
-  - `agent-list-hook.blackbox.ts`: the `hasLoadedAgents` contract.
+  - `agent-list-hook.blackbox.ts`: the `hasLoadedAgents` contract and the
+    session-end reset.
 
   The component and drawer cases fail with origin/main's components and pass
   with the fix, five consecutive runs.
