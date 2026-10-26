@@ -1,5 +1,5 @@
 import { Router, type Response } from 'express';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { authenticateInternal, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { InvalidExternalHttpRequestError, ExternalHttpRequestFailedError } from './errors';
@@ -11,7 +11,7 @@ const router = Router();
 
 router.post(
   '/request',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const startTime = Date.now();
     try {

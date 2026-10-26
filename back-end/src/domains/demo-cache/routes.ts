@@ -13,7 +13,7 @@
 
 import { type Response, Router } from 'express';
 import { z } from 'zod';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticateInternal } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import {
@@ -57,7 +57,7 @@ const agentFlagSchema = z.object({ agentId: z.string().min(1) });
 
 router.post(
   '/get',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { key } = getSchema.parse(req.body);
     const result = await cacheGet(key);
@@ -67,7 +67,7 @@ router.post(
 
 router.post(
   '/get-many',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { keys } = getManySchema.parse(req.body);
     const results = await cacheGetMany(keys);
@@ -77,7 +77,7 @@ router.post(
 
 router.post(
   '/get-position',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const body = getPositionSchema.parse(req.body);
     const result = await cacheGetPosition(body);
@@ -87,7 +87,7 @@ router.post(
 
 router.post(
   '/set',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const body = setSchema.parse(req.body);
     const stored = await cacheSetWithAck({
@@ -103,7 +103,7 @@ router.post(
 
 router.post(
   '/purge',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { goalHash } = purgeSchema.parse(req.body);
     const removed = await cachePurge(goalHash);
@@ -116,7 +116,7 @@ router.post(
 // so the Python agent can auto-resolve the cache context for DAG nodes / sub-agents.
 router.post(
   '/agent-flag',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { agentId } = agentFlagSchema.parse(req.body);
     const result = await agentFastMode(agentId);
