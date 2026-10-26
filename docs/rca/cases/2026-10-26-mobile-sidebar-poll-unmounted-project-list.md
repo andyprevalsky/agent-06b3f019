@@ -68,24 +68,30 @@ input's `focusout`.
 
 ## Solution
 
-`RoseMobileAgentList` shows the spinner only when there is nothing to show yet:
-
-- for the first agent load, before any load has settled and while there are
-  no agents; or
-- for a search that has no rows.
-
-Background polls keep the groups mounted. The "first load settled" guard also
-covers accounts with no agents, which would otherwise still lose the input on
-every poll.
+- `useAgentList` now also returns `hasLoadedAgents`. It is false until the
+  first request settles (success or failure), and later polls never reset it.
+  `isLoadingAgents` keeps its tested "any request in flight" meaning.
+- `MobileAgentDrawer` passes `isLoading={isLoadingAgents && !hasLoadedAgents}`
+  to `RoseMobileAgentList`, so the spinner covers exactly the pending first
+  load. This includes the case where the drawer opened before that load began,
+  which CodeRabbit flagged on PR #1588 against a component-local guess.
+- `RoseMobileAgentList` also keeps existing rows when `isLoading` is true
+  (`isLoading && agents.length === 0`), matching the desktop
+  `SidebarAgentList` rule. A search with no rows still shows the spinner.
+- After the first load, accounts with no agents no longer lose the input on
+  every poll either.
 
 ## Verification
 
 - Regression (vitest blackbox, run by `/deploy` front-end tests):
-  `front-end/src/tests/blackbox/projects-sidebar-flow.blackbox.tsx`. It has two
-  new cases: the list, inline input and project menu survive an
-  `isLoading=true` refresh; and the input survives refreshes for a zero-agent
-  account. Both fail on origin/main (spinner replaces the list) and pass with
-  the fix, five consecutive runs.
+  - `projects-sidebar-flow.blackbox.tsx`: the list, inline input and project
+    menu survive an `isLoading=true` refresh.
+  - `mobile-agent-drawer.blackbox.tsx`: the first load shows the spinner, and
+    a later poll on a zero-agent account keeps the inline input.
+  - `agent-list-hook.blackbox.ts`: the `hasLoadedAgents` contract.
+
+  The component and drawer cases fail with origin/main's components and pass
+  with the fix, five consecutive runs.
 - End to end: the unchanged spec at 390px, with 8× CDP CPU throttling.
   - Prod (unfixed): 8/8 failed.
   - Local production build of unfixed origin/main: 2/6 failed.

@@ -7,6 +7,11 @@ import { reconcileAgent } from '@/lib/progressEstimate';
  *                            |  ^
  *                            +--+ overlapping request starts/settles
  *   IDLE --cannot submit goals----------------> IDLE
+ *
+ * hasLoadedAgents: false until the first request settles (success or
+ * failure), then true. Background polls keep isLoadingAgents's in-flight
+ * meaning, so views that must not tear down on every poll gate their
+ * first-load spinner on hasLoadedAgents instead.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -21,6 +26,7 @@ export function useAgentList(canSubmitGoals: boolean) {
   const { toast } = useToast();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const [hasLoadedAgents, setHasLoadedAgents] = useState(false);
   const latestLoad = useRef(0);
   const activeLoads = useRef(0);
 
@@ -40,6 +46,7 @@ export function useAgentList(canSubmitGoals: boolean) {
     } finally {
       activeLoads.current -= 1;
       setIsLoadingAgents(activeLoads.current > 0);
+      setHasLoadedAgents(true);
     }
   }, [toast]);
 
@@ -53,5 +60,5 @@ export function useAgentList(canSubmitGoals: boolean) {
     return () => clearInterval(id);
   }, [canSubmitGoals, loadAgents]);
 
-  return { agents, setAgents, isLoadingAgents, loadAgents };
+  return { agents, setAgents, isLoadingAgents, hasLoadedAgents, loadAgents };
 }

@@ -90,7 +90,7 @@ it('keeps the list, inline project input and project menu mounted while agents r
   fireEvent.change(screen.getByRole('textbox', { name: 'New project name' }), {
     target: { value: 'Website' },
   });
-  // The agent poll sets isLoading on every refresh after the first load.
+  // Defence in depth: even an isLoading refresh must not hide existing rows.
   view.rerender(mobileList({ isLoading: true }));
   expect(screen.queryByLabelText('Loading agents')).toBeNull();
   expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Website');
@@ -103,14 +103,6 @@ it('keeps the list, inline project input and project menu mounted while agents r
   view.rerender(mobileList({ isLoading: true }));
   expect(menu).toBeInTheDocument();
   expect(within(menu).getByRole('menuitem', { name: 'Delete project' })).toBeVisible();
-});
-it('keeps an inline project input through refreshes for an account with no agents', async () => {
-  mockProjectsApi([makeProject()]);
-  const view = renderWithProviders(mobileList({ agents: [], isLoading: true }));
-  view.rerender(mobileList({ agents: [] }));
-  fireEvent.click(await screen.findByRole('button', { name: '+ New project' }));
-  view.rerender(mobileList({ agents: [], isLoading: true }));
-  expect(screen.getByRole('textbox', { name: 'New project name' })).toBeVisible();
 });
 it('saves only changed repository fields from the existing gear settings', async () => {
   const state = mockProjectsApi([makeProject()]);

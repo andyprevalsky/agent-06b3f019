@@ -70,6 +70,37 @@ describe('useAgentList', () => {
     });
   });
 
+  it('reports hasLoadedAgents once the first load settles and keeps it through later polls', async () => {
+    mockSession();
+    const finishRequests: Array<() => void> = [];
+    server.use(
+      http.get(`${API_BASE}/agents`, async () => {
+        await new Promise<void>((resolve) => finishRequests.push(resolve));
+        return HttpResponse.json({ agents: [] });
+      }),
+    );
+
+    const { result } = renderHook(() => useAgentList(false));
+    expect(result.current.hasLoadedAgents).toBe(false);
+    let load: Promise<void> | undefined;
+    act(() => {
+      load = result.current.loadAgents();
+    });
+    await waitFor(() => expect(finishRequests).toHaveLength(1));
+    expect(result.current.hasLoadedAgents).toBe(false);
+    finishRequests[0]();
+    await act(async () => load);
+    expect(result.current.hasLoadedAgents).toBe(true);
+
+    act(() => {
+      load = result.current.loadAgents();
+    });
+    await waitFor(() => expect(result.current.isLoadingAgents).toBe(true));
+    expect(result.current.hasLoadedAgents).toBe(true);
+    finishRequests[1]();
+    await act(async () => load);
+  });
+
   it('stays loading until every overlapping request settles', async () => {
     mockSession();
     const finishRequests: Array<() => void> = [];

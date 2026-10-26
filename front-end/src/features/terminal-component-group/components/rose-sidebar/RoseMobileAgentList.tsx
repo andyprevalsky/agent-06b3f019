@@ -4,12 +4,10 @@
  * STATE MACHINE: RoseMobileAgentList
  *   [DELETE CONFIRM] (deleteTarget) | [PROJECT SETTINGS] (openProject) | [LIST]
  *   [LIST] shows a spinner only while there is nothing to show yet: the first
- *   agent load (before any load settles, with no agents) or a search with no
- *   rows. Background polls set
- *   isLoading too; they must keep the groups mounted so an inline project
- *   input, rename or open project menu survives the refresh.
+ *   agent load (the drawer passes isLoading only until that load settles) or a
+ *   search with no rows. Background polls must keep the groups mounted so an
+ *   inline project input, rename or open project menu survives them.
  */
-import { useState } from 'react';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { Agent } from '../../hooks';
@@ -88,11 +86,8 @@ function useMobileRows(props: MobileAgentListProps) {
 }
 export function RoseMobileAgentList(props: MobileAgentListProps) {
   const { rows, projects, sidebar } = useMobileRows(props);
-  const [agentsLoaded, setAgentsLoaded] = useState(!props.isLoading);
-  if (!props.isLoading && !agentsLoaded) setAgentsLoaded(true);
   const showSpinner =
-    (props.isLoading && !agentsLoaded && props.agents.length === 0) ||
-    (props.isSearching && rows.length === 0);
+    (props.isLoading && props.agents.length === 0) || (props.isSearching && rows.length === 0);
   return (
     <ScrollArea className="min-h-0 flex-1 text-foreground">
       <div data-testid="rose-mobile-agent-list" className="py-2">
