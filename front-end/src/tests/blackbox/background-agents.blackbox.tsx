@@ -405,13 +405,64 @@ describe('paused background browser (root pause)', () => {
     const tasks = model.groups
       .flatMap((group) => group.roots)
       .filter((n) => isTaskNodeId(n.agentId));
-    expect(tasks.length).toBeGreaterThan(0);
-    expect(tasks.map((n) => n.status)).toEqual(tasks.map(() => 'PAUSED'));
-    expect(tasks.map((n) => getStatusText(n))).toEqual(tasks.map(() => 'paused'));
-    expect(model.counts.running).toBe(0);
+    expect(tasks.map((n) => [n.status, getStatusText(n)])).toEqual([['PAUSED', 'paused']]);
+    expect(model.counts).toEqual({ total: 1, running: 0 });
     renderDock(pausedBrowser());
     expect(screen.queryByTestId('background-agents-banner')).not.toBeInTheDocument();
   });
+
+  // Prod shape: Agent.backgroundTasks keys the task by its run inbox (the tool
+  // call id) while the spawn rows address it by its task path. One task is one row.
+  it.each([
+    ['running', 2, 'ACTIVE'],
+    ['paused', 6, 'PAUSED'],
+    ['completed', 2, 'COMPLETED'],
+  ] as const)(
+    'lists one row for a %s task known to both the tree and its spawn rows',
+    (status, rowCount, nodeStatus) => {
+      const rows = pausedBrowser().slice(0, rowCount);
+      if (status === 'completed') {
+        rows.push(
+          row({
+            toolCallId: 'call_br',
+            toolName: 'spawn_browser_agent',
+            toolStatus: 'FINISHED',
+            excludeFromModel: true,
+            title: 'Browser automation complete',
+            action_type: 'task_complete',
+            task_id: 't-br',
+          }),
+          done('call_br', '/root/order_breakfast_dd', 'completed', 'Ordered.'),
+        );
+      }
+      tree.nodes.set(
+        'root-1',
+        makeAgentTreeNode({
+          agentId: 'root-1',
+          backgroundTasks: [
+            {
+              address: 'call_br',
+              path: '/root/order_breakfast_dd',
+              type: 'browser',
+              goal: 'Place a breakfast order',
+              status,
+            },
+          ],
+        }),
+      );
+      const model = buildAgentPanelModel({
+        nodes: tree.nodes as Map<string, TreeNode>,
+        selectedAgentId: 'root-1',
+        spawns: [...deriveBackgroundSpawns(rows).values()],
+      });
+      const tasks = model.groups
+        .flatMap((group) => group.roots)
+        .filter((n) => isTaskNodeId(n.agentId));
+      expect(tasks.map((n) => n.status)).toEqual([nodeStatus]);
+      // The selected agent's own rows supply the live activity of a running task.
+      if (status === 'running') expect(tasks[0].toolsInUse).toEqual(['Clicking <a "Continue">']);
+    },
+  );
 });
 
 describe('running-agents dock', () => {
