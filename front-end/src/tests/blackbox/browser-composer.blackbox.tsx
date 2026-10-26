@@ -1,7 +1,9 @@
 /** Browser composition stays on the existing owner channel without exposing root controls. */
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import QueryInput, {
+  type QueryInputProps,
+} from '@/features/terminal-component-group/components/QueryInput';
 import {
   RoseAppsContext,
   type RoseAppsValue,
@@ -68,23 +70,21 @@ it('shows only text, files, Send and an honest read-only model label in the owne
   expect(onPause).not.toHaveBeenCalled();
 });
 
-it('pins the reported Browser task model instead of the owner model', () => {
+it('labels the Browser composer with its Rose pool, never the raw provider model', () => {
+  // Prod agent 447576b9 (rose-1-flash root): the browser reported the Cerebras
+  // leg "qwen-3.8-27b"; the composer must name the Rose pool it runs on.
   renderWithProviders(
     <RoseAppsContext.Provider
       value={browser({
         tabs: [
-          {
-            agentId: 'owner',
-            taskId: 'browser-task',
-            live: true,
-            actualModel: 'browser-actual-model',
-          },
+          { agentId: 'owner', taskId: 'browser-task', live: true, actualModel: 'qwen-3.8-27b' },
         ],
       })}
     >
       <QueryInput
         liftAboveApps
         agentId="owner"
+        agentDetail={{ model: 'rose-labs/rose-1-flash' } as QueryInputProps['agentDetail']}
         value=""
         onChange={vi.fn()}
         onSubmit={vi.fn()}
@@ -93,9 +93,33 @@ it('pins the reported Browser task model instead of the owner model', () => {
     </RoseAppsContext.Provider>,
   );
   const box = within(screen.getByTestId('browser-query-input'));
-  expect(box.getByText('browser-actual-model')).toBeVisible();
+  expect(box.getByTestId('browser-model-label')).toHaveTextContent('rose-flash');
+  expect(box.queryByText('qwen-3.8-27b')).toBeNull();
   expect(box.queryByText('root-selected-model')).toBeNull();
   expect(box.queryByRole('combobox')).toBeNull();
+});
+
+it('does not attach the agents-running header to the Browser composer', () => {
+  const banner = <div data-testid="background-agents-banner">Running 1 agent</div>;
+  const tree = (open: boolean) => (
+    <RoseAppsContext.Provider value={browser(open ? {} : { openApp: null })}>
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        topAttachment={banner}
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>
+  );
+  const view = renderWithProviders(tree(true));
+  const box = within(screen.getByTestId('browser-query-input'));
+  expect(box.queryByTestId('background-agents-banner')).toBeNull();
+  expect(box.queryByText('Running 1 agent')).toBeNull();
+  // The owner's own composer keeps the header.
+  view.rerender(tree(false));
+  expect(screen.getByTestId('background-agents-banner')).toBeInTheDocument();
 });
 
 it('keeps the root composer controls when the Browser drawer is closed', () => {

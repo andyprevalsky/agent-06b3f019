@@ -20,12 +20,27 @@ export function browserComposerTarget(apps: RoseAppsValue | null, agentId?: stri
   return target;
 }
 
-/** A missing producer field must stay unknown, not inherit a root-model choice. */
-export function browserComposerModel(apps: RoseAppsValue | null, agentId?: string): string {
-  const target = browserComposerTarget(apps, agentId);
-  return (
-    apps?.tabs.find(
-      (tab) => tab.agentId === target?.dataset.agentId && tab.taskId === target?.dataset.taskId,
-    )?.actualModel ?? 'Model unavailable'
-  );
+/**
+ * Browser steps run on the owner agent's Rose pool; a non-Rose owner model uses
+ * the dedicated browser pool. Mirrors `browser_pool_for_agent_model`
+ * (agents/domains/spawn_browser_agent_v3/config.py) + `pool_for_model`
+ * (agents/providers/rose/legacy_adapter.py), shown in the composer's short
+ * pool-name style (rose-flash / rose-ultra). The served provider leg (e.g.
+ * "qwen-3.8-27b") is never displayed.
+ */
+export function browserRosePoolLabel(ownerModel: string | null | undefined): string | null {
+  if (typeof ownerModel !== 'string' || ownerModel.trim() === '') return null;
+  const model = ownerModel.trim().toLowerCase();
+  const rose = model.includes('rose-labs') || model === 'rose' || model.startsWith('rose-');
+  if (!rose || model.includes('browser-use')) return 'rose-browser-use';
+  if (model.includes('local')) return 'rose-local';
+  if (model.includes('oss')) return 'rose-oss';
+  if (model.includes('ultra')) return 'rose-ultra';
+  if (model.includes('mini')) return 'rose-mini';
+  return 'rose-flash';
+}
+
+/** The owner's selected (create-mode) model never labels the Browser; its agent model does. */
+export function browserComposerModel(ownerModel: string | null | undefined): string {
+  return browserRosePoolLabel(ownerModel) ?? 'Model unavailable';
 }

@@ -3,8 +3,10 @@
  *
  * Stock: top toolbar, attachments, textarea and model/send controls.
  * Rose Desktop: nub toolbar, pinned tools, attachments, model/speed/send.
- * Browser: existing owner-agent input, files and Send only; read-only model
- *   label stays unknown until the browser task reports its actual model.
+ * Browser: existing owner-agent input, files and Send only; no top attachment
+ *   (the agents-running header belongs to the owner's own composer); read-only
+ *   model label is the Rose pool the browser runs on (from the owner agent's
+ *   model), never the served provider model; unknown owner model → unknown.
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
@@ -19,7 +21,7 @@
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
  * TOP ATTACHMENT (props.topAttachment, e.g. BackgroundAgentsBanner):
- *   [NONE]     -> box has all corners rounded
+ *   [NONE | BROWSER] -> box has all corners rounded (Browser never renders it)
  *   [RENDERED] -> attachment sits flush above (same column/edges), box top
  *                 corners square off via `data-query-input-attachment`
  *
@@ -110,7 +112,7 @@ export default function QueryInput(props: QueryInputProps) {
               <NubToolbar {...topBarProps} />
             </NubTab>
           )}
-          {props.topAttachment}
+          {!browser && props.topAttachment}
           <QueryInputShell
             dripStyles={dripStyles}
             drippiness={drippiness}
@@ -128,7 +130,7 @@ export default function QueryInput(props: QueryInputProps) {
               roseDesktop={roseDesktop}
               roseDark={roseDark}
               browser={browser}
-              browserModelLabel={browser ? browserComposerModel(apps, props.agentId) : undefined}
+              browserModelLabel={browser ? browserComposerModel(props.agentDetail?.model) : undefined}
             />
           </QueryInputShell>
         </div>
