@@ -11,7 +11,7 @@
  * returns with the next keepalive sample. A null resource was not measured.
  */
 
-import { useSyncExternalStore } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 export interface ByteUsage {
   used_bytes: number;
@@ -99,11 +99,12 @@ function subscribe(taskId: string, listener: () => void): () => void {
 }
 
 export function useCodeResources(taskId: string): CodeResourceSample | null {
-  return useSyncExternalStore(
-    (listener) => subscribe(taskId, listener),
-    () => getCodeResources(taskId),
-    () => getCodeResources(taskId),
+  const subscribeTask = useCallback(
+    (listener: () => void) => subscribe(taskId, listener),
+    [taskId],
   );
+  const read = useCallback(() => getCodeResources(taskId), [taskId]);
+  return useSyncExternalStore(subscribeTask, read, read);
 }
 
 /** Test isolation: forget every sample (listeners stay attached). */

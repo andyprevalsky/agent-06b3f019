@@ -6,13 +6,13 @@
  *      ▼
  *   [BARS]    three small vertical bars (CPU · Memory · Disk), filled to usage;
  *      │      a bar ≥ RESOURCE_WARNING_PCT (80%) is amber; an unmeasured one is empty
- *      │ hover / focus / click
+ *      │ mouse hover, or click / tap / Enter (a mouse click keeps a hover-opened popover)
  *      ▼
  *   [POPOVER] CPU "36% of 8 cores" · Memory "11 / 16 GiB 69%" + "4.9 GiB available
  *             on this box" · Disk "93 / 103 GiB 91%" + "9.8 GiB free on workspace
  *             disk" · divider · "Updated 11:02:15 AM" (viewer's local time).
  *             An unmeasured resource reads "Unavailable", never 0.
- *      │ pointer leave / click / Escape
+ *      │ mouse leave, click / tap again, or Escape
  *      ▼
  *   [BARS]
  *
@@ -20,7 +20,7 @@
  * E2B reports no app/system CPU split, so CPU has no subline.
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -115,6 +115,7 @@ export function CodeResourcesIndicator({
 }) {
   const sample = useCodeResources(taskId);
   const [open, setOpen] = useState(false);
+  const pointer = useRef<string | null>(null);
   if (!running || !sample) return null;
   const rows = resourceRows(sample);
   return (
@@ -124,7 +125,15 @@ export function CodeResourcesIndicator({
           type="button"
           data-testid="code-resources"
           aria-label="Sandbox CPU, memory and disk"
-          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            pointer.current = event.pointerType;
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            // Hover already opened it for a mouse; the click must not toggle it shut.
+            if (pointer.current === 'mouse' && open) event.preventDefault();
+            pointer.current = null;
+          }}
           onPointerEnter={(event) => event.pointerType === 'mouse' && setOpen(true)}
           onPointerLeave={(event) => event.pointerType === 'mouse' && setOpen(false)}
           className="flex items-center rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"

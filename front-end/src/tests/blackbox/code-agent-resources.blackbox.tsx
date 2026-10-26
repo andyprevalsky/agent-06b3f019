@@ -55,8 +55,9 @@ const SAMPLE = {
 let deliver: (record: unknown) => void = () => {};
 
 beforeAll(async () => {
-  // The real agent-channel handler: a CODE_RESOURCES broadcast reaches the store
-  // exactly as useRealtimeSubscription wires it.
+  // The real subscribeToAgent CODE_RESOURCES handler (parse + validate) feeds the
+  // store; useRealtimeSubscription's own onCodeResources → publishCodeResources
+  // link is covered in hooks-lib-realtime-subscription.blackbox.ts.
   const events: Record<string, (wrapper: unknown) => void> = {};
   const channel = { on: vi.fn(), subscribe: vi.fn() };
   channel.on.mockImplementation(

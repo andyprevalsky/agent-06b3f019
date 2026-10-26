@@ -248,6 +248,19 @@ export async function retireOwnedCodeSession(
   return view((await findOwnedCodeSession(userId, codeSessionId)) ?? row);
 }
 
+async function sampleAndPublish(
+  task: { id: string; agentId: string; sandboxId: string },
+  resources: CodeResourceDeps
+): Promise<CodeResourceSample | null> {
+  const sample = await resources.sample(task.sandboxId);
+  if (sample !== null) {
+    await resources.publish(task.agentId, task.id, sample).catch((error: unknown) => {
+      log.warn('Resource sample broadcast failed', { taskId: task.id, error: String(error) });
+    });
+  }
+  return sample;
+}
+
 /**
  * Keepalive from the attached code-agent activity (liveness is heartbeat-only;
  * there is no runtime limit): extend the E2B sandbox's idle window and the
@@ -274,19 +287,18 @@ export async function keepAliveCodeTask(
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
   // CLI runs and the Rose Mac app is connected.
   // This keepalive is also the one resource sampler per running session (item 29):
-  // a Mac session has no sandbox to measure.
-  let sample: CodeResourceSample | null = null;
-  if (!isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId)) {
-    await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
-    sample = await resources.sample(task.sandboxId);
-    if (sample !== null) {
-      await resources.publish(task.agentId, task.id, sample).catch((error: unknown) => {
-        log.warn('Resource sample broadcast failed', { taskId, error: String(error) });
-      });
-    }
-  }
-  if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
-  const resize = await pendingResizeForTask(task.codeSessionId);
+  // a Mac session has no sandbox to measure. The sample runs alongside the lease
+  // and resize reads so its bounded E2B read never delays them.
+  const e2b =
+    !isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId);
+  if (e2b) await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+  const [sample, resize] = await Promise.all([
+    e2b ? sampleAndPublish(task, resources) : Promise.resolve(null),
+    (async () => {
+      if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+      return pendingResizeForTask(task.codeSessionId);
+    })(),
+  ]);
   return {
     alive: true,
     code_session_id: task.codeSessionId,
