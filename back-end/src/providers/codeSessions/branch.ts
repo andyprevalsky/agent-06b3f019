@@ -1,6 +1,6 @@
 /**
  * Branch model for persistent code sessions
- * (docs/plans/active/code-agent-persistent-sessions.md §1b).
+ * (docs/plans/completed/code-agent-persistent-sessions.md §1b).
  *
  *   new (root) agent ──► rose/<slug>-<id8>            cut from the default branch,
  *                                                     merges into the default branch

@@ -21,7 +21,7 @@ tags:
 sources:
   - benchmark run original600-1792711291636839185 (/benchmark full attempt 3, HEAD 620cb2e10), shard 1
   - agent c74ce999-8d52-401c-af4e-05fe4c806266 (chat-mode, task PASS then finalizer failure)
-  - plan: docs/plans/active/code-agent-persistent-sessions.md (logical browser per agent, 2026-10-21)
+  - plan: docs/plans/completed/code-agent-persistent-sessions.md (logical browser per agent, 2026-10-21)
   - commit 620cb2e10 (reproduced on this revision)
 repro: agents/benchmarks/cloud_batch_cleanup_test.py::test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postgres
 status: fixed
@@ -56,7 +56,7 @@ passed. Every failure was a non-browser task.
    (`createLogicalBrowserInTransaction`) now gives every agent an
    unmaterialized logical browser at creation: `sessionId NULL`, `status
    PAUSED`, `provider kernel`, `logicalOwnerKey agent:<id>`. That is the design
-   in docs/plans/active/code-agent-persistent-sessions.md (user direction
+   in docs/plans/completed/code-agent-persistent-sessions.md (user direction
    2026-10-21) and is pinned by back-end browser-session-logical.cases.ts.
    Browser tasks materialize the root's row with a Kernel `sessionId`, so they
    passed. Non-browser trees keep the NULL row, so they failed.

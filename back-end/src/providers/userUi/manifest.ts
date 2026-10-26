@@ -2,7 +2,7 @@
  * rose_user_ui bundle contract: the `rose-ui.json` manifest, `theme.json`, and
  * the whole-bundle validation shared by the publish API, the code-agent
  * workspace seed, and the `rose-ui` CLI. Approved in
- * docs/plans/active/rose-user-ui.md (manifest Zod schema, CLAUDE.md rule 5);
+ * docs/plans/completed/rose-user-ui.md (manifest Zod schema, CLAUDE.md rule 5);
  * any change to these schemas needs fresh approval.
  *
  *   rose_user_ui/ (code agent)          validateUserUiBundle(files)

@@ -1,6 +1,6 @@
 """User tools domain - tools a user's code agent authored in ``rose_user_ui/tools/<name>/``.
 
-System context (docs/plans/active/rose-user-ui.md, "User tools")::
+System context (docs/plans/completed/rose-user-ui.md, "User tools")::
 
     code agent writes tools/<t>/tool.json + handler → publish (backend /api/user-ui, W1)
             │
