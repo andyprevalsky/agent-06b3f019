@@ -113,6 +113,7 @@ browser-agent-recordings/
 /hermes-agent/
 /codex/
 /prime-agent/
+/kimi-code/
 
 # Prompt review tool — generated artifacts (regenerable via `bash prompt-review/run.sh`)
 prompt-review/data.json

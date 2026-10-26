@@ -170,7 +170,9 @@ export async function searchPlannerMemories(
       CROSS JOIN q
       WHERE m."id" <> ${exclude}
         AND m."worldModelMode" = 'real'
-        AND (m."benchmarkTaskName" IS NOT NULL OR m."userId" = ${userId})
+        -- Own runs, plus ownerless curated benchmark fixtures. An owned
+        -- benchmark run replays its account's real data; never share it.
+        AND (m."userId" = ${userId} OR (m."userId" IS NULL AND m."benchmarkTaskName" IS NOT NULL))
         ${passedFilter}
     )
     SELECT * FROM scored
@@ -191,6 +193,15 @@ export async function searchPlannerMemories(
     compressor_version: row.compressorVersion,
     similarity: Number(row.similarity),
   }));
+}
+
+/** Same visibility as search: the owner, or anyone for an ownerless benchmark fixture. */
+export function plannerMemoryVisibleTo(
+  row: { userId: string | null; benchmarkTaskName: string | null },
+  userId: string | null | undefined
+): boolean {
+  if (row.userId === null) return row.benchmarkTaskName !== null;
+  return row.userId === userId;
 }
 
 export async function setPlannerMemoryCriticalPath(

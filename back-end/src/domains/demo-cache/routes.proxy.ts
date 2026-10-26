@@ -13,6 +13,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { FAST_MODE_ANTHROPIC_UPSTREAM, FAST_MODE_CODEX_UPSTREAM } from './config';
+import { verifyDemoCacheWriteCapability } from './accountPolicy';
 import { cacheGet, cacheSet } from './service';
 
 const anthropicLog = createLogger('AnthropicProxy');
@@ -76,17 +77,39 @@ function pathAfterProxyMount(req: Request, traceParam: string): string {
   return tail === '' ? '/' : tail;
 }
 
-function stripRecordOnlyPrefix(pathAndQuery: string): {
-  pathAndQuery: string;
+interface ProxyMode {
   readEnabled: boolean;
-} {
-  if (pathAndQuery === '/record-only') {
-    return { pathAndQuery: '/', readEnabled: false };
+  writeEnabled: boolean;
+}
+
+const READ_ONLY: ProxyMode = { readEnabled: true, writeEnabled: false };
+
+/**
+ * Cache mode for one proxy request. The routes are unauthenticated and the
+ * sandbox controls its base URL, so writes require a capability the backend
+ * signed for this exact trace segment (`record.<sig>` reads and writes,
+ * `record-only.<sig>` only writes). Anything else is replay-only.
+ */
+function proxyMode(traceParam: string, segment: string | undefined): ProxyMode | null {
+  const match = /^(record|record-only)(?:\.([0-9a-f]+))?$/.exec(segment ?? '');
+  if (match === null) return null;
+  const readEnabled = match[1] === 'record';
+  const signed = match[2] !== undefined && verifyDemoCacheWriteCapability(traceParam, match[2]);
+  if (!signed) {
+    anthropicLog.warn('Demo cache proxy write capability rejected', { mode: match[1] });
   }
-  if (pathAndQuery.startsWith('/record-only/')) {
-    return { pathAndQuery: pathAndQuery.slice('/record-only'.length), readEnabled: false };
-  }
-  return { pathAndQuery, readEnabled: true };
+  return { readEnabled, writeEnabled: signed };
+}
+
+function stripProxyMode(
+  traceParam: string,
+  pathAndQuery: string
+): ProxyMode & { pathAndQuery: string } {
+  const segment = /^\/([^/?]+)/.exec(pathAndQuery)?.[1];
+  const mode = proxyMode(traceParam, segment);
+  if (mode === null) return { pathAndQuery, ...READ_ONLY };
+  const rest = pathAndQuery.slice(1 + (segment ?? '').length);
+  return { pathAndQuery: rest === '' || rest.startsWith('?') ? `/${rest}` : rest, ...mode };
 }
 
 async function fetchCodexUpstream(
@@ -111,57 +134,49 @@ async function fetchCodexUpstream(
 
 export const anthropicProxyRouter = Router();
 
+async function handleAnthropic(req: Request, res: Response, mode: ProxyMode): Promise<void> {
+  const trace = parseAnthropicTraceParam(req.params.traceParam);
+  const result = await resolveAnthropic(
+    trace.traceHash,
+    req.body,
+    anthropicHeaders(req),
+    { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
+    mode.readEnabled,
+    { sessionId: trace.sessionId, writeEnabled: mode.writeEnabled }
+  );
+
+  anthropicLog.info(`Anthropic proxy ${result.servedFromCache ? 'HIT' : 'MISS'}`, {
+    traceHash: trace.traceHash,
+    sessionId: trace.sessionId,
+    seq: requestSeq(req.body),
+    readEnabled: mode.readEnabled,
+    writeEnabled: mode.writeEnabled,
+    wrote: result.wrote,
+  });
+
+  res.status(result.status);
+  res.setHeader('content-type', result.contentType);
+  res.setHeader(
+    'x-fast-mode-cache',
+    result.servedFromCache ? 'hit' : mode.readEnabled ? 'miss' : 'record-only'
+  );
+  res.end(result.body);
+}
+
 anthropicProxyRouter.post(
   '/:traceParam/v1/messages',
-  asyncHandler(async (req: Request, res: Response) => {
-    const trace = parseAnthropicTraceParam(req.params.traceParam);
-    const result = await resolveAnthropic(
-      trace.traceHash,
-      req.body,
-      anthropicHeaders(req),
-      { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
-      true,
-      { sessionId: trace.sessionId }
-    );
-
-    anthropicLog.info(`Anthropic proxy ${result.servedFromCache ? 'HIT' : 'MISS'}`, {
-      traceHash: trace.traceHash,
-      sessionId: trace.sessionId,
-      seq: requestSeq(req.body),
-      wrote: result.wrote,
-    });
-
-    res.status(result.status);
-    res.setHeader('content-type', result.contentType);
-    res.setHeader('x-fast-mode-cache', result.servedFromCache ? 'hit' : 'miss');
-    res.end(result.body);
-  })
+  asyncHandler(async (req: Request, res: Response) => handleAnthropic(req, res, READ_ONLY))
 );
 
 anthropicProxyRouter.post(
-  '/:traceParam/record-only/v1/messages',
+  '/:traceParam/:mode/v1/messages',
   asyncHandler(async (req: Request, res: Response) => {
-    const trace = parseAnthropicTraceParam(req.params.traceParam);
-    const result = await resolveAnthropic(
-      trace.traceHash,
-      req.body,
-      anthropicHeaders(req),
-      { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
-      false,
-      { sessionId: trace.sessionId }
-    );
-
-    anthropicLog.info('Anthropic proxy RECORD', {
-      traceHash: trace.traceHash,
-      sessionId: trace.sessionId,
-      seq: requestSeq(req.body),
-      wrote: result.wrote,
-    });
-
-    res.status(result.status);
-    res.setHeader('content-type', result.contentType);
-    res.setHeader('x-fast-mode-cache', 'record-only');
-    res.end(result.body);
+    const mode = proxyMode(String(req.params.traceParam), String(req.params.mode));
+    if (mode === null) {
+      res.status(404).json({ error: 'Unknown proxy mode' });
+      return;
+    }
+    await handleAnthropic(req, res, mode);
   })
 );
 
@@ -172,7 +187,7 @@ codexProxyRouter.use(
   asyncHandler(async (req: Request, res: Response) => {
     const traceParam = req.params.traceParam;
     const trace = parseCodexTraceParam(traceParam);
-    const resolvedPath = stripRecordOnlyPrefix(pathAfterProxyMount(req, traceParam));
+    const resolvedPath = stripProxyMode(traceParam, pathAfterProxyMount(req, traceParam));
     const pathAndQuery = resolvedPath.pathAndQuery;
     const result = await resolveCodex(
       trace.traceHash,
@@ -182,7 +197,7 @@ codexProxyRouter.use(
       codexHeaders(req),
       { cacheGet, cacheSet, fetchUpstream: fetchCodexUpstream },
       resolvedPath.readEnabled,
-      { sessionId: trace.sessionId }
+      { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
     );
 
     const cacheable = isCacheableCodexRequest(req.method, pathAndQuery);
