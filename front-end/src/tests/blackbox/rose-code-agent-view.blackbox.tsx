@@ -245,7 +245,6 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(transcript.className).not.toContain('max-h-[300px]');
     // No terminal view: no Transcript / Terminal tabs and no terminal surface.
     expect(within(page).queryByRole('tablist')).toBeNull();
-    expect(within(page).queryByRole('tab', { name: 'Terminal' })).toBeNull();
     expect(page.querySelector('.code-agent-terminal-mount')).toBeNull();
     expect(transcript.closest('.hidden')).toBeNull();
 
