@@ -506,7 +506,48 @@ describe('running-agents dock', () => {
     await userEvent.click(within(panel).getByText('explore · hotel_price'));
     expect(onNavigate).not.toHaveBeenCalled();
     fireEvent.keyDown(panel, { key: 'Escape' });
-    expect(screen.queryByTestId('background-agents-panel')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Running 2 agents/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByTestId('background-agents-panel-slot')).toHaveAttribute(
+      'data-state',
+      'closed',
+    );
+  });
+
+  it('opens and closes by animating the same mounted slot (no mount at full height, no remount)', async () => {
+    tree.nodes.set('child-1', makeAgentTreeNode({ agentId: 'child-1', parentAgentId: 'root-1' }));
+    renderDock([...gp(), ...explore()]);
+    const toggle = screen.getByRole('button', { name: /Running 2 agents/ });
+    // Closed: the slot is already mounted at 0fr, inert and hidden, so the
+    // first open has a starting frame to animate from.
+    const slot = screen.getByTestId('background-agents-panel-slot');
+    expect(slot).toHaveAttribute('data-state', 'closed');
+    expect(slot).toHaveClass('grid', 'grid-rows-[0fr]', 'transition-[grid-template-rows]');
+    expect(slot).toHaveClass('motion-reduce:transition-none');
+    expect(slot).toHaveAttribute('inert');
+    expect(slot).toHaveAttribute('aria-hidden', 'true');
+
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel-slot')).toBe(slot);
+    expect(slot).toHaveAttribute('data-state', 'open');
+    expect(slot).toHaveClass('grid-rows-[1fr]', 'transition-[grid-template-rows]');
+    expect(slot).not.toHaveClass('grid-rows-[0fr]');
+    expect(slot).not.toHaveAttribute('inert');
+    const content = screen.getByTestId('background-agents-panel');
+    expect(slot.contains(content)).toBe(true);
+
+    // Closing keeps the content mounted so the collapse animates the same nodes.
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel-slot')).toBe(slot);
+    expect(slot).toHaveClass('grid-rows-[0fr]');
+    expect(slot).toHaveAttribute('inert');
+    expect(screen.getByTestId('background-agents-panel')).toBe(content);
+
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel')).toBe(content);
+    expect(slot).toHaveClass('grid-rows-[1fr]');
   });
 
   it('groups for_each children under one cluster header', async () => {
