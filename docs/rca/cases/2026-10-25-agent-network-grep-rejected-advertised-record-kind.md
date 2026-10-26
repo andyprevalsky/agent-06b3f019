@@ -24,6 +24,7 @@ sources:
   - agent a9cdd906-f8b8-4aba-9b6e-dfd43f18ef0d (descend full rerun on 4bb71d90f, shard-01, job r002-j0061)
   - agent 3327c447-2cf2-46e8-80de-94eb897daab8 (explore /root/auth_obstacle)
   - commit d2cfa2c90 (branch rca/GREP-explore-agent-network)
+  - commit 81c465b2c (order application, superseded on branch rca/GREP2)
 repro: back-end/src/tests/blackbox/data-agent-task-path.cases.ts proveAgentNetworkRecordKind (data blackbox domain)
 status: fixed
 ---
@@ -67,22 +68,29 @@ failed pre-fix with
 
 ## Solution
 
-For agent_network-only selections, `validateAgentNetworkSelectors` accepts
-`record_kind` message/all (they select every stored-message row) and `order`
-(the repo and display order now honor oldest_first/newest_first), and rejects
-llm_output/llm_context/code_event, surface, until, page_after and a non-task
-trace_path with `InvalidGrepParamError('<that parameter>')`. Selections
-without agent sources keep the old behavior. No
-prompt, schema or harness change. Golden reference: Claude Code's Grep accepts
-selectors that do not apply in the chosen mode and ignores them rather than
-failing the call (`claude-code-src/src/tools/GrepTool/GrepTool.ts:59`,
-"Requires output_mode: content, ignored otherwise"); the fix converges on that
-for vacuously-satisfied selectors while still rejecting unsatisfiable ones by
-name. 10k-agent behavior: pure request validation, no new queries or state.
+For agent_network selections, `validateAgentNetworkSelectors` accepts
+`record_kind` message/all (they select every stored-message row) and, on a
+sole agent_network search, accepts and ignores `order` (an agent_trajectories
+selector per the GrepTool schema; results stay newest first and
+`display_order` reports that). It rejects llm_output/llm_context/code_event,
+surface, until, page_after and a non-task trace_path with
+`InvalidGrepParamError('<that parameter>')`, and `order` with another source
+with `order/page_after`. Selections without agent sources keep the old
+behavior. No prompt, schema or harness change. Golden reference: tools accept
+a parameter that does not apply, ignore it, and say so in the schema —
+`claude-code-src/src/tools/GrepTool/GrepTool.ts:59` ("Requires output_mode:
+content, ignored otherwise"), hermes `file_tools.py:1301`, openclaw
+`sessions-history-tool.ts:60`. 10k-agent behavior: pure request validation, no
+new queries or state.
 
 ## Human feedback
 
-None recorded.
+Golden-reference review (parent /descend thread, 2026-10-26) rejected applying
+`order` on agent_network in 81c465b2c as ungrounded, because the schema
+documents `order` as agent_trajectories-only. Inapplicable parameters must be
+ignored (or rejected) consistently with the schema text. The review also found
+that the tests claimed page_after coverage they did not have; the page_after,
+non-task trace_path and order-with-another-source rejections are now tested.
 
 ## Reusable lesson
 

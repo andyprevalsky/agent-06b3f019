@@ -100,10 +100,12 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
 const AGENT_NETWORK_RECORD_KINDS = new Set(['message', 'all']);
 
 /**
- * Trajectory selectors on an agent_network-only search. agent_network reads the
- * stored messages of the caller's tree: an agent task path scopes it, the
- * message/all kinds select every row, and order reads it in either direction.
- * Anything else names itself, so the caller can drop that one parameter.
+ * Trajectory selectors on an agent_network search. agent_network reads the
+ * stored messages of the caller's tree: an agent task path scopes it and the
+ * message/all kinds select every row. `order` is an agent_trajectories selector,
+ * so a sole agent_network search accepts and ignores it (results stay newest
+ * first, as display_order reports). Anything else names itself, so the caller
+ * can drop that one parameter.
  */
 function validateAgentNetworkSelectors(params: GrepParams, sources: ValidSource[]): void {
   if (
