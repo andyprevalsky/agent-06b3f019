@@ -68,6 +68,8 @@ def _install_http(monkeypatch, handler):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://a-4989-resource.openai.azure.com")
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "test-key")
+    # No shared cooldown authority: these cases own every request the handler sees.
+    monkeypatch.setattr(foundry, "_shared_scope", lambda: None)
     foundry._cooldown_until.clear()
     foundry._auth_cooldown_until.clear()
 
