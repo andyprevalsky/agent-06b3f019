@@ -832,12 +832,7 @@ machine is destroyed. Run one suite with `-- "<command>"`. To
 check whether a failure is pre-existing, run the same command with
 `CLOUDBENCH_GATE_REF=$(git rev-parse origin/main)`. Only run the commands below directly on
 a Linux host; a macOS failure of the `/proc`-dependent suites does not block the deploy and
-does not need a human override, but the Linux gate must pass. Without
-`--disposable-controller AUTHORITY` (docs/cloudbench-disposable-controller.md) the
-remote entrypoint creates no Machine and exits 78 with `Controller capacity gap`. On a
-Linux deploy host (for example a boxes.dev devbox), run the suites below directly under
-one `run-deploy-stage cloudbench-controller-linux-host` stage with `TMPDIR=/var/tmp`,
-after Step 4g. These are the suites it runs:
+does not need a human override, but the Linux gate must pass. These are the suites it runs:
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
