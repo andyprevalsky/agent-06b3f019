@@ -149,6 +149,11 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       if (id.endsWith('/auth') || id.endsWith('/hybridAuth'))
         return {
           authenticate: (_req: unknown, _res: unknown, next: () => void) => next(),
+          // The fixture plays the agent worker on the internal-only routes.
+          authenticateInternal: (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
+            req.isInternal = true;
+            next();
+          },
           hybridAuth: async (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
             req.isInternal = true;
             next();

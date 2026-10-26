@@ -159,3 +159,26 @@ export function rejectImpersonatedUpload(
  * fails the build if an upload route falls back to bare `authenticate`.
  */
 export const authenticateMachineUpload = [authenticate, rejectImpersonatedUpload];
+
+/**
+ * Refuse every caller except the internal API key.
+ *
+ * `authenticate` also admits any Supabase JWT, including anonymous sign-ups, so
+ * a route that acts on arbitrary users, phone numbers, sandboxes, archives or
+ * the global DEMO cache is internal-only only if it says so here.
+ * `src/tests/structural/internal-route-guard.test.ts` keeps the list closed.
+ */
+export function requireInternal(req: AuthRequest, res: Response, next: NextFunction): void {
+  if (req.isInternal === true) {
+    next();
+    return;
+  }
+  log.warn('Refused internal-only route for a non-internal caller', {
+    path: req.originalUrl,
+    userId: req.user?.id,
+  });
+  res.status(403).json({ error: 'Internal callers only' });
+}
+
+/** `authenticate` then `requireInternal`: the guard for worker/agent-only routes. */
+export const authenticateInternal = [authenticate, requireInternal];
