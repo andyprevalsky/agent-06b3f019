@@ -1,5 +1,6 @@
 import { type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
+import { callerCanAccessAgent, callerCanAccessCodeTask } from '../../providers/agentAccess';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import type { FilePointer } from '../../providers/storage';
@@ -103,7 +104,7 @@ router.post(
 
 router.post(
   '/create',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const {
@@ -186,7 +187,7 @@ router.post(
 
 router.post(
   '/close',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
@@ -216,7 +217,9 @@ router.get(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const session = await service.getSession(req.params.taskId);
+      const session = (await callerCanAccessCodeTask(req, req.params.taskId))
+        ? await service.getSession(req.params.taskId)
+        : null;
       if (session === null) {
         res.status(404).json({ error: 'Session not found' });
         return;
@@ -238,6 +241,10 @@ router.get(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await callerCanAccessAgent(req, req.params.agentId))) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
       const sessions = await service.getAgentSessions(req.params.agentId);
       res.json({ sessions });
     } catch (error) {
@@ -251,7 +258,7 @@ router.get(
 
 router.post(
   '/:taskId/output',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { output, credential_feedback: rawCredentialFeedback } = req.body as {
@@ -303,7 +310,7 @@ router.post(
 
 router.get(
   '/:sandboxId/health',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const result = await service.checkSandboxHealth(req.params.sandboxId);
     res.json(result);
