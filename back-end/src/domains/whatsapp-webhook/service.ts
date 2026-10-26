@@ -33,6 +33,7 @@ import { sendOnChannel } from '../../providers/smsSupervisor/channelDelivery';
 import type { WhatsAppMediaAttachment } from '../../providers/smsSupervisor/inboundMedia';
 import { createLogger } from '../../providers/logger';
 import { alertError } from '../../providers/errorAlert';
+import { acquireLease, releaseLease } from '../../providers/sharedState';
 
 const log = createLogger('WhatsApp Webhook');
 
@@ -164,20 +165,19 @@ export interface InboundWhatsAppResult {
   ok: true;
 }
 
-// Bounded, in-memory dedup of recently-handled Meta message ids. Meta re-delivers
-// a webhook when it does not get a timely 2xx, so a slow DB turn can re-run the
-// same inbound message; this suppresses the immediate retry. Per-instance only —
-// a shared dedup store (unique wamid) is the multi-instance follow-up.
-const RECENT_MESSAGE_IDS = new Set<string>();
-const RECENT_MESSAGE_ID_CAP = 5000;
-function alreadyProcessedMessage(messageId: string): boolean {
+// Dedup of recently-handled Meta message ids, shared by every backend instance.
+// Meta re-delivers a webhook when it does not get a timely 2xx, so a slow DB
+// turn can re-run the same inbound message, and the retry may land on another
+// instance. The first delivery claims the wamid for a day.
+const MESSAGE_ID_NAMESPACE = 'whatsapp-wamid';
+const MESSAGE_ID_TTL_MS = 24 * 60 * 60 * 1000;
+const messageClaims = new Map<string, string>();
+
+export async function alreadyProcessedMessage(messageId: string): Promise<boolean> {
   if (messageId === '') return false;
-  if (RECENT_MESSAGE_IDS.has(messageId)) return true;
-  RECENT_MESSAGE_IDS.add(messageId);
-  if (RECENT_MESSAGE_IDS.size > RECENT_MESSAGE_ID_CAP) {
-    const oldest = RECENT_MESSAGE_IDS.values().next().value;
-    if (oldest !== undefined) RECENT_MESSAGE_IDS.delete(oldest);
-  }
+  const token = await acquireLease(MESSAGE_ID_NAMESPACE, messageId, MESSAGE_ID_TTL_MS);
+  if (token === null) return true;
+  messageClaims.set(messageId, token);
   return false;
 }
 
@@ -186,8 +186,16 @@ function alreadyProcessedMessage(messageId: string): boolean {
  * retry. Without this, a throw after the reservation would make the retry a
  * no-op (skipped + 200) and silently drop the inbound message.
  */
-function releaseProcessedMessage(messageId: string): void {
-  if (messageId !== '') RECENT_MESSAGE_IDS.delete(messageId);
+export async function releaseProcessedMessage(messageId: string): Promise<void> {
+  const token = messageClaims.get(messageId);
+  if (token === undefined) return;
+  messageClaims.delete(messageId);
+  await releaseLease(MESSAGE_ID_NAMESPACE, messageId, token);
+}
+
+/** Forget this instance's claim tokens once a delivery batch finishes. */
+function forgetMessageClaim(messageId: string): void {
+  messageClaims.delete(messageId);
 }
 
 export async function handleInboundWhatsApp(
@@ -241,7 +249,7 @@ export async function handleInboundWhatsApp(
   // Provision each unique sender once, then route every message in the batch.
   const userIdByPhone = new Map<string, string>();
   for (const { fromPhone, messageBody, messageId, attachments = [] } of messages) {
-    if (alreadyProcessedMessage(messageId)) {
+    if (await alreadyProcessedMessage(messageId)) {
       log.info('Duplicate WhatsApp delivery skipped', { messageId });
       continue;
     }
@@ -284,9 +292,10 @@ export async function handleInboundWhatsApp(
     } catch (error) {
       // Processing failed (e.g. DB error) → release the dedup reservation so
       // Meta's retry reprocesses this message instead of skipping it as a dup.
-      releaseProcessedMessage(messageId);
+      await releaseProcessedMessage(messageId);
       throw error;
     }
+    forgetMessageClaim(messageId);
   }
 
   return { ok: true };

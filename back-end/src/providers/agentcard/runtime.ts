@@ -16,6 +16,7 @@ import { createLogger } from '../logger';
 import { AGENTCARD_MCP_RESOURCE, AgentCardOAuthError, loadOAuthConfig } from './config';
 import { isExpired, refreshAccessToken } from './oauth';
 import { getUserToken, saveUserToken } from './store';
+import { withSerializedLock } from '../sharedState';
 import type { AgentCardTool } from './types';
 
 export type { AgentCardTool } from './types';
@@ -58,6 +59,8 @@ export class AgentCardMcpTimeoutError extends Error {
  * Coalesces concurrent refreshes for the same user into a single in-flight promise. AgentCard
  * ROTATES the refresh token on every use, so two parallel refreshes of the same bundle would race:
  * one wins and the other fails with `invalid_grant` (or overwrites the freshly-stored token).
+ * The map only coalesces callers inside this process; a per-user Postgres advisory lock
+ * serializes refreshes across backend instances.
  */
 const inFlightRefreshes = new Map<string, Promise<string>>();
 
@@ -66,7 +69,7 @@ const inFlightRefreshes = new Map<string, Promise<string>>();
  * the rotated refresh token) when the current one is expired/near-expiry or when
  * `forceRefresh` is set (used after a 401). Refreshes are single-flighted per user.
  */
-async function getValidAccessToken(userId: string, forceRefresh = false): Promise<string> {
+export async function getValidAccessToken(userId: string, forceRefresh = false): Promise<string> {
   const token = await getUserToken(userId);
   if (token === undefined) throw new AgentCardNotConnectedError(userId);
 
@@ -75,19 +78,27 @@ async function getValidAccessToken(userId: string, forceRefresh = false): Promis
   const existing = inFlightRefreshes.get(userId);
   if (existing !== undefined) return existing;
 
-  const refreshPromise = refreshUserToken(userId, forceRefresh).finally(() => {
+  const refreshPromise = withSerializedLock(`agentcard-refresh:${userId}`, () =>
+    refreshUserToken(userId, forceRefresh, token.accessToken)
+  ).finally(() => {
     inFlightRefreshes.delete(userId);
   });
   inFlightRefreshes.set(userId, refreshPromise);
   return refreshPromise;
 }
 
-async function refreshUserToken(userId: string, forceRefresh: boolean): Promise<string> {
-  // Re-read under the single-flight guard: a concurrent refresh may already have rotated and
-  // persisted a fresh bundle, in which case we must reuse it rather than burn the refresh token.
+async function refreshUserToken(
+  userId: string,
+  forceRefresh: boolean,
+  staleAccessToken: string
+): Promise<string> {
+  // Re-read under the cross-instance lock: a concurrent refresh (here or on another instance) may
+  // already have rotated and persisted a fresh bundle, which we must reuse rather than burn the
+  // refresh token. A forced refresh (after a 401) also reuses a token that replaced the stale one.
   const token = await getUserToken(userId);
   if (token === undefined) throw new AgentCardNotConnectedError(userId);
-  if (!forceRefresh && !isExpired(token)) return token.accessToken;
+  const rotatedMeanwhile = token.accessToken !== staleAccessToken;
+  if ((!forceRefresh || rotatedMeanwhile) && !isExpired(token)) return token.accessToken;
 
   if (token.refreshToken === undefined) {
     // Expired and nothing to refresh with — force a reconnect.

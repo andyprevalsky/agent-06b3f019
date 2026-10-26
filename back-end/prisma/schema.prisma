@@ -2260,3 +2260,17 @@ model IPhoneAcquireIntent {
   @@unique([deviceId, browserTaskId, requestKey])
   @@index([leaseId])
 }
+
+/// Cross-instance ephemeral state (providers/sharedState.ts): short-lived flow
+/// state, dedupe claims and leases that every backend instance must agree on.
+/// Rows expire; writers reap expired rows in small batches.
+model SharedEphemeralState {
+  namespace String
+  key       String
+  value     Json
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([namespace, key])
+  @@index([expiresAt])
+}

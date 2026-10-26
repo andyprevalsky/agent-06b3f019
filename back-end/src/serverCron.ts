@@ -252,13 +252,25 @@ function scheduleGmailSync(): void {
   }
   // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
   const cronLog = createLogger('Cron');
+  // Each integration is claimed atomically (claimGmailIntegrationForSync), so
+  // instances can share the work; this only stops one process stacking ticks.
+  let running = false;
   const runSync = () => {
+    if (running) {
+      cronLog.info('Gmail sync already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
     cronLog.info('Running Gmail sync job...');
-    runGmailSyncJob().catch((err) => {
-      cronLog.error('Gmail sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runGmailSyncJob()
+      .catch((err) => {
+        cronLog.error('Gmail sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        running = false;
       });
-    });
   };
   runSync();
   cron.schedule('*/5 * * * *', runSync);
@@ -295,13 +307,25 @@ function schedulePlaidSync(): void {
     return;
   }
   const cronLog = createLogger('Cron');
+  // Each item sync holds a cross-instance lease (claimPlaidItemSync); this only
+  // stops one process stacking ticks.
+  let running = false;
   const runPlaidSync = () => {
+    if (running) {
+      cronLog.info('Plaid transaction sync already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
     cronLog.info('Running Plaid transaction sync job...');
-    runPlaidTransactionSyncJob().catch((err) => {
-      cronLog.error('Plaid transaction sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runPlaidTransactionSyncJob()
+      .catch((err) => {
+        cronLog.error('Plaid transaction sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        running = false;
       });
-    });
   };
   cron.schedule('*/5 * * * *', runPlaidSync);
   cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
