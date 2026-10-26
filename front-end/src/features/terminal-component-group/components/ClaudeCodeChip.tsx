@@ -22,7 +22,8 @@
  *               codeAgentChip.desktop.tsx). Maximize opens the code-agent view; no
  *               terminal and no saved-output read.
  * [DESKTOP, no snapshot] (older sessions) → status-only CollapsedChip: no terminal,
- *               no Maximize / fullscreen, no saved-output read.
+ *               no Maximize / fullscreen, no saved-output read; an ended simulated
+ *               (WMH) session expands to its recorded result.
  * Flag off → the stock branches below, unchanged.
  *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
@@ -41,8 +42,14 @@ import {
   SpinningUpChip,
 } from './claudeCodeChip.renderers';
 
-/** Rose Desktop, an older session without a snapshot: status only, never a terminal view. */
+/**
+ * Rose Desktop, a session without a snapshot: status only, never a terminal view.
+ * A simulated (WMH) session's recorded result is no terminal: once it ended, the chip
+ * expands to that recorded text (no real-session read).
+ */
 function DesktopStatusChip({ vm }: { vm: ClaudeCodeChipVM }) {
+  const ended = vm.chipState === 'completed' || vm.chipState === 'failed';
+  const recorded = ended ? vm.simulatedOutput : undefined;
   return (
     <CollapsedChip
       state={vm.chipState}
@@ -52,10 +59,10 @@ function DesktopStatusChip({ vm }: { vm: ClaudeCodeChipVM }) {
       failureMessage={vm.failureMessage}
       githubRepoUrl={vm.githubRepoUrl}
       codeProvider={vm.codeProvider}
-      terminalTranscript=""
+      terminalTranscript={recorded ?? ''}
       terminalContainerRef={vm.terminalContainerRef}
       onToggleExpand={vm.toggleExpand}
-      terminal={false}
+      terminal={recorded !== undefined}
     />
   );
 }
