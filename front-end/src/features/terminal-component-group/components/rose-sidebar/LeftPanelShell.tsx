@@ -30,7 +30,7 @@ import { ROSE_BAR_EASE, ROSE_BAR_EXPANDED_WIDTH, ROSE_BAR_WIDTH } from './roseSi
 const ICON_ROW_GAP = 16;
 
 /** At most 640px, ending left of the app icon row (--rose-app-icons-inset, published by RoseAppsProvider). */
-export function leftPanelWidth(left: number): string {
+function leftPanelWidth(left: number): string {
   return `min(640px, calc(100vw - ${left}px - var(--rose-app-icons-inset, ${ROSE_BAR_WIDTH}px) - ${ICON_ROW_GAP}px))`;
 }
 

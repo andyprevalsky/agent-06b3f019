@@ -458,7 +458,9 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
     const settings = screen.getByTestId('rose-project-settings');
     // RoseAppsProvider publishes the icon row's width; the drawer subtracts it.
-    expect(document.documentElement.style.getPropertyValue('--rose-app-icons-inset')).toMatch(/px$/);
+    expect(document.documentElement.style.getPropertyValue('--rose-app-icons-inset')).toMatch(
+      /px$/,
+    );
     expect(settings.style.width).toContain('var(--rose-app-icons-inset');
     expect(settings.style.width).toContain(`100vw - ${settings.style.left}`);
   });
