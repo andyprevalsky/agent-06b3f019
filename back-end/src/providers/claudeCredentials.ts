@@ -122,26 +122,17 @@ export interface ClaudeCodeCredentialResult {
 }
 
 /**
- * Fetch and decrypt Claude Code credentials for a user.
- * Returns the decrypted credentials JSON string, or null if unavailable.
+ * Resolve the Claude Code sandbox credential for a user, with the source +
+ * integration ID so the caller can mark the right token rate-limited on a
+ * "hit your limit" failure.
  *
  * Skips the user's own integration when `rateLimitedUntil` is in the future —
  * the agent's outer pool-rotation logic sets this when Anthropic returns 429,
  * and the same exhaustion almost always applies to the inner Claude Code CLI.
- */
-export async function fetchClaudeCodeCredentials(userId: string): Promise<string | null> {
-  const result = await fetchClaudeCodeCredentialsWithMeta(userId);
-  return result?.credentials ?? null;
-}
-
-/**
- * Same as `fetchClaudeCodeCredentials` but also returns the source + integration ID
- * so the caller can mark the right token rate-limited on a "hit your limit" failure.
  *
  * Resolution order:
  *   1. User's own `claude_code` integration (if not rate-limited)
- *   2. User's refreshable OAuth envelope after a direct-token auth failure
- *   3. Pool integration (least-recently-used non-rate-limited token)
+ *   2. Pool integration (least-recently-used non-rate-limited token)
  */
 export async function fetchClaudeCodeCredentialsWithMeta(
   userId: string
@@ -179,34 +170,10 @@ export async function fetchClaudeCodeCredentialsWithMeta(
       );
     }
 
-    // Direct Anthropic calls can reject an expired access token even though the
-    // same persisted OAuth envelope still has a refresh token that Claude Code
-    // can exchange. Keep direct callers off the rejected access token (the
-    // integration remains EXPIRED), but let the CLI consume the full envelope
-    // without re-injecting that known-bad token as CLAUDE_CODE_OAUTH_TOKEN.
-    const directAuthFailedIntegrations = await prisma.integration.findMany({
-      where: {
-        userId,
-        name: 'claude_code',
-        status: 'EXPIRED',
-        failureReason: 'auth_error',
-        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-    for (const integration of directAuthFailedIntegrations) {
-      const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
-      if (decrypted) {
-        const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
-        if (result?.credentialMode === 'oauth_envelope') {
-          log.info(
-            `Serving refreshable user Claude Code envelope for ${userId} after direct-token auth failure`
-          );
-          return { ...forceOauthEnvelopeRefresh(result), integrationId: integration.id };
-        }
-      }
-    }
-
+    // An EXPIRED (direct auth_error) row is never handed to a sandbox to
+    // refresh: Claude refresh tokens are single-use and a refresh revokes every
+    // other holder of the grant (see buildClaudeCodeCredentialResult). The user's
+    // own Claude Code re-uploads a live token; until then the pool serves.
     const poolResult = await fetchPoolCredentials();
     if (poolResult) {
       return poolResult;
@@ -240,24 +207,9 @@ function decryptIntegrationCredentials(
   return decrypted;
 }
 
-function forceOauthEnvelopeRefresh(result: ClaudeCodeCredentialResult): ClaudeCodeCredentialResult {
-  const parsed = JSON.parse(result.credentials ?? '{}') as Record<string, unknown>;
-  const oauth = parsed.claudeAiOauth as Record<string, unknown>;
-  // The direct API already proved this access token unusable. Preserve it to
-  // satisfy Claude Code's credential schema, but expire the sandbox copy so
-  // the CLI exchanges the refresh token before its first model request.
-  oauth.expiresAt = 0;
-  return {
-    ...result,
-    credentials: JSON.stringify(parsed),
-    accessToken: undefined,
-  };
-}
-
 /**
- * Fetch and decrypt the FULL credentials envelope for an available pool token,
- * for use by the inner Claude Code CLI (which needs the OAuth refresh + access
- * token, not just the access token).
+ * Fetch and decrypt the credentials of an available pool token for the inner
+ * Claude Code CLI (access token only; see buildClaudeCodeCredentialResult).
  *
  * Selects the least-recently-used non-rate-limited pool integration; updates
  * `lastUsedAt` for LRU ordering. Returns null if no usable pool token exists.
@@ -328,12 +280,22 @@ export async function fetchPoolCredentials(
   }
 }
 
+/** A sandbox must start with at least this much access-token lifetime left. */
+const SANDBOX_MIN_ACCESS_TOKEN_LIFETIME_MS = 5 * 60 * 1000;
+
 /**
- * Convert a decrypted Claude Code credentials JSON into the strongest sandbox
- * injection mode it supports. A full OAuth envelope lets Claude Code refresh
- * tokens from its normal config file; an access-token-only envelope can still
- * run through CLAUDE_CODE_OAUTH_TOKEN. Obvious test/seed envelopes are rejected
- * before they burn an E2B sandbox.
+ * Convert a decrypted Claude Code credentials JSON into an access-token-only
+ * sandbox credential (CLAUDE_CODE_OAUTH_TOKEN), or null when it is unusable.
+ *
+ * A stored envelope is a copy of a grant the user's own Claude Code (Mac
+ * Keychain, devbox) still holds. Anthropic refresh tokens are single-use and a
+ * refresh revokes every earlier access token of the grant
+ * (compute-token-semantics.blackbox.ts), so a sandbox that refreshes signs the
+ * user out everywhere and revokes concurrent sandboxes. The refresh token
+ * therefore never leaves the server, and Claude Code treats an env token as
+ * inference-only and never refreshes it. An access token that is expired or
+ * about to expire is not served; its owner's device refreshes and re-uploads.
+ * Obvious test/seed envelopes are rejected before they burn an E2B sandbox.
  */
 function buildClaudeCodeCredentialResult(
   credentialsJson: string,
@@ -346,39 +308,18 @@ function buildClaudeCodeCredentialResult(
     const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
     if (!oauth) return null;
     const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
-    const refreshToken = typeof oauth.refreshToken === 'string' ? oauth.refreshToken : '';
     // Real Anthropic OAuth access tokens are minted with this prefix; anything
     // else is a placeholder (seed data, tests) that will 401 immediately.
     if (!accessToken.startsWith('sk-ant-oat')) return null;
-    const common = { source, userId, poolTokenId };
-    if (refreshToken.length > 0) {
-      const result: ClaudeCodeCredentialResult = {
-        ...common,
-        credentials: credentialsJson,
-        accessToken,
-        credentialMode: 'oauth_envelope',
-      };
-      // E2B startup can take longer than the remaining lifetime of an access
-      // token. Handing a nearly-expired token to the sandbox creates a TOCTOU
-      // race where selection succeeds but the first model request gets a 401.
-      // Expire only the sandbox copy so Claude Code refreshes the full envelope
-      // before use; the persisted production credential remains untouched.
-      const expiresAt = oauth.expiresAt;
-      if (
-        typeof expiresAt === 'number' &&
-        Number.isFinite(expiresAt) &&
-        expiresAt <= Date.now() + 5 * 60 * 1000
-      ) {
-        return forceOauthEnvelopeRefresh(result);
-      }
-      return result;
+    const expiresAt = oauth.expiresAt;
+    if (
+      typeof expiresAt === 'number' &&
+      Number.isFinite(expiresAt) &&
+      expiresAt <= Date.now() + SANDBOX_MIN_ACCESS_TOKEN_LIFETIME_MS
+    ) {
+      return null;
     }
-    return {
-      ...common,
-      credentials: credentialsJson,
-      accessToken,
-      credentialMode: 'oauth_token',
-    };
+    return { source, userId, poolTokenId, accessToken, credentialMode: 'oauth_token' };
   } catch {
     return null;
   }

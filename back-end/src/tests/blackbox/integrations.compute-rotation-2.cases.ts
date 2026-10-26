@@ -13,7 +13,6 @@ import {
   prisma,
   cleanupIntegrations,
   fetchClaudeCodeCredentialsWithMeta,
-  markUserTokenRateLimited,
 } from './integrations.context';
 
 export async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
@@ -293,7 +292,7 @@ export async function testRotation_userAuthErrorDisablesToken() {
   }
 }
 
-export async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() {
+export async function testRotation_directAuthErrorFallsBackToPoolForClaudeCode() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
   const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
@@ -318,47 +317,23 @@ export async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnve
     const disabled = await prisma.integration.findUnique({ where: { id: userToken.id } });
     assert(disabled?.status === 'EXPIRED', 'direct auth_error must disable direct token use');
 
+    // The rejected grant is never handed to a sandbox to refresh: a refresh
+    // would revoke the user's own Claude Code holding the same grant.
     const codeCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
     assert(
-      codeCredential?.source === 'user',
-      'Claude Code must retain the user OAuth envelope when only direct access-token auth failed'
+      codeCredential?.source === 'pool' && codeCredential.poolTokenId === poolToken.id,
+      'Claude Code must use the available pool token after the user token failed authentication'
     );
     assert(
-      codeCredential.credentialMode === 'oauth_envelope',
-      'Claude Code recovery requires a refreshable OAuth envelope'
-    );
-    assert(
-      codeCredential.credentials !== undefined,
-      'Claude Code recovery must include the complete OAuth envelope'
-    );
-    const recoveredEnvelope = JSON.parse(codeCredential.credentials) as {
-      claudeAiOauth?: { expiresAt?: number; refreshToken?: string };
-    };
-    assert(
-      recoveredEnvelope.claudeAiOauth?.expiresAt === 0,
-      'The sandbox envelope must force-refresh the direct access token that failed'
-    );
-    assert(
-      recoveredEnvelope.claudeAiOauth?.refreshToken === 'test-refresh',
-      'The sandbox envelope must preserve the refresh token used by Claude Code'
-    );
-    assert(
-      codeCredential.accessToken === undefined,
-      'Claude Code must not re-inject the direct access token that just failed authentication'
-    );
-
-    await markUserTokenRateLimited(caller.userId, { cooldownMs: 60_000 });
-    const backedOffCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
-    assert(
-      backedOffCredential?.source === 'pool' && backedOffCredential.poolTokenId === poolToken.id,
-      'A Claude Code failure must back off the recovered envelope and use the available pool token'
+      codeCredential.credentialMode === 'oauth_token' && codeCredential.credentials === undefined,
+      'Claude Code sandboxes receive only an access token, never a refreshable envelope'
     );
   } finally {
     await cleanupIntegrations([userToken.id, poolToken.id]);
   }
 }
 
-export async function testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh() {
+export async function testRotation_nearExpiryClaudeCodeTokenIsNotServed() {
   const caller = await createAnonSession();
   const userToken = await seedClaudeIntegration(caller.userId, {
     poolingEnabled: false,
@@ -367,26 +342,9 @@ export async function testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh() {
 
   try {
     const codeCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
-    assert(codeCredential?.source === 'user', "Expected the caller's Claude credential");
     assert(
-      codeCredential.credentialMode === 'oauth_envelope',
-      'Near-expiry recovery requires the refreshable OAuth envelope'
-    );
-    assert(codeCredential.credentials !== undefined, 'Expected the complete OAuth envelope');
-    const recoveredEnvelope = JSON.parse(codeCredential.credentials) as {
-      claudeAiOauth?: { expiresAt?: number; refreshToken?: string };
-    };
-    assert(
-      recoveredEnvelope.claudeAiOauth?.expiresAt === 0,
-      'A near-expiry sandbox credential must force refresh before its first model request'
-    );
-    assert(
-      recoveredEnvelope.claudeAiOauth?.refreshToken === 'test-refresh',
-      'Forced refresh must preserve the OAuth refresh token'
-    );
-    assert(
-      codeCredential.accessToken === undefined,
-      'A near-expiry access token must not also be injected directly'
+      codeCredential?.source !== 'user',
+      'A near-expiry user access token must not be served; its device refreshes and re-uploads'
     );
   } finally {
     await cleanupIntegrations([userToken.id]);
