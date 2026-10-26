@@ -9762,6 +9762,28 @@ def test_ensure_tool_result_pairing_pulls_late_result_forward():
     assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
+def test_ensure_tool_result_pairing_ignores_results_before_their_declaration():
+    """An earlier orphan must not hide the first real result after a later call."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    messages = [
+        {"role": "tool", "tool_call_id": "reused", "content": "earlier orphan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "reused", "type": "function", "function": {"name": "spawn_agent"}}],
+        },
+        {"role": "assistant", "content": "intervening turn"},
+        {"role": "tool", "tool_call_id": "reused", "content": "first real result"},
+        {"role": "tool", "tool_call_id": "reused", "content": "duplicate result"},
+    ]
+    repaired = _ensure_tool_result_pairing(messages)
+    assert repaired[0]["role"] == "assistant"
+    assert repaired[1] == messages[3]
+    assert [message["content"] for message in repaired if message["role"] == "tool"] == ["first real result"]
+    assert _ensure_tool_result_pairing(repaired) == repaired
+
+
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
     """tool message with tool_call_id not declared by any preceding assistant is dropped."""
     from helpers.llm import _ensure_tool_result_pairing
@@ -10933,6 +10955,10 @@ async def run_all_tests():
     r.record(
         "ensure_tool_result_pairing_strips_orphan_tool_result",
         test_ensure_tool_result_pairing_strips_orphan_tool_result,
+    )
+    r.record(
+        "ensure_tool_result_pairing_ignores_earlier_orphan",
+        test_ensure_tool_result_pairing_ignores_results_before_their_declaration,
     )
     r.record(
         "ensure_tool_result_pairing_dedupes_cross_message_ids",

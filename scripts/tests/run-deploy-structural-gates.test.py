@@ -582,7 +582,7 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
     they are component coverage, never proof that the public route may allocate.
     """
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None):
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0", admitted=True, disposable=False, gate_path=None, proc_fault=""):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -594,6 +594,19 @@ class LinuxGateStorageRetentionTests(unittest.TestCase):
 import json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
+# The wrapper models an unrelated host sibling, outside the fake guest.
+if (args[:2]==['machine','run'] and os.environ.get('GATE_TEST_PROC_FAULT')=='foreign-unreadable'
+        and os.environ.get('GATE_TEST_PROC_WRAPPED')!='1'):
+    import subprocess
+    foreign=subprocess.Popen([sys.executable,'-c',
+        "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+    try:
+        assert foreign.stdout.readline().strip()=='ready'
+        env=dict(os.environ,GATE_TEST_PROC_WRAPPED='1')
+        raise SystemExit(subprocess.run([sys.executable,__file__,*args],env=env).returncode)
+    finally:
+        foreign.stdin.close();foreign.wait(timeout=10);foreign.stdout.close()
 with Path(os.environ['GATE_TEST_CALLS']).open('a') as out: out.write(json.dumps(args)+'\n')
 if args[:2]==['volumes','create']:
     fault=os.environ.get('GATE_TEST_VOLUME_FAULT','')
@@ -645,14 +658,20 @@ elif args[:2]==['machine','run']:
         original_iter=Path.iterdir
         def bounded_proc(path):
             if str(path)!='/proc': return original_iter(path)
-            selected=[]
-            for process in original_iter(path):
+            # Only this fake guest and its descendants inhabit the fake VM.
+            # The caller shell and its siblings are host-side processes.
+            pending=[os.getpid()];selected=set()
+            while pending:
+                pid=pending.pop()
+                if pid in selected: continue
+                selected.add(pid)
+                process=Path('/proc')/str(pid)
                 try:
-                    if process.name.isdecimal() and process.stat().st_uid==os.getuid():
-                        status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
-                        if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
-                except (FileNotFoundError, ProcessLookupError): continue  # exited mid-scan
-            return iter(selected)
+                    tasks=list(original_iter(process/'task'))
+                    for task in tasks:
+                        pending.extend(int(child) for child in (task/'children').read_text().split())
+                except FileNotFoundError: continue  # collector still observes any live task
+            return iter(Path('/proc')/str(pid) for pid in sorted(selected))
         Path.iterdir=bounded_proc
         subject={'__name__':'fake_native_collector','__file__':str(helper)}
         exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
@@ -661,8 +680,19 @@ elif args[:2]==['machine','run']:
         subject['launch'](Namespace(repo=repo,record=remote/'launch.json',driver_pid=os.getpid(),caller=Path(files['/tmp/controller-host-caller.json']),ref='a'*40,image='fixture/immutable@sha256:'+'b'*64))
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='exchanged-owner': (repo/'.context/controller-workspace-volume/ownership.json').write_text('{}')
         if os.environ.get('GATE_TEST_VOLUME_FAULT')=='missing-owner': (repo/'.context/controller-workspace-volume/ownership.json').unlink()
-        rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
-        if rc: raise SystemExit(rc)
+        observer=None
+        try:
+            if os.environ.get('GATE_TEST_PROC_FAULT')=='owned-unreadable':
+                import subprocess
+                observer=subprocess.Popen([sys.executable,'-c',
+                    "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0)==0; print('ready',flush=True); sys.stdin.read()"],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                assert observer.stdout.readline().strip()=='ready'
+            rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
+            if rc: raise SystemExit(rc)
+        finally:
+            if observer is not None:
+                observer.stdin.close();observer.wait(timeout=10);observer.stdout.close()
     print('Machine ID: abcdef12345678')
 elif args[0]=='logs':
     outcome=os.environ['GATE_TEST_OUTCOME']
@@ -704,6 +734,7 @@ else: print('origin/fixture')
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,
                "GATE_TEST_CALLS":str(calls), "GATE_TEST_OUTCOME":outcome,
+               "GATE_TEST_PROC_FAULT":proc_fault,
                "CLOUDBENCH_GATE_EXPORT_HOST":export,"CLOUDBENCH_GATE_EXPORT_DIR":str(root/"custody"),
                "GATE_TEST_EXPORT":export,"GATE_TEST_REMOTE":str(root/"remote"),
                "GATE_TEST_BAD_COLLECTOR":"1" if bad_collector else "0",
@@ -1032,6 +1063,21 @@ else: print('origin/fixture')
                 result, calls = self._run(retain="1", export="1", keep_tmp=keep)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(calls, [])
+
+    def test_fake_export_ignores_foreign_unreadable_host_sibling(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="foreign-unreadable")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertEqual(sum(row[:3]==["ssh","sftp","get"] for row in calls),3)
+
+    def test_fake_export_refuses_unreadable_owned_guest_child(self):
+        result,calls=self._run(retain="1",export="1",proc_fault="owned-unreadable")
+        self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("cannot observe controller writer ownership",result.stdout+result.stderr)
+        self.assertNotIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertFalse(any(row[:3]==["ssh","sftp","get"] for row in calls))
 
     def test_invalid_opt_in_values_refuse_before_native_launch(self):
         for retain,size in (("invalid","80"),("1","80gb"),("1","0"),("1","-1"),("1","80;false")):

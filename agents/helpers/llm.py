@@ -9,6 +9,7 @@ import random
 import re
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
@@ -2638,6 +2639,10 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     # fake placeholder).
     emitted_results: set[str] = set()
     pulled_forward: set[int] = set()
+    result_positions: Dict[str, List[int]] = {}
+    for position, message in enumerate(messages):
+        if message.get("role") == "tool" and message.get("tool_call_id"):
+            result_positions.setdefault(message["tool_call_id"], []).append(position)
     result: List[Dict[str, Any]] = []
     declared_at_or_before: set[str] = set()
     i = 0
@@ -2693,16 +2698,9 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             for tc_id in tc_ids:
                 if tc_id in emitted_results:
                     continue
-                straggler = next(
-                    (
-                        later
-                        for later in messages[j:]
-                        if later.get("role") == "tool"
-                        and later.get("tool_call_id") == tc_id
-                        and id(later) not in pulled_forward
-                    ),
-                    None,
-                )
+                positions = result_positions.get(tc_id, [])
+                candidate = bisect_left(positions, j)
+                straggler = messages[positions[candidate]] if candidate < len(positions) else None
                 if straggler is not None:
                     repaired = True
                     emitted_results.add(tc_id)

@@ -32,6 +32,10 @@ class LiveDisplayTest(unittest.TestCase):
     def get(self, path):
         return urlopen(self.base + path, timeout=3)
 
+    def wait_for_frame_idle(self):
+        self.assertTrue(self.server.predict_lock.acquire(timeout=3), "previous frame handler did not finish")
+        self.server.predict_lock.release()
+
     def test_read_only_capability_and_live_revision(self):
         with self.assertRaises(HTTPError) as error:
             self.get("/wrong/state")
@@ -75,10 +79,12 @@ class LiveDisplayTest(unittest.TestCase):
             self.server.upstream = f"http://127.0.0.1:{upstream.server_port}"
             with self.get("/fixture-capability/frame") as response:
                 frame = json.load(response)
+            self.wait_for_frame_idle()
             self.assertEqual(received, [("/api/predict", {"prompt": self.server.state()["prompt"]})])
             self.assertEqual(frame["revision"], self.server.state()["revision"])
             with self.get("/fixture-capability/frame"):
                 pass
+            self.wait_for_frame_idle()
             self.assertEqual(len(received), 1, "duplicate viewer requests reuse the bounded cache")
             update(state, {"prompt": "new prompt"})
             original = self.server.state
@@ -99,6 +105,50 @@ class LiveDisplayTest(unittest.TestCase):
             upstream.shutdown()
             upstream.server_close()
             thread.join()
+
+    def test_stale_frame_check_joins_previous_response_handler(self):
+        lock = self.server.predict_lock
+        joined = threading.Event()
+        releasing = threading.Event()
+        timed_out = threading.Event()
+        client_thread = threading.get_ident()
+        releases = 0
+
+        class DeferredReleaseLock:
+            def acquire(self, blocking=True, timeout=-1):
+                if blocking:
+                    joined.set()
+                acquired = lock.acquire(blocking, timeout)
+                if acquired and not blocking and releases < 2:
+                    joined.clear()
+                return acquired
+
+            def release(self):
+                nonlocal releases
+                if threading.get_ident() != client_thread and releases < 2:
+                    releases += 1
+                    releasing.set()
+                    if not joined.wait(3):
+                        timed_out.set()
+                lock.release()
+
+        self.server.predict_lock = DeferredReleaseLock()
+        self.test_native_upstream_protocol_and_no_stale_frame()
+        self.assertTrue(releasing.is_set())
+        self.assertTrue(joined.is_set())
+        self.assertEqual(releases, 2)
+        self.assertFalse(timed_out.is_set(), "fixture never joined the previous handler")
+
+    def test_inflight_frame_preserves_429(self):
+        self.server.upstream = self.base
+        self.server.predict_lock.acquire()
+        try:
+            with self.assertRaises(HTTPError) as error:
+                self.get("/fixture-capability/frame")
+            self.assertEqual(error.exception.code, 429)
+            self.assertEqual(json.load(error.exception), {"error": "Frame already generating"})
+        finally:
+            self.server.predict_lock.release()
 
     def test_private_modal_provider_never_exposes_credentials(self):
         from types import SimpleNamespace
