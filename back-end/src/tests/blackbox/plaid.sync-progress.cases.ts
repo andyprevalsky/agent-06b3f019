@@ -127,9 +127,14 @@ async function sandboxProgress(ctx: PlaidSuiteContext): Promise<void> {
   );
   assert(rerun !== null && rerun.runId !== before.runId, 'the webhook started a new sync run');
   assert(rerun.retiredRunIds.includes(before.runId), 'the previous run is retired');
-  // Plaid's history arrives as additions, so the run's count is what it newly saved.
-  const expected = (await savedTransactions(item.id)) - savedBefore;
-  assert(expected > 0, `the sandbox Item delivered real transactions, got ${expected}`);
+  const newlySaved = (await savedTransactions(item.id)) - savedBefore;
+  assert(newlySaved > 0, `the sandbox Item delivered real transactions, got ${newlySaved}`);
+  // The run counts every transaction it applied. When the exchange-time run
+  // already saved part of the history, Plaid re-sends those rows as
+  // modifications alongside the new additions, so count rows the run touched.
+  const expected = await prisma.plaidTransaction.count({
+    where: { plaidItemId: item.id, updatedAt: { gte: rerun.startedAt } },
+  });
   const rows = await prisma.integrationSyncProgress.count({ where: { userId, provider: 'plaid' } });
   assert(rows === 1, `one progress row for the plaid row, got ${rows}`);
   const after = await plaidBar(ctx, accessToken);
