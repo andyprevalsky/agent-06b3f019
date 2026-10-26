@@ -248,8 +248,8 @@ one.
 - If the intended fix is a prompt edit, Step 5b is recorded: the class you
   stopped at, the next-deeper class you tried, and why the more general
   solution failed to be coherent.
-- The golden-reference check (Step 6b in `docs/root-cause-analysis.md`) is
-  recorded: the `path:line` in `claude-code-src/`, `openclaw/`, `hermes-agent/`,
+- When the fix changes an approval-gated surface, the golden-reference check
+  (Step 6b in `docs/root-cause-analysis.md`) is recorded: the `path:line` in `claude-code-src/`, `openclaw/`, `hermes-agent/`,
   or `codex/` that handles the same problem, and whether the fix converges on
   it. Prefer the fix that brings Rose closer to the reference harnesses.
 

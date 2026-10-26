@@ -408,6 +408,12 @@ compatible patch whenever the simplification removes the bug class outright.
 
 ### Step 6b: Check the golden references before choosing the fix
 
+Run this step only when the fix changes an approval-gated surface: LLM-visible
+prompt or instruction text, agent recovery/terminal behavior, runtime
+trajectory injection, Zod schemas, or another harness-fix approval hunk. An
+ordinary code, test or UI fix skips it and records `Golden reference: not
+applicable (no approval-gated hunk)` in the case file.
+
 The reference harnesses are heavily tested in production; this repo is not yet.
 Before settling on a fix, find how they handle the same problem:
 `claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, and `codex/` (run
