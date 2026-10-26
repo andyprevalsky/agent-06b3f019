@@ -296,6 +296,7 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(goal.closest('[data-message-role="USER"]')).not.toBeNull();
     expect(screen.queryByTestId('agent-exchange-group')).toBeNull();
     const slot = screen.getByTestId('code-work-slot');
+    fireEvent.click(within(slot).getByRole('button', { name: /Working/ }));
     expect(slot).toHaveTextContent('Merge it after the scorecard.');
   });
 
@@ -408,6 +409,8 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
       ),
     );
     expect(screen.queryByText(/private payload/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Working/ }));
+    expect(screen.queryByText(/private payload/)).toBeNull();
     const routing = screen.getByTestId('code-routing-activity');
     fireEvent.click(within(routing).getByRole('button'));
     expect(within(routing).getByText(/private payload/)).toBeVisible();
@@ -440,6 +443,8 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
         }),
       ),
     );
+    // A failed send is a step of the Working fold, never hidden as routine routing.
+    fireEvent.click(screen.getByRole('button', { name: /Working/ }));
     expect(screen.queryByTestId('code-routing-activity')).toBeNull();
     expect(screen.getByText(/failed payload/)).toBeVisible();
   });

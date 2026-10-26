@@ -1,7 +1,9 @@
 /**
  * Code sessions use the main chat renderer, with one live/collapsed work slot per turn.
- * WORK SLOT: [RUNNING] latest activity · [EXPANDED] history, 20 a page (WorkHistoryPager;
- *   opening a running slot lands on its latest page) · [DONE] collapses. Agent
+ * WORK SLOT (the root transcript's work row): [RUNNING] compact "Working · <elapsed>"
+ *   fold (the clock is a leaf, useBatchElapsed) with the live thinking/streaming
+ *   indicator; no activity card · [EXPANDED] history, 20 a page (WorkHistoryPager;
+ *   opening a running slot lands on its latest page) · [DONE] "Worked for …", collapses. Agent
  *   coordination (a2a) lives inside the slots; the top level never groups exchanges.
  */
 import { Fragment, useEffect, useMemo, useState } from 'react';
@@ -20,6 +22,7 @@ import { ThinkingIndicator } from '../ThinkingIndicator';
 import { MessageListItems } from '../MessageListItems';
 import { WorkHistoryPager } from '../WorkHistoryPager';
 import { useWorkHistoryPage } from '../useWorkHistoryPage';
+import { useBatchElapsed } from '../useBatchElapsed';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 
 import { CodeRoutingActivity } from './CodeRoutingActivity';
@@ -76,6 +79,11 @@ function Messages({
   );
 }
 
+/** Leaf clock: its tick re-renders only this text, never the slot's rows. */
+function SlotElapsed({ startedAt }: { startedAt: number | null }) {
+  return <span data-testid="code-work-elapsed">· {useBatchElapsed(startedAt, true)}</span>;
+}
+
 function WorkSlot({
   turn,
   owner,
@@ -91,11 +99,7 @@ function WorkSlot({
   useEffect(() => {
     if (!running) setExpanded(false);
   }, [running]);
-  const visible = expanded
-    ? pages.slice(turn.activities)
-    : running
-      ? turn.activities.slice(-1)
-      : [];
+  const visible = expanded ? pages.slice(turn.activities) : [];
   return (
     <div
       data-testid="code-work-slot"
@@ -114,6 +118,7 @@ function WorkSlot({
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span>{workLabel(turn)}</span>
+        {running && <SlotElapsed startedAt={turn.startedAt} />}
         {turn.summary && <span>· {turn.summary}</span>}
       </button>
       <div hidden={!running && !expanded} data-testid="code-work-activities">

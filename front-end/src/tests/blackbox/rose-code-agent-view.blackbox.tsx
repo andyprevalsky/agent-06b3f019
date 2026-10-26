@@ -238,7 +238,8 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const transcript = within(page).getByTestId('code-agent-transcript');
     expect(within(transcript).getAllByTestId('code-work-slot')).toHaveLength(1);
     expect(transcript).toHaveTextContent('Explored 1 file, edited 1 file, ran 1 command');
-    expect(transcript.querySelectorAll('[data-message-id]')).toHaveLength(1);
+    // Running: a compact Working fold; its steps show only once expanded.
+    expect(transcript.querySelectorAll('[data-message-id]')).toHaveLength(0);
     await user.click(within(transcript).getByRole('button', { name: /Working/ }));
     expect(transcript).toHaveTextContent('widen the existing toggle to three states');
     // The page transcript grows with the column (no 300px chip cap).
@@ -452,11 +453,12 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
         ]),
       });
       const user = await renderOnOwner();
-      await openFromRow(user);
+      const page = await openFromRow(user);
       const indicator = screen.getByTestId('thinking-indicator');
       expect(indicator).toHaveTextContent('Streaming');
       expect(indicator).toHaveTextContent(provider === 'claude' ? '120 tokens' : '20 tokens');
       expect(indicator).toHaveTextContent('10.0 tok/s');
+      await user.click(within(page).getByRole('button', { name: /Working/ }));
       expect(
         screen.getByText('Live native answer').closest('[data-message-state]'),
       ).toHaveAttribute('data-message-state', 'streaming');
@@ -523,9 +525,8 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(within(page).queryByTestId('agent-exchange-group')).toBeNull();
     const goal = within(page).getByText('Chart BTC for 24h');
     expect(goal.closest('[data-message-role="USER"]')).not.toBeNull();
-    const slot = within(page).getByTestId('code-work-slot');
-    await user.click(within(slot).getByRole('button', { name: /Worked/ }));
-    expect(within(slot).getByText('Use UTC labels')).toBeInTheDocument();
+    await user.click(within(page).getByRole('button', { name: /Worked/ }));
+    expect(within(page).getByTestId('code-work-slot')).toHaveTextContent('Use UTC labels');
     // Ended session: nothing shows terminal output, so nothing reads it.
     expect(requests('GET', `/codex-code-session/${TASK}`)).toHaveLength(0);
   });
