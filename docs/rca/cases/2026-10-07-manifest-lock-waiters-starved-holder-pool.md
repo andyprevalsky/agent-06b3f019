@@ -11,6 +11,8 @@ symptoms:
   - "Timed out fetching a new connection from the connection pool"
   - backend-coverage-blackbox data-google-sources and data-real-user stalled for about 94 seconds
   - P2024
+  - pg_advisory_xact_lock( hashtextextended($1, $2) ) 165,841 calls, 4.1 s average, 120 s worst (prod pg_stat_statements 2026-10-26)
+  - manifest lock held a pooled connection in an open transaction during storage I/O
 tags:
   - prisma
   - connection-pool
@@ -19,7 +21,8 @@ tags:
   - deploy-structural-gates
 sources:
   - PR #1417
-repro: back-end/src/tests/unit/archive-manifest-lock-pool.test.ts
+  - memory:scalability-audit-100-seats-20261024
+repro: back-end/src/tests/blackbox/archive-run-cost.helper.ts (manifest lock holds no connection during storage I/O); back-end/src/tests/unit/archive-manifest-lock-pool.test.ts
 status: fixed
 ---
 
@@ -59,10 +62,52 @@ contend. A waiter now holds no connection while it waits and issues at most
 one short attempt about every 2.1 seconds for one root, instead of pinning a
 connection for the full wait.
 
+### Recurrence 2026-10-26 (100-seat audit lane S10): the holder still pinned a connection
+
+The 2026-10-07 fix bounded the *waiters* but kept the *holder* inside an
+interactive transaction for its whole operation, including R2 reads and
+writes. Prod `pg_stat_statements` (read-only, 2026-10-26) showed the lock
+statement at 165,841 calls, 4.1 s average and 120 s worst. Each holder pinned
+one of Supavisor's 60 server connections for as long as its storage I/O ran.
+The per-process admission limit added on 2026-10-07 only rationed that
+pinning; it did not remove it.
+
+Why the earlier fix did not hold: it treated the symptom (waiters filling the
+pool) at the waiter, while the first-bad boundary is the lock *primitive*. A
+transaction-scoped advisory lock ties lock lifetime to a pooled connection.
+
+Repro: `ROSE_USE_SYSTEM_PG=true CONDUCTOR_WORKSPACE_NAME=s10lane
+CONDUCTOR_PORT=4710 bash back-end/scripts/run-blackbox-tests.sh archive`, case
+`manifest lock holds no connection during storage I/O`. Before the fix it
+failed with `manifest lock held a pooled connection in an open transaction
+during storage I/O: [{"pid":2841884,...}]`; it passes now.
+
+Fix: `TraceArchiveManifestLease`, one row per root (owner, expiry). Each step
+is a single autocommit statement, so no connection or transaction stays open
+across the operation:
+- acquire: a conditional upsert that takes the row only when it has expired;
+- check ownership: a `SELECT` before each write;
+- release: an owner-scoped `DELETE`.
+The expiry is fixed at acquire + 120 s, the same bound the old transaction
+timeout gave, so a crashed holder's lease simply lapses. The admission limiter
+is removed.
+
+Tests adapted to the new mechanism, keeping their assertions:
+- the native lease-loss cases now expire the root's lease row instead of
+  terminating the advisory-lock backend;
+- waiter observation uses `archiveManifestLockWaiters()`;
+- the pool test now asserts per-root serialization, and that distinct roots can
+  hold leases beyond the pool size.
+
+At 10,000 agents: lease rows are bounded by roots currently being written, plus
+expired leftovers from crashed holders, which the next acquire overwrites. Each
+held lease costs zero connections. Waiters back off exponentially, from 100 ms
+up to 1 s, within the same 120 s deadline.
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-A blocking lock wait inside a pooled transaction must be bounded and retried outside the transaction whenever the lock holder needs another connection from the same pool.
+Never hold a pooled transaction across external I/O for mutual exclusion; use a lease row (owner + expiry, single-statement acquire, check and release) so neither holders nor waiters pin connections.
