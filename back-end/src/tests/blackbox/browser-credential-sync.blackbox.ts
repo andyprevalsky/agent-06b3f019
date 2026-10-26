@@ -434,6 +434,43 @@ test('unchanged cookie re-upload rewrites no rows and issues O(1) statements per
   }
 });
 
+test('mixed-case cookie host keeps its canonical CookieBundle and re-enables it on change', async () => {
+  const userId = await createUser();
+  const upload = (value: string) =>
+    processCookiesUpload(
+      userId,
+      [cookie({ name: 'session', value, domain: '.WWW.Example.COM', browserProfile: 'Default' })],
+      'chrome'
+    );
+  const bundleWhere = {
+    userId_authRealm_browserSource_browserProfile: {
+      userId,
+      authRealm: 'example.com',
+      browserSource: 'chrome',
+      browserProfile: 'Default',
+    },
+  };
+  try {
+    await upload('old-value');
+    await prisma.cookieBundle.update({
+      where: bundleWhere,
+      data: { disabledAt: new Date(), disabledReason: 'auth failed' },
+    });
+
+    await upload('old-value');
+    const unchanged = await prisma.cookieBundle.findUnique({ where: bundleWhere });
+    assert(unchanged !== null, 'expected mixed-case host bundle to survive an unchanged upload');
+    assert(unchanged.disabledAt !== null, 'expected unchanged upload to keep bundle disabled');
+
+    await upload('new-value');
+    const changed = await prisma.cookieBundle.findUnique({ where: bundleWhere });
+    assert(changed !== null, 'expected mixed-case host bundle to survive a changed upload');
+    assert(changed.disabledAt === null, 'expected changed mixed-case cookie to clear disabledAt');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('password upload persists browserProfile and clears disabled state', async () => {
   const userId = await createUser();
   try {

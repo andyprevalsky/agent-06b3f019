@@ -220,16 +220,20 @@ function groupByProfile(cookies: SanitizedCookie[]) {
 
 /** Every dot-suffix of a cookie host (`a.b.com` → a.b.com, b.com, com). */
 function domainSuffixes(domain: string): string[] {
-  const labels = domain.replace(/^\.+/, '').split('.');
+  const labels = domain.toLowerCase().replace(/^\.+/, '').split('.');
   return labels.map((_, i) => labels.slice(i).join('.'));
 }
 
-/** Realm keys (`realm\0profile`) holding at least one of `rows` — same match as the realm's cookies. */
+/**
+ * Realm keys (`realm\0profile`) holding at least one of `rows`: the cookie's
+ * canonical realm (how its bundle is keyed) plus every host suffix (how a
+ * bundle's cookies are matched).
+ */
 function realmKeysTouchedBy(rows: Array<{ domain: string; browserProfile: string }>) {
   const keys = new Set<string>();
   for (const row of rows) {
-    for (const suffix of domainSuffixes(row.domain))
-      keys.add(`${suffix}\u0000${row.browserProfile}`);
+    const realms = [authRealmFromCookieDomain(row.domain), ...domainSuffixes(row.domain)];
+    for (const realm of realms) keys.add(`${realm}\u0000${row.browserProfile}`);
   }
   return keys;
 }
