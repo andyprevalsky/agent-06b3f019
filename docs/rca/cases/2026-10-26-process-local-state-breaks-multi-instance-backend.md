@@ -69,18 +69,30 @@ proactive-SMS advisory-locked lease). It was not generalized.
     `DELETE ... RETURNING`.
   - `acquireLease` / `releaseLease`: `INSERT ... ON CONFLICT DO UPDATE WHERE
     expired`, owner-token release.
-  - `withSerializedLock`: `pg_advisory_xact_lock` through
-    `runTransactionWithRetry`.
+  - `renewLease`.
+  - `withSerializedLock`: a lease row renewed by a heartbeat, with waiters
+    polling at capped backoff. The first version held an interactive
+    transaction carrying `pg_advisory_xact_lock`, which pinned a pooled
+    connection per holder and per waiter through slow outside calls (Twilio
+    send, AgentCard HTTP). A 120s timeout also silently broke exclusion. With
+    Supavisor `pool_size=60`, about 60 contended commits would stall the
+    fleet, so the adversarial review rejected it.
 - Call sites:
   - PKCE → ephemeral put/take, 10-minute TTL.
-  - SMS commit lock → per-user advisory lock.
-  - WhatsApp dedupe → lease per wamid, 24 h.
+  - SMS commit lock → per-user lease lock.
+  - WhatsApp dedupe → lease per wamid: 10 minutes while the message is
+    handled, 24 h once handled, so a crash mid-handling lets Meta's retry
+    through.
   - Gmail → atomic `updateMany` claim (only while still due) plus an
     in-process overlap guard.
-  - Plaid → per-item lease (15 min) shared by cron and webhook, plus an overlap
-    guard.
-  - AgentCard refresh → per-user advisory lock, then a re-read that reuses a
-    token another instance rotated.
+  - Plaid → per-item lease (15 min) shared by cron and webhook. A sync skipped
+    because the lease is held files a resync request the holder honors. Plus
+    an overlap guard.
+  - Gmail and Plaid overlap guards expire after one hour, so a hung run cannot
+    stop a sync.
+  - AgentCard refresh → per-user lease lock, then a re-read that reuses a
+    token another instance rotated. A forced refresh compares against the
+    token that actually got the 401.
   - Compute connect sessions → the owner mirrors its poll snapshot each second
     and applies cancel requests that other instances file (the browser and CDP
     socket can only live on the owner).
