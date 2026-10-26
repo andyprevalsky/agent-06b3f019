@@ -107,12 +107,19 @@ be stored" and "codex non-recorder URL https://api.example.com/codex-proxy/0fcbe
 - Open follow-up: Codex rose-harness sandboxes receive `ROSE_API_KEY` (the
   backend API key, `providers/e2b.ts`), which can call `/api/fast-cache/set`
   directly; that route guard belongs to lane S1.
-- Open follow-up: `BrowserHttpCache.record` (`agents/providers/demo_cache/browser_http.py`)
-  calls `cache_set` without `goal`/`root_goal`, so a non-DEMO browser child under
-  a DEMO root on a resume/write-lock path could still write a shared
-  `browser_http` row. Also, recorder write-through for `browser_http`,
-  web_search and web_fetch uses global keys, so a recorder's private fetches can
-  replay into DEMO sessions.
+- Browser HTTP write-through (follow-up, lane S9): `BrowserHttpCache.record`
+  was the only tool-level writer that skipped `cache_write_allowed_for_agent`.
+  It called `cache_set` with neither the agent nor the tree root, so a non-DEMO
+  browser child under a DEMO root stored responses under `browser_http:global:`
+  keys, which every DEMO replay of that URL reads. On main a scratch record
+  returned `True` with one store. The cache now takes the browser `agent_id`,
+  resolves the tree-root gate once per run, and passes `goal` to `cache_set`.
+  Regression: `test_browser_http_write_skips_child_under_demo_tree_root` and
+  `test_network_cache_install_threads_agent_id` in
+  `agents/tests/demo_cache/test_browser_cache.py` (agents coverage).
+- Open follow-up: recorder write-through for `browser_http`, web_search and
+  web_fetch uses global keys, so a recorder's private fetches can replay into
+  DEMO sessions.
 - Golden reference: `claude-code-src/src/tools/AgentTool/agentMemory.ts:12-62`
   scopes persistent memory to the user's own home, project or local directory.
   The only shared memory there is checked-in (curated) project memory. The fix
