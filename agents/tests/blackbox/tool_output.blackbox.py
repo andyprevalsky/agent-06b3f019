@@ -26,13 +26,13 @@ def fake_output_storage():
     # Each fixture models a fresh storage/account universe; metadata must not
     # leak references to an artifact held by a prior fixture.
     from collections import OrderedDict
-    with patch("utils.tool_output._persisted_outputs", OrderedDict()), patch("utils.tool_output._pending_outputs", {}), patch("helpers.attachments.upload_to_storage", upload), patch("helpers.attachments.download_from_storage", download):
+    with patch("helpers.tool_output._persisted_outputs", OrderedDict()), patch("helpers.tool_output._pending_outputs", {}), patch("helpers.attachments.upload_to_storage", upload), patch("helpers.attachments.download_from_storage", download):
         yield objects
 
 
 async def test_scoped_output_roundtrip():
     import re
-    from utils.tool_output import preview_tool_text, read_tool_output
+    from helpers.tool_output import preview_tool_text, read_tool_output
     from browser_tools.secret_refs import secret_logging_context
     owner = dict(user_id="u", agent_id="a", session_id="s")
     text = "😀" * 110_000 + "SECRET_VALUE" + "EXACT_TAIL"
@@ -62,7 +62,7 @@ async def test_scoped_output_roundtrip():
                 pass
             else:
                 raise AssertionError("Cross-owner retrieval succeeded")
-        with patch("utils.tool_output.time.time", return_value=10**12):
+        with patch("helpers.tool_output.time.time", return_value=10**12):
             try:
                 await read_tool_output(**owner, output_id=output_id)
             except ValueError as exc:
@@ -72,7 +72,7 @@ async def test_scoped_output_roundtrip():
 
 
 async def test_native_values_and_failure():
-    from utils.tool_output import bound_tool_result, preview_tool_text
+    from helpers.tool_output import bound_tool_result, preview_tool_text
     owner = dict(user_id="u", agent_id="a")
     with fake_output_storage():
         for value in (None, False, 42, [1, 2], {"value": "small"}):
@@ -93,7 +93,7 @@ async def test_native_values_and_failure():
 
 async def test_repeated_projection_is_stable_and_readable():
     import re
-    from utils.tool_output import preview_tool_text, read_tool_output
+    from helpers.tool_output import preview_tool_text, read_tool_output
     owner = dict(user_id="repeat-user", agent_id="repeat-agent", session_id="repeat-session")
     text = "x" * 150_000 + "TAIL"
     with fake_output_storage() as objects:
@@ -125,13 +125,13 @@ async def run_all_tests():
 
 async def test_projection_identity_scope_expiry_and_failure():
     import re
-    from utils.tool_output import preview_tool_text, read_tool_output, OUTPUT_TTL_SECONDS
+    from helpers.tool_output import preview_tool_text, read_tool_output, OUTPUT_TTL_SECONDS
     owner = dict(user_id="u", agent_id="a", session_id="s")
     text = "y" * 150_000 + "TAIL"
     clock = [1000.0]
     def identifier(preview):
         return re.search(r'output_id="([a-f0-9]{32})"', preview).group(1)
-    with fake_output_storage() as objects, patch("utils.tool_output.time.time", side_effect=lambda: clock[0]):
+    with fake_output_storage() as objects, patch("helpers.tool_output.time.time", side_effect=lambda: clock[0]):
         first = await preview_tool_text(text, **owner)
         initial_bytes = dict(objects)
         clock[0] += 10
@@ -175,7 +175,7 @@ async def test_projection_identity_scope_expiry_and_failure():
 
 
 async def test_concurrent_projection_shares_upload():
-    import utils.tool_output as output
+    import helpers.tool_output as output
     owner = dict(user_id="concurrent-user", agent_id="a")
     text = "z" * 150_000
     with fake_output_storage() as objects:

@@ -250,7 +250,7 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
     if provider == "exa" and any(len("\n".join(r.get("excerpts", []))) > max_chars_per_result for r in raw_results):
         import sys
 
-        from utils.tool_output import preview_tool_text
+        from helpers.tool_output import preview_tool_text
 
         # Redact before the original enters Fast Mode's existing cache. No
         # scoped handle is cached: each consumer projects under its own scope.

@@ -6,7 +6,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from tools.base import EventType, MessageStatus, ToolEvent
-from utils.tool_output import ReadToolOutputTool, preview_tool_text, read_tool_output
+from helpers.tool_output import ReadToolOutputTool, preview_tool_text, read_tool_output
 
 
 @activity.defn

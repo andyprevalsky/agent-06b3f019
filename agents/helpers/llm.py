@@ -2250,7 +2250,7 @@ async def _render_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
-    from utils.tool_output import DEFAULT_INLINE_CHARS, preview_tool_text
+    from helpers.tool_output import DEFAULT_INLINE_CHARS, preview_tool_text
 
     async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
         suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""

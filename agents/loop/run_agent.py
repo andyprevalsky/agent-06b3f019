@@ -70,7 +70,7 @@ from utils.llm_timeouts import (
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
 from utils.rose_desktop import is_rose_desktop_user
-from utils.tool_output import preview_tool_text
+from helpers.tool_output import preview_tool_text
 from utils.tool_schemas import create_agent_action_model, get_tool_models
 from utils.user_tool_models import build_user_tool_registry, llm_declarations
 

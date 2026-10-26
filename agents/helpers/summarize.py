@@ -9,6 +9,8 @@ import structlog
 from pydantic import BaseModel, Field
 from temporalio import activity
 
+from utils.secret_text_redaction import redact_sensitive_text as _redact_sensitive_text
+
 logger = structlog.get_logger()
 
 
@@ -56,12 +58,6 @@ SUMMARY_MESSAGE_CHAR_BUDGET = 7_500
 SUMMARY_FIELD_CHAR_BUDGET = 5_000
 SUMMARY_TOOL_ARGS_CHAR_BUDGET = 2_000
 
-_SECRET_PATTERNS = [
-    re.compile(
-        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*([^\s,;]+)"
-    ),
-    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
-]
 
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
@@ -279,14 +275,6 @@ def _build_tool_pair_maps(
     return asst_by_id, tools_by_id
 
 
-def _redact_sensitive_text(text: str) -> str:
-    redacted = text
-    for pattern in _SECRET_PATTERNS:
-        if pattern.groups >= 2:
-            redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
-        else:
-            redacted = pattern.sub(lambda m: f"{m.group(1)}[REDACTED]", redacted)
-    return redacted
 
 
 def _truncate_middle(value: str, limit: int) -> str:
@@ -754,7 +742,7 @@ async def summarize_tool_result(
         On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
         with a marker, and summarized=False.
     """
-    from utils.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text
 
     retained = await preview_tool_text(tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "",
                                        agent_id=agent_id or "", session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS)
@@ -873,7 +861,7 @@ async def summarize_and_filter_links(
     """
     import json
 
-    from utils.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text
 
     retained = await preview_tool_text(markdown, user_id=claude_token_user_id or gpt_token_user_id or "",
                                        agent_id=agent_id or "", session_id=session_id, limit=max_markdown_length)

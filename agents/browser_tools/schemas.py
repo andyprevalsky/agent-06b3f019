@@ -19,7 +19,7 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
-from utils.tool_output import ReadToolOutputTool
+from utils.tool_output_schema import ReadToolOutputTool
 
 MAX_BROWSER_WAIT_MS = 60_000
 

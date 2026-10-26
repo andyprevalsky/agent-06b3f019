@@ -4659,7 +4659,7 @@ async def test_explore_retained_output_dispatch_scope_and_bounds():
     from unittest.mock import AsyncMock
     from _test_utils import retained_tool_output_fixture
     from domains.spawn_agent.service import spawn_explore_agent_activity
-    from utils.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text
     from helpers.llm import build_llm_messages
     from utils.tool_schemas import get_explore_agent_tools, TOOL_MODELS, ALL_PHASE_TOOLS
 

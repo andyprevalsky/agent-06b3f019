@@ -3,7 +3,7 @@ import json
 import re
 
 from utils.browser_result_limits import BROWSER_STATE_MAX_CHARS, EVALUATE_RESULT_MAX_CHARS
-from utils.tool_output import bound_tool_result, preview_tool_text
+from helpers.tool_output import bound_tool_result, preview_tool_text
 
 
 class BrowserModelResult(dict):

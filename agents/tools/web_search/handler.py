@@ -56,7 +56,7 @@ async def _project_received_excerpts(result: Any, *, user_id: Optional[str], age
     """Apply the old excerpt budget after retaining received text for this caller."""
     if not isinstance(result, dict) or "_received_exa_results" not in result:
         return result
-    from utils.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text
 
     rows = []
     for row in result["_received_exa_results"]:

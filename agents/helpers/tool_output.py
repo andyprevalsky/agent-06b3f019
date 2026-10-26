@@ -12,12 +12,12 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, Field
+from utils.secret_text_redaction import redact_sensitive_text
+from utils.tool_output_schema import READ_MAX_CHARS, ReadToolOutputTool
 
 DEFAULT_INLINE_CHARS = 100_000
-READ_MAX_CHARS = 20_000
 OUTPUT_TTL_SECONDS = 24 * 60 * 60
 MAX_STORED_BYTES = 32 * 1024 * 1024
 _FILENAME = "retained-tool-output.json"
@@ -26,23 +26,6 @@ _FILENAME = "retained-tool-output.json"
 MAX_PERSISTED_OUTPUTS = 1024
 _persisted_outputs: OrderedDict[tuple[tuple[str, str, str], str], tuple[str, float]] = OrderedDict()
 _pending_outputs: dict[tuple[tuple[str, str, str], str], asyncio.Future[str]] = {}
-
-
-class ReadToolOutputTool(BaseModel):
-    """Read a retained tool result with pagination.
-
-    Use offset and limit for large results. Reads return at most 20,000 Unicode
-    characters and a next_offset; continue with offset to read the rest.
-    Use the output_id from a tool result preview. Results are available only
-    within their originating agent/session for 24h. Use query to find a literal
-    substring at or after offset.
-    """
-
-    tool: Literal["read_tool_output"]
-    output_id: str = Field(pattern=r"^[a-f0-9]{32}$", description="Opaque ID from a tool result preview.")
-    offset: int = Field(default=0, ge=0, description="Character offset; use next_offset to continue.")
-    limit: int = Field(default=READ_MAX_CHARS, ge=1, le=READ_MAX_CHARS, description="Maximum number of Unicode characters to read (default: 20000, max: 20000).")
-    query: str | None = Field(default=None, min_length=1, max_length=1000, description="Optional literal substring to find at or after offset.")
 
 
 def _owner(user_id: str, agent_id: str, session_id: str) -> tuple[str, str, str]:
@@ -63,12 +46,11 @@ def _storage_path(owner: tuple[str, str, str], output_id: str) -> str:
 
 def _safe_text(text: str) -> str:
     from browser_tools.secret_refs import redact_current_secret_values
-    from helpers.summarize import _redact_sensitive_text
 
     # Do not let the generic key=value matcher consume a trusted placeholder
     # and the unrelated source text immediately following its closing braces.
     pieces = re.split(r"(\{\{secret:[^}]+\}\})", redact_current_secret_values(text))
-    return "".join(piece if piece.startswith("{{secret:") else _redact_sensitive_text(piece) for piece in pieces)
+    return "".join(piece if piece.startswith("{{secret:") else redact_sensitive_text(piece) for piece in pieces)
 
 
 async def _persist(text: str, owner: tuple[str, str, str]) -> str:

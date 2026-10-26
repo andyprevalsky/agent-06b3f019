@@ -33,7 +33,7 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
-from utils.tool_output import ReadToolOutputTool
+from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
     WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS,

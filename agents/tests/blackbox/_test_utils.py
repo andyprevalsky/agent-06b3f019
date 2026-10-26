@@ -282,8 +282,8 @@ def retained_tool_output_fixture():
             raise ValueError("No retained output in this scope")
         return stored[path]
 
-    with (patch("utils.tool_output._persisted_outputs", OrderedDict()),
-          patch("utils.tool_output._pending_outputs", {}),
+    with (patch("helpers.tool_output._persisted_outputs", OrderedDict()),
+          patch("helpers.tool_output._pending_outputs", {}),
           patch("helpers.attachments.upload_to_storage", side_effect=upload),
           patch("helpers.attachments.download_from_storage", side_effect=download),
           patch("httpx.AsyncClient.send", side_effect=AssertionError("Unexpected provider/network request"))):

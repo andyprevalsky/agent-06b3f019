@@ -34,7 +34,7 @@ def main_message_builder():
 
 async def assert_main_preserves_only_authenticated_output(fake_output_storage):
     import httpx
-    import utils.tool_output as output
+    import helpers.tool_output as output
     from browser_tools.secret_refs import secret_logging_context
 
     def denied(*args, **kwargs):
@@ -44,7 +44,7 @@ async def assert_main_preserves_only_authenticated_output(fake_output_storage):
 
     output_id = "cafebabe" * 4
     body_secret = "d" * 32
-    with main_message_builder() as build, fake_output_storage() as objects, patch.object(socket.socket, "connect", denied), patch.object(socket, "create_connection", denied), patch.object(httpx.AsyncClient, "send", denied_http), patch("utils.tool_output.uuid.uuid4", return_value=uuid.UUID(output_id)), secret_logging_context({"pin": "cafebabe", "body_secret": body_secret}):
+    with main_message_builder() as build, fake_output_storage() as objects, patch.object(socket.socket, "connect", denied), patch.object(socket, "create_connection", denied), patch.object(httpx.AsyncClient, "send", denied_http), patch("helpers.tool_output.uuid.uuid4", return_value=uuid.UUID(output_id)), secret_logging_context({"pin": "cafebabe", "body_secret": body_secret}):
         first = await output.preview_tool_text("X" * 150000 + "TAIL", user_id="u", agent_id="a", limit=40000)
         context = [{"role": "TOOL", "text": first, "timestamp": "2026-01-01T00:00:00Z", "metadata": {"toolName": "web_fetch", "toolCallId": "fetch", "toolStatus": "FINISHED"}}]
         canonical = copy.deepcopy(context)

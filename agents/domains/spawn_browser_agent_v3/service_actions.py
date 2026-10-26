@@ -50,7 +50,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
 )
 from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_image_url_for_page, validate_product_url_for_pages
-from utils.tool_output import read_tool_output
+from helpers.tool_output import read_tool_output
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService

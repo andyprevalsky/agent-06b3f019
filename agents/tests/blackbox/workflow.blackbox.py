@@ -11384,7 +11384,7 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
     import re
     from unittest.mock import AsyncMock, patch
     from _test_utils import retained_tool_output_fixture
-    from utils.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text
     from tools.read_tool_output import read_tool_output_activity
     import tools.read_tool_output as reader
     from helpers.llm import build_llm_messages

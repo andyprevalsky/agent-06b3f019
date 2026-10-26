@@ -1200,7 +1200,7 @@ async def spawn_explore_agent_activity(
     final_response = compile_explore_wrap_up(result.get("final_response", "") or "", [])
     evidence_fallback = not bool(final_response)
     if evidence_fallback:
-        from utils.tool_output import preview_tool_text
+        from helpers.tool_output import preview_tool_text
 
         complete_evidence = compile_explore_wrap_up("", tool_call_results, budget=None)
         # Explore shares the parent's agent ID; the empty/root session is what

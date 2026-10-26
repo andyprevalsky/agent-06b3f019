@@ -14150,7 +14150,7 @@ async def test_retained_browser_output_real_dispatch_and_history(objects):
             with patch("helpers.tracing.current_agent_id", return_value=agent):
                 denied = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, user_id=user, session_id=session)
                 assert denied["success"] is False
-        with patch("utils.tool_output.time.time", return_value=10**12):
+        with patch("helpers.tool_output.time.time", return_value=10**12):
             expired = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, user_id="user-a", session_id="session-a")
             assert expired["success"] is False
 
@@ -14172,7 +14172,7 @@ async def test_retained_browser_output_redaction_expiry_failure(objects):
     args = {"action": "read_tool_output", "params": {"output_id": output_id, "offset": 29_990, "limit": 200}}
     read = await execute_action(dom, history, args, secret_refs={"password": secret}, user_id="user-a")
     assert read["success"] and secret not in read["content"] and "END" in read["content"]
-    with patch("utils.tool_output.time.time", return_value=10**12):
+    with patch("helpers.tool_output.time.time", return_value=10**12):
         expired = await execute_action(dom, history, args, user_id="user-a")
         assert expired["success"] is False
     with patch("helpers.attachments.upload_to_storage", side_effect=OSError("fixture disk full")):
@@ -14189,7 +14189,7 @@ async def test_browser_retained_handle_survives_native_redaction(objects):
     refs = {"password": "abcd"}
     handle = "abcd" * 8
     dom, history, _, _ = _private_secret_action_fixture(AsyncMock(return_value={"result": {"value": "x" * 30_000 + "abcdTAIL"}}))
-    with patch("utils.tool_output.uuid.uuid4", return_value=SimpleNamespace(hex=handle)):
+    with patch("helpers.tool_output.uuid.uuid4", return_value=SimpleNamespace(hex=handle)):
         result = await execute_action(dom, history, {"action": "evaluate", "params": {"code": "1"}}, user_id="user-a", secret_refs=refs)
     from browser_tools.dom_service import DOMService
     actual_dom = DOMService("ws://fixture.invalid")
