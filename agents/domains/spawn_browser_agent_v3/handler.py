@@ -272,6 +272,22 @@ def _browser_task_terminal_metadata(
     return metadata
 
 
+def browser_pause_terminal_event(result: Any, started_task_id: Optional[str]) -> ToolEvent:
+    """The manager's terminal row when a pause (or kill) cancelled the browser activity.
+
+    The cancelled activity paused its provider session (never a teardown) and
+    returned its ``session_id``; ``_browser_task_terminal_metadata`` keeps it on
+    the row so the owner's ending can name the session to continue.
+    """
+    return ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title="Browser Session Paused",
+        message="User paused the browser agent",
+        status=MessageStatus.ERROR,
+        metadata=_browser_task_terminal_metadata(result, started_task_id),
+    )
+
+
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
@@ -12953,13 +12969,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title="Browser Session Paused",
-                        message="User paused the browser agent",
-                        status=MessageStatus.ERROR,
-                        metadata=_browser_task_terminal_metadata(result, activity_task_id),
-                    )
+                    yield browser_pause_terminal_event(result, activity_task_id)
                     return
 
                 if result and result.get("status") == BROWSER_DRAIN_YIELD_STATUS:

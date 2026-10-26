@@ -400,7 +400,9 @@ describe('paused background browser (root pause)', () => {
       selectedAgentId: 'root-1',
       spawns,
     });
-    const tasks = model.groups.flatMap((group) => group.roots).filter((n) => isTaskNodeId(n.agentId));
+    const tasks = model.groups
+      .flatMap((group) => group.roots)
+      .filter((n) => isTaskNodeId(n.agentId));
     expect(tasks.length).toBeGreaterThan(0);
     expect(tasks.map((n) => n.status)).toEqual(tasks.map(() => 'PAUSED'));
     expect(tasks.map((n) => getStatusText(n))).toEqual(tasks.map(() => 'paused'));
