@@ -172,7 +172,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
     selectedAgentId: props.selectedAgentId,
     onSelectAgent: props.onSelectAgent,
   });
-  const actionsFor = useRoseAgentMenuActions(handlers, roseActions);
+  const actionsFor = useRoseAgentMenuActions(handlers);
   const { codeAgentsFor, observeRoot, visibleRootIds } = useRoseCodeAgents(
     [...grouped.home, ...grouped.projects.flatMap((g) => g.agents)],
     props.selectedAgentId,

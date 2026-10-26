@@ -204,24 +204,17 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
 
 /** New-agent entry points; each makes the next goal create a fresh agent. */
 function buildNewAgentHandlers(a: BuildArgs) {
-  const openNewAgent = (projectId: string | null, shareWith: string | null = null) => {
+  const openNewAgent = (projectId: string | null) => {
     a.cleanupAgentState();
     a.resetAnimationState();
     a.setCurrentView('agents');
     a.messaging.setNewAgentProjectId(projectId);
-    a.messaging.setNewAgentShareWith(shareWith);
   };
   return {
     /** New Super Agent: the next goal creates a Home agent. */
     handleCreateNewAgent: () => openNewAgent(null),
     /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
     handleCreateNewAgentInProject: (project: { id: string }) => openNewAgent(project.id),
-    /**
-     * Agent menu "New agent in this branch" (Rose Desktop): the next goal creates an
-     * agent in that agent's project that works in its code session (same branch).
-     */
-    handleCreateNewAgentInBranch: (agent: { agent_id: string; project_id?: string | null }) =>
-      openNewAgent(agent.project_id ?? null, agent.agent_id),
   };
 }
 

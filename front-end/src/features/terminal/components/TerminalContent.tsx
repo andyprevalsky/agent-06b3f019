@@ -321,7 +321,6 @@ function SidebarSection({
       onCreateAgent={agents.handleCreateNewAgent}
       roseActions={{
         onCreateAgentInProject: agents.handleCreateNewAgentInProject,
-        onNewAgentInBranch: agents.handleCreateNewAgentInBranch,
       }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}
