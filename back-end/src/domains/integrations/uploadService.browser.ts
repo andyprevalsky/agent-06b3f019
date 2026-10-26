@@ -218,30 +218,20 @@ function groupByProfile(cookies: SanitizedCookie[]) {
   }));
 }
 
-function cookieSignature(cookie: SanitizedCookie): string {
-  return [
-    cookie.value,
-    cookie.expires_utc !== undefined && cookie.expires_utc !== null
-      ? BigInt(cookie.expires_utc).toString()
-      : '',
-    String(cookie.is_secure ?? false),
-    String(cookie.is_httponly ?? false),
-    cookie.creation_utc !== undefined && cookie.creation_utc !== null
-      ? BigInt(cookie.creation_utc).toString()
-      : '',
-    cookie.last_access_utc !== undefined && cookie.last_access_utc !== null
-      ? BigInt(cookie.last_access_utc).toString()
-      : '',
-    String(cookie.has_expires ?? true),
-    String(cookie.is_persistent ?? true),
-    String(cookie.priority ?? 1),
-    String(cookie.samesite ?? -1),
-    String(cookie.source_scheme ?? 0),
-    String(cookie.source_port ?? -1),
-    cookie.last_update_utc !== undefined && cookie.last_update_utc !== null
-      ? BigInt(cookie.last_update_utc).toString()
-      : '',
-  ].join(COOKIE_SNAPSHOT_SEPARATOR);
+/** Every dot-suffix of a cookie host (`a.b.com` → a.b.com, b.com, com). */
+function domainSuffixes(domain: string): string[] {
+  const labels = domain.replace(/^\.+/, '').split('.');
+  return labels.map((_, i) => labels.slice(i).join('.'));
+}
+
+/** Realm keys (`realm\0profile`) holding at least one of `rows` — same match as the realm's cookies. */
+function realmKeysTouchedBy(rows: Array<{ domain: string; browserProfile: string }>) {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    for (const suffix of domainSuffixes(row.domain))
+      keys.add(`${suffix}\u0000${row.browserProfile}`);
+  }
+  return keys;
 }
 
 /**
@@ -314,7 +304,41 @@ export async function processCookiesUpload(
   return { cookieCount: sanitizedCookies.length, integration };
 }
 
-/** Upsert cookies in batches of 100. */
+/**
+ * After the snapshot replace, a profile's cookies are exactly the upload, so a
+ * bundle is orphaned when no uploaded cookie host falls under its realm.
+ */
+async function deleteOrphanedCookieBundles(
+  userId: string,
+  browser: string,
+  sanitizedCookies: SanitizedCookie[],
+  browserProfiles: string[]
+) {
+  const liveKeys = realmKeysTouchedBy(sanitizedCookies);
+  const bundles = await repo.findCookieBundlesForProfiles({
+    userId,
+    browserSource: browser,
+    browserProfiles,
+  });
+  const orphaned = bundles.filter(
+    (bundle) => !liveKeys.has(`${bundle.authRealm}\u0000${bundle.browserProfile}`)
+  );
+  await repo.deleteCookieBundlesById(
+    userId,
+    orphaned.map((bundle) => bundle.id)
+  );
+  return orphaned.length;
+}
+
+/**
+ * Replace each uploaded profile's cookie snapshot in batches of 100.
+ *
+ * Unchanged cookies are not rewritten, and per-realm CookieBundle work is
+ * set-based: the realms whose cookies were inserted, changed or deleted are
+ * derived from the write statements themselves, so a steady-state re-upload
+ * costs O(cookies / 100) statements and writes no rows, independent of how
+ * many sites the browser holds.
+ */
 async function upsertCookieBatches(
   userId: string,
   browser: string,
@@ -323,40 +347,31 @@ async function upsertCookieBatches(
 ) {
   const BATCH_SIZE = 100;
   let processedCount = 0;
-  const countBefore = await repo.getCookieCount(userId);
   const groups = groupByProfileAndRealm(sanitizedCookies);
   const profileGroups = groupByProfile(sanitizedCookies);
+  const realmKey = (group: { authRealm: string; browserProfile: string }) =>
+    `${group.authRealm}\u0000${group.browserProfile}`;
 
-  for (const group of groups) {
-    const changed = await repo.cookieBundleSnapshotChanged({
-      userId,
-      authRealm: group.authRealm,
-      browserSource: browser,
-      browserProfile: group.browserProfile,
-      snapshot: group.cookies.map((cookie) => ({
-        identity: cookieIdentity(cookie),
-        signature: cookieSignature(cookie),
-      })),
-      incomingCount: group.cookies.length,
-    });
-    await repo.upsertCookieBundle({
-      userId,
-      authRealm: group.authRealm,
-      browserSource: browser,
-      browserProfile: group.browserProfile,
-      clearDisabled: changed,
-    });
-  }
+  const createdBundles = await repo.insertMissingCookieBundles({
+    userId,
+    browserSource: browser,
+    bundles: groups.map(({ authRealm, browserProfile }) => ({ authRealm, browserProfile })),
+  });
+  const created = new Set(createdBundles.map(realmKey));
 
+  const touched: Array<{ domain: string; browserProfile: string }> = [];
   for (const group of profileGroups) {
-    await repo.deleteCookiesMissingFromProfileSnapshot({
+    const deleted = await repo.deleteCookiesMissingFromProfileSnapshot({
       userId,
       browserSource: browser,
       browserProfile: group.browserProfile,
       identities: group.cookies.map(cookieIdentity),
     });
+    for (const row of deleted)
+      touched.push({ domain: row.domain, browserProfile: group.browserProfile });
   }
 
+  let newlyInserted = 0;
   for (let i = 0; i < sanitizedCookies.length; i += BATCH_SIZE) {
     const batch = sanitizedCookies.slice(i, i + BATCH_SIZE);
     const { deduped, dupCount } = dedupeBatch(batch);
@@ -378,29 +393,39 @@ async function upsertCookieBatches(
       .join(', ');
 
     const params = buildCookieParams(userId, browser, deduped);
-    await repo.bulkUpsertCookies(values, params);
+    const changedRows = await repo.bulkUpsertCookies(values, params);
+    touched.push(...changedRows);
+    newlyInserted += changedRows.filter((row) => row.inserted).length;
     processedCount += deduped.length;
     await onBatch(i + batch.length);
   }
 
-  for (const group of profileGroups) {
-    await repo.deleteCookieBundlesWithoutCookiesForProfile({
-      userId,
-      browserSource: browser,
-      browserProfile: group.browserProfile,
-    });
-  }
+  const touchedKeys = realmKeysTouchedBy(touched);
+  const changedBundles = groups.filter(
+    (group) => touchedKeys.has(realmKey(group)) && !created.has(realmKey(group))
+  );
+  await repo.markCookieBundlesChanged({
+    userId,
+    browserSource: browser,
+    bundles: changedBundles.map(({ authRealm, browserProfile }) => ({ authRealm, browserProfile })),
+  });
 
-  const countAfter = await repo.getCookieCount(userId);
-  const newlyInserted = countAfter - countBefore;
-  const conflictsResolved = processedCount - newlyInserted;
+  const bundlesRemoved = await deleteOrphanedCookieBundles(
+    userId,
+    browser,
+    sanitizedCookies,
+    profileGroups.map((group) => group.browserProfile)
+  );
 
   log.info('Processed cookies', {
     browser,
     userId,
     total: processedCount,
     newlyInserted,
-    conflictsResolved,
+    changed: touched.length - newlyInserted,
+    bundlesChanged: changedBundles.length,
+    bundlesCreated: createdBundles.length,
+    bundlesRemoved,
   });
 }
 
