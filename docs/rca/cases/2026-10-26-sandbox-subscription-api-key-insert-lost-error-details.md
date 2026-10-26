@@ -68,3 +68,13 @@ given.
 ## Reusable lesson
 
 Retain structured provider error details and distinguish an auxiliary provisioning result from the successful operation that called it.
+
+## October 26 recurrence on the final integrated source
+
+The unchanged auxiliary insert error recurred at 21:37:56.886Z on source
+646ee1bab18145f519306376014282bcfadea99d, in the final smoke run's
+logs/backend.log at line6014. The new-user journey and all eight main smoke
+tasks passed. The retained error still lacks the provider details needed to
+establish cause or recovery; API-key availability remains unverified. This
+observation prompted no provider query, repair or additional provisioning run.
+Read-only attribution is retained in .context/rca-final-bench-triage/findings.txt.
