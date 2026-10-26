@@ -79,6 +79,18 @@ export async function updateProgress(tx: Tx, id: string, data: ProgressRowData) 
   return tx.integrationSyncProgress.update({ where: { id }, data });
 }
 
+/** The stored run state of one user's `accountId` rows of `providers` (one indexed read). */
+export async function listProgressStates(
+  userId: string,
+  providers: string[],
+  accountId: string
+): Promise<Array<{ provider: string; state: string }>> {
+  return prisma.integrationSyncProgress.findMany({
+    where: { userId, accountId, provider: { in: providers } },
+    select: { provider: true, state: true },
+  });
+}
+
 /** All progress rows of one user: one indexed range read, bounded by accounts. */
 export async function listProgressForUser(userId: string): Promise<ProgressRow[]> {
   return prisma.integrationSyncProgress.findMany({
