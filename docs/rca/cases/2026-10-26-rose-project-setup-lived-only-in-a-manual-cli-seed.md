@@ -63,8 +63,13 @@ branch `main`, the PJ4 startup script, six declared env files (paths only)
 and a GithubRepoAccess grant. A renamed Rose-repo project still counts as the
 Rose project.
 
-Conditional and skip-duplicate writes make later edits and concurrent lists
-safe. Setup failures are logged and never fail the list. Env-file values still
+Owners come from an explicit list (`utils/roseRepoOwners.ts`, Andy only), not
+the desktop/dev list. Project settings and declared files commit in one
+transaction. The clone grant is written only after one GitHub API read shows
+the backend token can reach the repo. Conditional and skip-duplicate writes
+make later edits and concurrent lists safe. Setup failures are logged and never
+fail the list. The blackbox runs on a synthetic owner, and its harness refuses
+a non-local `DATABASE_URL` before any query. Env-file values still
 arrive only through codebase sync.
 
 `back-end/scripts/setup-rose-project.ts` provides a READ ONLY dry run and
