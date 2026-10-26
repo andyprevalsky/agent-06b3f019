@@ -323,7 +323,9 @@ function buildFixture(
 export async function restoreFixture(fixture: ScopedDbFixture): Promise<void> {
   await deleteFixtureScope(fixture);
   for (const table of fixture.table_order) {
-    const tableRows = (fixture.rows[table] ?? []).map((row) => normalizeRow(table, row));
+    const tableRows = (fixture.rows[table] ?? []).map((row) =>
+      normalizeRow(table, row, fixture.user_id)
+    );
     if (tableRows.length === 0) continue;
     await delegate(table).createMany({
       data: tableRows,
@@ -404,8 +406,11 @@ function delegate(table: FixtureTable): ModelDelegate {
   return (prisma as unknown as Record<string, ModelDelegate>)[name];
 }
 
-function normalizeRow(table: FixtureTable, row: unknown): Record<string, unknown> {
+function normalizeRow(table: FixtureTable, row: unknown, userId: string): Record<string, unknown> {
   const normalized = { ...(row as Record<string, unknown>) };
+  // Fixtures archived before MessageRecord.userId existed omit it; every
+  // captured Person, and so every message, belongs to the fixture's user.
+  if (table === 'MessageRecord' && normalized.userId === undefined) normalized.userId = userId;
   for (const field of BIGINT_FIELDS[table] ?? []) {
     const value = normalized[field];
     if (typeof value === 'string' || typeof value === 'number') normalized[field] = BigInt(value);
