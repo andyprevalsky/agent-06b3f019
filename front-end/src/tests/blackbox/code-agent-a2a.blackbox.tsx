@@ -81,7 +81,7 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(screen.getAllByTestId('code-agent-chip')).toHaveLength(1);
   });
 
-  it('native code-session groups preserve directions as "Codex → Rose" / "Rose → Codex"', () => {
+  it('native code-session a2a rows fold into the Worked-for slot as "Codex → Rose" / "Rose → Codex"', () => {
     const messages = [chipMessage(), eventsMessage(LIVE_EVENTS), SENT(), RECEIVED()];
     renderWithProviders(
       createElement(
@@ -97,10 +97,10 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
       ),
     );
     const transcript = screen.getByTestId('code-agent-transcript');
-    const group = within(transcript).getByTestId('agent-exchange-group');
-    expect(within(transcript).queryByTestId('a2a-row')).toBeNull();
-    fireEvent.click(within(group).getByRole('button', { name: /Agents coordinating/ }));
-    const rows = within(transcript).getAllByTestId('a2a-row');
+    expect(within(transcript).queryByTestId('agent-exchange-group')).toBeNull();
+    const slot = within(transcript).getByTestId('code-work-slot');
+    fireEvent.click(within(slot).getByRole('button', { name: /Working/ }));
+    const rows = within(slot).getAllByTestId('a2a-row');
     expect(rows.map((r) => [r.getAttribute('data-a2a-direction'), r.textContent])).toEqual([
       ['sent', 'Codex → RoseTests pass; ready to merge.'],
       ['received', 'Rose → CodexMerge it after the scorecard.'],
@@ -112,7 +112,7 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(within(transcript).getAllByTestId('code-work-slot')).toHaveLength(1);
   });
 
-  it('collapses hundreds of canonical mirrors across native work slots with bounded details', () => {
+  it('folds hundreds of canonical mirrors into their native work slots: one row each, 20 a page', () => {
     const records = [
       { id: 'start1', type: 'turn', event: 'started', turn_id: 'one', ts: 1000 },
       {
@@ -156,19 +156,25 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
         }),
       );
     const view = renderWithProviders(native(messages));
-    expect(screen.getAllByTestId('code-work-slot')).toHaveLength(2);
-    const group = screen.getByTestId('agent-exchange-group');
-    expect(group).toHaveTextContent('120 exchanges');
+    expect(screen.queryByTestId('agent-exchange-group')).toBeNull();
+    const slots = screen.getAllByTestId('code-work-slot');
+    expect(slots).toHaveLength(2);
     expect(screen.queryByTestId('a2a-row')).toBeNull();
-    fireEvent.click(within(group).getByRole('button', { name: /Agents coordinating/ }));
-    expect(within(group).getAllByTestId('a2a-row')).toHaveLength(20);
-    fireEvent.click(within(group).getByRole('button', { name: 'Next exchanges' }));
-    expect(within(group).getByText('Native private 20')).toBeInTheDocument();
-    expect(within(group).queryByText('Native private 0')).toBeNull();
+    const [first, second] = slots;
+    fireEvent.click(within(first).getByRole('button', { name: /Worked/ }));
+    // 120 mirrored rows per turn → 60 exchanges, 20 a page.
+    expect(within(first).getAllByTestId('a2a-row')).toHaveLength(20);
+    expect(within(first).getByText('1 / 3')).toBeInTheDocument();
+    fireEvent.click(within(first).getByRole('button', { name: 'Next activities' }));
+    expect(within(first).getByText('Native private 20')).toBeInTheDocument();
+    expect(within(first).queryByText('Native private 0')).toBeNull();
+    fireEvent.click(within(second).getByRole('button', { name: /Worked/ }));
+    expect(within(second).getByText('Native private 60')).toBeInTheDocument();
+    expect(within(second).getByText('1 / 3')).toBeInTheDocument();
     view.rerender(native([{ ...rows[0], message_id: 'replayed-lead' }, ...messages]));
-    expect(screen.getByTestId('agent-exchange-group')).toBe(group);
-    expect(within(group).getByText('Native private 20')).toBeVisible();
-    expect(group).toHaveTextContent('120 exchanges');
+    expect(screen.getAllByTestId('code-work-slot')[0]).toBe(first);
+    expect(within(first).getByText('Native private 20')).toBeVisible();
+    expect(within(first).getByText('2 / 3')).toBeInTheDocument();
   });
 
   it('keeps human turns, user-facing questions and final answers in the native transcript', () => {
@@ -239,7 +245,12 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
         }),
       ),
     );
-    expect(screen.getAllByTestId('agent-exchange-group')).toHaveLength(2);
+    expect(screen.queryByTestId('agent-exchange-group')).toBeNull();
+    const [turnOne, turnTwo] = screen.getAllByTestId('code-work-slot');
+    fireEvent.click(within(turnOne).getByRole('button', { name: /Worked/ }));
+    fireEvent.click(within(turnTwo).getByRole('button', { name: /Worked/ }));
+    expect(within(turnOne).getByText('Tests pass; ready to merge.')).toBeVisible();
+    expect(within(turnTwo).getByText('Merge it after the scorecard.')).toBeVisible();
     for (const text of [
       'First human steer',
       'Second human steer',
@@ -283,9 +294,86 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     // (Andy 2026-10-26), never an "Agents coordinating" exchange.
     const goal = screen.getByText('Private native instruction');
     expect(goal.closest('[data-message-role="USER"]')).not.toBeNull();
-    const group = screen.getByTestId('agent-exchange-group');
-    expect(within(group).queryByText('Private native instruction')).toBeNull();
-    expect(group).toHaveTextContent('1 exchange');
+    expect(screen.queryByTestId('agent-exchange-group')).toBeNull();
+    const slot = screen.getByTestId('code-work-slot');
+    expect(slot).toHaveTextContent('Merge it after the scorecard.');
+  });
+
+  it('a real rose-agents send session: routing tool, canonical rows and mirror fold into the turn', () => {
+    // agentGraphSendService shape: Codex runs `rose-agents send parent …`; the backend
+    // writes the canonical agent_message row (plus a replayed mirror with the same
+    // a2a.message_id), then Rose's reply arrives as a received row.
+    const sent = a2aTimelineMessage('sent', 'Chart pushed to main.', 'a2a-1');
+    sent.timestamp = new Date(1600).toISOString();
+    const mirror = { ...sent, message_id: 'a2a-1-mirror' };
+    const reply = a2aTimelineMessage('received', 'Thanks, close the session.', 'a2a-2');
+    reply.timestamp = new Date(1700).toISOString();
+    const messages = [
+      eventsMessage([
+        {
+          id: 'goal',
+          seq: 0,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          text: 'Chart BTC',
+          ts: 900,
+        },
+        { id: 'start', seq: 1, type: 'turn', event: 'started', turn_id: 'one', ts: 1000 },
+        {
+          id: 'send',
+          seq: 2,
+          type: 'tool',
+          turn_id: 'one',
+          ts: 1500,
+          tool: {
+            name: 'Run',
+            target: 'rose-agents send parent "Chart pushed to main."',
+            activity_kind: 'exec',
+            result: { status: 'ok', exit_code: 0 },
+          },
+        },
+        {
+          id: 'end',
+          seq: 3,
+          type: 'turn',
+          event: 'ended',
+          turn_id: 'one',
+          ts: 2000,
+          turn_outcome: 'completed',
+        },
+      ]),
+      sent,
+      mirror,
+      reply,
+    ];
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(CodeSessionMessages, {
+          c: { provider: 'codex', chipState: 'completed', meta: null } as unknown as Parameters<
+            typeof CodeSessionMessages
+          >[0]['c'],
+          taskId: 'task-1',
+          echoes: [],
+        }),
+      ),
+    );
+    const transcript = screen.getByTestId('code-agent-transcript');
+    expect(within(transcript).queryByTestId('agent-exchange-group')).toBeNull();
+    expect(within(transcript).queryByText(/Agents coordinating/)).toBeNull();
+    expect(
+      within(transcript).getByText('Chart BTC').closest('[data-message-role="USER"]'),
+    ).not.toBeNull();
+    const slot = within(transcript).getByTestId('code-work-slot');
+    expect(within(transcript).queryByTestId('a2a-row')).toBeNull();
+    fireEvent.click(within(slot).getByRole('button', { name: /Worked/ }));
+    const rows = within(slot).getAllByTestId('a2a-row');
+    expect(rows.map((r) => [r.getAttribute('data-a2a-direction'), r.textContent])).toEqual([
+      ['sent', 'Codex → RoseChart pushed to main.'],
+      ['received', 'Rose → CodexThanks, close the session.'],
+    ]);
   });
 
   it('keeps successful native send payloads behind details and leaves errors visible', () => {

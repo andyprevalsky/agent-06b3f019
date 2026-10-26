@@ -28,7 +28,8 @@
  *   "Open app" header button opens the full-screen app view for this task; the
  *   chip frames no live preview itself (OpenAppButton).
  *
- * Maximize opens the existing FullscreenView (owned by ClaudeCodeChip).
+ * MAXIMIZE: opens this session's code-agent view (useCodeAgentView, transcript only:
+ *   no terminal); without a view provider (isolated renders) there is no Maximize.
  */
 
 import { useState, type ReactNode } from 'react';
@@ -44,12 +45,14 @@ import {
   type CodeAgentTranscriptEvent,
   type CodeSessionFacts,
 } from '../hooks/codeAgentContract';
+import { useAgentContext } from '../hooks';
 import { useLocalEchoes } from '../hooks/codeAgentLocalState';
 import { desktopChipState, formatElapsed, useNow } from '../hooks/codeAgentSteering';
 import { ProviderIcon, StatusDisplay } from './claudeCodeChip.shared';
 import type { ClaudeCodeChipVM } from './claudeCodeChip.hooks';
 import { CodeAgentSteerInput, CodeAgentTranscript } from './codeAgentChip.steer';
 import { OpenAppButton } from './app-view/OpenAppButton';
+import { useCodeAgentView } from './code-agent-view/codeAgentViewState';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
@@ -212,6 +215,21 @@ function OpenInTerminal({ taskId }: { taskId: string }) {
   );
 }
 
+/** Maximize → this session's code-agent view (its owner is the chat that holds the chip). */
+function useOpenViewAction(meta: CodeAgentMeta): (() => void) | null {
+  const view = useCodeAgentView();
+  const { selectedAgentId } = useAgentContext();
+  if (view === null || !selectedAgentId) return null;
+  return () =>
+    view.open({
+      taskId: meta.task_id,
+      ownerAgentId: selectedAgentId,
+      provider: meta.provider,
+      title: meta.title ?? '',
+      status: null,
+    });
+}
+
 interface DesktopCodeAgentChipProps {
   meta: CodeAgentMeta;
   vm: ClaudeCodeChipVM;
@@ -225,6 +243,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
   const [open, setOpen] = useState(true);
   const echoes = useLocalEchoes(meta.task_id);
   const now = useNow(running);
+  const openView = useOpenViewAction(meta);
 
   const startedAt = eventTimeMs(meta.started_at);
   const endedAt = running ? now : (eventTimeMs(meta.ended_at) ?? null);
@@ -277,17 +296,19 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
             {elapsed}
           </span>
         )}
-        <button
-          type="button"
-          aria-label={`Maximize ${codeAgentLabel(meta.provider)}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            vm.openFullscreen();
-          }}
-          className="rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"
-        >
-          <Maximize2 className={`h-4 w-4 ${MUTED}`} />
-        </button>
+        {openView && (
+          <button
+            type="button"
+            aria-label={`Maximize ${codeAgentLabel(meta.provider)}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              openView();
+            }}
+            className="rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"
+          >
+            <Maximize2 className={`h-4 w-4 ${MUTED}`} />
+          </button>
+        )}
         {expandable &&
           (open ? (
             <ChevronUp className={`h-4 w-4 flex-shrink-0 ${MUTED}`} />

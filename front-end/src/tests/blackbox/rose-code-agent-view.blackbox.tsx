@@ -527,6 +527,8 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const slot = within(page).getByTestId('code-work-slot');
     await user.click(within(slot).getByRole('button', { name: /Worked/ }));
     expect(within(slot).getByText('Use UTC labels')).toBeInTheDocument();
+    // Ended session: nothing shows terminal output, so nothing reads it.
+    expect(requests('GET', `/codex-code-session/${TASK}`)).toHaveLength(0);
   });
 
   it('a completed session stays open; a send shows the backend error as one plain line', async () => {

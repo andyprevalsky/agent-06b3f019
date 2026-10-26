@@ -5,6 +5,10 @@
 import { createElement, type ReactNode } from 'react';
 import { AgentContext } from '@/features/agent-context';
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
+import {
+  CodeAgentViewContext,
+  type OpenCodeAgent,
+} from '@/features/terminal-component-group/components/code-agent-view/codeAgentViewState';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
@@ -295,6 +299,19 @@ export function renderChip(messages: Message[], roseDesktop = true) {
   );
 }
 
+/** The chip inside a code-agent view provider (Rose Desktop terminal); `open` spies Maximize. */
+export function renderChipWithView(messages: Message[], open: (agent: OpenCodeAgent) => void) {
+  const value = { openCodeAgent: null, open, close: () => {} };
+  return renderWithProviders(
+    createElement(
+      CodeAgentViewContext.Provider,
+      { value },
+      createElement(WithAgent, { messages }, createElement(ClaudeCodeChip, { taskId: 'task-1' })),
+    ),
+    { roseDesktop: true },
+  );
+}
+
 export interface RenderItemsOptions {
   roseDesktop?: boolean;
   currentAnimatingId?: string | null;
@@ -397,5 +414,17 @@ export function btcRows(ownerId: string, taskId: string): Message[] {
     ),
     eventsMessage(records),
     codexMessage,
+    msg(
+      {
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: `call-${taskId}`,
+        toolStatus: 'FINISHED',
+        task_id: taskId,
+        action_type: 'task_complete',
+        success: true,
+        code_provider: 'codex',
+      },
+      { text: 'Finished' },
+    ),
   ];
 }

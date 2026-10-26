@@ -3,8 +3,8 @@
  * already-loaded messages (the session's rows ride the owner's existing
  * agent:<id> channel) — no extra list, fetch or poll for the view itself.
  * Lifecycle reuses the chip's view-model (useClaudeCodeChip): one WS for this
- * session while it runs, one saved-output read once it has ended, both
- * dropped when the view closes. The view mounts no terminal (transcript only).
+ * session while it runs, dropped when the view closes. The view mounts no
+ * terminal and never reads the saved terminal output (transcript only).
  */
 
 import { useMemo } from 'react';
@@ -85,7 +85,7 @@ export function useCodeAgentConversation(open: OpenCodeAgent): CodeAgentConversa
   const toolCallId = useMemo(() => codeAgentToolCallId(messages, taskId), [messages, taskId]);
   const wsUrl = useMemo(() => sessionWsUrl(messages, taskId), [messages, taskId]);
   const provider: CodeAgentProvider = meta?.provider ?? open.provider ?? 'claude';
-  const vm = useClaudeCodeChip(taskId, wsUrl, false, provider);
+  const vm = useClaudeCodeChip(taskId, wsUrl, false, provider, { savedOutput: false });
   const chipState = meta
     ? desktopChipState(meta, vm.chipState)
     : vm.chipState === 'spinning_up'

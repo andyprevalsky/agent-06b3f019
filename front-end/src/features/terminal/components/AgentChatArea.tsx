@@ -33,7 +33,7 @@
  *                   info item of the query box's rose nub.
  *
  * APP VIEW (Rose Desktop only, UI ledger rows 10/39; AppViewProvider):
- *   a code-agent chip's live preview card opens that code session's preview,
+ *   a code-agent chip's "Open app" button opens that code session's preview,
  *   which replaces the whole chat column (AppScreenHost): the app full screen,
  *   the normal query box floating over it (Popular Goals hidden) steering that
  *   session. Escape / an agent row / Home / New Super Agent close it.

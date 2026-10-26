@@ -27,7 +27,14 @@ import userEvent from '@testing-library/user-event';
 import { usageLimitDetails } from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 
-import { chipMessage, codeAgent, msg, renderChip, signIn } from './code-agent-steering.fixtures';
+import {
+  chipMessage,
+  codeAgent,
+  msg,
+  renderChip,
+  renderChipWithView,
+  signIn,
+} from './code-agent-steering.fixtures';
 
 const { fetchSession } = vi.hoisted(() => ({ fetchSession: vi.fn().mockResolvedValue(null) }));
 vi.mock('@/features/terminal-component-group/api', async (importOriginal) => ({
@@ -179,14 +186,48 @@ describe('W5b: paused code sessions', () => {
     );
   });
 
-  it('fullscreen shows the same paused state, not Failed', async () => {
+  it('Maximize opens the code-agent view (never a terminal); the chip stays Paused', async () => {
+    const open = vi.fn();
+    const { container } = renderChipWithView(
+      [chipMessage({ provider: 'claude' }), finalRow({ code_agent: closedCodeAgent('paused') })],
+      open,
+    );
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Maximize Claude Code' }));
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-1',
+        ownerAgentId: 'root-agent-1',
+        provider: 'claude',
+      }),
+    );
+    expect(document.querySelector('.code-agent-terminal-mount')).toBeNull();
+    expect(container.querySelector('.code-agent-terminal-mount')).toBeNull();
+    expect(screen.getByTestId('code-agent-chip')).toHaveAttribute(
+      'data-code-agent-state',
+      'paused',
+    );
+    expect(screen.queryByText('Claude Code Failed')).not.toBeInTheDocument();
+  });
+
+  it('an ended desktop session never reads the saved terminal output (nothing shows it)', async () => {
+    renderChipWithView(
+      [chipMessage({ provider: 'claude' }), finalRow({ code_agent: closedCodeAgent('completed') })],
+      vi.fn(),
+    );
+    expect(screen.getByTestId('code-agent-chip')).toHaveAttribute(
+      'data-code-agent-state',
+      'completed',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchSession).not.toHaveBeenCalled();
+  });
+
+  it('without a code-agent view provider the desktop chip offers no Maximize', () => {
     renderChip([
       chipMessage({ provider: 'claude' }),
       finalRow({ code_agent: closedCodeAgent('paused') }),
     ]);
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Maximize Claude Code' }));
-    expect(screen.getByText('Claude Code Paused')).toBeInTheDocument();
-    expect(screen.queryByText('Claude Code Failed')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Maximize Claude Code' })).toBeNull();
   });
 
   it('a later live snapshot (resumed session) outranks an earlier pause', () => {

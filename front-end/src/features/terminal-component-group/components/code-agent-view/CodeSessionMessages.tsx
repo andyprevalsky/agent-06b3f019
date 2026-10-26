@@ -1,4 +1,9 @@
-/** Code sessions use the main chat renderer, with one live/collapsed work slot per turn. */
+/**
+ * Code sessions use the main chat renderer, with one live/collapsed work slot per turn.
+ * WORK SLOT: [RUNNING] latest activity · [EXPANDED] history, 20 a page (WorkHistoryPager;
+ *   opening a running slot lands on its latest page) · [DONE] collapses. Agent
+ *   coordination (a2a) lives inside the slots; the top level never groups exchanges.
+ */
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useAgentContext } from '../../hooks';
@@ -12,10 +17,9 @@ import {
 } from '../../hooks/codeSessionTurns';
 import { foldSessionTranscript } from '../../hooks/codeSessionTranscript';
 import { ThinkingIndicator } from '../ThinkingIndicator';
-import { useAgentExchangeGroups } from '../useAgentExchangeGroups';
-import { parseAgentToAgentMessage } from '../../hooks/codeAgentContract';
-import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { MessageListItems } from '../MessageListItems';
+import { WorkHistoryPager } from '../WorkHistoryPager';
+import { useWorkHistoryPage } from '../useWorkHistoryPage';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 
 import { CodeRoutingActivity } from './CodeRoutingActivity';
@@ -28,11 +32,9 @@ function Messages({
   messages,
   owner,
   streamingMessageId,
-  projection,
   healthyNativeTools,
 }: {
   healthyNativeTools?: ReadonlySet<string>;
-  projection?: ReturnType<typeof useAgentExchangeGroups> & { viewerId?: string };
   streamingMessageId?: string;
   messages: ReturnType<typeof useAgentContext>['messages'];
   owner: string | null;
@@ -40,7 +42,6 @@ function Messages({
   const items = (rows: typeof messages) => (
     <MessageListItems
       filteredMessages={rows}
-      agentExchangeProjection={projection}
       streamingMessageIds={streamingMessageId ? new Set([streamingMessageId]) : undefined}
       currentAnimatingId={null}
       onAnimationComplete={noop}
@@ -85,11 +86,16 @@ function WorkSlot({
   healthyNativeTools: ReadonlySet<string>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const pages = useWorkHistoryPage(turn.activities.length);
   const running = turn.status === 'running';
   useEffect(() => {
     if (!running) setExpanded(false);
   }, [running]);
-  const visible = expanded ? turn.activities : running ? turn.activities.slice(-1) : [];
+  const visible = expanded
+    ? pages.slice(turn.activities)
+    : running
+      ? turn.activities.slice(-1)
+      : [];
   return (
     <div
       data-testid="code-work-slot"
@@ -100,7 +106,10 @@ function WorkSlot({
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          if (!expanded && running) pages.openAtLatest();
+          setExpanded(!expanded);
+        }}
         className="flex items-center gap-2 text-sm text-muted-foreground"
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -125,6 +134,7 @@ function WorkSlot({
           owner={owner}
           streamingMessageId={running ? turn.streamingMessageId : undefined}
         />
+        {expanded && <WorkHistoryPager {...pages} />}
       </div>
     </div>
   );
@@ -170,36 +180,6 @@ export function CodeSessionMessages({
       ),
     [messages, taskId],
   );
-  const roseDesktop = useRoseDesktop();
-  const exchangeMessages = useMemo(
-    () => entries.flatMap((entry) => (entry.kind === 'message' ? [entry.message] : [])),
-    [entries],
-  );
-  const exchanges = useAgentExchangeGroups(exchangeMessages, roseDesktop, null, noop, true);
-  const groups = useMemo(() => {
-    const canonicalIds = new Set(messages.map((message) => message.message_id));
-    const unmeasured = new Set(
-      exchangeMessages
-        .filter((message) => !canonicalIds.has(message.message_id))
-        .flatMap((message) => {
-          const a2a = parseAgentToAgentMessage(message);
-          return a2a ? [JSON.stringify([a2a.from.id, a2a.to.id, a2a.message_id])] : [];
-        }),
-    );
-    return {
-      ...exchanges.groups,
-      groupsByLeadId: new Map(
-        [...exchanges.groups.groupsByLeadId].map(([id, group]) => [
-          id,
-          {
-            ...group,
-            metricsUnknown: group.exchanges.some((exchange) => unmeasured.has(exchange.key)),
-          },
-        ]),
-      ),
-    };
-  }, [messages, exchangeMessages, exchanges.groups]);
-  const projection = { ...exchanges, groups, viewerId: taskId };
   return (
     <div data-testid="code-agent-transcript" className="space-y-2">
       {groupMessages(entries).map((entry) =>
@@ -211,16 +191,7 @@ export function CodeSessionMessages({
             healthyNativeTools={healthyNativeTools}
           />
         ) : (
-          <Messages
-            key={
-              entry.messages
-                .map((message) => groups.groupsByLeadId.get(message.message_id)?.key)
-                .find(Boolean) ?? entry.key
-            }
-            messages={entry.messages}
-            owner={selectedAgentId}
-            projection={projection}
-          />
+          <Messages key={entry.key} messages={entry.messages} owner={selectedAgentId} />
         ),
       )}
     </div>
