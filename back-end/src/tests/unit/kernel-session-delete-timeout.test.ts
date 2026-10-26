@@ -11,4 +11,3 @@ assert.strictEqual(
   Kernel.DEFAULT_TIMEOUT,
   'Kernel session delete must allow the Kernel SDK request budget'
 );
-console.log('PASS kernel session delete uses the Kernel SDK request budget');
