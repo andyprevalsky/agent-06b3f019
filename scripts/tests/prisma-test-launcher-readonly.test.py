@@ -60,6 +60,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 "assert-prisma-client-current.mjs",
                 "normalize-local-user-phones.sh",
                 "backfill-local-message-record-owner.sh",
+                "apply-local-message-record-trgm-index.sh",
                 "blackbox-phone-env.sh",
             ):
                 source = ROOT / "back-end/scripts" / name

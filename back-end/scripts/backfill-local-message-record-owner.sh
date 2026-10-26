@@ -17,9 +17,15 @@ if [ -z "$URL" ]; then
   echo "backfill-local-message-record-owner: pass a database URL or set DATABASE_URL" >&2
   exit 2
 fi
+# libpq/Prisma honour a `host`/`hostaddr` query parameter over the authority
+# host, so a localhost authority alone does not prove a local target.
 node -e '
   const parsed = new URL(process.argv[1]);
-  if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+  const local = ["localhost", "127.0.0.1", "::1"];
+  if (!local.includes(parsed.hostname)) process.exit(1);
+  for (const key of ["host", "hostaddr"]) {
+    if (parsed.searchParams.has(key)) process.exit(1);
+  }
 ' "$URL" || {
   echo "Refusing to backfill MessageRecord.userId: target is not a localhost database" >&2
   exit 2

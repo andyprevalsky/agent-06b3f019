@@ -336,6 +336,7 @@ SQL
     bash "$SCRIPT_DIR/backfill-local-message-record-owner.sh" "$LOCAL_DB_URL" >/dev/null
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+    bash "$SCRIPT_DIR/apply-local-message-record-trgm-index.sh" "$LOCAL_DB_URL" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
     # pre-seed a valid production credential without disabling the real Codex
     # black-box test that consumes it.

@@ -1246,6 +1246,7 @@ else
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && bash scripts/backfill-local-message-record-owner.sh "$LOCAL_DB_URL" >/dev/null)
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && bash scripts/apply-local-message-record-trgm-index.sh "$LOCAL_DB_URL" >/dev/null)
 echo "🔎 Ensuring agent-network grep indexes..."
 (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 

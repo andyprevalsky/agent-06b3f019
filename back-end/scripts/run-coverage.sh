@@ -571,6 +571,7 @@ SQL
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
   DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+  bash "$SCRIPT_DIR/apply-local-message-record-trgm-index.sh" "$LOCAL_PSQL_URL" >/dev/null
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.

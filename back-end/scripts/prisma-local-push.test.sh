@@ -248,6 +248,25 @@ if BACKFILL_LOCAL_MESSAGE_RECORD_OWNER_DRY_RUN=1 bash "$BACKFILL" "$REMOTE_URL" 
 fi
 BACKFILL_LOCAL_MESSAGE_RECORD_OWNER_DRY_RUN=1 bash "$BACKFILL" "$LOCAL_URL" | grep -Fq 'validation passed'
 
+# libpq/Prisma prefer a `host`/`hostaddr` query parameter over the URL authority,
+# so a localhost authority with such a parameter must be refused by every
+# local-only writer, including the post-push MessageRecord trigram index step.
+TRGM="$(dirname "$SCRIPT")/apply-local-message-record-trgm-index.sh"
+APPLY_LOCAL_MESSAGE_RECORD_TRGM_INDEX_DRY_RUN=1 bash "$TRGM" "$LOCAL_URL" | grep -Fq 'validation passed'
+for override in 'host=db.example.com' 'hostaddr=203.0.113.7'; do
+  HIJACK_URL="$LOCAL_URL?$override"
+  if DATABASE_URL="$HIJACK_URL" DIRECT_URL="$LOCAL_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
+    bash "$SCRIPT" >/dev/null 2>&1 ||
+    DATABASE_URL="$LOCAL_URL" DIRECT_URL="$HIJACK_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
+      bash "$SCRIPT" >/dev/null 2>&1 ||
+    NORMALIZE_LOCAL_USER_PHONES_DRY_RUN=1 bash "$NORMALIZE" "$HIJACK_URL" >/dev/null 2>&1 ||
+    BACKFILL_LOCAL_MESSAGE_RECORD_OWNER_DRY_RUN=1 bash "$BACKFILL" "$HIJACK_URL" >/dev/null 2>&1 ||
+    APPLY_LOCAL_MESSAGE_RECORD_TRGM_INDEX_DRY_RUN=1 bash "$TRGM" "$HIJACK_URL" >/dev/null 2>&1; then
+    echo "local-only guard accepted a $override query override" >&2
+    exit 1
+  fi
+done
+
 # Real SQL on a scratch database: a pre-userId table gains the column, every row
 # gets its Person's owner, reruns are no-ops, and NOT NULL then succeeds.
 if can_create_scratch_db; then
