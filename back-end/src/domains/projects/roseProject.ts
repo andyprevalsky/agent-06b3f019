@@ -23,13 +23,11 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { Prisma } from '@prisma/client';
-
-import { prisma } from '../../providers/database';
 import { fetchGithubRepoVisibility, normalizeGithubUrl } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
-import { newSyncSalt, type ProjectWithCount } from '../../providers/projects/store';
 import { isRoseRepoOwner } from '../../utils/roseRepoOwners';
+import * as repo from './repo';
+import type { ProjectWithCount } from './repo';
 
 const log = createLogger('Projects');
 
@@ -115,18 +113,6 @@ export function planRoseProjectSetup(
   return { createProject: false, fillProjectId: fill ? rose.id : null, grantRepo };
 }
 
-async function declareEnvFiles(tx: Prisma.TransactionClient, projectId: string): Promise<void> {
-  await tx.projectEnvFile.createMany({
-    data: ROSE_PROJECT_ENV_FILES.map((path) => ({
-      projectId,
-      path,
-      kind: 'env',
-      source: 'declared',
-    })),
-    skipDuplicates: true,
-  });
-}
-
 /**
  * Idempotent and race-safe: create-if-missing, fill-if-still-pristine, skip
  * duplicates. Project settings and the declared env files commit together, so
@@ -139,35 +125,15 @@ export async function applyRoseProjectSetup(
   plan: RoseProjectPlan,
   deps: RoseSetupDeps = DEFAULT_ROSE_SETUP
 ): Promise<void> {
-  const settings = {
-    repoUrl: ROSE_PROJECT_REPO_URL,
-    startupScript: roseStartupScript(),
-  };
   if (plan.createProject || plan.fillProjectId !== null) {
-    const fillProjectId = plan.fillProjectId;
-    await prisma.$transaction(async (tx) => {
-      if (plan.createProject) {
-        const project = await tx.project.upsert({
-          where: { userId_name: { userId, name: ROSE_PROJECT_NAME } },
-          create: {
-            userId,
-            name: ROSE_PROJECT_NAME,
-            defaultBranch: ROSE_PROJECT_DEFAULT_BRANCH,
-            syncSalt: newSyncSalt(),
-            ...settings,
-          },
-          update: {},
-        });
-        if (project.repoUrl === ROSE_PROJECT_REPO_URL) await declareEnvFiles(tx, project.id);
-      }
-      if (fillProjectId !== null) {
-        // Conditional: a concurrent edit after the list read wins over the defaults.
-        const filled = await tx.project.updateMany({
-          where: { id: fillProjectId, userId, repoUrl: null, startupScript: null },
-          data: settings,
-        });
-        if (filled.count === 1) await declareEnvFiles(tx, fillProjectId);
-      }
+    await repo.writeRoseProjectSetup(userId, {
+      createProject: plan.createProject,
+      fillProjectId: plan.fillProjectId,
+      name: ROSE_PROJECT_NAME,
+      defaultBranch: ROSE_PROJECT_DEFAULT_BRANCH,
+      repoUrl: ROSE_PROJECT_REPO_URL,
+      startupScript: roseStartupScript(),
+      envPaths: ROSE_PROJECT_ENV_FILES,
     });
   }
   if (plan.grantRepo) {
@@ -178,9 +144,6 @@ export async function applyRoseProjectSetup(
       });
       return;
     }
-    await prisma.githubRepoAccess.createMany({
-      data: [{ userId, repoUrl: ROSE_PROJECT_REPO_URL }],
-      skipDuplicates: true,
-    });
+    await repo.grantGithubRepoAccess(userId, ROSE_PROJECT_REPO_URL);
   }
 }
