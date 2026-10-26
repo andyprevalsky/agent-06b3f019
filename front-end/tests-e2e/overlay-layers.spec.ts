@@ -1,8 +1,11 @@
 import { expect, test } from '@playwright/test';
-import { FRONTEND_URL } from './helpers';
+import { FRONTEND_URL, IS_PROD } from './helpers';
 
 for (const surface of ['select', 'popover', 'context', 'sheet'] as const) {
   test(`${surface} stays interactive inside a dialog above the composer`, async ({ page }) => {
+    // The fixture page is built only into the local bundled preview (ROSE_E2E_FIXTURES);
+    // production deploys ship the app alone, so the Step 6b local gate owns this check.
+    test.skip(IS_PROD, 'Overlay fixture page exists only in the local semantic stack');
     page.setDefaultTimeout(5_000);
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
