@@ -73,9 +73,13 @@ function at(message: Message) {
   const value = eventTimeMs(message.timestamp);
   return value !== null && value > 0 ? value : null;
 }
-function groupKey(activity: TrajectoryActivity) {
+/** Stable across a live placeholder being replaced by its persisted row (same instance). */
+function groupKey(activity: TrajectoryActivity, ordinal: number) {
   const call = activity.message.metadata?.toolCallId;
-  return activity.kind === 'comms' ? activity.key : typeof call === 'string' ? call : activity.key;
+  if (activity.kind === 'comms') return activity.key;
+  if (typeof call === 'string') return call;
+  // A streaming thought has no persisted id yet; its batch keeps its place in the turn.
+  return activity.kind === 'thinking' ? `thinking:${ordinal}` : activity.key;
 }
 
 export function groupTrajectoryWork(
@@ -86,6 +90,7 @@ export function groupTrajectoryWork(
   const result: TrajectoryWorkGrouping = { groupsByLeadId: new Map(), foldedIds: new Set() };
   let current: TrajectoryWorkGroup | null = null;
   let turn = 'initial';
+  let ordinal = 0;
   let seen = new Set<string>();
   const canonicalComms = new Set<string>();
   for (const message of messages) {
@@ -105,7 +110,10 @@ export function groupTrajectoryWork(
       }
       current = null;
       seen = new Set();
-      if (message.role === 'USER') turn = message.message_id;
+      if (message.role === 'USER') {
+        turn = message.message_id;
+        ordinal = 0;
+      }
       continue;
     }
     if (activity.kind === 'comms' && canonicalComms.has(activity.key)) {
@@ -115,7 +123,7 @@ export function groupTrajectoryWork(
     if (activity.kind === 'comms') canonicalComms.add(activity.key);
     if (!current) {
       current = {
-        key: `${turn}:${groupKey(activity)}`,
+        key: `${turn}:${groupKey(activity, ordinal++)}`,
         leadId: message.message_id,
         activities: [],
         status: 'running',
