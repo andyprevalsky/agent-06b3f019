@@ -87,7 +87,8 @@ def record(machine, app):
 
 def metadata(machine, key):
     try:
-        value = json.loads(machine.get("config", {}).get("metadata", {}).get(key, "null"))
+        # The Machines API can return a stopped Machine with "config": null.
+        value = json.loads(((machine.get("config") or {}).get("metadata") or {}).get(key, "null"))
         return value if isinstance(value, dict) else {}
     except (ValueError, TypeError):
         return {}
@@ -151,7 +152,8 @@ def eligible(machine, app, live_hash, live_queue=None):
             and pool.get("drained_queue") == source.get("queue", f"navi-agent-tasks@{source['hash']}")
             and custody_ready(machine, app)
         )
-    except (KeyError, TypeError):
+    except (AttributeError, KeyError, TypeError):
+        # A Machine whose config is null or malformed is never reusable.
         return False
 
 
