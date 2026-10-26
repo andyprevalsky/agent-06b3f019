@@ -60,6 +60,35 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(container.querySelector('.lucide-loader-circle')).toBeNull();
     expect(container.querySelector(`.lucide-${icon}`)).not.toBeNull();
   });
+  it("keeps the folded rows' tool identity on the compressed row", () => {
+    const plan = msg(
+      {
+        toolName: 'cloud_agent',
+        toolCallId: 'cloud',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Creating Cloud Agent',
+        startPhase: 'plan',
+      },
+      { message_id: 'cloud', timestamp: new Date(start).toISOString() },
+    );
+    const search = msg(
+      { toolName: 'web_search', toolCallId: 'search', toolStatus: 'FINISHED', title: 'Search' },
+      { message_id: 'search', timestamp: new Date(start + 1000).toISOString() },
+    );
+    render(<TrajectoryWorkGroup group={group([plan, search])} renderMessage={() => null} />);
+    const row = screen.getByTestId('trajectory-work-group');
+    expect(row).toHaveAttribute(
+      'data-tool-statuses',
+      'cloud_agent:IN_PROGRESS web_search:FINISHED',
+    );
+    expect(row).toHaveAttribute('data-agent-start-phase', 'plan');
+    expect(row).toHaveAttribute('data-activity-kinds', 'work');
+    cleanup();
+    render(<TrajectoryWorkGroup group={group()} renderMessage={() => null} />);
+    expect(screen.getByTestId('trajectory-work-group')).not.toHaveAttribute(
+      'data-agent-start-phase',
+    );
+  });
   it('does not invent elapsed time for a missing timestamp', () => {
     const untimed = { ...activity('read_file'), timestamp: '' };
     render(<TrajectoryWorkGroup group={group([untimed])} renderMessage={() => null} />);

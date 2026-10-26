@@ -2867,7 +2867,7 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
         NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
-        npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
+        ROSE_E2E_FIXTURES=true npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 

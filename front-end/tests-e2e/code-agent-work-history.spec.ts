@@ -187,7 +187,7 @@ for (const provider of ['claude', 'codex'] as const) {
     await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}&code-agent=${TASK}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(page.getByTestId('code-agent-view-composer').locator('textarea')).toBeVisible({
+    await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible({
       timeout: 60_000,
     });
     const view = page.getByTestId('code-agent-view');
@@ -196,7 +196,7 @@ for (const provider of ['claude', 'codex'] as const) {
     await expect(slot).toHaveCount(1);
     await expect(slot).toHaveAttribute('data-state', 'running');
     await expect(history.locator('[data-message-id]')).toHaveCount(1);
-    await expect(page.getByTestId('code-agent-view-composer').locator('textarea')).toBeVisible();
+    await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible();
     await slot.getByRole('button', { expanded: false }).click();
     await expect(history.locator('[data-message-id]')).toHaveCount(30);
     completed = true;
