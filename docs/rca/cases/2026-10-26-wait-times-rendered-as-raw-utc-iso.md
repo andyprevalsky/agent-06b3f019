@@ -13,7 +13,7 @@ symptoms:
   - raw ISO timestamp in transcript wait row
 tags:
   - rose-desktop
-  - wait_for
+  - wait-for
   - timezone
 sources:
   - commit 6c49168e8
