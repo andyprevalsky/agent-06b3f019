@@ -43,6 +43,10 @@ interface Cli {
   USERCONTENT_CSP: string;
   DEFAULT_BUDGETS: Record<string, number>;
   evaluateBudgets(result: unknown): Verdict;
+  traceMainThreadTasks(
+    trace: Buffer,
+    minMs: number
+  ): { phase: string; duration: number; cpu: number }[];
   auditEntryFiles(
     entry: string,
     files: AuditFile[]
@@ -88,7 +92,7 @@ const JANKY = {
   normal: {
     fps: cli.frameStats(jankyFrames),
     workers: [{ fps: cli.frameStats(Array.from({ length: 40 }, (_, i) => i * 50)) }],
-    longTasks: [{ phase: 'steady', duration: 84 }],
+    longTasks: [{ phase: 'steady', duration: 84, cpu: 83 }],
     cls: 0.31,
     errors: ['ReferenceError: x is not defined'],
     animations: [{ name: 'slide', properties: ['left', 'width'] }],
@@ -134,6 +138,49 @@ test('host noise makes missed fps inconclusive but keeps every other violation',
   }
   const quietPass = cli.evaluateBudgets({ ...SMOOTH, host: { loadPerCore: 3.1 } });
   assert.equal(quietPass.warnings.filter((w) => w.rule === 'fps-inconclusive').length, 0);
+});
+
+test('long-task judges main-thread CPU time, so a host stall of the renderer is not a page defect', () => {
+  // A 134 ms wall-clock task that used 2 ms of CPU: the host descheduled the renderer.
+  const stalled = cli.evaluateBudgets({
+    ...SMOOTH,
+    normal: { ...SMOOTH.normal, longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }] },
+  });
+  assert.equal(stalled.pass, true, JSON.stringify(stalled.violations));
+  assert.ok(stalled.warnings.some((w) => w.rule === 'long-task-stall'));
+  // The same wall time spent computing is the page's own work.
+  const busy = cli.evaluateBudgets({
+    ...SMOOTH,
+    normal: { ...SMOOTH.normal, longTasks: [{ phase: 'steady', duration: 134, cpu: 131 }] },
+  });
+  assert.deepEqual(rules(busy), ['long-task']);
+
+  // Steady tasks come from a Chromium trace: renderer main-thread RunTask events with tdur.
+  const trace = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 2, args: { name: 'Compositor' } },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 3000, tdur: 2900 },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 134000, tdur: 1800 },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 81000, tdur: 80500 },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 2, dur: 90000, tdur: 90000 },
+      ],
+    })
+  );
+  assert.deepEqual(cli.traceMainThreadTasks(trace, 50), [
+    { phase: 'steady', duration: 134, cpu: 1.8 },
+    { phase: 'steady', duration: 81, cpu: 80.5 },
+  ]);
+  const noCpu = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 90000 },
+      ],
+    })
+  );
+  assert.throws(() => cli.traceMainThreadTasks(noCpu, 50), /no thread CPU time/);
 });
 
 test('frame stats and CLS session windows', () => {

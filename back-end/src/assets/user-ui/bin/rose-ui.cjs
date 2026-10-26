@@ -361,11 +361,16 @@ function evaluateBudgets(result, budgets = DEFAULT_BUDGETS) {
       if (stats.p50 < budgets.fpsP50Min) violations.push({ rule: 'fps-p50', message: `${label} p50 ${stats.p50} fps (min ${budgets.fpsP50Min})`, value: stats.p50, limit: budgets.fpsP50Min });
       if (stats.p5 < budgets.fpsP5Min) violations.push({ rule: 'fps-p5', message: `${label} p5 ${stats.p5} fps (min ${budgets.fpsP5Min}); worst frame ${stats.worstFrameMs} ms`, value: stats.p5, limit: budgets.fpsP5Min });
     }
+    // Steady tasks are judged on main-thread CPU time (from the trace): wall-clock time
+    // also counts the host descheduling the renderer, which is not the page's work.
     const steady = (normal.longTasks || []).filter((t) => t.phase === 'steady' && t.duration > budgets.longTaskMaxMs);
-    if (steady.length > 0) {
-      const max = Math.max(...steady.map((t) => t.duration));
-      violations.push({ rule: 'long-task', message: `${steady.length} main-thread task(s) over ${budgets.longTaskMaxMs} ms while running (max ${round(max)} ms)`, value: max, limit: budgets.longTaskMaxMs });
+    const heavy = steady.filter((t) => t.cpu > budgets.longTaskMaxMs);
+    if (heavy.length > 0) {
+      const max = Math.max(...heavy.map((t) => t.cpu));
+      violations.push({ rule: 'long-task', message: `${heavy.length} main-thread task(s) over ${budgets.longTaskMaxMs} ms of CPU while running (max ${round(max)} ms)`, value: max, limit: budgets.longTaskMaxMs });
     }
+    const stalled = steady.filter((t) => !(t.cpu > budgets.longTaskMaxMs));
+    if (stalled.length > 0) warnings.push({ rule: 'long-task-stall', message: `${stalled.length} task(s) took over ${budgets.longTaskMaxMs} ms of wall time but under ${budgets.longTaskMaxMs} ms of CPU (max ${round(Math.max(...stalled.map((t) => t.duration)))} ms wall): the host stalled the renderer; not judged` });
     const loading = (normal.longTasks || []).filter((t) => t.phase === 'load' && t.duration > budgets.longTaskMaxMs);
     if (loading.length > 0) warnings.push({ rule: 'load-long-task', message: `${loading.length} task(s) over ${budgets.longTaskMaxMs} ms during load (max ${round(Math.max(...loading.map((t) => t.duration)))} ms)` });
     if (typeof normal.cls === 'number' && normal.cls > budgets.clsMax) violations.push({ rule: 'layout-shift', message: `cumulative layout shift ${round(normal.cls, 3)} (max ${budgets.clsMax})`, value: normal.cls, limit: budgets.clsMax });
@@ -828,6 +833,24 @@ async function hostBaseline(browser, preview, viewport) {
   }
 }
 
+/**
+ * Renderer main-thread tasks longer than minMs (wall) in a Chromium trace, with the CPU time
+ * the thread spent in each. A task stalled by the host (preempted, page faults, a blocked IPC)
+ * has wall time but little CPU; a busy page burns CPU for the whole task.
+ */
+function traceMainThreadTasks(buf, minMs) {
+  const events = JSON.parse(buf.toString('utf8')).traceEvents || [];
+  const main = new Set(events.filter((e) => e.ph === 'M' && e.name === 'thread_name' && e.args && e.args.name === 'CrRendererMain').map((e) => `${e.pid}:${e.tid}`));
+  const tasks = events.filter((e) => e.ph === 'X' && e.name === 'ThreadControllerImpl::RunTask' && main.has(`${e.pid}:${e.tid}`));
+  if (tasks.length === 0) throw new Error('trace recorded no renderer main-thread tasks');
+  return tasks
+    .filter((e) => e.dur > minMs * 1000)
+    .map((e) => {
+      if (typeof e.tdur !== 'number') throw new Error('trace has no thread CPU time for main-thread tasks');
+      return { phase: 'steady', duration: round(e.dur / 1000), cpu: round(e.tdur / 1000) };
+    });
+}
+
 /** Normal + hidden + reduced-motion measurements of one route (one user frame). */
 async function measureRoute(browser, preview, route, opts) {
   const viewport = opts.viewport;
@@ -835,9 +858,18 @@ async function measureRoute(browser, preview, route, opts) {
   const run = await openHost(browser, preview, route, { viewport, probe: true });
   try {
     await sleep(opts.settleMs);
-    const normal = await measureWindow(run.page, preview, run.workers, opts.seconds * 1000);
+    // Trace the steady window: its tasks carry thread CPU time, which host load cannot inflate.
+    await browser.startTracing(undefined, { categories: ['-*', 'toplevel'] });
+    let normal;
+    let trace;
+    try {
+      normal = await measureWindow(run.page, preview, run.workers, opts.seconds * 1000);
+    } finally {
+      trace = await browser.stopTracing();
+    }
     const snap = normal.snaps.find(Boolean);
     if (!snap) throw new Error(`no user frame measured on ${route}`);
+    const steadyTasks = traceMainThreadTasks(trace, DEFAULT_BUDGETS.longTaskMaxMs);
     let fps = frameStats(snap.frames);
     let workers = normal.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
     const missesFps = (s) => s.frames >= 10 && s.p50 !== null && (s.p50 < DEFAULT_BUDGETS.fpsP50Min || s.p5 < DEFAULT_BUDGETS.fpsP5Min);
@@ -860,7 +892,7 @@ async function measureRoute(browser, preview, route, opts) {
       fps,
       fpsWindows,
       workers,
-      longTasks: snap.longTasks.map((t) => ({ phase: t.phase, duration: round(t.duration) })),
+      longTasks: [...snap.longTasks.filter((t) => t.phase === 'load').map((t) => ({ phase: t.phase, duration: round(t.duration) })), ...steadyTasks],
       cls: round(cumulativeLayoutShift(snap.shifts), 4),
       errors: snap.errors,
       animations: snap.animations,
@@ -1344,5 +1376,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS, USAGE,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };
