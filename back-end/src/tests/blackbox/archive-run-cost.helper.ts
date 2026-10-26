@@ -42,6 +42,10 @@ export async function testFixtureExcludesUserLifetimeHistory(seed: RunSeed): Pro
       `per-run fixture restore scope still replaces the user's ${table} rows`
     );
   }
+  // A base-image history row that cascades from User (onDelete: Cascade).
+  await prisma.cookieBundle.create({
+    data: { userId: seed.userId, authRealm: 'example.com', browserSource: 'chrome' },
+  });
   const before = await userHistoryCounts(seed);
   await restoreFixture(jsonRoundTrip(fixture) as ScopedDbFixture);
   assert.deepStrictEqual(
@@ -56,6 +60,7 @@ async function userHistoryCounts(seed: RunSeed) {
     people: await prisma.person.count({ where: { userId: seed.userId } }),
     messages: await prisma.messageRecord.count({ where: { personId: seed.personId } }),
     cookies: await prisma.cookie.count({ where: { userId: seed.userId } }),
+    cookieBundles: await prisma.cookieBundle.count({ where: { userId: seed.userId } }),
   };
 }
 
@@ -170,5 +175,18 @@ export async function testLateLlmArtifactIndexesOnlyItself(
   assert(
     indexed.some((row) => row.searchText === 'Early LLM result'),
     'indexing a late artifact must keep the finalized rows'
+  );
+
+  // A rewritten late path replaces that path's rows instead of accumulating them.
+  const rewritten = encryptedLlm(seed.rootAgentId, late.path, 'Rewritten LLM result');
+  assert.strictEqual((await post('artifact', rewritten)).status, 200);
+  const latePathRows = await prisma.agentTrajectorySearch.findMany({
+    where: { userId: seed.userId, rootAgentId: seed.rootAgentId, archivePath: late.path },
+    select: { searchText: true },
+  });
+  assert.deepStrictEqual(
+    latePathRows.map((row) => row.searchText),
+    ['Rewritten LLM result'],
+    'an overwritten late artifact left stale search rows'
   );
 }

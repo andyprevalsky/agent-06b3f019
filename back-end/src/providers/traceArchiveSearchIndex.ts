@@ -352,9 +352,18 @@ export async function indexLateArchivedLlmArtifact(
       seen,
       !finalized
     );
-    for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-      await prisma.$executeRaw(insertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
-    }
+    // A worker may rewrite the same path: replace that path's rows, never accumulate them.
+    await runTransactionWithRetry(async (tx) => {
+      await tx.$executeRaw`
+        DELETE FROM "AgentTrajectorySearch"
+        WHERE "userId" = ${fixture.user_id}
+          AND "rootAgentId" = ${rootAgentId}
+          AND "archivePath" = ${objectPath}
+      `;
+      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+        await tx.$executeRaw(insertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
+      }
+    });
     return rows.length;
   });
 }

@@ -19,6 +19,7 @@ tags:
   - agent-trajectory-search
   - db-fixture
 sources:
+  - PR #1577
   - commit b3679ea7b
   - memory:scalability-audit-100-seats-20261024
   - plan:docs/plans/completed/trace-capture-and-eval-authoring.md
@@ -91,6 +92,9 @@ per-late-file whole-run read.
   the user's small configuration rows (User, Integration, credentials,
   identity, SMS session) are unchanged. The REPEATABLE READ start snapshot now
   reads only run-scoped rows, so it no longer approaches its 30 s budget.
+  Restoring a base-image fixture keeps the existing `User` row (insert only
+  when missing): deleting it cascades to `CookieBundle`, `AgentPhoneMessage`
+  and other history the fixture no longer carries (CodeRabbit, PR #1577).
 - `traceArchiveSearchIndex.ts`: the finalize delete is
   `deleteArchivedBundleRowsSql(userId, rootAgentId)`; the owner equality makes
   it a seek on `AgentTrajectorySearch_user_root_time_idx`. Rows are only ever
@@ -99,7 +103,8 @@ per-late-file whole-run read.
   fixture and that one file, and inserts its rows with `ON CONFLICT DO NOTHING`
   (same dedupe digest as the whole-bundle index; earlier content keeps its
   original path). N late files now cost N reads, and the manifest lock is held
-  for three object reads instead of the whole run.
+  for three object reads instead of the whole run. A rewritten late path
+  deletes that path's rows and re-inserts in one transaction (CodeRabbit).
 
 10k-agent behaviour: per-run fixture rows and reads are O(agents, messages and
 tools in that run) plus O(1) user configuration rows; zero rows from user
@@ -115,7 +120,9 @@ Not changed here (follow-ups): the manifest advisory lock is still an
 interactive transaction around R2 I/O (a lease that does not pin a pooled
 connection is the structural fix); `AgentTrajectorySearch.agentGoal` is copied
 onto every row (~2.4 GB); the fixture's `ToolSideEffect operationKey LIKE
-'%<id>%'` scan is O(table) but the table holds ~2k rows today.
+'%<id>%'` scan is O(table) but the table holds ~2k rows today; restoring any
+fixture still deletes `Integration` rows, which cascades to `PlaidItem`
+(pre-existing, bounded per user).
 
 ## Human feedback
 

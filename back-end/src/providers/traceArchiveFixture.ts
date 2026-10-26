@@ -325,13 +325,25 @@ export async function restoreFixture(fixture: ScopedDbFixture): Promise<void> {
   for (const table of fixture.table_order) {
     const tableRows = (fixture.rows[table] ?? []).map((row) => normalizeRow(table, row));
     if (tableRows.length === 0) continue;
-    await delegate(table).createMany({ data: tableRows, skipDuplicates: table === 'Tool' });
+    await delegate(table).createMany({
+      data: tableRows,
+      skipDuplicates: table === 'Tool' || preservedParent(fixture, table),
+    });
   }
+}
+
+/**
+ * Deleting the User cascades to its lifetime history (CookieBundle,
+ * AgentPhoneMessage, ...). A base-image fixture does not carry that history,
+ * so its User is kept and only inserted when the base image lacks it.
+ */
+function preservedParent(fixture: ScopedDbFixture, table: FixtureTable): boolean {
+  return table === 'User' && fixture.restore.user_history === 'base-image';
 }
 
 async function deleteFixtureScope(fixture: ScopedDbFixture): Promise<void> {
   for (const table of [...fixture.table_order].reverse()) {
-    if (table === 'Tool') continue;
+    if (table === 'Tool' || preservedParent(fixture, table)) continue;
     const where = deleteWhere(table, fixture);
     if (where !== null) await delegate(table).deleteMany({ where });
   }
