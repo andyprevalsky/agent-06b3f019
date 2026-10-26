@@ -7606,6 +7606,16 @@ async def _spawn_browser_agent_activity_v3_real(
     # Filled by the final post-close instruction read (collect_unread_user_instructions).
     unread_user_instructions: List[str] = []
 
+    async def collect_unread_user_instructions() -> None:
+        # A Browser-composer message can land after the last step's read and
+        # before any pause-close (completion, max steps, user pause, failure);
+        # the owner gets it in this browser's result instead of losing it.
+        try:
+            latest = await _load_browser_resume_user_instructions(agent_id, instruction_state)
+            unread_user_instructions[:] = _unread_user_instructions(instruction_state, latest)
+        except Exception as read_error:  # includes an ending before the first instruction read
+            logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
+
     def _visible_activity_result(
         result: Dict[str, Any],
         *,
@@ -9051,16 +9061,6 @@ async def _spawn_browser_agent_activity_v3_real(
             "schema_user_instruction_count": schema_user_instruction_count,
             "schema_attempted_user_instruction_count": len(user_instruction_messages),
         }
-
-        async def collect_unread_user_instructions() -> None:
-            # A Browser-composer message can land after the last step's read and
-            # before the pause-close; the owner gets it in this browser's result.
-            try:
-                latest = await _load_browser_resume_user_instructions(agent_id, instruction_state)
-            except Exception as read_error:
-                logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
-                return
-            unread_user_instructions[:] = _unread_user_instructions(instruction_state, latest)
 
         async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
             nonlocal instruction_state, response_schema, user_instruction_messages
@@ -12345,6 +12345,7 @@ Based on this feedback, I need to continue working on the task and address the i
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
             if cleanup_failure is None:
                 paused_session_id = session_id
+        await collect_unread_user_instructions()
 
         if task_id and browser_turn_messages:
             # A user pause: keep this run's exact conversation so a later
@@ -12393,6 +12394,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "browser_url": browser_url,
             "message": "Browser agent cancelled by user",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+            **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
         }
 
     except WorkflowGenerationSealed:
@@ -12428,6 +12430,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 pause=True,
                 current_url=current_url,
             )
+        await collect_unread_user_instructions()
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(
@@ -12439,6 +12442,8 @@ Based on this feedback, I need to continue working on the task and address the i
             error_context=error_context,
             goal=goal,
         )
+        # The failure row and result carry input the browser never acted on.
+        error_message = _with_unread_user_messages(error_message, list(unread_user_instructions))
 
         error_message = _redact_activity_value(error_message)
 
@@ -13023,7 +13028,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
-                        message="User paused the browser agent",
+                        message=_with_unread_user_messages(
+                            "User paused the browser agent", (result or {}).get("unread_user_messages")
+                        ),
                         status=MessageStatus.ERROR,
                         metadata=_browser_task_terminal_metadata(result, activity_task_id),
                     )
