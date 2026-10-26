@@ -903,71 +903,101 @@ async def test_message_guard_refusals_reach_the_tool_result():
         assert status.value == "ERROR" and text == f"Message delivery failed: {unread}", text
 
 
+class _BrowserActivityHandle:
+    """A started browser activity: acts until the manager cancels it, then returns what the
+    real activity's CancelledError branch returns after pausing its provider session."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.cancelled = False
+
+    def done(self):
+        return False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def __await__(self):
+        async def _run():
+            while not self.cancelled:
+                await asyncio.sleep(0.002)
+            return {"status": "cancelled", "task_id": "task-br", "session_id": self.session_id}
+
+        return _run().__await__()
+
+
 async def test_root_pause_ends_background_browser_paused_with_its_session_id():
     """Item 12 (Andy 2026-10-26): pausing the root pauses its running browser agent.
 
-    Prod root 447576b9: the pause cancelled /root/order_breakfast_dd, its
-    Kernel session was paused (not torn down), but the owner was told
-    "User paused the browser agent" with no session id. The real pause signal
-    stops the running browser task; its manager emits the real pause terminal
-    row; the run ends "paused" and the notification (text + metadata) carries
-    the paused provider session id for continuation.
+    Prod root 447576b9: the pause cancelled /root/order_breakfast_dd and its
+    Kernel session was paused (BrowserSession PAUSED, not torn down), but the
+    owner was told only "User paused the browser agent", with no session id.
+    The real pause signal reaches the real browser manager, which stops the
+    acting activity (cancel) and posts its pause row; the run ends "paused" and
+    the notification (text + metadata) names the paused session for continuation.
+    Only the Temporal activity handle is faked.
     """
-    from domains.spawn_browser_agent_v3.handler import browser_pause_terminal_event
+    from domains.spawn_browser_agent_v3 import handler as browser
     from helpers.agent_addressing import background_tree_entries
     from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES
-    from helpers.tool_interrupts import tool_stop_requested
 
     harness = _Harness()
     with _env(harness):
-        wf = _workflow(harness, agent_id="agent-root")
-        running, stopped = [], []
+        wf = _workflow(harness, agent_id="11111111-1111-4111-8111-111111111111")
+        handles = []
 
-        async def _browser_manager(tool_name, tool_args, tool_call_id):
-            running.append(tool_call_id)
-            # The manager's wait: browser activity done, or a pause/kill stop request.
-            while not tool_stop_requested(wf, tool_call_id):
+        def _start_activity(*_args, **_kwargs):
+            handles.append(_BrowserActivityHandle(f"kernel-sess-{len(handles) + 1}"))
+            return handles[-1]
+
+        async def _execute_tool(tool_name, tool_args, tool_call_id):
+            manager = browser.SpawnBrowserAgentManagerV3()
+            async for event in manager.execute_tool(wf, {"goal": tool_args["goal"]}, tool_call_id):
+                await wf._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
+            return {}
+
+        wf._execute_tool = _execute_tool
+        with (
+            patch.object(browser.workflow, "in_workflow", return_value=True),
+            patch.object(browser.workflow, "start_activity", side_effect=_start_activity),
+        ):
+            await wf._execute_tool_once(
+                "spawn_agent", {**BROWSER_ARGS, "task_name": "order_breakfast_dd"}, "toolu_br"
+            )
+            for _ in range(500):
+                if handles:
+                    break
                 await asyncio.sleep(0.002)
-            stopped.append(tool_call_id)
-            # What the cancelled activity returns after pausing its provider session.
-            cancelled = {"status": "cancelled", "task_id": "task-br", "session_id": "kernel-sess-1"}
-            await wf._handle_tool_event(browser_pause_terminal_event(cancelled, "task-br"), tool_call_id, tool_name)
-            return {"message": "User paused the browser agent"}
+            assert len(handles) == 1 and not handles[0].cancelled, "the browser agent is acting"
 
-        wf._execute_tool = _browser_manager
-        await wf._execute_tool_once("spawn_agent", {**BROWSER_ARGS, "task_name": "order_breakfast_dd"}, "toolu_br")
-        assert "toolu_br" in wf._background_handles, "the browser task runs in the background"
-        for _ in range(200):
-            if running:
-                break
-            await asyncio.sleep(0.002)
-        assert running == ["toolu_br"], "the browser agent is acting when the root is paused"
+            await wf.pause()
+            await asyncio.wait_for(asyncio.gather(*wf._background_handles.values()), 5)
 
-        await wf.pause()
-        await asyncio.wait_for(asyncio.gather(*wf._background_handles.values()), 5)
+            assert handles[0].cancelled is True, "the root pause must stop the acting browser activity"
+            assert wf._background_finished["toolu_br"]["status"] == "paused", wf._background_finished
+            entries = background_tree_entries(
+                wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished
+            )
+            assert {e["path"]: e["status"] for e in entries}["/root/order_breakfast_dd"] == "paused", entries
+            terminal = [r for r in harness.tool_rows("toolu_br") if r["metadata"].get("action_type") == "task_complete"]
+            assert [r["metadata"]["session_id"] for r in terminal] == ["kernel-sess-1"], terminal
+            notes = harness.notifications()
+            assert len(notes) == 1, harness.rows
+            meta = notes[0]["metadata"]
+            assert meta["status"] == "paused" and meta["sessionId"] == "kernel-sess-1", meta
+            assert "User paused the browser agent" in notes[0]["text"], notes[0]["text"]
+            assert "Session ID: kernel-sess-1" in notes[0]["text"], notes[0]["text"]
+            assert wf._wait_wake_events[-1]["status"] == "paused", wf._wait_wake_events
 
-        assert stopped == ["toolu_br"], "the root pause must stop the running browser agent"
-        assert wf._background_finished["toolu_br"]["status"] == "paused", wf._background_finished
-        entries = background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
-        assert {e["path"]: e["status"] for e in entries}["/root/order_breakfast_dd"] == "paused", entries
-        terminal = [r for r in harness.tool_rows("toolu_br") if r["metadata"].get("action_type") == "task_complete"]
-        assert len(terminal) == 1 and terminal[0]["metadata"]["session_id"] == "kernel-sess-1", terminal
-        notes = harness.notifications()
-        assert len(notes) == 1, harness.rows
-        meta = notes[0]["metadata"]
-        assert meta["status"] == "paused" and meta["sessionId"] == "kernel-sess-1", meta
-        assert "User paused the browser agent" in notes[0]["text"], notes[0]["text"]
-        assert "Session ID: kernel-sess-1" in notes[0]["text"], notes[0]["text"]
-        assert wf._wait_wake_events[-1]["status"] == "paused", wf._wait_wake_events
-
-        # A pause handled before the launched task's first step still ends that run "paused".
-        await wf.resume()
-        await wf._execute_tool_once("spawn_agent", {**BROWSER_ARGS, "task_name": "order_breakfast_ic"}, "toolu_br2")
-        await wf.pause()
-        await asyncio.wait_for(asyncio.gather(*wf._background_handles.values()), 5)
-        assert stopped == ["toolu_br", "toolu_br2"], stopped
-        assert wf._background_finished["toolu_br2"]["status"] == "paused", wf._background_finished["toolu_br2"]
-        assert harness.notifications()[-1]["metadata"]["status"] == "paused", harness.notifications()
+            # A pause handled before the launched task's first step still ends that run "paused".
+            await wf.resume()
+            await wf._execute_tool_once(
+                "spawn_agent", {**BROWSER_ARGS, "task_name": "order_breakfast_ic"}, "toolu_br2"
+            )
+            await wf.pause()
+            await asyncio.wait_for(asyncio.gather(*wf._background_handles.values()), 5)
+            assert wf._background_finished["toolu_br2"]["status"] == "paused", wf._background_finished["toolu_br2"]
+            assert harness.notifications()[-1]["metadata"]["status"] == "paused", harness.notifications()
 
 
 async def run_all_tests():
