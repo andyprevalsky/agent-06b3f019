@@ -7,15 +7,24 @@ import { prisma } from '../../providers/database';
 
 // Cookie operations
 
-export async function getCookieCount(userId: string) {
-  return prisma.cookie.count({ where: { userId } });
+/** A Cookie row the snapshot inserted, changed or deleted. */
+export interface CookieRowChange {
+  domain: string;
+  browserProfile: string;
+  inserted: boolean;
 }
 
+/**
+ * Upsert one cookie batch. Rows whose stored content already equals the
+ * incoming cookie are skipped (no new tuple, `syncedAt` keeps the time the
+ * content last changed), mirroring the LocalStorage/IndexedDB hash guard.
+ * Returns only the rows actually inserted or changed.
+ */
 export async function bulkUpsertCookies(
   valuesClause: string,
   params: (string | number | bigint | boolean | null)[]
 ) {
-  return prisma.$executeRawUnsafe(
+  return prisma.$queryRawUnsafe<CookieRowChange[]>(
     `
     INSERT INTO "Cookie" (id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", "browserSource", "syncedAt", "creationUtc", "topFrameSiteKey", "lastAccessUtc", "hasExpires", "isPersistent", priority, "sameSite", "sourceScheme", "sourcePort", "lastUpdateUtc", "browserProfile")
     VALUES ${valuesClause}
@@ -34,59 +43,54 @@ export async function bulkUpsertCookies(
       "sourceScheme" = EXCLUDED."sourceScheme",
       "sourcePort" = EXCLUDED."sourcePort",
       "lastUpdateUtc" = EXCLUDED."lastUpdateUtc"
+    WHERE (
+      "Cookie".value, "Cookie"."expiresUtc", "Cookie"."isSecure", "Cookie"."isHttpOnly",
+      "Cookie"."creationUtc", "Cookie"."lastAccessUtc", "Cookie"."hasExpires", "Cookie"."isPersistent",
+      "Cookie".priority, "Cookie"."sameSite", "Cookie"."sourceScheme", "Cookie"."sourcePort",
+      "Cookie"."lastUpdateUtc"
+    ) IS DISTINCT FROM (
+      EXCLUDED.value, EXCLUDED."expiresUtc", EXCLUDED."isSecure", EXCLUDED."isHttpOnly",
+      EXCLUDED."creationUtc", EXCLUDED."lastAccessUtc", EXCLUDED."hasExpires", EXCLUDED."isPersistent",
+      EXCLUDED.priority, EXCLUDED."sameSite", EXCLUDED."sourceScheme", EXCLUDED."sourcePort",
+      EXCLUDED."lastUpdateUtc"
+    )
+    RETURNING domain, "browserProfile", (xmax = 0) AS inserted
   `,
     ...params
   );
 }
 
-export async function cookieBundleSnapshotChanged(params: {
+/** Create any missing CookieBundle markers for the snapshot's realms in one statement. */
+export async function insertMissingCookieBundles(params: {
   userId: string;
-  authRealm: string;
   browserSource: string;
-  browserProfile: string;
-  snapshot: Array<{ identity: string; signature: string }>;
-  incomingCount: number;
+  bundles: Array<{ authRealm: string; browserProfile: string }>;
 }) {
-  const existing = await prisma.$queryRaw<{ identity: string; signature: string }[]>`
-    SELECT
-      domain || CHR(31) || name || CHR(31) || path || CHR(31) || "topFrameSiteKey" || CHR(31) || COALESCE("browserProfile", '') AS identity,
-      value || CHR(31) || COALESCE("expiresUtc"::text, '') || CHR(31) ||
-        "isSecure"::text || CHR(31) || "isHttpOnly"::text || CHR(31) ||
-        COALESCE("creationUtc"::text, '') || CHR(31) || COALESCE("lastAccessUtc"::text, '') || CHR(31) ||
-        "hasExpires"::text || CHR(31) || "isPersistent"::text || CHR(31) ||
-        priority::text || CHR(31) || "sameSite"::text || CHR(31) ||
-        "sourceScheme"::text || CHR(31) || "sourcePort"::text || CHR(31) ||
-        COALESCE("lastUpdateUtc"::text, '') AS signature
-    FROM "Cookie"
-    WHERE "userId" = ${params.userId}
-      AND "browserSource" = ${params.browserSource}
-      AND "browserProfile" = ${params.browserProfile}
-      AND (
-        LTRIM(domain, '.') = ${params.authRealm}
-        OR LTRIM(domain, '.') LIKE ${`%.${params.authRealm}`}
-      )
+  if (params.bundles.length === 0) return [];
+  return prisma.$queryRaw<Array<{ authRealm: string; browserProfile: string }>>`
+    INSERT INTO "CookieBundle" (id, "userId", "authRealm", "browserSource", "browserProfile", "createdAt", "updatedAt")
+    SELECT gen_random_uuid(), ${params.userId}, realm, ${params.browserSource}, profile, NOW(), NOW()
+    FROM unnest(${params.bundles.map((b) => b.authRealm)}::text[], ${params.bundles.map((b) => b.browserProfile)}::text[]) AS t(realm, profile)
+    ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO NOTHING
+    RETURNING "authRealm", "browserProfile"
   `;
-  if (existing.length !== params.incomingCount) return true;
-  const existingSignatures = new Map(existing.map((row) => [row.identity, row.signature]));
-  return params.snapshot.some(
-    (cookie) => existingSignatures.get(cookie.identity) !== cookie.signature
-  );
 }
 
-export async function upsertCookieBundle(params: {
+/** Changed cookie content re-enables the realm's bundle (one statement for all changed realms). */
+export async function markCookieBundlesChanged(params: {
   userId: string;
-  authRealm: string;
   browserSource: string;
-  browserProfile: string;
-  clearDisabled: boolean;
+  bundles: Array<{ authRealm: string; browserProfile: string }>;
 }) {
+  if (params.bundles.length === 0) return 0;
   return prisma.$executeRaw`
-    INSERT INTO "CookieBundle" (id, "userId", "authRealm", "browserSource", "browserProfile", "createdAt", "updatedAt", "disabledAt", "disabledReason")
-    VALUES (gen_random_uuid(), ${params.userId}, ${params.authRealm}, ${params.browserSource}, ${params.browserProfile}, NOW(), NOW(), NULL, NULL)
-    ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET
-      "updatedAt" = NOW(),
-      "disabledAt" = CASE WHEN ${params.clearDisabled} THEN NULL ELSE "CookieBundle"."disabledAt" END,
-      "disabledReason" = CASE WHEN ${params.clearDisabled} THEN NULL ELSE "CookieBundle"."disabledReason" END
+    UPDATE "CookieBundle" bundle
+    SET "updatedAt" = NOW(), "disabledAt" = NULL, "disabledReason" = NULL
+    FROM unnest(${params.bundles.map((b) => b.authRealm)}::text[], ${params.bundles.map((b) => b.browserProfile)}::text[]) AS t(realm, profile)
+    WHERE bundle."userId" = ${params.userId}
+      AND bundle."browserSource" = ${params.browserSource}
+      AND bundle."authRealm" = t.realm
+      AND bundle."browserProfile" = t.profile
   `;
 }
 
@@ -96,7 +100,7 @@ export async function deleteCookiesMissingFromProfileSnapshot(params: {
   browserProfile: string;
   identities: string[];
 }) {
-  return prisma.$executeRaw`
+  return prisma.$queryRaw<Array<{ domain: string }>>`
     DELETE FROM "Cookie"
     WHERE "userId" = ${params.userId}
       AND "browserSource" = ${params.browserSource}
@@ -105,6 +109,7 @@ export async function deleteCookiesMissingFromProfileSnapshot(params: {
         domain || CHR(31) || name || CHR(31) || path || CHR(31) || "topFrameSiteKey" || CHR(31) || COALESCE("browserProfile", '')
         = ANY(${params.identities})
       )
+    RETURNING domain
   `;
 }
 
@@ -132,28 +137,24 @@ export async function deleteCookieBundlesForBrowserSnapshot(params: {
   });
 }
 
-export async function deleteCookieBundlesWithoutCookiesForProfile(params: {
+export async function findCookieBundlesForProfiles(params: {
   userId: string;
   browserSource: string;
-  browserProfile: string;
+  browserProfiles: string[];
 }) {
-  return prisma.$executeRaw`
-    DELETE FROM "CookieBundle" bundle
-    WHERE bundle."userId" = ${params.userId}
-      AND bundle."browserSource" = ${params.browserSource}
-      AND bundle."browserProfile" = ${params.browserProfile}
-      AND NOT EXISTS (
-        SELECT 1
-        FROM "Cookie" cookie
-        WHERE cookie."userId" = bundle."userId"
-          AND cookie."browserSource" = bundle."browserSource"
-          AND cookie."browserProfile" = bundle."browserProfile"
-          AND (
-            LTRIM(cookie.domain, '.') = bundle."authRealm"
-            OR LTRIM(cookie.domain, '.') LIKE CONCAT('%.', bundle."authRealm")
-          )
-      )
-  `;
+  return prisma.cookieBundle.findMany({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+      browserProfile: { in: params.browserProfiles },
+    },
+    select: { id: true, authRealm: true, browserProfile: true },
+  });
+}
+
+export async function deleteCookieBundlesById(userId: string, ids: string[]) {
+  if (ids.length === 0) return { count: 0 };
+  return prisma.cookieBundle.deleteMany({ where: { userId, id: { in: ids } } });
 }
 
 // LocalStorage operations

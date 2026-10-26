@@ -17,6 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 RENDERED_ROOT = ROOT / "prompt-review" / "rendered"
+# kimi-code is excluded: its goldens are verbatim copies whose prompts contain
+# real `--- ... ---` lines that SEPARATOR_LINE would strip.
 REPOS = ["ours", "claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"]
 
 # Patterns that indicate sidecar metadata accidentally emitted by renderers.

@@ -1,5 +1,5 @@
 # Tip record of gitignored reference harness clones used for golden prompt
-# snapshots under prompt-review/rendered/{openclaw,hermes-agent,codex,prime-agent}/.
+# snapshots under prompt-review/rendered/{openclaw,hermes-agent,codex,prime-agent,kimi-code}/.
 # This is NOT a checkout pin — --force re-clones current tip and updates
 # this file; re-run prompt-review renderers and commit rendered/ together.
 # Refresh with: bash scripts/sync-reference-repos.sh --force
@@ -7,3 +7,4 @@ openclaw 870c5b6b7f978520006e02dbcd95f80d56bb72a5
 hermes-agent 6ec05205a943cf813bd56c3c79d64bcf922dac67
 codex ed0cc1a4ab30e1e83f1214e7a368c55b83fd089d
 prime-agent e8951e5079ede44e73086be0ca78a78f3613eb86
+kimi-code 8dabf4a10eaec7302344ba3060b7b3c69a5a76dc

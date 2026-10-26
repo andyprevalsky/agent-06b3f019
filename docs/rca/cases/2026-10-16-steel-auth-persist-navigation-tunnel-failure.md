@@ -37,6 +37,14 @@ The fixture/provider/coverage files are byte-identical to prior passing9f/5221 s
 
 Native custody journal `auth-persist-ZdtzOf/custody.json` records cleanup-complete, zero failures, and successful release of both browsers, Kernel profile and local fixture. Processes joined, owned ports closed and prepared DB had zero other clients.
 
+### Recurrence 2026-10-26 (PR fix/scale-s5-cookie-sync-diff deploy)
+
+Backend coverage at `7825de8dd` (diff limited to the cookie upload path, no browser-provider code) failed only
+`browser-provider` with the same `FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/`
+(224/225 domains; bundle `backend-coverage-failed-20261026-175357-4111023`). The unchanged focused
+`bash scripts/run-blackbox-tests.sh browser-provider` failed identically at ~18:00Z, so the tunnel failure persisted for
+several minutes rather than being a single blip. The earlier coverage run on the same SHA (17:22Z) had passed this domain.
+
 ## Solution
 
 No causal code fix was established or applied. Root authorized one unchanged normal focused retry: owner60543 ran `cd back-end && bash scripts/run-blackbox-tests.sh browser-provider`, actual start04:30:05.260021Z, next eligible due04:40:05.260021Z. It passed in105916ms (wrapper118.8s); custody cleanup succeeded and its newly owned standalone DB was dropped before further work.
