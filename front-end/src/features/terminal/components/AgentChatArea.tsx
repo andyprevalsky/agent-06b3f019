@@ -16,8 +16,8 @@
  *
  * CODE AGENT VIEW (Rose Desktop, useOpenCodeAgent): a left-bar code-agent row
  *   of the selected (owner) agent is open → CodeAgentConversationView replaces
- *   the whole column (header + transcript/terminal + the query box as its
- *   direct channel); closing it returns to this agent's chat below.
+ *   the whole column (header + transcript over the root's blur backdrop + the
+ *   query box as its direct channel); closing it returns to this agent's chat.
  *
  * AGENTS BANNER (BackgroundAgentsBanner, attached to the top of QueryInput):
  *   0 running agents → hidden (brief "All agents finished" after the last one)
@@ -33,7 +33,7 @@
  *                   info item of the query box's rose nub.
  *
  * APP VIEW (Rose Desktop only, UI ledger rows 10/39; AppViewProvider):
- *   a code-agent chip's live preview card opens that code session's preview,
+ *   a code-agent chip's "Open app" button opens that code session's preview,
  *   which replaces the whole chat column (AppScreenHost): the app full screen,
  *   the normal query box floating over it (Popular Goals hidden) steering that
  *   session. Escape / an agent row / Home / New Super Agent close it.
@@ -74,7 +74,7 @@ import type {
 } from '../types';
 
 import { AppScreenHost } from './AppScreenHost';
-import { ChatScrollArea } from './ChatScrollArea';
+import { BlurOverlay, ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { composerCanSubmit } from './composerCanSubmit';
@@ -128,11 +128,13 @@ function ChatColumn({
 
   const codeAgent = useOpenCodeAgent(a.selectedAgentId);
   if (codeAgent !== null) {
+    const blur = <BlurOverlay selectedAgentId={a.selectedAgentId} {...drip} />;
     return (
       <CodeAgentConversationView
         key={codeAgent.taskId}
         codeAgent={codeAgent}
         readOnlyMessage={readOnlyMessage}
+        backdrop={blur}
       />
     );
   }

@@ -1,15 +1,15 @@
 /**
- * Blackbox: the trajectory live preview card (UI ledger rows 10/39) through the
- * real Terminal (Rose Desktop flag on).
+ * Blackbox: the code-agent chip's way into the app view (UI ledger rows 10/39)
+ * through the real Terminal (Rose Desktop flag on).
  *
- *   metadata.code_agent.preview_url (dev cloud session) → the code-agent chip
- *   shows a small scaled live frame, only while the chip is on screen (each
- *   frame load takes a fresh POST …/preview/handoff code); clicking it opens
- *   the full-screen app view for that code session.
- *   Off screen: no frame, no reads. No preview_url: no card. Flag off: stock chip.
+ *   metadata.code_agent.preview_url (dev cloud session) → the chip header shows a
+ *   plain "Open app" button that opens the full-screen app view for that code
+ *   session. The chip itself frames nothing (no live preview card, no handoff
+ *   mint) even on screen (Andy 2026-10-26: no preview video in the root display).
+ *   No preview_url / same-origin URL: no button. Flag off: stock chip.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 
@@ -74,40 +74,29 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe('trajectory live preview card', () => {
-  it('on screen: a scaled live frame with a fresh sign-in code; clicking opens the app view', async () => {
+describe('code-agent chip app entry', () => {
+  it('on screen: no preview frame or card in the chip; "Open app" opens the app view', async () => {
     onScreenEverywhere();
     serveAgentWithChip();
     const handoff = serveHandoff();
     servePreview('running');
-    await openAgentWithChip();
-
-    // Every frame load (including a remount of the chip) uses the newest code.
-    const cardFrame = () => screen.getByTestId('code-agent-preview-frame');
-    await waitFor(() =>
-      expect(cardFrame()).toHaveAttribute(
-        'src',
-        `${PREVIEW_URL}#rose_preview_handoff=hc-${handoff.calls()}`,
-      ),
-    );
-    expect(cardFrame()).toHaveAttribute('loading', 'lazy');
-    expect(cardFrame()).toHaveAttribute('tabindex', '-1');
-    expect(cardFrame().getAttribute('style')).toContain('scale(0.1875)');
-    expect(cardFrame().getAttribute('sandbox')).toContain('allow-same-origin');
-    // The card reads nothing else: no preview status until the view is opened.
+    const chip = await openAgentWithChip();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(within(chip).queryByTestId('code-agent-preview-frame')).not.toBeInTheDocument();
+    expect(chip.querySelector('iframe, video')).toBeNull();
+    // The chip reads nothing for the app: no mint, no preview status.
+    expect(handoff.calls()).toBe(0);
     expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(0);
 
-    const cardCodes = handoff.calls();
-    fireEvent.click(screen.getByRole('button', { name: 'Open Snake game preview' }));
+    fireEvent.click(within(chip).getByRole('button', { name: 'Open app' }));
     const view = await screen.findByTestId('app-view-screen');
     expect(within(view).getByRole('heading', { name: 'Snake game' })).toBeInTheDocument();
-    // The full-screen frame takes its own fresh code (exactly one more mint).
     expect(await within(view).findByTestId('app-view-frame')).toHaveAttribute(
       'src',
-      `${PREVIEW_URL}#rose_preview_handoff=hc-${cardCodes + 1}`,
+      `${PREVIEW_URL}#rose_preview_handoff=hc-1`,
     );
-    expect(handoff.calls()).toBe(cardCodes + 1);
-    expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(1);
+    expect(handoff.calls()).toBe(1);
   });
 
   it('a Codex session opens with its own steer label and the "Preview" title fallback', async () => {
@@ -115,7 +104,7 @@ describe('trajectory live preview card', () => {
     serveHandoff();
     servePreview('running');
     const chip = await openAgentWithChip();
-    fireEvent.click(await within(chip).findByRole('button', { name: 'Open app preview' }));
+    fireEvent.click(await within(chip).findByRole('button', { name: 'Open app' }));
     const view = await screen.findByTestId('app-view-screen');
     expect(within(view).getByRole('heading', { name: 'Preview' })).toBeInTheDocument();
     expect(
@@ -125,56 +114,28 @@ describe('trajectory live preview card', () => {
     ).toBeInTheDocument();
   });
 
-  it('off screen: the card holds no frame and makes no handoff call', async () => {
-    serveAgentWithChip();
-    const handoff = serveHandoff();
-    const chip = await openAgentWithChip();
-    expect(await within(chip).findByTestId('code-agent-preview-card')).toBeInTheDocument();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(within(chip).queryByTestId('code-agent-preview-frame')).not.toBeInTheDocument();
-    expect(handoff.calls()).toBe(0);
-  });
-
-  it.each(['PREVIEW_UNAVAILABLE', 'USER_SESSION_REQUIRED', 'CODE_TASK_NOT_FOUND'] as const)(
-    'a %s mint leaves the card empty and still opens the view',
-    async (refusal) => {
-      onScreenEverywhere();
-      serveAgentWithChip();
-      const handoff = serveHandoff(refusal);
-      servePreview('running');
-      await openAgentWithChip();
-      await screen.findByTestId('code-agent-preview-card');
-      await waitFor(() => expect(handoff.calls()).toBeGreaterThan(0));
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(screen.queryByTestId('code-agent-preview-frame')).not.toBeInTheDocument();
-      expect(screen.queryByText(/refused/)).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: 'Open Snake game preview' }));
-      expect(await screen.findByTestId('app-view-screen')).toBeInTheDocument();
-    },
-  );
-
-  it('no preview_url: no card', async () => {
+  it('no preview_url: no button', async () => {
     serveAgentWithChip({ preview_url: undefined });
     const chip = await openAgentWithChip();
-    expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(within(chip).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
   });
 
-  it('a preview_url on the app origin is never framed', async () => {
+  it('a preview_url on the app origin is never offered', async () => {
     onScreenEverywhere();
     serveAgentWithChip({ preview_url: `${window.location.origin}/` });
     const handoff = serveHandoff();
     const chip = await openAgentWithChip();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(within(chip).queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(within(chip).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
     expect(handoff.calls()).toBe(0);
   });
 
-  it('flag off: the stock chip renders and no preview card exists', () => {
+  it('flag off: the stock chip renders and no app button exists', () => {
     renderChip(
       [chipMessage({ task_id: 'task-1', preview_url: PREVIEW_URL, target: 'cloud' })],
       false,
     );
     expect(screen.queryByTestId('code-agent-chip')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('code-agent-preview-card')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
   });
 });

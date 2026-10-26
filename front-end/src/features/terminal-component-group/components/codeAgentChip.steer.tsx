@@ -172,38 +172,6 @@ export function CodeAgentTranscript({
   );
 }
 
-export type ChipTab = 'transcript' | 'terminal';
-
-export function ChipTabs({ tab, onChange }: { tab: ChipTab; onChange: (tab: ChipTab) => void }) {
-  const tabs: Array<{ id: ChipTab; label: string }> = [
-    { id: 'transcript', label: 'Transcript' },
-    { id: 'terminal', label: 'Terminal' },
-  ];
-  return (
-    <div
-      role="tablist"
-      className="flex gap-4 border-t border-border px-3.5 text-[12.5px] dark:border-white/[0.07]"
-    >
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          role="tab"
-          aria-selected={tab === t.id}
-          onClick={() => onChange(t.id)}
-          className={
-            tab === t.id
-              ? 'py-2 font-semibold text-foreground shadow-[inset_0_-2px_0_#e8507f] dark:text-[#ecece8]'
-              : `py-2 ${MUTED} hover:text-foreground dark:hover:text-[#ecece8]`
-          }
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export function CodeAgentSteerInput({
   taskId,
   toolCallId,

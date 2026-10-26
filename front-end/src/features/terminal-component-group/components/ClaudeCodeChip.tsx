@@ -17,9 +17,10 @@
  * spinning_up -> live -> (verifying) -> (completed | failed)
  *
  * ROSE DESKTOP (flag on AND a `metadata.code_agent` snapshot for this task):
- * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, Transcript/Terminal
- *               tabs, steer input, commit summary, paused state; see
- *               codeAgentChip.desktop.tsx). Fullscreen shows the same desktop state.
+ * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, transcript (no
+ *               terminal view), steer input, commit summary, paused state; see
+ *               codeAgentChip.desktop.tsx). Maximize opens the code-agent view; no
+ *               terminal and no saved-output read.
  * Flag off, or no snapshot → the stock branches below, unchanged.
  *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
@@ -46,14 +47,10 @@ export default function ClaudeCodeChip({
 }: ClaudeCodeChipProps) {
   const desktop = useDesktopCodeAgent(taskId, toolCallId);
   const desktopMeta = desktop.meta;
-  // The desktop chip keeps its Terminal tab mounted while live, so the xterm
-  // must attach even before the WS reports `live`.
-  const vm = useClaudeCodeChip(
-    taskId,
-    wsUrl,
-    forceShow || desktopMeta?.state === 'live',
-    desktopMeta?.provider ?? codeProvider,
-  );
+  // Rose Desktop shows no terminal output: it never reads the saved terminal output.
+  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow, desktopMeta?.provider ?? codeProvider, {
+    savedOutput: desktopMeta === null,
+  });
 
   if (vm.isFullscreen) {
     return (

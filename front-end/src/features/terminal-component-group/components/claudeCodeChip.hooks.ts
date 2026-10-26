@@ -271,6 +271,7 @@ export function useClaudeCodeChip(
   wsUrl: string | undefined,
   forceShow: boolean,
   initialCodeProvider: CodeProvider = 'claude',
+  { savedOutput = true }: { savedOutput?: boolean } = {},
 ): ClaudeCodeChipVM {
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
@@ -318,7 +319,8 @@ export function useClaudeCodeChip(
   useSavedOutputFetch({
     taskId,
     codeProvider: derived.codeProvider,
-    shouldFetch: isComplete && taskId !== 'pending' && derived.simulatedOutput === undefined,
+    shouldFetch:
+      savedOutput && isComplete && taskId !== 'pending' && derived.simulatedOutput === undefined,
     terminalRef,
     outputBufferRef,
     onOutputLoaded: setTerminalTranscript,

@@ -7,12 +7,19 @@
  *   person's turn        → USER message (key turn:<client_message_id> from the
  *                          optimistic echo through the direct-turn row to the
  *                          session's own record: one row, never duplicated)
- *   Rose's goal/message  → agent-to-agent row ("Rose → Codex")
+ *   Rose's initial goal  → USER message, like the goal prompt of a root agent
+ *   agent coordination: later native Rose → code-agent messages and the canonical
+ *   a2a rows of this code agent (rose-agents send, either direction)
+ *                        → agent-to-agent activity rows inside the running turn's
+ *                          WORK SLOT, else the latest slot, else the next one (a
+ *                          Rose message while none runs starts one). One row per
+ *                          [from, to, message_id] (the work groups' comms identity):
+ *                          canonical mirrors fold away. Never a top-level row.
  *   thinking / narration / tools / control  → the turn's WORK SLOT (never top-level)
  *   final answer (result text, else the last narration once the turn ends)
  *                        → final-answer row after the slot
  *   error                → error tool row outside the slot
- *   a2a rows, display media / send_message_to_user of THIS code agent
+ *   display media / send_message_to_user of THIS code agent
  *                        → as-is, outside the slot
  *
  * TURNS (key provider:task:turn): a person/Rose message while no turn runs
@@ -27,7 +34,12 @@
 
 import type { Message } from '@/lib/api/types';
 
-import { codeAgentLabel, eventTimeMs, type CodeAgentProvider } from './codeAgentContract';
+import {
+  codeAgentLabel,
+  eventTimeMs,
+  parseAgentToAgentMessage,
+  type CodeAgentProvider,
+} from './codeAgentContract';
 import type { LocalEcho } from './codeAgentLocalState';
 import {
   foldSessionTranscript,
@@ -279,6 +291,9 @@ class SessionBuilder {
   readonly out: CodeSessionEntry[] = [];
   private open: OpenTurn | null = null;
   private turnCount = 0;
+  private readonly comms = new Set<string>();
+  /** Coordination before any slot exists: joins the next slot. */
+  private pendingComms: Message[] = [];
 
   constructor(private readonly input: CodeSessionInput) {}
 
@@ -296,7 +311,24 @@ class SessionBuilder {
       tools: [],
       lastNarration: null,
     };
+    this.open.turn.activities.push(...this.pendingComms);
+    this.pendingComms = [];
     this.out.push({ kind: 'work', key, turn: this.open.turn });
+  }
+
+  /** Seen [from, to, message_id] → null (a mirror); else the row, direction from this agent. */
+  private commsRow(message: Message): Message | null {
+    const a2a = parseAgentToAgentMessage(message);
+    if (!a2a) return message;
+    // The work groups' comms identity (trajectoryWorkGroups.trajectoryActivity).
+    const key = JSON.stringify([a2a.from.id, a2a.to.id, a2a.message_id]);
+    if (this.comms.has(key)) return null;
+    this.comms.add(key);
+    const { taskId } = this.input;
+    const direction =
+      a2a.from.id === taskId ? 'sent' : a2a.to.id === taskId ? 'received' : a2a.direction;
+    const raw = message.metadata?.a2a as Record<string, unknown>;
+    return { ...message, metadata: { ...message.metadata, a2a: { ...raw, direction } } };
   }
 
   private finish(outcome: TurnOutcome, endedAt: number | null) {
@@ -305,6 +337,38 @@ class SessionBuilder {
     open.turn.status = outcome;
     open.turn.endedAt = endedAt;
     this.open = null;
+  }
+
+  /**
+   * Agent coordination as a work activity. `starts`: a native Rose message (starts a
+   * turn when none runs); else a canonical a2a row (running, else latest, else next slot).
+   */
+  coordination(message: Message, at: number | null, turnId: string | null, starts: boolean) {
+    const row = this.commsRow(message);
+    if (row === null) return;
+    const running = this.open;
+    if (running && turnId !== null && running.turnId !== null && running.turnId !== turnId) {
+      this.finish('interrupted', at);
+    }
+    if (!this.open && !starts) {
+      const latest = [...this.out].reverse().find((item) => item.kind === 'work');
+      if (latest?.kind === 'work') latest.turn.activities.push(row);
+      else this.pendingComms.push(row);
+      return;
+    }
+    if (!this.open) this.startTurn(at, turnId);
+    (this.open as OpenTurn).turn.activities.push(row);
+  }
+
+  /** Coordination that never met a slot still folds into one (never top-level). */
+  flushComms() {
+    const first = this.pendingComms[0];
+    if (first) this.startTurn(eventTimeMs(first.timestamp), null);
+  }
+
+  /** Nothing rendered yet: the session's first message is its goal prompt. */
+  get empty(): boolean {
+    return this.out.length === 0;
   }
 
   /** A person's (or Rose's) message: steer the running turn or start the next. */
@@ -482,7 +546,11 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   const builder = new SessionBuilder(input);
   for (const item of buildTimeline(input, records)) {
     if (item.kind === 'row') {
-      builder.out.push({ kind: 'message', key: item.message.message_id, message: item.message });
+      if ((item.message.metadata?.action_type as string) === 'agent_message') {
+        builder.coordination(item.message, item.at, null, false);
+      } else {
+        builder.out.push({ kind: 'message', key: item.message.message_id, message: item.message });
+      }
     } else if (item.kind === 'person') {
       const id = `code:${input.taskId}:${item.key}`;
       builder.person(personMessage(id, item.text, item.at), item.at, item.turnId);
@@ -491,11 +559,12 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
       if (entry.type === 'message' && entry.role === 'user') {
         const key = entry.clientMessageId ? `turn:${entry.clientMessageId}` : entry.key;
         const id = `code:${input.taskId}:${key}`;
-        const message =
-          entry.sender === 'agent'
-            ? roseMessage(input, id, entry)
-            : personMessage(id, entry.text, entry.at ?? item.at);
-        builder.person(message, entry.at ?? item.at, entry.turnId, entry.turnStartedAt);
+        const at = entry.at ?? item.at;
+        if (entry.sender === 'agent' && !builder.empty) {
+          builder.coordination(roseMessage(input, id, entry), at, entry.turnId, true);
+        } else {
+          builder.person(personMessage(id, entry.text, at), at, entry.turnId, entry.turnStartedAt);
+        }
       } else if (entry.type === 'metrics') {
         builder.metrics(entry);
       } else if (entry.type === 'turn') {
@@ -507,6 +576,7 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
       }
     }
   }
+  builder.flushComms();
   builder.close();
   return builder.out;
 }
