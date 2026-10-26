@@ -505,3 +505,12 @@ exact-timeout behavioral replay and indexed pairing scaling. V1's rejection is
 preserved; V2 clears only these exact runtime-context changes. No human approval
 was requested or inferred; deployment and original task completion remain
 separate outcomes. Full review artifacts are retained locally with the RCA.
+
+The reference catalog added Kimi Code during deployment. An additional check
+of commit `8dabf4a10eaec7302344ba3060b7b3c69a5a76dc` found
+`kimi-code/packages/agent-core-v2/src/agent/loop/machine/engine.ts:449`
+separates `tool.update` from `tool.done`, while
+`kimi-code/packages/agent-core-v2/src/agent/contextMemory/loopEventFold.ts:193`
+appends only a result matching a
+pending call ID. This supports the same progress/result separation. It was
+checked after the original design and does not replace the frozen V2 review.

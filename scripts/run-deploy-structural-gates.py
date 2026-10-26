@@ -117,6 +117,11 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    # Linux pidfd fixtures select a capable runtime or the offline controller image.
+    Gate(
+        "cloudbench-export-recovery",
+        ("bash", "scripts/tests/cloudbench-export-recovery.test.sh"),
+    ),
     Gate(
         "original600-portable-operator",
         ("python3", "scripts/tests/original600-portable-operator.test.py"),

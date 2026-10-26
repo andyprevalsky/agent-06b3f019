@@ -29,6 +29,7 @@ export async function runBrowserResumeCustodyCases() {
       'user-lease',
       'provider-ended',
       'incompatible',
+      'incompatible-delayed',
       'manual-follow',
       'stale-binding',
       'fresh-sequential',
@@ -37,8 +38,13 @@ export async function runBrowserResumeCustodyCases() {
       'logical-pause',
       'create-rejected',
     ]) {
+      const incompatible = scenario.startsWith('incompatible');
       const owner = `custody-${randomUUID()}`;
       const children = new Set<ChildProcess>();
+      let releaseCreate!: () => void;
+      const createHeld = new Promise<void>((resolve) => {
+        releaseCreate = resolve;
+      });
       let creates = 0,
         hydrations = 0,
         stops = 0;
@@ -89,10 +95,13 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          setTimeout(
-            () => res.end(JSON.stringify(native())),
-            scenario === 'incompatible' ? 1000 : 100
-          );
+          if (incompatible) {
+            // Keep the first operation in flight until the contender has answered.
+            await createHeld;
+            res.end(JSON.stringify(native()));
+          } else {
+            setTimeout(() => res.end(JSON.stringify(native())), 100);
+          }
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
           res.end(
@@ -170,7 +179,15 @@ export async function runBrowserResumeCustodyCases() {
             new URL('./browser-session-resume-custody.worker.ts', import.meta.url),
             [session.id],
             {
-              execArgv: ['--import', 'tsx'],
+              execArgv: [
+                '--import',
+                'tsx',
+                // Force contender startup past the old one-second response window.
+                // The existing ten-second worker deadline remains unchanged.
+                ...(scenario === 'incompatible-delayed' && !fresh
+                  ? ['--import', 'data:text/javascript,await new Promise(r => setTimeout(r, 1500))']
+                  : []),
+              ],
               stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
               env: {
                 ...process.env,
@@ -231,16 +248,35 @@ export async function runBrowserResumeCustodyCases() {
         else if (scenario === 'fresh-concurrent')
           results = await Promise.all([run(true), run(true)]);
         else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
-        else if (scenario === 'incompatible') {
-          const first = run(true);
+        else if (incompatible) {
+          let firstSettled = false;
+          const first = run(true).finally(() => {
+            firstSettled = true;
+          });
           await retryWithBackoff(async () => creates > 0, {
             maxRetries: 1000,
             initialBackoffMs: 10,
             fixedDelays: Array.from({ length: 999 }, () => 10),
             shouldRetryResult: (created) => !created,
           });
-          const second = run();
-          results = await Promise.all([first, second]);
+          let second: Outcome;
+          try {
+            second = await run();
+            assert.match(
+              second.error ?? '',
+              /Browser resume request is incompatible with the in-flight operation/
+            );
+            assert.equal(firstSettled, false, 'the create owner must still be blocked');
+            assert.equal(
+              (await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey: key } }))
+                .status,
+              'STARTED',
+              'the incompatible contender must observe active custody'
+            );
+          } finally {
+            releaseCreate();
+          }
+          results = [await first, second];
         } else {
           results = [await run()];
           if (scenario === 'user-lease') {
@@ -297,7 +333,7 @@ export async function runBrowserResumeCustodyCases() {
           );
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
-        } else if (scenario === 'incompatible' || scenario === 'manual-follow') {
+        } else if (incompatible || scenario === 'manual-follow') {
           assert(results[0]!.ok);
           assert(!results[1]!.ok);
           assert.equal(creates, 1);
@@ -333,6 +369,7 @@ export async function runBrowserResumeCustodyCases() {
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } finally {
+        releaseCreate();
         for (const child of children) child.kill('SIGTERM');
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
