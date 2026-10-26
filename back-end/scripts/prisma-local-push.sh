@@ -30,5 +30,6 @@ fi
 # Long-lived local databases can hold blank or duplicated phones that would
 # block the unique User.phone index; normalize them on this same local target.
 bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
+bash "$(dirname "${BASH_SOURCE[0]}")/backfill-local-message-record-owner.sh" "$DIRECT_URL" >/dev/null
 
 exec npx prisma db push "$@"

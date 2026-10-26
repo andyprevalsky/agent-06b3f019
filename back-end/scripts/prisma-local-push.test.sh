@@ -240,4 +240,42 @@ else
   echo "local User.phone normalization SQL: skipped (no local Postgres)"
 fi
 
+# The pre-push MessageRecord owner backfill also rewrites rows: same guard.
+BACKFILL="$(dirname "$SCRIPT")/backfill-local-message-record-owner.sh"
+if BACKFILL_LOCAL_MESSAGE_RECORD_OWNER_DRY_RUN=1 bash "$BACKFILL" "$REMOTE_URL" >/dev/null 2>&1; then
+  echo "MessageRecord owner backfill remote-target guard failed" >&2
+  exit 1
+fi
+BACKFILL_LOCAL_MESSAGE_RECORD_OWNER_DRY_RUN=1 bash "$BACKFILL" "$LOCAL_URL" | grep -Fq 'validation passed'
+
+# Real SQL on a scratch database: a pre-userId table gains the column, every row
+# gets its Person's owner, reruns are no-ops, and NOT NULL then succeeds.
+if can_create_scratch_db; then
+  OWNER_DB="message_owner_backfill_test_$$"
+  OWNER_URL="postgresql://postgres:postgres@localhost:5432/$OWNER_DB"
+  psql "$ADMIN_URL" -qc "CREATE DATABASE $OWNER_DB" >/dev/null
+  trap 'psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS ${SCRATCH_DB:-none}" >/dev/null 2>&1 || true; psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $OWNER_DB" >/dev/null 2>&1 || true' EXIT
+  bash "$BACKFILL" "$OWNER_URL" >/dev/null
+  psql "$OWNER_URL" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
+CREATE TABLE "Person" (id text PRIMARY KEY, "userId" text NOT NULL);
+CREATE TABLE "MessageRecord" (id text PRIMARY KEY, "personId" text NOT NULL REFERENCES "Person"(id));
+INSERT INTO "Person" VALUES ('p-a', 'user-a'), ('p-b', 'user-b');
+INSERT INTO "MessageRecord" VALUES ('m-1', 'p-a'), ('m-2', 'p-b'), ('m-3', 'p-a');
+SQL
+  bash "$BACKFILL" "$OWNER_URL" >/dev/null
+  bash "$BACKFILL" "$OWNER_URL" >/dev/null
+  actual=$(psql "$OWNER_URL" -Atc \
+    "SELECT string_agg(id || '=' || coalesce(\"userId\", 'NULL'), ',' ORDER BY id) FROM \"MessageRecord\"")
+  expected='m-1=user-a,m-2=user-b,m-3=user-a'
+  if [ "$actual" != "$expected" ]; then
+    echo "MessageRecord owner backfill produced $actual, expected $expected" >&2
+    exit 1
+  fi
+  psql "$OWNER_URL" -v ON_ERROR_STOP=1 -qc \
+    'ALTER TABLE "MessageRecord" ALTER COLUMN "userId" SET NOT NULL' >/dev/null
+  echo "local MessageRecord owner backfill SQL: PASS"
+else
+  echo "local MessageRecord owner backfill SQL: skipped (no local Postgres)"
+fi
+
 echo "local Prisma push safety tests: PASS"

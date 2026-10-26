@@ -1,5 +1,8 @@
 -- VALIDATE scans under SHARE UPDATE EXCLUSIVE, which does not block reads or
--- writes. SET NOT NULL then reuses the validated CHECK instead of rescanning.
+-- writes. SET NOT NULL then reuses the validated CHECK instead of rescanning,
+-- so its ACCESS EXCLUSIVE lock is brief.
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE "MessageRecord" VALIDATE CONSTRAINT "MessageRecord_personId_userId_fkey";
 ALTER TABLE "MessageRecord" VALIDATE CONSTRAINT "MessageRecord_userId_not_null";
 ALTER TABLE "MessageRecord" ALTER COLUMN "userId" SET NOT NULL;
