@@ -348,27 +348,28 @@ async function parkUploadInPreface(userId: string, browser: string, domain: stri
   const authRealm = authRealmFromCookieDomain(domain);
   let release: () => void = () => undefined;
   const released = new Promise<void>((resolve) => (release = resolve));
-  let held: () => void = () => undefined;
-  const holding = new Promise<void>((resolve) => (held = resolve));
+  let held: (holderPid: number) => void = () => undefined;
+  const holding = new Promise<number>((resolve) => (held = resolve));
   const tx = prisma.$transaction(
     async (t) => {
       await t.$executeRaw`
         INSERT INTO "CookieBundle" (id, "userId", "authRealm", "browserSource", "browserProfile", "createdAt", "updatedAt")
         VALUES (gen_random_uuid(), ${userId}, ${authRealm}, ${browser}, '', NOW(), NOW())
         ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET "updatedAt" = NOW()`;
-      held();
+      const [{ pid }] = await t.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      held(pid);
       await released;
     },
     { maxWait: 10_000, timeout: 60_000 }
   );
-  await holding;
+  const holderPid = await holding;
   return {
-    /** The upload is blocked on the held row (its pre-phase is running). */
+    /** The upload's CookieBundle write is blocked by this holder (its pre-phase is running). */
     parked: () =>
       waitUntil(`${browser} upload parked on its CookieBundle row`, async () => {
         const waiting = await prisma.$queryRaw<{ n: bigint }[]>`
           SELECT count(*) AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
+          WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))
             AND query LIKE '%INSERT INTO "CookieBundle"%'`;
         return Number(waiting[0].n) > 0;
       }),
