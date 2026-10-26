@@ -897,6 +897,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # The startup agent-config read failed, so output_schema is unknown
         # (not known-absent) until a later read succeeds.
         self._agent_config_unavailable: bool = False
+        # Getter reloads back off across turns while the read keeps failing.
+        self._agent_config_retry_count: int = 0
+        self._agent_config_retry_at: Optional[datetime] = None
         self._response_schema_applied_revision: int = 0
         self._response_schema_accepted_revision: int = 0
         self._response_schema_initialized: bool = False
@@ -3127,6 +3130,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     await asyncio.sleep(1)
                 continue
             self._agent_config_unavailable = False
+            self._agent_config_retry_count = 0
+            self._agent_config_retry_at = None
             self.output_schema = agent_config.get("response_schema")
             workflow.logger.info(
                 f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
@@ -3148,10 +3153,29 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
             if self.output_schema is None and self._agent_config_unavailable:
-                await self._load_output_schema(poll_until_present=False)
+                await self._reload_output_schema_with_backoff()
             return self.output_schema
 
         return get_schema
+
+    async def _reload_output_schema_with_backoff(self) -> None:
+        """One config read per turn; failures back off exponentially across turns.
+
+        The getter runs every main-loop turn, so retries must not stack inside a
+        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
+        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
+        correlated backend outage. workflow.now()/random() keep it deterministic.
+        """
+        now = workflow.now()
+        if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
+            return
+        await self._load_output_schema(poll_until_present=False, max_attempts=1)
+        if not self._agent_config_unavailable:
+            return
+        self._agent_config_retry_count += 1
+        base = min(2.0 ** (self._agent_config_retry_count - 1), 60.0)
+        delay = base + workflow.random().random() * 0.25 * base
+        self._agent_config_retry_at = now + timedelta(seconds=delay)
 
     def _require_current_response_schema_acceptance(self) -> None:
         """Do not certify a processed failure as acceptance of new requirements."""

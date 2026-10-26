@@ -2956,6 +2956,58 @@ async def test_workflow_verifier_schema_survives_a_failed_startup_config_fetch()
     assert untouched.await_count == 0
 
 
+async def test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff():
+    """descend-full69 MA6b: the getter runs every main-loop turn, not only at verification.
+
+    While config reads keep failing, each turn retried 5 rounds of a 10 s
+    activity plus 1 s sleeps (~100 s per turn, unbounded across turns), and in a
+    correlated backend outage every affected agent retried in lockstep. A turn
+    makes at most one read, and failures back off exponentially (bounded,
+    jittered) across turns before the next read.
+    """
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True}]}
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-outage"
+    wf.output_schema = None
+    wf._agent_config_unavailable = True
+    clock = {"now": datetime(2026, 10, 26, tzinfo=timezone.utc)}
+    fetch = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+        patch("workflows.agent_workflow.workflow.now", side_effect=lambda: clock["now"]),
+        patch("workflows.agent_workflow.workflow.random", return_value=MagicMock(random=lambda: 0.5)),
+        patch("workflows.agent_workflow.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        getter = wf._make_response_schema_getter()
+        assert await getter() is None
+        assert fetch.await_count == 1, "one read per turn"
+        assert await getter() is None
+        assert fetch.await_count == 1, "no read before the backoff deadline"
+        assert sleep.await_count == 0, "the turn never sleeps for the schema"
+
+        delays = []
+        for _ in range(9):
+            delays.append(wf._agent_config_retry_at - clock["now"])
+            clock["now"] = wf._agent_config_retry_at
+            before = fetch.await_count
+            assert await getter() is None
+            assert fetch.await_count == before + 1
+        assert all(b > a for a, b in zip(delays[:5], delays[1:6])), delays
+        assert max(delays) <= timedelta(seconds=75), "bounded backoff"
+
+        fetch.side_effect = None
+        fetch.return_value = {"response_schema": schema}
+        clock["now"] = wf._agent_config_retry_at
+        assert await getter() == schema
+        assert wf._agent_config_unavailable is False
+        assert await getter() == schema
+        assert fetch.await_count == 11
+
+
 def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
     """descend-full69 MA5: transcript fills turned list fields into markdown strings.
 
@@ -12327,6 +12379,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_verifier_schema_survives_a_failed_startup_config_fetch",
         test_workflow_verifier_schema_survives_a_failed_startup_config_fetch,
+    )
+    await r.record_async(
+        "wf_schema_reload_is_one_attempt_per_turn_with_backoff",
+        test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff,
     )
     r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",
