@@ -14087,6 +14087,253 @@ async def test_execute_action_select_dropdown_with_element():
         )
     assert out == {"success": True, "message": ""}
 
+def _with_retained_output_fixture(function):
+    import functools
+    @functools.wraps(function)
+    async def run():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("output_fixture", Path(__file__).with_name("tool_output.blackbox.py"))
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        with fixture.fake_output_storage() as objects, patch("helpers.tracing.current_agent_id", return_value="agent-a"):
+            await function(objects)
+    return run
+
+
+@_with_retained_output_fixture
+async def test_retained_browser_output_real_dispatch_and_history(objects):
+    """Read beyond both old cuts through schema, dispatcher, durable history and planner."""
+    import re
+    from browser_tools.schemas import BROWSER_TOOL_MODELS
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages
+
+    for action_name, length in (("evaluate", 65_000), ("read_browser_state", 95_000)):
+        source = "α" * length + "EXACT_TAIL_AFTER_OLD_CUTOFF"
+        dom, _, _, _ = _private_secret_action_fixture(AsyncMock(return_value={"result": {"value": source}}))
+        dom.get_browser_state = AsyncMock(return_value={"url": "https://example.test", "title": "Fixture", "dom_tree": source})
+        history = ActionHistory()
+        action = {"action": action_name, "params": {"code": "1"} if action_name == "evaluate" else {}}
+        result = await execute_action(dom, history, action, session_id="session-a", user_id="user-a")
+        turns = []
+        _append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="original")
+        messages = build_browser_use_messages(task="Read retained tail", browser_state={}, action_history=[], available_actions=[action_name, "read_tool_output"], turn_messages=turns)
+        payload = json.loads(next(m for m in messages if m.get("role") == "tool")["content"])
+        preview = payload["value" if action_name == "evaluate" else "formatted_state"]
+        assert len(preview) <= (20_000 if action_name == "evaluate" else 40_000)
+        match = re.search(r'output_id="([a-f0-9]{32})" offset=(\d+)', preview)
+        assert match, "Bounded output must contain an actual retrieval handle"
+        output_id, offset_text = match.groups()
+        recovered = preview.split("\n[Retained tool output:")[0]
+        offset = int(offset_text)
+        while offset is not None:
+            args = BROWSER_TOOL_MODELS["read_tool_output"](tool="read_tool_output", output_id=output_id, offset=offset, limit=7777).model_dump(exclude={"tool"})
+            page = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, session_id="session-a", user_id="user-a")
+            assert page["success"] is True, page
+            assert len(page["content"]) <= 7777
+            page_turns = []
+            _append_browser_turn_messages(page_turns, unified_action={"action": "read_tool_output", "params": args}, result=page, tool_call_id=f"read-{offset}")
+            page_messages = build_browser_use_messages(task="Read retained tail", browser_state={}, action_history=[], available_actions=["read_tool_output"], turn_messages=page_turns)
+            visible = json.loads(next(m for m in page_messages if m.get("role") == "tool")["content"])
+            recovered += visible["content"]
+            offset = visible["next_offset"]
+        assert recovered.endswith(source)
+        assert "EXACT_TAIL_AFTER_OLD_CUTOFF" in recovered
+        assert history.get_entries()[-1]["action"] == "read_tool_output"
+        # Canonical result/history are still complete for FE/evaluator evidence.
+        assert (result["value"] if action_name == "evaluate" else result["dom_tree"]) == source
+        first = history.get_entries()[0]["result"]
+        assert first["value"] == source if action_name == "evaluate" else first["formatted_state"].endswith(source)
+        for user, session, agent in (("other-user", "session-a", "agent-a"), ("user-a", "other-session", "agent-a"), ("user-a", "session-a", "other-agent")):
+            with patch("helpers.tracing.current_agent_id", return_value=agent):
+                denied = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, user_id=user, session_id=session)
+                assert denied["success"] is False
+        with patch("utils.tool_output.time.time", return_value=10**12):
+            expired = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, user_id="user-a", session_id="session-a")
+            assert expired["success"] is False
+
+
+@_with_retained_output_fixture
+async def test_retained_browser_output_redaction_expiry_failure(objects):
+    import re
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
+    secret = "NEVER_STORE_THIS_SECRET"
+    source = "x" * 30_000 + secret + "END"
+    dom, history, _, _ = _private_secret_action_fixture(AsyncMock(return_value={"result": {"value": source}}))
+    action = {"action": "evaluate", "params": {"code": "1"}}
+    result = await execute_action(dom, history, action, secret_refs={"password": secret}, user_id="user-a")
+    assert result["success"] is True
+    preview = _browser_tool_result_for_history("evaluate", result)["value"]
+    output_id = re.search(r'output_id="([a-f0-9]{32})"', preview).group(1)
+    assert all(secret.encode() not in content for content in objects.values())
+    args = {"action": "read_tool_output", "params": {"output_id": output_id, "offset": 29_990, "limit": 200}}
+    read = await execute_action(dom, history, args, secret_refs={"password": secret}, user_id="user-a")
+    assert read["success"] and secret not in read["content"] and "END" in read["content"]
+    with patch("utils.tool_output.time.time", return_value=10**12):
+        expired = await execute_action(dom, history, args, user_id="user-a")
+        assert expired["success"] is False
+    with patch("helpers.attachments.upload_to_storage", side_effect=OSError("fixture disk full")):
+        failed = await execute_action(dom, history, action, user_id="user-a")
+        assert failed["success"] is False and "disk full" in failed["error"]
+
+
+@_with_retained_output_fixture
+async def test_browser_retained_handle_survives_native_redaction(objects):
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _model_visible_browser_turn_messages
+    from browser_tools.secret_refs import mask_secret_values
+    from providers.rose.browser_use import build_browser_use_messages
+    refs = {"password": "abcd"}
+    handle = "abcd" * 8
+    dom, history, _, _ = _private_secret_action_fixture(AsyncMock(return_value={"result": {"value": "x" * 30_000 + "abcdTAIL"}}))
+    with patch("utils.tool_output.uuid.uuid4", return_value=SimpleNamespace(hex=handle)):
+        result = await execute_action(dom, history, {"action": "evaluate", "params": {"code": "1"}}, user_id="user-a", secret_refs=refs)
+    from browser_tools.dom_service import DOMService
+    actual_dom = DOMService("ws://fixture.invalid")
+    actual_dom.register_secret_refs(refs)
+    actual_dom.mark_secret_used()
+    # The native loop applies this real policy again after action supervision.
+    result = actual_dom.model_visible_action_result("evaluate", result)
+    turns = []
+    _append_browser_turn_messages(turns, unified_action={"action": "evaluate", "params": {"code": "1"}}, result=result, tool_call_id="eval")
+    projected = _model_visible_browser_turn_messages(turns, lambda value: mask_secret_values(value, refs), secret_values_used=True)
+    messages = build_browser_use_messages(task="Read the result", browser_state={}, action_history=[], available_actions=["read_tool_output"], turn_messages=projected)
+    payload = json.loads(next(m for m in messages if m.get("role") == "tool")["content"])
+    assert payload["retained_output"]["output_id"] == handle
+    assert f'output_id="{handle}"' in payload["value"]
+    action = {"action": "read_tool_output", "params": {"output_id": handle, "offset": 29_998, "limit": 100}}
+    call_turns = []
+    _append_browser_turn_messages(call_turns, unified_action=action, result={"success": True}, tool_call_id="read")
+    call_view = _model_visible_browser_turn_messages(call_turns, lambda value: mask_secret_values(value, refs), secret_values_used=True)
+    args = json.loads(call_view[0]["tool_calls"][0]["function"]["arguments"])
+    assert args["output_id"] == handle
+    page = await execute_action(dom, history, {"action": "read_tool_output", "params": args}, user_id="user-a", secret_refs=refs)
+    assert page["success"] is True and page["output_id"] == handle
+    assert page["content"].endswith("TAIL") and "abcd" not in page["content"]
+
+
+@_with_retained_output_fixture
+async def test_browser_fallback_and_attachment_contract(objects):
+    from domains.spawn_browser_agent_v3 import service_actions as actions
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_tool_result_for_history
+    from providers.rose.browser_use import build_browser_use_tools
+    tools = build_browser_use_tools(["read_tool_output"])
+    assert tools[0]["name"] == "read_tool_output"
+    assert set(tools[0]["input_schema"]["properties"]) == {"output_id", "offset", "limit", "query"}
+    source = {"success": False, "error": True, "rows": [{"text": "x" * 200} for _ in range(1000)], "tail": "EXACT_GENERIC_TAIL"}
+    dom, history, _, _ = _private_secret_action_fixture()
+    with patch.object(actions, "_execute_read_logs_action", AsyncMock(return_value=source)):
+        result = await actions.execute_action(dom, history, {"action": "read_logs", "params": {}}, user_id="user-a", session_id="s")
+    view = _browser_tool_result_for_history("read_logs", result)
+    assert view["success"] is False and view["error"] is True
+    assert len(json.dumps(view, ensure_ascii=False)) <= 100_000
+    assert result == source
+    output_id = view["retained_output"]["output_id"]
+    object_count = len(objects)
+    chunks, offset = [], 0
+    while offset is not None:
+        page = await actions.execute_action(dom, history, {"action": "read_tool_output", "params": {"output_id": output_id, "offset": offset}}, user_id="user-a", session_id="s")
+        assert page["success"] is True, page
+        chunks.append(page["content"])
+        offset = page["next_offset"]
+    assert json.loads("".join(chunks)) == source
+    assert len(objects) == object_count, "Reading output must not re-spill it"
+    # Screenshots remain actual attachments and never enter text persistence.
+    image = "ZmFrZQ==" * 30_000
+    with patch.object(actions, "_execute_screenshot", AsyncMock(return_value={"success": True, "screenshot": image})):
+        result = await actions.execute_action(dom, history, {"action": "screenshot", "params": {}}, user_id="user-a", session_id="s")
+    turns = []
+    _append_browser_turn_messages(turns, unified_action={"action": "screenshot"}, result=result, tool_call_id="image-call")
+    assert json.loads(turns[1]["content"])["screenshot_attached"] is True
+    assert image not in turns[1]["content"]
+    assert turns[2]["content"][1]["image_url"]["url"].endswith(image)
+    assert len(objects) == object_count
+
+
+@_with_retained_output_fixture
+async def test_evaluate_result_is_bounded_once_in_model_context(objects):
+    """CP2 repro: large script leaves flow through action, history, and prompt."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages
+
+    blob = '{"price":"$129.00","sku":"' + "x" * 63_000 + '"}'
+    large = {"url": "https://example.test/hotel", "prices": [blob] * 30}
+    values = [large, "😀" * 20_001, "z" * 20_000, "short result", {"price": 129}, [1, 2], 42, False, None]
+    for value in values:
+        dom, history, _, evaluate = _private_secret_action_fixture(
+            AsyncMock(return_value={"result": {"value": value}}),
+        )
+        action = {"action": "evaluate", "params": {"code": "(() => 1)()"}}
+        result = await execute_action(dom, history, action, user_id="user-a")
+        turns = []
+        _append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="cp2-eval")
+        messages = build_browser_use_messages(
+            task="Read hotel prices", browser_state={}, action_history=[],
+            available_actions=["evaluate"], turn_messages=turns,
+        )
+        tool = next(message for message in messages if message.get("role") == "tool")
+        payload = json.loads(tool["content"])
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        print(f"CP2 evaluate: source_chars={len(text)} tool_chars={len(tool['content'])}")
+        assert payload["success"] is True
+        assert "value" in payload
+        assert "message" not in payload or payload["message"] == "Executed JS."
+        if len(text) > 20_000:
+            assert isinstance(payload["value"], str)
+            assert len(payload["value"]) == 20_000
+            assert "read_tool_output output_id=" in payload["value"]
+            assert text.startswith(payload["value"].split("\n[Retained tool output:")[0])
+            assert len(tool["content"]) < 40_000
+        else:
+            assert payload["value"] == value
+            assert type(payload["value"]) is type(value)
+        assert history.record_action.await_args.kwargs["result"]["value"] == value
+        if value == "short result":
+            assert tool["content"].count("short result") == 1
+        evaluate.assert_awaited_once()
+
+
+@_with_retained_output_fixture
+async def test_read_browser_state_text_is_bounded_in_model_context(objects):
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages, format_browser_state_for_tool
+
+    state = {"url": "https://example.test/hotel", "title": "Hotel", "timestamp": "2026-10-20T00:00:00Z",
+             "dom_tree": "[1]<button>Reserve</button>"}
+    small = format_browser_state_for_tool(state)
+    assert small.endswith(state["dom_tree"])
+    # Exercise the exact boundary as well as a large DOM and oversized metadata.
+    padding = 40_000 - len(small)
+    for extra_dom, title in [("x" * padding, "Hotel"), ("x" * (padding + 1), "Hotel"),
+                             ("😀" * 100_000, "Hotel"), ("", "T" * 60_000)]:
+        current = {**state, "dom_tree": state["dom_tree"] + extra_dom, "title": title}
+        dom, history, _, _ = _private_secret_action_fixture()
+        dom.get_browser_state = AsyncMock(return_value=current)
+        action = {"action": "read_browser_state", "params": {}}
+        result = await execute_action(dom, history, action, user_id="user-a")
+        turns = []
+        _append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="cp2-state")
+        messages = build_browser_use_messages(
+            task="Read hotel prices", browser_state={}, action_history=[],
+            available_actions=["read_browser_state"], turn_messages=turns,
+        )
+        payload = json.loads(next(message for message in messages if message.get("role") == "tool")["content"])
+        formatted = payload["formatted_state"]
+        print(f"CP2 state: formatted_chars={len(formatted)}")
+        assert len(formatted) == 40_000
+        assert formatted.startswith("# Current Browser State\n")
+        assert "dom_tree" not in payload and "title" not in payload
+        if title == "Hotel" and len(extra_dom) == padding:
+            assert formatted == small + extra_dom
+        else:
+            assert "read_tool_output output_id=" in formatted
+        assert current["dom_tree"] == state["dom_tree"] + extra_dom
+
 
 async def test_execute_action_evaluate():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -25345,6 +25592,223 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
 
 
+async def _run_browser_activity_cancelled_mid_step(cancellation_details):
+    """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
+
+    Returns (outcome, terminal_writes, close_mock). ``terminal_writes`` are the
+    save_browser_action_message calls that close the parent's spawn toolCallId.
+    """
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from tools.base import MessageStatus
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for recipes", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+
+    async def execute_step_until_cancelled(*args, **kwargs):
+        env.cancel(cancellation_details=cancellation_details)
+        await asyncio.sleep(30)
+        raise AssertionError("the cancelled step must not complete")
+
+    save_action = AsyncMock()
+    close_mock = AsyncMock()
+    native_start = await native_browser_start_source(
+        "1970-01-01T00:00:00+00:00", tool_call_id="call_e97ab0c5c14041d49e4744b74fa8e8fc"
+    )
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_browser_control_state", AsyncMock(return_value="agent")),
+        patch("helpers.messages._send_realtime_batch", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_until_cancelled),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_action),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    outcome = None
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        try:
+            outcome = await asyncio.wait_for(
+                env.run(
+                    spawn_browser_agent_activity_v3,
+                    user_id="user-1",
+                    agent_id="agent-1",
+                    goal="Find three gluten-free Christmas starters on Sainsbury's",
+                    tool_call_id="call_e97ab0c5c14041d49e4744b74fa8e8fc",
+                    task_id="task-1",
+                    output_schema={"fields": [{"name": "result", "type": "string"}]},
+                    use_claude_mode=False,
+                    start_url="https://www.sainsburys.co.uk",
+                ),
+                timeout=20,
+            )
+        except asyncio.CancelledError:
+            outcome = "raised CancelledError"
+
+    terminal_writes = [
+        call.kwargs
+        for call in save_action.await_args_list
+        if call.kwargs.get("tool_call_id") == "call_e97ab0c5c14041d49e4744b74fa8e8fc"
+        and call.kwargs.get("status") in (MessageStatus.FINISHED, MessageStatus.ERROR)
+        and (call.kwargs.get("is_completion_message") or call.kwargs.get("action_type") == "task_complete")
+        # FE-only teardown rows never reach the model (drop_rows_never_sent_to_model).
+        and not (call.kwargs.get("extra_metadata") or {}).get("excludeFromModel")
+    ]
+    return outcome, terminal_writes, close_mock
+
+
+async def test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow():
+    """A StartToClose timeout must not post a second, "paused by user" result.
+
+    Polar batch 1 (2026-10-20, source 0a2470cc6), 10 roots incl. e2176bec: the
+    browser activity hit its 30-minute StartToClose timeout. The workflow got
+    the ActivityError and posted "Browser automation failed: activity
+    StartToClose timeout" (ERROR) on the spawn toolCallId; the planner then
+    took its next turn. Seconds later the worker's local timeout cancelled the
+    zombie attempt, and its CancelledError branch posted a model-visible
+    FINISHED "Browser Session Cancelled: Agent paused by user" on the SAME
+    toolCallId. Latest-terminal-wins dedup let that row replace the timeout
+    error, which sorted after the next ASSISTANT turn -> the benchmark aborted
+    with "[role_alternation] Consecutive assistant messages at OAI indices 3
+    and 4", and the model was told the user paused a task that actually timed
+    out. Only a cancel the workflow asked for is a pause; on any other cancel
+    the manager boundary owns the tool result (spawn_claude_code_agent already
+    makes this distinction).
+    """
+    from temporalio.activity import ActivityCancellationDetails
+
+    from benchmarks.context_validator import validate_context
+    from tools.base import MessageStatus as _MessageStatus
+
+    spawn_call = "call_e97ab0c5c14041d49e4744b74fa8e8fc"
+    next_calls = [
+        "call_f8eaf40c17274eff8fd25155ab4742b3",
+        "call_059f427ccc57451d98ac1dd7e9452ca1",
+    ]
+    outcome, terminal_writes, close_mock = await _run_browser_activity_cancelled_mid_step(
+        ActivityCancellationDetails(timed_out=True)
+    )
+
+    # Real root rows from agent e2176bec-206d-41d5-879c-5a219991f6d8 up to the
+    # benchmark's abort, followed by whatever the timed-out attempt persisted.
+    messages = [
+        _make_validator_msg("USER", "Christmas get-together plan", "2026-10-20T04:44:07.160Z"),
+        _make_validator_msg("TOOL", "Agent initialization complete.", "2026-10-20T04:44:17.234Z", {
+            "toolCallId": "tc-agent-init", "toolName": "agent_init", "toolStatus": "FINISHED",
+        }),
+        _make_validator_msg("ASSISTANT", "**Planning multi-site browsing**", "2026-10-20T04:44:27.795Z", {
+            "tool_calls": [{"tool": "spawn_agent", "tool_call_id": spawn_call, "goal": "Sainsbury's starters"}],
+        }),
+        _make_validator_msg("TOOL", "", "2026-10-20T04:44:27.879Z", {
+            "toolCallId": spawn_call, "toolName": "spawn_browser_agent", "toolStatus": "IN_PROGRESS",
+        }),
+        _make_validator_msg("TOOL", "activity StartToClose timeout", "2026-10-20T05:14:27.991Z", {
+            "toolCallId": spawn_call, "toolName": "spawn_browser_agent", "toolStatus": "ERROR",
+            "title": "Browser automation failed", "action_type": "task_complete",
+        }),
+        _make_validator_msg("ASSISTANT", "**Preparing separate site searches**", "2026-10-20T05:14:36.023Z", {
+            "tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id, "goal": "site"} for call_id in next_calls],
+        }),
+    ]
+    for offset, write in enumerate(terminal_writes):
+        messages.append(_make_validator_msg(
+            "TOOL",
+            write.get("message") or "",
+            f"2026-10-20T05:14:38.{785 + offset:03d}Z",
+            {
+                "toolCallId": write["tool_call_id"],
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED" if write["status"] == _MessageStatus.FINISHED else "ERROR",
+                "title": write.get("title"),
+                "action_type": write.get("action_type"),
+            },
+        ))
+
+    role_errors = [
+        v.message for v in validate_context(messages) if v.rule == "role_alternation" and v.severity == "error"
+    ]
+    assert not terminal_writes, (
+        "a timed-out browser attempt must leave the spawn tool result to the workflow's "
+        f"timeout error, got late terminal writes {[(w.get('title'), w.get('message')) for w in terminal_writes]}; "
+        f"validator: {role_errors}"
+    )
+    assert not role_errors, role_errors
+    assert outcome != {"status": "cancelled"} and not (
+        isinstance(outcome, dict) and outcome.get("message") == "Browser agent cancelled by user"
+    ), f"a timed-out attempt must not report a user cancellation: {outcome}"
+    close_mock.assert_awaited()
+
+
+async def test_requested_browser_cancel_still_posts_the_pause_result():
+    """Activity cancellation leaves the single pause owner at the workflow boundary."""
+    from temporalio.activity import ActivityCancellationDetails
+
+    outcome, terminal_writes, close_mock = await _run_browser_activity_cancelled_mid_step(
+        ActivityCancellationDetails(cancel_requested=True)
+    )
+    assert terminal_writes == [], terminal_writes
+    assert isinstance(outcome, dict) and outcome.get("status") == "cancelled", outcome
+    close_mock.assert_awaited()
+
+
+async def test_missing_cancellation_cause_never_invents_user_pause():
+    from temporalio.activity import ActivityCancellationDetails
+    with patch("domains.spawn_browser_agent_v3.handler.activity.cancellation_details", return_value=None):
+        outcome, writes, close = await _run_browser_activity_cancelled_mid_step(
+            ActivityCancellationDetails(cancel_requested=True))
+    assert isinstance(outcome, dict) and outcome["message"] == "Browser activity cancelled"
+    assert writes == []
+    close.assert_awaited()
+
+
+def _make_validator_msg(role, text, ts, metadata=None):
+    return {"role": role, "text": text, "timestamp": ts, "metadata": metadata or {}}
+
+
 async def test_private_browser_pause_urls_use_protected_continuity():
     """Activity results expose redacted URLs while exact continuation stays private."""
     from contextlib import ExitStack
@@ -26355,6 +26819,8 @@ async def test_manager_cancelled_browser_pause_event_is_task_complete():
             events.append(event)
 
     pause_event = events[-1]
+    assert "paused" not in pause_event.message.lower()
+    assert "userPauseRequested" not in pause_event.metadata
     assert pause_event.type == EventType.POST_MESSAGE
     assert pause_event.status == MessageStatus.ERROR
     assert pause_event.metadata == {
@@ -26366,7 +26832,7 @@ async def test_manager_cancelled_browser_pause_event_is_task_complete():
     }
 
 
-async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
+async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id(user_resumes=False, explicit_user=True):
     """TRY_CANCEL must not erase the browser task ownership key."""
     from domains.spawn_browser_agent_v3.handler import (
         SpawnBrowserAgentManagerV3,
@@ -26382,6 +26848,9 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
 
         def cancel(self):
             self.cancelled = True
+            if user_resumes:
+                workflow_instance.is_paused = False
+                workflow_instance._user_pause_active = False
 
         def __await__(self):
             async def _cancelled():
@@ -26393,6 +26862,7 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         user_id="user-1",
         agent_id="11111111-1111-4111-8111-111111111111",
         is_paused=True,
+        _user_pause_active=explicit_user,
         write_lock_enabled=True,
         system_name="Rose",
     )
@@ -26427,7 +26897,16 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "toolName": "spawn_browser_agent",
         "action_type": "task_complete",
         "task_id": expected_task_id,
+        **({"userPauseRequested": True} if explicit_user else {}),
     }
+
+
+async def test_pause_intent_survives_resume_while_cancellation_joins():
+    await test_manager_cancelled_browser_pause_preserves_preallocated_task_id(user_resumes=True)
+
+
+async def test_automatic_browser_pause_never_claims_user_intent():
+    await test_manager_cancelled_browser_pause_preserves_preallocated_task_id(explicit_user=False)
 
 
 class _SequencedActivityHandle:
@@ -31197,6 +31676,8 @@ async def _run_browser_durable_user_feedback_replay(
         "same_session_available": True,
     }
     patch_targets = [
+        # This fixture owns feedback/schema behavior, not the live worker registry.
+        patch("helpers.activity_generation_drain.read_agent_queue_pointer", AsyncMock(return_value={"task_queue": "test", "surface_hash": None})),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(side_effect=fetch_agent_snapshot)),
@@ -33614,6 +34095,12 @@ async def run_all_tests():
         "execute_action_select_dropdown_with_el",
         test_execute_action_select_dropdown_with_element,
     )
+    await r.record_async("browser_retained_handle_survives_native_redaction", test_browser_retained_handle_survives_native_redaction)
+    await r.record_async("browser_fallback_and_attachment_contract", test_browser_fallback_and_attachment_contract)
+    await r.record_async("retained_browser_output_real_dispatch_and_history", test_retained_browser_output_real_dispatch_and_history)
+    await r.record_async("retained_browser_output_redaction_expiry_failure", test_retained_browser_output_redaction_expiry_failure)
+    await r.record_async("evaluate_result_bounded_once", test_evaluate_result_is_bounded_once_in_model_context)
+    await r.record_async("read_browser_state_text_bounded", test_read_browser_state_text_is_bounded_in_model_context)
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
     r.record(
         "secret_ref_recursive_values_preserve_protocol_and_original_arguments",
@@ -34748,6 +35235,15 @@ async def run_all_tests():
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
     await r.record_async(
+        "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
+        test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow,
+    )
+    await r.record_async(
+        "requested_browser_cancel_still_posts_the_pause_result",
+        test_requested_browser_cancel_still_posts_the_pause_result,
+    )
+    await r.record_async("missing_cancellation_cause_never_invents_user_pause", test_missing_cancellation_cause_never_invents_user_pause)
+    await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,
     )
@@ -34783,6 +35279,8 @@ async def run_all_tests():
         "manager_cancelled_pause_preserves_task_id",
         test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
     )
+    await r.record_async("pause_intent_survives_resume_while_cancellation_joins", test_pause_intent_survives_resume_while_cancellation_joins)
+    await r.record_async("automatic_browser_pause_never_claims_user_intent", test_automatic_browser_pause_never_claims_user_intent)
     await r.record_async(
         "manager_restarts_drained_task_same_step_rolling_deploy",
         test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy,

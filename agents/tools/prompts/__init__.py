@@ -47,6 +47,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "list_agents": list_agents_prompt,
     "send_message_to_agent": send_message_to_agent_prompt,
     "kill_agent": kill_agent_prompt,
+    "read_tool_output": "Read omitted tool output using its opaque output_id. Pages use Unicode character offsets; follow next_offset or search with query. Only outputs from this agent/session can be read.",
     # Research
     "grep": grep_prompt,
     "inspect_code": inspect_code_prompt,

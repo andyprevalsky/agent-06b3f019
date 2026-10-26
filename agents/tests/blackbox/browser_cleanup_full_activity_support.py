@@ -164,6 +164,15 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                         body = json.loads(body)
                     if '/messages' in captured['url'] and body.get('metadata', {}).get('title') in selected_titles:
                         selected.append(captured)
+                if scenario == 'cancellation' and terminal_writer_stage == 'terminal':
+                    # The activity no longer owns a parent cancellation result.
+                    # Keep its cleanup/recording proof, but do not invent a writer
+                    # to inject a generation error into after P2 moved ownership.
+                    assert not selected and close.await_count == 1, r
+                    assert error is None and outcome['status'] == 'cancelled', r
+                    assert all((m.get('extra_metadata') or {}).get('excludeFromModel') for m in terminal), r
+                    assert len(owned_tasks) == 1 and not seal_observed, r
+                    continue
                 assert len(selected) == 1 and close.await_count == 1, r
                 if terminal_writer_status == 409:
                     assert error == 'WorkflowGenerationSealed', r

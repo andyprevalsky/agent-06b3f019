@@ -1159,11 +1159,16 @@ def build_verifier_context_messages(
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
-            if str(call_site or "") == "benchmark_declared_evaluator":
+            if str(call_site or "") == "benchmark_declared_evaluator" or (
+                metadata.get("benchmark_final_evidence") is True
+                and call_site == "semantic_output_field_recovery_judge"
+            ):
                 # Declared-evaluator evidence carries the runtime per-tool-result
                 # cap, and the caller sends any prompt that would overflow the
                 # model to the agentic judge. A second, grader-only cut here
                 # would drift from the runtime (grep-agent-trajectories-cross-surface).
+                # Final benchmark evidence for output-field recovery is likewise
+                # normalized/budgeted by its owner; do not re-truncate the card.
                 tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
@@ -2190,6 +2195,8 @@ async def build_llm_messages(
     pre_resolved_ids: Optional[set] = None,
     llm_only_user_preamble: str = "",
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
     *,
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     request_overhead: Any = None,
@@ -2199,6 +2206,7 @@ async def build_llm_messages(
         return await _render_llm_messages(
             context, system_prompt, pre_resolved_ids,
             llm_only_user_preamble, user_id, render_text, require_inline_attachments,
+            agent_id=agent_id, session_id=session_id,
         )
 
     return await admit_text_attachments(
@@ -2215,6 +2223,8 @@ async def _render_llm_messages(
     user_id: Optional[str] = None,
     render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
     require_inline_attachments: bool = False,
+    agent_id: Optional[str] = None,
+    session_id: str = "",
 ) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
@@ -2240,6 +2250,18 @@ async def _render_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    from utils.tool_output import DEFAULT_INLINE_CHARS, preview_tool_text
+
+    async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
+        suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""
+        preview = await preview_tool_text(
+            value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id,
+            limit=DEFAULT_INLINE_CHARS - len(suffix),
+        )
+        if suffix and any(label not in preview for label in attachment_labels):
+            preview += suffix
+        return preview
+
     # Pointer annotations are an LLM-boundary representation, not canonical DB
     # state. Initial workflow context already carries them, but a cross-worker
     # activity rebuilds from unannotated DB rows. Normalize a copy here so worker
@@ -2305,6 +2327,11 @@ async def _render_llm_messages(
         # Skip before downloads and admission so they consume no file budget.
         if role == "ASSISTANT" and not text.strip() and not metadata.get("tool_calls") and attachments_data:
             continue
+        attachment_labels = []
+        for att_data in attachments_data:
+            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+            if fp and not fp.is_text():
+                attachment_labels.append(build_attachment_metadata_text(fp))
 
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
         content, metadata_texts = await resolve_message_attachments(
@@ -2459,7 +2486,8 @@ async def _render_llm_messages(
                                 sections.append(build_file_pointer_label(fname))
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
-                    messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
+                    tool_content = await bounded_tool_text(f"{ts_prefix}[{label} result]: {tool_content}", attachment_labels)
+                    messages.append({"role": "user", "content": tool_content})
                     continue
 
                 tool_content = ts_prefix + text
@@ -2479,6 +2507,7 @@ async def _render_llm_messages(
                             sections.append(build_file_pointer_label(fname))
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
 
+                tool_content = await bounded_tool_text(tool_content, attachment_labels)
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "content": tool_content,
@@ -2492,6 +2521,7 @@ async def _render_llm_messages(
             full_text = f"{ts_prefix}[TOOL]: {text}"
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+            full_text = await bounded_tool_text(full_text, attachment_labels)
             if content:
                 content.insert(0, {"type": "text", "text": full_text})
                 messages.append({"role": "user", "content": content})
@@ -6597,6 +6627,7 @@ async def call_llm_activity(
                     pre_resolved_ids=pre_resolved_ids,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=pending_user_id or user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,
@@ -6619,6 +6650,7 @@ async def call_llm_activity(
                     pre_resolved_ids=None,
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
+                    agent_id=_context_key,
                     max_context_tokens=max_context_tokens,
                     request_overhead=attachment_overhead,
                     require_inline_attachments=require_inline_attachments,

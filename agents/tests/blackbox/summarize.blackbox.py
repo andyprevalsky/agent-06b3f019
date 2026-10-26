@@ -648,24 +648,25 @@ async def test_summarize_tool_result_happy():
 
 
 async def test_summarize_tool_result_llm_failure_truncates():
-    """On LLM failure, fall back to hard-cap truncation with marker."""
+    """Failure retains the full original before the existing 50k cut."""
+    import re
     from helpers import summarize
     import helpers.llm as llm_mod
+    from tools.read_tool_output import read_tool_output_activity
+    from _test_utils import retained_tool_output_fixture
 
     async def boom(*a, **kw):
         raise RuntimeError("LLM dead")
 
-    big_text = "y" * 80_000
-    with patch("temporalio.activity.heartbeat"):
-        with patch.object(llm_mod, "call_llm", boom):
-            out = await summarize.summarize_tool_result(
-                tool_name="web_fetch",
-                tool_result_text=big_text,
-                parent_objective="goal",
-            )
-    assert out["summarized"] is False
-    assert len(out["summary"]) <= summarize.TOOL_RESULT_HARD_CAP_CHARS + 200
-    assert "truncated, original_len=80000" in out["summary"]
+    big_text = "y" * 80_000 + "EXACT_TAIL"
+    with retained_tool_output_fixture(), patch("temporalio.activity.heartbeat"), patch.object(llm_mod, "call_llm", boom):
+        out = await summarize.summarize_tool_result(tool_name="web_fetch", tool_result_text=big_text,
+            parent_objective="goal", agent_id="a", claude_token_user_id="u")
+        assert out["summarized"] is False
+        assert len(out["summary"]) <= summarize.TOOL_RESULT_HARD_CAP_CHARS
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', out["summary"])[1]
+        page = await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": "EXACT_TAIL"})
+        assert page["content"] == "EXACT_TAIL"
 
 
 async def test_summarize_tool_result_below_cap_passthrough_on_failure():
@@ -979,9 +980,31 @@ async def test_summarize_and_filter_links_actually_summarizes():
     assert llm.await_args.kwargs["compute_token_lineage_key"] == "agent:lineage-1"
 
 
+async def test_web_fetch_retains_original_before_summary_prompt_cut():
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from helpers.summarize import summarize_and_filter_links
+    from tools.read_tool_output import read_tool_output_activity
+
+    raw = "web content " * 10000 + "BEYOND_SUMMARIZER_CUTOFF"
+    async def summary(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        assert "BEYOND_SUMMARIZER_CUTOFF" not in prompt
+        assert "Retained tool output:" in prompt
+        return {"content": '{"summary":"brief","files_to_download":[]}', "usage": {}}
+    with retained_tool_output_fixture(), patch("temporalio.activity.heartbeat"), patch("helpers.llm.call_llm", summary):
+        result = await summarize_and_filter_links("https://example.test", "goal", raw, [],
+            agent_id="agent", claude_token_user_id="user", session_id="explore-task")
+        assert result["summarized"] and result["summary"].startswith("brief")
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', result["summary"])[1]
+        page = await read_tool_output_activity("user", "agent", "explore-task", {"output_id": output_id, "query": "BEYOND_SUMMARIZER_CUTOFF"})
+        assert page["content"] == "BEYOND_SUMMARIZER_CUTOFF"
+
+
 async def run_all_tests():
     print("summarize blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("web_fetch_retains_before_summary_cut", test_web_fetch_retains_original_before_summary_prompt_cut)
     await r.record_async(
         "summarize_and_filter_links_actually_summarizes",
         test_summarize_and_filter_links_actually_summarizes,

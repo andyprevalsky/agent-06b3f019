@@ -25,12 +25,12 @@ import structlog
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
+from utils.browser_auth_contract import build_authentication_contract
 
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from utils.browser_auth_contract import build_authentication_contract
 
 logger = structlog.get_logger()
 
@@ -930,7 +930,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     block_note = detect_amazon_return_self_service_block(url, f"{bs.get('title') or ''}\n{dom_tree}")
     block_text = f"\nPage Signal: {block_note}\n" if block_note else ""
 
-    return (
+    text = (
         f"# Current Browser State\n\n"
         f"Timestamp: {timestamp}\n"
         f"{stats_text}Current URL: {url}{title_part}\n"
@@ -938,6 +938,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
         f"Interactive elements:\n{dom_tree}"
     )
+    return text
 
 
 def build_browser_state_message_content(

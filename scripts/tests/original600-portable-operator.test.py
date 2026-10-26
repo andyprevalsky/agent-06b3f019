@@ -204,6 +204,29 @@ class Portable(unittest.TestCase):
                 return response
         return API(),record
 
+    def test_default_e2e_keeps_a_full_window_grade_after_barrier_release(self):
+        # 2026-10-20 Polar batch 1 receipts (shard-01, fleet run 20261020-043621-26573):
+        # caller.json epoch, global-release released_at, and r003-j0054's benchmark rc after it
+        # used its whole 7200 s window. The bound e2e (epoch + 9300) TERMed the controller at
+        # 06:56:31 before it collected that grade, turning a genuine FAIL into INFRA_ERROR.
+        epoch, released, graded = 1792470090.9202385, 1792471441.4939306, 1792479345.0  # 06:55:45Z
+        evidence_release = 480  # Eval Suite target: evidence and full native release after the last execution
+        task, e2e = CLI.bound_timeouts(argparse.Namespace(task_timeout=7200), RUNNER)
+        self.assertEqual(task, 7200)
+        self.assertGreaterEqual(epoch + e2e, graded + evidence_release,
+                                'default e2e must keep a full-window copy graded, exported and released')
+        # The same budget holds for every accepted window: startup to barrier release (measured
+        # 1350.6 s) plus the window, the copy's post-window tail (measured 704 s) and release.
+        for window in (60, 480, 1200, 3300, 5400, 7200):
+            with self.subTest(window=window):
+                bound = CLI.bound_timeouts(argparse.Namespace(task_timeout=window), RUNNER)[1]
+                self.assertGreaterEqual(bound, (released - epoch) + window + (graded - released - 7200) + evidence_release)
+                self.assertGreaterEqual(bound, RUNNER['RUN_DEADLINE'])
+                # The host gate watchdog outlives the shard's TERM fence plus its cleanup.
+                self.assertGreater(RUNNER['gate_watchdog_seconds'](bound), bound)
+                with self.assertRaisesRegex(ValueError, 'e2e-timeout must cover'):
+                    RUNNER['campaign_timeouts'](window, window + RUNNER['POST_TASK_ALLOWANCE'])
+
     def test_fragment_request_retains_transport_margin(self):
         # The old receiver's unused CLI trailer made this request 6,202 bytes.
         payload={"machine": "1234567890abcd", "source_ref": "f0967aaa680b9917f62c4dc8063966e588d0aa5d",
@@ -2117,7 +2140,8 @@ class Portable(unittest.TestCase):
                                                ('rootless', names[:3] + rootless, [], 'cloud-root'),
                                                ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
-                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
+                                               ('timeout-over-2h', names, ['--task-timeout', '7201'], 'ask the user to choose a lower execution timeout'),
+                                               ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '1680'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
                 with self.subTest(label=label):
                     path = fx.inputs/('bad-'+label)
@@ -2773,7 +2797,7 @@ class Sharded(unittest.TestCase):
                     launched.append(self)
 
                 def status(self, barrier):
-                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier), infra=dict(infra_true=0))))
+                    (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status=barrier, ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
 
                 def poll(self):
                     self.polls += 1
@@ -2961,7 +2985,7 @@ class Sharded(unittest.TestCase):
                             info.size = len(raw); tar.addfile(info, io.BytesIO(raw))
                         self.code = 0
                     elif self.polls == 1:
-                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready'), infra=dict(infra_true=0))))
+                        (self.out/'shard-status.json').write_text(json.dumps(dict(state='LIVE', barrier=dict(status='ready', ready_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], failed_count=0, expected_count=len(self.config['shard']['tasks'])*self.config['shard']['runs'], survivor_count=len(self.config['shard']['tasks'])*self.config['shard']['runs']), infra=dict(infra_true=0))))
                     return self.code
 
                 def wait(self):

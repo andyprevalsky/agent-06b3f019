@@ -46,6 +46,102 @@ def test_legacy_cached_spawn_names_are_stable_and_scoped():
         live, from_fast_cache=False, cache_sequence_id="turn-1"
     ) == 0
     assert "task_name" not in live["tool_calls"][0]
+async def test_tool_output_preview_and_readback_at_model_boundary():
+    """Main builder retains complete text, structured output and attachment labels."""
+    import copy
+    import re
+    from helpers.llm import build_llm_messages
+    from _test_utils import retained_tool_output_fixture
+
+    tail = "EXACT_TAIL_SENTINEL"
+    raw = "body " * 30000 + tail
+    context = [
+        {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+            {"tool": "grep", "tool_call_id": "tc-1", "pattern": "x"}]}},
+        {"role": "TOOL", "text": raw, "metadata": {
+            "toolCallId": "tc-1", "toolName": "grep", "toolStatus": "ERROR", "error": True,
+            "structured_response": {"success": False, "error": True, "body": raw}}},
+    ]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as stored:
+        messages = await build_llm_messages(context, "SYSTEM" * 30000, user_id="u", agent_id="a")
+        assert messages[0]["content"] == "SYSTEM" * 30000
+        preview = next(m for m in messages if m["role"] == "tool")
+        assert len(preview["content"]) <= 100000
+        assert tail not in preview["content"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', preview["content"])[1]
+        from tools.read_tool_output import read_tool_output_activity
+        page = await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        assert page["success"] and tail in page["content"]
+        assert page == await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        for owner in [("other", "a"), ("u", "other")]:
+            try:
+                await read_tool_output_activity(*owner, "", {"output_id": output_id})
+            except (ValueError, KeyError):
+                pass
+            else:
+                raise AssertionError("Cross-owner read succeeded")
+        assert stored
+        # Binary attachment metadata remains attached and is retained in full.
+        attached = copy.deepcopy(context)
+        attached[1]["file_pointer"] = {
+            "id": "binary-1", "storage_path": "u/blob.bin", "original_filename": "blob.bin",
+            "mime_type": "application/octet-stream", "size_bytes": 4096,
+            "created_at": "2024-01-01T00:00:00Z"}
+        attached_messages = await build_llm_messages(attached, "system", user_id="u", agent_id="a")
+        attached_preview = next(m["content"] for m in attached_messages if m["role"] == "tool")
+        assert "blob.bin" in attached_preview
+        attached_id = re.search(r'output_id="([a-f0-9]{32})"', attached_preview)[1]
+        attachment_page = await read_tool_output_activity("u", "a", "", {"output_id": attached_id, "query": "blob.bin"})
+        assert "blob.bin" in attachment_page["content"]
+        assert attached[1]["file_pointer"]["storage_path"] == "u/blob.bin"
+        # Fail closed on persistence failure, retaining the original context.
+        failed_context = copy.deepcopy(context)
+        failed_context[1]["text"] += " new uncached content"
+        with patch("helpers.attachments.upload_to_storage", side_effect=OSError("storage failed")):
+            try:
+                await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
+            except OSError:
+                pass
+            else:
+                raise AssertionError("A lost tail was reported as a successful preview")
+        small = copy.deepcopy(context)
+        small[1]["text"] = "short result"
+        small[1]["metadata"].pop("structured_response")
+        small_messages = await build_llm_messages(small, "system", user_id="u", agent_id="a")
+        assert "short result" == next(m["content"] for m in small_messages if m["role"] == "tool")
+        read_context = [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-1", "output_id": output_id}]}},
+            {"role": "TOOL", "text": json.dumps(page), "metadata": {
+                "toolCallId": "read-1", "toolName": "read_tool_output", "toolStatus": "FINISHED"}},
+        ]
+        read_messages = await build_llm_messages(read_context, "system", user_id="u", agent_id="a")
+        assert tail in next(m["content"] for m in read_messages if m["role"] == "tool")
+    assert context == original, "Canonical evaluator/archive context must remain unchanged"
+
+
+async def test_repeated_main_tool_projection_reuses_artifact():
+    """Parent's real-builder probe: same context, same bytes and one upload."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from helpers.llm import build_llm_messages
+    from tools.read_tool_output import read_tool_output_activity
+
+    context = [{"role": "TOOL", "text": "x" * 150000 + "TAIL", "metadata": {
+        "toolName": "web_search", "toolCallId": "same-call", "toolStatus": "FINISHED"}}]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as objects:
+        first = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        bytes_before = dict(objects)
+        second = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        assert first == second, "Repeated unchanged model projection changes the handle/messages"
+        assert len(objects) == 1 and objects == bytes_before, "Repeated projection uploads duplicate artifacts"
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', str(first))[1]
+        page = await read_tool_output_activity("repeat-user", "repeat-agent", "", {"output_id": output_id, "query": "TAIL"})
+        assert page["content"] == "TAIL"
+    assert context == original
 
 
 def test_prepare_schema_for_openai():
@@ -10272,6 +10368,8 @@ async def run_all_tests():
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
     )
     r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
+    await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
+    await r.record_async("repeated_main_tool_projection", test_repeated_main_tool_projection_reuses_artifact)
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)

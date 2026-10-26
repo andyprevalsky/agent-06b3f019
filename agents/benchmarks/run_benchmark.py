@@ -4297,19 +4297,17 @@ SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
 
 def _extract_agent_structured_output(messages: List[dict], root_agent_data: Optional[dict]) -> str:
     """The agent's POPULATED output — the response schema it generated plus the completion-summary
-    structured outputs it filled in — serialized for semantic judging. Deliberately excludes
-    free-form assistant prose: the populated output schema is the contract we judge against."""
-    populated_outputs: List[dict] = []
-    for msg in messages:
-        meta = msg.get("metadata") or {}
-        summary = meta.get("completionSummary")
-        if not summary:
-            continue
-        for out in summary.get("outputs") or []:
-            populated_outputs.append({"key": out.get("key"), "value": out.get("value")})
-    response_schema = ((root_agent_data or {}).get("agent") or {}).get("response_schema")
-    blob = {"generated_response_schema": response_schema, "populated_outputs": populated_outputs}
-    return json.dumps(blob, default=str, indent=2)
+    structured outputs it filled in, with the actual final completion card. Unrelated
+    assistant prose is excluded; task-specific expected fields remain unchanged."""
+    from benchmarks.completion_evidence import completion_messages, completion_payload
+
+    cards = [completion_payload(message) for message in completion_messages(messages)]
+    populated_outputs = [output for card in cards for output in (card.get("outputs") if isinstance(card.get("outputs"), list) else []) if isinstance(output, dict)]
+    agent = (root_agent_data or {}).get("agent") or {}
+    blob = {"generated_response_schema": agent.get("response_schema"),
+            "populated_outputs": populated_outputs, "completion_cards": cards,
+            "structured_output": agent.get("structured_output", agent.get("structuredOutput"))}
+    return json.dumps(blob, default=str, ensure_ascii=False)
 
 
 async def _judge_output_recovers_expected_fields(
@@ -4346,7 +4344,8 @@ async def _judge_output_recovers_expected_fields(
                         "the output honestly reports no data for it."
                     ),
                 },
-                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
+                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob}",
+                 "metadata": {"benchmark_final_evidence": True}},
             ],
             verifier_system_prompt=verifier_prompt,
             response_schema=expected_schema,
@@ -9787,7 +9786,9 @@ def _run_grep_fixture(action: str, *args: str) -> dict:
 
 
 def _message_text(message: dict) -> str:
-    return str(message.get("text") or message.get("message") or message.get("content") or "")
+    from benchmarks.completion_evidence import completion_message_text
+
+    return completion_message_text(message)
 
 
 def _tool_messages(messages: List[dict], tool_name: str) -> List[dict]:
@@ -12568,6 +12569,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                 {
                     "role": "TOOL",
                     "text": evidence_text,
+                    "metadata": {"benchmark_final_evidence": True},
                 },
             ],
             verifier_system_prompt=verifier_prompt,
@@ -13536,21 +13538,9 @@ def _final_completion_summaries(data: dict) -> list[dict]:
 
 
 def _completion_cards_from_messages(messages: list) -> list[dict]:
-    summaries: list[dict] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        metadata = message.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        completion = metadata.get("completionSummary")
-        if (
-            metadata.get("toolName") == "completion_summary"
-            and str(metadata.get("toolStatus") or "").upper() == "FINISHED"
-            and isinstance(completion, dict)
-        ):
-            summaries.append(completion)
-    return summaries
+    from benchmarks.completion_evidence import completion_card, completion_messages
+
+    return [completion_card(message["metadata"]) for message in completion_messages(messages)]
 
 
 def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:

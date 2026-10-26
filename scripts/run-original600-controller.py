@@ -1111,7 +1111,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
                                   **guest_namespace_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
-                                CLOUDBENCH_GATE_TIMEOUT_S='7200', PYTHONDONTWRITEBYTECODE='1'))
+                                CLOUDBENCH_GATE_TIMEOUT_S=str(runner['gate_watchdog_seconds'](bound_timeouts(args, runner)[1])), PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if guest_env['override']:
@@ -1145,8 +1145,11 @@ def simultaneous_copies(args, runner):
 
 def bound_timeouts(args, runner):
     """The run's (--task-timeout, --e2e-timeout), within the runner's operator deadline."""
-    return runner['campaign_timeouts'](getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT']),
-                                       getattr(args, 'e2e_timeout', runner['RUN_DEADLINE']))
+    task_timeout = getattr(args, 'task_timeout', runner['DEFAULT_TASK_TIMEOUT'])
+    e2e_timeout = getattr(args, 'e2e_timeout', None)
+    if e2e_timeout is None:  # default: the operator deadline, widened so a full window is graded and released
+        e2e_timeout = runner['default_e2e_timeout'](task_timeout)
+    return runner['campaign_timeouts'](task_timeout, e2e_timeout)
 
 
 def original_manifest(manifest, runner):
@@ -1449,6 +1452,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                              tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'],
                              **shard_bindings(args, runner))
     directory, started_at = open_admission(parent, None, binding, runner, False)
+    task_timeout, e2e_timeout = bound_timeouts(args, runner)
+    startup_deadline = runner['startup_deadline_epoch'](started_at, task_timeout, e2e_timeout)
     token = token_from_agents(runner['read'](args.agents_env))
     os.environ['FLY_API_TOKEN'] = token
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
@@ -1463,7 +1468,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
     scorecard['print_instruction'](directory)
     try:  # nothing is allocated until coordinate() spawns the first runner
-        with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+        with runner['bounded'](min(110, admission_remaining(startup_deadline))):
             cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
         cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
                    requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
@@ -1490,7 +1495,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
             shard_objects[item['index']] = shard
-            shards.append(dict(index=item['index'], out=shard_dir / 'run', config=str(config),
+            shards.append(dict(index=item['index'], expected_count=len(shard['tasks'])*shard['runs'], out=shard_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config))))
         runner['save'](directory / 'shards.private.json', dict(plan=plan, runtime_env=env, group_run_id=group_id,
                        shards=[dict(s, out=str(s['out'])) for s in shards]))
@@ -1508,6 +1513,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         runner_path = root / 'scripts/cloudbench-original600-runner.py'
 
         def spawn(shard):
+            admission_remaining(startup_deadline)
             env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
             with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
                 return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
@@ -1522,7 +1528,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             attempt_dir.mkdir(mode=0o700)
             bound = shard_objects[index]
             slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
-            with runner['bounded'](min(110, admission_remaining(started_at + 5400))):
+            with runner['bounded'](min(110, admission_remaining(startup_deadline))):
                 fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
                                           summary=True)
             fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
@@ -1534,7 +1540,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             config = prepare(args, root, pins, runner, attempt_dir, fresh, started_at=started_at, shard=bound,
                              runtime_env=env, sibling_controller_slots=controllers - 1, scheduled_total=copies,
                              guest_env=guest_env)
-            replacement = dict(index=index, out=attempt_dir / 'run', config=str(config),
+            replacement = dict(index=index, expected_count=len(bound['tasks'])*bound['runs'], out=attempt_dir / 'run', config=str(config),
                                config_sha256=digest(runner['read'](config)))
             print(json.dumps(dict(status='SHARD_RETRY', shard=index, directory=str(attempt_dir))), flush=True)
             return replacement, spawn(replacement)
@@ -1543,6 +1549,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         raise
 
     record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
+                                       startup_deadline=startup_deadline,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
     exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]
@@ -2400,10 +2407,73 @@ def prepare_admission_request(args, root, runner):
         os.close(fd)
 
 
+def adopt_live_sharded(argv):
+    """Re-adopt a live sharded run whose operator and host runners died (service restart).
+
+    Restores the cross-shard infra stop, live shard-status/scorecard counters, barrier
+    delivery and exact supervisor TERM over the original journal, release and clocks.
+    Each shard's re-adopting runner refuses unless its recorded runner and gate are gone.
+    Cleanup after the supervisors join stays with the documented dead-owner route."""
+    parser = argparse.ArgumentParser(prog='run-original600-controller.py --adopt-live')
+    parser.add_argument('--adopt-live', type=Path, required=True, help='sharded admission directory holding coordination.json')
+    parser.add_argument('--workspace', type=Path, help="checkout whose env files resolve the Fly credential (default: the shards' original source root)")
+    parser.add_argument('--check', action='store_true', help='local binding checks only; no credential read or provider request')
+    parser.add_argument('--stop', metavar='REASON', help='explicit operator stop: every adopter TERMs its exact supervisor once (durable)')
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    root = Path(__file__).resolve().parents[1]
+    runner = runpy.run_path(str(root / 'scripts/cloudbench-original600-runner.py'))
+    coordinator = runpy.run_path(str(root / 'scripts/cloudbench-shard-coordinator.py'))
+    directory = args.adopt_live.absolute()
+    if directory.resolve(strict=True) != directory or directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o077:
+        raise ValueError('private physical sharded admission directory required')
+    journal = directory / 'coordination.json'
+    record = json.loads(runner['read'](journal))
+    shards = [dict(index=int(i), out=Path(v['out'])) for i, v in sorted((record.get('shards') or {}).items(), key=lambda kv: int(kv[0]))]
+    if not shards or any(directory not in s['out'].parents for s in shards):
+        raise ValueError('every adopted shard output must belong to this admission')
+    coordinator['adoptable'](record, shards)
+    bindings = [runner['adoption_binding'](s['out']) for s in shards]  # refuse all before spawning any
+    workspace = args.workspace
+    if workspace is None:
+        sources = {json.loads(runner['read'](s['out'].parent / 'config.private.json'))['source_root'] for s in shards}
+        if len(sources) != 1:
+            raise ValueError('pass --workspace: the shards do not share one original source root')
+        workspace = Path(sources.pop())
+    plan = dict(status='ADOPT_LIVE_PLAN', directory=str(directory), scheduled_total=record['scheduled_total'],
+                infra_early_stop=record['infra_early_stop'], release_id=record['release_id'], released_at=record.get('released_at'),
+                workspace=str(workspace), shards=[dict(index=s['index'], out=str(s['out']), machine=b['machine'],
+                                                       dead_runner_pid=b['caller']['pid']) for s, b in zip(shards, bindings)])
+    print(json.dumps(plan), flush=True)
+    if args.check:
+        return 0
+    runner_path = root / 'scripts/cloudbench-original600-runner.py'
+
+    def spawn(shard):
+        log_path = Path(shard['out']).parent / ('adopt-runner.private.log')
+        with open(log_path, 'ab') as log:
+            os.chmod(log_path, 0o600)
+            return subprocess.Popen([sys.executable, str(runner_path), '--adopt-live', str(shard['out']), '--workspace', str(workspace)],
+                                    cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    result = coordinator['adopt_coordinate'](shards, spawn, journal, stop_reason=args.stop)
+    adoption = result['adoptions'][-1]
+    settled = result.get('finished_at') is not None
+    print(json.dumps(dict(status='ADOPTED_SHARDS_JOINED' if settled else 'ADOPTION_DETACHED_RUN_STILL_ADOPTABLE',
+                          directory=str(directory), exit_codes=adoption.get('exit_codes'), lost=adoption.get('lost'),
+                          detached=adoption.get('detached'), terminate_reason=result.get('terminate_reason'),
+                          infra_true=result.get('infra_true'),
+                          next_step=('per shard: cloudbench-resume-controller-export.py --dead-owner (docs/original600-operator-cli.md)'
+                                     if settled else 'rerun --adopt-live; the campaign was not stopped'))), flush=True)
+    return 0 if settled else 1
+
+
 def main():
     if sys.argv[1:2] == ['--status']:
         status = runpy.run_path(str(Path(__file__).with_name('original600-status.py')))
         return status['main'](sys.argv[2:])
+    if sys.argv[1:2] == ['--adopt-live']:
+        return adopt_live_sharded(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', help='perform fresh capacity reads, then allocate and own one original600 controller')
     parser.add_argument('--source-ref', required=True)
@@ -2434,9 +2504,9 @@ def main():
     parser.add_argument('--tasks-per-controller', type=int, help='explicit tasks per controller (all repetitions of a task share one controller)')
     parser.add_argument('--task-count', type=int, help='run only the first N manifest tasks (diagnostic ladder)')
     parser.add_argument('--repetitions', type=int, default=3, help='copies per task (default 3)')
-    parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200)')
-    parser.add_argument('--e2e-timeout', type=int, default=5400,
-                        help='whole-campaign budget from the admission clock, seconds (default 5400, the operator deadline)')
+    parser.add_argument('--task-timeout', type=int, default=1200, help='per-task execution window, seconds (default 1200, at most 7200)')
+    parser.add_argument('--e2e-timeout', type=int, default=None,
+                        help='whole-campaign budget from the admission clock, seconds (default 5400, or the task timeout plus startup, grading and release allowances when longer)')
     parser.add_argument('--worker-headroom', type=int, default=0, help='extra native Machine slots to require for autoscaled workers')
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')

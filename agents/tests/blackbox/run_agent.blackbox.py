@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from _test_utils import (
     BlackboxResult,
     teardown_mock,
+    retained_tool_output_fixture,
 )
 
 
@@ -2547,7 +2548,7 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     """
     from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 
-    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000  # well above the hard cap
+    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000 + "EXACT_TAIL_SENTINEL"  # well above the hard cap
     assert len(huge) > TOOL_RESULT_HARD_CAP_CHARS
 
     tool_calls = [{"tool": "grep", "pattern": "amazon"}]
@@ -2556,15 +2557,36 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
         return {"success": True, "message": huge}
 
-    result, _, _ = await _run_single_iteration(
-        tool_calls,
-        detected_tools,
-        skip_verification=True,
-        execute_tool_override=mock_execute_tool,
-        max_iterations=1,
-        is_inside_temporal_activity=True,
-        poll_messages_override=None,
-    )
+    with retained_tool_output_fixture():
+        result, _, _ = await _run_single_iteration(
+            tool_calls,
+            detected_tools,
+            skip_verification=True,
+            execute_tool_override=mock_execute_tool,
+            max_iterations=1,
+            is_inside_temporal_activity=True,
+            poll_messages_override=None,
+        )
+        import re
+        from tools.read_tool_output import read_tool_output_activity
+        text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "EXACT_TAIL_SENTINEL"})
+        assert page["content"] == "EXACT_TAIL_SENTINEL"
+        assert [m for m in result["context"] if m["role"] == "TOOL"][-1]["metadata"]["toolStatus"] == "FINISHED"
+
+        async def failed_tool(*args):
+            return {"success": False, "error": True, "message": huge}
+
+        failed, _, _ = await _run_single_iteration(
+            tool_calls, detected_tools, execute_tool_override=failed_tool,
+            max_iterations=1, is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+        error_row = [m for m in failed["context"] if m["role"] == "TOOL"][-1]
+        assert error_row["metadata"]["toolStatus"] == "ERROR"
+        assert error_row["metadata"]["error"] is True
+        error_id = re.search(r'output_id="([a-f0-9]{32})"', error_row["text"])[1]
+        assert (await read_tool_output_activity("user-test", "agent-test", "", {"output_id": error_id, "query": "EXACT_TAIL_SENTINEL"}))["content"] == "EXACT_TAIL_SENTINEL"
 
     tool_msgs = [m for m in result.get("context") or [] if m.get("role") == "TOOL"]
     assert tool_msgs, "expected the grep tool result in context"
@@ -2572,7 +2594,37 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
         f"uncapped tool result entered context ({len(text)} chars); hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
     )
-    assert "truncated, original_len=" in text
+    assert "Retained tool output:" in text
+
+
+async def test_workflow_output_retention_uses_activity():
+    """Large workflow receipts perform storage I/O inside a registered activity."""
+    import re
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
+
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("failure " * 10000 + "WORKFLOW_TAIL")
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+        text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
+        page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "WORKFLOW_TAIL"})
+        assert page["content"] == "WORKFLOW_TAIL"
+        assert "preview_tool_output_activity" in calls
 
 
 async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
@@ -2598,7 +2650,7 @@ async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
         context = kwargs["context"]
         return [context[0], *context[-4:]], True
 
-    with patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
+    with retained_tool_output_fixture(), patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
         result, _, _ = await _run_single_iteration(
             tool_calls,
             detected_tools,
@@ -3942,6 +3994,7 @@ async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
+    await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "poll_inbox_rows_reach_next_llm_call_once",

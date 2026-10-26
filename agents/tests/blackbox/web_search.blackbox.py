@@ -44,6 +44,7 @@ def _setup():
 
 def test_types_contracts_are_importable():
     """Public web-search result contracts stay importable for tool callers."""
+    from typing import Any, NotRequired
     from tools.web_search.types import ExecuteActivityCallable, SearchResult
 
     assert ExecuteActivityCallable is not None
@@ -52,6 +53,8 @@ def test_types_contracts_are_importable():
         "sources": list[str],
         "query": str,
         "provider": str,
+        "_received_exa_results": NotRequired[list[dict[str, Any]]],
+        "_excerpt_limit": NotRequired[int],
     }
 
 
@@ -174,7 +177,8 @@ async def test_manager_passes_cache_write_agent_without_changing_world_model_arg
             world_model_mode=mode,
         )
         search = next(c for c in calls if c["activity"] == "web_search_activity")
-        assert search["kwargs"]["args"][-3:] == expected, mode
+        assert search["kwargs"]["args"][5:8] == expected, mode
+        assert search["kwargs"]["args"][8:] == ["user-1", ""], mode
 
 
 async def test_manager_execute_tool_happy():
@@ -516,6 +520,122 @@ async def test_parallel_rate_limit_recovers_after_retry_after():
     assert out["usage"]["service"] == [{"cost_cents": 0.1, "provider": "Parallel AI Search"}]
 
 
+async def test_received_exa_tail_reaches_main_and_explore_reader():
+    """Locally received Exa highlights survive the excerpt cap in both dispatch paths."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.llm import build_llm_messages
+    from tools.read_tool_output import read_tool_output_activity
+    from tools.web_search.handler import web_search
+
+    original = "received 😀 " * 1100 + "EXA_RECEIVED_TAIL"
+    request_bodies = []
+    async def post(url, *, headers, json, timeout):
+        assert url == "https://api.exa.ai/search"
+        request_bodies.append(copy.deepcopy(json))
+        return httpx.Response(200, json={"results": [{"title": "Received", "url": "https://example.test/source", "highlights": [original]}]}, request=httpx.Request("POST", url))
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+
+    async def activity(fn, args=None, **kwargs):
+        if fn.__name__ == "web_search_activity":
+            return await fn(*args)
+        assert fn.__name__ == "post_agent_message", fn
+        return None
+
+    async def check_result(text, session):
+        assert "EXA_RECEIVED_TAIL" not in text
+        assert len(text) < 2600, len(text)
+        match = re.search(r'output_id="([a-f0-9]{32})"', text)
+        assert match, "Exa discarded the received highlight tail without a reader handle"
+        page = await read_tool_output_activity("user", "agent", session, {"output_id": match[1], "query": "EXA_RECEIVED_TAIL"})
+        assert page["content"] == "EXA_RECEIVED_TAIL"
+        context = [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [{"tool": "read_tool_output", "tool_call_id": "read", "output_id": match[1]}]}},
+            {"role": "TOOL", "text": page["content"], "metadata": {"toolCallId": "read", "toolName": "read_tool_output", "toolStatus": "FINISHED"}},
+        ]
+        messages = await build_llm_messages(context, "system", user_id="user", agent_id="agent", session_id=session)
+        assert "EXA_RECEIVED_TAIL" in messages[-1]["content"]
+        return match[1]
+
+    async def explore_loop(**kwargs):
+        execute = kwargs["execute_tool"]
+        result = await execute("web_search", {"query": "received highlights"}, "explore-search")
+        output_id = await check_result(result["message"], "task")
+        page = await execute("read_tool_output", {"output_id": output_id, "query": "EXA_RECEIVED_TAIL"}, "explore-read")
+        assert "EXA_RECEIVED_TAIL" in page["message"]
+        return {"status": "completed", "final_response": "Tail recovered"}
+
+    with (retained_tool_output_fixture(), patch("temporalio.activity.heartbeat"),
+          patch("tools.web_search.repo.get_http_client", return_value=client),
+          patch("tools.web_search.service.load_config", return_value=_provider_config(parallel_key="", exa_key="fixture-exa"))):
+        main = await web_search(activity, {"query": "received highlights"}, "main-search", "agent", "user")
+        assert "_received_exa_results" not in main["result"]
+        await check_result(main["result"]["answer"], "")
+        with patch("loop.run_agent.run_agent", explore_loop), patch("loop.activity_helper.call_temporal_activity_from_activity", activity):
+            result = await spawn_explore_agent_activity(agent_id="agent", user_id="user", task_id="task", goal="received highlights", model="fixture", attachment_texts=["fixture"])
+            assert result["status"] == "completed"
+    assert len(request_bodies) == 2
+    assert all(body == {"query": "received highlights", "type": "auto", "numResults": 5, "contents": {"highlights": True}} for body in request_bodies)
+
+
+async def test_cached_exa_original_is_projected_in_consumer_scope():
+    """Cache redacted received text, then create handles in each caller's scope."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from browser_tools.secret_refs import secret_logging_context
+    from tools.read_tool_output import read_tool_output_activity
+    from tools.web_search.handler import web_search_activity
+
+    original = "source " * 1000 + " SECRET_EXA_VALUE EXA_CACHE_TAIL"
+    client = MagicMock()
+    client.post = AsyncMock(return_value=httpx.Response(200, json={"results": [
+        {"title": "source", "url": "https://example.test", "highlights": [original]}]},
+        request=httpx.Request("POST", "https://api.exa.ai/search")))
+    cached = {}
+    async def save(key, kind, goal_hash, result, **kwargs):
+        cached.update(copy.deepcopy(result))
+    with (retained_tool_output_fixture(), secret_logging_context({"password": "SECRET_EXA_VALUE"}),
+          patch("temporalio.activity.heartbeat"), patch("tools.web_search.repo.get_http_client", return_value=client),
+          patch("tools.web_search.service.load_config", return_value=_provider_config(parallel_key="", exa_key="fixture")),
+          patch("tools.web_search.handler.fast_cache_client.cache_write_allowed_for_agent", new=AsyncMock(return_value=True)),
+          patch("tools.web_search.handler.fast_cache_client.cache_set", new=save)):
+        first = await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_write_enabled=True,
+            demo_cache_agent_id="producer", user_id="producer-user")
+        assert "EXA_CACHE_TAIL" in str(cached)
+        assert "SECRET_EXA_VALUE" not in str(cached)
+        assert "output_id=" not in str(cached)
+        cached_before = copy.deepcopy(cached)
+        with patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)):
+            second = await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_enabled=True,
+                demo_cache_agent_id="consumer", user_id="consumer-user", session_id="task")
+        assert cached == cached_before
+        with (patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)),
+              patch("helpers.attachments.upload_to_storage", new=AsyncMock(side_effect=OSError("retention unavailable")))):
+            try:
+                await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_enabled=True,
+                    demo_cache_agent_id="failed-consumer", user_id="failed-user", session_id="task")
+            except OSError:
+                pass
+            else:
+                raise AssertionError("Storage failure returned a clipped success")
+        assert client.post.await_count == 1
+        first_id = re.search(r'output_id="([a-f0-9]{32})"', first["answer"])[1]
+        second_id = re.search(r'output_id="([a-f0-9]{32})"', second["answer"])[1]
+        assert first_id != second_id
+        page = await read_tool_output_activity("consumer-user", "consumer", "task", {"output_id": second_id, "query": "EXA_CACHE_TAIL"})
+        assert page["content"] == "EXA_CACHE_TAIL"
+        try:
+            await read_tool_output_activity("consumer-user", "consumer", "task", {"output_id": first_id})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Consumer reused producer's retained-output authority")
+
+
 async def test_rate_limited_parallel_fails_over_to_configured_exa():
     """With Parallel rate-limited, the configured Exa key answers before any keyless scrape."""
     calls: dict[str, list[dict]] = {}
@@ -729,6 +849,8 @@ async def test_hanging_provider_and_fallback_raise_the_typed_outage_before_the_a
 async def run_all_tests():
     print("web-search blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("cached_exa_consumer_scope", test_cached_exa_original_is_projected_in_consumer_scope)
+    await r.record_async("received_exa_tail_main_explore", test_received_exa_tail_reaches_main_and_explore_reader)
     r.record("types_contracts", test_types_contracts_are_importable)
     await r.record_async("happy_path", test_web_search_happy_path)
     await r.record_async("boundary", test_web_search_boundary)
