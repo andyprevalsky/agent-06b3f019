@@ -75,14 +75,29 @@ function startedAt(entry: BackgroundTaskEntry, fallback: Date): Date {
   return Number.isNaN(date.getTime()) ? fallback : date;
 }
 
-/** Leaf nodes for the listed owners' tasks (running first, then finished), in owner order. */
-export function backgroundTaskNodes(owners: BackgroundTaskOwner[]): BackgroundTaskNode[] {
+/** The task's address: its path, or `<owner id>/<task id>` when the owner has no path. */
+function taskAddress(owner: { id: string }, entry: BackgroundTaskEntry): string {
+  return entry.path ?? `${owner.id}/${entry.address}`;
+}
+
+/**
+ * Leaf nodes for the listed owners' tasks (running first, then finished), in owner order.
+ * `keep` (search) filters each owner's tasks BEFORE the per-owner/response caps, so a
+ * matching task is never dropped because unrelated tasks filled the cap.
+ */
+export function backgroundTaskNodes(
+  owners: BackgroundTaskOwner[],
+  keep: (address: string, entry: BackgroundTaskEntry) => boolean = () => true
+): BackgroundTaskNode[] {
   const nodes: BackgroundTaskNode[] = [];
   for (const owner of owners) {
-    for (const entry of listedBackgroundTasks(owner).slice(0, PER_OWNER_LIMIT)) {
+    const kept = listedBackgroundTasks(owner).filter((entry) =>
+      keep(taskAddress(owner, entry), entry)
+    );
+    for (const entry of kept.slice(0, PER_OWNER_LIMIT)) {
       if (nodes.length >= TOTAL_LIMIT) return nodes;
       nodes.push({
-        agent_id: entry.path ?? `${owner.id}/${entry.address}`,
+        agent_id: taskAddress(owner, entry),
         path: entry.path ?? null,
         task_id: entry.address,
         parent_agent_id: owner.id,

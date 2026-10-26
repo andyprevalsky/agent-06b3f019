@@ -2,20 +2,18 @@
  * Agent-tree search (GET /api/agents/:id/tree with q / path_prefix): goal and
  * path matches in the caller's tree, shallowest first, with breadcrumbs.
  *
- * Search covers what the node view lists: agent rows (indexed goal/path query,
- * LIMITed) and the background tasks (explore/browser/code) of every agent the
- * search loaded — the matches, their ancestors, the caller path and the owner
- * a prefix resolves to. A filter must never hide an item the browse view
- * shows (2026-10-26-list-agents-search-omitted-background-tasks).
+ * Search covers what the node view lists: agent rows whose goal/path match and
+ * background tasks (explore/browser/code) whose goal/path match, found by the
+ * same busId-scoped, LIMITed tree read. Tasks are filtered before the
+ * per-owner/response caps apply, so a filter never hides an item the browse
+ * view shows (2026-10-26-list-agents-search-omitted-background-tasks).
  *
- * 10k agents: one indexed tree query, one address resolve and at most one
- * primary-key read beyond the ancestor walk; tasks are read from rows already
- * loaded (backgroundTaskNodes caps them per owner and per response).
+ * 10k agents: two indexed tree queries (agent goals, task entries) each
+ * LIMITed, plus the primary-key ancestor walk; nothing reads beyond one tree.
  */
 
 import { TERMINAL_STATUSES } from './statusBroadcastWorkflowId';
-import { ROOT_TASK_PATH, rootOf } from './agentTaskPath';
-import { resolveTreeAddress } from './agentAddressResolver';
+import { ROOT_TASK_PATH } from './agentTaskPath';
 import { backgroundTaskNodes } from './agentTreeBackgroundTasks';
 import { loadAncestors, pathEntry, pathTo, type Row, type TreePathEntry } from './agentTreePaths';
 import type { AgentTreeQuery } from './types';
@@ -52,17 +50,11 @@ export async function searchMatches(
     query.path_prefix === undefined || query.path_prefix === ROOT_TASK_PATH
       ? null
       : query.path_prefix.replace(/\/+$/, '');
-  const rows = await repo.searchTreeByGoal(rootAgentId, caller.userId, tokens, query.limit, prefix);
-  // A prefix naming a background task (or an agent above the matches) loads its owner,
-  // whose task list is then searched with the other loaded agents'.
-  const prefixOwner = prefix === null ? null : await resolveTreeAddress(caller, prefix);
-  const owners = [...rows];
-  if (prefixOwner !== null && !('error' in prefixOwner)) {
-    const ownerRow =
-      known.get(prefixOwner.agent_id) ?? (await repo.findTreeNodesByIds([prefixOwner.agent_id]))[0];
-    if (ownerRow !== undefined) owners.push(ownerRow);
-  }
-  await loadAncestors(owners, known);
+  const [rows, taskOwnerRows] = await Promise.all([
+    repo.searchTreeByGoal(rootAgentId, caller.userId, tokens, query.limit, prefix),
+    repo.searchTreeTaskOwners(rootAgentId, caller.userId, tokens, query.limit, prefix),
+  ]);
+  await loadAncestors([...rows, ...taskOwnerRows], known);
   const counts = await repo.countDirectChildren(
     rows.map((row) => row.id),
     caller.userId,
@@ -77,25 +69,22 @@ export async function searchMatches(
     child_count: counts.get(row.id)?.total ?? 0,
     active_child_count: counts.get(row.id)?.active ?? 0,
   }));
-  const taskOwners = [...known.values()].filter(
-    (row) => row.deletedAt === null && row.userId === caller.userId && rootOf(row) === rootAgentId
-  );
-  const taskMatches: TreeMatch[] = backgroundTaskNodes(taskOwners)
-    .filter((task) => matchesSearch(task.agent_id, task.goal, prefix, tokens))
-    .map((task) => {
-      const owner = known.get(task.parent_agent_id);
-      return {
-        agent_id: task.agent_id,
-        path: task.path,
-        goal: task.goal,
-        status: task.status,
-        depth: task.depth,
-        type: task.type,
-        ancestor_ids: owner === undefined ? [] : pathTo(owner, known).map((row) => row.id),
-        child_count: 0,
-        active_child_count: 0,
-      };
-    });
+  const taskMatches: TreeMatch[] = backgroundTaskNodes(taskOwnerRows, (address, entry) =>
+    matchesSearch(address, entry.goal, prefix, tokens)
+  ).map((task) => {
+    const owner = known.get(task.parent_agent_id);
+    return {
+      agent_id: task.agent_id,
+      path: task.path,
+      goal: task.goal,
+      status: task.status,
+      depth: task.depth,
+      type: task.type,
+      ancestor_ids: owner === undefined ? [] : pathTo(owner, known).map((row) => row.id),
+      child_count: 0,
+      active_child_count: 0,
+    };
+  });
   // Shallowest first; within a depth, agents before tasks (stable sort).
   return [...agentMatches, ...taskMatches].sort((a, b) => a.depth - b.depth).slice(0, query.limit);
 }

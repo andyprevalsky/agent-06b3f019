@@ -377,6 +377,62 @@ test('GET /:id/tree — paths, path nodes and background tasks (running and fini
   }
 });
 
+test('GET /:id/tree — search filters tasks before the per-owner cap and finds tasks of unloaded owners', async () => {
+  const fx = await createFixture('addr-search-cap');
+  const { ids } = fx;
+  // The owner array: running first, then finished oldest-first. With 12 entries
+  // the newest finished task sits past the 10-per-owner listing cap.
+  const finished = Array.from({ length: 11 }, (_, index) => ({
+    ...SCAN_TASK,
+    address: `bg_done_${index}`,
+    task_name: `done_${index}`,
+    path: `/root/outreach/done_${index}`,
+    goal: index === 10 ? 'Read the member number page' : `Finished check ${index}`,
+    status: 'completed',
+  }));
+  try {
+    await prisma.agent.update({
+      where: { id: ids.outreach },
+      data: { backgroundTasks: [SCAN_TASK, ...finished] },
+    });
+    await prisma.agent.update({
+      where: { id: ids.aKid },
+      data: {
+        backgroundTasks: [
+          {
+            ...SCAN_TASK,
+            address: 'bg_z',
+            task_name: 'zebra',
+            path: '/root/outreach/draft_a/lookup/zebra',
+            goal: 'Find zebra permits',
+          },
+        ],
+      },
+    });
+    const exact = await getView(fx.userId, ids.draftB, { path_prefix: '/root/outreach/done_10' });
+    assert(
+      same(idsOf(exact.matches ?? []), ['/root/outreach/done_10']),
+      `path_prefix finds the newest finished task past the cap: ${JSON.stringify(exact.matches)}`
+    );
+    const byGoal = await getView(fx.userId, ids.draftB, { q: 'member NUMBER' });
+    assert(
+      same(idsOf(byGoal.matches ?? []), ['/root/outreach/done_10']),
+      `query finds the task past the cap: ${JSON.stringify(byGoal.matches)}`
+    );
+    // aKid is in another branch, its own goal does not match, and it is not on the caller path.
+    const unloaded = await getView(fx.userId, ids.rKid, { q: 'zebra' });
+    const [zebra] = unloaded.matches ?? [];
+    assert(
+      unloaded.matches?.length === 1 &&
+        zebra.agent_id === '/root/outreach/draft_a/lookup/zebra' &&
+        same(zebra.ancestor_ids, [ids.root, ids.outreach, ids.draftA, ids.aKid]),
+      `query finds a task whose owner the search did not otherwise load: ${JSON.stringify(unloaded.matches)}`
+    );
+  } finally {
+    await deleteFixture(fx);
+  }
+});
+
 interface TreeNodeLike {
   agent_id: string;
   parent_agent_id: string | null;
