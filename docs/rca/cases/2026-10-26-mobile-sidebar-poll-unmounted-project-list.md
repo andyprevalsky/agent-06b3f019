@@ -20,8 +20,10 @@ tags:
   - flaky-gate
   - scale-100-seats
 sources:
-  - Production Semantic Frontend Gate runs 40385944860 (7c173ec12), 40399452972 (7395d9110)
-  - lane S11 of the 100-seat readiness audit (follow-up #1 from S5)
+  - commit 7c173ec12 (Production Semantic Frontend Gate run 40385944860 failed)
+  - commit 7395d9110 (Production Semantic Frontend Gate run 40399452972 failed)
+  - commit 614800d4e (introduced the mobile project list spinner condition)
+  - task S11 of the 100-seat readiness audit (follow-up #1 from S5)
 repro: front-end/src/tests/blackbox/projects-sidebar-flow.blackbox.tsx
 status: fixed
 ---
@@ -64,7 +66,7 @@ throttle): `REMOVED DIV[rose-agent-groups] from DIV[rose-mobile-agent-list]`
 appeared immediately after the second input gained focus, followed by the
 input's `focusout`.
 
-## Fix
+## Solution
 
 `RoseMobileAgentList` shows the spinner only when there is nothing to show yet:
 
@@ -96,8 +98,19 @@ The fix removes work: a poll no longer tears down and rebuilds the mobile
 project/agent subtree. It adds one boolean of state per mounted list, and no
 requests, subscriptions or per-agent cost.
 
-## Problem class
+## Human feedback
 
-A loading flag that means "a request is in flight" was used as "there is
+None. The parent assigned the red prod gate as the critical path for sibling
+lane deploys and asked for the product regression to be fixed, not the test.
+
+## Reusable lesson
+
+- A "green at SHA X, red at SHA Y" gate signal does not imply a commit
+  regression. Diff the shipped surface between X and Y first; here
+  `front-end/src` was identical, so the failure had to be nondeterministic.
+- To reproduce a CI-only UI timing failure, run the unchanged spec with CDP
+  `Emulation.setCPUThrottlingRate` and add focus and DOM-removal listeners.
+  A removal of the whole container identifies a remount.
+- A loading flag that means "a request is in flight" was used as "there is
 nothing to render". Polled data must keep showing the last good state, so an
 in-flight refresh must not unmount interactive UI.
