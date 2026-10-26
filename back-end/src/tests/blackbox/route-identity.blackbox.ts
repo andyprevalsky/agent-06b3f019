@@ -207,11 +207,11 @@ async function runTests(): Promise<boolean> {
         const goal = `route identity proxy ${randomUUID()}`;
         const proxied = (url: string) => new URL(url).pathname;
         const anthropic = proxied(
-          buildFastModeAnthropicEnv(goal, true, 'https://proxy.invalid/anthropic-proxy')
+          buildFastModeAnthropicEnv(goal, true, 'https://proxy.invalid/anthropic-proxy', false)
             .ANTHROPIC_BASE_URL
         );
         const codex = proxied(
-          buildFastModeCodexEnv(goal, true, 'https://proxy.invalid/codex-proxy')
+          buildFastModeCodexEnv(goal, true, 'https://proxy.invalid/codex-proxy', false)
             .CODEX_FAST_MODE_PROXY_URL
         );
         const bare = (path: string) => path.replace(/,[0-9a-f]+(?=\/|$)/, '');

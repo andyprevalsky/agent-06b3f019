@@ -8,7 +8,11 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from './crypto';
-import { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled } from './demoCacheAccountPolicy';
+import {
+  demoCacheWriteCapability,
+  shouldWriteDemoCacheForUser,
+  resolveFastModeWriteEnabled,
+} from './demoCacheAccountPolicy';
 
 export { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled };
 
@@ -151,13 +155,25 @@ export function verifyProxyTraceParam(
   return given.length === expected.length && timingSafeEqual(given, expected) ? traceSegment : null;
 }
 
-function proxyPath(goal: string, readEnabled: boolean, options?: CodeAgentTraceOptions): string {
+function proxyPath(
+  goal: string,
+  readEnabled: boolean,
+  writeEnabled: boolean,
+  options?: CodeAgentTraceOptions
+): string {
   const hash = codeAgentTraceHash(options?.trace ?? { goal });
   const sessionId = options?.sessionId?.trim();
-  const traceSegment = signProxyTraceSegment(
-    sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash
-  );
-  return readEnabled ? traceSegment : `${traceSegment}/record-only`;
+  const traceSegment =
+    sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash;
+  // The trace hash carries no owner, so only recorder sessions may add slots,
+  // and only through a server-signed capability the proxy verifies.
+  const capability = writeEnabled ? demoCacheWriteCapability(traceSegment) : null;
+  // Every route (reads included) also requires the minted trace capability.
+  const signed = signProxyTraceSegment(traceSegment);
+  if (!readEnabled) {
+    return capability === null ? `${signed}/record-only` : `${signed}/record-only.${capability}`;
+  }
+  return capability === null ? signed : `${signed}/record.${capability}`;
 }
 
 /**
@@ -175,7 +191,7 @@ export function buildFastModeAnthropicEnv(
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
-    ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
+    ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
   };
 }
 
@@ -202,6 +218,6 @@ export function buildFastModeCodexEnv(
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
-    CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
+    CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
   };
 }
