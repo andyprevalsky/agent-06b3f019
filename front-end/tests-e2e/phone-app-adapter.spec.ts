@@ -147,7 +147,8 @@ for (const width of [1280, 390]) {
     await phone.getByRole('button', { name: 'Hand back phone control' }).click();
     await expect(screen).toBeDisabled();
     expect(commands.filter((command) => command.mode === 'user')).toHaveLength(1);
-    expect(commands.filter((command) => command.mode === 'agent')).toHaveLength(1);
+    // The screen disables optimistically; the hand-back request lands after it.
+    await expect.poll(() => commands.filter((command) => command.mode === 'agent').length).toBe(1);
     if (width < 768) await phone.getByRole('button', { name: 'Close phone' }).click();
     else await page.getByTestId('rose-app-phone').click();
     await expect(phone).toHaveCount(0);
