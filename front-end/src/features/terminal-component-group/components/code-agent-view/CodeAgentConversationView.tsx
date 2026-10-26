@@ -1,7 +1,8 @@
 /**
  * Code-agent conversation: existing main-chat messages with one work slot per
  * native turn. Running activity updates in place; finished work collapses
- * above its answer. No terminal view (transcript only). User messages, displays and A2A rows stay outside the slot.
+ * above its answer. No terminal view (transcript only). User messages,
+ * displays and A2A rows stay outside the slot.
  * The existing QueryInput sends directly with attachments and native settings;
  * questions and approvals sit above it without replacing the draft. Read-only
  * views keep the transcript and show a notice instead of the composer.

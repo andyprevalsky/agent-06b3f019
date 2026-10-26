@@ -9,8 +9,8 @@
  *   POST /api/claude-code-session/:taskId/turns {client_message_id, text, tool_call_id}
  *        → 200 {status:'delivered'} | 409 {error:'This code session has finished…'}
  *
- * Row click → the code agent's view replaces the chat column (header, transcript,
- * Terminal tab, the query box as its direct channel); Escape, the owner row,
+ * Row click → the code agent's view replaces the chat column (header, transcript
+ * with no terminal view, the query box as its direct channel); Escape, the owner row,
  * another row or Home return. Deep link ?agent-id=<owner>&code-agent=<task>.
  * 10k agents: opening reads nothing new (the owner's loaded messages); the
  * stock account never opens it.
