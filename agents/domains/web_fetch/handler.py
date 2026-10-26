@@ -37,7 +37,7 @@ from domains.web_fetch.service import (
 )
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
-from helpers.summarize import summarize_and_filter_links
+from helpers.summarize import select_page_metadata, summarize_and_filter_links
 from helpers.tracing import traced
 from helpers.world_model_runtime import (
     WorldModelToolExecutionAdapter,
@@ -214,9 +214,9 @@ class WebFetchManager(ToolManager):
                     agent_id,
                     f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
                     compute_token_lineage_key,
-                    # Head-only facts (e.g. citation_publication_date) that
-                    # main-content markdown drops.
-                    scrape_metadata,
+                    # Allowlisted head-only facts (title, publication and
+                    # modified dates) that main-content markdown can drop.
+                    select_page_metadata(scrape_metadata),
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),

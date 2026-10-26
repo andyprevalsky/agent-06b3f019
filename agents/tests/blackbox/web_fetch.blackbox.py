@@ -948,8 +948,59 @@ async def test_handler_forwards_page_declared_metadata_to_summarizer():
     )
 
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    assert summary_call["args"][-1] == page_metadata
+    # Only the allowlisted, bounded subset crosses the activity boundary.
+    assert summary_call["args"][-1] == {
+        "title": "RFC 9110: HTTP Semantics | RFC Editor",
+        "citation_publication_date": "2022/06/06",
+    }
     assert out["result"]["content"].startswith("RFC 9110, published June 2022.")
+
+
+async def test_handler_passes_no_parallel_extract_ids_to_summarizer():
+    """Review finding 2026-10-26: Parallel Extract fallback IDs stay out of the summarizer.
+
+    ``extract_parallel`` returns extract_id, session_id, warnings and errors
+    beside the page's title and publish_date; only those page facts may reach
+    the summarize activity's arguments.
+    """
+    from domains.web_fetch.handler import WebFetchManager
+
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "web_fetch_activity":
+            return {
+                "markdown": "# RFC9110: HTTP Semantics\nInternet Standard",
+                "links": [],
+                "metadata": {
+                    "provider": "Parallel Extract",
+                    "title": "RFC 9110: HTTP Semantics",
+                    "publish_date": "2022-06-06",
+                    "url": "https://www.rfc-editor.org/rfc/rfc9110",
+                    "extract_id": "extract_8c1f2b",
+                    "session_id": "session_93ad7e",
+                    "warnings": ["full_content truncated"],
+                    "errors": [],
+                },
+            }
+        if name == "summarize_and_filter_links":
+            return {"summary": "RFC 9110, published June 2022.", "files_to_download": [], "usage": {}}
+        return None
+
+    await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://www.rfc-editor.org/rfc/rfc9110", "objective": "publication month and year"},
+        tool_call_id="tc-parallel",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
+    assert summary_call["args"][-1] == {"title": "RFC 9110: HTTP Semantics", "publish_date": "2022-06-06"}
+    assert "extract_8c1f2b" not in repr(summary_call["args"])
+    assert "session_93ad7e" not in repr(summary_call["args"])
 
 
 async def test_handler_simulator_appends_mode_only_to_boundary_activities():
@@ -1320,6 +1371,10 @@ async def run_all_tests() -> bool:
     await r.record_async(
         "handler_forwards_page_declared_metadata_to_summarizer",
         test_handler_forwards_page_declared_metadata_to_summarizer,
+    )
+    await r.record_async(
+        "handler_passes_no_parallel_extract_ids_to_summarizer",
+        test_handler_passes_no_parallel_extract_ids_to_summarizer,
     )
     await r.record_async(
         "handler_simulator_appends_mode_only_to_boundaries",
