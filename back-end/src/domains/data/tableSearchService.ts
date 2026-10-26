@@ -120,7 +120,12 @@ export async function searchAgentNetworkSource(
   };
   const [total, rows] = await Promise.all([
     grepRepo.countAgentNetworkGrepRows(query),
-    grepRepo.searchAgentNetworkGrepRows({ ...query, limit: input.headLimit, offset: input.offset }),
+    grepRepo.searchAgentNetworkGrepRows({
+      ...query,
+      limit: input.headLimit,
+      offset: input.offset,
+      oldestFirst: input.order === 'oldest_first',
+    }),
   ]);
   return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
 }
