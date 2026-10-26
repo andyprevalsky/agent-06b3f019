@@ -35859,9 +35859,10 @@ async def test_phone_captured_verifier_replays_same_foundry_client_offline():
         assert request.url.host=='phone-rca.openai.azure.com', 'offline replay must not escape synthetic Foundry endpoint'
         calls.append(json.loads(request.content))
         return httpx.Response(200,text=sse,headers={'content-type':'text/event-stream'})
+    from providers.rose import foundry
     set_mock_handler(transport)
     try:
-        with patch.dict(os.environ,{'GPT_API_KEY':'','ANTHROPIC_API_KEY':'','CEREBRAS_API_KEY':'','AZURE_FOUNDRY_ENDPOINT':'https://phone-rca.openai.azure.com','AZURE_FOUNDRY_API_KEY':'synthetic','AZURE_FOUNDRY_DEPLOYMENTS':'gpt-6-sol'}):
+        with patch.dict(os.environ,{'GPT_API_KEY':'','ANTHROPIC_API_KEY':'','CEREBRAS_API_KEY':'','AZURE_FOUNDRY_ENDPOINT':'https://phone-rca.openai.azure.com','AZURE_FOUNDRY_API_KEY':'synthetic','AZURE_FOUNDRY_DEPLOYMENTS':'gpt-6-sol'}), patch.object(foundry, '_shared_scope', return_value=None):
             chunks=[chunk async for chunk in RoseClient(openrouter_key='synthetic').complete(
                 pool='rose-1-ultra',messages=captured['messages'],response_model=response_model,
                 max_tokens=16000,temperature=0.3,deadline_s=180,ttft_timeout_s=60,

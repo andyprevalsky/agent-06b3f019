@@ -181,6 +181,17 @@ def assert_captured_call(
     return call
 
 
+def _start_case() -> None:
+    """Each recorded case starts with no captures and no global mock handler.
+
+    A handler a previous case left set overrides every later client's own
+    MockTransport (httpx_capture routes through the global handler first), so a
+    case could silently talk to another test's fake server.
+    """
+    clear_captures()
+    clear_mock_handler()
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
@@ -196,7 +207,7 @@ class BlackboxResult:
         builds a coroutine, never runs a single assertion, and raises nothing —
         so a completely dead test reported ✅. Detect that and fail loudly.
         """
-        clear_captures()
+        _start_case()
         try:
             returned = fn()
             if inspect.iscoroutine(returned):
@@ -215,7 +226,7 @@ class BlackboxResult:
 
     async def record_async(self, name: str, fn: Callable) -> None:
         """Run an async test function, record the result."""
-        clear_captures()
+        _start_case()
         try:
             await fn()
             self.passed += 1

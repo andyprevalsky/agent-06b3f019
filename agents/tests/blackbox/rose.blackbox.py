@@ -7227,6 +7227,7 @@ async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
     and the Responses body carries no temperature; the dump said xhigh / 0.3.
     """
     from helpers import observability
+    from providers.rose import foundry
 
     sent = []
     foundry_sse = "\n".join(
@@ -7263,6 +7264,7 @@ async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
             },
         ),
         patch.object(observability, "dump_llm_context", side_effect=lambda **kw: dumps.append(kw)),
+        patch.object(foundry, "_shared_scope", return_value=None),
     ):
         await RoseClient(openrouter_key="ork-x").complete_browser_use(
             task="Wait briefly",
