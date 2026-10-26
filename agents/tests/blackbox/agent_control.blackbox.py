@@ -907,9 +907,10 @@ class _BrowserActivityHandle:
     """A started browser activity: acts until the manager cancels it, then returns what the
     real activity's CancelledError branch returns after pausing its provider session."""
 
-    def __init__(self, session_id):
+    def __init__(self, session_id, extra=None):
         self.session_id = session_id
         self.cancelled = False
+        self.extra = extra or {}
 
     def done(self):
         return False
@@ -921,7 +922,7 @@ class _BrowserActivityHandle:
         async def _run():
             while not self.cancelled:
                 await asyncio.sleep(0.002)
-            return {"status": "cancelled", "task_id": "task-br", "session_id": self.session_id}
+            return {"status": "cancelled", "task_id": "task-br", "session_id": self.session_id, **self.extra}
 
         return _run().__await__()
 
@@ -1000,6 +1001,49 @@ async def test_root_pause_ends_background_browser_paused_with_its_session_id():
             assert harness.notifications()[-1]["metadata"]["status"] == "paused", harness.notifications()
 
 
+async def test_root_pause_hands_unread_browser_input_to_the_owner():
+    """Andy: "go to instacart instead" to the browser, then pause the root before its next step.
+
+    The paused activity's final read returns that never-acted-on input
+    (``unread_user_messages``); the owner's paused-browser result must carry it.
+    """
+    from domains.spawn_browser_agent_v3 import handler as browser
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness, agent_id="22222222-2222-4222-8222-222222222222")
+        handles = []
+
+        def _start_activity(*_args, **_kwargs):
+            handles.append(
+                _BrowserActivityHandle("kernel-sess-1", {"unread_user_messages": ["go to instacart instead"]})
+            )
+            return handles[-1]
+
+        async def _execute_tool(tool_name, tool_args, tool_call_id):
+            manager = browser.SpawnBrowserAgentManagerV3()
+            async for event in manager.execute_tool(wf, {"goal": tool_args["goal"]}, tool_call_id):
+                await wf._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
+            return {}
+
+        wf._execute_tool = _execute_tool
+        with (
+            patch.object(browser.workflow, "in_workflow", return_value=True),
+            patch.object(browser.workflow, "start_activity", side_effect=_start_activity),
+        ):
+            await wf._execute_tool_once("spawn_agent", {**BROWSER_ARGS, "task_name": "order_breakfast"}, "toolu_br")
+            for _ in range(500):
+                if handles:
+                    break
+                await asyncio.sleep(0.002)
+            await wf.pause()
+            await asyncio.wait_for(asyncio.gather(*wf._background_handles.values()), 5)
+            assert wf._background_finished["toolu_br"]["status"] == "paused", wf._background_finished
+            note = harness.notifications()[-1]
+            assert note["metadata"]["sessionId"] == "kernel-sess-1", note["metadata"]
+            assert "go to instacart instead" in note["text"], note["text"]
+
+
 async def run_all_tests():
     print("agent_control blackbox tests:")
     r = BlackboxResult()
@@ -1025,6 +1069,9 @@ async def run_all_tests():
     await r.record_async(
         "root_pause_ends_background_browser_paused_with_session_id",
         test_root_pause_ends_background_browser_paused_with_its_session_id,
+    )
+    await r.record_async(
+        "root_pause_hands_unread_browser_input_to_owner", test_root_pause_hands_unread_browser_input_to_the_owner
     )
     await r.record_async("send_wakes_finished_explore_task", test_send_to_finished_explore_task_wakes_its_next_run)
     await r.record_async("message_guard_refusals_reach_tool_result", test_message_guard_refusals_reach_the_tool_result)
