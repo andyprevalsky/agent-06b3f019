@@ -140,18 +140,33 @@ test('host noise makes missed fps inconclusive but keeps every other violation',
   assert.equal(quietPass.warnings.filter((w) => w.rule === 'fps-inconclusive').length, 0);
 });
 
-test('long-task judges main-thread CPU time, so a host stall of the renderer is not a page defect', () => {
-  // A 134 ms wall-clock task that used 2 ms of CPU: the host descheduled the renderer.
-  const stalled = cli.evaluateBudgets({
-    ...SMOOTH,
-    normal: { ...SMOOTH.normal, longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }] },
+test('long-task: CPU-heavy tasks fail; wall-only tasks fail unless a second window is clean', () => {
+  const withTasks = (normal: Record<string, unknown>) =>
+    cli.evaluateBudgets({ ...SMOOTH, normal: { ...SMOOTH.normal, ...normal } });
+  // A 134 ms wall-clock task that used 2 ms of CPU and did not recur: the host stalled the renderer.
+  const stalled = withTasks({
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }],
+    longTaskRecheck: [],
   });
   assert.equal(stalled.pass, true, JSON.stringify(stalled.violations));
   assert.ok(stalled.warnings.some((w) => w.rule === 'long-task-stall'));
-  // The same wall time spent computing is the page's own work.
-  const busy = cli.evaluateBudgets({
-    ...SMOOTH,
-    normal: { ...SMOOTH.normal, longTasks: [{ phase: 'steady', duration: 134, cpu: 131 }] },
+  // A blocking wait the page repeats (GPU readback, sync XHR, a busy-wait on a loaded host) recurs.
+  const recurring = withTasks({
+    longTasks: [{ phase: 'steady', duration: 84, cpu: 30 }],
+    longTaskRecheck: [{ phase: 'steady', duration: 82, cpu: 28 }],
+  });
+  assert.deepEqual(rules(recurring), ['long-task']);
+  // Not re-measured, or no CPU time recorded: judged on wall time.
+  assert.deepEqual(rules(withTasks({ longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }] })), [
+    'long-task',
+  ]);
+  assert.deepEqual(rules(withTasks({ longTasks: [{ phase: 'steady', duration: 134 }] })), [
+    'long-task',
+  ]);
+  // The same wall time spent computing is the page's own work, whatever the second window shows.
+  const busy = withTasks({
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 131 }],
+    longTaskRecheck: [],
   });
   assert.deepEqual(rules(busy), ['long-task']);
 
