@@ -82,7 +82,8 @@ export function groupTrajectoryWork(
   const result: TrajectoryWorkGrouping = { groupsByLeadId: new Map(), foldedIds: new Set() };
   let current: TrajectoryWorkGroup | null = null;
   let turn = 'initial';
-  let ordinal = 0;
+  // The visible row that precedes the batch ('start' right after a USER row).
+  let anchor = 'start';
   let seen = new Set<string>();
   const canonicalComms = new Set<string>();
   for (const message of messages) {
@@ -102,10 +103,8 @@ export function groupTrajectoryWork(
       }
       current = null;
       seen = new Set();
-      if (message.role === 'USER') {
-        turn = message.message_id;
-        ordinal = 0;
-      }
+      if (message.role === 'USER') turn = message.message_id;
+      anchor = message.role === 'USER' ? 'start' : message.message_id;
       continue;
     }
     if (activity.kind === 'comms' && canonicalComms.has(activity.key)) {
@@ -115,9 +114,10 @@ export function groupTrajectoryWork(
     if (activity.kind === 'comms') canonicalComms.add(activity.key);
     if (!current) {
       current = {
-        // The batch's place in its turn: a live placeholder replaced by its persisted
-        // thought or tool row keeps the same instance (and the user's expand state).
-        key: `${turn}:${ordinal++}`,
+        // Anchored to the boundary row before it, never to its own first row: a live
+        // placeholder replaced by its persisted thought/tool row, or an earlier batch
+        // splitting or vanishing, keeps this instance (and the user's expand state).
+        key: `${turn}:${anchor}`,
         leadId: message.message_id,
         activities: [],
         status: 'running',

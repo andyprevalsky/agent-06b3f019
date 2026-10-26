@@ -130,6 +130,45 @@ describe('one ordered live trajectory carousel', () => {
     expect(within(row).getByRole('button')).toHaveAttribute('aria-expanded', 'true');
     expect(within(row).getAllByTestId('trajectory-history-entry')).toHaveLength(text ? 2 : 1);
   });
+  const boundary = (id: string, at: number) =>
+    msg(
+      { toolName: 'send_message_to_user', toolStatus: 'FINISHED', isUserAttentionMessage: true },
+      { message_id: id, text: `Update ${id}`, timestamp: stamp(at) },
+    );
+  const rowFor = (id: string) =>
+    document
+      .querySelector(`[data-message-id="${id}"]`)!
+      .closest('[data-testid="trajectory-work-group"]') as HTMLElement;
+  it('keeps the opened batch open when a late boundary splits an earlier batch', () => {
+    const [a1, a2, c1] = [work('a1'), work('a2'), work('c1')];
+    const v = renderWithProviders(view([a1, a2, boundary('b1', 3), c1]));
+    const groups = () => screen.getAllByTestId('trajectory-work-group');
+    expect(groups()).toHaveLength(2);
+    fireEvent.click(within(groups()[1]).getByRole('button'));
+    expect(rowFor('c1')).not.toBeNull();
+    v.rerender(view([a1, boundary('late', 2), a2, boundary('b1', 3), c1]));
+    expect(groups()).toHaveLength(3);
+    const toggles = groups().map((group) => within(group).getAllByRole('button')[0]);
+    expect(toggles.map((toggle) => toggle.getAttribute('aria-expanded'))).toEqual([
+      'false',
+      'false',
+      'true',
+    ]);
+    expect(rowFor('c1')).toBe(groups()[2]);
+    expect(within(groups()[2]).getByTestId('trajectory-work-history')).toContainElement(
+      document.querySelector('[data-message-id="c1"]') as HTMLElement,
+    );
+  });
+  it('keeps the opened batch open when an earlier single-row batch disappears', () => {
+    const [orphan, b1, b2] = [work('orphan'), work('b1-work'), work('b2-work')];
+    const v = renderWithProviders(view([orphan, boundary('b0', 3), b1, b2]));
+    const groups = () => screen.getAllByTestId('trajectory-work-group');
+    fireEvent.click(within(groups()[1]).getByRole('button'));
+    v.rerender(view([boundary('b0', 3), b1, b2]));
+    expect(groups()).toHaveLength(1);
+    expect(within(groups()[0]).getAllByRole('button')[0]).toHaveAttribute('aria-expanded', 'true');
+    expect(within(groups()[0]).getAllByTestId('trajectory-history-entry')).toHaveLength(2);
+  });
   it.each([
     msg({}, { role: 'ASSISTANT', message_id: 'empty-assistant', text: '' }),
     msg({}, { role: 'USER', message_id: 'empty-user', text: '' }),
