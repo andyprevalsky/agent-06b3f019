@@ -2417,7 +2417,7 @@ def test_trajectory_recall_starts_from_base_history_on_isolated_stack(tmp_path):
     from benchmarks import run_benchmark as bench
 
     admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
-    db_name = f"bench_traj_{uuid.uuid4().hex[:10]}"
+    db_name = f"victoria_bench_traj_{uuid.uuid4().hex[:10]}"
     db_url = admin.rsplit("/", 1)[0] + "/" + db_name
     port = urlparse(admin).port or 5432
 
@@ -2460,11 +2460,26 @@ def test_trajectory_recall_starts_from_base_history_on_isolated_stack(tmp_path):
             bench._prepare_base_trajectory_history(recall, "http://localhost:3001", batch_started_at)
             assert len(remaining()) == 3
 
-            (context / "services.json").write_text(json.dumps({
-                "status": "running",
-                "ports": {"backend": 3001, "health": 3003},
-                "database": {"name": db_name, "port": port},
-            }))
+            def manifest(**database) -> None:
+                (context / "services.json").write_text(json.dumps({
+                    "status": "running",
+                    "ports": {"backend": 3001, "health": 3003},
+                    "database": {"name": db_name, "port": port, **database},
+                }))
+
+            # Only run.sh's per-run database is isolated: a workspace or shared
+            # victoria DB on the same server, or an unowned container, is not.
+            for not_isolated in (
+                {"use_system_postgres": True, "name": "victoria"},
+                {"use_system_postgres": True, "name": "victoria_stack_gate_gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": False, "container": "victoria-db-gate-gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": True, "container": ""},
+            ):
+                manifest(**not_isolated)
+                assert bench._isolated_stack_database_url() is None, not_isolated
+            manifest(use_system_postgres=False, owned_by_run_sh=True, container="victoria-db-run-1")
+            assert bench._isolated_stack_database_url() is not None
+            manifest(use_system_postgres=True)
             bench._prepare_base_trajectory_history(producer, "http://localhost:3001", batch_started_at)
             bench._prepare_base_trajectory_history(recall, "https://navi-j9a9.onrender.com", batch_started_at)
             assert len(remaining()) == 3

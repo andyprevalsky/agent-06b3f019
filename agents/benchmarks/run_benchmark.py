@@ -7829,12 +7829,23 @@ def _reads_base_trajectory_history(task: BenchmarkTask) -> bool:
 
 
 def _isolated_stack_database_url() -> Optional[str]:
-    """Return the active per-run stack DB, never a workspace or prod fallback."""
+    """Return the active per-run stack DB, never a workspace, shared or prod DB.
+
+    Isolated means run.sh's per-run database: ``victoria_bench_<run>`` on system
+    Postgres, or a Postgres server container run.sh created and owns for this run.
+    """
     try:
         services = json.loads((_benchmark_context_path() / "services.json").read_text())
         if not isinstance(services, dict) or not _services_manifest_is_active(services):
             return None
-        return manifest_database_url(services)
+        database = services.get("database")
+        if not isinstance(database, dict):
+            return None
+        if database.get("use_system_postgres"):
+            isolated = str(database.get("name") or "").startswith("victoria_bench_")
+        else:
+            isolated = database.get("owned_by_run_sh") is True and bool(database.get("container"))
+        return manifest_database_url(services) if isolated else None
     except (OSError, ValueError):
         return None
 
