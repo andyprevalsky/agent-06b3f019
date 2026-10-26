@@ -416,6 +416,23 @@ def supervisor_settled(probe,probed_after_join=False):
 STOPPED_PROBE_GRACE_S=60
 STOPPED_NATIVE_STATES=('stopped','destroyed')
 EXPORT_RECOVERY_DOC='docs/original600-operator-cli.md#recover-a-stopped-controllers-retained-export'
+def recover_seal(api,root,authority,export,out,env):
+ """A startup deadline can fire after the controller Machine was created: the gate never
+ sealed ownership, and cleanup-workspace (correctly) refuses the existing allocation.
+ Resolve that exact allocation by its create-intent name and run the pinned seal once."""
+ intent=json.loads(read(export/'machine-create.intent.json'))
+ with bounded(30):rows=api.api('GET','/machines',timeout=30)
+ need(isinstance(rows,list),'native controller listing required')
+ match=[m for m in rows if isinstance(m,dict) and m.get('name')==intent['name']]
+ need(len(match)==1 and re.fullmatch('[0-9a-f]{14}',match[0].get('id')or''),'exact controller allocation required')
+ mid=match[0]['id']
+ save(out/'controller-seal-recovery.intent.json',dict(machine=mid,name=intent['name'],image=intent['image'],authority_sha256=sha(read(authority))))
+ args=[sys.executable,str(root/'scripts/cloudbench-disposable-controller.py'),'seal','--authority',str(authority),'--root',str(root),'--directory',str(export),
+       '--workspace',str(export/'workspace-volume.ownership.json'),'--machine',mid,'--name',intent['name'],'--image',intent['image']]
+ with (out/'gate.private.log').open('ab')as log:code=subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=240).returncode
+ need(code==0 and (export/'disposable-controller.ownership.json').exists(),'pinned seal recovery refused')
+ return mid
+
 def native_controller(api,mid,instance):
  need(re.fullmatch('[0-9a-f]{14}',mid),'exact Machine required')
  with bounded(20):value=api.api('GET','/machines/'+mid,timeout=20)
@@ -727,7 +744,8 @@ def run(config_path,config_sha,out,*,github_token=None):
    if mid is None and ownership.exists():
     record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];controller_instance=record['machine']['instance_id'];need(mid not in auth['protected_machines'],'protected controller ID')
     save(out/'controller.identity.json',dict(machine=mid,instance=record['machine']['instance_id'],source_ref=ref,authority_sha256=sha(authority.read_bytes())))
-    if 'cloudbench-controller-bulk-transfer.py' in v['source_files']:
+    if joined:pass # a sealed-late controller already ran its gate; no launch sidecars remain to deliver
+    elif 'cloudbench-controller-bulk-transfer.py' in v['source_files']:
      import runpy
      bulk_path=Path(__file__).with_name('cloudbench-controller-bulk-transfer.py')
      need(sha(bulk_path.read_bytes())==v['source_files'][bulk_path.name],'bulk helper source changed')
@@ -778,6 +796,19 @@ def run(config_path,config_sha,out,*,github_token=None):
    release=export/'disposable-controller.release.json'
    if cleanup is not None and cleanup.poll()is not None:
     code=cleanup.wait()
+    if(cleanup_action=='cleanup-workspace' and code!=0 and not release.exists() and not ownership.exists()
+       and not(out/'controller-seal-recovery.intent.json').exists()):
+     try:sealed=recover_seal(api,root,authority,export,out,env)
+     except BaseException as e:sealed=None;last_error=type(e).__name__
+     if sealed is not None:
+      # Preserve the refused workspace-only attempt; the sealed controller follows the joined path.
+      os.rename(out/'cleanup-call.intent.json',out/'cleanup-call.workspace-refused.json')
+      cleanup=None;cleanup_action=None;probe={};probed_after_join=False;next_probe=0
+      save(out/'export-recovery-required.json',dict(schema='original600-export-recovery-required-v1',status='EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED',machine=sealed,
+           gate_exit_code=gate.returncode,export_verified=False,cleanup_owner_pid=os.getpid(),recovery=EXPORT_RECOVERY_DOC,export_directory=str(export),
+           benchmark_success_inferred=False,observed_at=time.time()))
+      print(json.dumps(dict(status='EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED',machine=sealed,recovery=EXPORT_RECOVERY_DOC)),flush=True)
+      continue
     if release.exists():
      r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe,probed_after_join)
      status='FAILED_STARTUP_WORKSPACE_RELEASED'if cleanup_action!='cleanup'else'CONTROLLER_RELEASE_VERIFIED'if probe.get('state')=='JOINED'else'CONTROLLER_STOPPED_RELEASE_VERIFIED'if probe.get('state')=='CONTROLLER_STOPPED'else'FAILED_BEFORE_SUPERVISOR_RELEASED'

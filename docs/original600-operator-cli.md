@@ -636,6 +636,15 @@ init reruns the gate script against the evidence volume.
 
 A missing or mismatched archive keeps the receipt open; it never grants credit.
 
+A startup deadline can also fire after the controller was created, before the
+gate seals ownership. Its `cleanup-workspace` then refuses the existing
+allocation. The runner resolves that exact Machine by its create-intent name,
+runs the pinned `seal` once, preserves the refused intent as
+`cleanup-call.workspace-refused.json`, resumes probing and writes
+`export-recovery-required.json` (`EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED`).
+While the controller is still started, download the same three custody files
+directly from it (steps 2–3, no fork). The runner then releases it once.
+
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
 cohort membership, app, source, verifier bytes, complete environment hashes and
