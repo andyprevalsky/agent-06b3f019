@@ -78,18 +78,22 @@ function assertExchangeBar(account: Account, label: string): void {
  * Polls Plaid (with the production /transactions/sync request, from no cursor,
  * so the stored cursor is untouched) until the Item's history is ready — the
  * moment Plaid would send its SYNC_UPDATES_AVAILABLE historical-update webhook.
+ * The Sandbox can report HISTORICAL_UPDATE_COMPLETE about a second before the
+ * history is readable (an empty page with an empty cursor), so ready also
+ * means the page carries transactions.
  */
 async function waitForPlaidHistory(ctx: PlaidSuiteContext, accessToken: string): Promise<void> {
   const page = await retryWithBackoff(() => syncTransactions(accessToken, null), {
     maxRetries: 40,
     fixedDelays: Array.from({ length: 40 }, () => 1_000),
     isRetryable: ctx.isRetryablePlaidSandboxError,
-    shouldRetryResult: (res) => res.transactions_update_status !== 'HISTORICAL_UPDATE_COMPLETE',
+    shouldRetryResult: (res) =>
+      res.transactions_update_status !== 'HISTORICAL_UPDATE_COMPLETE' || res.added.length === 0,
     component: 'PlaidSandboxHistoryWait',
   });
   assert(
-    page.transactions_update_status === 'HISTORICAL_UPDATE_COMPLETE',
-    `sandbox history ready, got ${page.transactions_update_status}`
+    page.transactions_update_status === 'HISTORICAL_UPDATE_COMPLETE' && page.added.length > 0,
+    `sandbox history readable, got ${page.transactions_update_status} with ${page.added.length} added`
   );
 }
 
