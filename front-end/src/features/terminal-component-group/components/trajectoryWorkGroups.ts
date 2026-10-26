@@ -73,15 +73,6 @@ function at(message: Message) {
   const value = eventTimeMs(message.timestamp);
   return value !== null && value > 0 ? value : null;
 }
-/** Stable across a live placeholder being replaced by its persisted row (same instance). */
-function groupKey(activity: TrajectoryActivity, ordinal: number) {
-  const call = activity.message.metadata?.toolCallId;
-  if (activity.kind === 'comms') return activity.key;
-  if (typeof call === 'string') return call;
-  // A streaming thought has no persisted id yet; its batch keeps its place in the turn.
-  return activity.kind === 'thinking' ? `thinking:${ordinal}` : activity.key;
-}
-
 export function groupTrajectoryWork(
   messages: Message[],
   status?: string,
@@ -123,7 +114,9 @@ export function groupTrajectoryWork(
     if (activity.kind === 'comms') canonicalComms.add(activity.key);
     if (!current) {
       current = {
-        key: `${turn}:${groupKey(activity, ordinal++)}`,
+        // The batch's place in its turn: a live placeholder replaced by its persisted
+        // thought or tool row keeps the same instance (and the user's expand state).
+        key: `${turn}:${ordinal++}`,
         leadId: message.message_id,
         activities: [],
         status: 'running',

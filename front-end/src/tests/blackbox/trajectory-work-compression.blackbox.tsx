@@ -104,7 +104,10 @@ describe('one ordered live trajectory carousel', () => {
     fireEvent.click(toggle);
     expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
   });
-  it('keeps an opened live batch open when its streaming thought is persisted', () => {
+  it.each([
+    ['its thought text', true],
+    ['only its tool call', false],
+  ])('keeps an opened live batch open when the streaming thought persists as %s', (_, text) => {
     const live = msg(
       { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
       { message_id: 'streaming:thinking', timestamp: stamp(1) },
@@ -115,12 +118,17 @@ describe('one ordered live trajectory carousel', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const persisted = msg(
       {},
-      { role: 'ASSISTANT', message_id: 'persisted-thought', text: 'Plan it.', timestamp: stamp(1) },
+      {
+        role: 'ASSISTANT',
+        message_id: 'persisted-thought',
+        text: text ? 'Plan it.' : '',
+        timestamp: stamp(1),
+      },
     );
     v.rerender(view([persisted, work('after-thought')]));
     const row = screen.getByTestId('trajectory-work-group');
     expect(within(row).getByRole('button')).toHaveAttribute('aria-expanded', 'true');
-    expect(within(row).getAllByTestId('trajectory-history-entry')).toHaveLength(2);
+    expect(within(row).getAllByTestId('trajectory-history-entry')).toHaveLength(text ? 2 : 1);
   });
   it.each([
     msg({}, { role: 'ASSISTANT', message_id: 'empty-assistant', text: '' }),
