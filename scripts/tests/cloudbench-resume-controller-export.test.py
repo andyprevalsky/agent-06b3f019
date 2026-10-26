@@ -1637,6 +1637,67 @@ class ExportResume(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["provider_calls"], 0)
 
 
+class WriterScanPermission(unittest.TestCase):
+    """A transiently unreadable /proc entry is re-observed; a persistently unreadable live one fails closed."""
+
+    def scan(self, denials, *, alive=True):
+        collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
+        writers = collector["writers"]
+        with tempfile.TemporaryDirectory() as name:
+            proc, repo = Path(name) / "proc", Path(name) / "repo"
+            repo.mkdir()
+            for pid, cwd in ((9999, repo), (8888, Path(name))):
+                task = proc / str(pid) / "task" / str(pid)
+                (task / "fd").mkdir(parents=True)
+                (task / "cwd").symlink_to(cwd)
+                (task / "maps").write_text("")
+            denied = {"left": denials}
+            real_readlink = os.readlink
+
+            def readlink(path):
+                # Simulates a foreign process whose credentials change mid-scan (e.g. sudo).
+                if str(path) == str(proc / "8888/task/8888/cwd") and denied["left"]:
+                    denied["left"] -= 1
+                    if not alive:
+                        (proc / "8888/task/8888/cwd").unlink()
+                        (proc / "8888/task/8888/maps").unlink()
+                        (proc / "8888/task/8888/fd").rmdir()
+                        (proc / "8888/task/8888").rmdir()
+                        (proc / "8888/task").rmdir()
+                        (proc / "8888").rmdir()
+                    raise PermissionError(13, "Permission denied", str(path))
+                return real_readlink(path)
+
+            sleeps = []
+            with mock.patch.dict(
+                writers.__globals__,
+                Path=lambda value: proc if str(value) == "/proc" else Path(value),
+                birth=lambda pid: f"birth-{pid}",
+                os=SimpleNamespace(readlink=readlink),
+                time=SimpleNamespace(sleep=sleeps.append),
+            ):
+                try:
+                    return writers([repo], set()), sleeps
+                finally:
+                    self.denied_left = denied["left"]
+
+    def test_transient_permission_error_is_reobserved(self):
+        found, sleeps = self.scan(2)
+        self.assertEqual(found, [{"pid": 9999, "birth": "birth-9999"}])
+        self.assertEqual(len(sleeps), 2)
+        self.assertEqual(self.denied_left, 0)
+
+    def test_persistently_unreadable_live_process_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "cannot observe controller writer ownership"):
+            self.scan(1000)
+        self.assertGreater(self.denied_left, 0)
+
+    def test_unreadable_process_that_exits_is_not_a_writer(self):
+        found, sleeps = self.scan(1, alive=False)
+        self.assertEqual(found, [{"pid": 9999, "birth": "birth-9999"}])
+        self.assertEqual(sleeps, [])
+
+
 class CleanupClock(unittest.TestCase):
     def test_separate_cleanup_window_preserves_expired_original_clock(self):
         clock = M["normal_clock"]
