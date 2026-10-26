@@ -146,17 +146,37 @@ function installFakeClaude(): void {
     `#!${process.execPath}
 // ws-server keeps stdin open until the turn's result (direct chat / agent
 // messages), so answer the first stream-json prompt line instead of waiting
-// for end-of-input.
+// for end-of-input. Control requests (initialize) come first and are answered
+// like the real CLI does.
 const { writeFileSync } = require('node:fs');
 let stdin = '';
+let pending = '';
 let answered = false;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (c) => {
   stdin += c;
-  if (answered || !stdin.includes('\\n')) return;
+  pending += c;
+  let newline;
+  let line;
+  while (!answered && (newline = pending.indexOf('\\n')) !== -1) {
+    const candidate = pending.slice(0, newline);
+    pending = pending.slice(newline + 1);
+    let parsed;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {}
+    if (parsed?.type === 'control_request') {
+      process.stdout.write(JSON.stringify({ type: 'control_response', response: {
+        request_id: parsed.request_id, subtype: 'success', response: { models: [] }
+      } }) + '\\n');
+      continue;
+    }
+    line = candidate;
+    break;
+  }
+  if (answered || line === undefined) return;
   answered = true;
   // The prompt arrives as a stream-json user message; record its text.
-  const line = stdin.split('\\n')[0];
   let text = line;
   try {
     const msg = JSON.parse(line);

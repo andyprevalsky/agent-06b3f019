@@ -132,4 +132,10 @@ export const KNOWN_TAGS = [
   'browsecomp',
   // Code-capability fixtures with hidden tests (agents/benchmarks/code_bench.py, plan C8).
   'code-bench',
+  // Agent Display tool benchmarks (agent-display-revenue-chart).
+  'display',
+  // Parent-owned agent subtree lifecycle (kill-agent-subtree).
+  'agent-graph',
+  // Harness plumbing; matches the predeploy deploy_category of the same name.
+  'harness',
 ];
