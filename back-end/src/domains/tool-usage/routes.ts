@@ -7,7 +7,7 @@
  */
 
 import { type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import {
@@ -65,7 +65,7 @@ function saveToolUsageValidationError(body: Record<string, unknown>): string | n
  */
 router.post(
   '/',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const validationError = saveToolUsageValidationError(req.body as Record<string, unknown>);

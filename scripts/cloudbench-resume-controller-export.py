@@ -8,6 +8,7 @@ import gzip
 import json
 import math
 import os
+import queue
 import re
 import runpy
 import shlex
@@ -15,6 +16,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1346,6 +1348,79 @@ def _execute(value, fly, cancelled):
 DOWNLOAD_ATTEMPTS = 3
 
 
+STREAM_BLOCK_BYTES = 16 * 1024 * 1024
+
+
+def stream_get(fly, seconds, machine_id, remote_path, target):
+    """One owned guest read streamed into a new private file with 16 MiB writes.
+
+    `flyctl ssh sftp get` issues 32 KiB writes, which a FUSE run directory absorbed at
+    under 2 MB/s (SAME60 2026-10-22: a 4.9 GB archive missed its one-hour window). A
+    pty-free `cat` keeps network backpressure, needs no local staging, and fsyncs once.
+    The timeout kills only this owned child."""
+    need(type(seconds) is int and seconds > 0, "invalid stream budget")
+    argv = [fly.binary, "ssh", "console", "-a", R["APP"], "--machine", machine_id,
+            "-C", "cat -- " + shlex.quote(remote_path)]
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        process = subprocess.Popen(argv, env=fly.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except BaseException:
+        os.close(fd)
+        raise
+    blocks, errors, stderr, expired = queue.Queue(maxsize=2), [], [], []
+
+    def drain_stderr():
+        stderr.append(process.stderr.read(65536))
+        while process.stderr.read(65536):
+            pass
+
+    def write_blocks():
+        try:
+            while (block := blocks.get()) is not None:
+                view = memoryview(block)
+                while view:
+                    view = view[os.write(fd, view):]
+        except BaseException as error:
+            errors.append(error)
+            while blocks.get() is not None:  # keep the reader unblocked; nothing more is written
+                pass
+
+    def expire():
+        expired.append(True)
+        process.kill()
+
+    threads = [threading.Thread(target=drain_stderr, daemon=True), threading.Thread(target=write_blocks, daemon=True)]
+    for thread in threads:
+        thread.start()
+    timer = threading.Timer(seconds, expire)
+    timer.start()
+    written = 0
+    try:
+        while block := process.stdout.read(STREAM_BLOCK_BYTES):
+            blocks.put(block)
+            written += len(block)
+    finally:
+        blocks.put(None)
+        threads[1].join()
+        rc = process.wait()
+        timer.cancel()
+        threads[0].join(timeout=10)
+        process.stdout.close()
+        process.stderr.close()
+        try:
+            if not errors and not expired:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+    message = (stderr[0] if stderr else b"").decode("utf-8", "replace")
+    if expired:
+        return 124, "stream timed out after %d bytes" % written, message
+    if errors:
+        return 74, "local write failed after %d bytes: %s" % (written, type(errors[0]).__name__), message
+    return rc, "streamed %d bytes" % written, message
+
+
 def publish(value, fly, journal, remote_stage, active):
     """Download, verify with the run's own collector and mark only via export-ready."""
     out = Path(value["state"]["out"])
@@ -1354,17 +1429,12 @@ def publish(value, fly, journal, remote_stage, active):
     for name in ("launch.json", "manifest.json", "originals.tar.gz"):
         for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
             active()
-            rc, stdout, stderr = fly.flyctl(
+            rc, stdout, stderr = stream_get(
+                fly,
                 transfer_budget(value["state"]),
-                "ssh",
-                "sftp",
-                "get",
-                "-a",
-                R["APP"],
-                "--machine",
                 value["state"]["machine_id"],
                 ("/tmp/gate/controller-host-custody/launch.json" if name == "launch.json" else remote_stage + "/" + name),
-                str(stage / name),
+                stage / name,
             )
             save(
                 journal / (name + (".download.json" if attempt == 1 else ".download-%d.json" % attempt)),
@@ -1522,15 +1592,24 @@ def dead_owner_helper_argv(state, argv):
 
 
 def fetch_launch(state, fly=None):
-    """Dead gate: one owned read of the remote launch record into export/, as the gate's first download."""
-    need(state.get("dead_owner") is True, "launch fetch is dead-owner recovery only")
+    """One owned read of the remote launch record into export/, as the gate's first download.
+
+    A dead gate never reached its downloads. A live runner's joined gate can also return
+    export-pending without the record, e.g. when its watchdog expired across a host suspend."""
+    dead = state.get("dead_owner") is True
     validate_normal(state)
     out = Path(state["out"])
     export = out / "export"
+    if not dead:
+        log = read(out / "gate.private.log")
+        need(
+            ("GATE_EXPORT_PENDING machine=" + state["machine_id"]).encode() in log and b"GATE_RESULT exit=" in log,
+            "live gate did not positively return export pending",
+        )
     target = export / "launch.json"
     need(not os.path.lexists(target), "export launch record already present")
     need(not (export / "disposable-export.verified.json").exists(), "export already verified")
-    journal = out / "dead-owner-launch-fetch"
+    journal = out / ("dead-owner-launch-fetch" if dead else "live-owner-launch-fetch")
     journal.mkdir(mode=0o700)  # once only
     save(journal / "intent.json", {"machine": state["machine_id"], "source_ref": state["source_ref"]})
     fly = fly or runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))["Fly"](
@@ -1797,7 +1876,7 @@ def main(argv=None):
     mode.add_argument(
         "--fetch-launch",
         action="store_true",
-        help="Dead owner only: fetch the remote launch record the killed gate never downloaded.",
+        help="Fetch the remote launch record a dead gate, or a live owner's export-pending gate, never downloaded.",
     )
     mode.add_argument(
         "--release",
@@ -1805,12 +1884,14 @@ def main(argv=None):
         help="Dead owner only: after the verified export, run the runner's own controller cleanup.",
     )
     args = parser.parse_args(argv)
-    need(not (args.fetch_launch or args.release) or args.dead_owner, "--fetch-launch/--release require --dead-owner")
+    need(not args.release or args.dead_owner, "--release requires --dead-owner")
     if args.fetch_launch or args.release:
-        need(args.cleanup_window is not None and args.cleanup_deadline_epoch is None, "dead-owner window required")
+        if args.dead_owner:
+            need(args.cleanup_window is not None and args.cleanup_deadline_epoch is None, "dead-owner window required")
         state = normal_state(
             args.config, args.config_sha256, Path(args.run_directory).absolute(),
-            cleanup_window=args.cleanup_window, dead_owner=True,
+            cleanup_window=args.cleanup_window, dead_owner=args.dead_owner,
+            **({"cleanup_deadline_epoch": args.cleanup_deadline_epoch} if args.cleanup_deadline_epoch is not None else {}),
         )
         lock = os.open(
             Path(state["out"]) / "controller-export-recovery.lock",

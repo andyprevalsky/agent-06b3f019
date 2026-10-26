@@ -1,6 +1,6 @@
 import { Router, type Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { authenticateInternal, type AuthRequest } from '../../providers/auth';
 import * as service from './service';
 import { VapiNotConfiguredError, VapiApiError } from './vapiClientService';
 import holdRouter from './routesHold';
@@ -27,7 +27,7 @@ router.use('/hold', holdRouter);
  */
 router.post(
   '/call',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     try {
       const { to, system_prompt, output_schema, idempotency_key, user_id } =
@@ -84,7 +84,7 @@ router.post(
  */
 router.get(
   '/call/:id',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     try {
       const { id } = req.params;
