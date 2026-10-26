@@ -192,7 +192,14 @@ export async function releaseProcessedMessage(messageId: string): Promise<void> 
   const token = messageClaims.get(messageId);
   if (token === undefined) return;
   messageClaims.delete(messageId);
-  await releaseLease(MESSAGE_ID_NAMESPACE, messageId, token);
+  // Never let bookkeeping replace the processing error; an unreleased claim only
+  // delays Meta's retry by the short processing TTL.
+  await releaseLease(MESSAGE_ID_NAMESPACE, messageId, token).catch((error: unknown) =>
+    log.warn('WhatsApp dedup release failed', {
+      messageId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  );
 }
 
 /** Keep a handled message's claim for a day and forget this instance's token. */
@@ -200,7 +207,14 @@ async function settleMessageClaim(messageId: string): Promise<void> {
   const token = messageClaims.get(messageId);
   if (token === undefined) return;
   messageClaims.delete(messageId);
-  await renewLease(MESSAGE_ID_NAMESPACE, messageId, token, MESSAGE_ID_TTL_MS);
+  // The message is already routed: a failed extension must not fail the webhook.
+  await renewLease(MESSAGE_ID_NAMESPACE, messageId, token, MESSAGE_ID_TTL_MS).catch(
+    (error: unknown) =>
+      log.warn('WhatsApp dedup claim extension failed', {
+        messageId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+  );
 }
 
 export async function handleInboundWhatsApp(

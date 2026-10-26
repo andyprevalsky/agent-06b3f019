@@ -68,6 +68,26 @@ async function main(): Promise<unknown> {
       await release();
       return { claimed: true };
     }
+    case 'lease-hold': {
+      // Holds a short lease well past its TTL while the heartbeat renews it.
+      const shared = await import('../../providers/sharedState');
+      const [key, ttlMs, holdMs] = args;
+      const token = await shared.acquireLease('mi-lease', key, Number(ttlMs));
+      if (token === null) return { held: false };
+      const lease = shared.holdLease('mi-lease', key, token, Number(ttlMs));
+      await barrier();
+      await sleep(Number(holdMs));
+      const lost = lease.lost();
+      await lease.release();
+      return { held: true, lost };
+    }
+    case 'lease-try': {
+      const shared = await import('../../providers/sharedState');
+      const [key, ttlMs, afterMs] = args;
+      await barrier();
+      await sleep(Number(afterMs));
+      return { acquired: (await shared.acquireLease('mi-lease', key, Number(ttlMs))) !== null };
+    }
     case 'agentcard-refresh': {
       const runtime = await import('../../providers/agentcard/runtime');
       await barrier();

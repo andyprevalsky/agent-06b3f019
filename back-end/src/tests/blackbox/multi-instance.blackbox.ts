@@ -14,6 +14,7 @@
  *  - a Plaid item sync runs on one instance at a time
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
+ *  - a held lease is renewed past its TTL, so no instance takes it over
  *
  * Usage: npx tsx src/tests/blackbox/multi-instance.blackbox.ts
  */
@@ -248,6 +249,16 @@ async function main(): Promise<void> {
       const foreign = peer.foreign as { state?: string };
       assert(foreign.state === 'unknown', "another user must not read the session's snapshot");
       assert(host.released === true, "B's cancel must release the browser A owns");
+    });
+    await test('a held lease is renewed past its TTL, so no instance takes it over', async () => {
+      const key = `mi-${randomUUID()}`;
+      const [holder, peer] = await concurrently([
+        ['lease-hold', [key, '3000', '9000']],
+        ['lease-try', [key, '3000', '6000']],
+      ]);
+      assert(holder.held === true, 'the holder must acquire the lease');
+      assert(peer.acquired === false, 'a renewed lease must not be taken over after its TTL');
+      assert(holder.lost === false, 'the holder must not have lost its lease');
     });
   } finally {
     await prisma.integration.deleteMany({ where: { userId } });

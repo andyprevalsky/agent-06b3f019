@@ -11,12 +11,7 @@
 
 import type { Transaction } from 'plaid';
 import { createLogger } from '../../providers/logger';
-import {
-  acquireLease,
-  putEphemeral,
-  releaseLease,
-  takeEphemeral,
-} from '../../providers/sharedState';
+import { acquireLease, holdLease, putEphemeral, takeEphemeral } from '../../providers/sharedState';
 import { isPlaidError, syncTransactions } from '../../providers/plaid';
 import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
 import {
@@ -132,8 +127,7 @@ async function applyTransaction(
 
 const PLAID_SYNC_LEASE_NAMESPACE = 'plaid-item-sync';
 const PLAID_RESYNC_NAMESPACE = 'plaid-item-resync';
-// Longer than any observed full-history sync; an expired lease is taken over,
-// so a crashed instance never wedges the item.
+// Renewed while held; a crashed instance's lease expires, so it never wedges the item.
 const PLAID_SYNC_LEASE_TTL_MS = 15 * 60 * 1000;
 
 /**
@@ -143,7 +137,10 @@ const PLAID_SYNC_LEASE_TTL_MS = 15 * 60 * 1000;
 export async function claimPlaidItemSync(itemRowId: string): Promise<(() => Promise<void>) | null> {
   const token = await acquireLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, PLAID_SYNC_LEASE_TTL_MS);
   if (token === null) return null;
-  return () => releaseLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, token);
+  // Renewed while the sync runs, so a long first sync never loses the item to
+  // a second concurrent sync.
+  const lease = holdLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, token, PLAID_SYNC_LEASE_TTL_MS);
+  return () => lease.release();
 }
 
 /** Release an item's sync claim, then run once more if a sync was requested meanwhile. */

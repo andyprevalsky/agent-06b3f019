@@ -16,7 +16,10 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { randomUUID } from './crypto';
+import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
+
+const log = createLogger('SharedState');
 
 const REAP_BATCH = 100;
 
@@ -117,9 +120,54 @@ export async function renewLease(
   return count === 1;
 }
 
+export interface HeldLease {
+  /** True once a renewal found the lease lost or taken over (or could not run). */
+  lost(): boolean;
+  /** Stop renewing and release the lease if this holder still owns it. */
+  release(): Promise<void>;
+}
+
+/**
+ * Keep a lease alive while its holder works: renew every ttl/3 and record a
+ * loss instead of discarding it, so callers and operators can see that another
+ * instance may have taken over.
+ */
+export function holdLease(namespace: string, key: string, token: string, ttlMs: number): HeldLease {
+  let lost = false;
+  const markLost = (reason: string) => {
+    if (!lost) log.warn('Shared lease lost while held', { namespace, key, reason });
+    lost = true;
+  };
+  const heartbeat = setInterval(
+    () => {
+      renewLease(namespace, key, token, ttlMs)
+        .then((renewed) => {
+          if (!renewed) markLost('taken over or expired');
+        })
+        .catch((error: unknown) =>
+          markLost(error instanceof Error ? error.message : String(error))
+        );
+    },
+    Math.max(Math.floor(ttlMs / 3), 1_000)
+  );
+  heartbeat.unref();
+  return {
+    lost: () => lost,
+    release: async () => {
+      clearInterval(heartbeat);
+      await releaseLease(namespace, key, token).catch((error: unknown) =>
+        log.warn('Shared lease release failed; it expires on its own', {
+          namespace,
+          key,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
+    },
+  };
+}
+
 const LOCK_NAMESPACE = 'serialized-lock';
 const LOCK_TTL_MS = 60_000;
-const LOCK_HEARTBEAT_MS = 15_000;
 const LOCK_POLL_RAMP_MS = [50, 100, 200, 400];
 const LOCK_POLL_MAX_MS = 500;
 
@@ -148,15 +196,15 @@ export async function withSerializedLock<T>(
     component: `SharedLock:${key}`,
   });
   if (token === null) throw new Error(`sharedState: timed out waiting for lock ${key}`);
-  const held = token;
-  const heartbeat = setInterval(() => {
-    void renewLease(LOCK_NAMESPACE, key, held, LOCK_TTL_MS).catch(() => undefined);
-  }, LOCK_HEARTBEAT_MS);
-  heartbeat.unref();
+  const lease = holdLease(LOCK_NAMESPACE, key, token, LOCK_TTL_MS);
   try {
     return await fn();
   } finally {
-    clearInterval(heartbeat);
-    await releaseLease(LOCK_NAMESPACE, key, held).catch(() => undefined);
+    if (lease.lost()) {
+      log.error('Serialized lock was lost while its holder ran; exclusion was not guaranteed', {
+        key,
+      });
+    }
+    await lease.release();
   }
 }
