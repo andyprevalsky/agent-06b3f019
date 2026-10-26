@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -830,55 +831,98 @@ Output the summary only — no preamble."""
         return {"summary": truncated, "usage": {}, "summarized": False, "error": str(e)}
 
 
-# Scrape-provider bookkeeping in the metadata block, not facts about the page.
-_SCRAPE_BOOKKEEPING_METADATA_KEYS = frozenset(
-    {
-        "provider",
-        "scrapeId",
-        "statusCode",
-        "proxyUsed",
-        "cacheState",
-        "cachedAt",
-        "creditsUsed",
-        "concurrencyLimited",
-        "contentType",
-        "url",
-        "sourceURL",
-        "error",
-    }
+# Named page facts the web_fetch summarizer receives from scrape metadata.
+# Main-content markdown can omit facts a page declares only in its <head>
+# (the RFC Editor states a publication date only in citation_publication_date).
+# Like Hermes and OpenClaw, keep an explicit allowlist: the title, then one
+# validated publication date. Every other provider key (og:*, citation_reference
+# lists, extract/session IDs) is dropped.
+# Lookups are case-insensitive because HTML meta names are; earlier names win.
+_PAGE_TITLE_KEYS = ("title",)
+_PAGE_PUBLISHED_KEYS = (
+    "citation_publication_date",
+    "citation_date",
+    "article:published_time",
+    "datePublished",
+    "dc.date",
+    "DC.date.issued",
+    "publishedTime",
+    "publish_date",  # Parallel Extract
 )
-_PAGE_METADATA_VALUE_CHARS = 500
-_PAGE_METADATA_BLOCK_CHARS = 4_000
+# OpenClaw web_fetch bounds (src/agents/tools/web-fetch.ts:75-76): 256 chars
+# per field, 512 for all metadata.
+_PAGE_METADATA_VALUE_CHARS = 256
+_PAGE_METADATA_BLOCK_CHARS = 512
+# ISO dates plus slash dates: citation_publication_date uses YYYY/MM/DD (or YYYY).
+_PAGE_DATE_RE = re.compile(
+    r"^(?P<year>\d{4})(?:(?P<sep>[-/])(?P<month>\d{1,2})(?:(?P=sep)(?P<day>\d{1,2})(?P<time>[T ][\d:.+Z-]{1,20})?)?)?$"
+)
 
 
-def format_page_metadata(metadata: Optional[Dict[str, Any]]) -> str:
-    """The page's own declared metadata (``<meta>`` tags) as ``key: value`` lines.
+def _clean_page_metadata_text(value: Any) -> str:
+    """One line of untrusted page text: no control characters, collapsed spaces."""
+    if not isinstance(value, str):
+        return ""
+    printable = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in value)
+    return " ".join(printable.split())
 
-    Pages can declare facts such as ``citation_publication_date`` only in the
-    document head, while main-content markdown omits them. Sorted for a stable
-    prompt; bounded so a metadata-heavy page cannot crowd out the content.
+
+def _is_page_metadata_date(value: str) -> bool:
+    match = _PAGE_DATE_RE.match(value)
+    if match is None:
+        return False
+    try:
+        if match.group("time"):
+            datetime.fromisoformat(value)
+        else:
+            datetime(int(match.group("year")), int(match.group("month") or 1), int(match.group("day") or 1))
+    except ValueError:
+        return False
+    return True
+
+
+def select_page_metadata(metadata: Any) -> Dict[str, str]:
+    """The allowlisted page facts from scrape metadata, title first.
+
+    Returns at most ``title`` and one publication date, keyed by the
+    matching allowlist name. Dates must parse; values are
+    sanitized to one line and bounded to the OpenClaw-like caps.
     """
     if not isinstance(metadata, dict):
-        return ""
-    lines: List[str] = []
+        return {}
+    by_name: Dict[str, List[Any]] = {}
+    for key in sorted(k for k in metadata if isinstance(k, str)):
+        raw = metadata[key]
+        by_name.setdefault(key.lower(), []).extend(raw if isinstance(raw, list) else [raw])
+
+    def first(names: Tuple[str, ...], accept) -> Optional[Tuple[str, str]]:
+        for name in names:
+            for raw in by_name.get(name.lower(), []):
+                value = _clean_page_metadata_text(raw)
+                if value and accept(value):
+                    return name, value[:_PAGE_METADATA_VALUE_CHARS]
+        return None
+
+    selected: Dict[str, str] = {}
     size = 0
-    for key in sorted(str(k) for k in metadata):
-        if key in _SCRAPE_BOOKKEEPING_METADATA_KEYS:
+    for found in (
+        first(_PAGE_TITLE_KEYS, lambda _value: True),
+        first(_PAGE_PUBLISHED_KEYS, _is_page_metadata_date),
+    ):
+        if found is None:
             continue
-        raw = metadata.get(key)
-        values = raw if isinstance(raw, list) else [raw]
-        scalars = [
-            " ".join(str(v).split()) for v in values if isinstance(v, (str, int, float)) and not isinstance(v, bool)
-        ]
-        unique = [v for i, v in enumerate(scalars) if v and v not in scalars[:i]]
-        if not unique:
+        name, value = found
+        line_chars = len(name) + 2 + len(value) + 1
+        if size + line_chars > _PAGE_METADATA_BLOCK_CHARS:
             continue
-        line = f"{key}: {' | '.join(unique)[:_PAGE_METADATA_VALUE_CHARS]}"
-        if size + len(line) + 1 > _PAGE_METADATA_BLOCK_CHARS:
-            break
-        lines.append(line)
-        size += len(line) + 1
-    return "\n".join(lines)
+        selected[name] = value
+        size += line_chars
+    return selected
+
+
+def format_page_metadata(metadata: Any) -> str:
+    """The allowlisted page facts as ``key: value`` lines (empty when none)."""
+    return "\n".join(f"{key}: {value}" for key, value in select_page_metadata(metadata).items())
 
 
 @activity.defn
