@@ -4,9 +4,10 @@
  * Stateless apart from which project row is being renamed (owned by the parent).
  *
  * EXPANDED (bar hovered) — Projects on top (Andy, 2026-10-26), then Home:
- *   [folder] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
+ *   [icon] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
  *       project A agents (indented)
- *   [folder] Project B   [+] [⚙]
+ *   [icon] Project B   [+] [⚙]
+ *   (icon = GitHub repo owner's avatar when connected to a GitHub repo, else folder)
  *       ...
  *   + New project  (inline: Enter creates, Escape cancels)
  *   Home agents
