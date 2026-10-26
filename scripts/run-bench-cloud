@@ -7038,7 +7038,7 @@ done
 # A pre-terminal infrastructure failure is the same situation: the driver may
 # still be running, so request the bounded authenticated shutdown before
 # waiting for a seal. Its verdict stays infrastructure failure either way.
-if { [ "$TIMED_OUT" = "1" ] || [ "$PRETERMINAL_INFRA_FAILURE" = "1" ]; } \
+if { [ "$TIMED_OUT" = "1" ] || [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ]; } \
     && [ -n "${FLEET_MACHINE_ID:-}" ]; then
     GUEST_SHUTDOWN_RESULT=1
     if confirm_guest_shutdown; then
@@ -7059,7 +7059,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
     # Without a delivered shutdown nothing will seal the runtime evidence; do
     # not hold the job "running" for the wall-clock backstop. The EXIT trap
     # reuses GUEST_SHUTDOWN_RESULT and the fleet natively stops the guest.
-    if [ "$PRETERMINAL_INFRA_FAILURE" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+    if [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
         echo "❌ guest shutdown unconfirmed after a pre-terminal infrastructure failure; retaining runtime evidence owner -- infrastructure failure" >&2
         exit 70
     fi
