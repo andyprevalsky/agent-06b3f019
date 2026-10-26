@@ -162,6 +162,25 @@ function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelB
   );
 }
 
+/** Always-mounted slot that animates grid rows 0fr <-> 1fr (instant under reduced motion). */
+function PanelSlot({ expanded, children }: { expanded: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        'grid transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(.22,1,.36,1)] motion-reduce:transition-none',
+        expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+      )}
+      data-testid="background-agents-panel-slot"
+      data-state={expanded ? 'open' : 'closed'}
+      aria-hidden={!expanded}
+      // React 18 has no `inert` prop; set the attribute on every render.
+      ref={(slot) => slot?.toggleAttribute('inert', !expanded)}
+    >
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
 export function BackgroundAgentsBanner({
   selectedAgentId,
   messages,
@@ -224,34 +243,22 @@ export function BackgroundAgentsBanner({
           aria-hidden="true"
         />
       </button>
-      <div
-        className={cn(
-          'grid transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(.22,1,.36,1)] motion-reduce:transition-none',
-          expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+      <PanelSlot expanded={expanded}>
+        {bodyMounted && (
+          <div
+            id="background-agents-panel"
+            className="max-h-72 overflow-y-auto overflow-x-hidden border-t border-border/70 px-1 py-1"
+            data-testid="background-agents-panel"
+          >
+            <PanelBody
+              groups={groups}
+              getChildren={getChildren}
+              onNavigate={navigate}
+              openTrajectories={tasks.open}
+            />
+          </div>
         )}
-        data-testid="background-agents-panel-slot"
-        data-state={expanded ? 'open' : 'closed'}
-        aria-hidden={!expanded}
-        // React 18 has no `inert` prop; set the attribute on every render.
-        ref={(slot) => slot?.toggleAttribute('inert', !expanded)}
-      >
-        <div className="min-h-0 overflow-hidden">
-          {bodyMounted && (
-            <div
-              id="background-agents-panel"
-              className="max-h-72 overflow-y-auto overflow-x-hidden border-t border-border/70 px-1 py-1"
-              data-testid="background-agents-panel"
-            >
-              <PanelBody
-                groups={groups}
-                getChildren={getChildren}
-                onNavigate={navigate}
-                openTrajectories={tasks.open}
-              />
-            </div>
-          )}
-        </div>
-      </div>
+      </PanelSlot>
     </div>
   );
 }

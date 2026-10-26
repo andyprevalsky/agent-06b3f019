@@ -27,6 +27,16 @@ import { getStatusText, type TreeNode } from '@/hooks/useAgentTree';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
 import { makeAgentTreeNode } from './terminal-component-chips.fixtures';
+import {
+  done,
+  explore,
+  forEach,
+  gp,
+  live,
+  renderDock,
+  row,
+  started,
+} from './background-agents.fixtures';
 
 const tree = vi.hoisted(() => ({ nodes: new Map<string, unknown>() }));
 vi.mock('@/hooks/useAgentTree', async () => {
@@ -41,88 +51,6 @@ beforeAll(() => {
 beforeEach(() => {
   tree.nodes = new Map();
 });
-
-const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
-let seq = 0;
-function row(
-  metadata: Record<string, unknown>,
-  text = '',
-  role: Message['role'] = 'TOOL',
-): Message {
-  seq += 1;
-  return {
-    message_id: `m-${seq}`,
-    timestamp: new Date(T0 + seq * 1000).toISOString(),
-    role,
-    text,
-    metadata,
-  };
-}
-
-function started(callId: string, type: string, path: string, goal: string): Message {
-  return row(
-    {
-      toolCallId: callId,
-      toolName: 'spawn_agent',
-      toolStatus: 'FINISHED',
-      hidden: true,
-      runInBackground: true,
-      backgroundAddress: path,
-      backgroundPath: path,
-      backgroundGoal: goal,
-      backgroundAgentType: type,
-    },
-    'Started',
-  );
-}
-
-function live(callId: string, extra: Record<string, unknown>): Message {
-  return row({
-    toolCallId: callId,
-    toolName: 'spawn_general_purpose_agent',
-    toolStatus: 'IN_PROGRESS',
-    excludeFromModel: true,
-    busId: 'root-1',
-    ...extra,
-  });
-}
-
-function done(callId: string, path: string, status: string, body: string): Message {
-  return row(
-    {
-      agentNotification: true,
-      toolName: 'agent_notification',
-      fromAgentAddress: path,
-      status,
-      backgroundTaskId: callId,
-    },
-    `Message Type: ${status === 'failed' ? 'FAILED' : 'FINAL_ANSWER'}\nTask name: x\nSender: ${path}\nPayload:\n${body}`,
-    'USER',
-  );
-}
-
-const gp = () => [
-  started('call_gp', 'general_purpose', '/root/budget_planner', 'Draft a rough budget'),
-  live('call_gp', { subAgentIds: ['child-1'], spawnGroupId: 'call_gp' }),
-];
-const forEach = () => [
-  started('call_fe', 'for_each', '/root/venue_capacities', 'Look up each venue'),
-  live('call_fe:0', { subAgentIds: ['fe-a'] }),
-  live('call_fe:1', { subAgentIds: ['fe-b'] }),
-  live('call_fe:2', { subAgentIds: ['fe-c'] }),
-];
-const explore = () => [
-  started('call_ex', 'explore', '/root/hotel_price', 'Find the average hotel price'),
-  row({
-    toolCallId: 'call_ex',
-    toolName: 'spawn_agent',
-    toolStatus: 'IN_PROGRESS',
-    excludeFromModel: true,
-    agentType: 'explore',
-    taskId: 't-ex',
-    title: 'Exploring',
-  }),
-];
 
 function renderList(messages: Message[], onNavigateToAgent = vi.fn()) {
   return render(
@@ -294,21 +222,6 @@ class ScanCountingMap<K, V> extends Map<K, V> {
     this.scanned += this.size;
     super.forEach(callback, thisArg);
   }
-}
-
-function renderDock(messages: Message[], onNavigate = vi.fn()) {
-  // Production mounts the dock inside the selected agent's AgentProvider.
-  return render(
-    <AgentContext.Provider value={makeAgentCtx({ selectedAgentId: 'root-1', messages })}>
-      <TooltipProvider>
-        <BackgroundAgentsBanner
-          selectedAgentId="root-1"
-          messages={messages}
-          onNavigate={onNavigate}
-        />
-      </TooltipProvider>
-    </AgentContext.Provider>,
-  );
 }
 
 describe('paused background browser (root pause)', () => {
