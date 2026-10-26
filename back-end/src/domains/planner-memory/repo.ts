@@ -3,6 +3,7 @@ export {
   findPlannerMemory,
   claimPlannerMemoryCompression,
   plannerMemoryStats,
+  plannerMemoryVisibleTo,
   releasePlannerMemoryCompression,
   searchPlannerMemories,
   setPlannerMemoryCriticalPath,

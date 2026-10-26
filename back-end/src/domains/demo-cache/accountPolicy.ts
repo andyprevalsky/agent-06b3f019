@@ -1,1 +1,4 @@
-export { shouldWriteDemoCacheForUser } from '../../providers/demoCacheAccountPolicy';
+export {
+  shouldWriteDemoCacheForUser,
+  verifyDemoCacheWriteCapability,
+} from '../../providers/demoCacheAccountPolicy';
