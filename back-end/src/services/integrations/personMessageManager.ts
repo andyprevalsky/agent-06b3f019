@@ -257,7 +257,10 @@ export async function upsertPersonAndMessageRecords(
     } catch (error) {
       if (error instanceof DisconnectedGoogleCredentialError) throw error;
       failedChunks++;
-      firstChunkError ??= error instanceof Error ? error.message : String(error);
+      // Prisma messages start with a newline; keep the cause on one readable line.
+      firstChunkError ??= (error instanceof Error ? error.message : String(error))
+        .replace(/\s+/g, ' ')
+        .trim();
       log.error('Error processing contact chunk', {
         jobId,
         error: error instanceof Error ? error.message : String(error),
