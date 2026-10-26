@@ -33,6 +33,8 @@ import {
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
 import {
+  testManifestLockHoldsNoConnectionDuringStorageIo,
+  testFixtureToolSideEffectsSeekByIndex,
   testFinalizeDeleteSeeksByRoot,
   testFixtureExcludesUserLifetimeHistory,
   testLateLlmArtifactIndexesOnlyItself,
@@ -160,6 +162,7 @@ async function seedRun(): Promise<SeededRun> {
 }
 
 async function cleanup(seed: SeededRun): Promise<void> {
+  await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
   await prisma.message.deleteMany({ where: { id: { in: [seed.messageId, seed.staleMessageId] } } });
   await prisma.toolSideEffect.deleteMany({
     where: { operationKey: { contains: seed.rootAgentId } },
@@ -217,12 +220,7 @@ async function testFixtureScopeAndRestore(): Promise<void> {
 
 async function withSeededRun(fn: (seed: SeededRun) => Promise<void>): Promise<void> {
   const seed = await seedRun();
-  try {
-    await fn(seed);
-  } finally {
-    await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
-    await cleanup(seed);
-  }
+  await fn(seed).finally(() => cleanup(seed));
 }
 
 async function testStartFixtureSnapshotExcludesPostReadyWrites(): Promise<void> {
@@ -585,6 +583,14 @@ async function runAll(): Promise<void> {
     {
       name: "run fixture excludes the user's lifetime history",
       fn: () => withSeededRun(testFixtureExcludesUserLifetimeHistory),
+    },
+    {
+      name: 'manifest lock holds no connection during storage I/O',
+      fn: () => withSeededRun(testManifestLockHoldsNoConnectionDuringStorageIo),
+    },
+    {
+      name: 'fixture tool side effects seek by index',
+      fn: () => withSeededRun(testFixtureToolSideEffectsSeekByIndex),
     },
     {
       name: 'finalize search-index delete seeks by root',

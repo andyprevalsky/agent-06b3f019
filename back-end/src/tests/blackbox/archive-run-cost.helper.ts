@@ -190,3 +190,57 @@ export async function testLateLlmArtifactIndexesOnlyItself(
     'an overwritten late artifact left stale search rows'
   );
 }
+
+/**
+ * The manifest lock must not hold a pooled connection or an open transaction
+ * while its operation performs storage I/O: Supavisor has 60 server
+ * connections, and prod held this lock for up to 120 s per root.
+ */
+export async function testManifestLockHoldsNoConnectionDuringStorageIo(
+  seed: RunSeed
+): Promise<void> {
+  const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
+  const heldInTransaction = async (since: Date) =>
+    prisma.$queryRaw<Array<{ pid: number; xactStart: Date }>>`
+      SELECT pid, xact_start AS "xactStart" FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
+    `;
+  await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
+    const operationStart = new Date();
+    // Stand-in for an R2 round trip performed under the lock.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const first = await heldInTransaction(operationStart);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const second = await heldInTransaction(operationStart);
+    const pinned = first.filter((row) =>
+      second.some((later) => later.pid === row.pid && +later.xactStart === +row.xactStart)
+    );
+    assert.deepStrictEqual(
+      pinned,
+      [],
+      `manifest lock held a pooled connection in an open transaction during storage I/O: ${JSON.stringify(pinned)}`
+    );
+    await ownership.assertOwned();
+  });
+}
+
+/** The fixture's ToolSideEffect read must seek by index, not scan the table. */
+export async function testFixtureToolSideEffectsSeekByIndex(seed: RunSeed): Promise<void> {
+  const { toolSideEffectsForAgentsSql } = await import('../../providers/traceArchiveFixture');
+  const nodes = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL enable_seqscan = off`;
+    const rows = await tx.$queryRaw<Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }>>(
+      Prisma.sql`EXPLAIN (FORMAT JSON) ${toolSideEffectsForAgentsSql([seed.rootAgentId])}`
+    );
+    return planNodes(rows[0]['QUERY PLAN'][0].Plan);
+  });
+  assert(
+    nodes.some(
+      (node) =>
+        node['Index Name'] === 'ToolSideEffect_operationKey_trgm_idx' &&
+        node['Index Cond']?.includes('"operationKey"')
+    ),
+    `fixture ToolSideEffect read cannot seek by operationKey: ${JSON.stringify(nodes).slice(0, 300)}`
+  );
+}

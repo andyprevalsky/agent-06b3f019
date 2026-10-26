@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
-import { databasePoolLimit, runTransactionWithRetry } from './database';
+import { randomUUID } from 'node:crypto';
+import { prisma } from './database';
 import { retryWithBackoff } from './retry';
 import {
   type StoreResult,
@@ -15,7 +16,6 @@ import {
   readPlainArchivedArtifact,
 } from './traceArchiveStrict';
 
-const TRACE_ARCHIVE_MANIFEST_LOCK_SEED = 8_104_327;
 export const TRACE_ARCHIVE_FINALIZING_MARKER = 'manifest.finalization-fence.json';
 
 export type ManifestArtifact = {
@@ -301,13 +301,14 @@ type ManifestLockOwnership = {
   reconcile: () => Promise<ManifestReconciliationResult>;
 };
 
-// Lock holders run nested queries on the shared pool (planner memory, trajectory
-// search). A same-root waiter therefore releases its connection between bounded
-// waits; otherwise waiters can fill the pool and starve the holder they wait on.
-const MANIFEST_LOCK_ATTEMPT_MS = 2_000;
+// Per-root lease row. Every lease statement is a single autocommit query, so no
+// pooled connection or transaction stays open across the operation's R2 I/O.
+// A holder owns the root until its fixed expiry (the bound the old interactive
+// transaction's timeout gave); a crashed holder's lease simply expires.
+const MANIFEST_LEASE_TTL_MS = 120_000;
 const MANIFEST_LOCK_WAIT_MS = 120_000;
 const MANIFEST_LOCK_RETRY_DELAY_MS = 100;
-const POSTGRES_LOCK_NOT_AVAILABLE = '55P03';
+const MANIFEST_LOCK_MAX_RETRY_DELAY_MS = 1_000;
 
 class ArchiveManifestLockBusyError extends Error {
   constructor(rootAgentId: string) {
@@ -316,124 +317,85 @@ class ArchiveManifestLockBusyError extends Error {
   }
 }
 
-function isLockNotAvailable(error: unknown): boolean {
-  const meta = (error as { meta?: { code?: unknown } } | null)?.meta;
-  return meta?.code === POSTGRES_LOCK_NOT_AVAILABLE;
-}
-
-// A holder pins one pooled connection for its whole operation while the
-// operation's own queries need another, so holders of different roots can pin
-// every connection between them and none can run a query until the pool
-// timeout. Admission keeps the roots one process has open to under half its
-// pool; callers for other roots wait here in memory, holding nothing. A caller
-// for a root that is already open goes straight through: it waits in Postgres
-// and gives its connection back between the bounded attempts above. Like the
-// advisory lock itself, admission is not re-entrant.
-const openManifestRoots = new Map<string, number>();
-const manifestRootWaiters: Array<{ rootAgentId: string; admit: () => void }> = [];
-
-function manifestRootLimit(): number {
-  return Math.max(1, Math.floor((databasePoolLimit() - 1) / 2));
-}
-
-function admitWaitingManifestRoots(): void {
-  for (let index = 0; index < manifestRootWaiters.length;) {
-    const waiter = manifestRootWaiters[index]!;
-    const open = openManifestRoots.get(waiter.rootAgentId);
-    if (open === undefined && openManifestRoots.size >= manifestRootLimit()) {
-      index += 1;
-      continue;
-    }
-    openManifestRoots.set(waiter.rootAgentId, (open ?? 0) + 1);
-    manifestRootWaiters.splice(index, 1);
-    waiter.admit();
+export class ArchiveManifestLeaseLostError extends Error {
+  constructor(rootAgentId: string) {
+    super(`Trace archive manifest lease was lost for ${rootAgentId}`);
+    this.name = 'ArchiveManifestLeaseLostError';
   }
 }
 
-async function admitManifestLock(rootAgentId: string): Promise<() => void> {
-  await new Promise<void>((admit) => {
-    manifestRootWaiters.push({ rootAgentId, admit });
-    admitWaitingManifestRoots();
-  });
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    const open = openManifestRoots.get(rootAgentId) ?? 1;
-    if (open > 1) openManifestRoots.set(rootAgentId, open - 1);
-    else openManifestRoots.delete(rootAgentId);
-    admitWaitingManifestRoots();
-  };
+// Callers currently waiting on another holder's lease (observability/tests).
+let manifestLockWaiters = 0;
+
+export function archiveManifestLockWaiters(): number {
+  return manifestLockWaiters;
+}
+
+async function acquireManifestLease(rootAgentId: string, ownerId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<Array<{ ownerId: string }>>`
+    INSERT INTO "TraceArchiveManifestLease" ("rootAgentId", "ownerId", "expiresAt")
+    VALUES (${rootAgentId}, ${ownerId}, clock_timestamp() + ${`${MANIFEST_LEASE_TTL_MS} milliseconds`}::interval)
+    ON CONFLICT ("rootAgentId") DO UPDATE
+      SET "ownerId" = EXCLUDED."ownerId", "expiresAt" = EXCLUDED."expiresAt"
+      WHERE "TraceArchiveManifestLease"."expiresAt" <= clock_timestamp()
+    RETURNING "ownerId"
+  `;
+  return rows[0]?.ownerId === ownerId;
+}
+
+async function releaseManifestLease(rootAgentId: string, ownerId: string): Promise<void> {
+  await prisma.$executeRaw`
+    DELETE FROM "TraceArchiveManifestLease"
+    WHERE "rootAgentId" = ${rootAgentId} AND "ownerId" = ${ownerId}
+  `;
 }
 
 export async function withArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
+  const ownerId = randomUUID();
   const deadline = Date.now() + MANIFEST_LOCK_WAIT_MS;
-  return retryWithBackoff(() => attemptArchiveManifestLock(rootAgentId, operation), {
-    maxRetries: Math.ceil(MANIFEST_LOCK_WAIT_MS / MANIFEST_LOCK_ATTEMPT_MS) + 1,
-    getBackoffDelayMs: () => MANIFEST_LOCK_RETRY_DELAY_MS,
-    isRetryable: (error) => error instanceof ArchiveManifestLockBusyError && Date.now() < deadline,
-    component: 'ArchiveManifestLock',
-  });
-}
-
-async function reportBusyLock<T>(rootAgentId: string, acquisition: Promise<T>): Promise<T> {
+  let waiting = false;
   try {
-    return await acquisition;
-  } catch (error) {
-    if (isLockNotAvailable(error)) throw new ArchiveManifestLockBusyError(rootAgentId);
-    throw error;
-  }
-}
-
-async function attemptArchiveManifestLock<T>(
-  rootAgentId: string,
-  operation: (ownership: ManifestLockOwnership) => Promise<T>
-): Promise<T> {
-  const release = await admitManifestLock(rootAgentId);
-  let enteredOperation: Promise<T> | undefined;
-  try {
-    return await runTransactionWithRetry(
-      async (tx) => {
-        await reportBusyLock(
-          rootAgentId,
-          tx.$queryRaw`
-          WITH settings AS MATERIALIZED (
-            SELECT set_config('idle_in_transaction_session_timeout', '120s', true),
-              set_config('lock_timeout', ${`${MANIFEST_LOCK_ATTEMPT_MS}ms`}, true)
-          ), acquired AS MATERIALIZED (
-            SELECT pg_advisory_xact_lock(
-              hashtextextended(${`${rootAgentId}:trace-archive-manifest`}, ${TRACE_ARCHIVE_MANIFEST_LOCK_SEED})
-            )
-            FROM settings
-          )
-          SELECT 1 AS locked FROM acquired
-        `
-        );
-        const assertOwned = async () => {
-          // A timed-out/terminated interactive transaction no longer owns the lock.
-          await tx.$queryRaw`SELECT 1 AS owned`;
-        };
-        enteredOperation = (async () => {
-          const result = await operation({
-            assertOwned,
-            reconcile: () => reconcileFinalizedManifestLocked(rootAgentId, assertOwned),
-          });
-          await assertOwned();
-          return result;
-        })();
-        void enteredOperation.catch(() => {});
-        return enteredOperation;
+    await retryWithBackoff(
+      async () => {
+        if (await acquireManifestLease(rootAgentId, ownerId)) return;
+        if (!waiting) {
+          waiting = true;
+          manifestLockWaiters += 1;
+        }
+        throw new ArchiveManifestLockBusyError(rootAgentId);
       },
-      { maxWait: 10_000, timeout: 120_000 }
+      {
+        maxRetries: Math.ceil(MANIFEST_LOCK_WAIT_MS / MANIFEST_LOCK_RETRY_DELAY_MS),
+        getBackoffDelayMs: (_error, attempt) =>
+          Math.min(MANIFEST_LOCK_MAX_RETRY_DELAY_MS, MANIFEST_LOCK_RETRY_DELAY_MS * 2 ** attempt),
+        isRetryable: (error) =>
+          error instanceof ArchiveManifestLockBusyError && Date.now() < deadline,
+        component: 'ArchiveManifestLock',
+      }
     );
   } finally {
-    // Prisma can reject on expiry before the callback's bounded storage I/O ends.
-    // Join that work; ownership checks prevent another rewrite or a false ACK.
-    await enteredOperation?.catch(() => {});
-    release();
+    if (waiting) manifestLockWaiters -= 1;
+  }
+  const assertOwned = async () => {
+    const rows = await prisma.$queryRaw<Array<{ owned: number }>>`
+      SELECT 1 AS owned FROM "TraceArchiveManifestLease"
+      WHERE "rootAgentId" = ${rootAgentId} AND "ownerId" = ${ownerId}
+        AND "expiresAt" > clock_timestamp()
+    `;
+    if (rows.length === 0) throw new ArchiveManifestLeaseLostError(rootAgentId);
+  };
+  try {
+    const result = await operation({
+      assertOwned,
+      reconcile: () => reconcileFinalizedManifestLocked(rootAgentId, assertOwned),
+    });
+    await assertOwned();
+    return result;
+  } finally {
+    await releaseManifestLease(rootAgentId, ownerId);
   }
 }
 

@@ -224,9 +224,7 @@ async function collectFixtureWithClient(
     db.agentRunCredentialPropagation.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    db.toolSideEffect.findMany({
-      where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
-    }),
+    db.$queryRaw<unknown[]>(toolSideEffectsForAgentsSql(agentIds)),
     db.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
   ]);
 
@@ -273,6 +271,19 @@ async function collectFixtureWithClient(
   rows.BrowserContext = browserContexts;
   rows.EmailIntegrationCredential = emailCredentials;
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
+}
+
+/**
+ * Side effects whose operation key names one of the run's agents. Keys embed
+ * the agent ID at varying positions, so this is a substring match; the
+ * ToolSideEffect_operationKey_trgm_idx trigram index lets it seek.
+ */
+export function toolSideEffectsForAgentsSql(agentIds: string[]): Prisma.Sql {
+  const matches = agentIds.map((id) => Prisma.sql`"operationKey" LIKE ${`%${id}%`}`);
+  return Prisma.sql`
+    SELECT * FROM "ToolSideEffect"
+    WHERE ${matches.length > 0 ? Prisma.join(matches, ' OR ') : Prisma.sql`FALSE`}
+  `;
 }
 
 async function collectUserEnvironmentRows(db: FixtureDbClient, userId: string): Promise<JsonRows> {
