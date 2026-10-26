@@ -339,6 +339,57 @@ describe('computeActiveBrowserPanels', () => {
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'task-b', browserUrl: 'b' }]);
   });
 
+  it('keeps a relaunched browser visible when it reuses the task id of an ended run', () => {
+    // Prod agent 447576b9 (2026-10-26): "go to instacart instead" made the root
+    // kill browser run 1 (call-1) and spawn run 2 (call-2) in the background on
+    // the SAME task_id. Run 1's task_complete must not hide run 2's chip while
+    // the agents-running pane shows that browser running.
+    const row = (id: string, second: number, metadata: Record<string, unknown>) => ({
+      message_id: id,
+      timestamp: `2026-10-26T15:59:${String(second).padStart(2, '0')}.000Z`,
+      text: '',
+      role: 'TOOL' as const,
+      metadata: { toolName: 'spawn_browser_agent', task_id: 'task-shared', ...metadata },
+    });
+    const msgs = [
+      row('run1-init', 7, {
+        toolCallId: 'call-1',
+        action_type: 'browser',
+        browser_url: 'https://live/run-1',
+        toolStatus: 'IN_PROGRESS',
+      }),
+      row('run1-done', 8, {
+        toolCallId: 'call-1',
+        action_type: 'task_complete',
+        toolStatus: 'FINISHED',
+      }),
+      row('run1-diagnostics', 9, {
+        toolCallId: 'browser-diagnostics:task-shared',
+        action_type: 'diagnostics',
+        toolStatus: 'FINISHED',
+      }),
+      row('run2-init', 27, {
+        toolCallId: 'call-2',
+        action_type: 'browser',
+        browser_url: 'https://live/run-2',
+        toolStatus: 'IN_PROGRESS',
+      }),
+    ] as Parameters<typeof computeActiveBrowserPanels>[0];
+    expect(computeActiveBrowserPanels(msgs)).toEqual([
+      { taskId: 'task-shared', browserUrl: 'https://live/run-2' },
+    ]);
+    // Run 2's own terminal still closes the chip.
+    const ended = [
+      ...msgs,
+      row('run2-done', 40, {
+        toolCallId: 'call-2',
+        action_type: 'task_complete',
+        toolStatus: 'FINISHED',
+      }),
+    ] as Parameters<typeof computeActiveBrowserPanels>[0];
+    expect(computeActiveBrowserPanels(ended)).toEqual([]);
+  });
+
   it('never renders two panels while one browser tool call is retrying', () => {
     // Production-shaped invariant: Temporal retried the logical call with a new
     // task ID. Even when an input prefix lacks task A's terminal event, only the
