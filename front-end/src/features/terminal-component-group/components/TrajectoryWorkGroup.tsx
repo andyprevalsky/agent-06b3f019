@@ -8,7 +8,8 @@
  *   [DONE, COLLAPSED]   <---- click ---->  [DONE, EXPANDED]
  *
  * RUNNING header: fixed-height live carousel (latest activity icon + label,
- *   ring for tool batches, live elapsed). EXPANDED swaps the icon for a chevron.
+ *   spinning loader for tool batches, live elapsed). EXPANDED swaps the icon for
+ *   a chevron.
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
  *   paged 20 at a time; new activities append while it stays open.
@@ -109,7 +110,12 @@ export function TrajectoryWorkGroup({
           {running ? (
             <>
               {toolBatch && (
-                <LoaderCircle data-testid="tool-batch-progress-ring" size={12} aria-hidden />
+                <LoaderCircle
+                  data-testid="tool-batch-progress-ring"
+                  size={12}
+                  aria-hidden
+                  className="animate-spin"
+                />
               )}
               <span data-testid="trajectory-batch-elapsed">{elapsed}</span>
               {comms > 0 && <span>· {comms} exchanges</span>}
