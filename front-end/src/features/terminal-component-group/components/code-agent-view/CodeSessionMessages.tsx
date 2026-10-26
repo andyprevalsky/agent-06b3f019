@@ -95,7 +95,7 @@ function WorkSlot({
       data-testid="code-work-slot"
       data-turn-key={turn.key}
       data-state={turn.status}
-      className="px-3.5 py-2"
+      className="py-2"
     >
       <button
         type="button"

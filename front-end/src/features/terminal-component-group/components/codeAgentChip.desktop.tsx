@@ -54,7 +54,10 @@ import { OpenAppButton } from './app-view/OpenAppButton';
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
 
-export function Summary({ summary }: { summary: CodeAgentSummary }) {
+/** `flush`: the code-agent view's rows sit on the transcript's left edge (no chip icon inset). */
+const ROW_INSET = 'pl-11 pr-3.5';
+
+export function Summary({ summary, flush }: { summary: CodeAgentSummary; flush?: boolean }) {
   const tests =
     summary.tests_passed === undefined
       ? null
@@ -64,7 +67,7 @@ export function Summary({ summary }: { summary: CodeAgentSummary }) {
   return (
     <div
       data-testid="code-agent-summary"
-      className="border-t border-border pb-3 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
+      className={`border-t border-border pb-3 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
     >
       <div>
         Committed <code className={CODE}>{summary.commit.slice(0, 7)}</code> on{' '}
@@ -107,14 +110,22 @@ export function Summary({ summary }: { summary: CodeAgentSummary }) {
 }
 
 /** The persistent code session's branch and where it merges, with push / PR / merge facts. */
-export function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeAgentMeta }) {
+export function SessionLine({
+  session,
+  meta,
+  flush,
+}: {
+  session: CodeSessionFacts;
+  meta: CodeAgentMeta;
+  flush?: boolean;
+}) {
   const branch = session.branch ?? meta.branch;
   if (!branch) return null;
   const target = session.merge_target ?? meta.base_branch;
   return (
     <div
       data-testid="code-agent-session"
-      className="border-t border-border pb-2.5 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
+      className={`border-t border-border pb-2.5 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
     >
       <code className={CODE}>{branch}</code>
       {target && (
@@ -147,11 +158,21 @@ export function SessionLine({ session, meta }: { session: CodeSessionFacts; meta
  * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
  * already the exact user-facing sentence); never re-worded on the client.
  */
-export function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string | null }) {
+export function FailureBox({
+  meta,
+  fallback,
+  flush,
+}: {
+  meta: CodeAgentMeta;
+  fallback: string | null;
+  flush?: boolean;
+}) {
   const body: ReactNode = meta.failure_message ?? fallback;
   if (!body) return null;
   return (
-    <div className="mx-3 mb-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+    <div
+      className={`mb-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 ${flush ? '' : 'mx-3'}`}
+    >
       <p
         data-testid="code-agent-failure"
         className="whitespace-pre-wrap text-sm text-red-600 dark:text-red-400"

@@ -16,8 +16,8 @@
  *
  * CODE AGENT VIEW (Rose Desktop, useOpenCodeAgent): a left-bar code-agent row
  *   of the selected (owner) agent is open → CodeAgentConversationView replaces
- *   the whole column (header + transcript/terminal + the query box as its
- *   direct channel); closing it returns to this agent's chat below.
+ *   the whole column (header + transcript over the root's blur backdrop + the
+ *   query box as its direct channel); closing it returns to this agent's chat.
  *
  * AGENTS BANNER (BackgroundAgentsBanner, attached to the top of QueryInput):
  *   0 running agents → hidden (brief "All agents finished" after the last one)
@@ -74,7 +74,7 @@ import type {
 } from '../types';
 
 import { AppScreenHost } from './AppScreenHost';
-import { ChatScrollArea } from './ChatScrollArea';
+import { BlurOverlay, ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { composerCanSubmit } from './composerCanSubmit';
@@ -133,6 +133,13 @@ function ChatColumn({
         key={codeAgent.taskId}
         codeAgent={codeAgent}
         readOnlyMessage={readOnlyMessage}
+        backdrop={
+          <BlurOverlay
+            selectedAgentId={a.selectedAgentId}
+            dripStyles={drip.dripStyles}
+            blur={drip.blur}
+          />
+        }
       />
     );
   }

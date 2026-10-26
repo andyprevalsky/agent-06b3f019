@@ -7,12 +7,15 @@
  *   person's turn        → USER message (key turn:<client_message_id> from the
  *                          optimistic echo through the direct-turn row to the
  *                          session's own record: one row, never duplicated)
- *   Rose's goal/message  → agent-to-agent row ("Rose → Codex")
+ *   Rose's initial goal  → USER message, like the goal prompt of a root agent
+ *   later native Rose → code-agent messages (coordination)
+ *                        → an agent-to-agent activity row inside the running turn's
+ *                          WORK SLOT (a Rose message while none runs starts one)
  *   thinking / narration / tools / control  → the turn's WORK SLOT (never top-level)
  *   final answer (result text, else the last narration once the turn ends)
  *                        → final-answer row after the slot
  *   error                → error tool row outside the slot
- *   a2a rows, display media / send_message_to_user of THIS code agent
+ *   canonical a2a rows, display media / send_message_to_user of THIS code agent
  *                        → as-is, outside the slot
  *
  * TURNS (key provider:task:turn): a person/Rose message while no turn runs
@@ -307,6 +310,21 @@ class SessionBuilder {
     this.open = null;
   }
 
+  /** A later Rose → code-agent message: an activity of the running turn (else it starts one). */
+  coordination(message: Message, at: number | null, turnId: string | null) {
+    const running = this.open;
+    if (running && turnId !== null && running.turnId !== null && running.turnId !== turnId) {
+      this.finish('interrupted', at);
+    }
+    if (!this.open) this.startTurn(at, turnId);
+    (this.open as OpenTurn).turn.activities.push(message);
+  }
+
+  /** Nothing rendered yet: the session's first message is its goal prompt. */
+  get empty(): boolean {
+    return this.out.length === 0;
+  }
+
   /** A person's (or Rose's) message: steer the running turn or start the next. */
   person(message: Message, at: number | null, turnId: string | null, startedAt?: number | null) {
     const running = this.open;
@@ -491,11 +509,12 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
       if (entry.type === 'message' && entry.role === 'user') {
         const key = entry.clientMessageId ? `turn:${entry.clientMessageId}` : entry.key;
         const id = `code:${input.taskId}:${key}`;
-        const message =
-          entry.sender === 'agent'
-            ? roseMessage(input, id, entry)
-            : personMessage(id, entry.text, entry.at ?? item.at);
-        builder.person(message, entry.at ?? item.at, entry.turnId, entry.turnStartedAt);
+        const at = entry.at ?? item.at;
+        if (entry.sender === 'agent' && !builder.empty) {
+          builder.coordination(roseMessage(input, id, entry), at, entry.turnId);
+        } else {
+          builder.person(personMessage(id, entry.text, at), at, entry.turnId, entry.turnStartedAt);
+        }
       } else if (entry.type === 'metrics') {
         builder.metrics(entry);
       } else if (entry.type === 'turn') {
