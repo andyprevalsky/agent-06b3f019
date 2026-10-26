@@ -90,16 +90,16 @@ def test_result_scorecards_are_in_both_root_prompt_phases():
     for phase in ("PLAN", "EXECUTE"):
         prompt = build_system_prompt(phase=phase, enabled_tools=[])
         assert "# Presenting results as Rose scorecards" in prompt
-        for reference in (
-            "github.com/Rose-Ai-Labs/rose/blob/main/front-end/src/index.css",
-            "github.com/Rose-Ai-Labs/rose/blob/main/.claude/shared/report-display-format.md",
-            "linear.app/insights",
-            "vercel.com/products/observability",
-            "stripe.com/sigma",
-            "mercury.com/insights",
-            "ramp.com/reporting",
-        ):
+        for reference in ("Linear", "Vercel", "Stripe", "Mercury", "Ramp"):
             assert reference in prompt
+        # Presentation guidance must be complete inline. A URL here becomes
+        # fetch work: a root once added the repo style files to its explore
+        # goal, the explore spent its turns on them and the task timed out.
+        section = prompt.split("# Presenting results as Rose scorecards", 1)[1].split("\n# ", 1)[0]
+        assert "http" not in section and "github.com" not in section
+        assert "Never fetch style\nreferences or add presentation work to a sub-agent's goal" in section
+        for token in ("Geist", "#ecece8", "0.75rem"):
+            assert token in section
         assert "Never invent scores, metrics, trends or completed checks" in prompt
         assert "Brief acknowledgements and clarification questions can remain plain text" in prompt
         assert "Never paste HTML source into a chat message" in prompt
