@@ -3,13 +3,13 @@
  *
  * Stateless apart from which project row is being renamed (owned by the parent).
  *
- * EXPANDED (bar hovered):
- *   Home agents
+ * EXPANDED (bar hovered) — Projects on top (Andy, 2026-10-26), then Home:
  *   [folder] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
  *       project A agents (indented)
  *   [folder] Project B   [+] [⚙]
  *       ...
  *   + New project  (inline: Enter creates, Escape cancels)
+ *   Home agents
  *
  * COLLAPSED (64px rail): project rows and "+ New project" are hidden; the
  * non-empty groups of agent icons are separated by 18×3px neutral line pills.
@@ -141,12 +141,10 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
     ? grouped.projects.filter((g) => g.agents.length > 0)
     : grouped.projects;
   const firstAgentGroup =
-    grouped.home.length > 0 ? 'home' : projectGroups.find((g) => g.agents.length > 0)?.project.id;
+    projectGroups.find((g) => g.agents.length > 0)?.project.id ??
+    (grouped.home.length > 0 ? 'home' : undefined);
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
-      <div data-testid="rose-group-home" className="flex flex-col">
-        <AgentRows agents={grouped.home} indented={false} props={props} />
-      </div>
       {isExpanded && props.projectLoading && (
         <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
           Loading projects…
@@ -172,6 +170,10 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
       {isExpanded && !isFiltering && (
         <NewProjectRow onCreate={props.projectActions.onCreateProject} />
       )}
+      {!isExpanded && grouped.home.length > 0 && firstAgentGroup !== 'home' && <GroupDivider />}
+      <div data-testid="rose-group-home" className="flex flex-col">
+        <AgentRows agents={grouped.home} indented={false} props={props} />
+      </div>
     </div>
   );
 }

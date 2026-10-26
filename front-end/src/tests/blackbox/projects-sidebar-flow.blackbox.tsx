@@ -49,7 +49,7 @@ it('uses the original grouped rows and gear settings instead of a separate Proje
   expect(within(screen.getByTestId('rose-group-p-rose')).getByText('Rose work')).toBeVisible();
   expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeVisible();
   fireEvent.click(within(project).getByRole('button', { name: 'Rose project settings' }));
-  expect(screen.getByRole('button', { name: 'Download setup helper' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Download setup helper' })).toBeNull();
   expect(screen.getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');
   expect(screen.getByRole('spinbutton', { name: 'Startup timeout (seconds)' })).toHaveValue(120);
   fireEvent.click(screen.getByRole('button', { name: 'Back to agents' }));

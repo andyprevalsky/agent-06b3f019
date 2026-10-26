@@ -128,7 +128,7 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.queryByLabelText('Resize sidebar')).toBeNull();
   });
 
-  it('orders Home, New Super Agent (black), Search, then Home agents and each project with its agents', async () => {
+  it('orders Home, New Super Agent (black), Search, then each project with its agents, then Home agents', async () => {
     renderBar();
     const bar = roseBar();
     const top = within(bar).getAllByRole('button').slice(0, 2);
@@ -150,15 +150,16 @@ describe('Rose left bar (flag on)', () => {
     expect(create).toHaveTextContent('New Super Agent');
     await screen.findByTestId('rose-project-row-p-rose');
     expect(rowOrder()).toEqual([
-      // Home: running first (sortAgents), an unknown project_id falls back to Home.
-      'agent:home-run',
-      'agent:orphan',
-      'agent:home-done',
+      // Projects on top (Rose first), then Home: running first (sortAgents),
+      // an unknown project_id falls back to Home.
       'project:p-rose',
       'agent:rose-run',
       'agent:rose-fail',
       'project:p-habits',
       'agent:habits-done',
+      'agent:home-run',
+      'agent:orphan',
+      'agent:home-done',
     ]);
     // Project agents sit indented while expanded; Home agents do not.
     expect(screen.getByTestId('rose-agent-row-rose-run').className).toContain('pl-[34px]');

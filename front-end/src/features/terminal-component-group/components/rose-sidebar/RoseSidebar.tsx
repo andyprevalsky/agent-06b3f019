@@ -10,10 +10,10 @@
  *
  * LAYOUT (top → bottom, rows 17/30/57/59/63):
  *   Home · New Super Agent (black) · Search
- *   agents grouped by project, with per-agent one-layer disclosures (RoseAgentGroups).
+ *   Projects on top: each project row + its agents, then + New project; then the
+ *   Home agents (RoseAgentGroups), with per-agent one-layer disclosures.
  *   The compact rail shows active tree counts >1; code sessions retain their
  *   provider icons. Code reads stay batched per on-screen page of ≤50 roots.
- *   + New project
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.

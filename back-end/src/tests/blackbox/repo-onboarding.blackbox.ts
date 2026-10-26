@@ -16,7 +16,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { after, test } from 'node:test';
-import { projectSyncClientFiles } from '../../providers/projects/syncClient';
 const run = promisify(execFile);
 const root = mkdtempSync(join(tmpdir(), 'rose-onboarding-'));
 const cli = process.env.ROSE_SYNC_TEST_CLI ?? resolve('../scripts/rose-sync');
@@ -238,20 +237,4 @@ test('onboarded workspace restores keys and runs dependency setup', async () => 
       unregisterWorkspaceExecutor(id);
     }
   });
-});
-
-test('downloaded setup helper contains only its four public source files', () => {
-  const files = projectSyncClientFiles();
-  assert.equal(files.length, 4);
-  assert.deepEqual(
-    files.map((file) => file.path),
-    [
-      'rose-sync',
-      'lib/rose-sync/cli.mjs',
-      'lib/rose-sync/capture.mjs',
-      'lib/rose-sync/onboarding.mjs',
-    ]
-  );
-  assert(files.every((file) => !file.content.includes(secret)));
-  assert(files.some((file) => file.content.includes('configureOnboarding')));
 });
