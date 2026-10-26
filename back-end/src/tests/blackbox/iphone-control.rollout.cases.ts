@@ -7,6 +7,7 @@ import type { Case } from './iphone-control.cases';
 import { fixture } from './auth-assistance.native-fixtures';
 import { getTaskInfo } from '../../domains/browser-session/service.task-info';
 import { toUserSettings } from '../../domains/browser-session/service.serializers';
+import { ineligiblePhoneFixtureNumber } from './phone-fixture-users';
 export const rolloutCases: Case[] = [
   [
     'browser init and resume piggyback optional rollout without other response changes',
@@ -91,7 +92,10 @@ export const rolloutCases: Case[] = [
           ).data.operation?.status,
           'SUCCEEDED'
         );
-        await prisma.user.update({ where: { userId: f.userId }, data: { phone: '+15555550123' } });
+        await prisma.user.update({
+          where: { userId: f.userId },
+          data: { phone: ineligiblePhoneFixtureNumber() },
+        });
         const ineligible = await settings();
         process.env.CLOUD_IPHONE_ENABLED = '0';
         assert.deepEqual(await settings(), ineligible, 'Ineligible profile bytes changed');
