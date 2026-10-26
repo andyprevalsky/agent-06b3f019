@@ -521,7 +521,19 @@ if $DB_FOUND; then
     echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
     exit 1
   fi
-  LOCAL_PSQL_URL="${LOCAL_PSQL_URL:-postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria}"
+  if [[ -z "${LOCAL_PSQL_URL:-}" ]]; then
+    # Workspace Docker container: never its shared `victoria`, which the local
+    # stack (Step 5 run.sh, semantic tests) serves from. The destructive
+    # blackbox cases get this workspace's own database inside the container,
+    # the same name the standalone runner and the E2B smoke use.
+    if ! COVERAGE_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    ENSURE_SYSTEM_DB_NAME="$COVERAGE_DB_NAME"
+    LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$COVERAGE_DB_NAME"
+    echo "Coverage database: $COVERAGE_DB_NAME (workspace container, not the stack's victoria)"
+  fi
   # Docker Desktop can briefly stop accepting new TCP connections while the
   # parallel coverage lanes saturate the shared host. Prisma's five-second
   # default connect timeout made every first query fail even when Postgres
