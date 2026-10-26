@@ -20,9 +20,9 @@ tags:
   - load-sensitive
   - coverage-gate
 sources:
-  - deploy branch deploy/devbox-20261026-ui26 @ 6a9c39735 (Step 4g agents coverage, 2026-10-26)
-  - /tmp/ui26-int/deploy-resume-e2e-fail.log (gate failure log, not committed)
-  - agents/tests/blackbox/deploy_resume_e2e.blackbox.py:76 (BROWSER_DEPLOY_GRACE)
+  - commit 6a9c39735 (deploy/devbox-20261026-ui26, Step 4g agents coverage failure; log /tmp/ui26-int/deploy-resume-e2e-fail.log, not committed)
+  - commit f8bfbc45a (pre-ui26 comparison base)
+  - task rolling_deploy_resumes_browser_task_on_the_new_machine (agents/tests/blackbox/deploy_resume_e2e.blackbox.py; BROWSER_DEPLOY_GRACE at :76)
 repro: agents/tests/blackbox/deploy_resume_e2e.blackbox.py (rolling_deploy_resumes_browser_task_on_the_new_machine) — passes locally; the failure is not reproduced
 status: open
 ---
