@@ -1299,8 +1299,16 @@ def shared_cpu_plan(root, runner, tasks, runs, bench_rows, task_ref=None):
         rows = catalog['get_task_metadata'](Path(scratch, 'tasks.json'), tasks)
     plan = campaign['stress_default_requirements'](root, rows, peak=len(tasks) * runs, baseline=bench_rows,
                                                    repetitions=runs)
-    baseline = sum(m['config']['guest']['cpus'] for m in bench_rows
-                   if m.get('state') not in ('stopped', 'destroyed') and m['config']['guest'].get('cpu_kind') == 'shared')
+    # stress_default_requirements already validated every active row; an unreachable-host
+    # Machine without a config is counted with the campaign's conservative allowance.
+    baseline = 0
+    for m in bench_rows:
+        if m.get('state') in ('stopped', 'destroyed'):
+            continue
+        if m.get('config') is None and m.get('host_status') == 'unreachable':
+            baseline += campaign['UNREACHABLE_HOST_SHARED_CPU_ALLOWANCE']
+        elif m['config']['guest'].get('cpu_kind') == 'shared':
+            baseline += m['config']['guest']['cpus']
     return plan['planned_shared_cpu_units'], baseline
 
 

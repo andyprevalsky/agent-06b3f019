@@ -2508,6 +2508,23 @@ def test_campaign_inventory_stress_defaults_invalid_native_baseline_refuses(tmp_
 
 
 
+def test_campaign_inventory_stress_defaults_count_unreachable_host_machine_at_largest_shared_size():
+    """Fly returned a started bench Machine on an unreachable host with "config": null
+    (2026-10-26); admission counts it conservatively instead of refusing every launch."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress_unreachable_baseline', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    rows = [{'name': 'plain-fixture', 'requires_browser_agent': False}]
+    known = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
+    unreachable = {'id': 'lost', 'state': 'started', 'host_status': 'unreachable', 'config': None}
+    plain = module.stress_default_requirements(ROOT, rows, peak=1, baseline=known)
+    lost = module.stress_default_requirements(ROOT, rows, peak=1, baseline=known + [unreachable])
+    assert lost['local_shared_cpu_governor_minimum'] == plain['local_shared_cpu_governor_minimum'] + 8
+    assert lost['local_machine_ceiling_minimum'] == plain['local_machine_ceiling_minimum'] + 1
+    with pytest.raises(ValueError, match='unknown native baseline configuration'):
+        module.stress_default_requirements(ROOT, rows, peak=1, baseline=known + [{**unreachable, 'host_status': 'ok'}])
+
+
 def test_campaign_inventory_stress_defaults_count_three_simultaneous_copies():
     import importlib.util
     spec = importlib.util.spec_from_file_location('stress600_defaults', ROOT / 'scripts/run-bench-campaign.py')
