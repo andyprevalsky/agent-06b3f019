@@ -64,6 +64,8 @@ export function isTaskNodeId(agentId: string): boolean {
 
 function taskStatus(status: string): TreeNode['status'] {
   const normalized = status.toLowerCase();
+  // A user pause ended the run: resumable, not running and not failed.
+  if (normalized === 'paused') return 'PAUSED';
   if (FAILED_TASK.has(normalized)) return 'FAILED';
   if (DONE_TASK.has(normalized)) return 'COMPLETED';
   return 'ACTIVE';
@@ -105,9 +107,15 @@ function fromTreeTask(task: TreeBackgroundTask, parentAgentId: string): TreeNode
   });
 }
 
+const SPAWN_NODE_STATUS: Record<BackgroundSpawn['state'], TreeNode['status']> = {
+  running: 'ACTIVE',
+  completed: 'COMPLETED',
+  failed: 'FAILED',
+  paused: 'PAUSED',
+};
+
 function fromSpawn(spawn: BackgroundSpawn, parentAgentId: string): TreeNode {
-  const status =
-    spawn.state === 'running' ? 'ACTIVE' : spawn.state === 'failed' ? 'FAILED' : 'COMPLETED';
+  const status = SPAWN_NODE_STATUS[spawn.state];
   return taskTreeNode({
     address: spawn.address ?? spawn.ownerToolCallId,
     parentAgentId,

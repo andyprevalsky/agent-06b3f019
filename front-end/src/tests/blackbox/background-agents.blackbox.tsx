@@ -18,7 +18,12 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import { BackgroundAgentsBanner } from '@/features/terminal-component-group/components/background-agents/BackgroundAgentsBanner';
+import {
+  buildAgentPanelModel,
+  isTaskNodeId,
+} from '@/features/terminal-component-group/components/background-agents/agentsPanelGroups';
 import { deriveBackgroundSpawns } from '@/features/terminal-component-group/hooks/backgroundSpawns';
+import { getStatusText, type TreeNode } from '@/hooks/useAgentTree';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
 import { makeAgentTreeNode } from './terminal-component-chips.fixtures';
@@ -296,6 +301,114 @@ function renderDock(messages: Message[], onNavigate = vi.fn()) {
     <BackgroundAgentsBanner selectedAgentId="root-1" messages={messages} onNavigate={onNavigate} />,
   );
 }
+
+describe('paused background browser (root pause)', () => {
+  // The rows prod root 447576b9 posted for /root/order_breakfast_dd when Andy
+  // paused the root (2026-10-26 16:08:51Z): the activity's cancel row, local
+  // teardown, the manager's pause row (provider session id) and the
+  // notification whose workflow status is "paused".
+  const pausedBrowser = () => [
+    started('call_br', 'browser', '/root/order_breakfast_dd', 'Place a breakfast order'),
+    row({
+      toolCallId: 'call_br',
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'IN_PROGRESS',
+      excludeFromModel: true,
+      title: 'Clicking <a "Continue">',
+    }),
+    row(
+      {
+        toolCallId: 'call_br',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'FINISHED',
+        excludeFromModel: true,
+        title: 'Browser Session Cancelled',
+        action_type: 'task_complete',
+        task_id: 't-br',
+      },
+      'Agent paused by user',
+    ),
+    row(
+      {
+        toolCallId: 'call_br',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'FINISHED',
+        excludeFromModel: true,
+        title: 'Browser Session Closed',
+        action_type: 'task_complete',
+        task_id: 't-br',
+      },
+      'Browser session closed after teardown',
+    ),
+    row(
+      {
+        toolCallId: 'call_br',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'ERROR',
+        excludeFromModel: true,
+        title: 'Browser Session Paused',
+        action_type: 'task_complete',
+        task_id: 't-br',
+        session_id: 'kernel-sess-1',
+      },
+      'User paused the browser agent',
+    ),
+    row(
+      {
+        agentNotification: true,
+        toolName: 'agent_notification',
+        fromAgentAddress: '/root/order_breakfast_dd',
+        agentType: 'browser',
+        status: 'paused',
+        messageType: 'FAILED',
+        backgroundTaskId: 'call_br',
+        sessionId: 'kernel-sess-1',
+      },
+      'Message Type: FAILED\nTask name: /root\nSender: /root/order_breakfast_dd\nPayload:\nUser paused the browser agent',
+      'USER',
+    ),
+  ];
+
+  it('derives the spawn as paused, not completed', () => {
+    expect(deriveBackgroundSpawns(pausedBrowser()).get('call_br')).toMatchObject({
+      state: 'paused',
+      rawStatus: 'paused',
+      agentType: 'browser',
+    });
+  });
+
+  it('lists the paused task as PAUSED (never running) and the dock does not claim it runs', () => {
+    tree.nodes.set(
+      'root-1',
+      makeAgentTreeNode({
+        agentId: 'root-1',
+        status: 'PAUSED',
+        backgroundTasks: [
+          {
+            address: 'call_br',
+            path: '/root/order_breakfast_dd',
+            type: 'browser',
+            goal: 'Place a breakfast order',
+            status: 'paused',
+          },
+        ],
+      }),
+    );
+    const spawns = [...deriveBackgroundSpawns(pausedBrowser()).values()];
+    const model = buildAgentPanelModel({
+      nodes: tree.nodes as Map<string, TreeNode>,
+      selectedAgentId: 'root-1',
+      spawns,
+    });
+    const tasks = model.groups.flatMap((group) => group.roots).filter((n) => isTaskNodeId(n.agentId));
+    expect(tasks.length).toBeGreaterThan(0);
+    expect(tasks.map((n) => n.status)).toEqual(tasks.map(() => 'PAUSED'));
+    expect(tasks.map((n) => getStatusText(n))).toEqual(tasks.map(() => 'paused'));
+    expect(model.counts.running).toBe(0);
+    renderDock(pausedBrowser());
+    expect(screen.queryByTestId('background-agents-banner')).not.toBeInTheDocument();
+  });
+});
 
 describe('running-agents dock', () => {
   it('is hidden when nothing is running', () => {
