@@ -24,6 +24,8 @@ sources:
   - commit e32aa6cbc (front-end)
   - commit 6731c38da (agents)
   - commit 5dba44817 (regression drives the real browser manager)
+  - commit 06fe4fa0f (pause ending rows read paused)
+  - commit 002c1a7b2 (one dock row per task)
 repro: agents/tests/blackbox/agent_control.blackbox.py::test_root_pause_ends_background_browser_paused_with_its_session_id; front-end/src/tests/blackbox/background-agents.blackbox.tsx 'paused background browser (root pause)'
 status: fixed
 ---
@@ -86,6 +88,19 @@ session id, through every consumer: notification, dock, spawn derivation.
   `agent_notification_metadata` accept an optional `session_id`.
 - Front end: `BackgroundRunState` gains `paused`; a `paused` notification and a
   `paused` tree task map to `PAUSED` (status text "paused", never counted as running).
+
+Follow-ups in the same lane:
+
+- The browser's own transcript for a pause ending now reads "Browser Session
+  Paused" (activity cancel row) and "Browser Paused" (local cleanup row), both
+  with `session_id`, when the provider pause close succeeded. Other endings
+  still say "Browser Session Closed". Cemented in the
+  `browser_cleanup_full_activity_support` cancellation/200 case.
+- The dock listed one task twice: `Agent.backgroundTasks.address` is the
+  current run's inbox (tool call id) while spawn rows use the task path. Task
+  nodes now take the task address (path, else id) as their identity, as the
+  backend tree does, and the selected agent's persisted copy of a task its own
+  spawn rows list is dropped. Covered for running, paused and completed.
 
 Continuation is unchanged: `send_message_to_agent(continue_conversation=true)`
 restores the archived paused transcript and the same logical browser session.
