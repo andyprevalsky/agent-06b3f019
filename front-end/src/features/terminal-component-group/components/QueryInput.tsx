@@ -3,8 +3,9 @@
  *
  * Stock: top toolbar, attachments, textarea and model/send controls.
  * Rose Desktop: nub toolbar, pinned tools, attachments, model/speed/send.
- * Browser: owner-agent input, files and Send only; Send targets the shown
- *   browser task (onSubmit target.browserTaskId → straight to that browser); no top attachment
+ * Browser: owner-agent input, files and Send only; a text-only Send targets the
+ *   shown browser task (onSubmit target.browserTaskId → straight to that browser;
+ *   with files it goes to the owner agent as before); no top attachment
  *   (the agents-running header belongs to the owner's own composer); read-only
  *   model label is the Rose pool the browser runs on (from the owner agent's
  *   model), never the served provider model; unknown owner model → unknown.
@@ -134,7 +135,9 @@ export default function QueryInput(props: QueryInputProps) {
               roseDark={roseDark}
               browser={browser}
               browserModelLabel={
-                browser ? browserComposerModel(props.agentDetail?.model) : undefined
+                browser
+                  ? browserComposerModel(apps, props.agentId, props.agentDetail?.model)
+                  : undefined
               }
             />
           </QueryInputShell>
@@ -168,8 +171,10 @@ function useSubmitHandler(
       ? attachments.collectDonePointers()
       : attachments.collectDonePointersAndClear();
     const files = pointers.length > 0 ? pointers : undefined;
-    // The Browser composer messages its browser task directly, not the owner agent.
-    const result = browserTaskId ? onSubmit(files, { browserTaskId }) : onSubmit(files);
+    // The Browser composer messages its browser task directly, not the owner
+    // agent. Files only reach models through the owner, so they go untargeted.
+    const result =
+      browserTaskId && files === undefined ? onSubmit(files, { browserTaskId }) : onSubmit(files);
     if (directChannel)
       void Promise.resolve(result).then((delivered) => {
         if (delivered === true) attachments.collectDonePointersAndClear();

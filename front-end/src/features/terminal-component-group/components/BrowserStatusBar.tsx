@@ -79,7 +79,7 @@ import { BrowserAgentPane } from './browser-status-bar/BrowserAgentPane';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
 import { latestBrowserPageUrl } from './rose-apps/browserPageUrl';
-import { latestBrowserActualModel } from './rose-apps/browserActualModel';
+import { latestBrowserActualModel, latestBrowserRosePool } from './rose-apps/browserActualModel';
 import { useRoseApps } from './rose-apps/roseAppsState';
 import { LegacyBrowserStatusBar } from './browser-status-bar/legacy/LegacyBrowserStatusBar';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -128,14 +128,25 @@ function useDrawerTabRegistration(
 ) {
   const pageUrl = useMemo(() => latestBrowserPageUrl(messages, taskId), [messages, taskId]);
   const actualModel = useMemo(() => latestBrowserActualModel(messages, taskId), [messages, taskId]);
+  const rosePool = useMemo(() => latestBrowserRosePool(messages, taskId), [messages, taskId]);
   const apps = useRoseApps();
   const register = apps?.registerAgentBrowser;
   const unregister = apps?.unregisterAgentBrowser;
   const missing = agentId !== null && apps?.tabs.some((t) => t.agentId === agentId) !== true;
   useEffect(() => {
     if (agentId === null || !register) return;
-    register({ agentId, taskId, live, pageUrl, actualModel, browserSessionMetadata });
-  }, [agentId, live, missing, pageUrl, actualModel, register, taskId, browserSessionMetadata]);
+    register({ agentId, taskId, live, pageUrl, actualModel, rosePool, browserSessionMetadata });
+  }, [
+    agentId,
+    live,
+    missing,
+    pageUrl,
+    actualModel,
+    rosePool,
+    register,
+    taskId,
+    browserSessionMetadata,
+  ]);
   useEffect(() => {
     if (agentId === null || !unregister) return undefined;
     return () => unregister(agentId, taskId);

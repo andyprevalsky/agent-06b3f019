@@ -103,6 +103,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
         existing.live === tab.live &&
         (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
         (existing.actualModel ?? null) === (tab.actualModel ?? null) &&
+        (existing.rosePool ?? null) === (tab.rosePool ?? null) &&
         JSON.stringify(existing.browserSessionMetadata ?? null) ===
           JSON.stringify(tab.browserSessionMetadata ?? null)
       ) {
