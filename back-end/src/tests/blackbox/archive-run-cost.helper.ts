@@ -128,12 +128,12 @@ function encryptedLlm(rootAgentId: string, artifactPath: string, text: string) {
  * earlier bundle files are made unreadable: re-reading them (whole-run
  * re-index per late file, quadratic in file count) fails this case.
  */
-export async function testLateLlmArtifactIndexesOnlyItself(params: {
-  baseUrl: string;
-  headers: Record<string, string>;
-  seed: RunSeed;
-}): Promise<void> {
-  const { baseUrl, headers, seed } = params;
+export async function testLateLlmArtifactIndexesOnlyItself(
+  baseUrl: string,
+  apiKey: string,
+  seed: RunSeed
+): Promise<void> {
+  const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
   const post = (route: string, body: unknown) =>
     request(`${baseUrl}/api/archive/${route}`, {
       method: 'POST',

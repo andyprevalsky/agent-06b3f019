@@ -593,13 +593,7 @@ async function runAll(): Promise<void> {
     {
       name: 'late llm artifact indexes only itself',
       fn: () =>
-        withSeededRun((seed) =>
-          testLateLlmArtifactIndexesOnlyItself({
-            baseUrl: BASE_URL,
-            headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
-            seed,
-          })
-        ),
+        withSeededRun((seed) => testLateLlmArtifactIndexesOnlyItself(BASE_URL, API_KEY, seed)),
     },
     {
       name: 'start fixture snapshot excludes post-ready writes',
