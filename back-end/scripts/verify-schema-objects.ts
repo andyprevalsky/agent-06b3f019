@@ -66,7 +66,8 @@ async function readCatalog(prisma: PrismaClient): Promise<Catalog> {
        WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')
          AND NOT c.relrowsecurity
          AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated')
-                     AND has_table_privilege(r.oid, c.oid, 'SELECT'))`
+                     -- Column-level grants expose a table too; has_table_privilege misses them.
+                     AND has_any_column_privilege(r.oid, c.oid, 'SELECT'))`
       );
       return {
         applied: new Set(applied.map((row) => row.migration_name)),
