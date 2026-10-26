@@ -30,54 +30,60 @@ type Catalog = {
 };
 
 async function readCatalog(prisma: PrismaClient): Promise<Catalog> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-    await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '15s'");
-    const applied = await tx.$queryRawUnsafe<Array<{ migration_name: string }>>(
-      `SELECT migration_name FROM _prisma_migrations
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '15s'");
+      const applied = await tx.$queryRawUnsafe<Array<{ migration_name: string }>>(
+        `SELECT migration_name FROM _prisma_migrations
        WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`
-    );
-    const indexes = await tx.$queryRawUnsafe<Array<{ name: string; valid: boolean }>>(
-      `SELECT c.relname AS name, i.indisvalid AS valid
+      );
+      const indexes = await tx.$queryRawUnsafe<Array<{ name: string; valid: boolean }>>(
+        `SELECT c.relname AS name, i.indisvalid AS valid
        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
        WHERE c.relnamespace = 'public'::regnamespace`
-    );
-    const triggers = await tx.$queryRawUnsafe<Array<{ key: string }>>(
-      `SELECT r.relname || '.' || t.tgname AS key
+      );
+      const triggers = await tx.$queryRawUnsafe<Array<{ key: string }>>(
+        `SELECT r.relname || '.' || t.tgname AS key
        FROM pg_trigger t JOIN pg_class r ON r.oid = t.tgrelid
        WHERE NOT t.tgisinternal AND r.relnamespace = 'public'::regnamespace`
-    );
-    const functions = await tx.$queryRawUnsafe<Array<{ name: string }>>(
-      `SELECT proname AS name FROM pg_proc WHERE pronamespace = 'public'::regnamespace`
-    );
-    const policies = await tx.$queryRawUnsafe<Array<{ key: string }>>(
-      `SELECT tablename || '.' || policyname AS key FROM pg_policies WHERE schemaname = 'public'`
-    );
-    const extensions = await tx.$queryRawUnsafe<Array<{ name: string }>>(
-      `SELECT extname AS name FROM pg_extension`
-    );
-    const rls = await tx.$queryRawUnsafe<Array<{ name: string }>>(
-      `SELECT relname AS name FROM pg_class
+      );
+      const functions = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        `SELECT proname AS name FROM pg_proc WHERE pronamespace = 'public'::regnamespace`
+      );
+      const policies = await tx.$queryRawUnsafe<Array<{ key: string }>>(
+        `SELECT tablename || '.' || policyname AS key FROM pg_policies WHERE schemaname = 'public'`
+      );
+      const extensions = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        `SELECT extname AS name FROM pg_extension`
+      );
+      const rls = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        `SELECT relname AS name FROM pg_class
        WHERE relnamespace = 'public'::regnamespace AND relrowsecurity`
-    );
-    const exposed = await tx.$queryRawUnsafe<Array<{ name: string }>>(
-      `SELECT c.relname AS name FROM pg_class c
+      );
+      const exposed = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+        `SELECT c.relname AS name FROM pg_class c
        WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')
          AND NOT c.relrowsecurity
          AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated')
                      AND has_table_privilege(r.oid, c.oid, 'SELECT'))`
-    );
-    return {
-      applied: new Set(applied.map((row) => row.migration_name)),
-      indexes: new Map(indexes.map((row) => [row.name, row.valid])),
-      triggers: new Set(triggers.map((row) => row.key)),
-      functions: new Set(functions.map((row) => row.name)),
-      policies: new Set(policies.map((row) => row.key)),
-      extensions: new Set(extensions.map((row) => row.name)),
-      rls: new Set(rls.map((row) => row.name)),
-      exposed: exposed.map((row) => row.name),
-    };
-  });
+      );
+      return {
+        applied: new Set(applied.map((row) => row.migration_name)),
+        indexes: new Map(indexes.map((row) => [row.name, row.valid])),
+        triggers: new Set(triggers.map((row) => row.key)),
+        functions: new Set(functions.map((row) => row.name)),
+        policies: new Set(policies.map((row) => row.key)),
+        extensions: new Set(extensions.map((row) => row.name)),
+        rls: new Set(rls.map((row) => row.name)),
+        exposed: exposed.map((row) => row.name),
+      };
+      // Prisma's interactive-transaction defaults (2s wait, 5s lifetime) are
+      // shorter than eight catalog reads on a busy pooler; each read keeps its
+      // own 15s statement limit.
+    },
+    { maxWait: 15_000, timeout: 60_000 }
+  );
 }
 
 export const SCHEMA_DRIFT_HINT =

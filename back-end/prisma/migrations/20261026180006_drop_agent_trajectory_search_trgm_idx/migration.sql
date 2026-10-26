@@ -4,5 +4,6 @@
 -- validation sort alone needs more temporary space than the disk has free, and a
 -- blocking build would stall the Message trigger that maintains this table.
 -- Record the absence so the migration history matches production; restore it
--- in a new migration once disk headroom is provisioned.
-DROP INDEX IF EXISTS "AgentTrajectorySearch_searchText_trgm_idx";
+-- in a new migration once the table shrinks or disk headroom is provisioned.
+-- CONCURRENTLY keeps any environment that still has it from blocking writes.
+DROP INDEX CONCURRENTLY IF EXISTS "AgentTrajectorySearch_searchText_trgm_idx";

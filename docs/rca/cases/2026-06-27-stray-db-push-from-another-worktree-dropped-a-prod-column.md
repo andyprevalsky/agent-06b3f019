@@ -267,17 +267,19 @@ observability gap**. The parent thread contained it with approval on
   (`@@index([col(ops: raw("gin_trgm_ops"))], map: …, type: Gin)`) and
   `extensions = [vector, pg_trgm]`, so neither `db push` nor `migrate diff` can
   drop them.
-- Migrations `20261026180002..4` rebuild them `CONCURRENTLY IF NOT EXISTS`.
-  Each is preceded by `20261026180001`, which runs a lone
+- `20261026180002` drops only INVALID leftovers of those index names, since
+  `IF NOT EXISTS` would otherwise skip a failed earlier build.
+  `20261026180003..5` then rebuild them `CONCURRENTLY IF NOT EXISTS`.
+  The session first runs `20261026180001`, a lone
   `SET statement_timeout = 0`: `migrate deploy` applies pending migrations on
   one session (verified locally with a 1 ms database default), and the pooled
   session's 120 s limit is shorter than the 177 s Message build.
-- `20261026180005` drops `AgentTrajectorySearch_searchText_trgm_idx`, recording
-  the approved absence. Measured: 2.0M rows × ~494 trigrams ≈ 1e9 postings, so
-  the concurrent validation sort alone would need roughly 16 GB+ of temporary
-  space against 27 GB free on the 90 GB disk. A blocking build would stall the
-  Message trigger. Restore it in a new migration after disk headroom is
-  provisioned.
+- `20261026180006` drops `AgentTrajectorySearch_searchText_trgm_idx`
+  `CONCURRENTLY IF EXISTS`, recording the approved absence. Measured: 2.0M
+  rows × ~494 trigrams ≈ 1e9 postings, so the concurrent validation sort alone
+  would need roughly 16 GB+ of temporary space against 27 GB free on the 90 GB
+  disk, and a blocking build would stall the Message trigger. Revisit after
+  lane S4 shrinks the table.
 - `20261026180000` re-enables RLS on all 41 tables and recreates the 19 baseline
   policies verbatim. It is idempotent after the manual containment
   (`DROP POLICY IF EXISTS` / `CREATE POLICY`, `SET LOCAL lock_timeout`).

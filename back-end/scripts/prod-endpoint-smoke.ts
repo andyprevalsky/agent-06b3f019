@@ -206,7 +206,13 @@ async function main(): Promise<void> {
   // e.g. through a stray `prisma db push` against prod. Check them read-only.
   let schemaChecks = 0;
   const databaseUrl = process.env.DIRECT_URL || process.env.DATABASE_URL;
-  if (!LOCAL_BASE && databaseUrl) {
+  if (!LOCAL_BASE && !databaseUrl) {
+    // Production smoke must verify the schema; a missing URL is a failed check.
+    schemaChecks = 1;
+    failed++;
+    console.log(`  ❌ ${'SKIPPED'.padEnd(18)} migration-declared objects`);
+    console.log('       DIRECT_URL/DATABASE_URL unset: schema-object verification did not run');
+  } else if (!LOCAL_BASE && databaseUrl) {
     schemaChecks = 1;
     try {
       const problems = driftProblems(await verifySchemaObjects(databaseUrl));
