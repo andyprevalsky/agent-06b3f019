@@ -19,8 +19,9 @@ tags:
   - explore
 sources:
   - agent 447576b9-f5e5-4f81-b883-865e5dad5fa9 (prod, 2026-10-26 15:55–16:08Z)
-  - commit 8cc1d49f9 (introduced useBatchElapsed)
-repro: none — replay of the captured prod rows through MessageList keeps ticking (see Diagnosis)
+  - commit 8cc1d49f9 (introduced useBatchElapsed and the static ring)
+  - commit 5e25aaa3a (ring spins; second-explore ordering regression)
+repro: front-end/src/tests/blackbox/trajectory-work-batch.blackbox.tsx (ring animate-spin fails pre-fix; the clock-freeze itself has no repro)
 status: open
 ---
 
@@ -57,7 +58,18 @@ captured, so the first-bad boundary is unproven. The static `LoaderCircle`
 
 ## Solution
 
-None shipped for the freeze. Missing capture: the client never records whether
+Follow-up (same day): `git log -S tool-batch-progress-ring` shows the ring was
+added in 8cc1d49f9 as a plain activity loader; no client-side batch estimate
+exists (JEV estimates are per-agent, sidebar-only and undeployed), so it cannot
+be driven by an ETA without new backend data. It was the only one of 74
+`LoaderCircle`/`Loader2` uses without `animate-spin`, so the live row's only
+progress glyph never moved next to the ticking clock. Commit 5e25aaa3a spins
+it; the batch blackbox fails on the pre-fix class. A second hypothesis (the
+first explore's FINISHED + FINAL_ANSWER while a second explore keeps running)
+was cemented as a regression and passes on base: the clock goes 36.7s → 41.7s
+and the batch stays running, so that ordering does not freeze it.
+
+None shipped for a frozen clock itself. Missing capture: the client never records whether
 the open transcript's batch clock is ticking (visibility state, last tick time,
 mount/unmount of the row). The next occurrence needs a screen recording or a
 browser performance trace of the open agent view, plus the agent id and wall
