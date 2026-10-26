@@ -74,6 +74,8 @@ const AGENTS = [
   }),
 ];
 
+const ADMIN_HEALTH_URL = 'http://localhost:3001/api/admin-health';
+
 function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}, { dark = false } = {}) {
   const user = signedInUser();
   // Dark = the signed-in user's stored Rose theme choice (features/rose-theme).
@@ -100,7 +102,7 @@ describe('Rose left bar (flag on)', () => {
     mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
     // Admin bars (showAdminHealth) prewarm Biz health on mount.
     server.use(
-      http.get(`${API_BASE}/admin-health`, () =>
+      http.get(ADMIN_HEALTH_URL, () =>
         HttpResponse.json({ error: 'admin health not mocked' }, { status: 503 }),
       ),
     );
