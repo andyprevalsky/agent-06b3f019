@@ -1,5 +1,19 @@
-/** A fixed-height live carousel; the ordered history mounts only after compression. */
-import { useEffect, useState, type ReactNode } from 'react';
+/**
+ * STATE MACHINE: TrajectoryWorkGroup
+ *
+ *   [RUNNING, COLLAPSED] -- click --> [RUNNING, EXPANDED] -- click --> [RUNNING, COLLAPSED]
+ *          |                                 |
+ *          | batch compresses                | batch compresses (same instance:
+ *          v                                 v  expand state and history kept)
+ *   [DONE, COLLAPSED]   <---- click ---->  [DONE, EXPANDED]
+ *
+ * RUNNING header: fixed-height live carousel (latest activity icon + label,
+ *   ring for tool batches, live elapsed). EXPANDED swaps the icon for a chevron.
+ * DONE header: chevron + "Worked for Xs" + activity count.
+ * EXPANDED: the ordered history so far (completed and in-progress activities),
+ *   paged 20 at a time; new activities append while it stays open.
+ */
+import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, LoaderCircle, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { useBatchElapsed } from './useBatchElapsed';
@@ -35,9 +49,6 @@ export function TrajectoryWorkGroup({
   const [page, setPage] = useState(0);
   const running = group.status === 'running';
   const elapsed = useBatchElapsed(group.startedAt, running);
-  useEffect(() => {
-    if (running) setExpanded(false);
-  }, [running]);
   const latest = group.activities.at(-1)!;
   const comms = group.activities.filter((activity) => activity.kind === 'comms').length;
   const toolName = String(latest.message.metadata?.toolName ?? '');
@@ -64,12 +75,11 @@ export function TrajectoryWorkGroup({
     >
       <button
         type="button"
-        disabled={running}
-        aria-expanded={!running && expanded}
+        aria-expanded={expanded}
         onClick={() => setExpanded(!expanded)}
-        className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground disabled:cursor-default"
+        className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
       >
-        {running ? (
+        {running && !expanded ? (
           latest.kind === 'thinking' && indicator ? null : (
             <Icon
               data-testid="trajectory-activity-icon"
@@ -109,7 +119,7 @@ export function TrajectoryWorkGroup({
           )}
         </span>
       </button>
-      {!running && expanded && (
+      {expanded && (
         <div
           data-testid="trajectory-work-history"
           className="mt-2 max-h-80 space-y-3 overflow-y-auto overscroll-contain border-l border-border pl-3"

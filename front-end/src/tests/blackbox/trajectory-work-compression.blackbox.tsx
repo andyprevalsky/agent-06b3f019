@@ -46,38 +46,63 @@ function view(messages: Message[], status = 'ACTIVE') {
   );
 }
 describe('one ordered live trajectory carousel', () => {
-  it('replaces comms → work → comms → work in ONE stable row; history is unavailable until compressed', () => {
+  it('replaces comms → work → comms → work in ONE stable row that expands to the work so far and stays open through completion', () => {
     const messages = [comm('first')];
     const v = renderWithProviders(view(messages));
     const row = screen.getByTestId('trajectory-work-group');
     const key = row.getAttribute('data-group-key');
-    for (const next of [work('first-work'), comm('second'), work('second-work')]) {
+    const toggle = within(row).getByRole('button');
+    for (const next of [work('first-work'), comm('second')]) {
       messages.push(next);
       v.rerender(view([...messages]));
       expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(1);
       expect(row).toHaveAttribute('data-group-key', key);
-      expect(within(row).getByRole('button')).toBeDisabled();
-      fireEvent.click(within(row).getByRole('button'));
+      expect(toggle).toBeEnabled();
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
       expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
       expect(screen.queryByTestId('agent-exchange-group')).toBeNull();
       expect(screen.queryByTestId('a2a-row')).toBeNull();
     }
+    // While the batch runs, the user opens it and sees what was done so far.
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const history = screen.getByTestId('trajectory-work-history');
+    const ids = () =>
+      [...history.querySelectorAll('[data-message-id]')].map((el) =>
+        el.getAttribute('data-message-id'),
+      );
+    expect(ids()).toEqual(['first', 'first-work', 'second']);
+    // A new in-progress step joins the open history; the live line keeps running.
+    messages.push(
+      msg(
+        {
+          toolName: 'read_file',
+          toolCallId: 'second-work',
+          title: 'Check second-work',
+          toolStatus: 'IN_PROGRESS',
+        },
+        { message_id: 'second-work', text: 'Work second-work', timestamp: stamp(2) },
+      ),
+    );
+    v.rerender(view([...messages]));
+    expect(ids()).toEqual(['first', 'first-work', 'second', 'second-work']);
     expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent('Check second-work');
-    expect(row).not.toHaveTextContent('Coordinate first');
+    expect(within(row).getByTestId('trajectory-batch-elapsed')).toBeInTheDocument();
+    expect(screen.getByTestId('trajectory-activity-line')).not.toHaveTextContent('Coordinate');
+    // Completion keeps the user's open state and the same history node (no collapse/flash).
+    messages[messages.length - 1] = work('second-work');
     v.rerender(view([...messages], 'COMPLETED'));
     expect(row).toHaveTextContent('Worked for 29.0s');
-    fireEvent.click(within(row).getByRole('button'));
-    const history = screen.getByTestId('trajectory-work-history');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('trajectory-work-history')).toBe(history);
     expect(within(history).getAllByTestId('trajectory-history-entry')).toHaveLength(4);
     expect(within(history).getAllByTestId('a2a-row')[0]).toHaveAttribute(
       'data-a2a-direction',
       'sent',
     );
-    expect(
-      [...history.querySelectorAll('[data-message-id]')].map((el) =>
-        el.getAttribute('data-message-id'),
-      ),
-    ).toEqual(['first', 'first-work', 'second', 'second-work']);
+    expect(ids()).toEqual(['first', 'first-work', 'second', 'second-work']);
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId('trajectory-work-history')).toBeNull();
   });
   it.each([
     msg({}, { role: 'ASSISTANT', message_id: 'empty-assistant', text: '' }),
