@@ -1109,8 +1109,29 @@ def remote(fly, value, journal, action, *, allow_pending=False):
     return result
 
 
+def read_source(path):
+    """Read a checked-in source file, which keeps its normal checkout mode.
+
+    The private-input reader (owner-only mode, single link) is for private
+    receipts; a collector checked out under umask 022 is 0644 and is instead
+    bound by the physical path and the launch record's collector SHA-256.
+    """
+    path = Path(path).absolute()
+    need(path.resolve(strict=True) == path, "physical collector source required")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+        info = os.fstat(handle.fileno())
+        need(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and not info.st_mode & 0o002
+            and info.st_size < 16 * 1024 * 1024,
+            "regular current-owner collector source required",
+        )
+        return handle.read(info.st_size + 1)
+
+
 def verify_stage(value, stage):
-    raw = read(value["collector_path"])
+    raw = read_source(value["collector_path"])
     namespace = {
         "__name__": "original_export_verify",
         "__file__": value["collector_path"],
@@ -1123,7 +1144,7 @@ def verify_stage(value, stage):
     )
     namespace = runpy.run_path(value["collector_path"], init_globals=namespace)
     need(
-        read(value["collector_path"]) == raw,
+        read_source(value["collector_path"]) == raw,
         "collector changed during verification setup",
     )
     expected = {name: file_sha(stage / name) for name in ("launch.json", "manifest.json", "originals.tar.gz")}
