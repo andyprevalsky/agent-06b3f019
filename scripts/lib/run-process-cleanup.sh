@@ -155,6 +155,44 @@ run_process_env_value_wait() {
   return 1
 }
 
+# Agent worktrees live INSIDE the canonical checkout (`.claude/worktrees/<n>`),
+# so a bare "$root"/* prefix test claims every nested worktree's processes as
+# this stack's. On 2026-10-26 a canonical-checkout sweep SIGTERMed a gate
+# worker's run.sh in .claude/worktrees/gate-GH that way. A path is in <root>
+# only when no directory between <root> (exclusive) and the path has its own
+# `.git` — i.e. it does not cross into a nested worktree or checkout.
+run_path_in_worktree() {  # <path> <root>
+  local path="$1" root="${2%/}" dir
+  [ -n "$path" ] && [ -n "$root" ] || return 1
+  case "$path" in
+    "$root") return 0 ;;
+    "$root"/*) ;;
+    *) return 1 ;;
+  esac
+  dir="${path%/}"
+  while [ -n "$dir" ] && [ "$dir" != "$root" ]; do
+    [ -e "$dir/.git" ] && return 1
+    dir="${dir%/*}"
+  done
+  return 0
+}
+
+# argv form of run_path_in_worktree: some token names a path inside <root>
+# (bounded at a path separator, so `<root>-other` and nested worktrees miss).
+run_cmd_mentions_worktree() {  # <command> <root>
+  local cmd="$1" root="${2%/}" token rest
+  [ -n "$root" ] || return 1
+  local -a tokens
+  read -r -a tokens <<<"$cmd" || true
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    case "$token" in *"$root"*) ;; *) continue ;; esac
+    rest="${token#*"$root"}"
+    case "$rest" in ""|/*) ;; *) continue ;; esac
+    run_path_in_worktree "$root$rest" "$root" && return 0
+  done
+  return 1
+}
+
 run_process_cwd_in_tree() {
   local pid="$1"
   local root="$2"
@@ -164,10 +202,7 @@ run_process_cwd_in_tree() {
   [ -n "$cwd" ] || return 1
   root_physical="$(cd "$root" && pwd -P)" || return 1
 
-  case "$cwd" in
-    "$root_physical"|"$root_physical"/*) return 0 ;;
-  esac
-  return 1
+  run_path_in_worktree "$cwd" "$root_physical"
 }
 
 run_process_has_ancestor() {

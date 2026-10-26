@@ -240,11 +240,9 @@ process_belongs_to_this_worktree() {
     local pid=$1
     local cwd cmd
     cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    if [ "$cwd" = "$PWD" ] || [[ "$cwd" == "$PWD"/* ]]; then
-        return 0
-    fi
+    run_path_in_worktree "$cwd" "$PWD" && return 0
     cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-    echo "$cmd" | grep -Fq "$PWD"
+    run_cmd_mentions_worktree "$cmd" "$PWD"
 }
 
 # Check if a port requires moving this workspace to a different range.
@@ -467,10 +465,7 @@ process_cwd_in_this_worktree() {
     # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
     # path used to start the process. Compare both spellings before reaping it.
     physical_worktree=$(pwd -P)
-    case "$cwd" in
-        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
-    esac
-    return 1
+    run_path_in_worktree "$cwd" "$PWD" || run_path_in_worktree "$cwd" "$physical_worktree"
 }
 
 kill_stale_tree() {
@@ -563,6 +558,32 @@ PYEOF
         hops=$((hops + 1))
     done
 
+    # Run identity: local.py launches every isolated stack with
+    # BENCHMARK_RUN_ID, which all its services, tunnels and reparented
+    # (ppid 1) children inherit. Manifest PIDs and ancestry miss a detached
+    # child, so a non-isolated sweep killed a bootstrapping isolated stack
+    # (2026-10-12). Protect any process whose run is still starting/running,
+    # or has not published services.json yet.
+    local run_id run_dir
+    run_id="$(run_process_env_value "$pid" BENCHMARK_RUN_ID)"
+    if [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$run_id" != "." ] && [ "$run_id" != ".." ]; then
+        run_dir="$PWD/.context/benchmarks/$run_id"
+        if [ -d "$run_dir" ]; then
+            [ -f "$run_dir/services.json" ] || return 0
+            MANIFEST="$run_dir/services.json" python3 - <<'PYEOF' && return 0
+import json, os, sys
+
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+live = isinstance(data, dict) and str(data.get("status", "")).strip().lower() in {"starting", "running"}
+sys.exit(0 if live else 1)
+PYEOF
+        fi
+    fi
+
     # Publication race: the isolated runner execs run.sh BEFORE it writes
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
@@ -612,7 +633,7 @@ kill_stale_same_worktree_benchmark_stack() {
 
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-        if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+        if run_cmd_mentions_worktree "$cmd" "$PWD" || process_cwd_in_this_worktree "$pid"; then
             if pid_belongs_to_active_isolated_benchmark "$pid"; then
                 echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
                 continue
@@ -690,6 +711,12 @@ if $IS_CLOUD; then
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                # `.cloud-env` marks the canonical checkout, but agent
+                # worktrees nest inside it (.claude/worktrees/<n>) and run
+                # their own stacks; a box-wide pattern kill murdered them.
+                if ! process_cwd_in_this_worktree "$pid"; then
+                    continue
+                fi
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
                     continue

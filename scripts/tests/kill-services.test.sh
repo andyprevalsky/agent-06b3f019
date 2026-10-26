@@ -344,6 +344,8 @@ mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/
 cp "$ROOT_DIR/scripts/kill-services.sh" "$WORKTREE/scripts/kill-services.sh"
 cp "$ROOT_DIR/scripts/list-services.sh" "$WORKTREE/scripts/list-services.sh"
 cp "$ROOT_DIR/scripts/process-identity.py" "$WORKTREE/scripts/process-identity.py"
+mkdir -p "$WORKTREE/scripts/lib"
+cp "$ROOT_DIR/scripts/lib/run-process-cleanup.sh" "$WORKTREE/scripts/lib/run-process-cleanup.sh"
 printf 'import time\ntime.sleep(1000)\n' > "$WORKTREE/agents/worker.py"
 
 worker_port="$(find_free_port)"
@@ -719,5 +721,57 @@ if ! grep -q '"\$ppid" = "\$current"' <<<"$controller_walk_source"; then
     exit 1
 fi
 echo "PASS: benchmark_controller_for_pid classifies PID 1 instead of bailing before it"
+
+# ── A nested Git worktree is a different stack, never part of this one ────────
+#
+# Regression (2026-10-26 09:50:58Z): agent worktrees live under the canonical
+# checkout at `.claude/worktrees/<name>`. A sweep run from the canonical
+# checkout treated every cwd under `$WORKTREE_DIR/*` as its own, so it SIGTERMed
+# a gate worker's `run.sh --benchmark` running in `.claude/worktrees/gate-GH`.
+# A process whose cwd (or argv path) crosses into a directory with its own
+# `.git` belongs to that nested worktree, not to the sweeping one.
+rm -rf "$WORKTREE/.context/benchmarks"
+NESTED="$WORKTREE/.claude/worktrees/gate-nested"
+mkdir -p "$NESTED/scripts" "$NESTED/agents"
+printf 'gitdir: /nonexistent/.git/worktrees/gate-nested\n' > "$NESTED/.git"
+cp "$WORKTREE/scripts/run.sh" "$NESTED/scripts/run.sh"
+printf 'import time\ntime.sleep(1000)\n' > "$NESTED/agents/worker.py"
+(cd "$NESTED" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+nested_stack_pid=$!
+(cd "$NESTED/agents" && exec python3 "$NESTED/agents/worker.py") > /dev/null 2>&1 &
+nested_worker_pid=$!
+(cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+own_stack_pid=$!
+PIDS+=("$nested_stack_pid" "$nested_worker_pid" "$own_stack_pid")
+sleep 0.5
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/nested-sweep.log" 2>&1) || true
+
+assert_alive "$nested_stack_pid" "run.sh in a nested Git worktree"
+assert_alive "$nested_worker_pid" "worker.py in a nested Git worktree"
+assert_dead "$own_stack_pid" "this worktree's own run.sh"
+
+# The path predicate itself: the root and its plain subdirectories are owned;
+# a nested worktree root and anything inside it are not; siblings that merely
+# share a prefix are not.
+(
+    source "$WORKTREE/scripts/kill-services.sh"
+    for owned in "$WORKTREE" "$WORKTREE/agents" "$WORKTREE/.claude/worktrees" "$WORKTREE/agents/worker.py"; do
+        run_path_in_worktree "$owned" "$WORKTREE" || { echo "FAIL: $owned should be in $WORKTREE" >&2; exit 1; }
+    done
+    for foreign in "$NESTED" "$NESTED/agents" "$NESTED/agents/worker.py" "${WORKTREE}-sibling/agents" "$TMP_ROOT/foreign"; do
+        if run_path_in_worktree "$foreign" "$WORKTREE"; then
+            echo "FAIL: $foreign must not be in $WORKTREE" >&2
+            exit 1
+        fi
+    done
+    run_cmd_mentions_worktree "python3 $WORKTREE/agents/worker.py" "$WORKTREE" \
+        || { echo "FAIL: own argv path not recognized" >&2; exit 1; }
+    if run_cmd_mentions_worktree "python3 $NESTED/agents/worker.py --x=$NESTED" "$WORKTREE"; then
+        echo "FAIL: nested worktree argv path treated as own" >&2
+        exit 1
+    fi
+)
+echo "PASS: the sweep never crosses into a nested Git worktree"
 
 echo "All kill-services tests passed."
