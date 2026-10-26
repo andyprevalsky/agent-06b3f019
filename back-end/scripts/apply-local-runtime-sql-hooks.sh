@@ -17,6 +17,8 @@ validate_local_database_url() {
   node -e '
     const parsed = new URL(process.argv[1]);
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+    // libpq/Prisma prefer a `host`/`hostaddr` query parameter over the authority.
+    if (["host", "hostaddr"].some((key) => parsed.searchParams.has(key))) process.exit(1);
   ' "$value" || {
     echo "Refusing local runtime SQL hooks: $variable_name is not a localhost database" >&2
     exit 2

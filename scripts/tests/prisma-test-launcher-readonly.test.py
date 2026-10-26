@@ -60,6 +60,8 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 "blackbox-auto-rca-env.sh",
                 "assert-prisma-client-current.mjs",
                 "normalize-local-user-phones.sh",
+                "backfill-local-message-record-owner.sh",
+                "apply-local-message-record-trgm-index.sh",
                 "blackbox-phone-env.sh",
             ):
                 source = ROOT / "back-end/scripts" / name
@@ -171,6 +173,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                         "psql db-exists",
                         "psql create-db",
                         "psql",
+                        "prisma db execute",
                         "prisma db execute",
                         "prisma db push --skip-generate --accept-data-loss",
                     ],

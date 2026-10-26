@@ -4889,6 +4889,7 @@ async def _install_fast_mode_network_cache(
     *,
     read_enabled: bool = True,
     write_enabled: bool = True,
+    agent_id: Optional[str] = None,
 ) -> None:
     """Record/replay browser HTTPS responses for Fast Mode.
 
@@ -4903,7 +4904,7 @@ async def _install_fast_mode_network_cache(
     """
     from providers.demo_cache.browser_http import BrowserHttpCache
 
-    http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled)
+    http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled, agent_id=agent_id)
 
     async def _request_body(req: Any) -> Optional[Any]:
         post_data = getattr(req, "post_data", None)
@@ -8431,6 +8432,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         goal,
                         read_enabled=fast_mode_cache_enabled,
                         write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
+                        agent_id=agent_id,
                     )
 
                 if _botsigged_diagnostics_enabled(start_url):

@@ -318,6 +318,7 @@ export async function testGrep_fanOutPaginationMetadataAligns(prisma: PrismaClie
     await prisma.messageRecord.createMany({
       data: [1, 2, 3].map((index) => ({
         personId: person.id,
+        userId,
         channel: 'IMESSAGE',
         from: index % 2 === 0 ? 'me' : phone,
         to: index % 2 === 0 ? phone : 'me',
