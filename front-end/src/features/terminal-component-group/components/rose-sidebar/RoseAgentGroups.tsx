@@ -14,6 +14,16 @@
  * COLLAPSED (64px rail): project rows and "+ New project" are hidden; the
  * non-empty groups of agent icons are separated by 18×3px neutral line pills.
  *
+ * OLD AGENTS (Andy, 2026-10-26; oldAgents.ts): per group (Home and each
+ * project), finished agents last active more than 4 days ago (never pinned,
+ * selected, paused/needs-help or running) are hidden behind one quiet row at
+ * the bottom of the group, and in the collapsed rail and mobile list too:
+ *   [OLD HIDDEN] --"View X old agents"--> [OLD SHOWN] old rows in place, then
+ *   [OLD SHOWN]  --"Hide X old agents"--> [OLD HIDDEN]
+ * The open set lives in memory only (never persisted); the rail shows no row
+ * but follows it. One shared minute clock (useNow) re-evaluates ages; no
+ * per-row timers, no fetches. A search query shows every match.
+ *
  * AGENT TREES: each root starts closed. A disclosure reveals direct GP children
  * and code sessions owned by that agent; each GP child has its own disclosure.
  * Collapsed rail hides descendants and shows the root's active tree count >1.
@@ -25,16 +35,22 @@
  * While a search query is active, project groups with no matching agent drop out.
  */
 
-import { Fragment } from 'react';
+import { Fragment, useState } from 'react';
 
 import type { Project } from '@/lib/api/projects';
+import { cn } from '@/lib/utils';
 import type { CodeAgentListItem } from '@/lib/api/tree';
 
 import type { Agent } from '../../hooks';
+import { useNow } from '../useNow';
 import type { GroupedAgents } from './groupAgentsByProject';
 import RoseAgentBranch from './RoseAgentBranch';
 import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
 import RoseProjectRow, { NewProjectRow } from './RoseProjectRow';
+import { oldAgentsLabel, splitOldAgents } from './oldAgents';
+
+const OLD_AGENT_CLOCK_MS = 60_000;
+const HOME_GROUP = 'home';
 
 export interface RoseProjectActions {
   onCreateAgentInProject: (project: Project) => void;
@@ -135,14 +151,95 @@ function ProjectGroupRow({
   );
 }
 
+function OldAgentsToggle({
+  count,
+  open,
+  indented,
+  onToggle,
+}: {
+  count: number;
+  open: boolean;
+  indented: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={onToggle}
+      className={cn(
+        'flex h-[30px] flex-none items-center whitespace-nowrap text-left text-[13px] text-[hsl(240_8%_45%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]',
+        indented ? 'pl-[66px]' : 'pl-[54px]',
+      )}
+    >
+      {oldAgentsLabel(count, open)}
+    </button>
+  );
+}
+
+interface GroupView {
+  key: string;
+  agents: Agent[];
+  old: Agent[];
+  /** Rows on screen: recent agents, plus the old ones while the group is open. */
+  shown: Agent[];
+}
+
+function GroupAgents({
+  view,
+  indented,
+  open,
+  onToggle,
+  props,
+}: {
+  view: GroupView;
+  indented: boolean;
+  open: boolean;
+  onToggle: () => void;
+  props: RoseAgentGroupsProps;
+}) {
+  return (
+    <>
+      <AgentRows agents={view.shown} indented={indented} props={props} />
+      {props.isExpanded && view.old.length > 0 && (
+        <OldAgentsToggle
+          count={view.old.length}
+          open={open}
+          indented={indented}
+          onToggle={onToggle}
+        />
+      )}
+    </>
+  );
+}
+
 export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
   const { grouped, isExpanded, isFiltering } = props;
+  const now = useNow(OLD_AGENT_CLOCK_MS, true);
+  const [openOld, setOpenOld] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleOld = (key: string) =>
+    setOpenOld((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const viewOf = (key: string, agents: Agent[]): GroupView => {
+    if (isFiltering) return { key, agents, old: [], shown: agents };
+    const { recent, old } = splitOldAgents(agents, now, props);
+    return { key, agents, old, shown: openOld.has(key) ? [...recent, ...old] : recent };
+  };
   const projectGroups = isFiltering
     ? grouped.projects.filter((g) => g.agents.length > 0)
     : grouped.projects;
+  const projectViews = projectGroups.map((g) => ({
+    project: g.project,
+    view: viewOf(g.project.id, g.agents),
+  }));
+  const homeView = viewOf(HOME_GROUP, grouped.home);
   const firstAgentGroup =
-    projectGroups.find((g) => g.agents.length > 0)?.project.id ??
-    (grouped.home.length > 0 ? 'home' : undefined);
+    projectViews.find((g) => g.view.shown.length > 0)?.project.id ??
+    (homeView.shown.length > 0 ? HOME_GROUP : undefined);
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
       {isExpanded && props.projectLoading && (
@@ -158,21 +255,37 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           </button>
         </div>
       )}
-      {projectGroups.map(({ project, agents }) => (
+      {projectViews.map(({ project, view }) => (
         <Fragment key={project.id}>
-          {!isExpanded && agents.length > 0 && firstAgentGroup !== project.id && <GroupDivider />}
-          {isExpanded && <ProjectGroupRow project={project} agents={agents} props={props} />}
+          {!isExpanded && view.shown.length > 0 && firstAgentGroup !== project.id && (
+            <GroupDivider />
+          )}
+          {isExpanded && <ProjectGroupRow project={project} agents={view.agents} props={props} />}
           <div data-testid={`rose-group-${project.id}`} className="flex flex-col">
-            <AgentRows agents={agents} indented props={props} />
+            <GroupAgents
+              view={view}
+              indented
+              open={openOld.has(view.key)}
+              onToggle={() => toggleOld(view.key)}
+              props={props}
+            />
           </div>
         </Fragment>
       ))}
       {isExpanded && !isFiltering && (
         <NewProjectRow onCreate={props.projectActions.onCreateProject} />
       )}
-      {!isExpanded && grouped.home.length > 0 && firstAgentGroup !== 'home' && <GroupDivider />}
+      {!isExpanded && homeView.shown.length > 0 && firstAgentGroup !== HOME_GROUP && (
+        <GroupDivider />
+      )}
       <div data-testid="rose-group-home" className="flex flex-col">
-        <AgentRows agents={grouped.home} indented={false} props={props} />
+        <GroupAgents
+          view={homeView}
+          indented={false}
+          open={openOld.has(HOME_GROUP)}
+          onToggle={() => toggleOld(HOME_GROUP)}
+          props={props}
+        />
       </div>
     </div>
   );

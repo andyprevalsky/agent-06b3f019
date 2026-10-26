@@ -3,6 +3,7 @@
  * order, project grouping, collapsed dividers, hover-expand, run-state glyphs,
  * bottom rows (Feedback / Biz health / Archived / account), account glyph and
  * Settings drawer. Flag off keeps the stock sidebar (app-sidebar suites).
+ * The "View X old agents" row lives in rose-sidebar-old-agents.blackbox.tsx.
  * Projects, project settings and the agent right-click menu live in
  * rose-sidebar-projects.blackbox.tsx; code-agent rows in
  * rose-sidebar-code-agents.blackbox.tsx.

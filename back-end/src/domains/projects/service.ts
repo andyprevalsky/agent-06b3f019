@@ -12,13 +12,18 @@
  *
  * 10k-agent behaviour: every call touches one user's project rows (bounded by
  * PROJECT_LIST_LIMIT / MAX_ENV_FILES); listing uses one query with counts.
- * Rose dev accounts get their "Rose" project set up on list (roseProject.ts).
+ * Rose repo owners get their "Rose" project set up on list (roseProject.ts).
  */
 import { createLogger } from '../../providers/logger';
 import type { EnvVariableMeta } from '../../providers/projects/envFile';
 import { sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
-import { applyRoseProjectSetup, planRoseProjectSetup } from './roseProject';
+import {
+  DEFAULT_ROSE_SETUP,
+  applyRoseProjectSetup,
+  planRoseProjectSetup,
+  type RoseSetupDeps,
+} from './roseProject';
 import type { CreateProjectBody, UpdateProjectBody } from './types';
 
 export class ProjectError extends Error {
@@ -175,17 +180,20 @@ function isUniqueViolation(err: unknown): boolean {
 
 const log = createLogger('Projects');
 
-export async function listProjects(userId: string): Promise<{ projects: ProjectDto[] }> {
+export async function listProjects(
+  userId: string,
+  roseSetup: RoseSetupDeps = DEFAULT_ROSE_SETUP
+): Promise<{ projects: ProjectDto[] }> {
   let rows = await repo.listProjects(userId);
   let connected = await repo.findGithubConnectedRepoUrls(
     userId,
     rows.map((row) => row.repoUrl)
   );
-  const rosePlan = planRoseProjectSetup(userId, rows, connected);
+  const rosePlan = planRoseProjectSetup(userId, rows, connected, roseSetup.isOwner);
   if (rosePlan !== null) {
     log.info('Setting up the Rose project', { userId, ...rosePlan });
     try {
-      await applyRoseProjectSetup(userId, rosePlan);
+      await applyRoseProjectSetup(userId, rosePlan, roseSetup);
     } catch (error) {
       // Listing never depends on the setup; the next list retries it.
       log.error('Rose project setup failed', {
