@@ -16,7 +16,8 @@ the assumptions you made in your message or final response.
 
 - Progress the user would want, results and scorecards: `rose message`.
 - To show anything visual (a page, a site folder, a 3D model, an image, a
-  video), run `rose display <path>`.
+  video, a .js module), run `rose display <path>`. A .js/.mjs file runs as a
+  module on a full-window page where `import * as THREE from 'three'` works.
 
 <!-- rose-desktop -->
 
