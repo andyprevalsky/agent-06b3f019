@@ -3,9 +3,12 @@
  * Covers both modes (timestamp, condition), status branches, countdown,
  * expand/collapse toggling, and the embedded InlineExploreChip.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { TrajectoryWorkGroup } from '@/features/terminal-component-group/components/TrajectoryWorkGroup';
+import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
+import { StatusLine } from '@/features/terminal-component-group/components/subAgentTree/StatusLine';
 import WaitForChip, {
   type WaitForCheck,
 } from '@/features/terminal-component-group/components/WaitForChip';
@@ -452,5 +455,81 @@ describe('WaitForChip — condition mode', () => {
     );
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     expect(done).toBe(true);
+  });
+});
+
+describe("wait times render in the viewer's local time zone", () => {
+  const originalTz = process.env.TZ;
+  afterEach(() => {
+    process.env.TZ = originalTz;
+  });
+  const RAW_ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+  it.each([
+    ['America/Los_Angeles', '2026-10-26T17:23:00+00:00', 'October 26th, 10:23am PDT'],
+    ['America/Los_Angeles', '2026-12-01T17:00:00Z', 'December 1st, 9:00am PST'],
+    ['Asia/Tokyo', '2026-10-26T17:23:00+00:00', 'October 27th, 2:23am GMT+9'],
+  ])('%s shows %s as "%s" on every wait surface', (tz, iso, local) => {
+    process.env.TZ = tz;
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(tz);
+    const title = `Waiting until ${iso}`;
+    const { container } = render(
+      <div>
+        <WaitForChip
+          title={title}
+          message="Sleeping for 1h"
+          status="IN_PROGRESS"
+          checks={[]}
+          metadata={{ waitForMode: 'timestamp', untilTimestamp: iso }}
+        />
+        <WaitForChip
+          title={title}
+          message=""
+          status="FINISHED"
+          checks={[]}
+          metadata={{ waitForMode: 'timestamp', untilTimestamp: iso, durationSeconds: 60 }}
+        />
+        {/* The streaming tool placeholder carries only the producer title. */}
+        <div data-testid="placeholder-wait">
+          <WaitForChip title={title} message="" status="IN_PROGRESS" checks={[]} />
+        </div>
+        <TrajectoryWorkGroup
+          group={
+            [
+              ...groupTrajectoryWork(
+                [
+                  {
+                    message_id: 'wait-row',
+                    role: 'TOOL',
+                    text: 'Sleeping for 1h',
+                    timestamp: iso,
+                    metadata: {
+                      toolName: 'wait_for',
+                      toolCallId: 'wait-row',
+                      title,
+                      toolStatus: 'IN_PROGRESS',
+                      waitForMode: 'timestamp',
+                      untilTimestamp: iso,
+                    },
+                  },
+                ],
+                'ACTIVE',
+              ).groupsByLeadId.values(),
+            ][0]
+          }
+          renderMessage={() => null}
+        />
+        {/* Agents-running pane and sub-agent tree status lines. */}
+        <StatusLine statusText={title} toolsInUse={[title]} isHovered={false} />
+        <StatusLine statusText={title} toolsInUse={[]} isHovered={false} />
+      </div>,
+    );
+    expect(screen.getByText(`Waiting for ${local}`)).toBeInTheDocument();
+    expect(screen.getByText(`Waited until ${local}`)).toBeInTheDocument();
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(
+      `Waiting until ${local}`,
+    );
+    expect(screen.getAllByText(`Waiting until ${local}`)).toHaveLength(3);
+    expect(screen.getByTestId('placeholder-wait')).toHaveTextContent(local);
+    expect(container.textContent).not.toMatch(RAW_ISO);
   });
 });
