@@ -286,4 +286,80 @@ try {
   rmSync(runLockFixtureRoot, { recursive: true, force: true });
 }
 
+// RCA 2026-10-26 07:18Z: two backend runners sharing one CONDUCTOR_WORKSPACE_NAME
+// shared victoria_<workspace>; the second runner's schema sync (prisma db push +
+// DROP TRIGGER hooks) deadlocked the first runner's live cases (40P01). Each
+// runner that prepares a database must hold a per-database lock for its whole
+// run, and a second runner must fail fast naming the holder.
+const testDbLockLibPath = join(process.cwd(), 'scripts', 'test-db-run-lock.sh');
+const testDbLockFixtureRoot = mkdtempSync(join(tmpdir(), 'test-db-run-lock-'));
+let testDbLockHolder: ReturnType<typeof spawn> | undefined;
+try {
+  const lockEnv = { ...process.env, ROSE_TEST_DB_LOCK_DIR: testDbLockFixtureRoot };
+  const holderReady = join(testDbLockFixtureRoot, 'holder-ready');
+  testDbLockHolder = spawn(
+    'bash',
+    [
+      '-c',
+      'source "$1"; acquire_test_db_run_lock "postgresql://postgres:pw@127.0.0.1:5432/victoria_gate-x?connection_limit=16" "fixture holder" || exit 9; touch "$2"; sleep 30',
+      'holder',
+      testDbLockLibPath,
+      holderReady,
+    ],
+    { env: { ...lockEnv, CONDUCTOR_WORKSPACE_NAME: 'gate-x' }, stdio: 'ignore' }
+  );
+  waitForPath(holderReady, true);
+
+  const tryAcquire = (url: string) =>
+    spawnSync(
+      'bash',
+      ['-c', 'source "$1"; acquire_test_db_run_lock "$2" "fixture contender"', 'contender', testDbLockLibPath, url],
+      { env: lockEnv, encoding: 'utf8', timeout: 15_000 }
+    );
+
+  // Same database through a differently spelled URL (no credentials or query).
+  const blocked = tryAcquire('postgresql://localhost/victoria_gate-x');
+  assert.equal(blocked.status, 1, 'a second runner on the same database must fail fast');
+  assert.match(
+    blocked.stderr,
+    new RegExp(`localhost:5432/victoria_gate-x is in use by another backend test runner: pid=${testDbLockHolder.pid} runner=fixture holder workspace=gate-x`),
+    'the failure must name the live holder'
+  );
+
+  // A different database is independent.
+  const other = tryAcquire('postgresql://postgres:postgres@localhost:5432/victoria_gate-y');
+  assert.equal(other.status, 0, `a different database must not be blocked: ${other.stderr}`);
+
+  // A SIGKILLed holder never strands the lock: the kernel lock dies with its keeper.
+  testDbLockHolder.kill('SIGKILL');
+  let recovered = tryAcquire('postgresql://localhost:5432/victoria_gate-x');
+  for (let attempt = 0; attempt < 100 && recovered.status !== 0; attempt++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    recovered = tryAcquire('postgresql://localhost:5432/victoria_gate-x');
+  }
+  assert.equal(recovered.status, 0, `a dead holder's lock must be recoverable: ${recovered.stderr}`);
+
+  // Both runners take the lock on the selected database BEFORE any schema sync
+  // and the blackbox child of coverage (BLACKBOX_TEST_SKIP_DB_SYNC=1) does not
+  // contend with its parent's lock.
+  for (const runner of ['run-blackbox-tests.sh', 'run-coverage.sh']) {
+    const source = readFileSync(join(process.cwd(), 'scripts', runner), 'utf8');
+    const lockAt = source.indexOf('acquire_test_db_run_lock "');
+    const pushAt = source.indexOf('npx prisma db push');
+    const ensureAt = source.indexOf('ensure_workspace_system_db "$LOCAL_DB_PORT"');
+    assert.ok(lockAt > 0, `${runner} must acquire the per-database run lock`);
+    assert.ok(lockAt < pushAt && lockAt < ensureAt, `${runner} must lock before its schema sync`);
+  }
+  const blackboxSource = readFileSync(join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'), 'utf8');
+  const skipBranch = blackboxSource.indexOf('if [[ "$SKIP_DB_SYNC" == "1" ]]; then');
+  const skipElse = blackboxSource.indexOf('  else', skipBranch);
+  assert.ok(
+    blackboxSource.indexOf('acquire_test_db_run_lock "') > skipElse,
+    'the coverage-launched blackbox child (skip sync) must not take its parent coverage lock'
+  );
+} finally {
+  testDbLockHolder?.kill('SIGKILL');
+  rmSync(testDbLockFixtureRoot, { recursive: true, force: true });
+}
+
 process.stdout.write('coverage script lock contracts passed\n');

@@ -301,6 +301,11 @@ if $DB_FOUND; then
     fi
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
+    # Hold this database for the whole run: a concurrent runner's schema sync
+    # deadlocks live cases (40P01). The skip-sync child of coverage runs under
+    # its parent's lock instead.
+    source "$SCRIPT_DIR/test-db-run-lock.sh"
+    acquire_test_db_run_lock "$LOCAL_DB_URL" "run-blackbox-tests.sh $*" || exit 1
     node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
     if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
       ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
