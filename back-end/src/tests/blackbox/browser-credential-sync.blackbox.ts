@@ -321,6 +321,156 @@ test('changed cookie content clears disabled CookieBundle state', async () => {
   }
 });
 
+type RawMethod = '$queryRaw' | '$executeRaw' | '$queryRawUnsafe' | '$executeRawUnsafe';
+const RAW_METHODS: RawMethod[] = [
+  '$queryRaw',
+  '$executeRaw',
+  '$queryRawUnsafe',
+  '$executeRawUnsafe',
+];
+
+/** Count raw SQL statements issued by `fn` (the cookie sync path is all raw SQL). */
+async function countRawStatements(fn: () => Promise<unknown>) {
+  const client = prisma as unknown as Record<RawMethod, (...args: unknown[]) => unknown>;
+  const originals = RAW_METHODS.map((method) => [method, client[method]] as const);
+  let count = 0;
+  for (const [method, original] of originals) {
+    client[method] = (...args: unknown[]) => {
+      count++;
+      return original.apply(prisma, args);
+    };
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [method, original] of originals) client[method] = original;
+  }
+  return count;
+}
+
+async function rowVersions(userId: string) {
+  const cookies = await prisma.$queryRaw<{ key: string; xmin: string }[]>`
+    SELECT domain || '|' || name AS key, xmin::text AS xmin FROM "Cookie" WHERE "userId" = ${userId}`;
+  const bundles = await prisma.$queryRaw<{ key: string; xmin: string }[]>`
+    SELECT "authRealm" AS key, xmin::text AS xmin FROM "CookieBundle" WHERE "userId" = ${userId}`;
+  const byKey = (rows: { key: string; xmin: string }[]) =>
+    new Map(rows.map((row) => [row.key, row.xmin]));
+  return { cookies: byKey(cookies), bundles: byKey(bundles) };
+}
+
+test('unchanged cookie re-upload rewrites no rows and issues O(1) statements per upload', async () => {
+  const userId = await createUser();
+  const REALMS = 40;
+  const snapshot = (changedRealm?: number) =>
+    Array.from({ length: REALMS }, (_, i) =>
+      cookie({
+        name: 'session',
+        value: i === changedRealm ? `rotated-${i}` : `value-${i}`,
+        domain: `.site${i}.com`,
+        browserProfile: 'Default',
+      })
+    );
+  try {
+    await processCookiesUpload(userId, snapshot(), 'chrome');
+    await prisma.cookieBundle.update({
+      where: {
+        userId_authRealm_browserSource_browserProfile: {
+          userId,
+          authRealm: 'site0.com',
+          browserSource: 'chrome',
+          browserProfile: 'Default',
+        },
+      },
+      data: { disabledAt: new Date(), disabledReason: 'auth failed' },
+    });
+    const before = await rowVersions(userId);
+    assert(before.cookies.size === REALMS, `expected ${REALMS} cookies`);
+    assert(before.bundles.size === REALMS, `expected ${REALMS} bundles`);
+
+    const statements = await countRawStatements(() =>
+      processCookiesUpload(userId, snapshot(), 'chrome')
+    );
+    const after = await rowVersions(userId);
+
+    const rewrittenCookies = [...after.cookies].filter(([k, x]) => before.cookies.get(k) !== x);
+    const rewrittenBundles = [...after.bundles].filter(([k, x]) => before.bundles.get(k) !== x);
+    assert(
+      rewrittenCookies.length === 0,
+      `expected unchanged re-upload to rewrite 0 Cookie rows, rewrote ${rewrittenCookies.length}/${REALMS}`
+    );
+    assert(
+      rewrittenBundles.length === 0,
+      `expected unchanged re-upload to rewrite 0 CookieBundle rows, rewrote ${rewrittenBundles.length}/${REALMS}`
+    );
+    assert(
+      statements <= 6,
+      `expected O(1) raw statements for a ${REALMS}-realm unchanged upload, issued ${statements}`
+    );
+    const stillDisabled = await prisma.cookieBundle.findFirstOrThrow({
+      where: { userId, authRealm: 'site0.com' },
+    });
+    assert(
+      stillDisabled.disabledAt !== null,
+      'expected unchanged snapshot to keep bundle disabled'
+    );
+
+    await processCookiesUpload(userId, snapshot(0), 'chrome');
+    const changed = await rowVersions(userId);
+    const touchedBundles = [...changed.bundles].filter(([k, x]) => after.bundles.get(k) !== x);
+    assert(
+      touchedBundles.length === 1 && touchedBundles[0][0] === 'site0.com',
+      `expected only the changed realm's bundle to be written, got ${touchedBundles.map(([k]) => k).join(',')}`
+    );
+    const reenabled = await prisma.cookieBundle.findFirstOrThrow({
+      where: { userId, authRealm: 'site0.com' },
+    });
+    assert(reenabled.disabledAt === null, 'expected changed cookie content to clear disabledAt');
+    const rotated = await prisma.cookie.findFirstOrThrow({
+      where: { userId, domain: '.site0.com' },
+    });
+    assert(rotated.value === 'rotated-0', 'expected changed cookie value to be stored');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('mixed-case cookie host keeps its canonical CookieBundle and re-enables it on change', async () => {
+  const userId = await createUser();
+  const upload = (value: string) =>
+    processCookiesUpload(
+      userId,
+      [cookie({ name: 'session', value, domain: '.WWW.Example.COM', browserProfile: 'Default' })],
+      'chrome'
+    );
+  const bundleWhere = {
+    userId_authRealm_browserSource_browserProfile: {
+      userId,
+      authRealm: 'example.com',
+      browserSource: 'chrome',
+      browserProfile: 'Default',
+    },
+  };
+  try {
+    await upload('old-value');
+    await prisma.cookieBundle.update({
+      where: bundleWhere,
+      data: { disabledAt: new Date(), disabledReason: 'auth failed' },
+    });
+
+    await upload('old-value');
+    const unchanged = await prisma.cookieBundle.findUnique({ where: bundleWhere });
+    assert(unchanged !== null, 'expected mixed-case host bundle to survive an unchanged upload');
+    assert(unchanged.disabledAt !== null, 'expected unchanged upload to keep bundle disabled');
+
+    await upload('new-value');
+    const changed = await prisma.cookieBundle.findUnique({ where: bundleWhere });
+    assert(changed !== null, 'expected mixed-case host bundle to survive a changed upload');
+    assert(changed.disabledAt === null, 'expected changed mixed-case cookie to clear disabledAt');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('password upload persists browserProfile and clears disabled state', async () => {
   const userId = await createUser();
   try {

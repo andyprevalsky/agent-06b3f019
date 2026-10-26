@@ -2,20 +2,10 @@ import { Prisma } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 import type { MessageGrepRow } from './grepRepo';
+import { regexPredicate } from './sharedGrepRepo';
 
 export interface MessageContextRow extends MessageGrepRow {
   anchorId: string;
-}
-
-function regexPredicate(
-  expression: Prisma.Sql,
-  pattern: string,
-  caseInsensitive: boolean
-): Prisma.Sql {
-  if (pattern.length === 0) return Prisma.sql`TRUE`;
-  return caseInsensitive
-    ? Prisma.sql`${expression} ~* ${pattern}`
-    : Prisma.sql`${expression} ~ ${pattern}`;
 }
 
 /** Select message matches in the same oldest-first order returned to callers. */
@@ -60,7 +50,7 @@ export async function searchConversationMatchRows(params: {
       p.email
     FROM "MessageRecord" m
     INNER JOIN "Person" p ON p.id = m."personId"
-    WHERE p."userId" = ${params.userId}
+    WHERE m."userId" = ${params.userId}
       AND ${predicate}
       ${messageFilter}
       ${personFilter}
@@ -92,8 +82,7 @@ export async function findMessageContextRows(params: {
     WITH anchors AS (
       SELECT m.*
       FROM "MessageRecord" m
-      INNER JOIN "Person" p ON p.id = m."personId"
-      WHERE p."userId" = ${params.userId}
+      WHERE m."userId" = ${params.userId}
         AND m.id IN (${Prisma.join(params.anchorIds)})
     )
     SELECT

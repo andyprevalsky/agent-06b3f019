@@ -333,15 +333,54 @@ export async function runTests(): Promise<boolean> {
           !foreign.some((c) => c.id === s.otherPrivateRootId),
           "another user's private run must never surface"
         );
-        const shared = await search({
-          goal: GOAL_BENCH,
-          user_id: s.otherUserId,
-        });
+        const ownBench = await search({ goal: GOAL_BENCH, user_id: s.userId });
         assert(
-          shared.some((c) => c.id === s.benchmarkRootId),
-          'benchmark runs are shared corpus'
+          ownBench.some((c) => c.id === s.benchmarkRootId),
+          'a benchmark identity must still retrieve its own benchmark runs'
         );
       })
+    );
+
+    results.push(
+      await runTest(
+        'an owned benchmark run never reaches another user; ownerless fixtures are shared',
+        async () => {
+          // Prod benchmark runs execute on a real account's prod-sync data, so
+          // their bundles (contacts, messages) belong to that account.
+          const foreignBench = await search({ goal: GOAL_BENCH, user_id: s.otherUserId });
+          assert(
+            !foreignBench.some((c) => c.id === s.benchmarkRootId),
+            "another user's benchmark run must never surface"
+          );
+          const foreignRead = await request(`${BASE_URL}/api/planner-memory/${s.benchmarkRootId}`, {
+            headers: { Authorization: `Bearer ${userToken(s.otherUserId)}` },
+          });
+          assert.strictEqual(foreignRead.status, 404, 'non-owner GET must not read the row');
+          const ownerRead = await request(`${BASE_URL}/api/planner-memory/${s.benchmarkRootId}`, {
+            headers: { Authorization: `Bearer ${userToken(s.userId)}` },
+          });
+          assert.strictEqual(ownerRead.status, 200, 'owner GET reads its own row');
+
+          // Curated fixtures are loaded ownerless through the internal PUT.
+          const fixtureId = randomUUID();
+          const fixtureGoal = `Pick up my dry cleaning on Valencia Street before 6pm ${RUN_ID}`;
+          try {
+            await putFixture(fixtureId, { goal: fixtureGoal });
+            await waitEmbedded(fixtureId);
+            const shared = await search({ goal: fixtureGoal, user_id: s.otherUserId });
+            assert(
+              shared.some((c) => c.id === fixtureId),
+              'ownerless benchmark fixtures are shared corpus'
+            );
+            const fixtureRead = await request(`${BASE_URL}/api/planner-memory/${fixtureId}`, {
+              headers: { Authorization: `Bearer ${userToken(s.otherUserId)}` },
+            });
+            assert.strictEqual(fixtureRead.status, 200, 'any user may read a shared fixture');
+          } finally {
+            await prisma.plannerMemory.deleteMany({ where: { id: fixtureId } });
+          }
+        }
+      )
     );
 
     results.push(

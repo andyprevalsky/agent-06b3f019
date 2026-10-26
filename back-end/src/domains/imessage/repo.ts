@@ -9,8 +9,7 @@ const IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS = 15_000;
  *
  * Used by the browser agent's OTP relay. The `since` window (typically the last
  * ~10 minutes) is the selective filter and is served by the
- * `MessageRecord_channel_timestamp_idx` composite index when a channel is
- * supplied, falling back to the `timestamp` index otherwise.
+ * `MessageRecord(userId, timestamp)` index.
  */
 export async function findRecentInboundMessages(params: {
   userId: string;
@@ -21,7 +20,7 @@ export async function findRecentInboundMessages(params: {
   const { userId, since, limit, channel } = params;
   return prisma.messageRecord.findMany({
     where: {
-      person: { userId },
+      userId,
       to: 'me',
       timestamp: { gte: since },
       ...(channel !== undefined ? { channel } : {}),

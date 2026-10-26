@@ -19,7 +19,7 @@ async function deleteMessageBatch(job: GoogleDataPurge): Promise<boolean> {
     job.email === null ? [] : [{ googleAccountEmail: job.email }, { googleAccountEmail: null }];
   const rows = await prisma.messageRecord.findMany({
     where: {
-      person: { userId: job.userId },
+      userId: job.userId,
       channel: MessageChannel.EMAIL,
       createdAt: { lte: job.requestedAt },
       ...(accountFilters.length > 0 ? { OR: accountFilters } : {}),

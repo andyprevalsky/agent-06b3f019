@@ -228,6 +228,7 @@ export async function upsertPersonAndMessageRecords(
       const rows = resolved.flatMap(({ personId, contact }) =>
         contact.messages.map((msg) => ({
           personId,
+          userId,
           channel: msg.channel,
           from: msg.from,
           to: msg.to,
