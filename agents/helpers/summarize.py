@@ -830,6 +830,57 @@ Output the summary only — no preamble."""
         return {"summary": truncated, "usage": {}, "summarized": False, "error": str(e)}
 
 
+# Scrape-provider bookkeeping in the metadata block, not facts about the page.
+_SCRAPE_BOOKKEEPING_METADATA_KEYS = frozenset(
+    {
+        "provider",
+        "scrapeId",
+        "statusCode",
+        "proxyUsed",
+        "cacheState",
+        "cachedAt",
+        "creditsUsed",
+        "concurrencyLimited",
+        "contentType",
+        "url",
+        "sourceURL",
+        "error",
+    }
+)
+_PAGE_METADATA_VALUE_CHARS = 500
+_PAGE_METADATA_BLOCK_CHARS = 4_000
+
+
+def format_page_metadata(metadata: Optional[Dict[str, Any]]) -> str:
+    """The page's own declared metadata (``<meta>`` tags) as ``key: value`` lines.
+
+    Pages can declare facts such as ``citation_publication_date`` only in the
+    document head, while main-content markdown omits them. Sorted for a stable
+    prompt; bounded so a metadata-heavy page cannot crowd out the content.
+    """
+    if not isinstance(metadata, dict):
+        return ""
+    lines: List[str] = []
+    size = 0
+    for key in sorted(str(k) for k in metadata):
+        if key in _SCRAPE_BOOKKEEPING_METADATA_KEYS:
+            continue
+        raw = metadata.get(key)
+        values = raw if isinstance(raw, list) else [raw]
+        scalars = [
+            " ".join(str(v).split()) for v in values if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+        ]
+        unique = [v for i, v in enumerate(scalars) if v and v not in scalars[:i]]
+        if not unique:
+            continue
+        line = f"{key}: {' | '.join(unique)[:_PAGE_METADATA_VALUE_CHARS]}"
+        if size + len(line) + 1 > _PAGE_METADATA_BLOCK_CHARS:
+            break
+        lines.append(line)
+        size += len(line) + 1
+    return "\n".join(lines)
+
+
 @activity.defn
 async def summarize_and_filter_links(
     url: str,
@@ -850,6 +901,7 @@ async def summarize_and_filter_links(
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
+    page_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.
@@ -883,12 +935,19 @@ async def summarize_and_filter_links(
         else:
             markdown_for_prompt = markdown
 
+        metadata_text = format_page_metadata(page_metadata)
+        metadata_section = (
+            f"PAGE METADATA (declared by the page, e.g. <meta> tags):\n---\n{metadata_text}\n---\n\n"
+            if metadata_text
+            else ""
+        )
+
         prompt = f"""You are filtering a fetched web page for an autonomous agent.
 
 The agent is trying to: {objective}
 
 PAGE URL: {url}
-PAGE CONTENT (markdown):
+{metadata_section}PAGE CONTENT (markdown):
 ---
 {markdown_for_prompt}
 ---
