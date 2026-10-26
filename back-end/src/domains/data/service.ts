@@ -102,15 +102,10 @@ function displayOrder(input: ValidatedGrepInput): {
   contextUnit: GrepResult['context_unit'];
 } {
   const soleTrajectory = input.sources.length === 1 && input.sources[0] === 'agent_trajectories';
-  const soleAgentNetwork = input.sources.length === 1 && input.sources[0] === 'agent_network';
   const allMessages = input.sources.every(isMessageFamilySource);
   // Conversations and calendars read forward in time; everything else is newest first.
-  // A sole agent search honors the caller's order.
   const allCalendar = isCalendarOnly(input.sources);
-  const oldestFirst =
-    soleTrajectory || soleAgentNetwork
-      ? input.order === 'oldest_first'
-      : allMessages || allCalendar;
+  const oldestFirst = soleTrajectory ? input.order === 'oldest_first' : allMessages || allCalendar;
   const contextUnit = allMessages
     ? 'message_record'
     : input.sources.some(isMessageFamilySource)

@@ -7,9 +7,10 @@
  *   results carry the agent's task path (location.agent_path; `agent_path:` in content)
  *   a background-task path narrows to its owner; an unknown path → 404 AGENT_PATH_NOT_FOUND
  *   a path is resolved only inside the caller's tree; a missing agent_id → 400
- *   agent_network rows are stored messages, so record_kind message/all reads them and
- *   order reads them in either direction; a model-record kind, surface, until or
- *   page_after → 400 naming that parameter
+ *   agent_network rows are stored messages, so record_kind message/all reads them;
+ *   order is accepted and ignored on a sole agent_network search (newest first);
+ *   a model-record kind, surface, until, page_after or non-task trace_path → 400
+ *   naming that parameter; order with another source → 400 order/page_after
  *
  * Registered by data.blackbox.ts.
  */
@@ -266,10 +267,7 @@ async function proveAgentNetworkRecordKind(
       `agent_network record_kind=${recordKind} keeps the trace_path scope, got ${JSON.stringify(res.data)}`
     );
   }
-  for (const [order, first] of [
-    ['oldest_first', tree.rootId],
-    ['newest_first', tree.siblingId],
-  ] as const) {
+  for (const order of ['oldest_first', 'newest_first']) {
     const res = await grep(headers, {
       pattern: tree.marker,
       sources: ['agent_network'],
@@ -279,27 +277,42 @@ async function proveAgentNetworkRecordKind(
     });
     assert(
       res.status === 200 &&
-        res.data.matches[0]?.location.agent_id === first &&
-        (res.data as unknown as { display_order?: string }).display_order === order,
-      `agent_network order=${order} reads the tree in that order, got ${res.status} ${JSON.stringify(res.data)}`
+        res.data.matches[0]?.location.agent_id === tree.siblingId &&
+        (res.data as unknown as { display_order?: string }).display_order === 'newest_first',
+      `agent_network ignores order=${order} and reads newest first, got ${res.status} ${JSON.stringify(res.data)}`
     );
   }
   for (const [key, value] of [
     ['record_kind', 'llm_output'],
     ['surface', 'WEB'],
     ['until', '2026-10-25T00:00:00Z'],
+    [
+      'page_after',
+      `agent_trajectories/${tree.rootId}/depth-0/${tree.rootId}/ASSISTANT/${tree.rootId}`,
+    ],
+    ['trace_path', `agent_trajectories/${tree.rootId}`],
   ] as const) {
     const res = await grep(headers, {
       sources: ['agent_network'],
-      [key]: value,
       trace_path: '/root/outreach/napa',
       agent_id: tree.siblingId,
+      [key]: value,
     });
     assert(
       res.status === 400 && JSON.stringify(res.data).includes(`'${key}'`),
       `agent_network rejects ${key}=${value} by name, got ${res.status} ${JSON.stringify(res.data)}`
     );
   }
+  const mixed = await grep(headers, {
+    pattern: tree.marker,
+    sources: ['agent_network', 'messages'],
+    order: 'oldest_first',
+    agent_id: tree.siblingId,
+  });
+  assert(
+    mixed.status === 400 && JSON.stringify(mixed.data).includes("'order/page_after'"),
+    `order with another source is rejected, got ${mixed.status} ${JSON.stringify(mixed.data)}`
+  );
 }
 
 /**
