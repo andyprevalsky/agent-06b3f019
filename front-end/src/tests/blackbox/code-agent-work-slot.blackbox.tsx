@@ -59,7 +59,64 @@ function renderRunning() {
   );
 }
 
+function renderSession(records: unknown[], untimed = false) {
+  const carrier = eventsMessage(records);
+  // An untimed carrier row and records without ts: the turn's start is unknown.
+  if (untimed) carrier.timestamp = '';
+  return createElement(
+    WithAgent,
+    { messages: [carrier] },
+    createElement(CodeSessionMessages, {
+      c: { provider: 'codex', chipState: 'live', meta: null } as unknown as Parameters<
+        typeof CodeSessionMessages
+      >[0]['c'],
+      taskId: 'task-1',
+      echoes: [],
+    }),
+  );
+}
+
 describe('code-agent running work slot', () => {
+  it('an unknown start reads just "Working"; the indicator never repeats the clock', () => {
+    signIn();
+    const view = renderWithProviders(
+      renderSession(
+        [{ id: 'edit', seq: 1, type: 'tool', tool: { name: 'Edit', target: 'chart.py' } }],
+        true,
+      ),
+    );
+    const fold = within(screen.getByTestId('code-work-slot')).getByRole('button');
+    expect(fold).not.toHaveTextContent('Timing unavailable');
+    expect(screen.queryByTestId('code-work-elapsed')).toBeNull();
+    view.rerender(
+      renderSession([{ id: 'th', seq: 1, type: 'thinking', partial: true, ts: 1000, text: 'Hmm' }]),
+    );
+    expect(screen.getByTestId('thinking-indicator')).toBeInTheDocument();
+    expect(screen.queryByTestId('code-work-elapsed')).toBeNull();
+  });
+
+  it('a turn id arriving later keeps the same slot (expand state survives)', () => {
+    signIn();
+    const before = [
+      { id: 'goal', seq: 0, type: 'message', role: 'user', sender: 'agent', text: 'Go', ts: 1000 },
+      { id: 'edit', seq: 1, type: 'tool', ts: 1200, tool: { name: 'Edit', target: 'chart.py' } },
+    ];
+    const view = renderWithProviders(renderSession(before));
+    const slot = screen.getByTestId('code-work-slot');
+    fireEvent.click(within(slot).getByRole('button', { name: /Working/ }));
+    view.rerender(
+      renderSession([
+        ...before,
+        { id: 'start', seq: 2, type: 'turn', event: 'started', turn_id: 'native-1', ts: 1300 },
+      ]),
+    );
+    expect(screen.getByTestId('code-work-slot')).toBe(slot);
+    expect(within(slot).getByRole('button', { name: /Working/ })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
   it('a running turn whose latest activity is a thought renders no standalone Thought card', () => {
     renderRunning();
     const slot = screen.getByTestId('code-work-slot');

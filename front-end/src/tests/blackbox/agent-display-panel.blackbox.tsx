@@ -115,9 +115,15 @@ describe('Agent Display destination', () => {
     expect(inline).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
     expect(within(chatRow()).getByText('Interactive game')).toBeInTheDocument();
     expect(within(panel()).queryByTestId('display-html-frame')).toBeNull();
-    // The existing way to open the same output full size is kept.
+    expect(inline).toHaveAttribute('loading', 'lazy');
+    // The existing way to open the same output full size is kept; while the panel
+    // shows it, the inline copy unmounts (one live frame).
     fireEvent.click(within(chatRow()).getByRole('button', { name: 'Open agent display' }));
     expect(within(panel()).getByTitle('game.html')).toBeInTheDocument();
+    expect(screen.getAllByTestId('display-html-frame')).toHaveLength(1);
+    expect(within(chatRow()).getByTestId('display-shown-in-panel')).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(within(chatRow()).getByTitle('game.html')).toBeInTheDocument();
   });
 
   it('preserves the existing inline renderer for non-app callers', () => {

@@ -22,7 +22,8 @@
  *   display media / send_message_to_user of THIS code agent
  *                        → as-is, outside the slot
  *
- * TURNS (key provider:task:turn): a person/Rose message while no turn runs
+ * TURNS (key provider:task:<turn id, else nN> fixed when the slot is created, so a
+ * turn id arriving later never remounts it): a person/Rose message while no turn runs
  * starts one; while one runs it is a steer and the same slot keeps updating.
  * `turn_id` on records, when the backend sends it, decides instead. A result /
  * error record ends the turn: duration = turn start (turn_started_at, else the
@@ -392,11 +393,10 @@ class SessionBuilder {
       this.finish('interrupted', entry.at);
     if (!this.open) this.startTurn(entry.turnStartedAt ?? entry.at, entry.turnId);
     if (this.open) {
+      // The slot keeps the key it was created with: a turn id arriving later never
+      // remounts it (its expand and page state survive).
       this.open.turnId = entry.turnId;
-      this.open.turn.key = `${this.input.provider}:${this.input.taskId}:${entry.turnId ?? `n${this.turnCount}`}`;
       this.open.turn.startedAt = entry.turnStartedAt ?? this.open.turn.startedAt;
-      const slot = this.out.find((item) => item.kind === 'work' && item.turn === this.open?.turn);
-      if (slot) slot.key = this.open.turn.key;
     }
   }
 
@@ -407,12 +407,7 @@ class SessionBuilder {
       this.startTurn(entry.turnStartedAt ?? entry.at ?? entry.firstSeenAt, entry.turnId);
     const open = this.open as OpenTurn;
     if (entry.turnStartedAt != null) open.turn.startedAt = entry.turnStartedAt;
-    if (entry.turnId && !open.turnId) {
-      open.turnId = entry.turnId;
-      open.turn.key = `${this.input.provider}:${this.input.taskId}:${entry.turnId}`;
-      const slot = this.out.find((item) => item.kind === 'work' && item.turn === open.turn);
-      if (slot) slot.key = open.turn.key;
-    }
+    if (entry.turnId && !open.turnId) open.turnId = entry.turnId;
     if (!open.emitted) {
       open.emitted = true;
       this.out.push({ kind: 'work', key: open.turn.key, turn: open.turn });

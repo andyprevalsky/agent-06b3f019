@@ -4,6 +4,9 @@
  * [live|verifying] -> LiveChip
  * [completed|failed] -> CollapsedChip
  * [fullscreen] -> FullscreenView portal
+ * Rose Desktop without a code_agent snapshot -> CollapsedChip with terminal={false}:
+ *   status header (+ structured response / failure when expanded); no terminal
+ *   surface, no Maximize, no fullscreen
  */
 
 import { type RefObject } from 'react';
@@ -90,7 +93,10 @@ interface CollapsedChipProps {
   terminalTranscript: string;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   onToggleExpand: () => void;
-  onMaximize: () => void;
+  /** Absent → no Maximize button (Rose Desktop shows no terminal view). */
+  onMaximize?: () => void;
+  /** false → never mount the terminal / terminal transcript surface. */
+  terminal?: boolean;
 }
 
 function CollapsedHeader(props: CollapsedChipProps) {
@@ -106,15 +112,17 @@ function CollapsedHeader(props: CollapsedChipProps) {
       <div className="flex items-center gap-1">
         <GithubRepoLink url={props.githubRepoUrl} />
         <SchemaChip outputSchema={props.outputSchema} size="sm" tooltipPosition="bottom" />
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onMaximize();
-          }}
-          className="rounded p-1.5 transition-colors hover:bg-muted"
-        >
-          <Maximize2 className="h-4 w-4 text-muted-foreground" />
-        </button>
+        {props.onMaximize && (
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onMaximize?.();
+            }}
+            className="rounded p-1.5 transition-colors hover:bg-muted"
+          >
+            <Maximize2 className="h-4 w-4 text-muted-foreground" />
+          </button>
+        )}
         {props.isExpanded ? (
           <ChevronUp className="h-4 w-4 text-muted-foreground" />
         ) : (
@@ -146,7 +154,7 @@ export function CollapsedChip(props: CollapsedChipProps) {
           <p className="whitespace-pre-wrap text-sm text-red-400">{props.failureMessage}</p>
         </div>
       )}
-      {props.isExpanded && (
+      {props.isExpanded && props.terminal !== false && (
         <div className="mt-2 overflow-hidden rounded-xl border border-black/10 shadow-sm dark:border-white/[0.09]">
           {props.state === 'completed' || props.state === 'failed' ? (
             <CompletedTranscriptSurface

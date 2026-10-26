@@ -100,6 +100,10 @@ function WorkSlot({
     if (!running) setExpanded(false);
   }, [running]);
   const visible = expanded ? pages.slice(turn.activities) : [];
+  const indicator =
+    running && (turn.isThinking || !turn.activityType || turn.streamingMessageId !== undefined);
+  // The indicator carries its own clock; an unknown start shows just "Working".
+  const clock = running && !indicator && turn.startedAt !== null && turn.startedAt > 0;
   return (
     <div
       data-testid="code-work-slot"
@@ -118,11 +122,11 @@ function WorkSlot({
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span>{workLabel(turn)}</span>
-        {running && <SlotElapsed startedAt={turn.startedAt} />}
+        {clock && <SlotElapsed startedAt={turn.startedAt} />}
         {turn.summary && <span>· {turn.summary}</span>}
       </button>
       <div hidden={!running && !expanded} data-testid="code-work-activities">
-        {running && (turn.isThinking || !turn.activityType || turn.streamingMessageId) && (
+        {indicator && (
           <ThinkingIndicator
             compact
             isClaudeStreaming

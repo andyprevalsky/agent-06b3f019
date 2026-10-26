@@ -606,7 +606,7 @@ describe('row 51: execution target and local failures', () => {
     expect(screen.getByTestId('code-agent-target')).toHaveAttribute('title', 'Andy MBP');
   });
 
-  it('Mac app: "Open in Terminal" on a live local session calls localCode.openTerminal(taskId); hidden on web and cloud', async () => {
+  it('no terminal affordance: "Open in Terminal" never renders, even for a live local session in the Mac app', () => {
     const openTerminal = vi.fn().mockResolvedValue({ success: true });
     const live = (target: 'local' | 'cloud') =>
       msg({
@@ -628,8 +628,8 @@ describe('row 51: execution target and local failures', () => {
       expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
       cloud.unmount();
       renderChip([live('local')]);
-      await userEvent.setup().click(screen.getByRole('button', { name: 'Open in Terminal' }));
-      expect(openTerminal).toHaveBeenCalledWith('task-1');
+      expect(screen.queryByRole('button', { name: 'Open in Terminal' })).not.toBeInTheDocument();
+      expect(openTerminal).not.toHaveBeenCalled();
     } finally {
       delete window.api;
     }

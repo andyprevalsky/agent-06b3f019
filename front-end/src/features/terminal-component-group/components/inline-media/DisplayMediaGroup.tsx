@@ -95,6 +95,7 @@ function DisplayHtmlFrame({ item, agentId }: { item: DisplayMediaItem; agentId?:
       data-user-ui-frame="true"
       sandbox="allow-scripts allow-pointer-lock allow-popups"
       referrerPolicy="no-referrer"
+      loading="lazy"
       className="w-full rounded-lg bg-white"
       style={{ height, border: 0, colorScheme: 'normal' }}
     />

@@ -1,6 +1,7 @@
 /** A single active output frame, mounted only while Agent Display is open. */
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
 import { AppDrawerShell } from './AppDrawerShell';
+import { shownDisplayEntry } from './agentDisplayEntries';
 import { useRoseApps } from './roseAppsState';
 
 export function AgentDisplayDrawer() {
@@ -8,11 +9,7 @@ export function AgentDisplayDrawer() {
   if (!apps) return null;
   const open = apps.openApp === 'display';
   const entries = apps.displayEntries.filter((entry) => entry.agentId === apps.selectedAgentId);
-  const chosen =
-    entries.find(
-      (entry) =>
-        entry.id === apps.displaySelection?.id && entry.agentId === apps.displaySelection.agentId,
-    ) ?? entries.at(-1);
+  const chosen = shownDisplayEntry(apps);
   return (
     <AppDrawerShell open={open} label="Agent Display" testId="agent-display-drawer" variant="full">
       <div

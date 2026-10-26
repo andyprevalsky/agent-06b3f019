@@ -318,7 +318,7 @@ export function deliveredAgentTurnIds(messages: Message[], taskId: string): Set<
   const ids = new Set<string>();
   for (const message of messages) {
     const metadata = message.metadata;
-    if (metadata?.task_id !== taskId || metadata.action_type !== 'agent_message') continue;
+    if (metadata?.task_id !== taskId || (metadata.action_type as string) !== 'agent_message') continue;
     const id = str(metadata.code_turn_id);
     if (id) ids.add(id);
   }
