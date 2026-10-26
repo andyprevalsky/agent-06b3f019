@@ -774,13 +774,18 @@ model MessageRecord {
   externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
   createdAt          DateTime       @default(now())
-  person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  /// Owner, denormalized from Person so per-user reads use (userId, timestamp)
+  /// instead of joining every user's rows. The composite relation keeps it equal
+  /// to Person.userId (insert mismatch fails; owner changes cascade).
+  userId             String
+  person             Person         @relation(fields: [personId, userId], references: [id, userId], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
-  @@index([timestamp])
   @@index([personId, timestamp])
-  @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
+  // Every timestamp-ordered read is per user. A global timestamp index lets the
+  // planner walk other users' rows whenever one user owns a large share.
+  @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
 }
 
@@ -836,6 +841,7 @@ model Person {
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
+  @@unique([id, userId]) // Target of MessageRecord's (personId, userId) relation
   @@index([userId])
   @@index([firstName])
   @@index([lastName])
