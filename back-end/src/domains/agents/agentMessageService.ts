@@ -198,13 +198,15 @@ async function validatePostTarget(
   return null;
 }
 
-const ENDED_BROWSER_TASK_STATUSES = new Set(['CLOSED', 'ERROR']);
-
 /**
  * `browser_task_id` (user Browser composer) addresses one running browser task
- * of this agent. The stored row carries `browserTaskId` (the tag the browser's
- * instruction read already filters on) and `excludeFromModel` (the owner's
- * model and loop skip it). One primary-key read per message.
+ * of this agent. Only an ACTIVE session is reading its instructions; then the
+ * stored row carries `browserTaskId` (the tag the browser's instruction read
+ * already filters on) and `excludeFromModel` (the owner's model and loop skip
+ * it). A paused/ended session (run over, or pause-closed after its last step)
+ * would never read it, so the message is delivered to the owner as before.
+ * Files only reach models through the owner, so a target with files is a 400.
+ * One primary-key read per message.
  */
 async function resolveBrowserTarget(
   agentId: string,
@@ -217,11 +219,12 @@ async function resolveBrowserTarget(
   if (isInternal || role !== 'USER') {
     return { error: 'browser_task_id is only valid on user messages', status: 400 };
   }
+  if ((body.attachments?.length ?? 0) > 0 || body.file_pointer !== undefined) {
+    return { error: 'browser_task_id cannot carry files; send files to the agent', status: 400 };
+  }
   const task = await repo.findAgentBrowserTask(agentId, browserTaskId);
   if (task === null) return { error: 'Browser task not found', status: 404 };
-  if (ENDED_BROWSER_TASK_STATUSES.has(task.status)) {
-    return { error: 'Browser task has ended', status: 409 };
-  }
+  if (task.status !== 'ACTIVE') return null;
   return {
     metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
   };
@@ -327,7 +330,6 @@ export async function postMessage(
           text: '',
           role,
           filePointer: attachment as Record<string, unknown>,
-          ...(browserTarget === null ? {} : { metadata: browserTarget.metadata }),
         });
       }
     }

@@ -9,6 +9,8 @@ import {
   type RoseAppsValue,
 } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { postMessage } from '@/lib/api/messages';
+import type { Message } from '@/lib/api';
+import { UserBubble } from '@/features/terminal-component-group/components/message-bubble/UserBubble';
 import { renderWithProviders } from './test-wrapper';
 
 vi.mock('@/lib/api/messages', async (original) => ({
@@ -162,6 +164,25 @@ it('sends from the Browser composer straight to its browser task', async () => {
   fetchSpy.mockRestore();
 });
 
+it('labels a Browser-composer message in the owner chat as sent to the Browser', () => {
+  const row = (metadata: Record<string, unknown>) =>
+    ({
+      message_id: `m-${Object.keys(metadata).length}`,
+      timestamp: '2026-10-26T15:59:40Z',
+      role: 'USER',
+      text: 'go to instacart instead',
+      metadata,
+    }) as Message;
+  const view = renderWithProviders(
+    <UserBubble message={row({ browserTaskId: 'browser-task', excludeFromModel: true })} />,
+  );
+  expect(screen.getByText('You → Browser:', { exact: false })).toBeVisible();
+  // An attention reply tagged for the browser is still the owner's own message.
+  view.rerender(<UserBubble message={row({ browserTaskId: 'browser-task' })} />);
+  expect(screen.queryByText('You → Browser:', { exact: false })).toBeNull();
+  expect(screen.getByText('go to instacart instead')).toBeVisible();
+});
+
 it('keeps the root composer controls when the Browser drawer is closed', () => {
   renderWithProviders(
     <RoseAppsContext.Provider value={browser({ openApp: null })}>
@@ -195,10 +216,10 @@ it('retains draft files when moving between the owner composer and Browser, and 
   expect(box.getByText('notes.txt')).toBeVisible();
   expect(box.getByRole('textbox')).toHaveValue('draft');
   fireEvent.click(box.getByRole('button', { name: 'Send' }));
-  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
-    [{ id: 'file-pointer', original_filename: 'notes.txt' }],
-    { browserTaskId: 'browser-task' },
-  );
+  // Files only reach models through the owner agent, so they go untargeted.
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith([
+    { id: 'file-pointer', original_filename: 'notes.txt' },
+  ]);
 });
 
 it('keeps the native code composer usable on its original direct channel in Browser', () => {

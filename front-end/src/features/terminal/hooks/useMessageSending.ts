@@ -297,7 +297,10 @@ export function useMessageSending({
           return;
         }
 
-        const responded = await checkAndRespondToAttention(selectedAgentId, messageInput);
+        // A Browser-composer message is the browser's input, never the owner's
+        // answer to a pending question.
+        const responded =
+          target === undefined && (await checkAndRespondToAttention(selectedAgentId, messageInput));
         if (responded) {
           toast({
             title: 'Response sent',
@@ -312,7 +315,8 @@ export function useMessageSending({
         // A Browser-composer target goes straight to that browser task.
         await postMessage(selectedAgentId, messageInput, attachments, target);
         setMessageInput('');
-        if (agentDetail?.status === 'PAUSED') {
+        // Only a message to the agent itself lifts its pause.
+        if (target === undefined && agentDetail?.status === 'PAUSED') {
           toast({
             title: 'Agent resuming',
             description: 'The agent will continue with your message',

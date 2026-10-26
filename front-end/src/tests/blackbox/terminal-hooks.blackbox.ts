@@ -434,6 +434,39 @@ describe('useMessageSending', () => {
     expect(result.current.messageInput).toBe('');
   });
 
+  it('a Browser-composer send goes to its browser task, never answers or resumes the owner', async () => {
+    server.use(
+      // The owner has a pending question: a normal send would answer it.
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({ requests: [{ id: 'att-1', agent_id: 'agent-001', answered: false }] }),
+      ),
+      http.post(`${API_BASE}/agents/:agentId/messages`, () =>
+        HttpResponse.json({
+          message_id: 'm1',
+          timestamp: new Date().toISOString(),
+          text: 'x',
+          role: 'USER',
+        }),
+      ),
+    );
+    const args = defaultArgs({
+      selectedAgentId: 'agent-001',
+      agentDetail: makeAgent({ status: 'PAUSED' }),
+    });
+    const { result } = renderHook(() => useMessageSending(args as never));
+    act(() => result.current.setMessageInput('go to instacart instead'));
+    await act(async () => {
+      await result.current.handleSendMessage(undefined, { browserTaskId: 'browser-task' });
+    });
+    const post = capturedRequests.find((r) => r.method === 'POST' && r.url.includes('/messages'));
+    expect(post?.body).toEqual({
+      message: 'go to instacart instead',
+      browser_task_id: 'browser-task',
+    });
+    expect(capturedRequests.some((r) => r.url.includes('/attention-requests'))).toBe(false);
+    expect(result.current.messageInput).toBe('');
+  });
+
   it('handleSendMessage error triggers error toast path (401)', async () => {
     server.use(
       http.post(`${API_BASE}/agents`, () =>

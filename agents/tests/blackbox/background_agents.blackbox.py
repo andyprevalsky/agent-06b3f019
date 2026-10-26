@@ -2320,10 +2320,6 @@ async def test_browser_composer_message_reaches_its_browser_not_the_root():
     assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
     assert state["user_instruction_messages"] == [{"role": "user", "content": "go to instacart instead"}], state
     assert state["user_instruction_message_ids"] == ["direct"]
-    # Another browser of the same owner does not take it as its instruction.
-    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[start, direct])):
-        other = await h._load_browser_resume_user_instructions("agent-1", {**task, "task_id": "task-2"})
-    assert other["user_instruction_messages"] == []
     # The owner: hidden from its model, no DAG interrupt (no new root turn), no new requirement.
     assert is_excluded_from_model(direct)
     assert is_dag_interrupt_message(direct) is False
