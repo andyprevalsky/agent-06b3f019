@@ -26229,6 +26229,14 @@ async def run_all_tests():
         test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
     )
     r.record(
+        "cloudbench_demo_cache_on_guest_read_only_like_local",
+        test_cloudbench_demo_cache_on_guest_is_read_only_like_local,
+    )
+    r.record(
+        "claude_code_only_run_withholds_gpt_compute_credentials",
+        test_claude_code_only_run_withholds_gpt_compute_credentials,
+    )
+    r.record(
         "local_cold_seed_extended_start_timeout",
         test_local_cold_seed_bootstrap_extends_service_start_timeout,
     )
