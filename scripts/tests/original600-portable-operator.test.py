@@ -1753,6 +1753,93 @@ class Portable(unittest.TestCase):
             r=self._stopped_controller_run(native)
             self.assertIn('error',r);self.assertIsNone(r['receipt']);self.assertEqual(r['cleanup_calls'],[]);self.assertIsNone(r['terminal'])
 
+    def _startup_deadline_run(self,machines,seal_ok=True):
+        # full run original600-1792981113422153716 shard-02: the gate's seal hit its startup
+        # Deadline after the controller was created, so no ownership record was written.
+        # cleanup-workspace refused the existing allocation and the runner sat forever.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700);root=base/'source';(root/'scripts').mkdir(parents=True)
+            mid='0123456789abcd';calls=base/'native-calls.jsonl';helper_calls=base/'helper-calls.jsonl'
+            (root/'scripts/cloudbench-original-volume-capture.py').write_text(
+                "import json\ndef resolve_token(scope):return 'fixture'\nclass Fly:\n def __init__(self,app,token):pass\n"
+                " def api(self,method,path,body=None,timeout=60):\n"
+                "  open("+repr(str(calls))+",'a').write(json.dumps([method,path])+'\\n')\n"
+                "  return "+repr(machines)+" if path=='/machines' else dict(id="+repr(mid)+",instance_id='fixture-instance',state='started')\n")
+            (root/'scripts/cloudbench-disposable-controller.py').write_text(
+                "import json,os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:];directory=Path(args[args.index('--directory')+1])\n"
+                "with open("+repr(str(helper_calls))+",'a')as f:f.write(json.dumps(args)+'\\n')\n"
+                "def write(name,value):\n fd=os.open(directory/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,json.dumps(value).encode());os.close(fd)\n"
+                "if args[0]=='cleanup-workspace':print('ValueError: Machine allocation exists or is ambiguous; seal/export required');sys.exit(1)\n"
+                "if args[0]=='seal':\n"
+                " if not "+repr(seal_ok)+":sys.exit(1)\n"
+                " auth=Path(args[args.index('--authority')+1]).read_bytes();import hashlib\n"
+                " ws=(directory/'workspace-volume.ownership.json').read_bytes()\n"
+                " write('disposable-controller.ownership.json',dict(authority_sha256=hashlib.sha256(auth).hexdigest(),workspace_sha256=hashlib.sha256(ws).hexdigest(),machine=dict(id=args[args.index('--machine')+1],instance_id='fixture-instance'),volume=dict(id='vol_fixture123')))\n"
+                " sys.exit(0)\n"
+                "if args[0]=='cleanup':\n"
+                " record=json.loads((directory/'disposable-controller.ownership.json').read_bytes())\n"
+                " write('disposable-controller.release.json',dict(machine_id=record['machine']['id'],volume_id=record['volume']['id'],volume_disposition='pending_destroy',machine_deleted=True))\n")
+            tasks=private(base/'tasks.json',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            inventory=private(base/'inventory.json','{}')
+            config=private(base/'config.private.json',dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(root),source_ref='a'*40,
+                source_files={'cloudbench-original600-runner.py':'f'*64,'cloudbench-original600-supervisor.py':'d'*64},tasks_path=str(tasks),started_at_epoch=time.time(),authority_template=str(template),
+                host_operator_provenance=dict(fixture=True),gate_env=dict(CLOUDBENCH_GATE_TIMEOUT_S='7200'),
+                remote_files=[dict(relative_path=RUNNER['WARM_INVENTORY_RELATIVE'],source_path=str(inventory),sha256=hashlib.sha256(inventory.read_bytes()).hexdigest())]))
+            out=base/'run';probes=[];transfers=[];digest=[None]
+            class JoinedGate:
+                pid=os.getpid();returncode=1
+                def poll(self):return 1
+                def wait(self):return 1
+            def spawn(command,source,env,stream,output,config_path,config_sha,authority):
+                export=output/'export';export.mkdir(mode=0o700)
+                private(export/'workspace-volume.ownership.json',dict(volume_id='vol_fixture123'))
+                private(export/'machine-create.intent.json',dict(name='cloudbench-gate-fixture-s02',image='registry.fly.io/app@sha256:'+'e'*64))
+                digest[0]=hashlib.sha256(authority.read_bytes()).hexdigest()
+                return JoinedGate()
+            def control(api,machine,payload):
+                probes.append(machine);return dict(state='JOINED')
+            real_sleep=time.sleep;slept=[0]
+            def bounded_sleep(seconds):
+                slept[0]+=1
+                if (out/'export-recovery-required.json').exists() and not (out/'export/disposable-export.verified.json').exists():
+                    private(out/'export/disposable-export.verified.json',dict(authority_sha256=digest[0],machine_id=mid))
+                if slept[0]>400:raise TimeoutError('runner spun after a refused workspace cleanup')
+                real_sleep(.01)
+            stubs=dict(validate_source_members=lambda *unused:None,pin_warm_snapshot=lambda *unused:None,host_gate=lambda *unused:root/'gate',
+                       launch_handoff=lambda output,remote:(output/'payload.gz','e'*64,['true']),spawn_gate=spawn,machine_control=control,
+                       transfer_sidecars=lambda *a,**kw:transfers.append(a[1]))
+            result=dict(probes=probes,transfers=transfers)
+            with patch.dict(RUNNER['run'].__globals__,stubs),patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'),patch.object(RUNNER['time'],'sleep',bounded_sleep):
+                try:result['code']=RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                except TimeoutError as error:result['error']=str(error)
+            for key,path in (('receipt',out/'export-recovery-required.json'),('terminal',out/'terminal.json'),('intent',out/'cleanup-call.intent.json'),
+                             ('refused',out/'cleanup-call.workspace-refused.json'),('seal',out/'controller-seal-recovery.intent.json')):
+                result[key]=json.loads(path.read_bytes()) if path.exists() else None
+            result['helper']=[json.loads(line)[0] for line in helper_calls.read_text().splitlines()] if helper_calls.exists() else []
+            result['native']=[json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return result
+
+    def test_startup_deadline_controller_is_sealed_reprobed_and_released(self):
+        r=self._startup_deadline_run([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02'),dict(id='fedcba98765432',name='other')])
+        self.assertNotIn('error',r,'runner must not spin after the allocation-exists refusal')
+        self.assertEqual(r['helper'],['cleanup-workspace','seal','cleanup'])
+        self.assertEqual(r['seal']['machine'],'0123456789abcd')
+        self.assertEqual(r['refused']['action'],'cleanup-workspace')
+        self.assertEqual(r['receipt']['status'],'EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED')
+        self.assertTrue(r['probes'] and set(r['probes'])=={'0123456789abcd'},'sealed controller must be re-probed')
+        self.assertEqual(r['transfers'],[],'a joined controller gets no late launch sidecars')
+        self.assertEqual({m for m,unused in r['native']},{'GET'})
+        self.assertEqual((r['intent']['action'],r['intent']['supervisor_state']),('cleanup','JOINED'))
+        self.assertEqual((r['code'],r['terminal']['status']),(1,'CONTROLLER_RELEASE_VERIFIED'))
+
+    def test_startup_deadline_ambiguous_or_refused_seal_never_releases(self):
+        for machines,seal_ok in (([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02'),dict(id='fedcba98765432',name='cloudbench-gate-fixture-s02')],True),
+                                 ([],True),([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02')],False)):
+            r=self._startup_deadline_run(machines,seal_ok)
+            self.assertIn('error',r);self.assertNotIn('cleanup',r['helper']);self.assertIsNone(r['terminal']);self.assertIsNone(r['receipt'])
+
     def test_actual_gate_typed_preallocation_refusal_terminates_only_joined_no_effect(self):
         source=Path(os.environ.get('ORIGINAL600_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
         message=source.index('echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)"')
