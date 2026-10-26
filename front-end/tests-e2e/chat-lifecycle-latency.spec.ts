@@ -199,7 +199,22 @@ function waitForFirstResponse(
         const persistedAssistantHasText = [
           ...document.querySelectorAll('[data-message-role="ASSISTANT"]'),
         ].some((element) => (element.textContent ?? '').trim().length > 0);
-        return thinkingHasTokens || answerHasText || persistedAssistantHasText;
+        // Rose Desktop folds persisted assistant text into a trajectory row's thinking
+        // activity, and the persisted final answer is a send_message_to_user row.
+        const foldedAssistantText =
+          document.querySelector(
+            '[data-testid="trajectory-work-group"][data-activity-kinds~="thinking"]',
+          ) !== null;
+        const persistedAnswerHasText = [
+          ...document.querySelectorAll('[data-message-kind="final-answer"]'),
+        ].some((element) => (element.textContent ?? '').trim().length > 0);
+        return (
+          thinkingHasTokens ||
+          answerHasText ||
+          persistedAssistantHasText ||
+          foldedAssistantText ||
+          persistedAnswerHasText
+        );
       },
       undefined,
       { timeout: timeoutMs },

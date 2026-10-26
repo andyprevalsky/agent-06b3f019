@@ -82,6 +82,7 @@ describe('current work batch elapsed time and ring semantics', () => {
       'cloud_agent:IN_PROGRESS web_search:FINISHED',
     );
     expect(row).toHaveAttribute('data-agent-start-phase', 'plan');
+    expect(row).toHaveAttribute('data-activity-kinds', 'work');
     cleanup();
     render(<TrajectoryWorkGroup group={group()} renderMessage={() => null} />);
     expect(screen.getByTestId('trajectory-work-group')).not.toHaveAttribute(

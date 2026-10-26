@@ -7,7 +7,7 @@ import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import { workLabel } from '../hooks/codeSessionTurns';
 const PAGE_SIZE = 20;
-/** The folded rows' tool identity, matching the stock row's data-tool-* attributes. */
+/** The folded rows' kinds and tool identity, matching the stock row's data-* attributes. */
 function toolIdentity(group: Group) {
   const statuses = new Set<string>();
   let startPhase: 'plan' | 'execute' | undefined;
@@ -19,7 +19,8 @@ function toolIdentity(group: Group) {
     const phase = message.metadata?.startPhase;
     if (tool === 'cloud_agent' && (phase === 'plan' || phase === 'execute')) startPhase = phase;
   }
-  return { statuses: [...statuses].join(' '), startPhase };
+  const kinds = [...new Set(group.activities.map((activity) => activity.kind))].join(' ');
+  return { statuses: [...statuses].join(' '), startPhase, kinds };
 }
 export function TrajectoryWorkGroup({
   group,
@@ -56,6 +57,7 @@ export function TrajectoryWorkGroup({
       data-testid="trajectory-work-group"
       data-group-key={group.key}
       data-state={group.status}
+      data-activity-kinds={tools.kinds}
       data-tool-statuses={tools.statuses || undefined}
       data-agent-start-phase={tools.startPhase}
       className="min-w-0"
