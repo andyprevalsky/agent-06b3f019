@@ -880,6 +880,7 @@ def main() -> int:
         "hermes-agent": ROOT,
         "codex": ROOT,
         "prime-agent": ROOT,
+        "kimi-code": ROOT,
     }
 
     EXTRACTS_DIR.mkdir(exist_ok=True)
@@ -888,7 +889,7 @@ def main() -> int:
     # Pre-extract reference repos so we can score against them.
     print(f"[build] extracting reference prompts...", file=sys.stderr)
     extracted: dict[str, list[dict]] = {}
-    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"):
+    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent", "kimi-code"):
         items = []
         for entry in catalog[repo_name]:
             if entry.get("category") not in RUNTIME_VISIBLE_CATEGORIES:
@@ -904,7 +905,7 @@ def main() -> int:
     rows = []
     # Index reference catalog entries by id for O(1) explicit lookups.
     by_id: dict[str, dict[str, dict]] = {}
-    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent"):
+    for repo_name in ("claude-code-src", "openclaw", "hermes-agent", "codex", "prime-agent", "kimi-code"):
         by_id[repo_name] = {
             e["id"]: e
             for e in catalog[repo_name]
@@ -925,6 +926,7 @@ def main() -> int:
         "hermes": "hermes-agent",
         "codex": "codex",
         "prime": "prime-agent",
+        "kimi": "kimi-code",
     }
 
     def resolve_match(ours_entry: dict, ui_key: str) -> tuple[dict | None, float, str]:
@@ -965,6 +967,7 @@ def main() -> int:
         match_hermes,  score_hermes,  src_hermes  = resolve_match(entry, "hermes")
         match_codex,   score_codex,   src_codex   = resolve_match(entry, "codex")
         match_prime,   score_prime,   src_prime   = resolve_match(entry, "prime")
+        match_kimi,    score_kimi,    src_kimi    = resolve_match(entry, "kimi")
 
         rows.append({
             "id": entry["id"],
@@ -1007,6 +1010,12 @@ def main() -> int:
                 "score": round(score_prime, 3),
                 "weak": (src_prime == "auto" and score_prime < WEAK_THRESHOLD),
                 "match_source": src_prime,
+            },
+            "kimi": {
+                "entry": hydrate(match_kimi, "kimi-code"),
+                "score": round(score_kimi, 3),
+                "weak": (src_kimi == "auto" and score_kimi < WEAK_THRESHOLD),
+                "match_source": src_kimi,
             },
         })
 
