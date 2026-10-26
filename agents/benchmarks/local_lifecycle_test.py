@@ -1314,6 +1314,34 @@ if __name__ == "__main__":
     raise SystemExit(rc)
 
 
+def test_process_table_reads_same_user_entry_with_unreadable_environ_by_argv():
+    """A same-user process mid setuid exec must not make the whole table unobservable."""
+    import tempfile
+
+    from benchmarks import local_cleanup_reconcile as reconcile
+
+    with tempfile.TemporaryDirectory() as raw:
+        _assert_unreadable_environ_entry(reconcile, Path(raw))
+
+
+def _assert_unreadable_environ_entry(reconcile, tmp_path):
+    entry = tmp_path / "12345"
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(b"node\0server.js\0")
+    environ = entry / "environ"
+    environ.write_bytes(b"RUN_STACK_CLEANUP_TOKEN=x\0")
+    os.symlink(str(tmp_path), entry / "cwd")
+    os.chmod(environ, 0)
+    try:
+        if os.access(environ, os.R_OK):
+            return  # running as root: permission bits are not enforced
+        assert reconcile._read_proc_entry(entry, os.getuid()) == (12345, "node server.js ", "", "")
+        assert reconcile._read_proc_entry(entry, os.getuid() + 1) is None
+        assert reconcile._read_proc_entry(tmp_path / "99999", os.getuid()) is None
+    finally:
+        os.chmod(environ, 0o600)
+
+
 def test_local_stack_reconcile_resolves_pending_receipt_only_when_nothing_is_left():
     import socket
 

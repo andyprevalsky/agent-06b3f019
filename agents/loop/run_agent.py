@@ -27,9 +27,11 @@ from pydantic import BaseModel
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
+from helpers.attachment_context import attachment_request_overhead
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
 from helpers.background_agents import is_agent_authored_user_metadata
 from helpers.context_compaction import is_excluded_from_model
+from helpers.context_limits import AUTOCOMPACT_BUFFER_TOKENS, EFFECTIVE_OUTPUT_RESERVATION
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
@@ -101,8 +103,6 @@ CREDIT_CHECK_INTERVAL = 5
 # Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
 # Reserve room for output + a safety buffer before the model's hard limit, so
 # the next LLM call still fits inside the window even after the trigger fires.
-EFFECTIVE_OUTPUT_RESERVATION = 20_000  # matches MAX_OUTPUT_TOKENS_FOR_SUMMARY
-AUTOCOMPACT_BUFFER_TOKENS = 13_000  # matches Claude Code's AUTOCOMPACT_BUFFER
 
 
 def compaction_trigger_tokens(max_context_tokens: int) -> int:
@@ -293,6 +293,7 @@ async def run_agent(
     jev_goal: Optional[str] = None,
     jev_agent_kind: Optional[str] = None,
     get_jev_response_schema: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+    require_inline_attachments: bool = False,
     _jev_session: Optional[JEVSession] = None,
 ) -> Dict[str, Any]:
     """
@@ -1215,6 +1216,9 @@ async def run_agent(
                         llm_context,
                         current_system_prompt,
                         user_id=user_id,
+                        max_context_tokens=max_context_tokens,
+                        request_overhead=attachment_request_overhead(AgentAction, completion_instruction),
+                        require_inline_attachments=require_inline_attachments,
                     )
             if is_inside_temporal_activity and completion_instruction and messages is not None:
                 messages.append({"role": "user", "content": completion_instruction})
@@ -1575,6 +1579,8 @@ async def run_agent(
                         exclude_anthropic_family_on_llm_retry,
                         pending_context_token,
                         get_environment_tail() if get_environment_tail else None,
+                        max_context_tokens,
+                        require_inline_attachments,
                         user_tool_decls or None,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),

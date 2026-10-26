@@ -49,6 +49,13 @@ After Behavior, How, TL;DR, Evidence, Detail, and Downstream Implications sectio
 are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
+Before any request reaches the user, run that file's Golden-reference
+adversarial review. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
+gates: rerun the guard with its mandatory flag, record
+`<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
+in `TEST_REPORT`, list it in the PR body and continue. Only `NOT_GROUNDED` and
+`HUMAN_REQUIRED` packets stop for the user.
+
 ---
 
 # Step 0: Capture original Conductor workspace title
@@ -79,7 +86,8 @@ end and stays active for the user's reply. Only the user ends it early, with
     production lane is verified, and the scorecard ending in READY TO CLOSE
     is posted. Stopping earlier is allowed only when the last message is one
     of /deploy's defined stops: a prompt, agent-behavior or
-    trajectory-injection approval request (Steps 0p/0b/0c); a credential or
+    trajectory-injection approval request (Steps 0p/0b/0c) that the
+    golden-reference review did not clear; a credential or
     billing escalation; a request for an explicit gate override; an approval
     for a destructive or irreversible action; or a deploy failure that cannot
     be fixed without the user.
@@ -328,7 +336,7 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
 2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
-3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request prompt-approval`. When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
+3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — run the golden-reference review; unless it returns `GROUNDED`, stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request prompt-approval`. When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
 
 **Operational gate maintenance is pre-authorized and MUST NOT block for human approval.** Changes limited to `.claude/commands/deploy.md` instructions that detect changed paths, select or invoke tests, record verification evidence, or tighten CI/deploy gates do not alter product or agent prompts. Classify those hunks as operational code behavior, rerun the guard with the mandatory flag immediately, and continue. Never stop an active implementation, RCA, benchmark, or deploy goal to ask permission for test-gate wiring.
 
@@ -340,9 +348,9 @@ bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
 
-If it fails, apply the classification above. For hunks that change LLM-visible text, stop and ask the human to review them, **linking each one as a clickable `path:line` reference** so they can open the file. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
+If it fails, apply the classification above. For hunks that change LLM-visible text, unless the golden-reference review returns `GROUNDED`, stop and ask the human to review them, **linking each one as a clickable `path:line` reference** so they can open the file. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
 
-Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
+Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, run a new golden-reference review of the new prompt diff and, unless it returns `GROUNDED`, show that diff and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
 
 After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`). A rejection remains blocked. After an approval, rerun the guard with the mandatory flag:
 
@@ -350,7 +358,7 @@ After the human responds, first run `python3 scripts/record_factory_event.py dep
 bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff, or a `GROUNDED` golden-reference review covers that exact diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` (or the review line from Canonical human-approval format) in `TEST_REPORT`.
 
 ## Step 0b: Agent recovery / terminal-behavior human-approval guard (no skip — always runs)
 
@@ -366,13 +374,13 @@ bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agen
 
 If it passes (no watched-file change, or no recovery/terminal-semantics hunk), record `Agent Behavior Approval Guard | Pass | no agent-behavior changes detected` in `TEST_REPORT`.
 
-If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request agent-behavior-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Run the golden-reference review; unless it returns `GROUNDED`, stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request agent-behavior-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard; pass it only after human approval or a `GROUNDED` golden-reference review of the current hunks. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` (or the review line) in `TEST_REPORT`.
 
 ## Step 0c: LLM trajectory-injection human-approval guard (no skip — always runs)
 
@@ -388,19 +396,19 @@ bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/
 
 If it passes (no watched-file change, or no trajectory-injection hunk), record `LLM Trajectory Injection Approval Guard | Pass | no trajectory-injection changes detected` in `TEST_REPORT`.
 
-If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** a runtime trajectory-injection change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, what synthetic context the planner will now see (or stop seeing) at runtime. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request llm-trajectory-injection-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change trajectory-injection hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** a runtime trajectory-injection change by construction. Run the golden-reference review; unless it returns `GROUNDED`, stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, what synthetic context the planner will now see (or stop seeing) at runtime. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request llm-trajectory-injection-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change trajectory-injection hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/check-llm-trajectory-injection-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `LLM Trajectory Injection Approval Guard | Pass | human approval retrieved for trajectory-injection edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard; pass it only after human approval or a `GROUNDED` golden-reference review of the current hunks. Record `LLM Trajectory Injection Approval Guard | Pass | human approval retrieved for trajectory-injection edits` (or the review line) in `TEST_REPORT`.
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
+1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
+   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker

@@ -12,6 +12,8 @@ export interface FilePointer {
   /** Optional intrinsic pixel size (images/videos); reserves inline layout. */
   width?: number;
   height?: number;
+  /** Desktop launcher screenshot attached automatically; agents treat it as possibly unrelated. */
+  auto_captured?: boolean;
 }
 
 // Size thresholds for file handling

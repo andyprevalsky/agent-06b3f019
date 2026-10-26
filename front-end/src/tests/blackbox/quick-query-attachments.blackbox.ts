@@ -130,6 +130,34 @@ describe('quick-query attachments', () => {
     unmount();
   });
 
+  it('marks only the launcher auto-screenshot pointer as auto_captured', async () => {
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+
+    await act(async () => {
+      dispatchQuickQueryEvent({
+        query: 'what is this error',
+        submittedAt: Date.now(),
+        attachments: [
+          { ...attachment('Screenshot.png', 'png', 'image/png'), autoCaptured: true },
+          attachment('notes.txt', 'hello world'),
+        ],
+      });
+    });
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledTimes(1);
+    });
+    const request = createAgent.mock.calls[0]?.[0] as { attachments: Record<string, unknown>[] };
+    expect(request.attachments[0]).toMatchObject({
+      original_filename: 'Screenshot.png',
+      auto_captured: true,
+    });
+    expect(request.attachments[1]?.original_filename).toBe('notes.txt');
+    expect(request.attachments[1]).not.toHaveProperty('auto_captured');
+    unmount();
+  });
+
   it('creates an agent from attachments-only payloads', async () => {
     const deps = makeDeps();
     const { unmount } = renderHook(() => useQuickQuery(deps));

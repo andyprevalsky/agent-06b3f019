@@ -943,7 +943,7 @@
   {
     "name": "background-agent-message-smoke",
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
-    "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research, and wait for it to finish before you answer.",
+    "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
     "expected_tools": [

@@ -18,6 +18,8 @@ export const filePointerSchema = z.object({
   mime_type: z.string(),
   size_bytes: z.number(),
   created_at: z.string(),
+  // Set by the Mac quick launcher on the screenshot it attaches automatically.
+  auto_captured: z.boolean().optional(),
 });
 
 const outputFieldConstraints = {
