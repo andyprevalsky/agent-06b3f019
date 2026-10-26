@@ -7,7 +7,7 @@ export {
 } from './traceArchiveBatch';
 import { createLogger } from './logger';
 import { prisma } from './database';
-import { indexArchivedTrace, indexArchivedTraceFromR2 } from './traceArchiveSearchIndex';
+import { indexArchivedTrace, indexLateArchivedLlmArtifact } from './traceArchiveSearchIndex';
 import { scheduleFinalizeEmbedding } from './plannerMemoryEmbedding';
 import { type PlannerMemoryRunInput, upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
@@ -283,7 +283,7 @@ export async function storeWorkerArtifact(
               select: { id: true },
             })) !== null;
       if (localRoot) {
-        await indexArchivedTraceFromR2(input.rootAgentId);
+        await indexLateArchivedLlmArtifact(input.rootAgentId, objectPath);
       }
     }
   }

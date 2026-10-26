@@ -61,6 +61,7 @@ async function seedDeterministicCorpus(): Promise<string[]> {
     data: [
       {
         personId: mom.id,
+        userId: TEST_USER_ID,
         channel: 'IMESSAGE',
         from: '+15550000001',
         to: '+15550000002',
@@ -70,6 +71,7 @@ async function seedDeterministicCorpus(): Promise<string[]> {
       },
       {
         personId: maya.id,
+        userId: TEST_USER_ID,
         channel: 'EMAIL',
         from: `maya-${suffix}@data-blackbox.local`,
         to: 'owner@data-blackbox.local',

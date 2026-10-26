@@ -119,6 +119,7 @@ async function apply() {
     data: [
       {
         personId: lighthouse.id,
+        userId: USER_ID,
         channel: 'EMAIL',
         from: 'lighthouse@benchmark.local',
         to: 'andy@benchmark.local',
@@ -133,6 +134,7 @@ async function apply() {
       },
       {
         personId: lighthouse.id,
+        userId: USER_ID,
         channel: 'EMAIL',
         from: 'lighthouse@benchmark.local',
         to: 'andy@benchmark.local',
@@ -148,6 +150,7 @@ async function apply() {
       },
       ...Array.from({ length: 30 }, (_, idx) => ({
         personId: lighthouse.id,
+        userId: USER_ID,
         channel: 'EMAIL' as const,
         from: 'ledger@benchmark.local',
         to: 'andy@benchmark.local',

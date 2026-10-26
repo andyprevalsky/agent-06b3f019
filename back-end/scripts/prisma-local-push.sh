@@ -11,6 +11,8 @@ validate_local_database_url() {
   node -e '
     const parsed = new URL(process.argv[1]);
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+    // libpq/Prisma prefer a `host`/`hostaddr` query parameter over the authority.
+    if (["host", "hostaddr"].some((key) => parsed.searchParams.has(key))) process.exit(1);
   ' "$value" || {
     echo "Refusing Prisma push: $variable_name is not a localhost database" >&2
     exit 2
@@ -30,5 +32,8 @@ fi
 # Long-lived local databases can hold blank or duplicated phones that would
 # block the unique User.phone index; normalize them on this same local target.
 bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
+bash "$(dirname "${BASH_SOURCE[0]}")/backfill-local-message-record-owner.sh" "$DIRECT_URL" >/dev/null
 
-exec npx prisma db push "$@"
+npx prisma db push "$@"
+# Push cannot model the gin_trgm_ops index; restore it from its migration.
+bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-message-record-trgm-index.sh" "$DIRECT_URL" >/dev/null
