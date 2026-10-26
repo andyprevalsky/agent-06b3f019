@@ -13,6 +13,7 @@
  * JavaScript response) and only as UTF-8 text that is not markup; a script
  * bundle may not carry its own index.html; the generated page draws real
  * WebGL pixels from `import * as THREE from 'three'` in the sandboxed frame,
+ * a default-exported mount(container) is called with a full-window element,
  * and a script that throws surfaces data-state="error" with its message.
  */
 import { assertDisplayCsp, bundleBase, served, treeFile } from './agent-tools-display.cases';
@@ -212,6 +213,50 @@ function scriptRenderCases(): BlackboxTest[] {
           assert(probe.origin === 'null', `opaque origin: ${JSON.stringify(probe)}`);
           assert(probe.storage === 'SecurityError', `no storage: ${JSON.stringify(probe)}`);
           process.stdout.write(`    .js module page: ${(red * 100).toFixed(1)}% red pixels\n`);
+        });
+      },
+    },
+    {
+      name: 'render: a .js module exporting a default mount(container) is called with a full-window element',
+      fn: async () => {
+        const mountModule = threeCubeModule(`mount-${RUN}`)
+          .replace(
+            "import * as THREE from 'three';",
+            "import * as THREE from 'three';\nexport default function mount(container) {"
+          )
+          .replace(
+            'renderer.setSize(innerWidth, innerHeight);',
+            'renderer.setSize(container.clientWidth, container.clientHeight);'
+          )
+          .replace(
+            'document.body.append(renderer.domElement);',
+            'container.append(renderer.domElement);'
+          )
+          .concat('}\n');
+        const res = await display(
+          otherA,
+          { items: [b64(Buffer.from(mountModule), 'mount.js')] },
+          { apiKeyUser: userA }
+        );
+        assert(res.status === 201 || res.status === 200, `display mount .js ${res.status}`);
+        const url = local(items(res)[0].file_pointer.usercontent_url ?? '');
+        await withBrowser(async (page, logs, hosts) => {
+          const frame = await displayFrame(page, url, hosts.rose);
+          await waitReady(frame, logs, 'mount page');
+          const host = await frame.evaluate(() => {
+            const el = document.getElementById('rose-root');
+            return {
+              canvases: el?.querySelectorAll('canvas').length ?? 0,
+              w: el?.clientWidth ?? 0,
+            };
+          });
+          assert(
+            host.canvases === 1 && host.w > 0,
+            `mounted into #rose-root: ${JSON.stringify(host)}`
+          );
+          await page.waitForTimeout(400);
+          const red = fraction(await page.locator('#f').screenshot(), reddish);
+          assert(red > 0.04, `mounted cube pixels: ${(red * 100).toFixed(2)}% red`);
         });
       },
     },

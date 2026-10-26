@@ -651,7 +651,7 @@ const ROSE_DESKTOP_MCP_TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description:
-            "Local files or folders: images, videos, an .html page (the files it references come along), a site folder (index.html), a .js/.mjs module run on a full-window page (import 'three' and 'three/addons/...' work; its relative imports come along), a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf.",
+            "Local files or folders: images, videos, an .html page (the files it references come along), a site folder (index.html), a .js/.mjs module run on a full-window page (import 'three' and 'three/addons/...' work; a default-exported function is called with a full-window element; its relative imports come along), a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf.",
         },
         urls: {
           type: 'array',
