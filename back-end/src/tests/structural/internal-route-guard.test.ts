@@ -35,6 +35,12 @@ const INTERNAL_ROUTES: Record<string, string[]> = {
   ],
   'claude-code/routes.ts': ['/create', '/close', '/:taskId/output', '/:sandboxId/health'],
   'codex-code/routes.ts': ['/create', '/close', '/:taskId/output', '/:sandboxId/health'],
+  'world-models/routes.ts': [
+    '/',
+    '/world_models',
+    '/world_models/:worldModelName/sessions',
+    '/world_models/:worldModelName/sessions/:sessionId/step',
+  ],
 };
 
 /** Text of one route declaration, up to the next `router.<verb>(`. */
@@ -119,6 +125,22 @@ assert.deepStrictEqual(
   [],
   'Routes documented as internal-only are guarded only by `authenticate`; apply ' +
     '`authenticateInternal` (and list them in INTERNAL_ROUTES).'
+);
+
+// The Fast Mode proxies carry no Authorization; every trace route must verify
+// the server-minted capability (RCA 2026-10-26-internal-routes-trusted-any-user-jwt).
+const proxySource = fs.readFileSync(path.join(domainsDir, 'demo-cache/routes.proxy.ts'), 'utf8');
+for (const routerName of ['anthropicProxyRouter', 'codexProxyRouter']) {
+  assert.ok(
+    new RegExp(`${routerName}\\.use\\(\\s*'/:traceParam',\\s*requireProxyCapability`).test(
+      proxySource
+    ),
+    `${routerName} must verify the proxy capability before any trace route`
+  );
+}
+assert.ok(
+  !/parse(Anthropic|Codex)TraceParam\(req\.params/.test(proxySource),
+  'proxy handlers must parse the verified trace segment, never the raw param'
 );
 
 console.log(`✅ internal-route-guard: ${guarded} internal-only route declarations guarded`);

@@ -27,6 +27,9 @@ import {
   disableFastModeForWorldModel,
 } from '../../domains/agents/agentExecutionMode';
 
+// Proxy URLs carry an HMAC capability keyed by BACKEND_API_KEY (fail-closed without one).
+process.env.BACKEND_API_KEY ??= 'demo-cache-flag-unit-key';
+
 let passed = 0;
 const failures: string[] = [];
 function test(name: string, fn: () => void): void {
@@ -50,7 +53,7 @@ test('#20 injects ANTHROPIC_BASE_URL with goalHash path when on', () => {
   assert.ok(env.ANTHROPIC_BASE_URL);
   assert.match(
     env.ANTHROPIC_BASE_URL!,
-    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16}$/
+    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/
   );
 });
 
@@ -59,7 +62,7 @@ test('#20 injects CODEX_FAST_MODE_PROXY_URL with goalHash path when on', () => {
   assert.ok(env.CODEX_FAST_MODE_PROXY_URL);
   assert.match(
     env.CODEX_FAST_MODE_PROXY_URL!,
-    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16}$/
+    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/
   );
 });
 
@@ -72,7 +75,7 @@ test('#20 derives Codex proxy URL from Anthropic proxy URL when explicit URL is 
     const env = buildFastModeCodexEnv('do a thing', true);
     assert.match(
       env.CODEX_FAST_MODE_PROXY_URL!,
-      /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16}$/
+      /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/
     );
   } finally {
     if (oldAnthropic === undefined) delete process.env.FAST_MODE_ANTHROPIC_PROXY_URL;
@@ -97,7 +100,7 @@ test('write-only injects ANTHROPIC_BASE_URL with record-only path when flag off'
   assert.ok(env.ANTHROPIC_BASE_URL);
   assert.match(
     env.ANTHROPIC_BASE_URL!,
-    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16}\/record-only$/
+    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16},[0-9a-f]{32}\/record-only$/
   );
 });
 
@@ -141,7 +144,7 @@ test('write-only injects CODEX_FAST_MODE_PROXY_URL with record-only path when fl
   assert.ok(env.CODEX_FAST_MODE_PROXY_URL);
   assert.match(
     env.CODEX_FAST_MODE_PROXY_URL!,
-    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16}\/record-only$/
+    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}\/record-only$/
   );
 });
 

@@ -18,6 +18,10 @@ import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
+import {
+  buildFastModeAnthropicEnv,
+  buildFastModeCodexEnv,
+} from '../../providers/codeAgentFastModeEnv';
 import { prisma } from '../../providers/database';
 
 config();
@@ -112,6 +116,10 @@ const INTERNAL_ONLY_ROUTES: Array<{ method: 'GET' | 'POST'; path: string }> = [
   { method: 'GET', path: '/api/browser-session/route-identity-session/files/list' },
   { method: 'POST', path: '/api/browser-session/route-identity-session/inject-localStorage' },
   { method: 'POST', path: '/api/external-http/request' },
+  { method: 'GET', path: '/api/world-models' },
+  { method: 'GET', path: '/api/world-models/world_models' },
+  { method: 'POST', path: '/api/world-models/world_models/route-identity/sessions' },
+  { method: 'POST', path: '/api/world-models/world_models/route-identity/sessions/s1/step' },
 ];
 
 function call(route: { method: string; path: string }, headers: Record<string, string>) {
@@ -189,6 +197,52 @@ async function runTests(): Promise<boolean> {
           }
         }
         assert.deepStrictEqual(failures, [], 'API key was refused by an internal route');
+      })
+    );
+
+    results.push(
+      await runTest('fast-mode proxies refuse a trace URL without its capability', async () => {
+        // A deterministic goal hash is guessable from a public goal; the
+        // server-minted capability in the trace segment is not.
+        const goal = `route identity proxy ${randomUUID()}`;
+        const proxied = (url: string) => new URL(url).pathname;
+        const anthropic = proxied(
+          buildFastModeAnthropicEnv(goal, true, 'https://proxy.invalid/anthropic-proxy')
+            .ANTHROPIC_BASE_URL
+        );
+        const codex = proxied(
+          buildFastModeCodexEnv(goal, true, 'https://proxy.invalid/codex-proxy')
+            .CODEX_FAST_MODE_PROXY_URL
+        );
+        const bare = (path: string) => path.replace(/,[0-9a-f]+(?=\/|$)/, '');
+        const forged = (path: string) => path.replace(/,[0-9a-f]+(?=\/|$)/, ',' + '0'.repeat(32));
+        const refused = (res: { status: number; data: unknown }) =>
+          res.status === 403 &&
+          (res.data as { error?: string }).error === 'Invalid Fast Mode proxy capability';
+        const msg = JSON.stringify({ model: 'claude-x', max_tokens: 1, messages: [] });
+        const failures: string[] = [];
+        for (const path of [anthropic, bare(anthropic), forged(anthropic)]) {
+          assert(path.startsWith('/anthropic-proxy/'), path);
+        }
+        for (const path of [bare(anthropic), forged(anthropic)]) {
+          for (const tail of ['/v1/messages', '/record-only/v1/messages']) {
+            const res = await request(`${BASE_URL}${path}${tail}`, { method: 'POST', body: msg });
+            if (!refused(res)) failures.push(`POST ${path}${tail} -> ${res.status}`);
+          }
+        }
+        for (const path of [bare(codex), forged(codex)]) {
+          const res = await request(`${BASE_URL}${path}/responses`, { method: 'POST', body: '{}' });
+          if (!refused(res)) failures.push(`POST ${path}/responses -> ${res.status}`);
+        }
+        assert.deepStrictEqual(failures, [], 'proxy served a trace without its capability');
+        assert.notStrictEqual(bare(anthropic), anthropic, 'minted proxy URL carries a capability');
+        // The minted URL is admitted (the handler runs; upstream outcome is irrelevant).
+        const minted = await fetch(`${BASE_URL}${anthropic}/v1/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: msg,
+        });
+        assert.notStrictEqual(minted.status, 403, 'minted capability was refused');
       })
     );
 

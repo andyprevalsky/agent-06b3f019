@@ -7,7 +7,7 @@
  * calls still run, but successful responses are written for later Fast Mode reads.
  */
 
-import { createHash } from './crypto';
+import { createHash, createHmac, timingSafeEqual } from './crypto';
 import { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled } from './demoCacheAccountPolicy';
 
 export { shouldWriteDemoCacheForUser, resolveFastModeWriteEnabled };
@@ -111,11 +111,52 @@ export function codeAgentTraceHash(input: CodeAgentTraceInput): string {
   return sha256(JSON.stringify(stable)).slice(0, 16);
 }
 
+const PROXY_CAPABILITY_CONTEXT = 'rose-fast-mode-proxy:v1:';
+const PROXY_CAPABILITY_SEPARATOR = ',';
+
+function proxyCapability(traceSegment: string, secret: string | undefined): string {
+  if (secret === undefined || secret === '') {
+    throw new Error('BACKEND_API_KEY is required to mint a Fast Mode proxy capability');
+  }
+  return createHmac('sha256', secret)
+    .update(`${PROXY_CAPABILITY_CONTEXT}${traceSegment}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * The trace hash is derived from the goal, so it is guessable; the proxy URL is
+ * the sandbox CLI's only credential. Append a server-minted capability so only
+ * a URL this backend issued can read or write that trace's cache entries.
+ */
+export function signProxyTraceSegment(
+  traceSegment: string,
+  secret: string | undefined = process.env.BACKEND_API_KEY
+): string {
+  // Express hands the route its param URL-decoded, so sign the decoded form.
+  const capability = proxyCapability(decodeURIComponent(traceSegment), secret);
+  return `${traceSegment}${PROXY_CAPABILITY_SEPARATOR}${capability}`;
+}
+
+/** The trace segment when the (decoded) route param `raw` carries its valid capability, else null. */
+export function verifyProxyTraceParam(
+  raw: string,
+  secret: string | undefined = process.env.BACKEND_API_KEY
+): string | null {
+  const at = raw.lastIndexOf(PROXY_CAPABILITY_SEPARATOR);
+  if (at <= 0 || secret === undefined || secret === '') return null;
+  const traceSegment = raw.slice(0, at);
+  const given = Buffer.from(raw.slice(at + 1));
+  const expected = Buffer.from(proxyCapability(traceSegment, secret));
+  return given.length === expected.length && timingSafeEqual(given, expected) ? traceSegment : null;
+}
+
 function proxyPath(goal: string, readEnabled: boolean, options?: CodeAgentTraceOptions): string {
   const hash = codeAgentTraceHash(options?.trace ?? { goal });
   const sessionId = options?.sessionId?.trim();
-  const traceSegment =
-    sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash;
+  const traceSegment = signProxyTraceSegment(
+    sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash
+  );
   return readEnabled ? traceSegment : `${traceSegment}/record-only`;
 }
 

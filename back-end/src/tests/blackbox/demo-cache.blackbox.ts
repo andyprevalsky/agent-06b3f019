@@ -21,6 +21,7 @@ import { PrismaClient } from '@prisma/client';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
 import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import { rewriteOaiDemoCacheValue } from '../../domains/demo-cache/oaiDemoCacheCleaner';
+import { signProxyTraceSegment } from '../../providers/codeAgentFastModeEnv';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -438,11 +439,17 @@ async function main(): Promise<void> {
       value: { status: 200, contentType: 'text/event-stream', body: cachedBody },
     });
 
-    const res = await fetch(`${BASE_URL}/anthropic-proxy/${traceHash}/v1/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
-      body: JSON.stringify({ model: 'claude-sonnet', messages: [{ role: 'user', content: 'hi' }] }),
-    });
+    const res = await fetch(
+      `${BASE_URL}/anthropic-proxy/${signProxyTraceSegment(traceHash)}/v1/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
+        body: JSON.stringify({
+          model: 'claude-sonnet',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      }
+    );
     const text = await res.text();
     assert(res.status === 200, `proxy status ${res.status}`);
     assert(res.headers.get('x-fast-mode-cache') === 'hit', 'expected anthropic cache hit');
@@ -459,11 +466,14 @@ async function main(): Promise<void> {
       value: { status: 200, contentType: 'text/event-stream', body: cachedBody },
     });
 
-    const res = await fetch(`${BASE_URL}/codex-proxy/${traceHash}/backend-api/codex/responses`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
-      body: JSON.stringify({ model: 'gpt-5.4', input: [{ role: 'user', content: 'hi' }] }),
-    });
+    const res = await fetch(
+      `${BASE_URL}/codex-proxy/${signProxyTraceSegment(traceHash)}/backend-api/codex/responses`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
+        body: JSON.stringify({ model: 'gpt-5.4', input: [{ role: 'user', content: 'hi' }] }),
+      }
+    );
     const text = await res.text();
     assert(res.status === 200, `proxy status ${res.status}`);
     assert(res.headers.get('x-fast-mode-cache') === 'hit', 'expected codex cache hit');

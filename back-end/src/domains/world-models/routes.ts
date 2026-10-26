@@ -1,14 +1,15 @@
 import { Router, type Response } from 'express';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { authenticateInternal, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
 import type { NewWorldModelSessionRequest, WorldModelStepRequest } from './types';
 
+// Internal-only: a WMH simulation shim for workers; any session id is steerable.
 const router = Router();
 
 router.get(
   '/',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (_req: AuthRequest, res: Response) => {
     res.json(await service.listWorldModels());
   })
@@ -16,7 +17,7 @@ router.get(
 
 router.get(
   '/world_models',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (_req: AuthRequest, res: Response) => {
     res.json(await service.listWorldModels());
   })
@@ -24,7 +25,7 @@ router.get(
 
 router.post(
   '/world_models/:worldModelName/sessions',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const body = req.body as NewWorldModelSessionRequest;
     res.json(await service.createSession(req.params.worldModelName, body));
@@ -33,7 +34,7 @@ router.post(
 
 router.post(
   '/world_models/:worldModelName/sessions/:sessionId/step',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const body = req.body as WorldModelStepRequest;
     if (body.action === undefined || body.action === null) {

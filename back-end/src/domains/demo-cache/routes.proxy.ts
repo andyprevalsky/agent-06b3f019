@@ -1,4 +1,4 @@
-import { type Request, type Response, Router } from 'express';
+import { type NextFunction, type Request, type Response, Router } from 'express';
 import {
   FORWARD_REQUEST_HEADERS,
   parseTraceParam as parseAnthropicTraceParam,
@@ -10,6 +10,7 @@ import {
   parseTraceParam as parseCodexTraceParam,
   resolveCodex,
 } from '../../providers/codexProxyCore';
+import { verifyProxyTraceParam } from '../../providers/codeAgentFastModeEnv';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { FAST_MODE_ANTHROPIC_UPSTREAM, FAST_MODE_CODEX_UPSTREAM } from './config';
@@ -109,12 +110,32 @@ async function fetchCodexUpstream(
   };
 }
 
+/**
+ * The proxies take no Authorization of their own (the sandbox CLI only knows its
+ * base URL), so the trace segment must carry the capability the backend minted
+ * for it. Without this a guessed goal hash reads or writes that trace's cache.
+ */
+function requireProxyCapability(req: Request, res: Response, next: NextFunction): void {
+  const traceSegment = verifyProxyTraceParam(req.params.traceParam ?? '');
+  if (traceSegment === null) {
+    res.status(403).json({ error: 'Invalid Fast Mode proxy capability' });
+    return;
+  }
+  res.locals.traceSegment = traceSegment;
+  next();
+}
+
+function verifiedTraceSegment(res: Response): string {
+  return res.locals.traceSegment as string;
+}
+
 export const anthropicProxyRouter = Router();
+anthropicProxyRouter.use('/:traceParam', requireProxyCapability);
 
 anthropicProxyRouter.post(
   '/:traceParam/v1/messages',
   asyncHandler(async (req: Request, res: Response) => {
-    const trace = parseAnthropicTraceParam(req.params.traceParam);
+    const trace = parseAnthropicTraceParam(verifiedTraceSegment(res));
     const result = await resolveAnthropic(
       trace.traceHash,
       req.body,
@@ -141,7 +162,7 @@ anthropicProxyRouter.post(
 anthropicProxyRouter.post(
   '/:traceParam/record-only/v1/messages',
   asyncHandler(async (req: Request, res: Response) => {
-    const trace = parseAnthropicTraceParam(req.params.traceParam);
+    const trace = parseAnthropicTraceParam(verifiedTraceSegment(res));
     const result = await resolveAnthropic(
       trace.traceHash,
       req.body,
@@ -169,9 +190,10 @@ export const codexProxyRouter = Router();
 
 codexProxyRouter.use(
   '/:traceParam',
+  requireProxyCapability,
   asyncHandler(async (req: Request, res: Response) => {
     const traceParam = req.params.traceParam;
-    const trace = parseCodexTraceParam(traceParam);
+    const trace = parseCodexTraceParam(verifiedTraceSegment(res));
     const resolvedPath = stripRecordOnlyPrefix(pathAfterProxyMount(req, traceParam));
     const pathAndQuery = resolvedPath.pathAndQuery;
     const result = await resolveCodex(
