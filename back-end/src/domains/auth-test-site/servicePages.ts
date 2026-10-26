@@ -131,6 +131,8 @@ export interface LoginPageOptions {
   next?: NextPage;
 }
 
+const PASSKEY_REQUEST_LOST = 'We could not finish signing you in. Please try again.';
+
 function passkeyBlock(site: AuthTestSite, next: NextPage): string {
   if (site.behavior.passkey === 'off' || site.passkey === null) return '';
   const optionsUrl = JSON.stringify(siteUrl(site, '/login/passkey/options'));
@@ -159,9 +161,23 @@ function passkeyBlock(site: AuthTestSite, next: NextPage): string {
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
-        }).then(function (response) { return response.json(); });
+        }).then(function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          return response.json();
+        });
       };
       var status = document.getElementById('passkey-status');
+      var show = function (result) {
+        if (result.redirect) { window.location.assign(result.redirect); return; }
+        status.className = 'error';
+        status.textContent = result.error;
+      };
+      // Only the browser failing to produce an assertion means "no passkey here".
+      // A request that never got an answer says nothing about the passkey.
+      var lost = function () {
+        status.className = 'error';
+        status.textContent = ${JSON.stringify(PASSKEY_REQUEST_LOST)};
+      };
       document.getElementById('passkey-button').addEventListener('click', function () {
         status.className = 'notice';
         status.textContent = 'Checking your passkey…';
@@ -176,22 +192,19 @@ function passkeyBlock(site: AuthTestSite, next: NextPage): string {
                   return { type: entry.type, id: toBytes(entry.id) };
                 }),
               },
-            });
+            }).then(
+              function (credential) {
+                return post(${verifyUrl}, {
+                  credentialId: toText(credential.rawId),
+                  clientDataJSON: toText(credential.response.clientDataJSON),
+                  authenticatorData: toText(credential.response.authenticatorData),
+                  signature: toText(credential.response.signature),
+                });
+              },
+              function () { return post(${verifyUrl}, { unavailable: true }); }
+            );
           })
-          .then(function (credential) {
-            return post(${verifyUrl}, {
-              credentialId: toText(credential.rawId),
-              clientDataJSON: toText(credential.response.clientDataJSON),
-              authenticatorData: toText(credential.response.authenticatorData),
-              signature: toText(credential.response.signature),
-            });
-          })
-          .catch(function () { return post(${verifyUrl}, { unavailable: true }); })
-          .then(function (result) {
-            if (result.redirect) { window.location.assign(result.redirect); return; }
-            status.className = 'error';
-            status.textContent = result.error;
-          });
+          .then(show, lost);
       });
     })();
     </script>`;
