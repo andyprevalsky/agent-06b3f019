@@ -20,6 +20,11 @@
  *             (MessageList subAgentId=<task id>, the rows the client already
  *             holds — no request); click the row again -> folded
  *
+ * OPEN/CLOSE MOTION: the panel slot is always rendered (CSS grid rows
+ *   0fr <-> 1fr, 240ms; prefers-reduced-motion: instant) and its body mounts
+ *   on the first open and then stays mounted, so opening and closing animate
+ *   the same nodes instead of mounting at full height. Closed = inert.
+ *
  * [COLLAPSED|EXPANDED] -- running drops to 0 --> [FINISHED FLASH]
  *     "All agents finished" for FINISHED_FLASH_MS, then [HIDDEN]
  *     (stays visible while EXPANDED so an open panel never vanishes).
@@ -157,6 +162,25 @@ function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelB
   );
 }
 
+/** Always-mounted slot that animates grid rows 0fr <-> 1fr (instant under reduced motion). */
+function PanelSlot({ expanded, children }: { expanded: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        'grid transition-[grid-template-rows] duration-[240ms] ease-[cubic-bezier(.22,1,.36,1)] motion-reduce:transition-none',
+        expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+      )}
+      data-testid="background-agents-panel-slot"
+      data-state={expanded ? 'open' : 'closed'}
+      aria-hidden={!expanded}
+      // React 18 has no `inert` prop; set the attribute on every render.
+      ref={(slot) => slot?.toggleAttribute('inert', !expanded)}
+    >
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
 export function BackgroundAgentsBanner({
   selectedAgentId,
   messages,
@@ -167,6 +191,9 @@ export function BackgroundAgentsBanner({
     messages,
   );
   const [expanded, setExpanded] = useState(false);
+  // The body mounts on the first open and then stays, so close animates too.
+  const [bodyMounted, setBodyMounted] = useState(false);
+  if (expanded && !bodyMounted) setBodyMounted(true);
   const tasks = useOpenTrajectories(trajectories);
   const flash = useFinishedFlash(counts.running);
   // Synthetic task rows (explore/browser/code) have no agent page to open;
@@ -216,20 +243,22 @@ export function BackgroundAgentsBanner({
           aria-hidden="true"
         />
       </button>
-      {expanded && (
-        <div
-          id="background-agents-panel"
-          className="max-h-72 overflow-y-auto overflow-x-hidden border-t border-border/70 px-1 py-1"
-          data-testid="background-agents-panel"
-        >
-          <PanelBody
-            groups={groups}
-            getChildren={getChildren}
-            onNavigate={navigate}
-            openTrajectories={tasks.open}
-          />
-        </div>
-      )}
+      <PanelSlot expanded={expanded}>
+        {bodyMounted && (
+          <div
+            id="background-agents-panel"
+            className="max-h-72 overflow-y-auto overflow-x-hidden border-t border-border/70 px-1 py-1"
+            data-testid="background-agents-panel"
+          >
+            <PanelBody
+              groups={groups}
+              getChildren={getChildren}
+              onNavigate={navigate}
+              openTrajectories={tasks.open}
+            />
+          </div>
+        )}
+      </PanelSlot>
     </div>
   );
 }

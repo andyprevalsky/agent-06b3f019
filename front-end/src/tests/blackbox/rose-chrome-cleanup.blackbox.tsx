@@ -379,6 +379,16 @@ describe('Popular Goals (#15, #24, #55)', () => {
     expect(within(layer).getByTestId('query-toolbar-nub')).toBeInTheDocument();
   });
 
+  it('Rose Desktop Terminal: the floating composer is pinned by its bottom edge, so growth extends upward', async () => {
+    setViewport(1280, 800);
+    await renderTerminal(true);
+    const layer = screen.getByTestId('query-input-layer');
+    // Pinned by top, a growing agents-running pane pushed the box below its slot
+    // for the frames before the anchor caught up, then it jumped up.
+    expect(layer.style.top).toBe('');
+    expect(layer.style.bottom).toMatch(/^-?\d+(\.\d+)?px$/);
+  });
+
   it('Rose Desktop Terminal: custom goals remain editable without the ticker', async () => {
     const user = userEvent.setup({ delay: null });
     await renderTerminal(true);
