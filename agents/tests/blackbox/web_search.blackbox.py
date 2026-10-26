@@ -601,19 +601,19 @@ async def test_cached_exa_original_is_projected_in_consumer_scope():
     with (retained_tool_output_fixture(), secret_logging_context({"password": "SECRET_EXA_VALUE"}),
           patch("temporalio.activity.heartbeat"), patch("tools.web_search.repo.get_http_client", return_value=client),
           patch("tools.web_search.service.load_config", return_value=_provider_config(parallel_key="", exa_key="fixture")),
-          patch("tools.web_search.handler.fast_cache_client.cache_write_allowed_for_agent", new=AsyncMock(return_value=True)),
-          patch("tools.web_search.handler.fast_cache_client.cache_set", new=save)):
+          patch("tools.web_search.handler.demo_cache_client.cache_write_allowed_for_agent", new=AsyncMock(return_value=True)),
+          patch("tools.web_search.handler.demo_cache_client.cache_set", new=save)):
         first = await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_write_enabled=True,
             demo_cache_agent_id="producer", user_id="producer-user")
         assert "EXA_CACHE_TAIL" in str(cached)
         assert "SECRET_EXA_VALUE" not in str(cached)
         assert "output_id=" not in str(cached)
         cached_before = copy.deepcopy(cached)
-        with patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)):
+        with patch("tools.web_search.handler.demo_cache_client.cache_get", new=AsyncMock(return_value=cached)):
             second = await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_enabled=True,
                 demo_cache_agent_id="consumer", user_id="consumer-user", session_id="task")
         assert cached == cached_before
-        with (patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)),
+        with (patch("tools.web_search.handler.demo_cache_client.cache_get", new=AsyncMock(return_value=cached)),
               patch("helpers.attachments.upload_to_storage", new=AsyncMock(side_effect=OSError("retention unavailable")))):
             try:
                 await web_search_activity("query", fast_mode_goal="goal", fast_mode_cache_enabled=True,

@@ -5171,7 +5171,10 @@ async def test_explore_grep_result_over_cap_never_silently_drops_a_match():
         visible.append(hard_cap_tool_result_text(result["message"]))
         return {"status": "completed", "result": "done", "tokens_in": 1, "tokens_out": 1}
 
+    from _test_utils import retained_tool_output_fixture
+
     with (
+        retained_tool_output_fixture(),
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch("tools.grep.GrepManager", return_value=fake_grep),
