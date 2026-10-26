@@ -787,6 +787,7 @@ model MessageRecord {
   // planner walk other users' rows whenever one user owns a large share.
   @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
+  @@index([message(ops: raw("gin_trgm_ops"))], map: "MessageRecord_message_trgm_idx", type: Gin)
 }
 
 model GoogleDataPurge {
