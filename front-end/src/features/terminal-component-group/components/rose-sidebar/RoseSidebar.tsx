@@ -17,6 +17,8 @@
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
  *      Feedback, Biz health and the account row (Settings) open in the
  *      right-panel slot (RoseAppsProvider); clicking again closes it.
+ *      Admins: mounting the bar prewarms Biz health (its code chunk and the
+ *      backend's monthly day-cache build) so the panel opens without the wait.
  *
  * SURFACE: always solid (bg-white / dark #262624), so data-surface="opaque".
  * MOBILE (< md): not mounted at all; the mobile agent drawer lists agents.
@@ -36,13 +38,14 @@
  */
 
 import { ArrowLeft, Activity, Archive, Globe, Megaphone } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useIsMobile } from '@/hooks/use-mobile';
 import type { CodeAgentListItem } from '@/lib/api/tree';
 import { cn } from '@/lib/utils';
+import { prewarmAdminHealth } from '@/pages/adminHealthPrewarm';
 
 import type { AppSidebarProps } from '../AppSidebar';
 import ArchivedAgentsDialog from '../ArchivedAgentsDialog';
@@ -151,6 +154,10 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const [query, setQuery] = useState('');
   const [isArchiveOpen, setIsArchiveOpen] = useState(false);
   const [archiveRefreshToken, setArchiveRefreshToken] = useState(0);
+  const showAdminHealth = props.showAdminHealth === true;
+  useEffect(() => {
+    if (showAdminHealth) prewarmAdminHealth();
+  }, [showAdminHealth]);
   const roseActions = props.roseActions ?? {};
   const projects = useRoseSidebarProjects(
     roseActions.onCreateAgentInProject ?? (() => notYet('New agent in a project')),

@@ -171,7 +171,7 @@ export default function VelocitySection({ data }: { data: AdminHealthData }) {
                 <Line
                   dataKey="githubCommits"
                   name="GitHub commits"
-                  stroke="#111827"
+                  stroke="currentColor"
                   strokeWidth={2}
                   connectNulls={false}
                 />

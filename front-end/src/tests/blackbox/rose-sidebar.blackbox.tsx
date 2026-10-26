@@ -14,6 +14,7 @@ import type { User } from '@supabase/supabase-js';
 import { http, HttpResponse } from 'msw';
 
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
+import * as adminHealthPrewarm from '@/pages/adminHealthPrewarm';
 
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
@@ -279,6 +280,37 @@ describe('Rose left bar (flag on)', () => {
     expect(biz).toHaveAttribute('aria-pressed', 'true');
     await user.click(biz);
     expect(panel).toHaveAttribute('data-state', 'closed');
+  });
+
+  it('Biz health covers the query box full width like Browser; admin bars prewarm it on mount', async () => {
+    const user = userEvent.setup();
+    const prewarm = vi.spyOn(adminHealthPrewarm, 'prewarmAdminHealth');
+    const { unmount } = renderBar();
+    expect(prewarm).not.toHaveBeenCalled();
+    unmount();
+
+    clearCaptures();
+    renderBar({ showAdminHealth: true });
+    // Prewarmed before any click: the backend's cold day build starts with the bar.
+    expect(prewarm).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        capturedRequests.some(
+          (r) => r.method === 'GET' && r.url.endsWith('/api/admin-health?timeSlice=monthly'),
+        ),
+      ).toBe(true),
+    );
+    await user.click(within(roseBar()).getByRole('button', { name: 'Biz health' }));
+    const panel = screen.getByTestId('rose-app-panel');
+    expect(panel).toHaveAttribute('data-variant', 'full');
+    expect(panel.style.left).toBe('64px');
+    expect(panel.style.right).toBe('0px');
+    expect(panel.style.width).toBe('');
+    expect(screen.queryByTestId('app-drawer-resize-handle')).toBeNull();
+    // Over the floating query box (ROSE_LAYER.composer = z-[100]).
+    expect(panel.className).toContain('z-[101]');
+    expect(panel.parentElement).toBe(document.body);
+    prewarm.mockRestore();
   });
 
   it('Feedback opens in the right drawer for every user', async () => {
