@@ -5384,6 +5384,7 @@ async def _emit_browser_task_terminal_for_fe(
     message: str = "Browser session closed",
     preparation_cancellation: Optional[Dict[str, Any]] = None,
     cleanup_failure: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
 
@@ -5417,6 +5418,7 @@ async def _emit_browser_task_terminal_for_fe(
                 "excludeFromModel": True,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
+                **({"session_id": session_id} if session_id and not cleanup_failure else {}),
             },
         )
 
@@ -5447,6 +5449,7 @@ def _schedule_browser_cleanup(
     local_only_setup_tasks: tuple[Any, ...] = (),
     preparation_cancellation: Optional[Dict[str, Any]] = None,
     cleanup_failure: Optional[Dict[str, Any]] = None,
+    paused_session_id: Optional[str] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -5559,15 +5562,22 @@ def _schedule_browser_cleanup(
             # task_complete terminal so timeout/cancel cleanup cannot leave the
             # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
             if emit_task_terminal and not local_only:
+                # A pause ending paused the provider session (kept for continuation);
+                # only the local CDP/recorder resources are released here.
                 await _emit_browser_task_terminal_for_fe(
                     agent_id=agent_id,
                     task_id=task_id,
                     tool_call_id=tool_call_id,
                     browser_url=browser_url,
-                    title="Browser Session Closed",
-                    message="Browser session closed after teardown",
+                    title="Browser Paused" if paused_session_id else "Browser Session Closed",
+                    message=(
+                        "Browser session paused; the same session continues when resumed"
+                        if paused_session_id
+                        else "Browser session closed after teardown"
+                    ),
                     preparation_cancellation=preparation_cancellation,
                     cleanup_failure=cleanup_failure,
+                    session_id=paused_session_id,
                 )
             if dom_service:
                 try:
@@ -7977,6 +7987,8 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
     cleanup_failure: Optional[Dict[str, Any]] = None
+    # Set when a pause/cancel ending paused (kept) the provider session.
+    paused_session_id: Optional[str] = None
 
     async def _close_browser_with_cleanup_receipt(
         exact_session_id: str, pause: bool = False, current_url: str = ""
@@ -12331,6 +12343,8 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+            if cleanup_failure is None:
+                paused_session_id = session_id
 
         if task_id and browser_turn_messages:
             # A user pause: keep this run's exact conversation so a later
@@ -12354,7 +12368,7 @@ Based on this feedback, I need to continue working on the task and address the i
             with _suppress_browser_cleanup_errors():
                 await _save_browser_action_message(
                     agent_id=agent_id,
-                    title="Browser Session Cancelled",
+                    title="Browser Session Paused" if paused_session_id else "Browser Session Cancelled",
                     task_id=task_id,
                     message="Agent paused by user",
                     status=MessageStatus.FINISHED,
@@ -12363,7 +12377,13 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
                     output_schema=response_schema,
-                    extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
+                    extra_metadata=(
+                        {"browser_cleanup": cleanup_failure}
+                        if cleanup_failure
+                        else {"session_id": paused_session_id}
+                        if paused_session_id
+                        else None
+                    ),
                 )
 
         return {
@@ -12602,6 +12622,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 # Pause-for-resume returns must keep the FE chip open for the next
                 # activity call (write / payment / auth assistance).
                 emit_task_terminal=not browser_task_paused_for_resume and not generation_sealed,
+                paused_session_id=paused_session_id,
                 local_only=generation_sealed,
                 local_only_recorders=locally_owned_recorders,
                 local_only_setup_tasks=(download_persister_task,),
