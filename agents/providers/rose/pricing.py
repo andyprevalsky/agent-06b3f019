@@ -148,6 +148,8 @@ def _average_pool_pricing(pool_name: str) -> Dict[str, float]:
     """Average the input/output prices across every model in a pool, then
     convert from per-token USD to cents-per-1k-tokens."""
     waterfall = _POOL_WATERFALLS[pool_name]
+    if pool_name == "rose-local":
+        return dict(_ZERO_USER_PRICING)
     prompt = sum(_PROVIDER_PRICING[m]["prompt"] for m in waterfall) / len(waterfall)
     completion = sum(_PROVIDER_PRICING[m]["completion"] for m in waterfall) / len(waterfall)
     return {
@@ -202,6 +204,8 @@ def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
     or plain Anthropic. Returns None if no entry matches.
     """
     normalized = model.lower().strip()
+    if normalized.startswith("local/"):
+        return dict(_ZERO_USER_PRICING)
     if normalized.startswith("rose-labs/"):
         normalized = normalized[len("rose-labs/"):]
     if normalized in _POOL_WATERFALLS:

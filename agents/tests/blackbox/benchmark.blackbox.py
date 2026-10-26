@@ -61,6 +61,10 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
     "attachment"; on the cloud the runner joined that list as one path and the
     task errored after 39 s ("join() argument must be ... not 'list'")."""
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.code_bench import ATTACHMENT_PREFIX, resolve_attachment
     from benchmarks.run_benchmark import TEST_ASSETS_DIR
 
     for task in all_tasks():
@@ -68,6 +72,16 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
         files = task.attachments or ([task.attachment] if task.attachment else [])
         for name in files:
             assert isinstance(name, str), (task.name, name)
+            if name.startswith(ATTACHMENT_PREFIX):
+                # Built at run time by code_bench.resolve_attachment from its
+                # checked-in fixture; never a static asset file. Build it and
+                # require exactly one uploadable regular file.
+                with tempfile.TemporaryDirectory(prefix="code-bench-attachment-") as tmp:
+                    built = resolve_attachment(name, Path(tmp))
+                    assert built is not None and built.is_file() and not built.is_symlink(), (task.name, name)
+                    assert built.stat().st_size > 0, (task.name, name)
+                    assert [p.name for p in Path(tmp).iterdir()] == [built.name], (task.name, name)
+                continue
             assert os.path.exists(os.path.join(TEST_ASSETS_DIR, name)), (task.name, name)
     fundraiser = get_task_by_name("raise-5m-rose-labs-brex")
     assert len(fundraiser.attachments) == 5 and fundraiser.attachment is None
@@ -1130,6 +1144,26 @@ def test_sms_runner_scoring_contract_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_code_bench_evaluator_proofs_are_in_permanent_gate():
+    """Code-bench graders (agents/benchmarks/code_bench_test.py, plan C8).
+
+    Every fixture's hidden-test grader must fail the unmodified repo and pass
+    its reference solution through the returned-archive path, the attachments
+    must stay byte-identical across builds, and the raw-CLI parity runner must
+    stay reachable through ``scripts/run-bench code-parity``.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/code_bench_test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -1640,6 +1674,177 @@ def test_benchmark_context_path_treats_root_context_as_repo_local():
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
         else:
             os.environ["BENCHMARK_CONTEXT_DIR"] = previous
+
+
+def test_local_port_run_binds_judge_backend_to_the_stack_under_test():
+    """descend-full69 MA: an isolated --port stack's declared judge leased tokens from localhost:3001.
+
+    agents/.env pins BACKEND_API_URL to the default dev stack; the run's judge
+    then failed "All connection attempts failed" with nothing listening there.
+    """
+    import os
+
+    from benchmarks import run_benchmark
+    from config import load_config
+
+    previous = os.environ.get("BACKEND_API_URL")
+    try:
+        os.environ["BACKEND_API_URL"] = "http://localhost:3001"
+        run_benchmark._bind_backend_api_url("http://localhost:3201/")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ.pop("BACKEND_API_URL")
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ["BACKEND_API_URL"] = "https://guest-tunnel.example.com"
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "https://guest-tunnel.example.com"
+    finally:
+        if previous is None:
+            os.environ.pop("BACKEND_API_URL", None)
+        else:
+            os.environ["BACKEND_API_URL"] = previous
+    main_source = Path(run_benchmark.__file__).read_text()
+    resolve = main_source.index('base_url = f"http://localhost:{args.port}"')
+    assert "_bind_backend_api_url(base_url)" in main_source[resolve : resolve + 1500]
+
+
+def test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card():
+    """descend-full69 MA7: the T7 agentic judge read every GP card as empty.
+
+    The agentic bundle kept each first-level GP's "Task Complete" row with empty
+    text and dropped metadata.completionSummary (only the root card was
+    re-rendered), and its benchmark_state lacked the typed
+    completion_outputs_count the T7 prompt tells the judge to use. The judge
+    failed a run whose 50 GP cards each showed 14 outputs.
+    """
+    import hashlib as _hashlib
+
+    from benchmarks import run_benchmark
+
+    outputs = [
+        {"key": "creator_name", "label": "Creator Name", "value": "Michael Lustgarten"},
+        {"key": "rank_from_initial_list", "label": "Rank", "value": 31},
+    ]
+    gp_card = {
+        "role": "TOOL",
+        "message": "",
+        "metadata": {
+            "toolName": "completion_summary",
+            "toolStatus": "FINISHED",
+            "title": "\u2705 Task Complete",
+            "completionSummary": {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs},
+        },
+    }
+    gp = {
+        "parent_agent_id": "root-1",
+        "goal": "You are analyzing ONE creator for Andy Prevalsky",
+        "status": "COMPLETED",
+        "messages": [{"role": "USER", "message": "analyze"}, gp_card],
+        "response_schema": {"fields": [{"name": "creator_name", "type": "str"}, {"name": "rank_from_initial_list", "type": "int"}]},
+        "structured_output": {"creator_name": "Michael Lustgarten", "rank_from_initial_list": 31},
+    }
+    root = {"goal": "Analyze the top creators", "status": "COMPLETED", "messages": []}
+    tree = {"root-1": root, "gp-db85901b": gp}
+    data = {
+        "agent": {"agent_id": "root-1", "status": "COMPLETED"},
+        "messages": [],
+        "_semantic_evaluator_tree": tree,
+        "_benchmark": {"tree": tree},
+    }
+
+    evidence = run_benchmark._declared_agentic_evaluator_evidence(data)
+
+    cards = [
+        row
+        for row in evidence["messages"]
+        if row["metadata"].get("source_agent_id") == "gp-db85901b"
+        and row["metadata"].get("evidence_type") == "final_completion"
+    ]
+    assert len(cards) == 1, evidence["messages"]
+    assert json.loads(cards[0]["text"]) == {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs}
+    (typed,) = [g for g in evidence["benchmark_state"]["first_level_gps"] if g["agent_id"] == "gp-db85901b"]
+    assert typed["completion_outputs_count"] == 2
+    assert typed["completion_is_ablated"] is False
+
+    audit = run_benchmark._agentic_judge_audit("judge-1", {"id": "f1", "storage_path": "u/f1.json"}, b"{}")
+    assert audit == {
+        "judge_agent_id": "judge-1",
+        "evidence_sha256": _hashlib.sha256(b"{}").hexdigest(),
+        "evidence_bytes": 2,
+        "evidence_file_id": "f1",
+        "evidence_storage_path": "u/f1.json",
+    }
+
+
+def test_mass_agent_completion_outputs_must_satisfy_their_response_schema():
+    """descend-full69 MA5: 44 of 50 first-level GPs finished with schema-incomplete output.
+
+    Their replayed verifier rows predated the output contract, so a GP completed
+    holding only fields coalesced from its transcript (Tim Ferriss: 5 of 14,
+    hook_formulas a str). Only the T7 judge looked, and it passed that evidence
+    some of the time. The static check validates the root and every first-level
+    GP with the verifier's own completion contract.
+    """
+    from benchmarks import run_benchmark
+
+    gp_fields = [
+        ("creator_name", "str"),
+        ("rank_from_initial_list", "int"),
+        ("platform_handles_and_urls", "str"),
+        ("posting_cadence_by_platform", "str"),
+        ("hook_formulas", "list[str]"),
+        ("top_5_performing_pieces_last_90_days", "list[object]"),
+        ("core_content_pillars", "list[str]"),
+        ("audience_persona", "str"),
+        ("monetization_funnels", "str"),
+        ("content_gaps", "list[str]"),
+        ("opportunities_for_aman", "str"),
+        ("engagement_approach", "str"),
+        ("citations_sources", "list[str]"),
+        ("confidence_level", "str"),
+    ]
+    gp_schema = {"fields": [{"name": n, "type": t, "required": True} for n, t in gp_fields]}
+    complete = {
+        n: (7 if t == "int" else ["x"] if t == "list[str]" else [{"title": "x"}] if t == "list[object]" else "x")
+        for n, t in gp_fields
+    }
+    file_pointer = {
+        "id": "dc45f44f-a4ed-55ff-b334-02674f6973f2",
+        "created_at": "2026-10-25T08:37:33.678222Z",
+        "mime_type": "text/html",
+        "original_filename": "hook-tested-script-openings.html",
+        "size_bytes": 10597,
+        "storage_path": "1f85ff25/dc45f44f_hook-tested-script-openings.html",
+    }
+    root_schema = {"fields": [{"name": "report", "type": "file_pointer", "required": True}]}
+    explore = {"parent_agent_id": "gp-tim", "goal": "Explore Tim", "agent_type": "explore"}
+
+    def run(tim_output):
+        tree = {
+            "root-1": {"response_schema": root_schema, "structured_output": {"report": file_pointer}},
+            "gp-molly": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": complete},
+            "gp-tim": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": tim_output},
+            "ex-1": explore,
+        }
+        data = {"agent": {"agent_id": "root-1"}, "logs": {"tree": tree}}
+        return run_benchmark._completion_structured_output_schema_check(data, {"include_first_level_gps": True})
+
+    # Tim's replayed output: 5 of 14 fields, hook_formulas a string.
+    ok, reason = run(
+        {
+            "creator_name": "Tim Ferriss",
+            "rank_from_initial_list": 3,
+            "platform_handles_and_urls": "YouTube @timferriss",
+            "monetization_funnels": "sponsors",
+            "hook_formulas": "- **Title formulas:** guest name + epithet",
+        }
+    )
+    assert ok is False
+    assert reason.startswith("T7: 1 of 3 completion outputs") and "gp-tim" in reason, reason
+    assert "hook_formulas:list_type" in reason and "posting_cadence_by_platform:missing" in reason, reason
+    assert run(dict(complete)) == (True, "")
 
 
 def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
@@ -5482,6 +5687,90 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         )
 
 
+async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
+    """RCA 2026-10-25 judge Codex token unavailable: under a 70-copy cloud fleet the only
+    Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
+    asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
+    Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    import importlib.util
+    from dataclasses import replace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    class _NoToken404:
+        status_code = 404
+
+        def json(self):
+            return {"error": "NO_TOKENS_AVAILABLE"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return _NoToken404()
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
+    judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            judge_error = error
+        else:
+            raise AssertionError("judge must not succeed without a compute token")
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+
+    logs = {"failure_evidence": {"errors": []}}
+    with contextlib.ExitStack() as stack:
+        for name in (
+            "_apply_live_fixtures",
+            "_apply_memory_fixtures",
+            "_apply_auth_test_site",
+            "_restore_live_fixture_scenarios_async",
+            "_release_auth_test_site",
+        ):
+            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+        for name, replacement in {
+            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+            "delete_agent": AsyncMock(return_value=None),
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
+        result = await bench._run_single_task_as_run_user(
+            "https://fixture.invalid", task, False, None, "", None, None, None
+        )
+    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+    assert result.failure_reason.startswith(
+        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+        "failed: Codex compute token unavailable for agentic benchmark judge"
+    ), result.failure_reason
+    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+    spec = importlib.util.spec_from_file_location(
+        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+    )
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+
+
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
     """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
     from benchmarks.results import TaskResult
@@ -6989,24 +7278,20 @@ def test_declared_evaluator_evidence_includes_structured_output_first():
     assert "org/r100" in text
 
 
-def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
+def test_declared_evaluator_evidence_keeps_code_agent_grounding_rows():
     """Fat Claude Code transcripts must not collapse judge evidence to completion-only.
 
     Regression (cuda-kernel-github-top100-code-agent k=3 r24 agent b977534d):
     root had 100+ messages including multi-100KB spawn_claude_code_agent /
-    code_agent_sdk_events / claude_code_history rows. build_single_turn_evidence
-    serialized to ~392k (>320k cap), so _declared_evaluator_evidence fell through
-    to compact_only (structured_output + final_completion + metadata) and the
-    declared judge correctly scored 0 for missing coding-agent grounding.
+    code_agent_sdk_events / claude_code_history rows. A grader-only budget fell
+    through to compact_only (structured_output + final_completion + metadata)
+    and the declared judge correctly scored 0 for missing coding-agent grounding.
 
-    Expected: within SINGLE_TURN_CHAR_BUDGET, still retain at least one capped
-    code-agent grounding row (sdk events / history / spawn_claude_code_agent).
+    Expected: every code-agent grounding row is in the evidence, whole while it
+    is under the runtime tool-result cap. A bundle too big for one judge call
+    goes to the agentic judge instead of being cut.
     """
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     repos = [
         {
@@ -7018,8 +7303,6 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
         }
         for i in range(1, 101)
     ]
-    # ~40 messages × ~12k capped bodies → >320k when naively kept, forcing the
-    # compact_only cascade on current code.
     fat_cc = "GitHub API search results for CUDA kernels:\n" + "\n".join(
         f"{i}. ggml-org/repo-{i} stars={100000 - i} "
         f"https://github.com/ggml-org/repo-{i} desc=CUDA kernel library {i} " + ("x" * 200)
@@ -7086,9 +7369,9 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
             },
         }
     )
-    dumped = json.dumps(evidence, default=str)
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
+    assert [
+        row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "spawn_claude_code_agent"
+    ] == [fat_cc] * 35
     tool_names = {
         (row.get("metadata") or {}).get("toolName")
         for row in evidence
@@ -7107,65 +7390,136 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
     assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
 
 
-def test_declared_evaluator_evidence_keeps_whole_rows_within_budget():
-    """A judge sees a whole tool result whenever the bundle fits its budget.
+def test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap():
+    """The grader cuts a tool result exactly where the runtime does, and nowhere else.
 
-    grep-agent-trajectories-code-tool-status: a 17,075-char grep result was cut
-    at 12,000 with no marker, 986 chars before the Status line its judge had to
-    cite, and the run failed on evidence the agent had actually produced.
-
-    When the bundle does not fit, a shortened row keeps both ends and says how
-    much is missing, so the judge never mistakes a cut for the whole result.
+    Andy (2026-10-24): the benchmark grader's cutoff must be the runtime's, never
+    its own. A grader-only 12k row cap dropped the fact a judge had to ground on
+    (grep-agent-trajectories-cross-surface, agent b140bb71). Tool rows must equal
+    ``hard_cap_tool_result_text`` (what agents apply before a tool result enters
+    their context); other rows are whole; the evidence module defines no caps or
+    budgets of its own. This fails if the two ever diverge.
     """
+    import benchmarks.semantic_evaluator_evidence as evidence_module
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        SINGLE_TURN_TEXT_CAP,
-        single_turn_evidence_exceeds_budget,
-    )
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS, hard_cap_tool_result_text
 
     status_line = "tool_status: FAILED"
+    at_cap = "x" * (TOOL_RESULT_HARD_CAP_CHARS - len(status_line)) + status_line
+    over_cap = "y" * TOOL_RESULT_HARD_CAP_CHARS + status_line
+    long_answer = "z" * (2 * TOOL_RESULT_HARD_CAP_CHARS)
+    data = {
+        "agent": {"agent_id": "root"},
+        "messages": [
+            {"role": "TOOL", "message": at_cap, "metadata": {"toolName": "grep"}},
+            {"role": "TOOL", "message": over_cap, "metadata": {"toolName": "grep"}},
+            {"role": "ASSISTANT", "message": long_answer, "metadata": {}},
+        ],
+    }
+    for rows in (_declared_evaluator_evidence(data), build_agentic_evidence(data)["messages"]):
+        tool_texts = [row["text"] for row in rows if row.get("role") == "TOOL"]
+        assert tool_texts == [at_cap, hard_cap_tool_result_text(over_cap)]
+        assert hard_cap_tool_result_text(over_cap) != over_cap
+        assert [row["text"] for row in rows if row.get("role") == "ASSISTANT"] == [long_answer]
 
-    def run_with_grep_result(padding: int) -> dict:
-        return {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": "x" * padding + status_line,
-                    "metadata": {"toolName": "grep", "toolStatus": "FINISHED"},
-                }
-            ]
-        }
+    assert evidence_module.hard_cap_tool_result_text is hard_cap_tool_result_text
+    grader_caps = [
+        name
+        for name, value in vars(evidence_module).items()
+        if isinstance(value, int) and ("CAP" in name or "BUDGET" in name)
+    ]
+    assert grader_caps == []
 
-    def grep_rows(evidence: list[dict]) -> list[str]:
-        return [
-            str(row.get("text") or "")
-            for row in evidence
-            if isinstance(row, dict) and (row.get("metadata") or {}).get("toolName") == "grep"
-        ]
 
-    within_budget = _declared_evaluator_evidence(run_with_grep_result(SINGLE_TURN_TEXT_CAP + 986))
-    assert [status_line in text for text in grep_rows(within_budget)] == [True]
+async def test_declared_judge_overflow_uses_runtime_compaction_trigger():
+    """A judge prompt overflows exactly where the agent loop would compact.
 
-    # A bundle too large for the judge still falls back to capped rows.
-    padding = SINGLE_TURN_CHAR_BUDGET
-    over_budget = _declared_evaluator_evidence(run_with_grep_result(padding))
-    assert not single_turn_evidence_exceeds_budget(over_budget)
-    (shortened,) = grep_rows(over_budget)
-    assert len(shortened) <= SINGLE_TURN_TEXT_CAP
-    assert shortened.startswith("x") and shortened.endswith(status_line)
-    kept = len(shortened.replace("x", "")) - len(status_line)  # the marker itself
-    omitted = padding + len(status_line) - (len(shortened) - kept)
-    assert f"[... {omitted} characters omitted ...]" in shortened
+    The threshold is ``run_agent.compaction_trigger_tokens`` over the verifier
+    model's window, measured with the runtime estimator. Moving the runtime
+    output reservation moves the grader's threshold with it.
+    """
+    import loop.run_agent as run_agent
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+    from helpers.llm import VERIFIER_MODEL
+    from helpers.model_info import get_model_context_window
+
+    window = await get_model_context_window(VERIFIER_MODEL)
+    trigger = run_agent.compaction_trigger_tokens(window)
+    assert trigger == window - run_agent.EFFECTIVE_OUTPUT_RESERVATION - run_agent.AUTOCOMPACT_BUFFER_TOKENS
+    # ~4 / 1.4 chars per estimated token (helpers.summarize estimator).
+    near_trigger = "e" * int((trigger - 2_000) * 4 / 1.4)
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger) is False
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger + "e" * 10_000) is True
+    original = run_agent.EFFECTIVE_OUTPUT_RESERVATION
+    try:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original + 10_000
+        assert await _declared_judge_context_overflows("judge prompt", near_trigger) is True
+    finally:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original
+
+
+def _b140bb71_shaped_run() -> dict:
+    """Synthetic replay of grep-agent-trajectories-cross-surface r001-j0003 (agent b140bb71).
+
+    Same root transcript shape as the captured fleet bundle
+    (.context/fleet/runs/20261023-194039-1982682): explore grep rows of 33,116,
+    13,867 and 304,941 chars, and the prior run's step count at char 6,339 of
+    the largest one. Filler replaces the production trajectory text.
+    """
+    fact = "It printed 112 numbers and counted 111 steps."
+    big_grep = "g" * 6_339 + fact
+    big_grep += "g" * (304_941 - len(big_grep))
+    explore = {"agentType": "explore", "subAgentId": "143a50ca"}
+
+    def tool(name: str, text: str, **metadata: str) -> dict:
+        return {"role": "TOOL", "message": text, "metadata": {"toolName": name, "toolStatus": "FINISHED", **metadata}}
+
+    messages = [
+        {"role": "USER", "message": "u" * 153, "metadata": {}},
+        tool("agent_init", "i" * 70),
+        tool("spawn_agent", "s" * 200, agentType="explore"),
+        tool("list_agents", "l" * 646, **explore),
+        tool("grep", "a" * 33_116, **explore),
+        tool("grep", "b" * 13_867, **explore),
+        tool("grep", big_grep, **explore),
+        tool("spawn_agent", "Explore summary: counted 111 steps. " + "c" * 7_950, agentType="explore"),
+        tool("attempt_completion", "Example Domain; 111 steps. " + "d" * 1_350),
+    ]
+    return {
+        "agent": {
+            "agent_id": "b140bb71-f957-4b3f-a394-e1f74efbfc26",
+            "status": "COMPLETED",
+            "structured_output": {"collatz_step_count": 111, "example_com_page_title": "Example Domain"},
+        },
+        "messages": messages,
+        "_benchmark": {},
+    }
+
+
+async def test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay():
+    """The judge sees the grounding fact the runtime kept, on the single-turn path.
+
+    b140bb71's explore LLM saw the 305k grep result fit to the 50k runtime cap,
+    which includes "counted 111 steps" at char 6,339. The grader cut that row to
+    12k (~6k head) and the judge failed a correct answer. With the runtime cap
+    the fact survives and the bundle fits one judge call (no agentic fallback).
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    evidence = _declared_evaluator_evidence(_b140bb71_shaped_run())
+    grep_rows = [row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "grep"]
+    assert len(grep_rows) == 3
+    assert "counted 111 steps" in grep_rows[2], len(grep_rows[2])
+
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+
+    assert await _declared_judge_context_overflows("judge prompt", json.dumps(evidence, default=str)) is False
 
 
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
     tree = {
@@ -7239,12 +7593,9 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
             },
         }
     )
-    dumped = json.dumps(evidence)
-    assert len(dumped) < 200_000
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
-    assert huge not in dumped
     state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
+    # Transcripts appear once as rows; the typed state never repeats child bodies.
+    assert huge not in json.dumps(state)
     assert state["tree"]["gp-0"]["research_tool_count"] >= 1
     assert state["tree"]["gp-0"]["explore_spawn_count"] >= 1
     assert state["tree"]["gp-0"]["message_count"] == 2
@@ -7260,9 +7611,15 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     assert state["usage"]["cost_cents"] == 0
 
 
-async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
-    """Hydrated 50-GP trees must stay on single_turn — agentic Codex token fetch is a fail-closed flake."""
+async def test_overflowing_single_turn_judge_falls_back_to_agentic():
+    """A judge prompt that overflows the model goes to the agentic judge, uncut.
+
+    Andy (2026-10-24): "if context overflows we fallback to an agentic verifier".
+    A hydrated 50-GP tree plus 130 fat root rows is far over the runtime
+    compaction trigger, so no single-turn call (or credential lease) is made.
+    """
     import benchmarks.run_benchmark as bench
+    import helpers.llm as llm
     from benchmarks.benchmark_tasks import BenchmarkTask
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
@@ -7345,35 +7702,29 @@ async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
         "_benchmark": {"tree": tree, "all_agents": all_agents},
     }
     agentic_calls = []
-    single_calls = []
-
-    async def fake_single(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
-        single_calls.append(evaluator_arg["id"])
-        assert evidence is not None
-        from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
-
-        assert not single_turn_evidence_exceeds_budget(evidence)
-        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
     async def fake_agentic(task_arg, evaluator_arg, data_arg, **_kwargs):
-        agentic_calls.append(evaluator_arg["id"])
-        raise AssertionError("mass-agent single_turn must not upgrade to agentic")
+        agentic_calls.append((evaluator_arg["id"], data_arg is data))
+        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
-    original_single = bench._call_declared_llm_judge
+    async def no_single_turn(*_args, **_kwargs):
+        raise AssertionError("an overflowing judge prompt must not reach the single-turn verifier")
+
     original_agentic = bench._call_declared_agentic_llm_judge
+    original_check_progress = llm.check_progress
     try:
-        bench._call_declared_llm_judge = fake_single
         bench._call_declared_agentic_llm_judge = fake_agentic
+        llm.check_progress = no_single_turn
         passed, reason, results = await bench._run_declared_evaluators(task, data)
     finally:
-        bench._call_declared_llm_judge = original_single
         bench._call_declared_agentic_llm_judge = original_agentic
+        llm.check_progress = original_check_progress
 
     assert passed is True
     assert reason is None
-    assert single_calls == ["t1-andy-only"]
-    assert agentic_calls == []
+    assert agentic_calls == [("t1-andy-only", True)]
     assert results[0]["passed"] is True
+    assert results[0]["evidence_mode"] == "agentic_llm_judge"
 
 
 def test_first_level_gp_count_static_uses_collected_transcripts():
@@ -9232,6 +9583,94 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
+def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362308052156") -> dict:
+    """Saved-run shape of spawn-sub-agents agent 30434b44 (original600 run 1792738962466034914).
+
+    The root posts its general-purpose completions as ``spawn_agent`` FINISHED rows, so a
+    tree-wide ``spawn_agent`` count is 2 even when no explore ever ran.
+    """
+    root, tokyo, nyc = "30434b44-root", "450a67e0-tokyo", "c9c5cad6-nyc"
+
+    def tool(name: str, call_id: str, **extra) -> dict:
+        metadata = {"toolName": name, "toolStatus": "FINISHED", "toolCallId": call_id, **extra}
+        return {"role": "TOOL", "message": "", "metadata": metadata}
+
+    def gp_messages(call_id: str, child: str) -> list[dict]:
+        if not gp_explores:
+            return [tool("web_search", f"{call_id}-search")]
+        return [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "metadata": {"tool_calls": [{"tool": "spawn_agent", "type": "explore", "tool_call_id": call_id}]},
+            },
+            tool("spawn_agent", call_id, agentType="explore", taskId=child),
+            tool("spawn_agent", f"{call_id}-progress", agentType="explore", taskId=child),
+            tool("web_fetch", f"{call_id}-fetch"),
+        ]
+
+    root_messages = [
+        tool("spawn_agent", "da7db8fe"),
+        tool("spawn_agent", "230e1dd3"),
+        {
+            "role": "TOOL",
+            "message": "I verified both official figures and multiplied them.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "completionSummary": {
+                    "summary": "I verified both official figures and multiplied them.",
+                    "outputs": [
+                        {"key": "tokyo_population", "value": "14137164"},
+                        {"key": "nyc_population", "value": "8584629"},
+                        {"key": "product", "value": product},
+                    ],
+                },
+            },
+        },
+    ]
+    tree = {
+        root: {"status": "COMPLETED", "goal": "spawn-sub-agents", "messages": root_messages},
+        tokyo: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("call_55fc", "e88ee23d")},
+        nyc: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("toolu_01Ate", "706a812c")},
+    }
+    return {"agent": {"agent_id": root}, "messages": root_messages, "_benchmark": {"tree": tree}}
+
+
+async def test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product():
+    """spawn-sub-agents: >=2 explore spawns and the official figures with their exact product.
+
+    Repro: original600 run 1792738962466034914 failed 3/5 valid copies on the stale
+    ``min_tool_counts.web_search=2`` while the 2026-06-02 bulk eval_prompt removal (79fe5c19e)
+    left the final answer unchecked.
+    """
+    from benchmarks import run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("spawn-sub-agents")
+    assert not (task.min_tool_counts or {}).get("web_search")
+    assert task.enforce_declared_evaluators is True
+
+    async def run(record: dict) -> tuple[bool, str | None]:
+        ok, reason, _ = await rb._run_declared_evaluators(task, record, base_url=None)
+        return ok, reason
+
+    valid = _spawn_sub_agents_record()
+    assert await run(valid) == (True, None)
+
+    no_explore = _spawn_sub_agents_record(gp_explores=False)
+    tree_counts: dict[str, int] = {}
+    for node in no_explore["_benchmark"]["tree"].values():
+        for name, count in rb._count_logical_tool_calls_from_messages(node["messages"]).items():
+            tree_counts[name] = tree_counts.get(name, 0) + count
+    assert tree_counts.get("spawn_agent") == 2  # root GP rows: a spawn_agent tool count cannot prove explores
+    ok, reason = await run(no_explore)
+    assert not ok and "explore-research" in reason and "spawned 0 explore" in reason
+
+    ok, reason = await run(_spawn_sub_agents_record(product="121362308052000"))
+    assert not ok and "final-answer-population-product" in reason and "121362308052156" in reason
+
+
 def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
     """CUDA ranking bench requires coding-agent route with zero tool failures."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -9258,12 +9697,15 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     Local repro (k=3 r7, 2026-09-02): agent 193b753e failed at ~872s with
     ``tree stalled … silent for 518s (threshold=510s)`` while Claude Code was
     still mid-session updating a progress chip (message_count frozen). Stall
-    budget for CC tasks must cover MAX_RUNTIME_S + buffer; cost idle is also
-    required so a truly dead tree still fails fast.
+    budget for CC tasks must cover a 30-minute progress chip + buffer; cost idle
+    is also required so a truly dead tree still fails fast.
     """
-    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds
+    from benchmarks.run_benchmark import (
+        AGENT_STALL_SECONDS,
+        CLAUDE_CODE_PROGRESS_SILENCE_SECONDS,
+        agent_stall_limit_seconds,
+    )
 
     cuda = get_task_by_name("cuda-kernel-github-top100-code-agent")
     chat = get_task_by_name("chat-mode")
@@ -9272,7 +9714,7 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
 
     assert cuda.requires_claude_code is True
     assert "spawn_claude_code_agent" in cuda.expected_tools
-    assert cuda_limit == max(AGENT_STALL_SECONDS, int(MAX_RUNTIME_S) + 120)
+    assert cuda_limit == max(AGENT_STALL_SECONDS, CLAUDE_CODE_PROGRESS_SILENCE_SECONDS)
     assert cuda_limit >= 1920
     assert chat_limit == AGENT_STALL_SECONDS
     assert chat_limit < cuda_limit
@@ -13757,6 +14199,41 @@ async def test_minted_benchmark_preserves_child_harness_outcomes():
             assert result.benchmark_status == expected, (stage, outcome, result.benchmark_status)
 
 
+def test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key():
+    """The forced bad-password fixture must name BrowserPassword's real unique key.
+
+    Postgres rejects an ON CONFLICT target that matches no unique index, so a
+    fixture left on the old (userId, origin, username) key fails outright once
+    saved logins are unique per browser source and profile.
+    """
+    import re
+
+    import benchmarks.run_benchmark as bench
+
+    schema = (Path(__file__).resolve().parents[3] / "back-end" / "prisma" / "schema.prisma").read_text()
+    model = re.search(r"model BrowserPassword \{(.*?)\n\}", schema, re.S)
+    assert model is not None
+    unique = re.search(r"@@unique\(\[([^\]]+)\]\)", model.group(1))
+    assert unique is not None
+    expected = [column.strip() for column in unique.group(1).split(",")]
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "bundle-id\tpwd-1\tpwd-2"
+        fixture = bench._seed_local_bad_amazon_auth_scenario("user-123", "amazon.com")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert fixture["password_ids"] == ["pwd-1", "pwd-2"]
+    password_inserts = re.findall(
+        r'INSERT INTO "BrowserPassword".*?ON CONFLICT \(([^)]*)\)', queries[0], re.S
+    )
+    assert len(password_inserts) == 2
+    for target in password_inserts:
+        assert [column.strip().strip('"') for column in target.split(",")] == expected
+
+
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
     """Repeated live minted-account benchmarks should not buy a fresh AgentPhone number."""
     import benchmarks.run_benchmark as bench
@@ -16143,7 +16620,7 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     original_tasks = benchmark_tasks._cached_tasks
     # configure_task_environment exports several process-wide flags (e.g.
-    # ROSE_DISABLE_CODE_AGENT_VERIFIER); restore all of them so later suites in
+    # ROSE_DISABLE_API_REQUEST); restore all of them so later suites in
     # the same runner process see the real environment.
     try:
         with patch.dict(os.environ, {}, clear=False):
@@ -16194,15 +16671,19 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
         check=False,
     )
 
+    def gate_and_cache(result: subprocess.CompletedProcess) -> list[str]:
+        # Other per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if "NON_PURCHASE_GATES_ENABLED" in line or "FAST_" in line]
+
     assert enabled.returncode == 0, enabled.stderr
-    assert enabled.stdout.splitlines() == [
+    assert gate_and_cache(enabled) == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
         "stack:FAST_MODE_CACHE_USE_LOCAL=1",
         "stack:FAST_MODE_CACHE_DATABASE_URL=",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
     ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
-    assert disabled.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert gate_and_cache(disabled) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
@@ -16224,10 +16705,134 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
 
 
-def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
-    """Only fast_cache:on DEMO replays may hold production pooler slots.
+def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
+    """Cloud guests get exactly the per-task worker environment local runs get.
 
-    Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
+    claude-code-agent failed both cloud copies of descend-full69-20261023: the
+    guest exported no ROSE_CODE_AGENT_PROVIDER, so the code tool followed the
+    root's GPT lease, ran Codex, and the sub-agent verifier rejected the
+    "Claude Code (not Codex)" goal. The same guests also lacked
+    ROSE_DISABLE_CODE_AGENT_VERIFIER, ROSE_DISABLE_API_REQUEST,
+    ROSE_DISABLE_GENERAL_PURPOSE_AGENT and BROWSER_MAX_ITERATIONS, which local
+    configure_task_environment always derives from the selected tasks. Compare
+    the whole catalog: every key local sets must reach the cloud guest with
+    the same value, through the real cloudbench-run.sh task-env path.
+
+    W2: the code-agent verifier is off by default in code, so neither local
+    nor cloud may set ROSE_DISABLE_CODE_AGENT_VERIFIER or the
+    ROSE_ENABLE_CODE_AGENT_VERIFIER opt-in for any task; benches and prod
+    take the same verifier path.
+    """
+    import importlib.util
+    import subprocess
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    # Stack fixtures cloud guests provision through their own payment/admin/
+    # frontend setup (cloudbench-run.sh BENCH_NEEDS_* blocks), not worker env.
+    stack_fixture_keys = {
+        "BENCHMARK_ISOLATED_RUN",
+        "BENCHMARK_BUNDLED_FRONTEND",
+        "ALLOW_TEMPORAL_CLEANUP",
+        "BENCHMARK_FAST_MODE_CACHE",
+        "SEED_ALLOW_MISSING_GPT_CODE",
+        "SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS",
+        local_bench.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
+        "AGENTCARD_ONBOARDING_RETURN_URL",
+        "ADMIN_USER_IDS_EXTRA",
+    }
+    worker_keys = {
+        "NON_PURCHASE_GATES_ENABLED",
+        "ROSE_CODE_AGENT_PROVIDER",
+        "ROSE_DISABLE_CODE_AGENT_VERIFIER",
+        "ROSE_ENABLE_CODE_AGENT_VERIFIER",
+        "ROSE_DISABLE_API_REQUEST",
+        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT",
+        "BROWSER_MAX_ITERATIONS",
+    }
+    verifier_keys = {"ROSE_DISABLE_CODE_AGENT_VERIFIER", "ROSE_ENABLE_CODE_AGENT_VERIFIER"}
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in worker_keys | stack_fixture_keys and key != "CLOUDBENCH_INFRA_PROBE"
+    }
+
+    def local_env(task_name: str) -> dict[str, str]:
+        with patch.dict(os.environ, clean_env, clear=True):
+            local_bench.configure_task_environment([task_name])
+            changed = {key: value for key, value in os.environ.items() if clean_env.get(key) != value}
+        return {key: value for key, value in changed.items() if key not in stack_fixture_keys and value != ""}
+
+    def cloud_env(task_name: str) -> dict[str, str]:
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **clean_env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task_name,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in lines if line.startswith("stack:"))
+        exported = dict(
+            line.removeprefix("benchmark:export ").split("=", 1) for line in lines if line.startswith("benchmark:")
+        )
+        # The stack (worker) and the benchmark process export the same values.
+        assert {key: value for key, value in stack.items() if key in worker_keys} == {
+            key: value for key, value in exported.items() if key in worker_keys
+        }, (task_name, lines)
+        return {key: value for key, value in stack.items() if key in worker_keys and value != ""}
+
+    local_by_task = {task.name: local_env(task.name) for task in benchmark_tasks.all_tasks()}
+    assert local_by_task["claude-code-agent"].get("ROSE_CODE_AGENT_PROVIDER") == "claude"
+    assert local_by_task["google-oauth"].get("ROSE_DISABLE_API_REQUEST") == "0"
+    verifier_overrides = {name: sorted(verifier_keys & set(env)) for name, env in local_by_task.items()}
+    assert not {name: keys for name, keys in verifier_overrides.items() if keys}, verifier_overrides
+    assert set().union(*local_by_task.values()) <= worker_keys, sorted(
+        set().union(*local_by_task.values()) - worker_keys
+    )
+
+    # Real guest entrypoint, once per distinct local environment.
+    representatives: dict[tuple[tuple[str, str], ...], str] = {}
+    for name, env in local_by_task.items():
+        representatives.setdefault(tuple(sorted(env.items())), name)
+    for signature, name in representatives.items():
+        cloud = cloud_env(name)
+        assert not verifier_keys & set(cloud), {"task": name, "cloud": cloud}
+        assert cloud == dict(signature), {"task": name, "local": dict(signature), "cloud": cloud}
+
+    # The guest's catalog helper resolves every task identically to local.
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_catalog_parity", repo_root / "scripts" / "cloudbench_catalog.py"
+    )
+    assert spec is not None and spec.loader is not None
+    catalog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(catalog)
+    by_name = catalog.index_unified_catalog(repo_root / "agents" / "benchmarks" / "tasks.json")
+    mismatched = {}
+    for name, env in local_by_task.items():
+        resolved = catalog.task_worker_environment([by_name[name]], clean_env)
+        cloud = {key: value for key, value in resolved.items() if value}
+        if cloud != env:
+            mismatched[name] = {"local": env, "cloud": cloud}
+    assert not mismatched, dict(list(mismatched.items())[:5])
+
+
+def test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler():
+    """Only demo_cache:on DEMO replays may hold production pooler slots.
+
+    Every other cloud guest keeps its DEMO cache in the isolated local DB,
     matching local isolated stacks; a broken resolver fails closed instead of
     silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
     still read the shared cache use bounded Prisma pools (20 per run.sh stack, 4 per
@@ -16255,50 +16860,62 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             check=False,
         )
 
+    def route(result: subprocess.CompletedProcess) -> list[str]:
+        # Per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if line.startswith("stack:FAST_")]
+
     live = print_env("chat-mode")
     assert live.returncode == 0, live.stderr
-    assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(live) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
-    shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
+    shared_route = [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=4",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
-    # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
+    # demo_cache:on replay keeps the frozen shared cache with a small pool, so a
     # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
-    assert shared.stdout.splitlines() == shared_route
+    assert route(shared) == shared_route
 
     # An inherited local route must not divert the replay to the empty local DB.
     inherited = print_env("test-mass-agent-run-0", FAST_MODE_CACHE_USE_LOCAL="1")
     assert inherited.returncode == 0, inherited.stderr
-    assert inherited.stdout.splitlines() == shared_route
+    assert route(inherited) == shared_route
 
     mixed = print_env("chat-mode,test-mass-agent-run-0")
     assert mixed.returncode == 0, mixed.stderr
-    assert mixed.stdout.splitlines() == shared_route
+    assert route(mixed) == shared_route
 
     tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
-    assert tuned.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
+    assert route(tuned) == [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=6",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(probe) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
         fake_python.write_text(
-            '#!/bin/sh\ncase "$2" in requires-gate) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+            '#!/bin/sh\ncase "$2" in task-env) exit 0 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
         )
         fake_python.chmod(0o755)
         broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
     assert broken.returncode == 31
     assert "route-broken" in broken.stderr
-    assert "Fast Mode cache routing failed (exit 31)" in broken.stderr
+    assert "DEMO cache routing failed (exit 31)" in broken.stderr
     assert "FAST_MODE_CACHE_USE_LOCAL" not in broken.stdout
 
     unknown = subprocess.run(
         [
             sys.executable,
             str(repo_root / "scripts" / "cloudbench_catalog.py"),
-            "needs-shared-fast-cache",
+            "needs-shared-demo-cache",
             str(repo_root / "agents" / "benchmarks" / "tasks.json"),
             "no-such-benchmark-task",
         ],
@@ -16320,7 +16937,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             [
                 "bash",
                 "-c",
-                '. "$1"; apply_fast_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                '. "$1"; apply_demo_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
                 "pool",
                 str(lib),
                 mode,
@@ -16338,9 +16955,9 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert pool_after("any", "9") == "9", "an explicit operator pool size wins"
 
     run_sh = (repo_root / "scripts" / "run.sh").read_text()
-    pool_call = run_sh.index("apply_fast_cache_pool_default\n")
+    pool_call = run_sh.index("apply_demo_cache_pool_default\n")
     assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
-    assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
+    assert pool_call < run_sh.index('echo "🧠 Ensuring DEMO cache schema..."')
 
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
@@ -17666,7 +18283,7 @@ def test_dotenv_fast_mode_cache_falls_back_to_database_url():
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
-def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
+def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
     """test-mass-agent-run-0 must read the July cache without Andy write-through."""
     from unittest.mock import patch
 
@@ -17713,6 +18330,174 @@ def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+async def test_claude_code_only_run_withholds_gpt_compute_credentials():
+    """A run of requires_claude_code tasks leases only Claude credentials.
+
+    claude-code-agent (descend-full69 K4/K8) leased type=gpt, so every code
+    spawn ran Codex. Local stacks and cloud guests share this run-level
+    compute-token refresh, so the isolated DB must hold no leasable gpt_code row
+    for a Claude-only run, while every other run keeps both credential types.
+    """
+    import asyncio
+    import uuid
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    db_name = f"bench_k8_{uuid.uuid4().hex[:10]}"
+    db_url = admin.rsplit("/", 1)[0] + "/" + db_name
+
+    def psql(url: str, sql: str) -> str:
+        result = subprocess.run(["psql", url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                                capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def fake_seed(command, **_kwargs):
+        psql(db_url, (
+            'DELETE FROM "Integration"; '
+            'INSERT INTO "Integration" (id, name, status, "userId", "poolingEnabled") VALUES '
+            "('c1','claude_code','CONNECTED','u',false),('g1','gpt_code','CONNECTED','u',false),"
+            "('g2','gpt_code','CONNECTED',NULL,true)"
+        ))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def leasable(kind: str) -> int:
+        return int(psql(db_url, f"SELECT count(*) FROM \"Integration\" WHERE name='{kind}' AND status='CONNECTED'"))
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    claude_task = by_name["claude-code-agent"]
+    assert claude_task.requires_claude_code
+    other_task = by_name["spawn-sub-agents"]
+    assert not other_task.requires_claude_code
+
+    psql(admin, f'CREATE DATABASE "{db_name}"')
+    try:
+        psql(db_url, (
+            'CREATE TABLE "Integration" (id text primary key, name text, status text, "userId" text, '
+            '"poolingEnabled" boolean, config jsonb, "rateLimitedUntil" timestamptz)'
+        ))
+        observed = {}
+        for label, tasks in {"claude-only": [claude_task], "other": [other_task], "mixed": [claude_task, other_task]}.items():
+            with (
+                patch.object(bench, "_local_victoria_database_url", return_value=db_url),
+                patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/db", "source")),
+                patch.object(bench, "_run_seed_subprocess", side_effect=fake_seed),
+                patch.object(bench, "_is_local_base_url", return_value=True),
+                patch.object(bench, "_is_simulate_mode", return_value=False),
+                patch.object(bench, "_anthropic_family_excluded", return_value=False),
+                patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=True)),
+                patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+                patch.object(bench, "_assert_require_compute_tokens_satisfied", return_value=None),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                os.environ.pop("CODEX_AUTH_PATH", None)
+                await bench._refresh_local_compute_tokens_for_run("http://localhost:3001", tasks=tasks)
+                # A later per-task overlay sync must not hand the GPT credential back.
+                assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True)
+            observed[label] = (leasable("claude_code"), leasable("gpt_code"))
+        assert observed == {"claude-only": (1, 0), "other": (1, 2), "mixed": (1, 2)}, observed
+    finally:
+        getattr(bench, "_withheld_compute_token_types", set()).clear()
+        psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_cloudbench_demo_cache_on_guest_is_read_only_like_local():
+    """A cloud guest replays the shared July cache under the same write policy as local.
+
+    Local isolated stacks make every shared-cache (demo_cache:on) run strict
+    read-only, so a cache miss fails loudly instead of calling a live model. The
+    cloud guest route used the shared cache without that flag: the
+    test-mass-agent-run-0 root's response_schema miss went to a live model,
+    produced field names the recorded July assemble does not use, and failed the
+    T7 schema evaluator (descend-full69 p3-proof-1). google-oauth keeps its one
+    deliberate local exception on both surfaces.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    read_only = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
+
+    def local_policy(task: str) -> str | None:
+        captured: dict = {}
+
+        def fake_popen(command, **kwargs):
+            captured["env"] = kwargs["env"]
+            return object()
+
+        with (
+            patch.dict(os.environ, {"FAST_MODE_CACHE_DATABASE_URL": "postgresql://july.example.test:6543/postgres"}),
+            patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "_record_stack_cleanup_owner", new=lambda *_args: None),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            os.environ.pop(read_only, None)
+            context_dir = Path(tmp) / "parity-run"
+            stack = local_bench.ServiceStack(
+                run_id="parity-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-parity-run",
+                base_port=55160,
+            )
+            local_bench.start_services(stack, clean_first=False, tasks=[task])
+        return captured["env"].get(read_only)
+
+    def cloud_policy(task: str) -> str | None:
+        env = {key: value for key, value in os.environ.items() if key not in {read_only, "CLOUDBENCH_INFRA_PROBE"}}
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in result.stdout.splitlines() if line.startswith("stack:"))
+        return stack.get(read_only)
+
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    start = fleet.index("    local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()")
+    policy = fleet[start : fleet.index("    local wid=\"\" borrowed_worker=0", start)]
+
+    def clone_policy(task: str) -> str | None:
+        with tempfile.TemporaryDirectory() as out:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "clone() {\n" + policy + '    [ "$shared_cache_read_only" = 0 ] || echo 1\n}\nclone',
+                ],
+                env={**os.environ, "ROOT_DIR": str(repo_root), "bench": task, "out": out},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip() or None
+
+    assert local_policy("test-mass-agent-run-0") == "1"
+    for task in ("test-mass-agent-run-0", "google-oauth"):
+        assert cloud_policy(task) == local_policy(task), task
+        assert clone_policy(task) == local_policy(task), task
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
@@ -20283,7 +21068,7 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
 
     task = get_task_by_name("spawn-sub-agents")
 
-    assert task.min_tool_counts == {"web_search": 2}
+    assert not task.min_tool_counts  # explore research is the declared explore_spawn_count check
     assert task.expected_tool_counts["spawn_general_purpose_agent"] == 2
     assert task.expected_tool_counts["spawn_browser_agent"] == 0
     assert task.expected_tool_counts["spawn_claude_code_agent"] == 0
@@ -21127,7 +21912,7 @@ def test_root_exact_tool_count_fails_fast_after_duplicate_call():
     assert _root_exact_tool_count_exceeded(task, messages[:2]) is None
 
 
-def test_message_side_effect_benchmarks_force_fast_cache_off():
+def test_message_side_effect_benchmarks_force_demo_cache_off():
     """Cached agent decisions cannot prove a live external side effect."""
     import os
 
@@ -21139,7 +21924,7 @@ def test_message_side_effect_benchmarks_force_fast_cache_off():
     try:
         for name in ("message-person", "message-person-agent-sms"):
             task = get_task_by_name(name)
-            assert task.fast_cache == "off"
+            assert task.demo_cache == "off"
             assert _resolved_fast_mode_cache(task) is False
     finally:
         if previous is None:
@@ -21194,7 +21979,7 @@ def test_unified_catalog_delineates_bench_axes():
     mass = by_name["test-mass-agent-run-0"]
     assert "smoke" in mass["tags"]
     assert mass["group"] == "pre-deploy"
-    assert mass["fast_cache"] == "on"
+    assert mass["demo_cache"] == "on"
     assert mass["enforce_declared_evaluators"] is True
     assert mass["min_agent_count"] == 50
     evaluators = {evaluator["id"]: evaluator for evaluator in mass["evaluators"]}
@@ -21214,6 +21999,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-meaningful-task-title",
         "t7-readable-report-files",
+        "t7-schema-complete-outputs",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -21245,6 +22031,7 @@ def test_unified_catalog_delineates_bench_axes():
             "completion_summary_file_outputs",
             "completion_summary_file_outputs",
         ],
+        "t7-schema-complete-outputs": ["completion_structured_output_schema"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }
@@ -21977,7 +22764,7 @@ def test_browser_min_steps_ignores_init_timeout_retry_before_session():
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
     """Non-orchestration code-agent evidence chips must produce step_count > 0.
 
-    When ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier, spawn chips
+    With the code-agent LLM verifier off (the default), spawn chips
     alone leave every code agent at 0 steps and declared judges fail. Persisted
     `code_agent_sdk_events` / `claude_code_history` chips (agentType=code) are
     the grounded trajectory the harness expects.
@@ -23922,6 +24709,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
         ("test_disposable_volume_ownership_is_in_permanent_gate", "disposable_volume_ownership_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
+        ("test_code_bench_evaluator_proofs_are_in_permanent_gate", "code_bench_evaluator_proofs_permanent_gate"),
         ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
@@ -24728,6 +25516,18 @@ async def run_all_tests():
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
+    r.record(
+        "mass_agent_completion_outputs_must_satisfy_their_response_schema",
+        test_mass_agent_completion_outputs_must_satisfy_their_response_schema,
+    )
+    r.record(
+        "agentic_judge_evidence_shows_each_sub_agent_task_complete_card",
+        test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card,
+    )
+    r.record(
+        "local_port_run_binds_judge_backend_to_the_stack_under_test",
+        test_local_port_run_binds_judge_backend_to_the_stack_under_test,
+    )
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async(
@@ -24758,6 +25558,23 @@ async def run_all_tests():
         "test_lantern_latest_completion_and_cache_evidence_are_strict",
     ):
         r.record(name, getattr(lantern_people_trace_tests, name))
+    from benchmarks import display_check_tests
+
+    for name in (
+        "test_display_fixture_expected_totals_match_csv",
+        "test_display_task_is_registered_in_catalog_and_selector",
+    ):
+        r.record(name, getattr(display_check_tests, name))
+    for name in (
+        "test_display_correct_chart_and_answer_pass",
+        "test_display_not_called_fails_display_checks",
+        "test_display_unfiltered_revenue_fails_figure_checks",
+        "test_display_raster_chart_is_read_through_a_vision_transcript",
+        "test_display_bundle_data_file_and_subagent_tree_rows",
+        "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
+        "test_display_root_inline_html_page_is_read",
+    ):
+        await r.record_async(name, getattr(display_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,
@@ -24772,6 +25589,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
+    )
+    await r.record_async(
+        "judge_compute_token_unavailable_skips",
+        test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
     )
     await r.record_async(
         "agentcard_release_skip_execution_cleanup",
@@ -24939,6 +25760,7 @@ async def run_all_tests():
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("disposable_volume_ownership_permanent_gate", test_disposable_volume_ownership_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
+            ("code_bench_evaluator_proofs_permanent_gate", test_code_bench_evaluator_proofs_are_in_permanent_gate),
             ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",
@@ -25115,6 +25937,10 @@ async def run_all_tests():
     await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
+    )
+    r.record(
+        "bad_amazon_password_fixture_unique_key",
+        test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key,
     )
     r.record(
         "minted_cleanup_preserves_identity",
@@ -25320,8 +26146,12 @@ async def run_all_tests():
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
     )
     r.record(
-        "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
-        test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler,
+        "cloudbench_code_agent_tasks_pin_claude_code_like_local",
+        test_cloudbench_code_agent_tasks_pin_claude_code_like_local,
+    )
+    r.record(
+        "cloudbench_demo_cache_route_keeps_live_guests_off_shared_pooler",
+        test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler,
     )
     r.record(
         "cloudbench_task_gate_resolution_fails_closed",
@@ -25396,7 +26226,15 @@ async def run_all_tests():
     )
     r.record(
         "local_isolated_july_cache_read_only",
-        test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
+        test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
+        "cloudbench_demo_cache_on_guest_read_only_like_local",
+        test_cloudbench_demo_cache_on_guest_is_read_only_like_local,
+    )
+    await r.record_async(
+        "claude_code_only_run_withholds_gpt_compute_credentials",
+        test_claude_code_only_run_withholds_gpt_compute_credentials,
     )
     r.record(
         "local_cold_seed_extended_start_timeout",
@@ -25586,7 +26424,7 @@ async def run_all_tests():
         test_logical_tool_counts_canonicalize_model_facing_routed_calls,
     )
     r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
-    r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
+    r.record("message_side_effect_demo_cache_off", test_message_side_effect_benchmarks_force_demo_cache_off)
     r.record(
         "message_person_requires_confirmed_send",
         test_message_person_benchmark_requires_confirmed_send,
@@ -25937,20 +26775,28 @@ async def run_all_tests():
         test_declared_evaluator_evidence_includes_structured_output_first,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
-        test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
+        "declared_evaluator_evidence_keeps_code_agent_grounding_rows",
+        test_declared_evaluator_evidence_keeps_code_agent_grounding_rows,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_whole_rows_within_budget",
-        test_declared_evaluator_evidence_keeps_whole_rows_within_budget,
+        "declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap",
+        test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap,
+    )
+    await r.record_async(
+        "declared_judge_overflow_uses_runtime_compaction_trigger",
+        test_declared_judge_overflow_uses_runtime_compaction_trigger,
+    )
+    await r.record_async(
+        "declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay",
+        test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     await r.record_async(
-        "mass_agent_single_turn_judge_does_not_upgrade_to_agentic",
-        test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic,
+        "overflowing_single_turn_judge_falls_back_to_agentic",
+        test_overflowing_single_turn_judge_falls_back_to_agentic,
     )
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
@@ -26107,6 +26953,10 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
         test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
+    )
+    await r.record_async(
+        "spawn_sub_agents_catalog_checks_explore_spawns_and_final_product",
+        test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product,
     )
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",

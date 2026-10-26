@@ -17,6 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/blackbox-phone-env.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
 # Match run.sh and run-blackbox-tests.sh resource naming when Conductor still
@@ -56,6 +57,17 @@ case "${TRACE_ARCHIVE_BACKEND:-}" in
     export TRACE_ARCHIVE_BACKEND=local
     ;;
 esac
+
+# rose_user_ui versions are stored hermetically on local disk for tests (the
+# user-ui blackbox reads back published bytes); prod uses Supabase Storage.
+export USER_UI_STORAGE_BACKEND=local
+export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage}"
+# display-tool media (domains/display) uses the same hermetic local store.
+export DISPLAY_STORAGE_BACKEND=local
+export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage}"
+# User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
+# HOME instead of E2B; the backend refuses this mode in production.
+export USER_TOOLS_SESSION_SANDBOX=local
 
 # Read the effective value of KEY from back-end/.env using dotenv last-in-wins
 # semantics (quoted values keep '#'; unquoted values drop inline comments).
@@ -482,9 +494,17 @@ fi
 if ! $DB_FOUND; then
   SYSTEM_PG_PORT=5432
   if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+    # Never the shared `victoria`: this workspace's own database only.
+    # Created after the Prisma freshness check: stale deps touch no DB.
+    if ! SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    ENSURE_SYSTEM_DB_NAME="$SYSTEM_DB_NAME"
     LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+    LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$SYSTEM_DB_NAME"
     DB_FOUND=true
-    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT, database $SYSTEM_DB_NAME"
   fi
 fi
 
@@ -511,6 +531,11 @@ if $DB_FOUND; then
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+  if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
+    ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
+    echo "❌ Could not create the test database $ENSURE_SYSTEM_DB_NAME on localhost:$LOCAL_DB_PORT." >&2
+    exit 1
+  fi
   # run-unit-tests.ts resolves `victoria-db-<basename>` on its own, which misses
   # a hash-suffixed worktree container and falls back to the shared :5432 DB
   # with a stale schema. Hand the unit tests the database synced below.
@@ -584,7 +609,7 @@ if ! $DB_FOUND || [ -z "${LOCAL_DB_URL:-}" ]; then
   exit 1
 fi
 
-# Fast Mode cache still requires an explicit URL outside production, but a local
+# DEMO cache still requires an explicit URL outside production, but a local
 # coverage run must not write fixtures into (or depend on capacity from) the
 # shared production cache database. The local schema includes FastModeCacheEntry,
 # so point the instrumented backend at the same isolated database used by every

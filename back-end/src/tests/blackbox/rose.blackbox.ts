@@ -276,6 +276,7 @@ async function testPool_isRoseModelVariants() {
 }
 
 async function testPool_forModelFuzzy() {
+  assertEqual(poolForModel('rose-labs/rose-local'), 'rose-local', 'local');
   assertEqual(poolForModel('rose-labs/rose-1-flash'), 'rose-1-flash', 'flash');
   assertEqual(poolForModel('rose-labs/rose-1-lite'), 'rose-1-flash', 'legacy lite alias');
   assertEqual(poolForModel('rose-1-lite'), 'rose-1-flash', 'bare legacy lite alias');
@@ -294,6 +295,62 @@ async function testPool_forModelFuzzy() {
   assertEqual(poolForModel('rose-labs/rose-2'), null, 'future rose-labs model');
   assertEqual(poolForModel('openai/gpt-4'), null, 'non-rose');
   assertEqual(poolForModel(''), null, 'empty');
+}
+
+async function testRoseLocalOnlyCallsLoopback() {
+  const originalFetch = global.fetch;
+  const priorBase = process.env.ROSE_LOCAL_BASE_URL;
+  const priorModel = process.env.ROSE_LOCAL_MODEL;
+  const seen: string[] = [];
+  try {
+    process.env.ROSE_LOCAL_BASE_URL = 'http://127.0.0.1:8080/v1';
+    process.env.ROSE_LOCAL_MODEL = 'test-local-model';
+    global.fetch = async (input) => {
+      const url = String(input);
+      seen.push(url);
+      assertEqual(url, 'http://127.0.0.1:8080/v1/chat/completions', 'loopback URL');
+      const sse =
+        'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n' +
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n' +
+        'data: [DONE]\n\n';
+      return new Response(sse, { headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const chunks: CompletionChunk[] = [];
+    for await (const chunk of await createStreamingCompletion({
+      model: 'rose-labs/rose-local',
+      messages: [{ role: 'user', content: 'hello' }],
+    }))
+      chunks.push(chunk);
+    assertEqual(seen.length, 1, 'one local request');
+    assert(
+      chunks.some((c) => c.choices[0]?.delta.content === 'local ok'),
+      'local output'
+    );
+    assert(
+      chunks.every((c) => c.pool_name === 'rose-local'),
+      'local provenance'
+    );
+    process.env.ROSE_LOCAL_BASE_URL = 'https://openrouter.ai/api/v1';
+    let rejected = false;
+    try {
+      for await (const chunk of await createStreamingCompletion({
+        model: 'rose-labs/rose-local',
+        messages: [{ role: 'user', content: 'hello' }],
+      })) {
+        assert(!chunk, 'unexpected streamed output');
+      }
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'remote URL rejected');
+    assertEqual(seen.length, 1, 'no remote request');
+  } finally {
+    global.fetch = originalFetch;
+    if (priorBase === undefined) delete process.env.ROSE_LOCAL_BASE_URL;
+    else process.env.ROSE_LOCAL_BASE_URL = priorBase;
+    if (priorModel === undefined) delete process.env.ROSE_LOCAL_MODEL;
+    else process.env.ROSE_LOCAL_MODEL = priorModel;
+  }
 }
 
 async function testPool_getPoolRegistryShape() {
@@ -343,8 +400,9 @@ async function testPool_getPoolRegistryShape() {
     'browserUse waterfall has no anthropic layer'
   );
   assert(lite.waterfall !== ultra.waterfall, 'lite.waterfall !== ultra.waterfall');
-  assertEqual(Object.keys(POOL_REGISTRY).length, 4, 'registry has 4 pools');
+  assertEqual(Object.keys(POOL_REGISTRY).length, 5, 'registry has 5 pools');
   assert(Boolean(POOL_REGISTRY['rose-1-mini']), 'rose-1-mini registered');
+  assert(Boolean(POOL_REGISTRY['rose-local']), 'rose-local registered');
 }
 
 async function testPool_unknownModelThrows() {
@@ -4227,6 +4285,7 @@ async function main(): Promise<void> {
   const tests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'pool / isRoseModel variants', fn: testPool_isRoseModelVariants },
     { name: 'pool / poolForModel fuzzy', fn: testPool_forModelFuzzy },
+    { name: 'local / loopback only', fn: testRoseLocalOnlyCallsLoopback },
     { name: 'pool / POOL_REGISTRY shape', fn: testPool_getPoolRegistryShape },
     { name: 'pool / unknown model throws', fn: testPool_unknownModelThrows },
     { name: 'claudeAuth / happy path', fn: testClaudeAuth_happyPath },

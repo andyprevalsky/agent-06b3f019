@@ -14,6 +14,10 @@
  *     the exact top-right corner. Sitting at top-9 (36px) still lands inside the
  *     3.5rem header and covers that button, so drop the rail just below the
  *     header (its full height incl. safe-area inset) to clear the menu entirely.
+ *
+ * Horizontal offset (md+): with Rose Desktop the rail sits left of the bare
+ * top-right app icons (--rose-app-icons-inset, published by RoseAppsProvider),
+ * so it never covers them; the stock UI publishes nothing (offset 0).
  */
 
 import type { ReactNode } from 'react';
@@ -27,7 +31,7 @@ interface TopRightControlsProps {
 export function TopRightControls({ children }: TopRightControlsProps) {
   return (
     <div
-      className="fixed right-4 top-[calc(var(--mobile-terminal-header-height)+0.5rem)] z-[100] flex max-w-[calc(100vw-2rem)] items-start justify-end gap-2 md:top-9"
+      className="fixed right-4 md:right-[calc(var(--rose-app-icons-inset,0px)+1rem)] top-[calc(var(--mobile-terminal-header-height)+0.5rem)] z-[100] flex max-w-[calc(100vw-2rem)] items-start justify-end gap-2 md:top-9"
       data-testid="top-right-controls"
     >
       <div className="contents" id={TOP_RIGHT_INSPECTION_SLOT_ID} />

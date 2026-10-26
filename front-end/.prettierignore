@@ -1,2 +1,10 @@
 dist
 node_modules
+
+# Data, not source: kept byte-for-byte so `prettier --check src` covers code only.
+# Generated intro-animation pixel maps (multi-MB).
+src/lib/animation-*-pixels.json
+# Captured production payloads replayed by blackbox tests.
+src/tests/blackbox/**/*.fixture.json
+# Byte-exact stock light-mode markup that rose-theme.blackbox compares verbatim.
+src/tests/blackbox/fixtures/rose-theme-light/

@@ -25,7 +25,7 @@ interface AttentionMessageProps {
   isWaiting: boolean;
   shouldType?: boolean;
   onComplete?: () => void;
-  onStartExecution?: () => void;
+  onStartExecution?: () => void | Promise<void>;
   isStreaming?: boolean;
   attentionRequestId?: string;
   onApprove?: (requestId: string) => Promise<void>;
@@ -95,30 +95,65 @@ function WaitingIndicator(): JSX.Element {
   );
 }
 
-function AutonomousExecutionButton({ onStartExecution }: { onStartExecution: () => void }) {
+function AutonomousExecutionButton({
+  onStartExecution,
+}: {
+  onStartExecution: () => void | Promise<void>;
+}) {
+  const [requestState, setRequestState] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const handleStart = async () => {
+    if (requestState !== 'idle') return;
+    setRequestState('sending');
+    setError(null);
+    try {
+      await onStartExecution();
+      setRequestState('sent');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Failed to send request');
+      setRequestState('idle');
+    }
+  };
   return (
-    <TooltipProvider delayDuration={300}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onStartExecution}
-            className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
-          >
-            <AutonomousExecutionIcon />
-            Start Autonomous Execution
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-xs text-left text-xs">
-          <p>
-            Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any
-            more questions and will relentlessly explore all possible avenues in order to accomplish
-            your goal given the context at its disposal.
-          </p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <div className="space-y-2">
+      <TooltipProvider delayDuration={300}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void handleStart()}
+              disabled={requestState !== 'idle'}
+              aria-busy={requestState === 'sending'}
+              className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
+            >
+              {requestState === 'sending' ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <AutonomousExecutionIcon />
+              )}
+              {requestState === 'sending'
+                ? 'Sending request…'
+                : requestState === 'sent'
+                  ? 'Request sent'
+                  : 'Start Autonomous Execution'}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-xs text-left text-xs">
+            <p>
+              Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any
+              more questions and will relentlessly explore all possible avenues in order to
+              accomplish your goal given the context at its disposal.
+            </p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      {error && (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -1,7 +1,9 @@
 import { PrismaClient } from '@prisma/client';
 import { execSync } from 'node:child_process';
 
-const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+const url =
+  (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+  process.env.DATABASE_URL;
 const p = new PrismaClient({ datasources: { db: { url } } });
 
 // Collect the explore_agent llm.cache.miss keys for an agent from ClickHouse,

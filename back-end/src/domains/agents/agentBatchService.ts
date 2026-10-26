@@ -1,3 +1,4 @@
+import { resolveBatchProjectIds } from './agentProject';
 import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
@@ -97,6 +98,7 @@ function buildBatchItem(
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
+    ...(typeof body.project_id === 'string' ? { projectId: body.project_id } : {}),
     verifierType,
     ...(isBenchmark ? { isBenchmark: true } : {}),
     ...(body.attachments !== undefined
@@ -272,18 +274,14 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   for (const body of bodies) applyFastModeDefault(body, userId);
   const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
+  await resolveBatchProjectIds(bodies, userId, parentById);
   for (const body of bodies) {
     applyMemoryDefault(body, inheritsBenchmarkFromBatchParent(body, parentById));
     disableFastModeForWorldModel(body);
     assertWorldModelModeAccess(body, userId);
   }
 
-  const defaultPriceLimitCents = DEFAULT_TASK_PRICE_LIMIT_CENTS;
-  for (const body of bodies) {
-    if (body.price_limit_cents === undefined) {
-      body.price_limit_cents = defaultPriceLimitCents;
-    }
-  }
+  for (const body of bodies) body.price_limit_cents ??= DEFAULT_TASK_PRICE_LIMIT_CENTS;
 
   // Idempotency: existing rows are returned untouched.
   const allAgentIds = bodies.map((b) => b.agent_id!);

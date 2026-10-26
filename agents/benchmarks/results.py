@@ -63,9 +63,16 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
-    repeatable_cache_read_input_tokens: int = 0
-    repeatable_cache_creation_input_tokens: int = 0
-    repeatable_cache_hit_pct: float = 0.0
+    # Prompt-cache share over cache-sequenced calls (llm_usage.aggregate_prompt_cache_share).
+    prompt_cache_read_input_tokens: int = 0
+    prompt_cache_creation_input_tokens: int = 0
+    prompt_cache_uncached_input_tokens: int = 0
+    prompt_cache_share_pct: float = 0.0
+    prompt_cache_call_count: int = 0
+    # Cache lanes that served the sequenced calls (llm_usage.cache_route); selects the floor.
+    prompt_cache_routes: list[str] = field(default_factory=list)
+    # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
+    prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0

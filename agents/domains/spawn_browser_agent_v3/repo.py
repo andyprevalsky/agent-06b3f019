@@ -917,11 +917,27 @@ class BrowserSessionCloseError(RuntimeError):
         }
 
 
-async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:
-    """Close only the named browser; propagate an unacknowledged cleanup request."""
+async def close_browser_session(
+    config: Any,
+    session_id: str,
+    pause: bool = False,
+    current_url: str = "",
+    signed_in_sites: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Close only the named browser; propagate an unacknowledged cleanup request.
+
+    The backend merges every credential in the closing browser into the user's
+    browser template. ``signed_in_sites`` are the sites where this task typed a
+    saved password or asserted a passkey: sign-in evidence that marks those
+    logins as validated, which wins the template's keep-best rule. Returns the
+    backend's merge receipt (``world_state``); a retried close reaches the same
+    decisions without writing again.
+    """
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}
     if current_url:
         payload["current_url"] = current_url
+    if signed_in_sites:
+        payload["signed_in_sites"] = sorted(set(signed_in_sites))
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -935,6 +951,35 @@ async def close_browser_session(config: Any, session_id: str, pause: bool = Fals
         raise
     except Exception as e:
         raise BrowserSessionCloseError(session_id, pause) from e
+    # The receipt is observability only: an acknowledged close stays a success
+    # even when its body is empty or unreadable.
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    world_state = body.get("world_state") if isinstance(body, dict) else None
+    return world_state if isinstance(world_state, dict) else None
+
+
+def world_state_receipt_summary(receipt: Any) -> Dict[str, str]:
+    """``site [account]`` -> ``outcome/rule`` for the close log (observability only).
+
+    The default template account (``""``) is left out of the key, and entries
+    the backend did not shape as sites are skipped.
+    """
+    sites = receipt.get("sites") if isinstance(receipt, dict) else None
+    if not isinstance(sites, list):
+        return {}
+    summary: Dict[str, str] = {}
+    for entry in sites:
+        if not isinstance(entry, dict) or not isinstance(entry.get("site"), str):
+            continue
+        account = entry.get("account")
+        key = f"{entry['site']} [{account}]" if isinstance(account, str) and account else entry["site"]
+        rule = entry.get("rule")
+        outcome = str(entry.get("outcome"))
+        summary[key] = f"{outcome}/{rule}" if isinstance(rule, str) and rule else outcome
+    return summary
 
 
 async def inject_local_storage(config: Any, session_id: str, origin: str) -> Optional[Dict[str, Any]]:
@@ -1211,3 +1256,22 @@ async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since
     except Exception as e:
         logger.warning("Failed to fetch iMessages", error=str(e))
         return []
+
+
+async def create_phone_auth_assistance_request(
+    config: Any, *, user_id: str, agent_id: str, task_id: str,
+    critical_reason: str, request_key: str, expected_cursor: int,
+    client: httpx.AsyncClient,
+) -> httpx.Response:
+    """Native creation has no browser URL/profile or credential-bearing fields."""
+    return await client.post(
+        f"{config.backend.api_url.rstrip('/')}/api/auth-assistance",
+        headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+        json={
+            "agentId": agent_id, "authRealm": "iphone", "mode": "manual_step",
+            "targetKind": "iphone", "browserTaskId": task_id,
+            "criticalReason": critical_reason, "requestKey": request_key,
+            "expectedCursor": expected_cursor,
+        },
+        timeout=15.0,
+    )

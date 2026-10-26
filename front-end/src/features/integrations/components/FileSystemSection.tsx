@@ -21,7 +21,7 @@ interface FileSystemSectionProps {
   isAvailable: boolean;
 }
 
-function FileSystemIcon() {
+export function FileSystemIcon() {
   return (
     <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <defs>

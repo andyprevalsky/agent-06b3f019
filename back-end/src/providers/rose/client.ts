@@ -40,6 +40,7 @@ import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } fro
 import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
+import { localCompletion } from './local';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { withNativeToolContract } from './transforms';
@@ -106,7 +107,7 @@ export async function createStreamingCompletion(
   if (options.response_format && options.response_model) {
     throw new Error('Rose: pass either response_format or response_model, not both');
   }
-
+  if (pool === 'rose-local') return localCompletion(options);
   const normalizedOptions: CompletionOptions = {
     ...options,
     // Provider Anthropic/OpenRouter speed=fast is on by default; callers opt out
@@ -156,8 +157,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const acc = createStreamAccumulator();
   let dumpPath: string | null = null;
 
-  // OpenAI-dialect legs (Responses, Cerebras, OpenRouter) receive a tool-envelope
-  // response_model as native tools, like agents/providers/rose/client.py. The
+  // OpenAI-dialect legs receive a tool-envelope response_model as native tools.
   // Anthropic legs extract the same tools from response_format themselves.
   const toolOptions = withNativeToolContract(opts.options);
   const openAiToolFields = {

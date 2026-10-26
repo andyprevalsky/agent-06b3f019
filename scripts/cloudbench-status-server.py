@@ -25,7 +25,7 @@ BENCH_LOG_ANCHOR_BYTES = 4_096
 MAX_RECOVERY_RECEIPT_BYTES = 65_536
 MAX_RECOVERY_STATE_BYTES = 1_048_576
 MAX_RECOVERY_RUN_BYTES = 512 * 1024 * 1024
-OPTIONAL_RUNTIME_EVIDENCE = "wmh-serve-log.txt"
+OPTIONAL_RUNTIME_EVIDENCE = ("wmh-serve-log.txt", "guest-diagnostics.jsonl")
 
 
 def read_runtime_metadata(path: Path, maximum: int) -> bytes:
@@ -43,17 +43,26 @@ def read_runtime_metadata(path: Path, maximum: int) -> bytes:
         return data
 
 
-def runtime_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
+def runtime_evidence_paths(root: Path, run_token: str, cleanup_state: str = "clean") -> dict[str, Path]:
     """Enumerate the complete stopped stack, never a capped agent-filtered view."""
-    return runtime_evidence_context_paths(root / "repo/.context/cloudbench", run_token)
+    return runtime_evidence_context_paths(root / "repo/.context/cloudbench", run_token, cleanup_state)
 
 
-def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, Path]:
-    """Apply the same stopped-stack contract to original or collected contexts."""
+def runtime_evidence_context_paths(context: Path, run_token: str, cleanup_state: str = "clean") -> dict[str, Path]:
+    """Apply the same stopped-stack contract to original or collected contexts.
+
+    ``cleanup_state="failed"`` is the diagnostic-only view of a stack whose
+    own teardown failed (for example a worker drain that outlived its grace).
+    run.sh then records services as stopped or failed; the files are still the
+    only copy of the worker/stack logs that explain the failure.
+    """
+    if cleanup_state not in ("clean", "failed"):
+        raise ValueError("unsupported cleanup state")
     service_path = context / "services.json"
     services = json.loads(read_runtime_metadata(service_path, MAX_RECOVERY_STATE_BYTES))
     count = services["env"]["worker_processes"]
-    if services["status"] != "stopped" or type(count) is not int or not 1 <= count <= 1024:
+    allowed = ("stopped",) if cleanup_state == "clean" else ("stopped", "failed")
+    if services["status"] not in allowed or type(count) is not int or not 1 <= count <= 1024:
         raise ValueError("stack is not stopped or worker inventory is invalid")
     names = {"worker.log", *(f"worker.{i}.log" for i in range(1, count))}
     if {p.name for p in (context / "logs").glob("worker*.log")} != names:
@@ -62,8 +71,11 @@ def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, P
     paths = {name: context / name for name in ["services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log", *("logs/" + n for n in sorted(names))]}
     # The served WMH's own log (per-step server timing) exists only when the
     # stack served a world model. It is stopped with the stack like the rest.
-    if os.path.lexists(context / OPTIONAL_RUNTIME_EVIDENCE):
-        paths[OPTIONAL_RUNTIME_EVIDENCE] = context / OPTIONAL_RUNTIME_EVIDENCE
+    # The guest diagnostics samples (CPU/load, DB pool, pg_stat_activity) exist
+    # only when the sampler ran.
+    for optional in OPTIONAL_RUNTIME_EVIDENCE:
+        if os.path.lexists(context / optional):
+            paths[optional] = context / optional
     total = 0
     for path in paths.values():
         info = path.lstat()
@@ -73,17 +85,48 @@ def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, P
     if total > MAX_RECOVERY_RUN_BYTES:
         raise ValueError("runtime evidence exceeds recovery byte ceiling")
     cleanup = dict(line.split("=", 1) for line in read_runtime_metadata(paths[cleanup_name], MAX_RECOVERY_RECEIPT_BYTES).decode().splitlines())
-    if cleanup.get("state") != "clean" or cleanup.get("token") != run_token:
-        raise ValueError("stack cleanup is not acknowledged")
+    if cleanup.get("state") != cleanup_state or cleanup.get("token") != run_token:
+        raise ValueError("stack cleanup is not acknowledged" if cleanup_state == "clean"
+                         else "stack cleanup did not record failure")
     return paths
 
 
-def runtime_evidence_manifest(root: Path, run_token: str, machine: str) -> dict:
-    return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine)
+def prelaunch_sealed(root: Path, run_token: str) -> bool:
+    """The boot supervisor stopped before launching any driver, stack or browser.
+
+    cloudbench-boot.sh writes this token-bound seal only on its no-launch paths,
+    before the cleanup ACK, so the only runtime evidence is the exact bench.log.
+    """
+    seal = root / f"cloudbench-prelaunch-{run_token}.sealed"
+    try:
+        info = seal.lstat()
+        return (stat.S_ISREG(info.st_mode)
+                and read_runtime_metadata(seal, MAX_RECOVERY_RECEIPT_BYTES) == f"{run_token}\n".encode()
+                and not os.path.lexists(root / "cloudbench-driver.pid"))
+    except (OSError, ValueError):
+        return False
 
 
-def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str) -> dict:
-    paths = runtime_evidence_context_paths(context, run_token)
+def runtime_evidence_manifest(root: Path, run_token: str, machine: str, cleanup_state: str = "clean") -> dict:
+    if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
+        manifest = runtime_evidence_files_manifest({"bench.log": root / "bench.log"}, run_token, machine)
+        manifest["prelaunch"] = True
+        return manifest
+    return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine, cleanup_state)
+
+
+def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str,
+                                      cleanup_state: str = "clean") -> dict:
+    paths = runtime_evidence_context_paths(context, run_token, cleanup_state)
+    manifest = runtime_evidence_files_manifest(paths, run_token, machine)
+    if runtime_evidence_context_paths(context, run_token, cleanup_state) != paths:
+        raise ValueError("runtime inventory changed")
+    if cleanup_state != "clean":
+        manifest["stack_cleanup_state"] = cleanup_state
+    return manifest
+
+
+def runtime_evidence_files_manifest(paths: dict[str, Path], run_token: str, machine: str) -> dict:
     files = {}
     for name, path in paths.items():
         before = path.stat()
@@ -104,8 +147,6 @@ def runtime_evidence_context_manifest(context: Path, run_token: str, machine: st
             if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                 raise ValueError("runtime evidence changed during read")
         files[name] = {"bytes": opened.st_size, "sha256": digest.hexdigest()}
-    if runtime_evidence_context_paths(context, run_token) != paths:
-        raise ValueError("runtime inventory changed")
     return {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
 
 
@@ -311,16 +352,22 @@ def main() -> int:
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
-            if parsed.path == "/runtime-evidence":
+            if parsed.path in ("/runtime-evidence", "/failed-runtime-evidence"):
                 supplied = self.headers.get("Authorization", "")
                 if not token or not hmac.compare_digest(supplied, f"Bearer {token}"):
                     self.send_error(403)
                     return
                 machine = os.environ.get("FLY_MACHINE_ID", "")
+                # The sealed view requires the driver's clean acknowledgement.
+                # The failed view is diagnostic only: the driver exited and
+                # refused that acknowledgement because the stack teardown
+                # failed. It never makes /runtime-evidence or the ACK appear.
+                cleanup_state = "clean" if parsed.path == "/runtime-evidence" else "failed"
                 if (not run_token or not machine
                     or self.headers.get("X-Cloudbench-Run-Token") != run_token
                     or self.headers.get("X-Cloudbench-Machine-Id") != machine
-                    or not cleanup_acknowledged() or read_driver_state() != "exited"):
+                    or cleanup_acknowledged() != (cleanup_state == "clean")
+                    or read_driver_state() != "exited"):
                     self.send_error(409, "exact runtime is not sealed")
                     return
                 try:
@@ -328,11 +375,15 @@ def main() -> int:
                     if parameters:
                         if set(parameters) != {"file"} or len(parameters["file"]) != 1:
                             raise ValueError("invalid runtime evidence request")
-                        paths = runtime_evidence_paths(root, run_token)
+                        if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
+                            paths = {"bench.log": root / "bench.log"}
+                        else:
+                            paths = runtime_evidence_paths(root, run_token, cleanup_state)
                         target = paths[parameters["file"][0]]
                         self._serve_recovery_evidence(target, MAX_RECOVERY_RUN_BYTES)
                     else:
-                        data = json.dumps(runtime_evidence_manifest(root, run_token, machine), sort_keys=True).encode()
+                        data = json.dumps(runtime_evidence_manifest(root, run_token, machine, cleanup_state),
+                                          sort_keys=True).encode()
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(data)))

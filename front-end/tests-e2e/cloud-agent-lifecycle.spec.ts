@@ -87,11 +87,15 @@ test.describe('cloud-agent lifecycle', () => {
   test('renders browser-visible cloud lifecycle chips as non-expandable rows', async ({ page }) => {
     const rec = attachRecorder(page);
 
-    await page.addInitScript(({ sessionValue, userValue }) => {
-      window.localStorage.setItem('rose-session', JSON.stringify(sessionValue));
-      window.localStorage.setItem('app-user', JSON.stringify(userValue));
-    }, { sessionValue: session, userValue: user });
+    await page.addInitScript(
+      ({ sessionValue, userValue }) => {
+        window.localStorage.setItem('rose-session', JSON.stringify(sessionValue));
+        window.localStorage.setItem('app-user', JSON.stringify(userValue));
+      },
+      { sessionValue: session, userValue: user },
+    );
 
+    let status = 'ACTIVE';
     await page.route('**/api/**', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -101,14 +105,14 @@ test.describe('cloud-agent lifecycle', () => {
       }
 
       if (request.method() === 'GET' && url.pathname === '/api/agents') {
-        await route.fulfill({ json: { agents: [agent] } });
+        await route.fulfill({ json: { agents: [{ ...agent, status }] } });
         return;
       }
 
       if (request.method() === 'GET' && url.pathname === `/api/agents/${AGENT_ID}`) {
         await route.fulfill({
           json: {
-            agent,
+            agent: { ...agent, status },
             messages: lifecycleMessages,
             pagination: { has_more: false, oldest_timestamp: null },
           },
@@ -128,12 +132,34 @@ test.describe('cloud-agent lifecycle', () => {
       waitUntil: 'domcontentloaded',
     });
 
+    // Rose Desktop folds a running agent's lifecycle rows into one live trajectory
+    // row: it shows the latest lifecycle title with the cloud icon, no progress ring,
+    // and cannot be expanded until the work compresses.
+    const group = page.getByTestId('trajectory-work-group');
+    await expect(group).toHaveCount(1);
+    await expect(group).toHaveAttribute('data-state', 'running');
+    await expect(group.getByTestId('trajectory-activity-line')).toHaveText(
+      lifecycleMessages.at(-1)!.metadata.title,
+    );
+    await expect(group.locator('svg.lucide-cloud')).toHaveCount(1);
+    await expect(group.getByTestId('tool-batch-progress-ring')).toHaveCount(0);
+    await expect(group.getByRole('button')).toBeDisabled();
     for (const msg of lifecycleMessages) {
-      await expect(page.getByText(msg.metadata.title, { exact: true })).toBeVisible();
       await expect(page.getByText(msg.text, { exact: true })).toHaveCount(0);
     }
 
-    const rows = page.locator('[data-message-role="TOOL"]');
+    // Once compressed, the history holds every lifecycle chip as a non-expandable row.
+    status = 'COMPLETED';
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(group).toHaveAttribute('data-state', 'completed');
+    await group.getByRole('button').click();
+    const history = group.getByTestId('trajectory-work-history');
+    for (const msg of lifecycleMessages) {
+      await expect(history.getByText(msg.metadata.title, { exact: true })).toBeVisible();
+      await expect(page.getByText(msg.text, { exact: true })).toHaveCount(0);
+    }
+
+    const rows = history.locator('[data-message-role="TOOL"]');
     await expect(rows).toHaveCount(lifecycleMessages.length);
 
     for (const row of await rows.all()) {

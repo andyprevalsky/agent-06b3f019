@@ -984,6 +984,10 @@ def run_exact_psql(
 
 
 def root_tree_query_sql(root_agent_id: str, *, include_sealing_state: bool = False) -> str:
+    # browser_sessions lists provider-backed rows only. Agent creation gives every
+    # agent a logical browser with no provider session ("sessionId" NULL); the
+    # schema's BrowserSession_unmaterialized_check guarantees such a row is only
+    # that unmaterialized identity, so it holds nothing to release or audit.
     statement = f"""
 WITH RECURSIVE tree AS (
   SELECT id, "parentAgentId", "deletedAt"
@@ -1015,6 +1019,7 @@ SELECT json_build_object(
     )
     FROM "BrowserSession" session
     WHERE session."agentId" IN (SELECT id FROM tree)
+      AND session."sessionId" IS NOT NULL
   ), '[]'::json)
 )::text;
 """.strip()

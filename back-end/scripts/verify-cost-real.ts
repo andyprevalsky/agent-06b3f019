@@ -1,5 +1,5 @@
 /**
- * Prove a $0 run is REAL (pure fast-cache replay), not "cost hacked to 0 while
+ * Prove a $0 run is REAL (pure demo-cache replay), not "cost hacked to 0 while
  * still issuing paid OpenRouter/Anthropic calls".
  *
  * For every LLM ToolUsage row in the tree, inspects each usageItem:
@@ -7,7 +7,7 @@
  *   - from_fast_cache=false -> a LIVE call actually hit a provider. We surface the
  *     actual_model + pool + cost so a "$0" that is really paid traffic can't hide.
  *
- * A genuine 100%-fast-cache run has live_calls=0 and paid_cents=0. Any live call
+ * A genuine 100%-demo-cache run has live_calls=0 and paid_cents=0. Any live call
  * (especially a non-claude/-gpt "-anthropic"/openrouter pool with cost>0) means the
  * run is NOT actually free.
  *
@@ -79,7 +79,7 @@ async function main() {
   }
   const verdict =
     live === 0 && paidCents === 0
-      ? '✅ REAL $0: 100% fast-cache replay, zero live provider calls, zero paid tokens.'
+      ? '✅ REAL $0: 100% demo-cache replay, zero live provider calls, zero paid tokens.'
       : `❌ NOT free: ${live} live calls, ${paidCents}c paid — the run is issuing real provider traffic.`;
   console.log(`\n${verdict}`);
   await prisma.$disconnect();

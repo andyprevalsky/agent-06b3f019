@@ -16,11 +16,13 @@ import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import exploreEvidenceRoutes from './routes.exploreEvidence';
 import batchRoutes from './routes.batch';
-import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
+import progressEstimateRoutes from './routes.progressEstimate';
 import archiveRoutes from './routes.archive';
 import reportBugRoutes from './routes.reportBug';
 import phoneRoutes from './routes.phone';
+import codeAgentRoutes from './routes.codeAgents';
+import rootPreviewRoutes from './routes.rootPreview';
 import agentMessageRoutes from './routes.agentMessages';
 import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
@@ -85,8 +87,9 @@ router.get(
   })
 );
 
+router.use('/', codeAgentRoutes);
+router.use('/', rootPreviewRoutes);
 router.use('/', archiveRoutes);
-router.use('/', alertRoutes);
 router.use('/', reportBugRoutes);
 
 router.get(
@@ -168,12 +171,17 @@ router.post(
         return;
       }
       const clientIP = getClientIP(req);
+      // The Rose Mac app's main process stamps its device id on renderer
+      // requests; it is recorded as the agent's origin (C14 local code agents).
+      const originDeviceHeader =
+        req.isInternal === true ? undefined : req.header('x-rose-device-id');
       const result = await lifecycleService.createAgent(
         body,
         userId,
         req.isInternal === true,
         clientIP,
-        routeGuards.isBenchmarkRequest(req)
+        routeGuards.isBenchmarkRequest(req),
+        originDeviceHeader !== undefined ? { originDeviceHeader } : {}
       );
       res.status(201).json(result);
     } catch (error) {
@@ -205,6 +213,7 @@ router.delete(
 );
 
 router.use(statusRoutes);
+router.use(progressEstimateRoutes);
 
 router.patch(
   '/:id',

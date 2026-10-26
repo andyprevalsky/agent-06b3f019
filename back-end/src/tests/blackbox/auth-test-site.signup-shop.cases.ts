@@ -212,6 +212,22 @@ test('signup_purchase: checkout needs an account, and one settled order belongs 
           stranger.status === 303 && !(stranger.headers.get('location') ?? '').includes('/orders/'),
           `a receipt must not render for a request without the purchaser's session: ${stranger.status}`
         );
+        // A browser whose checkout response was lost in transit (a proxy 502
+        // after the order was placed) must find the outcome by browsing, without
+        // resubmitting payment: the emptied checkout leads to the cart, and the
+        // cart and the account page both link the purchaser's receipt.
+        const orderLink = `/orders/${orderNumber}?`;
+        const lostCheckout = await getPage(base, pagePath(manifest, '/checkout'), cookies);
+        assert(
+          (lostCheckout.headers.get('location') ?? '').includes('/cart'),
+          `an emptied checkout leads to the cart: ${lostCheckout.headers.get('location')}`
+        );
+        const cartAfter = await (await getPage(base, pagePath(manifest, '/cart'), cookies)).text();
+        assert(cartAfter.includes(orderLink), 'the cart must link the order it just paid for');
+        const account = await (await getPage(base, pagePath(manifest, '/account'), cookies)).text();
+        assert(account.includes(orderLink), "the account page must list the member's orders");
+        const strangerCart = await (await getPage(base, pagePath(manifest, '/cart'), '')).text();
+        assert(!strangerCart.includes(orderNumber), "a stranger's cart must not list the order");
         // A browser that missed the redirect repeats the POST against the cart the
         // order already emptied; it must get the paid order back, not "empty cart".
         const replayed = await postForm(base, pagePath(manifest, '/checkout'), CARD, cookies);
@@ -361,6 +377,12 @@ test('member price shops state the membership terms, and a refused sign-up still
         const guestReceiptPath = placed.headers.get('location') ?? '';
         const withCart = await getPage(base, guestReceiptPath, cart);
         assert(withCart.status === 200, 'the guest browser reads its own receipt');
+        const guestOrderNumber = /\/orders\/(ORD-\d{8})\?/.exec(guestReceiptPath)?.[1] ?? '';
+        const guestCart = await (await getPage(base, pagePath(manifest, '/cart'), cart)).text();
+        assert(
+          guestOrderNumber !== '' && guestCart.includes(`/orders/${guestOrderNumber}?`),
+          'the guest cart must link the order it paid for'
+        );
         const withoutCart = await getPage(base, guestReceiptPath, '');
         assert(
           withoutCart.status === 303,

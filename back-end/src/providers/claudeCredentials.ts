@@ -114,6 +114,11 @@ export interface ClaudeCodeCredentialResult {
   userId: string;
   /** Integration ID — set when source='pool' so rotation can mark it rate-limited. */
   poolTokenId?: string;
+  /**
+   * The user's own Integration row (source='user'), so a usage limit marks
+   * exactly that account and the user's other accounts stay leasable.
+   */
+  integrationId?: string;
 }
 
 /**
@@ -164,7 +169,7 @@ export async function fetchClaudeCodeCredentialsWithMeta(
         const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
         if (result) {
           log.info(`Serving user Claude Code credentials for ${userId}`);
-          return result;
+          return { ...result, integrationId: userIntegration.id };
         }
         log.warn(`User Claude Code integration for ${userId} has no usable OAuth token`);
       }
@@ -197,7 +202,7 @@ export async function fetchClaudeCodeCredentialsWithMeta(
           log.info(
             `Serving refreshable user Claude Code envelope for ${userId} after direct-token auth failure`
           );
-          return forceOauthEnvelopeRefresh(result);
+          return { ...forceOauthEnvelopeRefresh(result), integrationId: integration.id };
         }
       }
     }

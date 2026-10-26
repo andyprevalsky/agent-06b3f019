@@ -1,3 +1,4 @@
+import { reconcileAgent } from '@/lib/progressEstimate';
 /**
  * Terminal feature — agent list loading and polling hook.
  *
@@ -29,7 +30,11 @@ export function useAgentList(canSubmitGoals: boolean) {
     setIsLoadingAgents(true);
     try {
       const fetched = await fetchAgents();
-      if (loadId === latestLoad.current) setAgents(fetched);
+      if (loadId === latestLoad.current)
+        setAgents((previous) => {
+          const byId = new Map(previous.map((agent) => [agent.agent_id, agent]));
+          return fetched.map((agent) => reconcileAgent(byId.get(agent.agent_id), agent));
+        });
     } catch (_err: unknown) {
       toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
     } finally {

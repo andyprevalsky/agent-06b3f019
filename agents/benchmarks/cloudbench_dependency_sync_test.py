@@ -1549,7 +1549,9 @@ boot_config_failed_child
         check=False,
     )
     assert failed.returncode == 0
-    assert failed.stdout.strip() == "bench-1"
+    # The barrier receives the child slot so it can replace a host-unresponsive
+    # clone in place before deciding to abort.
+    assert failed.stdout.strip() == "0"
 
     (barrier / "ready" / "machine-1").touch()
     ready = subprocess.run(
@@ -1610,6 +1612,8 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
 def test_fleet_gives_a_long_catalog_task_its_own_default_budget() -> None:
     fleet = FLEET_SCRIPT.read_text()
     catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    # The batch classifier reads the fleet-level fan-out threshold.
+    catalog_fn = re.search(r"^FLEET_FANOUT_MIN_AGENT_COUNT=.*$", fleet, re.M).group() + "\n" + catalog_fn
     budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
     script = f"""set -euo pipefail
 ROOT_DIR={shlex.quote(str(ROOT))}
@@ -1632,7 +1636,7 @@ done
     hold_timeout = catalog["phone-call-hold-queue"]["timeout_seconds"]
     intake_timeout = catalog["phone-call-client-intake"]["timeout_seconds"]
     assert hold_timeout > 7200 > intake_timeout
-    assert lines[:2] == [f"real\tplain\t{hold_timeout}", f"real\tplain\t{intake_timeout}"]
+    assert lines[:2] == [f"real\tplain\t{hold_timeout}\tflat", f"real\tplain\t{intake_timeout}\tflat"]
     assert lines[2:] == [
         "budget 0 7200 12600 7200",
         "budget 0 300 12600 600",
@@ -1680,6 +1684,8 @@ def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
     catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    # The batch classifier reads the fleet-level fan-out threshold.
+    catalog_fn = re.search(r"^FLEET_FANOUT_MIN_AGENT_COUNT=.*$", fleet, re.M).group() + "\n" + catalog_fn
     benchmarks = tmp_path / "agents" / "benchmarks"
     benchmarks.mkdir(parents=True)
     shutil.copy(TASKS_JSON.with_name("polar_tasks.json"), benchmarks / "polar_tasks.json")
@@ -1702,7 +1708,7 @@ _catalog_modes_for_batch phone-call-hold-queue
 
     accepted = preflight(2**31 - 1)
     assert accepted.returncode == 0, accepted.stderr
-    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}"]
+    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}\tflat"]
     # Beyond Bash's integer range `-gt` errors out, and near it the barrier
     # allowance added to the budget wraps negative; neither may reach the shell.
     for timeout_seconds in (2**63, 2**63 - 1):
@@ -2778,7 +2784,8 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
     write_executable(controls / "prepare-patch.sh", "#!/usr/bin/env bash\nexit 0\n")
     write_executable(
         controls / "catalog.py",
-        "#!/usr/bin/env python3\nimport sys\nsys.exit(10 if sys.argv[1] == 'requires-gate' else 0)\n",
+        "#!/usr/bin/env python3\nimport sys\n"
+        "sys.exit(0)\n",
     )
     write_executable(
         controls / "target.py",
@@ -2790,6 +2797,7 @@ cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
 cloudbench_env_value() { return 0; }
+cloudbench_apply_compute_token_authority() { return 0; }
 """
     )
     (controls / "seed-budget.sh").write_text("stack_wait_budget_seconds() { printf '5\\n'; }\n")
@@ -3035,7 +3043,7 @@ def test_task_gate_uses_pinned_catalog_only_after_exact_checkout_and_patch(
     status_restart = driver.index("# Replace the bootstrap read-only", patch_end)
     assert patch_end < production_resolve < status_restart
     assert "from benchmarks.benchmark_tasks" not in driver
-    assert '"$task_gate_python" "$CATALOG_SCRIPT" requires-gate' in resolve_gate
+    assert '"$task_gate_python" "$CATALOG_SCRIPT" task-env' in resolve_gate
 
     repo = tmp_path / "repo"
     catalog_dir = repo / "agents/benchmarks"
@@ -3074,7 +3082,7 @@ def test_task_gate_uses_pinned_catalog_only_after_exact_checkout_and_patch(
             ]
         )
     )
-    for task, expected in (("selected", "NON_PURCHASE_GATES_ENABLED=1"), ("plain", "")):
+    for task, expected in (("selected", True), ("plain", False)):
         result = subprocess.run(
             [
                 "bash",
@@ -3101,7 +3109,7 @@ printf '%s' "${{TASK_WORKER_ENV[*]:-}}"
             timeout=5,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout == expected
+        assert ("NON_PURCHASE_GATES_ENABLED=1" in result.stdout.split()) is expected, result.stdout
     assert not marker.exists(), "checkout-owned catalog/Python executed as control code"
 
 
@@ -3523,6 +3531,7 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
         _extract_fleet_function(boot, f"{name}() {{")
         for name in (
             "publish_driver_state",
+            "publish_prelaunch_seal",
             "publish_cleanup_ack",
             "seal_missing_injected_helper",
         )
@@ -3540,6 +3549,7 @@ def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: P
         CLOUDBENCH_RUN_TOKEN="current-token",
         DRIVER_STATE_FILE=str(tmp_path / "state"),
         CLEANUP_ACK_FILE=str(tmp_path / "ack"),
+        PRELAUNCH_SEAL_FILE=str(tmp_path / "prelaunch"),
         LOG=str(tmp_path / "boot.log"),
     )
     result = subprocess.run(
@@ -3561,6 +3571,9 @@ printf launched > {shlex.quote(str(tmp_path / "launched"))}
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "state").read_text() == "exited\n"
     assert (tmp_path / "ack").read_text() == "current-token\n"
+    # The no-launch seal lets the status server publish bench.log as the
+    # complete runtime evidence, so the fleet can retire this guest.
+    assert (tmp_path / "prelaunch").read_text() == "current-token\n"
     assert not (tmp_path / "launched").exists()
 
 
@@ -4171,6 +4184,7 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
     """
     boot = BOOT_SCRIPT.read_text()
     publish_state = _extract_fleet_function(boot, "publish_driver_state() {")
+    publish_seal = _extract_fleet_function(boot, "publish_prelaunch_seal() {")
     publish_ack = _extract_fleet_function(boot, "publish_cleanup_ack() {")
     seal_missing = _extract_fleet_function(boot, "seal_missing_injected_helper() {")
 
@@ -4185,6 +4199,7 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
     assert 'DRIVER="$REPO/scripts/cloudbench-run.sh"' not in boot
     assert 'bash "$REPO/scripts/cloudbench-fetch-ref.sh"' not in boot
     assert "refusing checked-out fallback" in seal_missing
+    assert seal_missing.index("publish_prelaunch_seal") < seal_missing.index("publish_cleanup_ack")
     assert seal_missing.index("publish_cleanup_ack") < seal_missing.index("publish_driver_state exited")
 
     for helper_name in ("driver", "fetch-ref-helper", "status-server"):
@@ -4195,13 +4210,16 @@ def test_boot_launch_missing_injected_control_seals_without_checkout_fallback(
             state = tmp_path / f"{helper_name}-{payload}.state"
             ack = tmp_path / f"{helper_name}-{payload}.ack"
             log = tmp_path / f"{helper_name}-{payload}.log"
+            seal = tmp_path / f"{helper_name}-{payload}.prelaunch"
             script = f"""set -uo pipefail
 {publish_state}
+{publish_seal}
 {publish_ack}
 {seal_missing}
 DRIVER_STATE_FILE="$1"
 CLEANUP_ACK_FILE="$2"
 LOG="$3"
+PRELAUNCH_SEAL_FILE="$6"
 CLOUDBENCH_RUN_TOKEN=token-no-launch
 seal_missing_injected_helper "$4" "$5"
 """
@@ -4216,6 +4234,7 @@ seal_missing_injected_helper "$4" "$5"
                     str(log),
                     helper_name,
                     str(injected),
+                    str(seal),
                 ],
                 text=True,
                 capture_output=True,
@@ -4225,6 +4244,7 @@ seal_missing_injected_helper "$4" "$5"
             assert result.returncode == 0, result.stderr
             assert state.read_text() == "exited\n"
             assert ack.read_text() == "token-no-launch\n"
+            assert seal.read_text() == "token-no-launch\n"
             assert f"controller-injected {helper_name} missing or empty" in log.read_text()
 
     # Even a malicious helper inside the requested ref cannot replace the
@@ -4412,6 +4432,7 @@ sleep() {{ :; }}
 {pool_count}
 {reap}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -4745,6 +4766,7 @@ controller_github_token_b64() {{ return 1; }}
 reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -5018,6 +5040,7 @@ controller_github_token_b64() {{ printf token; }}
 reap_machine() {{ printf '%s\n' "$1" > {shlex.quote(str(reaped))}; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -6370,6 +6393,7 @@ FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 FLEET_WORKER_VM_SIZE=shared-cpu-2x
 FLEET_WORKER_VM_MEMORY=4096
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision_worker}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -6437,7 +6461,10 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert 'FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"' in worker
-    assert 'CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"' in worker
+    assert (
+        'CLOUDBENCH_APP_USER="$APP_USER" CLOUDBENCH_SOURCE_SCOPE=worker-runtime \\\n'
+        '        bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"'
+    ) in worker
     assert 'git -C "$REPO_DIR" fetch origin "$REF"' not in worker
     assert worker.index("unset CLOUDBENCH_GITHUB_TOKEN_B64") < worker.index("bash ./scripts/run_local_worker.sh")
     assert "rm -f /tmp/rbw.env" in worker
@@ -6539,6 +6566,7 @@ fly_with_timeout() {{
 }}
 sleep() {{ :; }}
 {token_helper}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {provision}
 cloudbench_record_worker_evidence_owner() {{ :; }}
 cloudbench_capture_worker_runtime_evidence() {{ :; }}
@@ -24752,7 +24780,8 @@ CLOUDBENCH_TERMINAL_LOG_MAX_CHUNKS=999999 refresh_bench_log_to_eof
     assert result.returncode == 0, result.stderr
     poll_loop = cloud[cloud.index('poll_start="$(date +%s)"') : cloud.index("# Preserve the complete remote driver")]
     assert '[ "$BENCH_LOG_CHUNKS_PER_POLL" -le 4 ]' in poll_loop
-    assert '[ "$BENCH_LOG_BACKLOG_MAX_CHUNKS" -le 128 ]' in poll_loop
+    # 327f78ab3 bounds the terminal backlog by bytes; hostile overrides still cannot raise the ceiling.
+    assert '[ "$BENCH_LOG_BACKLOG_MAX_BYTES" -le 536870912 ]' in poll_loop
     assert '[ "$BENCH_LOG_BACKLOG_MAX_FAILURES" -le 5 ]' in poll_loop
     assert '[ "$BENCH_LOG_READ_MAX_FAILURES" -le 5 ]' in poll_loop
     assert '[ "$BENCH_LOG_TERMINAL_MAX_FAILURES" -le 5 ]' in poll_loop
@@ -31890,8 +31919,21 @@ def test_autoscaler_runtime_handoff_capacity_observation_pending(
         if inventory
         else ""
     )
+    # provision_worker reads the shared-cache policy through the real catalog
+    # script under ROOT_DIR; give it a one-task fixture catalog.
+    fixture_root = tmp_path / "root"
+    (fixture_root / "scripts").mkdir(parents=True)
+    (fixture_root / "agents" / "benchmarks").mkdir(parents=True)
+    (fixture_root / "scripts" / "cloudbench_catalog.py").symlink_to(ROOT / "scripts" / "cloudbench_catalog.py")
+    (fixture_root / "agents" / "benchmarks" / "tasks.json").write_text(
+        json.dumps([{"name": "fixture-task", "demo_cache": "off"}])
+    )
+    (fixture_root / "agents" / "benchmarks" / "polar_tasks.json").symlink_to(
+        ROOT / "agents" / "benchmarks" / "polar_tasks.json"
+    )
     script = f"""set -uo pipefail
 CASE={shlex.quote(str(tmp_path))}
+ROOT_DIR={shlex.quote(str(fixture_root))}
 APP=fixture-app
 RUN_ID=fixture-run
 FLEET_OWNER_TOKEN={"a" * 32}
@@ -32078,7 +32120,10 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
         + "\n"
     )
     launch = source.split("# ── Phase 2: launch each provisioned bench", 1)[1]
-    launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    # The per-bench launch body lives in launch_fleet_bench_child; splice it
+    # into this fixture's own bench loop.
+    launch = launch.split('    local i="$1" bench="$2" slot="${3:-}"\n', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
+    launch = launch.rsplit("    if [ -z \"$slot\" ]; then", 1)[0]
     supervisor = "\n".join(
         _extract_fleet_function(source, name + "() {")
         for name in (
@@ -36094,9 +36139,11 @@ def test_worker_reuse_gap_refuses_before_reservation_or_provider_work(tmp_path: 
     if terminal:(tmp_path/'benchmark-child.finished').write_text('143\n')
     calls=tmp_path/'forbidden'
     result=subprocess.run(['bash','-c',f'''set -uo pipefail
+ROOT_DIR={shlex.quote(str(ROOT))}
 reserve_worker_machine_slot() {{ printf reserve >> {shlex.quote(str(calls))}; return 0; }}
 machine_volume_size_gb() {{ printf lookup >> {shlex.quote(str(calls))}; return 99; }}
 clone_machine_target() {{ printf create >> {shlex.quote(str(calls))}; return 99; }}
+python3() {{ if [ "${{3:-}}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }}  # catalog policy: writable cache
 {functions}
 provision_worker task workspace aaaaaaaaaaaaaa 127.0.0.1 0 "$1" token
 ''','actual-worker-entry',str(tmp_path)],capture_output=True,text=True,timeout=5)

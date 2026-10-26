@@ -160,7 +160,7 @@ test('syncIntegrationCredentials keeps integration primary keys local', async ()
   const remote = {
     id: 'remote-gpt-id',
     userId: 'seed-user',
-    type: 'API' as const,
+    type: 'TOOL_SETUP' as const,
     name: 'gpt_code',
     status: 'CONNECTED' as const,
     isActive: true,
@@ -170,6 +170,7 @@ test('syncIntegrationCredentials keeps integration primary keys local', async ()
     failureReason: null,
     config: { encryptedCredentials: 'fresh-envelope' },
     poolingEnabled: false,
+    poolingEnabledOverride: null,
     rateLimitedUntil: null,
     lastUsedAt: null,
     accountId: '',

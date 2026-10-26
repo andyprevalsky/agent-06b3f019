@@ -19,6 +19,7 @@ from domains.set_plan.service import (
     validate_planner_result,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.rose_desktop import is_rose_desktop_user
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -54,7 +55,9 @@ class SetPlanManager(ToolManager):
         context_start = workflow.now()
         base_messages, user_messages = build_planner_messages(workflow_instance.context)
 
-        tools_description = get_planner_tools_description()
+        tools_description = get_planner_tools_description(
+            rose_desktop=is_rose_desktop_user(getattr(workflow_instance, "user_id", None))
+        )
         user_context = getattr(workflow_instance, "user_context_section", "")
         response_schema = getattr(workflow_instance, "output_schema", None)
 

@@ -171,6 +171,11 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
     env.update(CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="1",
                CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="1",
                CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="0")
+    # One confirmed INFRA job of two scheduled meets the native fixed-total stop
+    # (20*1 >= 2, K11), which correctly cancels before any retry. This case owns
+    # the retry mechanics, so it uses the documented operator opt-out; the stop
+    # itself is owned by the campaign-hub-grouping regression.
+    env["CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP"] = "disabled"
     if failure == "infra-parent-owned":
         # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
         env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
@@ -206,10 +211,17 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
                 'physical run handle unavailable' if failure == 'retry-handle-missing'
                 else 'terminal result or release remains unverified'
             )
-            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'task_status',
-                        'infra_failure', 'terminal_task', 'released_at_epoch'):
+            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'released_at_epoch'):
                 assert current[key] is None, f'current attempt inherited prior {key}'
                 assert broken.get(key) is None, f'current job inherited prior {key}'
+            # K11: an exited attempt's own recorded verdict stands even while its
+            # release is unverified; it must be attempt 2's record, never attempt 1's.
+            own = ({'task_status': 'PASSED', 'infra_failure': False, 'terminal_task': True}
+                   if failure == 'retry-unverified' else {})
+            assert previous['task_status'] == 'INFRA_ERROR'
+            for key in ('task_status', 'infra_failure', 'terminal_task'):
+                assert current.get(key) == own.get(key), f'current attempt {key} is not its own verdict'
+                assert broken.get(key) == own.get(key), f'current job {key} is not its own verdict'
         if failure.startswith('infra'):
             retry = next(index for index, event in enumerate(events) if event['task'] == 'broken' and event['attempt'] == 2 and event['event'] == 'started')
             peer_end = next(index for index, event in enumerate(events) if event['task'] == 'healthy' and event['event'] == 'finished')
@@ -600,6 +612,8 @@ def seed_fixture(tmp_path, monkeypatch):
     root.mkdir()
     for relative in (
         "scripts/run-bench-campaign.py",
+        # The campaign's fixed-total infra stop runs its sibling coordinator (K11).
+        "scripts/cloudbench-shard-coordinator.py",
         "scripts/cloudbench-campaign-seed.py",
         "scripts/cloudbench-seed-get.sh",
         # The campaign planner reads its sibling provider-capacity contract.
@@ -948,6 +962,34 @@ def test_campaign_inventory_seed_preflight_late_hash_cancellation_refuses_proof(
                 module.get(root, root / "scripts", {"token": "owned-fixture"}, directory, time.time() + 60)
         assert cancelled and not list(directory.glob("seed-probe-*"))
         assert not (directory / "seed-proof.private.json").exists() and calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_miss_is_a_typed_refusal_not_a_traceback(tmp_path, monkeypatch):
+    # A branch schema without a published canonical base crashed the guest preflight
+    # with FileNotFoundError on its removed probe instead of naming the missing key.
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    directory = root / "standalone"
+    directory.mkdir()
+    # The host GET helper's miss contract at its CLI boundary: remove the probe, exit 1.
+    (root / "scripts/cloudbench-seed-get.sh").write_text('rm -f "$3"\nexit 1\n')
+    try:
+        with pytest.raises(ValueError, match="canonical fixture key missing or unreadable: owned-fixture"):
+            module.get(root, root / "scripts", {"token": "owned-fixture"}, directory, time.time() + 60)
+        assert not list(directory.glob("seed-probe-*"))
+        token = module.fixture(root, root / "scripts")["token"]
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts/cloudbench-campaign-seed.py"), "standalone", "--root", str(root),
+             "--out-dir", str(directory), "--deadline", str(time.time() + 60)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, result.stderr
+        assert "Traceback" not in result.stderr, result.stderr
+        assert f"cloudbench-campaign-seed: canonical fixture key missing or unreadable: {token}" in result.stderr
+        assert not list(directory.glob("seed-probe-*")) and calls == []
     finally:
         server.shutdown()
         server.server_close()
@@ -2388,7 +2430,7 @@ def test_campaign_inventory_plans_native_wmh_guests_for_simulate_tasks(tmp_path)
             {'name': 'plain-fixture', 'requires_browser_agent': False}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
     assert result['planned_performance_cpu_units'] == 8
-    assert result['planned_shared_cpu_units'] == 2
+    assert result['planned_shared_cpu_units'] == 4
     assert result['planned_memory_mib'] == 65536 + 4096
 
 
@@ -2398,14 +2440,14 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     rows = [{'name': 'browser-fixture', 'requires_browser_agent': True}, {'name': 'plain-fixture', 'requires_browser_agent': False}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
-    assert result['planned_shared_cpu_units'] == 6
+    assert result['planned_shared_cpu_units'] == 8
     assert result['planned_memory_mib'] == 12288
     assert result['local_shared_cpu_governor_minimum'] is None
     assert result['local_machine_ceiling_minimum'] is None
     assert result['admission'] == 'withheld-unknown-native-capacity'
     known_inventory = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
     result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=known_inventory)
-    assert result['local_shared_cpu_governor_minimum'] == 27  # actual6+baseline1+original20
+    assert result['local_shared_cpu_governor_minimum'] == 29  # actual8+baseline1+original20
     assert result['local_machine_ceiling_minimum'] == 33  # baseline1+twofresh+two replacements+28 bounded worker slots
     assert result['worker_slots'] == 'dynamically-serialized-under-global-ceiling'
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
@@ -2474,11 +2516,11 @@ def test_campaign_inventory_stress_defaults_count_three_simultaneous_copies():
     baseline = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
     result = module.stress_default_requirements(ROOT, rows, peak=6, repetitions=3, baseline=baseline)
     assert result['planned_peak'] == 6
-    assert result['planned_shared_cpu_units'] == 18
+    assert result['planned_shared_cpu_units'] == 24
     assert result['planned_memory_mib'] == 36864
     assert result['disk_floor_mib'] == 6 * 288
     assert result['worker_reservation_slots'] == 84
-    assert result['local_shared_cpu_governor_minimum'] == 39
+    assert result['local_shared_cpu_governor_minimum'] == 45
     assert result['local_machine_ceiling_minimum'] == 97
     with pytest.raises(ValueError, match='invalid stress peak'):
         module.stress_default_requirements(ROOT, rows, peak=7, repetitions=3, baseline=None)
@@ -2500,7 +2542,7 @@ def test_campaign_inventory_stress600_plan_cli_counts_actual_three_copies(monkey
     assert module.main() == 2
     plan = json.loads(capsys.readouterr().out)
     assert plan['planned_peak'] == 600
-    assert plan['planned_shared_cpu_units'] == 2310
+    assert plan['planned_shared_cpu_units'] == 2400
     assert plan['planned_memory_mib'] == 4730880
     assert plan['disk_floor_mib'] == 172800
     assert plan['worker_reservation_slots'] == 8400

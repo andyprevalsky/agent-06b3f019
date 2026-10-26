@@ -182,9 +182,10 @@ def _render_matches(view: Dict[str, Any], rel: _Relations, query: Dict[str, Any]
     lines = [f"Matches for {what} (shallowest first):"]
     for match in matches:
         address = _address(match)
-        line = (
-            f"- {address} [{rel.of(str(match['agent_id']))}] agent {match.get('status')}: {_snippet(match.get('goal'))}"
-        )
+        kind = str(match.get("type") or "agent")
+        ancestors = [str(a) for a in match.get("ancestor_ids") or []]
+        relation = rel.of(str(match["agent_id"])) if kind == "agent" or not ancestors else rel.of_task(ancestors[-1])
+        line = f"- {address} [{relation}] {kind} {match.get('status')}: {_snippet(match.get('goal'))}"
         if not match.get("path"):
             line += f" (under {' › '.join(str(a) for a in match.get('ancestor_ids') or [])})"
         count = int(match.get("child_count") or 0)
@@ -259,6 +260,7 @@ async def send_agent_message_activity(
     idempotency_key: str,
     recipient_task_id: Optional[str],
     user_id: Optional[str],
+    continue_conversation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Deliver one message by agent id. The backend dedupes on ``idempotency_key`` (retry-safe).
 
@@ -275,16 +277,25 @@ async def send_agent_message_activity(
     }
     if recipient_task_id:
         payload["recipient_task_id"] = recipient_task_id
+    if continue_conversation is not None:
+        payload["continue_conversation"] = continue_conversation
     return await post_agent_message(target_agent_id, payload, user_id)
 
 
 @activity.defn
 async def send_agent_message_to_address_activity(
-    from_agent_id: str, to: str, message: str, idempotency_key: str, user_id: Optional[str]
+    from_agent_id: str,
+    to: str,
+    message: str,
+    idempotency_key: str,
+    user_id: Optional[str],
+    continue_conversation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Deliver one message to a tree address; the backend resolves it (retry-safe by key)."""
     activity.heartbeat(f"Sending agent message to {to}")
-    payload = {"to": to, "message": message, "idempotency_key": idempotency_key}
+    payload: Dict[str, Any] = {"to": to, "message": message, "idempotency_key": idempotency_key}
+    if continue_conversation is not None:
+        payload["continue_conversation"] = continue_conversation
     return await post_agent_message_to_address(from_agent_id, payload, user_id)
 
 

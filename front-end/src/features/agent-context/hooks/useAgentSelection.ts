@@ -1,3 +1,4 @@
+import { reconcileAgent } from '@/lib/progressEstimate';
 import { useCallback, useEffect, useRef } from 'react';
 import type React from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
@@ -63,7 +64,17 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       const isCurrentAgent = () => selectedAgentIdRef.current === agentId;
       const projection =
         pendingCreationRef.current?.agentId === agentId ? pendingCreationRef.current : null;
-      setAgent((previous) => (isCurrentAgent() ? data.agent : previous));
+      setAgent((previous) =>
+        isCurrentAgent()
+          ? {
+              ...data.agent,
+              ...reconcileAgent(
+                previous?.agent_id === data.agent.agent_id ? previous : undefined,
+                data.agent,
+              ),
+            }
+          : previous,
+      );
       setInspectionContext((previous) =>
         isCurrentAgent() ? (data.inspection_context ?? null) : previous,
       );

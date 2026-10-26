@@ -263,7 +263,7 @@ def test_worker_workflow_supplier_is_fixed_size_not_resource_based():
     Pollers must reserve a slot BEFORE polling, so the lone sticky poller loses
     the permit race and every workflow task burns the full 10s
     sticky_queue_schedule_to_start_timeout, then replays on a random worker.
-    Observed: a $0-LLM fast-cache smoke replay spent ~137s of 153s in
+    Observed: a $0-LLM demo-cache smoke replay spent ~137s of 153s in
     back-to-back 10s sticky timeouts. Memory protection belongs to the activity
     admission gate + autoscaler, not workflow-task slot starvation.
     """

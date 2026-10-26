@@ -14,18 +14,25 @@ const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 interface UpdateAgentStatusDependencies {
   cleanupPurchaseCards?: (agentId: string) => Promise<void>;
-  releaseBrowserSessions?: (agentId: string) => Promise<number>;
+  releaseBrowserSessions?: typeof releaseAgentBrowserSessions;
 }
 
 async function releaseTerminalBrowserSessions(
   agentId: string,
   status: string,
+  isRoot: boolean,
   dependencies: UpdateAgentStatusDependencies
 ): Promise<void> {
   // Every terminal agent, including children, owns its own browser rentals.
+  // A child pauses them; the root's completion saves signed-in state and then
+  // tears its sessions down (closeSession persists before the provider close).
   // Purchase settlement and trace finalization remain root-only below.
   try {
-    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(agentId);
+    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(
+      agentId,
+      {},
+      { retire: isRoot }
+    );
   } catch (error) {
     log.warn('Terminal browser-session release unavailable', {
       agent_id: agentId,
@@ -58,6 +65,23 @@ async function runRootTerminalCleanup(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/**
+ * Slack auto-RCA agents post their result to the incident thread. One indexed
+ * lookup per terminal root; every other agent exits there. Fire-and-forget so
+ * a Slack outage never delays the status write. Dynamic import keeps the
+ * agents and slack-auto-rca domains decoupled for layer-deps.
+ */
+function reportAutoRcaOutcome(agentId: string): void {
+  void import('../slack-auto-rca/outcomeService')
+    .then(({ reportSlackAutoRcaOutcome }) => reportSlackAutoRcaOutcome(agentId))
+    .catch((error: unknown) => {
+      log.warn('Slack auto-RCA outcome import failed', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
 }
 
 function statusUpdate(body: UpdateStatusBody): Prisma.AgentUpdateManyMutationInput {
@@ -171,9 +195,11 @@ export async function updateAgentStatus(
   }
   const firstTerminal = TERMINAL_STATUSES.has(body.status) && !TERMINAL_STATUSES.has(before.status);
   if (firstTerminal) {
-    await releaseTerminalBrowserSessions(agentId, body.status, dependencies);
-    if (before.parentAgentId === null) {
+    const isRoot = before.parentAgentId === null;
+    await releaseTerminalBrowserSessions(agentId, body.status, isRoot, dependencies);
+    if (isRoot) {
       await runRootTerminalCleanup(agentId, body.status, dependencies);
+      reportAutoRcaOutcome(agentId);
     }
   }
   return result.agent;

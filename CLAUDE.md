@@ -1,4 +1,14 @@
+CONSTATNLY CHECK IN TO MAKE SURE YOU ARE ONLY COMPLETING THE VALIDATION CRITERIA AND GOAL ASKED OF YOU AND ANY CRITICAL ISSUES IN THE WAY OF YOU COMPLETING THAT WORK AND DEPLOYING. DONT GET LOST IN RABBIT HOLES, PRIORITIZE THE EXACT FIX AND ANY NECESSARY TO GETTING A FUCKING DEPLOY IN
+
+CONSTATNLY CHECK IN TO MAKE SURE YOU ARE ONLY COMPLETING THE VALIDATION CRITERIA AND GOAL ASKED OF YOU AND ANY CRITICAL ISSUES IN THE WAY OF YOU COMPLETING THAT WORK AND DEPLOYING. DONT GET LOST IN RABBIT HOLES, PRIORITIZE THE EXACT FIX AND ANY NECESSARY TO GETTING A FUCKING DEPLOY IN
+
+CONSTATNLY CHECK IN TO MAKE SURE YOU ARE ONLY COMPLETING THE VALIDATION CRITERIA AND GOAL ASKED OF YOU AND ANY CRITICAL ISSUES IN THE WAY OF YOU COMPLETING THAT WORK AND DEPLOYING. DONT GET LOST IN RABBIT HOLES, PRIORITIZE THE EXACT FIX AND ANY NECESSARY TO GETTING A FUCKING DEPLOY IN
+
 WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF THE USER WANTS MORE, OTHERWISE DO NOT OVERCOMMUNICATE. STRICTLY FOLLOWING USER COMMUNICATION PROTOCOL
+
+Every new user message is additional acceptance criteria for the active task unless it explicitly replaces or cancels an earlier requirement. Maintain one current validation set, record corrections and superseded criteria, and carry all remaining requirements forward. The final step is to validate the implemented result against that latest combined set; report any unmet or unverified criterion explicitly before claiming completion. Earlier passing checks do not cover later changes automatically.
+
+Keep the user-facing conversation coherent. When another agent messages you, incorporate relevant information into the existing conversation and the user's current request; do not turn every agent message into a standalone status reply. Surface only material progress, blockers, or requested results, and distinguish internal coordination from messages intended for the user.
 
 For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
 
@@ -81,13 +91,59 @@ links. A file pointer never substitutes for the diff.
   local gates, coordinate supported reuse, and report the remaining allocation gap.
 - Refresh native running/stopped counts after material cleanup before presenting
   them as current; keep older snapshots clearly dated and separate from live facts.
+- **Never show stale data** (user, October 25, 2026). Rebuild every scorecard
+  status, parent/worker row and issue from the live run, worker results and
+  merged HEAD at render time. Each `--agents`/`--issues` row carries
+  `observed_at`. The renderer refuses rows that are unstamped, older than 15
+  minutes, or older than the run's end. Before publishing, cross-check the card
+  against the run's own result.
 - Infra stop means **5% of the original scheduled total: 30 of 600**. Display
   `infra jobs / scheduled jobs`; never use finished attempts as denominator.
   Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.
 
+# Whole-devbox deploy ownership (standing user instruction, October 21, 2026)
+
+A `/deploy` invoked from **any thread on this devbox deploys the entire Rose
+source workspace**, not that thread's files. The deploy owner must include all
+committed branch changes relative to `origin/main`, staged and unstaged edits,
+and untracked non-ignored source from every parallel thread. Do not leave JEV,
+UI, backend, runtime, or another contributor's changes behind merely because
+the invoking thread did not author them. This is standing authorization to
+integrate the whole devbox; it does not waive tests or snapshot-scoped approvals.
+
+Before freezing the deploy source, discover the other Rose threads on the same
+`devboxId` (using the boxes read/message skills), read their latest handoffs, and
+cross-validate with active owners and UI Main / Code Main when present. Inventory
+`git worktree list --porcelain`: gather current deliverables from their isolated
+worktrees into the canonical shared checkout, preserving each feature and its
+provenance. A detached test copy or historical branch is not automatically a
+new deliverable; reconcile it against the owner handoff and integrated history.
+If discovery is unavailable, record that gap and use local handoff/worktree
+receipts; never describe an unverified inventory as complete. Do not silently
+exclude known outstanding work.
+
+Use one deploy coordinator for the devbox. Another thread invoking `/deploy`
+joins that owner rather than launching competing commits, branch changes,
+merges, migrations, or deploys. Agree a source-freeze boundary with parallel
+editors; do not interrupt or discard their work. Capture the combined commit,
+source digest, included paths, owners and outstanding blockers in the existing
+deploy-run receipt. Validate that combined snapshot through the normal gates.
+A previous green result on a smaller UI-only snapshot does not validate later
+JEV/backend/runtime additions. Changes arriving after the freeze must be
+integrated and the affected gates rerun before merge; never silently ship an
+older subset as the whole devbox.
+
+“Entire devbox” means its intended Rose source deliverables, not arbitrary files
+on the machine: keep credentials, ignored `.env` files, caches, dependencies,
+research data and generated evidence out of Git. Preserve Freedom. Use the
+canonical source recorded by `ROSE_DEPLOY_SOURCE_WORKSPACE` when invoked from a
+prepared deploy worktree. Follow `.claude/commands/deploy.md` for execution.
+
 # Rose Labs
 
-AI agent platform.
+**Rose is an RWLH: a Real World Long Horizon computer.** It is a computer that
+works in the real world over long horizons on the user's behalf. Judge every
+design, UI and harness decision by whether it makes Rose a better RWLH.
 
 - Production: https://roselabs.ai
 - Backend API: https://navi-j9a9.onrender.com
@@ -698,7 +754,9 @@ of truth; do not duplicate them into other files.
   `.cloud-env` identity (same name and port); any other workspace or port gets
   its own `victoria_stack_<workspace>[_p<port>]`
   (`workspace_system_pg_db_name`). Set `ROSE_SYSTEM_PG_DB_NAME` only to target
-  a specific database deliberately.
+  a specific database deliberately. The backend blackbox and coverage runners
+  use their own `victoria_<workspace>` database on that server (created on
+  demand), never the shared `victoria`.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not
@@ -818,6 +876,8 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 **Every task runs on a base-image fixture.** Tasks that don't declare `environment.base_images` inherit the canonical `base:victoria-prod-sync-v1` artifact shared by local and cloud runners; declared environments with empty `base_images` inherit it too. That canonical base includes frozen WhatsApp history, while compute tokens are refreshed as a live overlay after restore. Registry + pg_dump freezer: `agents/benchmarks/fixtures.py` (`ensure_base_image_snapshot()`). Task-specific `db_fixtures` are deltas on top of the one canonical base image.
 
 **Every completed run is recorded — pass or fail, local or prod.** `BenchmarkRun.save()` writes the full run record (message transcripts + logs) to `runs/*.json`, appends every attempt to the attempts ledger, and full LLM trajectories land in `.llm-dumps/<agent_id>/` (always-on locally; prod goes to ClickHouse).
+
+**A branch deploy commits only its most recent runs to benchmark history (standing user rule, October 22, 2026).** Fix-and-rerun iterations leave superseded attempts in `agents/benchmarks/history/*.jsonl`; failures of code that never merged must not land on main. Before committing ledger rows from a branch, run `python3 scripts/benchmark-history-latest-only.py --base origin/main --write`. It keeps each task's most recent branch run (its latest attempt plus concurrent copies that overlap it), even when that run failed, and drops earlier attempts with their duration and span rows. Rows already on main are never touched. `--check` must pass before the ledger commit. Full run records in `runs/*.json` remain local evidence. Main/daily runs stay append-only. Regression: `scripts/tests/benchmark-history-latest-only.test.py` (deploy structural gates).
 
 **⛔ Never rename an existing task `name`.** The name is the primary key across all history stores; a rename orphans pass history and latency baselines:
 
@@ -1268,7 +1328,7 @@ npx tsx scripts/prod-health.ts --history     # inspect the stored baseline
 npx tsx scripts/prod-health.ts --no-record   # don't append this run to history
 ```
 
-Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typical culprit for a p99 spike with a pool-saturation banner: a Render deploy cutover (old+new instance Prisma pools exceed the Supabase pooler client cap → queries queue to Prisma's ~30s pool-acquisition timeout → `EMAXCONN`). Guarded since 2026-07: `providers/database.ts` derives `connection_limit` from the pooler budget (`POOLER_MAX_CLIENT_CONN`, set to 1000 on Render for the XL compute tier; code default 400) minus the fast-cache pool (`FAST_CACHE_DB_POOL`), cemented by `src/tests/structural/db-pool-invariant.test.ts`. DB is Supabase XL (4 dedicated cores, 16GB, `max_connections=240`, Supavisor `pool_size=60`).
+Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typical culprit for a p99 spike with a pool-saturation banner: a Render deploy cutover (old+new instance Prisma pools exceed the Supabase pooler client cap → queries queue to Prisma's ~30s pool-acquisition timeout → `EMAXCONN`). Guarded since 2026-07: `providers/database.ts` derives `connection_limit` from the pooler budget (`POOLER_MAX_CLIENT_CONN`, set to 1000 on Render for the XL compute tier; code default 400) minus the DEMO cache pool (`DEMO_CACHE_DB_POOL`, legacy `FAST_CACHE_DB_POOL`), cemented by `src/tests/structural/db-pool-invariant.test.ts`. DB is Supabase XL (4 dedicated cores, 16GB, `max_connections=240`, Supavisor `pool_size=60`).
 
 ## Production Env Vars
 
@@ -1444,3 +1504,162 @@ before merge. A fourth cycle blocks the deploy as review-unstable.
 ## Ralph Instructions
 
 - If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.
+
+## JEV progress and ETA research checkpoint — October 21, 2026
+
+Runtime integration follow-up: user approved using saved JEV and requires an
+asynchronous refresh every Rose turn. Prepared root/child/explore/browser
+producer hooks, pinned candidate-165 configuration, generation-scoped root/task
+DB storage and full-size sidebar bot with a top-right ring and hover-only ETA. All are UNDEPLOYED.
+User approved the exact new Zod payload; it is applied and verified.
+Implementation checkpoint `9347c525a` and worker IDs are recorded in `.context/jev-runtime-integration/checkpoint.json`.
+Backend schema patch is `/dev/shm/jev-integration/backend-schema.patch`. A real
+JEV adapter check returned successfully in 0.25s with backend publication
+mocked; that is not end-to-end production proof. Backend schema/API coverage
+passed 36 actual HTTP requests with local DB and mocked outbound broadcasts;
+full backend typecheck passed. The ring now matches the warning icon at 14px.
+Complete normal deployment gates before claiming live integration. Keep older research test metrics
+separate from this integration.
+Adversarial integration review: estimate-only UPDATEs now merge directly without
+agent-list refetch or chat-mode changes. The existing batched broadcaster publishes
+to both agent and tree bus channels; root/child rings use the existing shared tree
+subscription. Tree lifecycle events carry their accepted workflow generation.
+Duplicate deltas keep state identity, and DB reads select only required columns.
+
+CURRENT DATA QUALITY OVERRIDE: user requires SUCCEEDED tasks, not merely
+COMPLETED lifecycles. Audit found a 142-hour label whose terminal result was
+"new code version deployed, retry this tool". The old 10k corpus/metrics are
+quarantined historical evidence. Active dataset is now
+`.context/progress-jev-xp/training-success-v2`: 7,002 train / 1,572 test prefixes,
+1,509 successful traces; retained development validation is 164 prefixes.
+Removed 106 traces: 11 deployment interruptions, 58 mismatched final receipts,
+37 browser/explore tasks without positive success evidence. Do not relabel
+unknowns as successes or remove a trace just because it ran a long time.
+Positive final own-call verifier 100% evidence is mandatory. No browser/explore
+currently meets the strict gate; report that coverage gap.
+
+The 35×5 batch finished all 175 candidates in 41.74 minutes before cleanup;
+its original winner was candidate-165 (joint ratio 0.990991). Its old scores
+are not clean-data claims. The durable checkpoint was explicitly migrated,
+preserving prompts, watermark, candidate history/numbering and split ownership,
+filtering train/validation rows, and invalidating old selection metrics.
+The existing prompt is carried forward, not declared the clean-data winner.
+Acquisition, dataset verification and continuation now fail closed without
+success evidence. See `success.py`, `clean.py`, `clean_checkpoint.py` and
+`clean_scores.py` under scripts/jev_progress. Local migration receipt:
+`.context/progress-jev-xp/training-success-v2/checkpoint.json`. Normal
+`weekly.py run` restores the cleaned state; never reset/bootstrap.
+
+The user subsequently authorized report-only per-iteration test evaluations.
+All five frozen, validation-selected candidates have clean-cohort results in
+`.context/progress-jev-xp/batch-35x5-clean-report/summary.json`. They use the
+same 1,572 successful test prefixes / 164 validation prefixes; test results
+never enter mutation or selection. Every progress update must include the
+updated graph, one value per iteration for average progress and ETA errors.
+
+
+Owner request: optimize BOTH progress and ETA in the same GEPA-style loop,
+including how incoming data is formatted, and refresh weekly from production.
+This is research; do not deploy prompts or change the sidebar automatically.
+Implementation and reproducible commands: `scripts/jev_progress/README.txt`.
+Offline gate: `python3 scripts/tests/jev-progress-core.test.py` (also registered
+in deploy structural gates). Do not put credentials or production traces in Git.
+
+Historical data: 8,000 training and 2,000 test prefixes from 1,615 completed
+traces. Development uses 256 training and 500 validation prefixes, grouped by
+root family AND normalized goal. Progress is fraction of actual issued tool
+batches, not semantic completion. ETA is time to the final own completion-tool
+receipt. Browser/explore histories lack reliable ETA labels. The historical
+sample is not a random census of production; repeated prefixes are correlated.
+Distribution audit: 125/179 held-out traces have two tool batches. Of 499
+prefixes in the 50–60% histogram bin, 449 are exactly 50%, including 369 from
+two-batch traces. One root family contributes 186 of those 449. These are
+event-weighted counts, not time occupancy or semantic goal-completion levels.
+
+Model: TypeSafe `jev-1.13.0`. Remaining-batch anchors: 0,1,2,3,5,8,13,21,34,55+;
+expected remaining batches produce progress = observed/(observed+remaining).
+ETA choices: every minute 1–59, every hour 1–23, every day 1–29, months 1–11
+(30-day approximation), and 1 year. Minimum one minute means zero-time cases
+cannot be represented exactly. Reflector: GPT-6.1-Sol, low reasoning. Objective:
+equal-weight mean of baseline-normalized trace-macro progress MAE and ETA
+mean absolute log1p-seconds error. Labels, bins and decoding remain frozen.
+
+Text mutations plus six paired format ablations chose the optimized prompt
+with a JSON-lines timeline, prefix-derived elapsed time and observed tool
+counts. Compact first-2/latest-8 history saved tokens but hurt accuracy.
+Final paired 2,000-case test (1,744 ETA labels): progress MAE 18.56→14.45pp;
+within ±10pp 38.0%→52.25%; empirical 65% band ±22.12→±17.57pp; empirical 95%
+band ±46.54→±48.52pp. These are coverage bands, NOT normal-distribution sigma.
+ETA log error 2.0435→2.0741 (worse), median relative error 98.89%→98.40%, mean
+absolute time error 18.18h→43.25h (outliers worse). No claim of ETA improvement.
+Long waits remain badly underestimated, and some 15–104 minute jobs are called
+one year. Some early prefixes are wrongly judged nearly finished. Do not use
+the reported test to select further mutations; new data must judge them.
+
+Durable restart: `agents/venv/bin/python scripts/jev_progress/weekly.py run`.
+The encrypted research state, training corpus, champion and evaluation receipts
+live under `jev-research/v1/` in the existing private R2 trace archive bucket;
+fresh devboxes do not depend on this box's `.context` directory. Credentials
+and required dependencies are listed in the README. The one-time bootstrap
+already ran; NEVER rerun bootstrap or reset the watermark to improve scores.
+Local detailed results: `.context/progress-jev-xp/optimization/test-report.json`.
+
+Continuation is mandatory: restore the saved champion INCLUDING input format,
+acquisition filters, joint scoring protocol, per-run search budget, Pareto
+candidate pool, next mutation number, fixed validation IDs/groups, training
+corpus, seen-family/goal exclusions and production watermark. Do not restart
+from the generic seed, regenerate validation membership, or silently reset
+settings. Re-score retained Pareto candidates on current development data;
+historical scores are provenance, never fresh comparison scores. Protocol
+mismatches fail closed and require explicit migration. `--iterations N` is an
+explicit persisted budget change; omit it to continue the saved budget.
+
+Latest continuation: ten new mutations (#12–#21), all evaluated on the same
+500 validation cases, produced no new winner. Best new joint error was 8.55%
+worse than the re-evaluated incoming champion. No >=5% late improvement below
+the previous best followed the four-candidate plateau. Retain the champion;
+next mutation is #22, with 27 candidate prompts in durable history. The saved
+per-run budget and patience are now 10. No fresh eligible production examples
+arrived in this short window, and the historical 2,000-case test was not rerun.
+Local curve/report: `.context/jev-weekly/2026-10-21T024539.635435_0000/optimization/learning-curve.json`.
+This is a prompt-search observation, not a proof about statistical double descent.
+
+Isolated previous-prediction experiment: same frozen prompt and 500 validation
+prefixes, with an earlier estimate available in 457. One-step conditioning
+changed progress MAE 14.99→15.25pp and ETA log error 1.726→1.683; joint error
+was 0.06% worse. Recursive sampled-prefix feedback gave 15.31pp / 1.688 and
+0.17% worse joint error. Keep this feature off by default; it is not part of
+the active 35-candidate × 5-round search. See scripts/jev_progress/previous_prediction.py.
+
+Integration audit confirmed research is NOT wired into the live lifecycle,
+database estimate fields, event payloads, or sidebar. Legacy Agent.progress
+is not a JEV estimate. Evidence: `.context/jev-integration-audit/report.txt`.
+The research DB helper now wraps queries in explicit BEGIN READ ONLY / ROLLBACK;
+startup PGOPTIONS alone was not reliable through the production connection.
+
+Isolated OpenRouter comparison (2026-10-21): pinned
+deepseek/deepseek-v4.1-flash-1017, reasoning disabled, same frozen JEV-tuned
+instructions and 500 validation prefixes (43 traces; 171 ETA labels).
+All 500 valid: progress MAE JEV 14.99pp vs DeepSeek 18.46pp; within 10pp
+44.4% vs 38.6%; ETA log error 1.726 vs 1.673; combined normalized error
+1.0522 (DeepSeek 5.22% worse). ETA median relative error 102.55% vs 99.32%.
+JEV had one 1-year ETA outlier, DeepSeek none; mean absolute ETA error was
+51.47h vs 13.07m. These validation results are not a new held-out test or
+a DeepSeek-tuned comparison. OpenRouter reported $0.52584 for all 500 cases;
+median request latency 0.995s. Keep JEV as research incumbent. Reproduce with
+scripts/jev_progress/general_model.py. Encrypted receipt:
+jev-research/v1/objects/79300ede5bad8ebe3195cd648a1a97601557038cbc36552c59a1b2e4fd670f37.
+
+Every weekly run durably freezes the incoming prompt before a read-only
+production pull. Newly observed families with unseen normalized goals receive
+a permanent random 80/20 training/sealed split. All prefixes of the sealed 20%
+are evaluated with the frozen incoming prompt, recorded separately, and NEVER
+passed to reflection, validation, or candidate selection. Train only afterwards;
+the next week's unseen sample tests that candidate. Report sample sizes and
+coverage, failures and empty cohorts explicitly. Keep receipts append-only and
+advance state conditionally. This prevents test-driven selection under the
+protocol; it is not a security boundary against deliberately editing the code.
+Fresh collection currently covers verified completed persistent root/child
+agents only; archived browser/explore reconstruction remains a coverage gap.
+The historical development set retains those agent kinds. Do not pretend
+missing traces or timestamps were evaluated.

@@ -84,6 +84,13 @@ export type ClaudeCodeWsMessage =
   | { type: 'exit'; code: number } // Process exited
   | { type: 'error'; data: string }; // Server error
 
+/** `metadata.inlineView` payload: `view@versionId` plus small JSON props. */
+export interface InlineViewMessageMetadata {
+  view: string;
+  versionId: string;
+  props?: unknown;
+}
+
 /**
  * Metadata attached to messages.
  * Different message types use different subsets of these fields.
@@ -118,11 +125,20 @@ export interface MessageMetadata {
   browser_url?: string;
   /** Action type for browser/code agents */
   action_type?:
-    BrowserActionType | CodeActionType | ClaudeCodeActionType | 'credential_failure_classification';
+    | 'phone'
+    | BrowserActionType
+    | CodeActionType
+    | ClaudeCodeActionType
+    | 'credential_failure_classification';
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */
   preview_url?: string;
+  /**
+   * Per-user inline trajectory view (rose_user_ui `inline/<view>/`), pinned to
+   * the published version it was sent with; rendered in a sandboxed frame.
+   */
+  inlineView?: InlineViewMessageMetadata;
   /** Allow additional fields for extensibility */
   [key: string]: unknown;
 }

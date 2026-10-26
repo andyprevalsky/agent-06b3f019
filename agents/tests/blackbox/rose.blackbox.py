@@ -16,8 +16,65 @@ import json
 import os
 import ssl
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+
+async def test_rose_local_loopback_and_no_fallback():
+    from providers.rose.local import local_config
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append((self.path, json.loads(self.rfile.read(length))))
+            payload = (
+                'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n'
+                'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
+                'data: [DONE]\n\n'
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict(os.environ, {
+            "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+            "ROSE_LOCAL_MODEL": "test-local-model",
+        }):
+            with patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")):
+                chunks = [chunk async for chunk in RoseClient().complete(
+                    pool="rose-local", messages=[{"role": "user", "content": "hello"}], dump_context=False,
+                )]
+            assert requests[0][0] == "/v1/chat/completions"
+            assert requests[0][1]["model"] == "test-local-model"
+            assert requests[0][1]["messages"][-1]["content"] == "hello"
+            assert next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata") == "local/test-local-model"
+            assert "".join(chunk.data["text"] for chunk in chunks if chunk.kind == "content") == "local ok"
+            assert any(chunk.kind == "done" for chunk in chunks)
+        with patch.dict(os.environ, {"ROSE_LOCAL_BASE_URL": "https://api.openrouter.ai/v1", "ROSE_LOCAL_MODEL": "x"}):
+            try:
+                local_config()
+            except RoseError:
+                pass
+            else:
+                raise AssertionError("Rose Local accepted a remote endpoint")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 from _rose_stream_progress_fixture import single_step_waterfall
@@ -154,7 +211,7 @@ def test_oss_pool_is_open_weights_only():
     assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
     # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
-    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61"}
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61", "rose-local"}
     for name, spec in POOL_REGISTRY.items():
         if name in auth_skipped:
             assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
@@ -305,7 +362,11 @@ def test_cerebras_native_tools_enforce_representable_shapes():
     assert "minItems" not in params["properties"]["labels"]
     assert params["properties"]["count"]["minimum"] == 1
     assert params["properties"]["count"]["maximum"] == 5
-    assert params["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    # Omittable Optional: plain type (omission validates to None); see
+    # test_cerebras_tools_send_omittable_optionals_as_their_type.
+    assert params["properties"]["note"]["type"] == "string"
+    assert "anyOf" not in params["properties"]["note"]
+    assert "note" not in params["required"]
     assert body["tool_choice"] == "required"
     assert "response_format" not in body
     assert tools == original
@@ -322,6 +383,61 @@ def test_cerebras_native_tools_enforce_representable_shapes():
         else:
             raise AssertionError("Original local constraints were weakened")
     assert TypedTool.model_validate({"tool": "typed_lookup", "labels": ["a"], "count": 2}).note is None
+
+
+def test_cerebras_tools_send_omittable_optionals_as_their_type():
+    """An omittable Optional reaches Cerebras as its own type, not anyOf[X, null].
+
+    Captured descend-full69 r005-j0069 (2026-10-23): qwen-3.8-27b sent grep
+    sources='["agent_network"]' and head_limit='30' (strings) and the explore
+    turn re-generated. Controlled live replay of that exact request: with the
+    anyOf[X, null] encoding 9/9 grep calls were strings even with strict=True;
+    with the null branch dropped 7/7 strict and 7/7 non-strict were real lists
+    and integers. Omission already means None for these fields.
+    """
+    from copy import deepcopy
+
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import GrepTool, SpawnAgentTool, create_agent_action_model
+
+    tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["grep"], tool_registry={"grep": GrepTool})
+    )
+    original = deepcopy(tools)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )
+    props = body["tools"][0]["function"]["parameters"]["properties"]
+    for name, kind in (("sources", "array"), ("head_limit", "integer"), ("pattern", "string"), ("filters", "object")):
+        assert props[name].get("type") == kind, f"{name} must be a plain {kind}: {props[name]}"
+        assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
+    assert props["sources"]["items"]["enum"][0] == "messages"
+    assert tools == original, "caller tool schemas must not be mutated"
+    # The field's own description wins over a nested model's docstring.
+    spawn_tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["spawn_agent"], tool_registry={"spawn_agent": SpawnAgentTool})
+    )
+    field = spawn_tools[0]["input_schema"]["properties"]["output_schema"]
+    sent = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=spawn_tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )["tools"][0]["function"]["parameters"]["properties"]["output_schema"]
+    assert sent.get("description") == field["description"], sent.get("description")
+    assert "anyOf" not in sent
+    assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
 
 
 def test_cerebras_native_tools_keep_incompatible_schemas_visible():
@@ -739,6 +855,59 @@ async def test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted():
     assert len(requests) == 2, "a reply that used the whole output limit must be retried with room to finish"
     assert requests[1]["max_completion_tokens"] > 8192
     assert response.tool_calls[0].result == complete
+
+
+def test_chat_completions_bodies_drop_codex_history_items():
+    """Codex Responses items are Rose-internal history, never chat-completions fields.
+
+    Captured descend-full69 (2026-10-23, 8 explore_agent copies): a Foundry turn
+    stored codex_reasoning_items on an assistant message; the next rose-1-flash
+    call sent it to Cerebras, which answered 400 "messages.2.assistant.
+    codex_reasoning_items: property ... is unsupported" (live replay) and fell
+    through. Only the Responses transport (gpt_auth) reads these items.
+    """
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transforms import transform_messages_for_openai
+
+    history = [
+        {"role": "system", "content": "search"},
+        {"role": "user", "content": "find it"},
+        {
+            "role": "assistant",
+            "content": "looking",
+            "codex_reasoning_items": [{"id": "rs_1", "encrypted_content": "secret", "summary": []}],
+            "codex_message_items": [{"id": "msg_1", "type": "message"}],
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "grep", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "[]"},
+    ]
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=history,
+        tools=[
+            {
+                "name": "grep",
+                "description": "search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}},
+                    "required": ["pattern"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )
+    for outbound in (body["messages"], transform_messages_for_openai(history)):
+        assistant = next(m for m in outbound if m["role"] == "assistant")
+        assert not [k for k in assistant if k.startswith("codex_")], f"codex items leaked: {sorted(assistant)}"
+        assert assistant["tool_calls"][0]["id"] == "c1"
+        assert assistant["content"] == "looking"
+    assert history[2]["codex_reasoning_items"], "caller history must keep its Responses items"
 
 
 def test_build_cerebras_body_strips_cache_control():
@@ -2270,6 +2439,138 @@ async def test_claude_auth_400_raises_invalid_request_no_rotation():
     assert len([u for u in captured if "api.anthropic.com" in u]) == 1
 
 
+def _anthropic_request_violations(body):
+    """Anthropic /v1/messages rejections captured verbatim from live 400s (descend R4).
+
+    - "messages: text content blocks must be non-empty"
+    - "output_config.format.schema: For 'object' type, 'additionalProperties'
+      must be explicitly set to false"
+    """
+    violations = []
+    for idx, msg in enumerate(body["messages"]):
+        content = msg.get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        if not blocks:
+            violations.append(f"messages.{idx}: empty content")
+        for block in blocks or []:
+            if isinstance(block, dict) and block.get("type") == "text" and not str(block.get("text") or "").strip():
+                violations.append(f"messages.{idx}: text content blocks must be non-empty")
+    schema = ((body.get("output_config") or {}).get("format") or {}).get("schema")
+    for node in _walk_schema(schema):
+        if node.get("type") == "object" and node.get("additionalProperties") is not False:
+            violations.append("output_config.format.schema: additionalProperties must be explicitly set to false")
+    return violations
+
+
+def test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows():
+    """completion_summary context (convert_context_to_messages) carries empty attachment
+    and assistant rows; the Claude body must not contain empty text blocks (descend R4,
+    agent-display-revenue-chart 5/5 copies fell through to the waterfall)."""
+    messages = [
+        {"role": "system", "content": "You are summarizing the work completed by an AI agent."},
+        {"role": "user", "content": "I've attached our orders export. Show me revenue."},
+        {"role": "user", "content": ""},
+        {"role": "user", "content": ""},
+        {"role": "system", "content": "Initialized: Agent initialization complete."},
+        {"role": "user", "content": "<environment>\nYou are /root, the root agent.\n</environment>"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "toolu_01", "type": "function", "function": {"name": "set_plan", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "toolu_01", "content": "2 tasks."},
+        {"role": "user", "content": "<environment>\nYou are /root, the root agent.\n</environment>"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "3bc0250f-f26e-415e-a27c-5a971c7db727",
+                    "type": "function",
+                    "function": {"name": "attempt_completion", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "3bc0250f-f26e-415e-a27c-5a971c7db727", "content": "Beginning Execute Phase:"},
+        {"role": "system", "content": "Started code agent in background."},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "Message Type: FINAL_ANSWER\nPayload: totals"},
+        {"role": "user", "content": "   "},
+        {"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": "Summarize."}]},
+    ]
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=1024,
+        skip_cache_write=True,
+    )
+    assert _anthropic_request_violations(body) == [], body["messages"]
+    # Real content survives: the goal, both tool pairs, the final answer, the ask.
+    flat = json.dumps(body["messages"])
+    for kept in ("orders export", "toolu_01", "3bc0250f", "FINAL_ANSWER", "Summarize."):
+        assert kept in flat
+    assert body["messages"][-1]["role"] == "user"
+
+
+def test_build_anthropic_body_closes_non_strict_output_format_objects():
+    """A non-strict Pydantic schema (optional verifier fields) has no additionalProperties;
+    Anthropic output_config.format requires it explicitly false on every object
+    (descend R4, verifier_browser j0045/j0061)."""
+    from typing import Optional as _Opt
+
+    from pydantic import create_model
+
+    inner = create_model("VerifierOutput", url=(str, ...), price=(_Opt[str], None))
+    model = create_model("ProgressScoreWithOutput", output=(inner, ...), reasoning=(str, ...), score=(float, ...))
+    setattr(model, "rose_openai_strict", False)
+    response_format = build_openai_response_format(model)
+    assert "additionalProperties" not in json.dumps(response_format)  # the captured shape
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "Goal: buy one Canvas Tote"}],
+        tools=None,
+        tool_choice=None,
+        response_format=response_format,
+        max_tokens=1024,
+    )
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert _anthropic_request_violations(body) == []
+    schema = body["output_config"]["format"]["schema"]
+    assert set(schema["properties"]) == {"output", "reasoning", "score"}
+    assert set(schema["properties"]["output"]["properties"]) == {"url", "price"}
+
+
+async def test_claude_auth_400_logs_provider_message():
+    """A claudeAuth 400 must name Anthropic's validation message, not only its body length."""
+    from structlog.testing import capture_logs
+
+    message = "messages: text content blocks must be non-empty"
+    error = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+    set_mock_handler(lambda req: httpx.Response(400, json=error))
+    auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=3)
+    with capture_logs() as logs:
+        try:
+            await _drain(
+                claude_auth_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    auth=auth,
+                    request_id="r-400-message",
+                    max_tokens=16,
+                )
+            )
+        except RoseInvalidRequest:
+            pass
+        else:
+            raise AssertionError("400 must raise RoseInvalidRequest")
+    invalid = [log for log in logs if log.get("event") == "rose.claude_auth.invalid_request"]
+    assert len(invalid) == 1, logs
+    assert invalid[0]["provider_message"] == message
+
+
 async def test_claude_auth_5xx_retries_then_raises_server_error():
     calls = {"n": 0}
 
@@ -2726,6 +3027,47 @@ async def test_parse_anthropic_sse_empty_stream_raises_stall():
     except RoseStallError:
         raised = True
     assert raised
+
+
+async def test_parse_anthropic_sse_thinking_only_max_tokens_reports_length():
+    """Thinking that exhausts max_tokens is a reported truncation, not a stall (descend R4).
+
+    completion_summary (max_tokens 1024, xhigh effort) on the j0056 context with its CSV
+    attachment ended stop_reason=max_tokens before any text; the stall raise skipped the
+    caller's 1024->4096 length retry and dropped the call off Claude.
+    """
+    lines = _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9}}})
+    lines += _ev(
+        "content_block_start",
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+    )
+    # Captured event sequence: omitted thinking text, then only its signature.
+    lines += _ev(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": ""}},
+    )
+    lines += _ev(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}},
+    )
+    lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    lines += _ev(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 1024}},
+    )
+    chunks = await _drain(
+        parse_anthropic_sse(
+            _FakeStream(lines),
+            actual_model="claude-test",
+            pool_name="claude-token",
+            request_id="r-thinking-length",
+        )
+    )
+    assert not [c for c in chunks if c.kind in ("content", "tool_call")]
+    usage = next(c for c in chunks if c.kind == "usage").data
+    assert usage["finish_reason"] == "length"
+    assert usage["completion_tokens"] == 1024
+    assert chunks[-1].kind == "done"
 
 
 async def test_parse_anthropic_sse_refusal_raises_refusal():
@@ -4457,8 +4799,10 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         tools=[],
         tool_choice="auto",
     )
-    assert dump["reasoning_effort"] == "xhigh"
-    assert dump["effective_params"]["reasoning_effort"] == "xhigh"
+    # The browser pool's OpenRouter waterfall sends its pinned effort, not the default.
+    assert browser_pool.waterfall_reasoning_effort == "low"
+    assert dump["reasoning_effort"] == "low"
+    assert dump["effective_params"]["reasoning_effort"] == "low"
     assert dump["requested_params"]["reasoning_effort"] is None
 
     # Inventory: every agents-side body builder stamps non-empty effort.
@@ -6516,7 +6860,7 @@ async def test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone():
 
 
 def test_cut_off_recovery_limits_model_keys_and_cache_restart():
-    from providers.fast_cache.rose_cache import accumulate_chunk, empty_response
+    from providers.demo_cache.rose_cache import accumulate_chunk, empty_response
     from providers.rose.truncation import escalated_max_tokens, model_key, needs_result
 
     assert escalated_max_tokens(2048) == 16000
@@ -6616,6 +6960,99 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
         chunks.append(chunk)
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data.get("claude_token_error") == "auth_error"
+
+
+async def test_collect_refusal_after_partial_tool_call_moves_to_next_model():
+    """066bfdef: Opus streamed a partial `goto`, then stop_reason=refusal.
+
+    The collected tool call was never returned, so the refused attempt must be
+    abandoned (restart) and the call served by the pool's next model, exactly as
+    for a refusal before the first chunk. Before the fix the RoseRefusalError
+    escaped to the browser loop, which retried the identical request five times.
+    """
+    url = "https://shop.example/api/rose-shop/abc/?authRealm=rose-shop-abc"
+    anthropic_sse = []
+    anthropic_sse += _ev(
+        "message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 9, "output_tokens": 1}}}
+    )
+    anthropic_sse += _ev(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_refused", "name": "goto", "input": {}},
+        },
+    )
+    anthropic_sse += _ev(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"url": "https://shop.example/api'},
+        },
+    )
+    anthropic_sse += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    anthropic_sse += _ev(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 12}},
+    )
+    anthropic_sse += _ev("message_stop", {"type": "message_stop"})
+    waterfall_sse = "\n".join(
+        _openai_sse(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_next",
+                                        "function": {"name": "goto", "arguments": json.dumps({"url": url})},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14}},
+            ]
+        )
+    )
+    hosts: list[str] = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        if req.url.host == "api.anthropic.com":
+            return httpx.Response(200, text="\n".join(anthropic_sse), headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, text=waterfall_sse, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    tools = [
+        {
+            "name": "goto",
+            "description": "Navigate",
+            "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        }
+    ]
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-ultra",
+        messages=[{"role": "user", "content": f"Open {url}"}],
+        tools=tools,
+        tool_choice="auto",
+        max_tokens=2048,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-refusal-after-partial-tool-call",
+    )
+
+    assert hosts[0] == "api.anthropic.com" and hosts.count("api.anthropic.com") == 1, hosts
+    assert [(c.get("name"), json.loads(c.get("arguments") or "{}")) for c in response.tool_calls] == [
+        ("goto", {"url": url})
+    ], response.tool_calls
+    assert not response.actual_model.endswith("-claude"), response.actual_model
+    abandoned = response.usage.get("abandoned_attempts") or []
+    assert [a.get("error_type") for a in abandoned] == ["RoseRefusalError"], response.usage
 
 
 async def test_client_foundry_stream_exit_closes_http_owner():
@@ -6774,6 +7211,72 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert attempted == ["foundry", "openrouter"]
     assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
+async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
+    """The browser-use dump must record what the Foundry route actually sent (descend R13).
+
+    rose-1-browser-use pins waterfall_reasoning_effort=low for its Foundry fallback,
+    and the Responses body carries no temperature; the dump said xhigh / 0.3.
+    """
+    from helpers import observability
+
+    sent = []
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call",'
+            '"id":"fc_1","call_id":"call_1","name":"wait","arguments":""}}',
+            'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1",'
+            '"delta":"{\\"time_ms\\":1}"}',
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call",'
+            '"id":"fc_1","call_id":"call_1","name":"wait","arguments":"{\\"time_ms\\":1}"}}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request):
+        if request.url.host.endswith("openai.azure.com"):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    dumps = []
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "AZURE_FOUNDRY_API_KEY": "test-key",
+                "CEREBRAS_API_KEY": "",
+                "GPT_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
+            },
+        ),
+        patch.object(observability, "dump_llm_context", side_effect=lambda **kw: dumps.append(kw)),
+    ):
+        await RoseClient(openrouter_key="ork-x").complete_browser_use(
+            task="Wait briefly",
+            browser_state={"url": "https://example.com", "title": "Example", "dom_tree": "[1] button"},
+            action_history=[],
+            available_actions=["wait"],
+            include_screenshot=False,
+            call_site="test-browser-dump-wire-effort",
+            deadline_s=30,
+            skip_cache_write=True,
+        )
+    teardown_mock()
+    assert len(sent) == 1, sent
+    wire = sent[0]
+    assert len(dumps) == 1, dumps
+    config = dumps[0]["config"]
+    assert config["pool_name"] == "foundry"
+    assert config["effective_params"]["reasoning_effort"] == wire["reasoning"]["effort"] == "low"
+    assert config["reasoning_effort"] == wire["reasoning"]["effort"]
+    assert config["effective_params"]["temperature"] == wire.get("temperature")
+    assert config["temperature"] == wire.get("temperature")
 
 
 async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
@@ -7149,6 +7652,61 @@ def test_responses_body_marks_every_completed_user_message_without_caller_marker
     ], marked
     plain = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r")
     assert '"prompt_cache_breakpoint"' not in json.dumps(plain), "routes without breakpoint support are unchanged"
+
+
+async def test_chatgpt_oauth_route_never_sends_cache_breakpoints_and_keeps_its_cache_session():
+    """The leased-GPT (ChatGPT/Codex OAuth) backend rejects ``prompt_cache_breakpoint`` with HTTP 400.
+
+    Measured 2026-10-25 through the real transport with a leased token on gpt-6-sol:
+    the same body returned 200 without breakpoints and ``Codex 400`` with them, and the
+    call then fell through to Foundry. That backend already caches by prefix: a grown
+    planner-shaped request read 10,496 of ~11.2k prompt tokens with no breakpoint.
+    So the planner, dag_reasoning, verifier and dag_param bodies on this route must stay
+    breakpoint-free while their cache session stays stable across calls.
+    """
+    import providers.rose.gpt_auth as gpt_auth_mod
+    from providers.rose.pools import get_pool
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    captured_bodies = []
+
+    async def _capture_attempt(**kwargs):
+        captured_bodies.append(kwargs["body"])
+        if False:
+            yield None
+
+    marker = {"type": "ephemeral"}
+    first = [
+        {"role": "system", "content": "stable planner rules" + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + "user context"},
+        {"role": "user", "content": [{"type": "text", "text": "goal", "cache_control": marker}]},
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": "tool result"},
+    ]
+    grown = [*first, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "next step"}]
+    auth = GptAuthContext(token="test-token", source="user", user_id="test-user", max_rotations=0)
+    pool = get_pool("rose-1-ultra")
+    with patch.object(gpt_auth_mod, "_attempt_with_token", _capture_attempt):
+        for call_site in ("planner", "dag_reasoning", "verifier_execute", "dag_param_populator"):
+            for messages in (first, grown):
+                async for _ in gpt_auth_complete(
+                    pool_spec=pool,
+                    messages=messages,
+                    auth=auth,
+                    request_id="r",
+                    agent_id="agent-a",
+                    call_site=call_site,
+                ):
+                    pass
+
+    assert gpt_auth_mod.supports_prompt_cache_breakpoints(pool.gpt_auth_model), "fixture must use a GPT-5.6+ model"
+    for body in captured_bodies:
+        assert '"prompt_cache_breakpoint"' not in json.dumps(body), "the ChatGPT OAuth backend returns 400 for it"
+        assert '"cache_control"' not in json.dumps(body["input"])
+    for index in range(0, len(captured_bodies), 2):
+        before, after = captured_bodies[index], captured_bodies[index + 1]
+        assert before["prompt_cache_key"] == after["prompt_cache_key"], "a growing call keeps its cache session"
+        assert before["instructions"] == after["instructions"]
+        assert after["input"][: len(before["input"])] == before["input"], "the earlier request is a byte-stable prefix"
 
 
 def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
@@ -10333,6 +10891,7 @@ async def test_truncation_retains_incoming_candidate_exclusions():
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(
         "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
     )
@@ -10360,6 +10919,11 @@ async def run_all_tests():
         test_cerebras_tool_call_at_output_limit_is_escalated_not_accepted,
     )
     r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
+    r.record("chat_completions_bodies_drop_codex_history_items", test_chat_completions_bodies_drop_codex_history_items)
+    r.record(
+        "cerebras_tools_send_omittable_optionals_as_their_type",
+        test_cerebras_tools_send_omittable_optionals_as_their_type,
+    )
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(
@@ -10468,6 +11032,19 @@ async def run_all_tests():
         "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
     )
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
+    await r.record_async(
+        "browser_use_dump_records_foundry_wire_effort",
+        test_browser_use_dump_records_foundry_wire_effort_and_temperature,
+    )
+    r.record(
+        "claude_body_drops_empty_context_rows",
+        test_build_anthropic_body_accepts_completion_summary_context_with_empty_rows,
+    )
+    r.record(
+        "claude_body_closes_output_format_objects",
+        test_build_anthropic_body_closes_non_strict_output_format_objects,
+    )
+    await r.record_async("claude_auth_400_logs_provider_message", test_claude_auth_400_logs_provider_message)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
     await r.record_async(
@@ -10483,7 +11060,15 @@ async def run_all_tests():
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
     await r.record_async("anth_sse_tool_use", test_parse_anthropic_sse_tool_use_block)
     await r.record_async("anth_sse_empty_stalls", test_parse_anthropic_sse_empty_stream_raises_stall)
+    await r.record_async(
+        "anth_sse_thinking_only_max_tokens_length",
+        test_parse_anthropic_sse_thinking_only_max_tokens_reports_length,
+    )
     await r.record_async("anth_sse_refusal_raises", test_parse_anthropic_sse_refusal_raises_refusal)
+    await r.record_async(
+        "collect_refusal_after_partial_tool_call_next_model",
+        test_collect_refusal_after_partial_tool_call_moves_to_next_model,
+    )
     await r.record_async("anth_sse_thinking_emitted", test_parse_anthropic_sse_thinking_delta_counts_as_emitted)
     await r.record_async("anth_sse_skip_bad_json", test_parse_anthropic_sse_skips_event_lines_and_bad_json)
     await r.record_async("anth_sse_in_band_rate_limit_raises", test_parse_anthropic_sse_in_band_rate_limit_raises)
@@ -10747,6 +11332,10 @@ async def run_all_tests():
     r.record(
         "responses_body_marks_completed_user_messages",
         test_responses_body_marks_every_completed_user_message_without_caller_markers,
+    )
+    await r.record_async(
+        "chatgpt_oauth_route_never_sends_cache_breakpoints",
+        test_chatgpt_oauth_route_never_sends_cache_breakpoints_and_keeps_its_cache_session,
     )
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",

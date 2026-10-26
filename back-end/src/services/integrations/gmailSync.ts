@@ -17,6 +17,8 @@ import {
 } from './emailCredentialHealth';
 import { missingGoogleScopes } from '../../domains/integrations/googleScopes';
 import { googleClientId, googleClientSecret } from '../../domains/integrations/config';
+import { reportProgressBestEffort } from '../../domains/integrations/service.progress';
+import type { ProgressWriteInput } from '../../domains/integrations/syncAccountsContract';
 import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
 
 const log = createLogger('GmailSync');
@@ -383,7 +385,7 @@ async function syncGmailForUser(
     metadata: unknown;
   },
   integrationId: string
-): Promise<{ success: boolean; contacts: number; messages: number }> {
+): Promise<{ success: boolean; contacts: number; messages: number; messagesTotal?: number }> {
   const credentialEmail = credential.email || '';
   log.info('Starting sync for user', { userId, credentialId: credential.id });
 
@@ -429,6 +431,8 @@ async function syncGmailForUser(
 
   let emails: ParsedEmail[] = [];
   let newHistoryId: string;
+  // The mailbox size Google reports on a full sync (the progress bar's total).
+  let messagesTotal: number | undefined;
 
   if (historyId) {
     // Incremental sync using History API
@@ -442,6 +446,7 @@ async function syncGmailForUser(
       emails = await fetchGmailEmails(accessToken, userEmail);
       const profile = await getGmailProfile(accessToken);
       newHistoryId = profile.historyId;
+      messagesTotal = profile.messagesTotal;
     } else if (historyResult.addedMessageIds.length === 0) {
       // No new messages
       log.info('No new messages', { credentialId: credential.id });
@@ -461,6 +466,7 @@ async function syncGmailForUser(
     emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
     newHistoryId = profile.historyId;
+    messagesTotal = profile.messagesTotal;
   }
 
   let contactCount = 0;
@@ -518,7 +524,20 @@ async function syncGmailForUser(
     newContacts: contactCount,
     newMessages: messageCount,
   });
-  return { success: true, contacts: contactCount, messages: messageCount };
+  return { success: true, contacts: contactCount, messages: messageCount, messagesTotal };
+}
+
+/** One best-effort sync-progress write for a Gmail row (never fails the sync). */
+function reportGmailProgress(
+  integration: { userId: string; accountId: string },
+  input: ProgressWriteInput
+): Promise<void> {
+  return reportProgressBestEffort({
+    userId: integration.userId,
+    provider: 'gmail',
+    accountId: integration.accountId,
+    input,
+  });
 }
 
 /**
@@ -581,6 +600,19 @@ export async function runGmailSyncJob(): Promise<void> {
       data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
     });
 
+    // Sync progress: messages saved / the mailboxes' messagesTotal (null until
+    // every synced address reported one, e.g. an incremental history sync).
+    const runId = `gmail-sync:${integration.id}:${Date.now()}`;
+    let saved = 0;
+    let total: number | null = 0;
+    await reportGmailProgress(integration, {
+      runId,
+      state: 'syncing',
+      unit: 'messages',
+      done: 0,
+      total: null,
+    });
+
     // Sync each credential (email account) separately
     let allSucceeded = true;
     let lastError: string | null = null;
@@ -597,6 +629,12 @@ export async function runGmailSyncJob(): Promise<void> {
           allSucceeded = false;
           lastError = 'Gmail sync failed';
         }
+        saved += result.messages;
+        total =
+          total === null || result.messagesTotal === undefined
+            ? null
+            : total + result.messagesTotal;
+        await reportGmailProgress(integration, { runId, state: 'syncing', done: saved, total });
       } catch (error) {
         log.error('Error syncing credential', {
           credentialId: credential.id,
@@ -606,6 +644,14 @@ export async function runGmailSyncJob(): Promise<void> {
         lastError = 'Gmail sync failed';
       }
     }
+
+    await reportGmailProgress(integration, {
+      runId,
+      state: allSucceeded ? 'synced' : 'failed',
+      done: saved,
+      total,
+      error: allSucceeded ? null : lastError,
+    });
 
     if (allSucceeded) {
       successCount++;

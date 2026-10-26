@@ -102,8 +102,20 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
-    Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
+    Gate(
+        "benchmark-history-latest-only",
+        ("python3", "scripts/tests/benchmark-history-latest-only.test.py"),
+    ),
+    Gate(
+        "cloudbench-full-selection",
+        ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
+    ),
+    Gate(
+        "live-agent-display",
+        ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
+    ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate(
         "original600-portable-operator",
@@ -210,6 +222,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate(
+        "cloudbench-prelaunch-cancel",
+        ("python3", "scripts/tests/cloudbench-prelaunch-cancel.test.py"),
+    ),
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),

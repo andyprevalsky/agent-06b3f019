@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from biz_review_prompts import collect as collect_prompt_history
 from biz_review_browsers import e2b_cost, kernel_cost, steel_cost
 from biz_review_browsers import self_test as browsers_self_test
 from biz_review_fly import fly_cost
@@ -319,6 +320,7 @@ def collect(days: int, out_dir: Path) -> Path:
         "previousGit": {k: v for k, v in collect_git(previous_start, start).items()
                         if k in ("prsMerged", "commitsMerged")},
         "metrics": metrics,
+        "promptHistory": collect_prompt_history(now),
         "costs": costs,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -417,6 +419,40 @@ def pacific(stamp: str) -> str:
     return f"{moment:%B} {moment.day}, {moment:%-I:%M %p} {moment.tzname()}"
 
 
+def prompt_history_chart(history: dict | None) -> str:
+    """Aggregate-only weekly chart; absent historical data never becomes zero."""
+    if not history or history.get("status") != "ready":
+        return '<p class="m">Andy’s weekly prompts: history not collected.</p>'
+    weeks = history.get("weeks", [])
+    if not weeks:
+        return '<p class="m">Andy’s weekly prompts: no retained matching messages.</p>'
+    peak = max(1, max(row["count"] for row in weeks))
+    width, height = 720, 160
+    step = width / len(weeks)
+    bars, rows = [], []
+    for i, row in enumerate(weeks):
+        label = row["weekStart"] + (" · partial week" if row["partial"] else "")
+        count = row["count"]
+        bar_height = count / peak * (height - 20)
+        bars.append(f'<rect x="{i * step + 1:.2f}" y="{height - bar_height:.2f}" '
+                    f'width="{max(0.2, step - 2):.2f}" height="{bar_height:.2f}" '
+                    f'fill="var(--blue)" opacity="{0.5 if row["partial"] else 1}">'
+                    f'<title>{esc(label)}: {count:,} prompts</title></rect>')
+        rows.append(f'<tr><td>{esc(label)}</td><td class="num">{count:,}</td></tr>')
+    total = sum(row["count"] for row in weeks)
+    return (f'<section aria-label="Andy weekly prompt history"><h2>Andy’s weekly prompts</h2>'
+            f'<p><b>{total:,}</b> retained prompts · Monday–Sunday · America/Los_Angeles</p>'
+            f'<svg viewBox="0 0 {width} {height}" role="img" '
+            f'aria-label="Weekly prompt counts; exact values in the table below" '
+            f'style="width:100%;height:auto"><title>Andy’s weekly prompt history</title>'
+            + ''.join(bars) + '</svg>'
+            f'<p class="m">{esc(weeks[0]["weekStart"])} → {esc(weeks[-1]["weekStart"])}'
+            ' · faded bar = partial week</p>'
+            '<details><summary><span>Weekly counts and scope</span></summary>'
+            '<table><thead><tr><th>Week starting</th><th>Prompts</th></tr></thead><tbody>'
+            + ''.join(rows) + f'</tbody></table><p class="m">{esc(history["scope"])}</p></details></section>')
+
+
 def render(data: dict, narrative: dict) -> str:
     window, gitd, prev_git = data["window"], data["git"], data["previousGit"]
     metrics = data["metrics"]
@@ -455,6 +491,8 @@ def render(data: dict, narrative: dict) -> str:
         rows = "".join(task_row(item) for item in cur["items"])
         parts.append(f'<details><summary><span>All tasks</span><span class="n">{cur["total"]}</span></summary>'
                      f'<table class="tasks">{rows}</table></details>')
+
+    parts.append(prompt_history_chart(data.get("promptHistory")))
 
     # Costs
     ready = [c for c in data["costs"] if c["status"] == "ready"]
@@ -525,6 +563,17 @@ def self_test() -> None:
     }
     narrative = {"majors": [{"title": "A <b>", "impact": "i", "prs": [1]}],
                  "clusters": [{"title": "Chat", "count": "2 PRs", "items": ["x"]}]}
+    history = {"status": "ready", "scope": "Retained <only>", "weeks": [
+        {"weekStart": "2026-10-05", "count": 8, "partial": False},
+        {"weekStart": "2026-10-12", "count": 0, "partial": False},
+        {"weekStart": "2026-10-19", "count": 3, "partial": True}]}
+    chart = prompt_history_chart(history)
+    assert "11</b> retained prompts" in chart and "America/Los_Angeles" in chart
+    assert "partial week" in chart and "Retained &lt;only&gt;" in chart
+    assert "2026-10-12</td><td class=\"num\">0" in chart
+    assert "not collected" in prompt_history_chart(None)
+    assert "no retained" in prompt_history_chart({"status": "ready", "weeks": []})
+    data["promptHistory"] = history
     page = render(data, narrative)
     assert "33%" in page and "5 of 15 agent runs completed" in page
     assert "25</b><span>user-initiated tasks" in page and "archived" not in page.lower()

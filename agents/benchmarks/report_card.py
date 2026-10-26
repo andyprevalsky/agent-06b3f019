@@ -112,7 +112,7 @@ class RunState:
       tokens_out        – tree/run output token count. If None, derived by
                           summing per_task[*].tokens_out.
       wmh_grounding_usd – WMH grounding cost in USD (OPTIONAL; None local).
-      fast_cache_hit_rate – 0..1 fast-cache hit rate (OPTIONAL; None if unknown).
+      fast_cache_hit_rate – 0..1 demo-cache hit rate (OPTIONAL; None if unknown).
       infra             – optional Infra block (None for local runs).
       source_sha        – git HEAD the run executed from (None if unknown or the
                           tracked tree was dirty, so a card never claims it).

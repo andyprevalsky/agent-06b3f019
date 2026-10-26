@@ -388,7 +388,17 @@ def test_planner_tools_description_lists_only_assignable_tools():
         "call_phone_number",
         "message_person",
         "send_message_to_user_execute_phase",
+        "display",
     }, headers
+    # A plan task can show the root's own page (display html) without a code agent.
+    display_section = desc.split("### display\n", 1)[1].split("\n### ", 1)[0]
+    assert '"html"' in display_section and "`html` is a page you write yourself" in display_section, display_section
+    from utils.tool_schemas import get_planner_response_model
+
+    plan = get_planner_response_model().model_validate(
+        {"title": "Chart", "join": "all", "tasks": [{"task_idx": "0", "goal": "Show the chart page", "tool_name": "display"}]}
+    )
+    assert plan.tasks[0].tool_name == "display", plan
     assert all(TOOL_ALIASES.get(name, name) in headers or name == "reasoning" for name in PLANNER_ASSIGNABLE_TOOLS)
     for hidden in ("kill_agent", "send_message_to_agent", "attempt_completion"):
         assert hidden not in desc, hidden
@@ -1044,6 +1054,29 @@ async def test_run_planner_attempt_redelivers_after_dead_worker():
         "never heartbeats is redelivered instead of burning the 240s LLM budget"
     )
     assert heartbeat < start_to_close
+
+    local_instance = _FakeWFInstance()
+    local_instance.model = "rose-labs/rose-local"
+    restore = _patch_service_workflow(fake_wf)
+    try:
+        await run_planner_attempt(
+            workflow_instance=local_instance,
+            messages=[{"role": "user", "content": "goal"}],
+            tools_description="tools",
+            user_context="",
+            response_schema=None,
+            claude_max_token=None,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            user_messages=["goal"],
+            tool_call_id="tc-local",
+            attempt=0,
+        )
+    finally:
+        restore()
+    assert captured["args"][1] == "rose-labs/rose-local", "Local planner must stay on local inference"
     assert captured.get("schedule_to_start_timeout") is None, (
         "A short schedule_to_start with max_attempts=2 can fail a healthy pickup "
         "that would have succeeded inside the 240s StartToClose budget"

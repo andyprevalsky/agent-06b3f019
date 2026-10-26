@@ -102,10 +102,10 @@ DEMO_FLEET_CONCURRENCY_GOAL_PREFIX = "DEMO fleet concurrency probe"
 _DEMO_CACHE_GOAL_HASHES: frozenset[str]
 _demo_cache_goal_hash = None
 try:
-    from providers.fast_cache.normalize import (
+    from providers.demo_cache.normalize import (
         demo_cache_goal_hashes as _load_demo_cache_goal_hashes,
     )
-    from providers.fast_cache.normalize import (
+    from providers.demo_cache.normalize import (
         goal_hash as _load_demo_cache_goal_hash,
     )
 
@@ -119,7 +119,7 @@ except Exception:  # pragma: no cover - slim images / import-order unit tests
 def is_demo_cache_task(workflow_instance) -> bool:
     """True when Fast Mode DEMO cache replay / cold soft-complete may run.
 
-    Broader than ``is_oai_demo_mass_agent_task``: catalog DEMO / ``fast_cache:on``
+    Broader than ``is_oai_demo_mass_agent_task``: catalog DEMO / ``demo_cache:on``
     goal hashes (eagerly loaded) plus the fleet-concurrency DEMO prefix.
     Used only to gate ``workflow.fast_mode_cache_enabled`` — mass-agent-only
     spawn rules keep ``is_oai_demo_mass_agent_task``.
@@ -127,7 +127,7 @@ def is_demo_cache_task(workflow_instance) -> bool:
     if is_oai_demo_mass_agent_task(workflow_instance):
         return True
     goal = str(getattr(workflow_instance, "goal", None) or "")
-    cached = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
+    cached = str(getattr(workflow_instance, "demo_cache_goal", None) or "")
     root_goal = str(getattr(workflow_instance, "root_goal", None) or "")
     if any(DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)):
         return True

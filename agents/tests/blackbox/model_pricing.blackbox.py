@@ -40,11 +40,15 @@ async def test_every_pool_model_has_provider_pricing():
     ]
     assert missing == [], f"pool models with no pricing entry: {missing}"
 
-    for name in POOL_REGISTRY:
+    for name, spec in POOL_REGISTRY.items():
         pricing = get_pool_pricing(name)
         assert pricing is not None, f"{name} priced as None"
-        assert pricing["input_cents_per_1k"] > 0
-        assert pricing["output_cents_per_1k"] > 0
+        if not spec.waterfall:
+            # rose-local serves on the user's own machine: no remote leg to bill.
+            assert pricing == {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0}, (name, pricing)
+            continue
+        assert pricing["input_cents_per_1k"] > 0, name
+        assert pricing["output_cents_per_1k"] > 0, name
 
 
 def test_get_anthropic_pricing_claude():

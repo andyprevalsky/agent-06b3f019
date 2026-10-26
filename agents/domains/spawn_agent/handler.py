@@ -1149,6 +1149,9 @@ class SpawnAgentManager(ToolManager):
         }
         if tool_call.get("attachments"):
             browser_tool_call["attachments"] = tool_call["attachments"]
+        if isinstance(tool_call.get("_resume_paused_conversation"), dict):
+            # Set only by a continue_conversation resume (workflows/background_agents.py).
+            browser_tool_call["_resume_paused_conversation"] = tool_call["_resume_paused_conversation"]
 
         manager = get_browser_manager()
         async for event in manager.execute_tool(workflow_instance, browser_tool_call, tool_call_id):
@@ -1179,6 +1182,13 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["attachments"] = tool_call["attachments"]
         if tool_call.get("github_repo_link"):
             code_tool_call["github_repo_link"] = tool_call["github_repo_link"]
+        if tool_call.get("code_session_id"):
+            code_tool_call["code_session_id"] = tool_call["code_session_id"]
+        if tool_call.get("target"):
+            code_tool_call["target"] = tool_call["target"]
+        if tool_call.get("_fresh_conversation") is True:
+            # Set only by a continue_conversation=false resume (workflows/background_agents.py).
+            code_tool_call["_fresh_conversation"] = True
 
         manager = get_code_manager()
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):
@@ -1244,7 +1254,7 @@ class SpawnAgentManager(ToolManager):
         simulated_args.setdefault(
             "root_goal",
             str(
-                getattr(workflow_instance, "fast_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
+                getattr(workflow_instance, "demo_cache_root_goal", None) or getattr(workflow_instance, "goal", "") or ""
             ),
         )
 

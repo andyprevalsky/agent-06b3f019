@@ -12,6 +12,11 @@
  * session with zero output until our outer timeout (agent 28b8f555 stalled
  * 233s inside its second streaming request). The CLI's own idle timeout
  * default (90s) is kept, so CLAUDE_STREAM_IDLE_TIMEOUT_MS must not be set.
+ *
+ * Invariant: code agents cannot ask the user questions. The CLI is launched
+ * with AskUserQuestion, EnterPlanMode and ExitPlanMode (the tools whose
+ * requiresUserInteraction() asks the user) on --disallowedTools, which removes
+ * them from the model's tool list. --allowedTools alone only pre-approves.
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -28,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 
 const wsServerPath = resolve(
   __dirname,
@@ -43,25 +49,42 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'claude-ws-cli-env-'));
 const fakeBinDir = join(fixtureDir, 'bin');
 mkdirSync(fakeBinDir, { recursive: true });
 
-// Fake CLI: drain the stdin prompt, record the env it was launched with, then
-// emit a successful stream-json result so ws-server finishes the run normally.
+// Fake CLI: read the stream-json prompt line (ws-server keeps stdin open until
+// the turn's result), record the env it was launched with, then emit a
+// successful result so ws-server closes stdin and the run finishes normally.
 const fakeClaudePath = join(fakeBinDir, 'claude');
 writeFileSync(
   fakeClaudePath,
   `#!${process.execPath}
 const { writeFileSync } = require('node:fs');
 let stdin = '';
+let answered = false;
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { stdin += chunk; });
-process.stdin.on('end', () => {
+process.stdin.on('data', (chunk) => {
+  stdin += chunk;
+  let newline;
+  while (!answered && (newline = stdin.indexOf('\\n')) !== -1) {
+  const line = stdin.slice(0, newline);
+  stdin = stdin.slice(newline + 1);
+  const message = JSON.parse(line);
+  if (message.type === 'control_request') {
+    process.stdout.write(JSON.stringify({ type: 'control_response', response: {
+      request_id: message.request_id, subtype: 'success', response: { models: [] }
+    } }) + '\\n');
+    continue;
+  }
+  answered = true;
   writeFileSync(process.env.FAKE_CLAUDE_CAPTURE_PATH, JSON.stringify({
     streamWatchdog: process.env.CLAUDE_ENABLE_STREAM_WATCHDOG ?? null,
     streamIdleTimeoutMs: process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS ?? null,
     oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
-    stdin,
+    argv: process.argv.slice(2),
+    stdin: line,
   }));
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\\n');
+  }
 });
+process.stdin.on('end', () => process.exit(0));
 `
 );
 chmodSync(fakeClaudePath, 0o755);
@@ -74,6 +97,7 @@ type CliEnvCapture = {
   streamWatchdog: string | null;
   streamIdleTimeoutMs: string | null;
   oauthToken: string | null;
+  argv: string[];
   stdin: string;
 };
 
@@ -160,20 +184,68 @@ test('ws-server launches the Claude Code CLI with its stream idle watchdog enabl
   );
 });
 
+/** Every tool name passed to --disallowedTools (comma or space separated, repeatable). */
+function disallowedTools(argv: string[]): string[] {
+  const names: string[] = [];
+  argv.forEach((arg, index) => {
+    if (arg === '--disallowedTools' || arg === '--disallowed-tools') {
+      names.push(...(argv[index + 1] ?? '').split(/[\s,]+/).filter(Boolean));
+    }
+  });
+  return names;
+}
+
+const QUESTION_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+
+test('ws-server launches Claude Code with every ask-the-user tool disallowed', async () => {
+  const env = await captureCliEnv('no-questions', {});
+  const denied = disallowedTools(env.argv);
+  for (const tool of QUESTION_TOOLS) {
+    assert.ok(
+      denied.includes(tool),
+      `REGRESSION: Claude Code launched without ${tool} on --disallowedTools; code agents ` +
+        `must not be able to ask the user questions. argv: ${JSON.stringify(env.argv)}`
+    );
+  }
+});
+
+test('the rose MCP server does not re-enable a question tool for Claude Code', async () => {
+  const home = join(fixtureDir, 'home-rose-mcp');
+  mkdirSync(join(home, '.rose'), { recursive: true });
+  writeFileSync(join(home, '.rose', 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const env = await captureCliEnv('rose-mcp', {});
+  assert.ok(env.argv.includes('--mcp-config'), 'fixture must exercise the rose MCP launch');
+  const denied = disallowedTools(env.argv);
+  for (const tool of QUESTION_TOOLS) assert.ok(denied.includes(tool), `${tool} re-enabled`);
+});
+
 test('ws-server forces the watchdog on even when the sandbox env disables it', async () => {
   const env = await captureCliEnv('inherited-off', { CLAUDE_ENABLE_STREAM_WATCHDOG: '0' });
   assert.equal(env.streamWatchdog, '1');
 });
 
-test('native Claude result codec preserves action identity and error evidence', () => {
+function nativeClaudeEmitter(events: Record<string, unknown>[]): (message: unknown) => void {
   const source = readFileSync(wsServerPath, 'utf8');
-  const start = source.indexOf('function emitClaudeMessage(message)');
-  const end = source.indexOf('async function runClaudeCli()', start);
-  assert.ok(start > 0 && end > start);
-  const events: Record<string, unknown>[] = [];
-  const emit = runInNewContext(`(${source.slice(start, end).trim()})`, {
+  const parsed = ts.createSourceFile(
+    wsServerPath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS
+  );
+  const declaration = parsed.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'emitClaudeMessage'
+  );
+  assert.ok(declaration, 'real native event emitter must exist');
+  return runInNewContext(`(${declaration.getText(parsed)})`, {
     appendEvent: (event: Record<string, unknown>) => events.push(event),
   }) as (message: unknown) => void;
+}
+
+test('native Claude result codec preserves action identity and error evidence', () => {
+  const events: Record<string, unknown>[] = [];
+  const emit = nativeClaudeEmitter(events);
   for (const isError of [false, true]) {
     const result = { stdout: 'original tool output', exitCode: isError ? 1 : 0 };
     emit({
@@ -195,13 +267,8 @@ test('native Claude result codec preserves action identity and error evidence', 
 });
 
 test('native Claude batch retains every original block without assigning shared metadata', () => {
-  const source = readFileSync(wsServerPath, 'utf8');
-  const start = source.indexOf('function emitClaudeMessage(message)');
-  const end = source.indexOf('async function runClaudeCli()', start);
   const events: Record<string, unknown>[] = [];
-  const emit = runInNewContext(`(${source.slice(start, end).trim()})`, {
-    appendEvent: (event: Record<string, unknown>) => events.push(event),
-  }) as (message: unknown) => void;
+  const emit = nativeClaudeEmitter(events);
   const blocks = [
     { type: 'tool_result', tool_use_id: 'native-first', is_error: false, content: 'first output' },
     { type: 'tool_result', tool_use_id: 'native-second', is_error: true, content: 'second error' },

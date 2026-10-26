@@ -174,14 +174,18 @@ test.describe('browser-chip-count', () => {
       // ── Invariant: reload agrees with realtime ────────────────────────
       // The chip count must be derived purely from persisted messages, so a
       // fresh hydration renders the same zero-chip state. Zero chips is also
-      // true before the persisted messages load, so first wait for the three
-      // terminal Browser Agent cards (A done, B failed, retried call done);
-      // otherwise this step can pass before hydration has happened at all.
+      // true before the persisted messages load, so first wait for the
+      // persisted terminal Browser Agent rows (A and the retried call done, B
+      // failed); otherwise this step can pass before hydration has happened at
+      // all. Rose Desktop folds them into one trajectory row carrying their
+      // tool identity.
       await page.reload({ waitUntil: 'domcontentloaded' });
       await expect(
-        page.locator('[data-testid="browser-agent-chip"]'),
-        'after reload: persisted browser terminal cards never hydrated',
-      ).toHaveCount(3, { timeout: CHIP_SETTLE_TIMEOUT_MS });
+        page.locator(
+          '[data-testid="trajectory-work-group"][data-tool-statuses~="spawn_browser_agent:FINISHED"][data-tool-statuses~="spawn_browser_agent:ERROR"]',
+        ),
+        'after reload: persisted browser terminal rows never hydrated',
+      ).toHaveCount(1, { timeout: CHIP_SETTLE_TIMEOUT_MS });
       await expectChipCount(page, 0, 'after reload');
 
       expect(hasUncaughtErrors(rec), 'Uncaught errors during chip-count flow').toEqual([]);

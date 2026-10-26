@@ -24,7 +24,7 @@ interface SubAgentBreadcrumbProps {
 
 type LooseAncestor = AncestorNode & { agent_id?: string };
 
-export function resolveBreadcrumbAncestors(
+function resolveBreadcrumbAncestors(
   ancestors: AncestorNode[],
   agentDetail: AgentDetail,
 ): AncestorNode[] {
@@ -53,7 +53,7 @@ export function SubAgentBreadcrumb({
     <div className="absolute top-20 left-0 right-0 z-40 px-6">
       <div className="max-w-4xl mx-auto">
         <div
-          className="inline-flex px-4 py-2 rounded-lg text-sm items-center gap-1 border border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-800/80 shadow-lg overflow-x-auto max-w-full"
+          className="inline-flex px-4 py-2 rounded-lg text-sm items-center gap-1 border border-gray-200/50 dark:border-white/[0.08] bg-white/80 dark:bg-[rgba(32,32,30,0.78)] shadow-lg overflow-x-auto max-w-full"
           style={{
             backdropFilter:
               blur > 0

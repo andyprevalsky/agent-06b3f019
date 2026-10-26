@@ -41,15 +41,21 @@ if _env_path.is_file():
         if key and key not in os.environ:
             os.environ[key] = value
 
-# Imported after agents/ joins sys.path and agents/.env is loaded.
-RoseClient = importlib.import_module("providers.rose").RoseClient
+# Agent modules resolve only after the path and env setup above, so bind them
+# explicitly here instead of with module-level imports below executable code.
+_rose = importlib.import_module("providers.rose")
 _browser_use = importlib.import_module("providers.rose.browser_use")
+_prompts = importlib.import_module("utils.prompts")
+_tool_schemas = importlib.import_module("utils.tool_schemas")
+RoseClient = _rose.RoseClient
+RoseResponse = _rose.RoseResponse
+StructuredOutputAccumulator = _rose.StructuredOutputAccumulator
+gpt_auth_from_token = _rose.gpt_auth_from_token
 build_browser_use_messages = _browser_use.build_browser_use_messages
 normalize_browser_use_tool_call = _browser_use.normalize_browser_use_tool_call
-_prompts = importlib.import_module("utils.prompts")
 SYSTEM_PROMPT_DYNAMIC_BOUNDARY = _prompts.SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 build_planner_system_prompt = _prompts.build_planner_system_prompt
-PlannerResponse = importlib.import_module("utils.tool_schemas").PlannerResponse
+PlannerResponse = _tool_schemas.PlannerResponse
 
 
 LEGACY_BROWSER_DYNAMIC_RULE_RE = re.compile(
@@ -160,23 +166,32 @@ def browser_replay_inputs(data: dict[str, Any]) -> dict[str, Any]:
 REPLAY_USER_ID = os.environ.get("REPLAY_USER_ID", "1f85ff25-6e29-4c1b-8739-f917bd101a30")
 
 
-async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
-    """Lease a fresh GPT compute token when the dumped call used gptAuth.
+async def direct_auth_from_dump(data: dict[str, Any]) -> dict[str, Any]:
+    """Lease a fresh compute token of the type the dumped call used.
 
     Dumps record only the lease identity (type/source/pool id), never the
     credential, so the replay leases through the supported compute-token path.
+    Returns the RoseClient kwarg (``gpt_auth`` or ``claude_auth``), or {} when
+    the call used no direct auth. Replaying a claudeAuth call without a Claude
+    lease silently serves another model and cannot reproduce its decision.
     """
     from helpers.llm import _build_compute_auth_context, fetch_compute_token_activity
 
     output = data.get("output") if isinstance(data.get("output"), dict) else {}
     usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
     token_used = usage.get("compute_token_used") if isinstance(usage.get("compute_token_used"), dict) else {}
-    if token_used.get("type") != "gpt":
-        return None
-    lease = await fetch_compute_token_activity(REPLAY_USER_ID, token_type="gpt")
+    token_type = token_used.get("type")
+    if token_type not in ("gpt", "claude"):
+        return {}
+    lease = await fetch_compute_token_activity(REPLAY_USER_ID, token_type=token_type)
     if not lease:
-        raise SystemExit("Dump used gptAuth but no GPT compute token could be leased for the replay")
-    return _build_compute_auth_context(lease, REPLAY_USER_ID, max_rotations=0)
+        raise SystemExit(f"Dump used {token_type}Auth but no {token_type} compute token could be leased for the replay")
+    return {f"{token_type}_auth": _build_compute_auth_context(lease, REPLAY_USER_ID, max_rotations=0)}
+
+
+async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
+    """The leased GPT auth for a gptAuth dump (paths that only take gpt_auth)."""
+    return (await direct_auth_from_dump(data)).get("gpt_auth")
 
 
 def _pool_from_dump(data: dict[str, Any]) -> str:
@@ -362,6 +377,68 @@ async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, 
     return result
 
 
+async def _collect_recorded_call(
+    data: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    response_model: Any,
+    default_temperature: Optional[float],
+    default_max_tokens: int,
+    dump_extra: dict[str, Any],
+) -> RoseResponse:
+    """Replay a structured call on the transport and effort the dump recorded.
+
+    `collect()` cannot express reasoning effort and defaults to the pool's
+    racing order, so a planner dump served by gptAuth at effort=max was
+    replayed on a different model (e.g. a Foundry leg at default effort),
+    which cannot reproduce the original decision. Stream `complete()` with the
+    recorded gpt_auth / effort / provider_fast_mode and fold it the way
+    `collect()` does.
+    """
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
+    kwargs: dict[str, Any] = {
+        "pool": _pool_from_dump(data),
+        "messages": messages,
+        "response_model": response_model,
+        "temperature": requested.get("temperature", default_temperature),
+        "max_tokens": requested.get("max_tokens") or default_max_tokens,
+        "agent_id": data.get("agent_id"),
+        "call_site": f"replicate_{data.get('call_site') or 'planner'}",
+        "dump_extra": dump_extra,
+        "skip_cache_write": True,
+    }
+    kwargs.update(await direct_auth_from_dump(data))
+    effort = config.get("reasoning_effort") or requested.get("reasoning_effort")
+    if effort:
+        kwargs["effort"] = effort
+    if requested.get("provider_fast_mode") is not None:
+        kwargs["provider_fast_mode"] = bool(requested["provider_fast_mode"])
+
+    result = RoseResponse()
+    structured = StructuredOutputAccumulator()
+    async for chunk in RoseClient().complete(**kwargs):
+        if chunk.kind == "restart":
+            result = RoseResponse()
+            structured = StructuredOutputAccumulator()
+        elif chunk.kind == "metadata":
+            result.actual_model = chunk.data.get("actual_model", "") or result.actual_model
+            result.pool_name = chunk.data.get("pool_name", "") or result.pool_name
+            result.request_id = chunk.data.get("request_id", "") or result.request_id
+        elif chunk.kind == "content":
+            structured.add_chunk(chunk)
+        elif chunk.kind == "reasoning":
+            result.reasoning += chunk.data.get("text", "")
+        elif chunk.kind == "tool_call":
+            result.tool_calls.append(dict(chunk.data))
+        elif chunk.kind == "usage":
+            result.usage = dict(chunk.data)
+        elif chunk.kind == "done" and isinstance(chunk.data.get("timing"), dict):
+            result.timing = dict(chunk.data["timing"])
+    result.content = structured.current_text()
+    return result
+
+
 async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[str]) -> dict[str, Any]:
     if mode == "rebuild-system":
         messages = rebuild_planner_messages(data)
@@ -370,22 +447,16 @@ async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[st
         messages = data.get("messages") or []
         replication_mode = "exact"
 
-    config = data.get("config") if isinstance(data.get("config"), dict) else {}
-    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
-    client = RoseClient()
-    response = await client.collect(
-        pool=_pool_from_dump(data),  # type: ignore[arg-type]
+    response = await _collect_recorded_call(
+        data,
         messages=messages,
         response_model=PlannerResponse,
-        temperature=requested.get("temperature", 0.2),
-        max_tokens=requested.get("max_tokens", 16384),
-        agent_id=data.get("agent_id"),
-        call_site=f"replicate_{data.get('call_site') or 'planner'}",
+        default_temperature=0.2,
+        default_max_tokens=16384,
         dump_extra={
             "replicated_from": data.get("call_site"),
             "replication_mode": replication_mode,
         },
-        skip_cache_write=True,
     )
 
     plan: dict[str, Any]
@@ -402,6 +473,7 @@ async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[st
         "call_site": data.get("call_site"),
         "replication_mode": replication_mode,
         "actual_model": response.actual_model,
+        "pool_name": response.pool_name,
         "usage": response.usage,
         "timing": response.timing,
         "request_id": response.request_id,
@@ -441,9 +513,7 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     # Replay on the transport the dump actually used. Falling through to the
     # OpenRouter waterfall silently swaps the provider, so a direct-auth
     # (claudeAuth/gptAuth) divergence cannot be reproduced at all.
-    gpt_auth = await gpt_auth_from_dump(data)
-    if gpt_auth is not None:
-        kwargs["gpt_auth"] = gpt_auth
+    kwargs.update(await direct_auth_from_dump(data))
     # Reasoning effort materially changes tool choice, so a replay that drops it
     # is not the same call. `collect()` cannot express it — it forwards a fixed
     # arg list to `complete()` — so stream `complete()` directly and accumulate
@@ -496,7 +566,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
     if "browser_use" in call_site:
         result = await replay_browser_use(data, exact=args.mode == "exact")
-    elif call_site == "planner" or (isinstance(data.get("config"), dict) and data["config"].get("response_model") == "PlannerResponse"):
+    elif call_site == "planner" or (
+        isinstance(data.get("config"), dict) and data["config"].get("response_model") == "PlannerResponse"
+    ):
         result = await replay_planner(data, mode=args.mode, assertions=args.assert_ or [])
     else:
         if args.mode == "rebuild-system":

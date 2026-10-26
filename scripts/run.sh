@@ -975,17 +975,33 @@ else
     fi
 fi
 
-# Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
+# DEMO cache is intentionally shared across local/dev/prod so recorded runs
 # survive local DB resets. Capture the prod DB URL from back-end/.env before this
 # script overwrites DATABASE_URL with the local app database below.
 #
-# FAST_MODE_CACHE_USE_LOCAL=1 routes the fast-cache at the isolated LOCAL DB
+# FAST_MODE_CACHE_USE_LOCAL=1 routes the demo-cache at the isolated LOCAL DB
 # instead of the shared prod Supabase pooler. The shared pooler has a fixed
 # connection ceiling; when many local stacks (or a cloud fleet) run at once it
-# saturates, and the boot-time "Ensuring Fast Mode cache schema" step fails with
+# saturates, and the boot-time "Ensuring DEMO cache schema" step fails with
 # EMAXCONN / pool-timeout — blocking the stack from ever starting. For a smoke
 # gate that only needs a working runtime (not prod cache sharing), point the
 # cache at the local DB so startup can't be held hostage by pooler contention.
+# DEMO_CACHE_* is the current spelling of these variables. The legacy
+# FAST_MODE_CACHE_* / FAST_CACHE_DB_POOL names are still honoured and win while
+# present (even empty), so existing environments behave exactly as before.
+for _demo_cache_pair in \
+    DEMO_CACHE_DATABASE_URL:FAST_MODE_CACHE_DATABASE_URL \
+    DEMO_CACHE_USE_LOCAL:FAST_MODE_CACHE_USE_LOCAL \
+    DEMO_CACHE_DISABLE_WRITE_THROUGH:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH \
+    DEMO_CACHE_RECORD_DEMO:FAST_MODE_CACHE_RECORD_DEMO \
+    DEMO_CACHE_DB_POOL:FAST_CACHE_DB_POOL; do
+    _demo_cache_new="${_demo_cache_pair%%:*}"
+    _demo_cache_legacy="${_demo_cache_pair#*:}"
+    if [ -z "${!_demo_cache_legacy+x}" ] && [ -n "${!_demo_cache_new+x}" ]; then
+        export "$_demo_cache_legacy=${!_demo_cache_new}"
+    fi
+done
+unset _demo_cache_pair _demo_cache_new _demo_cache_legacy
 if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     # Fail closed: without a real LOCAL_DB_URL, exporting an empty value would let
     # the block below silently re-derive the prod pooler URL — defeating the whole
@@ -995,7 +1011,7 @@ if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABAS
         exit 1
     fi
     export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
-    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing Fast Mode cache at the isolated local DB (decoupled from the shared prod pooler)"
+    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing DEMO cache at the isolated local DB (decoupled from the shared prod pooler)"
 fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
     PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
@@ -1020,12 +1036,12 @@ PY
     fi
 fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
-    echo "❌ FAST_MODE_CACHE_DATABASE_URL is required; Fast Mode cache must route to the prod cache table."
+    echo "❌ FAST_MODE_CACHE_DATABASE_URL is required; DEMO cache must route to the prod cache table."
     echo "   Set it explicitly or keep the prod DATABASE_URL in back-end/.env so scripts/run.sh can derive it before local DB override."
     exit 1
 fi
-apply_fast_cache_pool_default
-echo "🧠 Ensuring Fast Mode cache schema..."
+apply_demo_cache_pool_default
+echo "🧠 Ensuring DEMO cache schema..."
 # This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
 # default (see above). When a cloud fleet boots concurrently (plus any neighbor
 # fleet on the same app), the pooler briefly saturates and this single query dies
@@ -1214,11 +1230,11 @@ if $DB_RESTORED; then
     echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
     (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
     # Restoring a base image resets the schema to exactly what the dump holds, so
-    # anything ensured BEFORE the restore (the Fast Mode cache table above) is
+    # anything ensured BEFORE the restore (the DEMO cache table above) is
     # gone unless that dump happened to contain it. Re-ensure idempotently so a
     # dump published before the table existed cannot leave the cache broken.
     if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ]; then
-        echo "🧠 Re-ensuring Fast Mode cache schema (post-restore)..."
+        echo "🧠 Re-ensuring DEMO cache schema (post-restore)..."
         if ! ensure_fast_mode_cache_schema bash -c \
             'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
             exit 1
@@ -2625,6 +2641,7 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
 else
     start_public_tunnel
 fi
+export_sandbox_backend_base_url
 # Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls
 # through the local proxy for cache capture. Locally this pins those calls to a
 # priority tier that can have 0 credits (e.g. Opus 4.8), which fails the
@@ -2850,7 +2867,7 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
         NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
-        npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
+        ROSE_E2E_FIXTURES=true npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 

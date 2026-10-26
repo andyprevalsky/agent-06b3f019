@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 import structlog.contextvars
 from temporalio import activity
+from temporalio.common import RetryPolicy
 
 from domains.spawn_agent.config import (
     EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
@@ -41,9 +42,11 @@ from helpers.agent_addressing import task_name_error
 from helpers.attachment_context import AttachmentContextLimitError
 from helpers.attachments import FilePointer
 from helpers.model_info import get_model_context_window
+from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
+from utils.grep_result_budget import fit_grep_result_to_budget
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
@@ -52,6 +55,26 @@ logger = structlog.get_logger()
 # Return gathered tool evidence just before the depth's activity timeout.
 # Leave room to drain pending FE posts and persist the final explore chip.
 LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
+# Background FE progress posts are best-effort UI writes, treated like Claude
+# Code's event uploader (claude-code-src/src/cli/transports/HybridTransport.ts):
+# each attempt is bounded at 15 s (:13-15), retried with a 500 ms delay
+# doubling to an 8 s cap (:86-87), and dropped once its attempts run out
+# (SerialBatchEventUploader.ts:172-177) rather than retried forever. Three
+# attempts is the existing in-activity default (loop/activity_helper.py:76).
+# The attempt bound wraps the whole post, including httpx pool/connection-lock
+# acquisition, which httpx's own timeouts do not cover (RCA P9: a leaked lock
+# pinned the explore activity and the worker shutdown drain). A drain waits at
+# most one post's full schedule, then drops what is left; delivery is not
+# guaranteed under a degraded backend (HybridTransport.ts:16-17).
+EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S = 15.0
+EXPLORE_FE_POST_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=3,
+)
+EXPLORE_FE_POST_BUDGET_S = 3 * EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S + 0.5 + 1.0
+EXPLORE_FE_DRAIN_TIMEOUT_S = EXPLORE_FE_POST_BUDGET_S
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -148,9 +171,15 @@ def _render_explore_tool_result(tool_name: str, value: Any) -> str:
                 details["url"] = value["url"]
             detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
             return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
-    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "list_agents"}:
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch", "inspect_code", "list_agents"}:
         return value
-    return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    def render(item: Any) -> str:
+        return json.dumps(item, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+    if tool_name == "grep" and isinstance(value, dict):
+        value = fit_grep_result_to_budget(value, TOOL_RESULT_HARD_CAP_CHARS, render)
+    return render(value)
 
 
 def _fallback_trace_text(item: Any) -> str:
@@ -527,12 +556,13 @@ async def spawn_explore_agent_activity(
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
-    from helpers.agent_inbox import AgentInbox, agent_message_metadata
+    from helpers.agent_inbox import AgentInbox, agent_message_metadata, format_agent_message
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
-    from providers.fast_cache.client import resolve_agent_fast_mode
+    from providers.demo_cache.client import resolve_agent_fast_mode
     from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
+    from tools.inspect_code import InspectCodeManager
     from tools.list_agents import explore_list_agents
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
@@ -680,7 +710,7 @@ async def spawn_explore_agent_activity(
             if previous is not None:
                 # Order only; a failed predecessor must not cancel its successor.
                 await asyncio.gather(previous, return_exceptions=True)
-            return await coro_factory()
+            return await asyncio.wait_for(coro_factory(), timeout=EXPLORE_FE_POST_BUDGET_S)
 
         task = asyncio.create_task(_ordered())
         if chain_key:
@@ -707,7 +737,15 @@ async def spawn_explore_agent_activity(
                 chain_key = str(chain_id) if chain_id else None
             _dispatch_fe_post(
                 chain_key,
-                lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
+                lambda: call_temporal_activity_from_activity(
+                    activity_fn,
+                    args=args,
+                    **{
+                        **kwargs,
+                        "start_to_close_timeout": timedelta(seconds=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S),
+                        "retry_policy": EXPLORE_FE_POST_RETRY,
+                    },
+                ),
             )
             return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
@@ -727,6 +765,17 @@ async def spawn_explore_agent_activity(
                 task_id=task_id,
                 pending_count=len(pending),
             ):
+                _, overdue = await asyncio.wait(pending, timeout=EXPLORE_FE_DRAIN_TIMEOUT_S)
+                if overdue:
+                    logger.warning(
+                        "Explore FE posts dropped after drain deadline",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        dropped=len(overdue),
+                        deadline_s=EXPLORE_FE_DRAIN_TIMEOUT_S,
+                    )
+                    for task in overdue:
+                        task.cancel()
                 results = await asyncio.gather(*pending, return_exceptions=True)
             # Only NOW drop the chain tails, and only those still pointing at a
             # task we just drained. Clearing them before the gather would publish
@@ -875,6 +924,16 @@ async def spawn_explore_agent_activity(
                         and not any(u.get("source") == source for u in unavailable_sources_collected)
                     ):
                         unavailable_sources_collected.append(normalized)
+        elif tool_name == "inspect_code":
+            result = await InspectCodeManager().execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            if result.get("error"):
+                return {"error": True, "message": str(result["error"])}
         elif tool_name == "list_agents":
             result = await explore_list_agents(
                 execute_activity=tagged_execute_activity,
@@ -976,15 +1035,18 @@ async def spawn_explore_agent_activity(
             async def _post_and_stash_inbox() -> None:
                 # Fire-and-forget like every FE post; its piggybacked inbox read
                 # is delivered at the next step.
-                pending = await save_explore_message(
-                    agent_id=agent_id,
-                    title=title,
-                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                    status=message_status,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                    inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                pending = await asyncio.wait_for(
+                    save_explore_message(
+                        agent_id=agent_id,
+                        title=title,
+                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                        status=message_status,
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        inbox=agent_inbox.read_request() if agent_inbox is not None else None,
+                    ),
+                    timeout=EXPLORE_FE_POST_ATTEMPT_TIMEOUT_S,
                 )
                 if agent_inbox is not None:
                     agent_inbox.stash(pending)
@@ -1070,6 +1132,7 @@ async def spawn_explore_agent_activity(
                 get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
                 on_tokens=on_tokens,
                 call_site_override="explore_agent",
+                jev_goal=goal,
                 cache_sequence_id=explore_cache_sequence_id,
                 # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
                 # agent_id), so the N parallel explore agents under one sub-agent don't all
@@ -1127,6 +1190,17 @@ async def spawn_explore_agent_activity(
         tool_call_results,
     )
 
+    # Messages that reached this explore after its last model turn (a background
+    # read landing late) were never acknowledged; hand them to the parent with
+    # the result instead of dropping them.
+    undelivered_agent_messages = await agent_inbox.finish() if agent_inbox is not None else []
+    if undelivered_agent_messages:
+        late = "\n".join(f"- {format_agent_message(message)}" for message in undelivered_agent_messages)
+        final_response = (
+            f"{(final_response or '').rstrip()}\n\n"
+            f"Agent messages sent to this explore agent that arrived after it finished:\n{late}"
+        )
+
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
     # keep the explore's own completion status so the user-visible result is
@@ -1168,6 +1242,7 @@ async def spawn_explore_agent_activity(
             else (None if run_completed else (result.get("message") or result.get("status")))
         ),
         "unavailable_sources": unavailable_sources_collected,
+        "undelivered_agent_messages": undelivered_agent_messages,
         "partial_structured_response": result.get("partial_structured_response"),
         "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),

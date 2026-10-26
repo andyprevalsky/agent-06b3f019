@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { FilePointer } from '../../providers/storage';
 
 export const createSessionSchema = z.object({
   agent_id: z.string().uuid(),
@@ -10,6 +11,14 @@ export const createSessionSchema = z.object({
   memory_enabled: z.boolean().optional(),
   harness_mode: z.enum(['code', 'rose']).optional(),
   rose_api_base_url: z.string().url().optional(),
+  code_session_id: z.string().uuid().optional(),
+  // Resume this session's sandbox and files in a new CLI conversation (paused-task resume).
+  fresh_conversation: z.boolean().optional(),
+  lease_owner: z.string().min(1).max(200).optional(),
+  base_branch: z.string().min(1).max(255).optional(),
+  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+  target: z.enum(['cloud', 'local']).optional(),
+  device_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({
@@ -17,4 +26,38 @@ export const closeSessionSchema = z.object({
   user_id: z.string().uuid().optional(),
   agent_id: z.string().uuid().optional(),
   additional_paths: z.array(z.string()).optional(),
+  reason: z.string().min(1).max(64).optional(),
 });
+
+export interface CreateSessionParams {
+  agent_id: string;
+  goal: string;
+  attachments?: FilePointer[];
+  github_repo_url?: string;
+  user_id: string;
+  fast_mode_cache_enabled?: boolean;
+  memory_enabled?: boolean;
+  harness_mode?: 'code' | 'rose';
+  rose_api_base_url?: string;
+  code_session_id?: string;
+  fresh_conversation?: boolean;
+  lease_owner?: string;
+  base_branch?: string;
+}
+
+export interface CloseSessionParams {
+  task_id: string;
+  user_id?: string;
+  agent_id?: string;
+  additional_paths?: string[];
+  reason?: string;
+}
+
+/** POST /:taskId/usage-limit — Codex stopped on a provider usage limit (C15). */
+export const codeTaskUsageLimitSchema = z.object({
+  // Epoch seconds/ms or ISO time the provider reports the limit resets.
+  resets_at: z.union([z.number().positive(), z.string().min(1).max(64)]).optional(),
+});
+
+/** POST /:taskId/resize — the attached activity applies a pending size change (C16). */
+export const codeTaskResizeSchema = z.object({ request_id: z.string().uuid() }).strict();

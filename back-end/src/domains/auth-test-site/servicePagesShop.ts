@@ -94,10 +94,26 @@ function summaryTable(site: AuthTestSite, totals: CartTotals, removable: boolean
     </table>`;
 }
 
+/** The viewer's orders, each linking its receipt; empty when there are none. */
+export function renderOrderHistory(site: AuthTestSite, orders: SiteOrder[]): string {
+  if (orders.length === 0) return '';
+  const rows = orders
+    .map(
+      (order) =>
+        `<li data-order-number="${order.orderNumber}"><a href="${siteUrl(site, `/orders/${order.orderNumber}`)}">Order ${order.orderNumber}</a> · ${money(order.totalCents)} · ${order.at.slice(0, 10)}</li>`
+    )
+    .join('\n      ');
+  return `<h2>Your orders</h2>
+    <ul id="order-history">
+      ${rows}
+    </ul>`;
+}
+
 export function renderCartPage(
   site: AuthTestSite,
   totals: CartTotals,
-  session: SiteSession | null
+  session: SiteSession | null,
+  orders: SiteOrder[] = []
 ): string {
   const cartCount = totals.lines.reduce((sum, line) => sum + line.quantity, 0);
   const body =
@@ -111,6 +127,7 @@ export function renderCartPage(
     `    <h1>Your cart</h1>
     ${accountBar(site, session, cartCount)}
     ${body}
+    ${renderOrderHistory(site, orders)}
     <p><a href="${siteUrl(site)}">Keep shopping</a></p>`
   );
 }

@@ -79,6 +79,20 @@ export function impersonatorFromPayload(payload: jwt.JwtPayload): string | undef
 }
 
 /**
+ * How the session was established: the first `amr` method (`otp`,
+ * `impersonation`, `anonymous`, `preview_handoff`, ...), or undefined when the
+ * token carries none. Both auth middlewares expose it as `req.user.authMethod`
+ * so a route can refuse a preview-handoff session that tries to mint further
+ * credentials.
+ */
+export function sessionMethodFromPayload(payload: jwt.JwtPayload): string | undefined {
+  const amr = (payload as { amr?: unknown }).amr;
+  if (!Array.isArray(amr) || amr.length === 0) return undefined;
+  const method = (amr[0] as { method?: unknown } | null)?.method;
+  return typeof method === 'string' && method !== '' ? method : undefined;
+}
+
+/**
  * Verify a Supabase access token and return its payload, or throw if the token
  * is invalid/expired/wrong-issuer. Accepts both the backend's HS256 tokens and
  * Supabase's asymmetric (ES256) tokens.

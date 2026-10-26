@@ -132,6 +132,15 @@ class NoHangingToolCallsInvariant:
         # authored assistant message cannot hide an unresolved tool call.
         if metadata.get("artifactOnly") is True and record.get("filePointer") and not record.get("text"):
             return
+        # A Display row (including a running code agent's mirror into this
+        # conversation) shows a file to the user; the caller's model gets the
+        # tool result instead, so it can land while that tool is still open.
+        if (
+            metadata.get("source") == "display"
+            and metadata.get("excludeFromModel") is True
+            and record.get("filePointer")
+        ):
+            return
         if _is_dag_stream_assistant(metadata):
             return
 
@@ -171,6 +180,12 @@ class NoHangingToolCallsInvariant:
                 record["agentId"] = self.agent_id
             if "timestamp" not in record and "created_at" in record:
                 record["timestamp"] = record["created_at"]
+            # The agent detail API names these `message` / `file_pointer`;
+            # realtime INSERT records use `text` / `filePointer`.
+            if "text" not in record and "message" in record:
+                record["text"] = record["message"]
+            if "filePointer" not in record and "file_pointer" in record:
+                record["filePointer"] = record["file_pointer"]
             snapshot.handle_insert(record)
 
         self._open_tools = snapshot._open_tools

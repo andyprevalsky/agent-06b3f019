@@ -13,10 +13,21 @@ import {
 import { createLogger } from '../../providers/logger';
 import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
 import * as repo from './repo';
+import { uploadRunProgress } from './service.uploadProgress';
 
 export { encryptPasswordForStorage };
 
 const log = createLogger('Integrations');
+
+/** Passwords per `<source>_passwords` row: the upload's sync-progress totals. */
+function countByIntegration(passwords: Array<{ browserSource: string }>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const pwd of passwords) {
+    const name = passwordIntegrationName(pwd.browserSource);
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return counts;
+}
 
 function passwordIntegrationName(browserSource: string): string {
   if (browserSource === 'apple_passwords') {
@@ -83,7 +94,15 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
   const deduplicatedPasswords = deduplicatePasswordsByOriginUsername(passwordData.passwords);
   log.info('Deduplicated passwords', { count: deduplicatedPasswords.length });
 
-  await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
+  const totals = countByIntegration(deduplicatedPasswords);
+  const progress = uploadRunProgress({
+    userId,
+    run: 'passwords-upload',
+    unit: 'passwords',
+    totals,
+  });
+  await progress.start();
+  await progress.step(() => bulkUpsertPasswordEntries(userId, deduplicatedPasswords));
   log.info('Upserted passwords', { count: deduplicatedPasswords.length, userId });
 
   // Create integration records per browser source
@@ -107,6 +126,7 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
     });
     log.info('Upserted password integration', { integrationName, userId });
   }
+  await progress.finish();
 
   return { passwordCount: deduplicatedPasswords.length };
 }
@@ -324,8 +344,16 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
   const deduplicatedPasswords = Array.from(passwordMap.values());
   log.info('Deduplicated Apple passwords', { count: deduplicatedPasswords.length });
 
+  const totals = new Map([['apple_passwords', deduplicatedPasswords.length]]);
+  const progress = uploadRunProgress({
+    userId,
+    run: 'passwords-upload',
+    unit: 'passwords',
+    totals,
+  });
+  await progress.start();
   if (deduplicatedPasswords.length > 0) {
-    await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
+    await progress.step(() => bulkUpsertPasswordEntries(userId, deduplicatedPasswords));
     log.info('Imported Apple passwords', { count: deduplicatedPasswords.length, userId });
   }
 
@@ -339,6 +367,7 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
     lastSuccessfulSyncAt: new Date(),
     config: { passwordCount: deduplicatedPasswords.length, lastImportAt: new Date().toISOString() },
   });
+  await progress.finish();
 
   return { passwordCount: deduplicatedPasswords.length };
 }

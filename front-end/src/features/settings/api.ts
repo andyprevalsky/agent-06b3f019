@@ -1,3 +1,4 @@
+import { fetchUserSettings } from '@/lib/api/userSettings';
 import { getStoredSession } from '@/lib/supabase';
 
 import { API_URL } from './config';
@@ -8,13 +9,9 @@ function getAuthHeaders() {
   return { Authorization: `Bearer ${session.access_token}` };
 }
 
-/** Loads user settings from the backend. */
+/** Loads user settings from the backend (shared client; the Rose left bar reads it too). */
 export async function loadSettingsApi(): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_URL}/api/user-settings`, {
-    headers: getAuthHeaders(),
-  });
-  if (!response.ok) throw new Error('Failed to load settings');
-  return response.json() as Promise<Record<string, unknown>>;
+  return fetchUserSettings();
 }
 
 /** Saves personal info fields via PUT. */

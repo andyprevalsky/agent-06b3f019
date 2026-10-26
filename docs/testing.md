@@ -40,7 +40,7 @@ cd agents && python scripts/run_blackbox_tests.py --list        # list domains
 ```
 
 Agents coverage runs each blackbox domain in its own bounded interpreter and
-then combines coverage before fast-cache and unit checks:
+then combines coverage before DEMO cache and unit checks:
 
 ```bash
 cd agents && bash scripts/run-coverage.sh

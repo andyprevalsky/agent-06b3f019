@@ -993,6 +993,62 @@ async def test_goal_names_the_account_and_first_run_precedes_the_graded_run() ->
             os.environ["BENCHMARK_FRONTEND_URL"] = previous_frontend
 
 
+async def test_first_run_agent_failure_is_a_graded_task_failure() -> None:
+    """The first-run agent failing its own goal is the task's verdict, not an
+    untrusted ERROR: a campaign retries ERROR as infrastructure and the Hub then
+    rejects that retry with 409 (descend-full69 r001-j0028, agent bcd9d7a7)."""
+    from benchmarks import auth_test_site
+    from benchmarks import run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-auth-created-account-reused")
+    headers = {"X-API-Key": "fixture-key", "X-User-Id": "user-1", "Content-Type": "application/json"}
+    early_fail = "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2."
+    first_agent = "bcd9d7a7-dfbd-4f3f-84e1-0ad32f3340fd"
+
+    async def fake_headers() -> dict:
+        return dict(headers)
+
+    async def fake_create_agent(_base_url: str, _first_task) -> str:
+        return first_agent
+
+    async def fake_poll_agent(_base_url: str, agent_id: str, _first_task, *_args):
+        return {"agent": {"id": agent_id, "status": "ACTIVE"}}, 0, 0, early_fail
+
+    async def no_fixtures(*_args, **_kwargs) -> list:
+        return []
+
+    async def no_op(*_args, **_kwargs) -> None:
+        return None
+
+    async def evidence(_base_url, _agent_id, _task, data, _start):
+        return data or {}, {"failure_evidence": {"errors": []}}
+
+    async def archive(*_args, **_kwargs):
+        return None, None
+
+    try:
+        with (
+            _FakeBackend("created_account_reused", {}) as backend,
+            patch.object(rb, "_api_headers", fake_headers),
+            patch.object(rb, "_current_benchmark_user_id", lambda: "user-1"),
+            patch.object(rb, "create_agent", fake_create_agent),
+            patch.object(rb, "poll_agent", fake_poll_agent),
+            patch.object(rb, "_apply_live_fixtures", no_fixtures),
+            patch.object(rb, "_apply_memory_fixtures", no_fixtures),
+            patch.object(rb, "_capture_task_failure_evidence", evidence),
+            patch.object(rb, "finalize_archive_and_score_world_model", archive),
+            patch.object(rb, "ensure_payment_lifecycle_cleanup", no_op),
+            patch.object(rb, "_delete_owned_native_admission_root", no_op),
+        ):
+            result = await rb.run_single_task(backend.base_url, task)
+    finally:
+        auth_test_site.set_active_manifest(None)
+    assert result.passed is False
+    assert (result.status, result.benchmark_status) == ("FAILED", "FAILED"), (result.status, result.benchmark_status)
+    assert early_fail in result.failure_reason, result.failure_reason
+
+
 async def test_lane_after_a_connected_inbox_waits_out_the_cached_user_context() -> None:
     """The worker caches user context for five minutes. After the email-otp lane
     the next lane's root agent still saw that lane's fixture inbox as the user's
@@ -1380,6 +1436,10 @@ async def run_all_tests():
     await runner.record_async(
         "goal_names_the_account_and_first_run_precedes_the_graded_run",
         test_goal_names_the_account_and_first_run_precedes_the_graded_run,
+    )
+    await runner.record_async(
+        "first_run_agent_failure_is_a_graded_task_failure",
+        test_first_run_agent_failure_is_a_graded_task_failure,
     )
     await runner.record_async(
         "stand_in_user_signs_in_or_declines_a_sign_in_help_request",

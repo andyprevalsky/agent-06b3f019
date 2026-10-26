@@ -47,7 +47,7 @@ export async function announceBrowserSessionBinding(
           select: { id: true, agentId: true, sessionId: true, debugUrl: true, status: true },
         }));
     const row = await findRow(where);
-    if (row === null) return;
+    if (row === null || row.sessionId === null) return;
     await (deps.broadcast ?? broadcastBrowserSessionBinding)(
       row.agentId,
       {

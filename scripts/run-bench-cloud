@@ -381,6 +381,32 @@ fi
 CLOUDBENCH_ARCHIVED_PROOF_B64=""
 CLOUDBENCH_ARCHIVED_PROOF_SHA=""
 CLOUDBENCH_ARCHIVED_DATA_ROOT=""
+cloudbench_outcome_ok() {  # sets OUTCOME_OK=1/0 from FINISHED TIMED_OUT BENCH_EXIT RUN_IDENTITY_OK RUN_PASS_OK IMESSAGE_RELAY_OK
+    if [ "$FINISHED" = "1" ] && [ "$TIMED_OUT" = "0" ] && [ "${BENCH_EXIT:-1}" = "0" ] \
+        && [ "$RUN_PASS_OK" = "1" ] && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
+        OUTCOME_OK="1"
+        return 0
+    fi
+    # Artifact-backed recovery: fast soft-complete guests (DEMO $0 cache) can tear
+    # down the data-plane proxy before the controller finishes the post-DONE driver
+    # 410 catch-up, leaving FINISHED=0 / BENCH_EXIT=1 even when the collected run
+    # JSON validates --require-pass. Prefer validated pass artifacts over the
+    # terminal-lifecycle race — same evidence the hub already trusts.
+    # An observed exit (FINISHED=1) is authoritative: run.json is saved before
+    # post-run gates (cache/memory ratchets), so a nonzero exit with a passing
+    # artifact is a real gate failure, never a race to recover from.
+    if [ "$FINISHED" != "1" ] \
+        && [ "$TIMED_OUT" = "0" ] \
+        && [ "$RUN_IDENTITY_OK" = "1" ] \
+        && [ "$RUN_PASS_OK" = "1" ] \
+        && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
+        echo "⚠️  recovering OUTCOME_OK from validated pass artifacts after terminal FINISHED race (finished=${FINISHED:-0} bench_exit=${BENCH_EXIT:-unknown})"
+        OUTCOME_OK="1"
+        return 0
+    fi
+    OUTCOME_OK="0"
+}
+
 cloudbench_load_archived_proof() {
     [ -n "${CLOUDBENCH_ARCHIVED_REUSE_PROOF_FILE:-}" ] || {
         [ "${CLOUDBENCH_STORAGE_MODE:-}" != retained-volume-fresh-generation ] || return 1
@@ -4346,7 +4372,8 @@ acquire_boot_config_update_slot() {
 boot_update_with_capacity_recovery() {
     local update_log="$1" regular_attempts max_regular timeout_seconds
     local capacity_wait capacity_retry regular_retry capacity_deadline native_budget rate_code rate_delay
-    local native_rc native_join_receipt="$1.join-native"
+    local native_rc native_join_receipt="$1.join-native" attempt_log="$1.attempt"
+    local host_timeouts=0 host_timeout_limit attempt_number=0
     shift
     # No native mutation is in flight until an attempt starts below, so an early
     # refusal (invalid contract, pacing failure) leaves nothing to fence.
@@ -4356,6 +4383,10 @@ boot_update_with_capacity_recovery() {
     capacity_wait="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS:-1200}"
     capacity_retry="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS:-8}"
     regular_retry="${CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS:-8}"
+    host_timeout_limit="${CLOUDBENCH_BOOT_UPDATE_HOST_TIMEOUT_LIMIT:-3}"
+    case "$host_timeout_limit" in
+        ''|*[!0-9]*|0) echo "❌ invalid boot update host-timeout limit" >&2; return 2 ;;
+    esac
     case "$max_regular:$timeout_seconds:$capacity_wait" in
         *[!0-9:]*|0:*|*:0:*|*:*:0)
             echo "❌ invalid boot update retry/capacity-wait contract" >&2
@@ -4388,26 +4419,36 @@ boot_update_with_capacity_recovery() {
         BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=0
         native_rc=0
         rm -f "$native_join_receipt" || return 1
+        # Classify each attempt from its own output, but keep every attempt in
+        # the update log: a per-attempt overwrite left only the last of ten
+        # Fly 408s as evidence for the whole retry sequence.
+        attempt_number=$((attempt_number + 1))
         CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT="$native_join_receipt" \
-            _with_timeout "$native_budget" "$@" > "$update_log" 2>&1 || native_rc=$?
+            _with_timeout "$native_budget" "$@" > "$attempt_log" 2>&1 || native_rc=$?
         if [ -f "$native_join_receipt" ]; then
             BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1
             rm -f "$native_join_receipt" || true
         fi
+        {
+            printf '=== boot update attempt %s at %s rc=%s ===\n' \
+                "$attempt_number" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$native_rc"
+            cat "$attempt_log" 2>/dev/null
+        } >> "$update_log"
         if [ "$native_rc" = 0 ]; then
+            rm -f "$attempt_log"
             return 0
         fi
         # An organization Machine-count limit is a permanent refusal for this
         # attempt, even for a same-ID update. Retain the first response; do not
         # replay the mutation as though host CPU capacity might become free.
-        if grep -Eiq 'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached' "$update_log" 2>/dev/null; then
+        if grep -Eiq 'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached' "$attempt_log" 2>/dev/null; then
             echo "❌ boot update refused by organization Machine limit; no retry" >&2
             return 1
         fi
         if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
             rate_code=""
-            if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$update_log"; then rate_code=429
-            elif grep -Eiq 'resource_exhausted' "$update_log"; then rate_code=resource_exhausted; fi
+            if grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)' "$attempt_log"; then rate_code=429
+            elif grep -Eiq 'resource_exhausted' "$attempt_log"; then rate_code=resource_exhausted; fi
             if [ -n "$rate_code" ]; then
                 rate_delay="$regular_retry"
                 [ "$rate_delay" -ge 1 ] || rate_delay=1
@@ -4420,7 +4461,8 @@ boot_update_with_capacity_recovery() {
         fi
         if grep -Eiq \
             'cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
-            "$update_log" 2>/dev/null; then
+            "$attempt_log" 2>/dev/null; then
+            host_timeouts=0
             if [ "$SECONDS" -ge "$capacity_deadline" ]; then
                 echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2
                 return 1
@@ -4429,9 +4471,32 @@ boot_update_with_capacity_recovery() {
             sleep "$capacity_retry"
             continue
         fi
+        # A Fly 408 naming this exact VM on a same-ID update means the flyd
+        # host that owns this Machine did not answer in time. A Machine never
+        # moves hosts, so replaying the same mutation cannot reach a healthy
+        # one. App-wide API errors (5xx, 429) are not host evidence and keep
+        # the normal budget. After consecutive host timeouts, stop spending the boot
+        # deadline here and name the exact Machine so the fleet can replace it
+        # through its owned clone lifecycle.
+        if [ -n "${BOOT_UPDATE_MACHINE_ID:-}" ] && grep -Fq \
+            "failed to update VM ${BOOT_UPDATE_MACHINE_ID}: request returned non-2xx status: 408" \
+            "$attempt_log" 2>/dev/null; then
+            host_timeouts=$((host_timeouts + 1))
+        else
+            host_timeouts=0
+        fi
+        if [ "$host_timeouts" -ge "$host_timeout_limit" ]; then
+            if [ -n "${BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER:-}" ]; then
+                printf '%s\n' "${BOOT_UPDATE_MACHINE_ID:-}" > "$BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER" 2>/dev/null || true
+            fi
+            echo "❌ boot update: Fly host for ${BOOT_UPDATE_MACHINE_ID:-this Machine} timed out ${host_timeouts} consecutive times; the Machine needs a replacement" >&2
+            rm -f "$attempt_log"
+            return 1
+        fi
         regular_attempts=$((regular_attempts + 1))
         [ "$regular_attempts" -lt "$max_regular" ] && sleep "$regular_retry"
     done
+    rm -f "$attempt_log"
     return 1
 }
 release_boot_config_update_slot() {
@@ -4708,8 +4773,8 @@ if owner.exists() or owner.is_symlink():
     cleanup_name = f"cloudbench-stack-cleanup-{token}.status"
     expected = {"services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log",
                 "logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-    # The served WMH log is optional evidence, present only for simulated runs.
-    optional = set(manifest["files"]) & {"wmh-serve-log.txt"}
+    # The served WMH log (simulated runs) and guest diagnostics are optional.
+    optional = set(manifest["files"]) & {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
     assert set(manifest["files"]) - optional == expected
     entries = list(capture.rglob("*"))
     assert all(not path.is_symlink() for path in entries)
@@ -4861,13 +4926,21 @@ while True:
     time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
-required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
-# Present only when the stack served a world model (its per-step server timing).
-OPTIONAL = "wmh-serve-log.txt"
+# A guest stopped before launching anything seals only its exact bench.log.
+prelaunch = expected.get("prelaunch") is True
+if prelaunch:
+    required = {"bench.log"}
+    assert set(expected) == {"version", "run_token", "machine_id", "files", "prelaunch"}
+    assert isinstance(files, dict) and set(files) == required
+else:
+    required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# Present only when the stack served a world model (its per-step server timing),
+# or when the guest diagnostics sampler ran (CPU/load, DB pool, pg_stat_activity).
+OPTIONAL = {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or name == OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name in OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -4893,10 +4966,15 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
-services = json.loads((pending / "services.json").read_text())
-count = services["env"]["worker_processes"]
-assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) - {OPTIONAL} == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+if prelaunch:
+    with (pending / "bench.log").open("rb") as log:
+        stamp = ("RUNSTAMP-" + run_token + "\n").encode()
+        assert log.read(len(stamp)) == stamp, "pre-launch log belongs to another run"
+else:
+    services = json.loads((pending / "services.json").read_text())
+    count = services["env"]["worker_processes"]
+    assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+    assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 assert manifest() == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
@@ -4905,7 +4983,7 @@ with (pending / "manifest.json").open("x") as output:
     os.fsync(output.fileno())
 # Persist child directory entries before acknowledging the published capture.
 # File fsync alone does not make their names durable across controller failure.
-for directory in (pending / "logs", pending):
+for directory in ((pending,) if prelaunch else (pending / "logs", pending)):
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -4917,7 +4995,107 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
+if prelaunch:
+    # No run result can exist to bind the latch to; the sealed pre-launch
+    # bundle is the complete runtime evidence, so release the latch here.
+    intent.unlink()
+    descriptor = os.open(intent.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 signal.alarm(0)
+PY
+}
+
+# Diagnostic-only capture of a guest whose stack teardown failed. The driver
+# then refuses its clean ACK, so the sealed /runtime-evidence never opens and
+# the disposable teardown deletes the only copy of the worker/stack logs that
+# explain the failure (descend-full69-20261023 P8: a worker drain that ran the
+# whole 2100 s grace). This never creates remote-logs/runtime-evidence, never
+# clears runtime-evidence.pending and never changes the run's classification.
+cloudbench_collect_failed_runtime_evidence() {
+    local destination="$1" port="$2" run_token="$3" machine="$4" deadline="$5"
+    python3 - "$destination" "$port" "$run_token" "$machine" "$deadline" <<'PY'
+import hashlib
+import json
+import os
+import re
+import signal
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+destination, port, run_token, machine, deadline = sys.argv[1:]
+os.umask(0o077)
+assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+signal.alarm(int(deadline))
+maximum = 512 * 1024 * 1024
+parent = Path(destination)
+final = parent / "failed-runtime-evidence"
+assert not final.exists() and not final.is_symlink()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
+           "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
+url = f"http://127.0.0.1:{port}/failed-runtime-evidence"
+
+
+def request(suffix=""):
+    return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=30)
+
+
+def manifest():
+    with request() as response:
+        data = response.read(1048577)
+        assert len(data) <= 1048576 and response.status == 200
+        return json.loads(data)
+
+
+expected = manifest()
+assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
+assert expected.get("stack_cleanup_state") == "failed"
+files = expected["files"]
+assert isinstance(files, dict) and "logs/worker.log" in files and len(files) <= 1030
+total = 0
+for name, metadata in files.items():
+    assert re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?", name) and ".." not in name
+    assert set(metadata) == {"bytes", "sha256"} and type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+    total += metadata["bytes"]
+assert total <= maximum
+pending = Path(tempfile.mkdtemp(prefix=".failed-runtime-evidence-", dir=parent))
+for name, metadata in files.items():
+    target = pending / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    remaining = metadata["bytes"]
+    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+        while remaining:
+            chunk = response.read(min(65536, remaining))
+            assert chunk, "failed runtime evidence response ended early"
+            output.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        assert not response.read(1), "failed runtime evidence response exceeded manifest"
+    assert digest.hexdigest() == metadata["sha256"], "failed runtime evidence hash mismatch"
+assert manifest() == expected, "failed runtime evidence changed across collection"
+with (pending / "manifest.json").open("x") as output:
+    json.dump({**expected, "diagnostic_only": True, "proof_credit": 0}, output, sort_keys=True)
+    output.write("\n")
+pending.rename(final)
+signal.alarm(0)
+print(f"📦 failed-cleanup runtime evidence captured for diagnosis: {final} ({len(files)} files)", file=sys.stderr)
 PY
 }
 
@@ -5434,7 +5612,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Machine. Bound those provider mutations across the fleet; the separate
     # boot-config barrier still releases all guest starts together afterward.
     acquire_boot_config_update_slot || exit 1
-    if boot_update_with_capacity_recovery "$_update_log" \
+    if BOOT_UPDATE_MACHINE_ID="$mid" \
+        BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$OUT_DIR/boot-config-host-unresponsive" \
+        boot_update_with_capacity_recovery "$_update_log" \
           flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_boot_file_args[@]}" \
           --command "$_boot_command" --skip-health-checks --skip-start --yes; then
@@ -6527,16 +6707,22 @@ progress_barrier_released="0"
 terminal_pending_exit=""
 terminal_pending_since=""
 terminal_read_failures="0"
-backlog_chunks="0"
+backlog_bytes="0"
 backlog_active="0"
 backlog_failures="0"
 log_read_failures="0"
 BENCH_LOG_CHUNKS_PER_POLL="${CLOUDBENCH_LOG_CHUNKS_PER_POLL:-4}"
 case "$BENCH_LOG_CHUNKS_PER_POLL" in ''|*[!0-9]*|0) BENCH_LOG_CHUNKS_PER_POLL=4 ;; esac
 [ "$BENCH_LOG_CHUNKS_PER_POLL" -le 4 ] || BENCH_LOG_CHUNKS_PER_POLL=4
-BENCH_LOG_BACKLOG_MAX_CHUNKS="${CLOUDBENCH_LOG_BACKLOG_MAX_CHUNKS:-128}"
-case "$BENCH_LOG_BACKLOG_MAX_CHUNKS" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_CHUNKS=128 ;; esac
-[ "$BENCH_LOG_BACKLOG_MAX_CHUNKS" -le 128 ] || BENCH_LOG_BACKLOG_MAX_CHUNKS=128
+# Every accepted chunk strictly advances the validated offset, so a backlog is
+# bounded by bytes, not by a chunk count: the 51-agent mass-agent terminal
+# burst is ~33.5 MiB and tripped the former 128 x 256 KiB cap on every copy
+# (descend-full69-20261023 P8), truncating the guest's own FATAL lines. The
+# ceiling matches the guest's 512 MiB runtime-evidence bound; a backlog that
+# stops advancing still fails after BENCH_LOG_BACKLOG_MAX_FAILURES retries.
+BENCH_LOG_BACKLOG_MAX_BYTES="${CLOUDBENCH_LOG_BACKLOG_MAX_BYTES:-536870912}"
+case "$BENCH_LOG_BACKLOG_MAX_BYTES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_BYTES=536870912 ;; esac
+[ "$BENCH_LOG_BACKLOG_MAX_BYTES" -le 536870912 ] || BENCH_LOG_BACKLOG_MAX_BYTES=536870912
 BENCH_LOG_BACKLOG_MAX_FAILURES="${CLOUDBENCH_LOG_BACKLOG_MAX_FAILURES:-5}"
 case "$BENCH_LOG_BACKLOG_MAX_FAILURES" in ''|*[!0-9]*|0) BENCH_LOG_BACKLOG_MAX_FAILURES=5 ;; esac
 [ "$BENCH_LOG_BACKLOG_MAX_FAILURES" -le 5 ] || BENCH_LOG_BACKLOG_MAX_FAILURES=5
@@ -6560,6 +6746,42 @@ DRIVER_DIED="0"
 # process is still alive; if it's gone with no DONE marker, stop promptly and
 # report a bring-up (infra) failure so the fleet controller excludes this box fast.
 DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-210}"
+# A finite terminal artifact burst can be much larger than one chunk. Drain
+# known backlog at wire speed; fail only when it exceeds the byte ceiling or
+# stops advancing. Sets BACKLOG_DECISION to idle|drain|retry|exceeded|stuck.
+cloudbench_bench_log_backlog_step() {  # <refresh-ok 0|1> <bytes appended by this refresh>
+    local refresh_ok="$1" appended="$2"
+    [[ "$appended" =~ ^[0-9]+$ ]] || appended=0
+    if [ "$refresh_ok" = "1" ]; then
+        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+            backlog_active="1"
+            backlog_failures="0"
+        else
+            backlog_active="0"
+            backlog_bytes="0"
+            backlog_failures="0"
+        fi
+    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
+        backlog_active="1"
+    fi
+    BACKLOG_DECISION="idle"
+    [ "$backlog_active" = "1" ] || return 0
+    backlog_bytes=$((backlog_bytes + appended))
+    if [ "$backlog_bytes" -gt "$BENCH_LOG_BACKLOG_MAX_BYTES" ]; then
+        BACKLOG_DECISION="exceeded"
+        return 0
+    fi
+    if [ "$refresh_ok" = "1" ]; then
+        BACKLOG_DECISION="drain"
+        return 0
+    fi
+    backlog_failures=$((backlog_failures + 1))
+    if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
+        BACKLOG_DECISION="stuck"
+    else
+        BACKLOG_DECISION="retry"
+    fi
+}
 while :; do
     now="$(date +%s)"
     # Pull only bounded append-only chunks over the data plane. The local file is
@@ -6569,8 +6791,15 @@ while :; do
     # PID remains owned and reapable.
     ensure_status_proxy >/dev/null 2>&1 || true
     log_refresh_ok="0"
+    log_size_before="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     refresh_bench_log "$BENCH_LOG_CHUNKS_PER_POLL" 2>/dev/null \
         && log_refresh_ok="1"
+    log_size_after="$(wc -c < "$SSH_LOG" | tr -d ' ')"
+    if [ "$BENCH_LOG_RESET" = "1" ] || [ "$log_size_after" -lt "$log_size_before" ]; then
+        log_bytes_appended="$log_size_after"
+    else
+        log_bytes_appended=$((log_size_after - log_size_before))
+    fi
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
        && [ "${_start_ok:-1}" = "0" ] && [ "$log_refresh_ok" = "1" ] \
        && [ -s "$SSH_LOG" ] && cloudbench_proxy_alive STATUS_PROXY_PID; then
@@ -6627,41 +6856,24 @@ while :; do
         last_change="$now"
         [ "$WATCHDOG_MODE" = "progress" ] && last_meaningful_progress="$now"
     fi
-    # A finite terminal artifact burst can be much larger than one chunk (the
-    # observed Polar run ended with a 16.34 MiB log). Drain known backlog at wire
-    # speed instead of sleeping 15--20 seconds per chunk or applying a watchdog
-    # to semantic/DONE bytes which are already durable but not parsed yet.
-    if [ "$log_refresh_ok" = "1" ]; then
-        if [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-            backlog_active="1"
-            backlog_failures="0"
-        else
-            backlog_active="0"
-            backlog_chunks="0"
-            backlog_failures="0"
-        fi
-    elif [ "$BENCH_LOG_HAS_MORE" = "1" ]; then
-        backlog_active="1"
-    fi
-    if [ "$backlog_active" = "1" ]; then
-        backlog_chunks=$((backlog_chunks + BENCH_LOG_CHUNKS_READ))
-        if [ "$backlog_chunks" -ge "$BENCH_LOG_BACKLOG_MAX_CHUNKS" ]; then
-            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_CHUNKS} bounded chunks before EOF -- infrastructure failure" >&2
+    cloudbench_bench_log_backlog_step "$log_refresh_ok" "$log_bytes_appended"
+    case "$BACKLOG_DECISION" in
+        drain) continue ;;
+        retry)
+            sleep 1
+            continue
+            ;;
+        exceeded)
+            echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_BYTES} bytes before EOF -- infrastructure failure" >&2
             DRIVER_DIED="1"; BENCH_EXIT="1"
             break
-        fi
-        if [ "$log_refresh_ok" = "1" ]; then
-            continue
-        fi
-        backlog_failures=$((backlog_failures + 1))
-        if [ "$backlog_failures" -ge "$BENCH_LOG_BACKLOG_MAX_FAILURES" ]; then
+            ;;
+        stuck)
             echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
             DRIVER_DIED="1"; BENCH_EXIT="1"
             break
-        fi
-        sleep 1
-        continue
-    fi
+            ;;
+    esac
     # A failed first/EOF read provides no current durable state. Never let a
     # healthy but temporarily unreadable guest fall through to a benchmark
     # deadline classification. Retry only a fixed number of times, then report
@@ -6841,11 +7053,17 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
         "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}}"
     then
         echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
+        # Keep the worker/stack logs of a failed stack teardown before the
+        # EXIT trap retires the guest. Diagnostic only: the failure stands.
+        cloudbench_collect_failed_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
+            "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" \
+            "${CLOUDBENCH_FAILED_RUNTIME_EVIDENCE_SECONDS:-300}" \
+            || echo "⚠️  failed-cleanup runtime evidence is unavailable (stack did not record a failed teardown)" >&2
         exit 70
     fi
 fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
-    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt; do
+    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log wmh-serve-log.txt guest-diagnostics.jsonl; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
         ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
             > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
@@ -7020,23 +7238,7 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
         RUN_PASS_OK="1"
     fi
 fi
-if [ "$FINISHED" = "1" ] && [ "$TIMED_OUT" = "0" ] && [ "${BENCH_EXIT:-1}" = "0" ] \
-    && [ "$RUN_PASS_OK" = "1" ] && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
-    OUTCOME_OK="1"
-fi
-# Artifact-backed recovery: fast soft-complete guests (DEMO $0 cache) can tear
-# down the data-plane proxy before the controller finishes the post-DONE driver
-# 410 catch-up, leaving FINISHED=0 / BENCH_EXIT=1 even when the collected run
-# JSON validates --require-pass. Prefer validated pass artifacts over the
-# terminal-lifecycle race — same evidence the hub already trusts.
-if [ "$OUTCOME_OK" != "1" ] \
-    && [ "$TIMED_OUT" = "0" ] \
-    && [ "$RUN_IDENTITY_OK" = "1" ] \
-    && [ "$RUN_PASS_OK" = "1" ] \
-    && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
-    echo "⚠️  recovering OUTCOME_OK from validated pass artifacts after terminal FINISHED race (finished=${FINISHED:-0} bench_exit=${BENCH_EXIT:-unknown})"
-    OUTCOME_OK="1"
-fi
+cloudbench_outcome_ok
 echo "🎯 result contract: identity=$RUN_IDENTITY_OK pass=$RUN_PASS_OK relay=$IMESSAGE_RELAY_OK benchmark_exit=${BENCH_EXIT:-unknown} (ok=$OUTCOME_OK)"
 
 rm -f "$SSH_LOG" "$BENCH_LOG_CHUNK_FILE" "$BENCH_LOG_HEADERS_FILE" \

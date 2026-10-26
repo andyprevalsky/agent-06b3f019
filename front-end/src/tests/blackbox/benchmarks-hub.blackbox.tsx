@@ -19,99 +19,10 @@ import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
 import { deriveRunName } from '@/features/benchmarks/runName';
 import type { HubRun } from '@/lib/api/benchmarksHub';
+import { CATALOG } from './benchmarks-hub.fixtures';
 
 // Authenticated session for getAuthHeaders()
 const SESSION = { access_token: 'test-token', user: { id: 'admin-1' } };
-
-const CATALOG = {
-  tasks: [
-    {
-      name: 'chat-mode',
-      title: 'Chat Mode',
-      description: 'basic chat',
-      prompt: 'say hi',
-      status: null,
-      bench: 'pipeline-e2e',
-      group: 'pre-deploy',
-      tags: ['smoke', 'chat'],
-      timeout_seconds: 240,
-      price_limit_cents: 100,
-      expected_tools: [],
-      min_agent_count: null,
-      is_chat_mode: true,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: {
-        attempts: 10,
-        passes: 9,
-        pass_rate: 0.9,
-        p50_duration_seconds: 42,
-        p95_duration_seconds: 90,
-        last_attempt_at: '2026-07-10T00:00:00Z',
-        last_status: 'passed',
-        last_fast_mode: true,
-      },
-    },
-    {
-      name: 'sim-task',
-      title: 'Sim Task',
-      description: 'simulated env',
-      prompt: 'simulate',
-      status: 'ready',
-      bench: 'rose-bench',
-      group: 'rose-bench',
-      tags: ['research'],
-      timeout_seconds: 600,
-      price_limit_cents: 200,
-      expected_tools: ['spawn_agent'],
-      min_agent_count: 1,
-      is_chat_mode: false,
-      world_model_mode: 'simulate',
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-    {
-      name: 'broken-task',
-      title: 'Broken Task',
-      description: 'missing fixtures',
-      prompt: 'x',
-      status: 'incomplete',
-      bench: 'rose-bench',
-      group: 'incomplete',
-      tags: ['research'],
-      timeout_seconds: null,
-      price_limit_cents: null,
-      expected_tools: [],
-      min_agent_count: null,
-      is_chat_mode: false,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-    {
-      name: 'polar-bu-001',
-      title: 'Polar BU 001',
-      description: 'polar-bench slice task',
-      prompt: 'browse',
-      status: 'ready',
-      bench: 'rose-bench',
-      group: 'polar-bench',
-      tags: ['polar-bench', 'browser'],
-      timeout_seconds: 900,
-      price_limit_cents: 1000,
-      expected_tools: ['spawn_browser_agent'],
-      min_agent_count: null,
-      is_chat_mode: false,
-      world_model_mode: null,
-      updated_at: '2026-07-10T00:00:00Z',
-      updated_by: null,
-      stats: null,
-    },
-  ],
-};
 
 const RUNS = {
   runs: [
@@ -327,7 +238,7 @@ describe('BenchmarksView (in-app hub)', () => {
     const chatRow = screen.getByTestId('task-row-chat-mode');
     expect(within(chatRow).getByText('90% pass')).toBeInTheDocument();
     expect(within(chatRow).getByText(/p50 42s/)).toBeInTheDocument();
-    // fast-mode Zap on chat-mode (last run used fast cache)
+    // fast-mode Zap on chat-mode (last run used DEMO cache)
     expect(within(chatRow).getByTestId('flag-fast')).toBeInTheDocument();
     // sim Sparkles on the simulated task
     const simRow = screen.getByTestId('task-row-sim-task');

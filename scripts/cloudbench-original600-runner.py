@@ -406,7 +406,38 @@ def supervisor_settled(probe,probed_after_join=False):
  # The launcher publishes its identity and execs the supervisor under the PID the gate
  # joins, and a verified export saw no live controller writer. An identity still absent
  # when probed after that join can never appear: the startup ended before a supervisor.
- return probe.get('state')=='JOINED' or(probe.get('state')=='NOT_PUBLISHED' and probed_after_join is True)
+ # A natively stopped controller (same instance) runs no process at all, so no writer.
+ return probe.get('state')=='JOINED' or(probe.get('state')in('NOT_PUBLISHED','CONTROLLER_STOPPED') and probed_after_join is True)
+
+# After the gate joins with an unverified export, unanswerable probes (host suspension,
+# lost export download, controller restart-policy 'no') must not spin forever: within
+# this bound the runner reads the exact native controller and, when it is stopped,
+# publishes the retained-export recovery receipt while staying the live cleanup owner.
+STOPPED_PROBE_GRACE_S=60
+STOPPED_NATIVE_STATES=('stopped','destroyed')
+EXPORT_RECOVERY_DOC='docs/original600-operator-cli.md#recover-a-stopped-controllers-retained-export'
+def recover_seal(api,root,authority,export,out,env):
+ """A startup deadline can fire after the controller Machine was created: the gate never
+ sealed ownership, and cleanup-workspace (correctly) refuses the existing allocation.
+ Resolve that exact allocation by its create-intent name and run the pinned seal once."""
+ intent=json.loads(read(export/'machine-create.intent.json'))
+ with bounded(30):rows=api.api('GET','/machines',timeout=30)
+ need(isinstance(rows,list),'native controller listing required')
+ match=[m for m in rows if isinstance(m,dict) and m.get('name')==intent['name']]
+ need(len(match)==1 and re.fullmatch('[0-9a-f]{14}',match[0].get('id')or''),'exact controller allocation required')
+ mid=match[0]['id']
+ save(out/'controller-seal-recovery.intent.json',dict(machine=mid,name=intent['name'],image=intent['image'],authority_sha256=sha(read(authority))))
+ args=[sys.executable,str(root/'scripts/cloudbench-disposable-controller.py'),'seal','--authority',str(authority),'--root',str(root),'--directory',str(export),
+       '--workspace',str(export/'workspace-volume.ownership.json'),'--machine',mid,'--name',intent['name'],'--image',intent['image']]
+ with (out/'gate.private.log').open('ab')as log:code=subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=240).returncode
+ need(code==0 and (export/'disposable-controller.ownership.json').exists(),'pinned seal recovery refused')
+ return mid
+
+def native_controller(api,mid,instance):
+ need(re.fullmatch('[0-9a-f]{14}',mid),'exact Machine required')
+ with bounded(20):value=api.api('GET','/machines/'+mid,timeout=20)
+ need(isinstance(value,dict) and value.get('id')==mid,'exact native controller read required')
+ state=value.get('state');return state if state in STOPPED_NATIVE_STATES and value.get('instance_id')==instance else None
 def cleanup_ready(gate_joined,probe,verified_export,probed_after_join=False):return gate_joined and supervisor_settled(probe,probed_after_join) and verified_export
 def cleanup_mode(gate_joined,has_ownership,has_workspace,probe,verified_export,probed_after_join=False):
  if not gate_joined:return None
@@ -424,7 +455,7 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe,probed_
  r=json.loads(read(export/'disposable-controller.release.json'))
  need(r['volume_id']==v['volume_id'] and r['volume_disposition']in('ABSENT','pending_destroy','destroyed'),'wrong original workspace release')
  if action=='cleanup':
-  settled=intent['supervisor_joined']is True or(intent.get('supervisor_state')=='NOT_PUBLISHED' and intent.get('probed_after_join')is True)
+  settled=intent['supervisor_joined']is True or(intent.get('supervisor_state')in('NOT_PUBLISHED','CONTROLLER_STOPPED') and intent.get('probed_after_join')is True)
   need(cleanup_ready(True,probe,(export/'disposable-export.verified.json').exists(),probed_after_join) and settled,'settled supervisor and verified export required')
   auth_sha=sha(read(authority));record=json.loads(read(export/'disposable-controller.ownership.json'))
   need(record['authority_sha256']==auth_sha and record['workspace_sha256']==sha(workspace_raw) and record['machine']['id']==mid and record['volume']['id']==v['volume_id'],'original controller ownership changed')
@@ -436,7 +467,7 @@ def reconciled_release(out,export,authority,mid,action,gate_joined,probe,probed_
  return r
 
 # The gate writes these only before any custody, workspace-volume or Machine intent.
-PREALLOCATION_REASONS=frozenset({'github-token-missing','controller-admission-refused'})
+PREALLOCATION_REASONS=frozenset({'github-token-missing','controller-admission-refused','source-ref-not-fetchable'})
 def preallocation_terminal(joined,gate_code,gate_pid,ref,export,receipt):
  # Directory/intent absence alone NEVER proves no allocation was attempted.
  # Only the exact gate's explicit early-failure receipt can end this owner.
@@ -698,6 +729,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   for number,handler in old_handlers.items():signal.signal(number,handler)
   raise
  mid=None;probe={};probed_after_join=False;attempt=0;cleanup=None;cleanup_action=None;last_error=None;next_probe=0;delivery={}
+ failing_since=None;next_native=0;controller_instance=None
  try:
   save(out/'caller.json',dict(pid=os.getpid(),birth=birth(os.getpid()),gate_pid=gate.pid,gate_birth=birth(gate.pid),source_ref=ref,task_ref=shard_task_ref(shard),epoch=epoch,deadline=epoch+5400,identity_path='/tmp/gate/repo/.context/'+identity_name,authority_sha256=sha(authority.read_bytes())))
   while True:
@@ -710,9 +742,10 @@ def run(config_path,config_sha,out,*,github_token=None):
      return gate.returncode
    ownership=export/'disposable-controller.ownership.json'
    if mid is None and ownership.exists():
-    record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];need(mid not in auth['protected_machines'],'protected controller ID')
+    record=json.loads(read(ownership));need(record['authority_sha256']==sha(authority.read_bytes()),'wrong controller ownership');mid=record['machine']['id'];controller_instance=record['machine']['instance_id'];need(mid not in auth['protected_machines'],'protected controller ID')
     save(out/'controller.identity.json',dict(machine=mid,instance=record['machine']['instance_id'],source_ref=ref,authority_sha256=sha(authority.read_bytes())))
-    if 'cloudbench-controller-bulk-transfer.py' in v['source_files']:
+    if joined:pass # a sealed-late controller already ran its gate; no launch sidecars remain to deliver
+    elif 'cloudbench-controller-bulk-transfer.py' in v['source_files']:
      import runpy
      bulk_path=Path(__file__).with_name('cloudbench-controller-bulk-transfer.py')
      need(sha(bulk_path.read_bytes())==v['source_files'][bulk_path.name],'bulk helper source changed')
@@ -723,18 +756,38 @@ def run(config_path,config_sha,out,*,github_token=None):
    if cleanup is None and mid and time.monotonic()>=next_probe:
     payload=dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name,action='PROBE')
     try:
-     probe=machine_control(api,mid,payload);probed_after_join=joined;save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
+     probe=machine_control(api,mid,payload);probed_after_join=joined;failing_since=None;save(out/('supervisor-probe-%06d.json'%attempt),probe);attempt+=1
      if(stop[0]or time.time()>=epoch+5400)and probe['state']=='LIVE':request_term(api,mid,payload,probe,out)
      if shard is not None:shard_status(out,probe,mid)
     except BaseException as e:
      last_error=type(e).__name__
      save(out/('supervisor-read-pending-%06d.json'%attempt),dict(error=last_error,no_gate_signal=True));attempt+=1
+     if joined and failing_since is None:failing_since=time.monotonic()
     next_probe=time.monotonic()+5
-   if shard is not None and cleanup is None and mid:
+   verified=export/'disposable-export.verified.json'
+   if(cleanup is None and mid and joined and failing_since is not None and probe.get('state')!='CONTROLLER_STOPPED'
+      and time.monotonic()-failing_since>=STOPPED_PROBE_GRACE_S and time.monotonic()>=next_native):
+    next_native=time.monotonic()+30
+    try:native=native_controller(api,mid,controller_instance)
+    except BaseException as e:native=None;last_error=type(e).__name__
+    if native is not None:
+     probe=dict(state='CONTROLLER_STOPPED',native_state=native,machine=mid,instance=controller_instance);probed_after_join=True
+     receipt=out/'export-recovery-required.json'
+     if not verified.exists() and not receipt.exists():
+      workspace=json.loads(read(export/'workspace-volume.ownership.json'))
+      save(receipt,dict(schema='original600-export-recovery-required-v1',status='EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED',machine=mid,instance=controller_instance,
+           native_state=native,workspace_volume=workspace.get('volume_id'),gate_exit_code=gate.returncode,export_verified=False,cleanup_owner_pid=os.getpid(),
+           recovery=EXPORT_RECOVERY_DOC,export_directory=str(export),benchmark_success_inferred=False,observed_at=time.time()))
+      print(json.dumps(dict(status='EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED',machine=mid,native_state=native,recovery=EXPORT_RECOVERY_DOC,receipt=str(receipt))),flush=True)
+   if shard is not None and cleanup is None and mid and probe.get('state')!='CONTROLLER_STOPPED':
     try:deliver_global(api,mid,dict(machine=mid,source_ref=ref,epoch=epoch,identity_path='/tmp/gate/repo/.context/'+identity_name),out,probe,delivery,stop[0]or time.time()>=epoch+5400)
     except (Exception,Deadline) as e:last_error=type(e).__name__ # retried next loop; never a cleanup or signal decision
-   verified=export/'disposable-export.verified.json'
    mode=cleanup_mode(joined,ownership.exists(),(export/'workspace-volume.ownership.json').exists(),probe,verified.exists(),probed_after_join)
+   if mode is not None and cleanup is None and probe.get('state')=='CONTROLLER_STOPPED':
+    # Re-read before the once-only deletion: a restarted controller is no longer proven idle.
+    try:native=native_controller(api,mid,controller_instance)
+    except BaseException as e:native=None;last_error=type(e).__name__
+    if native is None:mode=None;probe={};probed_after_join=False;failing_since=time.monotonic()
    if mode is not None and cleanup is None:
     cleanup_action=mode
     save(out/'cleanup-call.intent.json',dict(machine=mid,action=mode,gate_joined=True,supervisor_joined=probe.get('state')=='JOINED',supervisor_state=probe.get('state'),probed_after_join=probed_after_join,export_verified_file=sha(read(verified))if verified.exists()else None))
@@ -743,9 +796,22 @@ def run(config_path,config_sha,out,*,github_token=None):
    release=export/'disposable-controller.release.json'
    if cleanup is not None and cleanup.poll()is not None:
     code=cleanup.wait()
+    if(cleanup_action=='cleanup-workspace' and code!=0 and not release.exists() and not ownership.exists()
+       and not(out/'controller-seal-recovery.intent.json').exists()):
+     try:sealed=recover_seal(api,root,authority,export,out,env)
+     except BaseException as e:sealed=None;last_error=type(e).__name__
+     if sealed is not None:
+      # Preserve the refused workspace-only attempt; the sealed controller follows the joined path.
+      os.rename(out/'cleanup-call.intent.json',out/'cleanup-call.workspace-refused.json')
+      cleanup=None;cleanup_action=None;probe={};probed_after_join=False;next_probe=0
+      save(out/'export-recovery-required.json',dict(schema='original600-export-recovery-required-v1',status='EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED',machine=sealed,
+           gate_exit_code=gate.returncode,export_verified=False,cleanup_owner_pid=os.getpid(),recovery=EXPORT_RECOVERY_DOC,export_directory=str(export),
+           benchmark_success_inferred=False,observed_at=time.time()))
+      print(json.dumps(dict(status='EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED',machine=sealed,recovery=EXPORT_RECOVERY_DOC)),flush=True)
+      continue
     if release.exists():
      r=reconciled_release(out,export,authority,mid,cleanup_action,joined,probe,probed_after_join)
-     status='FAILED_STARTUP_WORKSPACE_RELEASED'if cleanup_action!='cleanup'else'CONTROLLER_RELEASE_VERIFIED'if probe.get('state')=='JOINED'else'FAILED_BEFORE_SUPERVISOR_RELEASED'
+     status='FAILED_STARTUP_WORKSPACE_RELEASED'if cleanup_action!='cleanup'else'CONTROLLER_RELEASE_VERIFIED'if probe.get('state')=='JOINED'else'CONTROLLER_STOPPED_RELEASE_VERIFIED'if probe.get('state')=='CONTROLLER_STOPPED'else'FAILED_BEFORE_SUPERVISOR_RELEASED'
      result=dict(status=status,supervisor_state=probe.get('state'),gate_exit_code=gate.returncode,controller_cleanup_exit_code=code,externally_reconciled_after_helper_failure=code!=0,machine=mid,source_ref=ref,started_at_epoch=epoch,original_deadline=epoch+5400,release=r,benchmark_success_inferred=False)
      save(out/'terminal.json',result);return gate.returncode
     if not(out/'cleanup.pending.json').exists():save(out/'cleanup.pending.json',dict(status='PENDING_EXTERNAL_OWNER_LIVE',helper_exit_code=code,no_cleanup_retry=True))

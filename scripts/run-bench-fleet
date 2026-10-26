@@ -894,7 +894,14 @@ case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exi
 # shared-cpu-2x/4GB: 74 running CPU units at full concurrency, below the
 # observed ceiling, with no performance reservation dependency. Worker-only
 # clones mirror prod's performance-1x/2GB shape.
-FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
+# descend-full69 proof 2 (7eb275b1b, 70 fresh clones started together) then
+# showed shared-cpu-2x is too small for one isolated stack: 3 of 15 2x primaries
+# were throttled to 81-93% CPU steal while their own user CPU stayed near 5%,
+# so interactive Prisma transactions expired (POST /messages, PATCH /status
+# 500s) and a terminal PATCH outlived the worker's 30s read. None of the 55
+# shared-cpu-4x primaries in the same run exceeded 9% steal. Campaigns derive
+# their shared-CPU governor from this shape, so planned capacity follows it.
+FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-4x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 # A small subset of benchmarks runs the test-payment frontend bundled inside
 # the primary VM. Browser tasks can also copy a large production credential
@@ -907,6 +914,14 @@ FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:
 # A --sim-on guest serves the native WMH itself: measured 2026-10-19 on the
 # 318k-observation model, serving holds ~30 GB steady (42 GB peak) and loads in
 # ~620 s on 8 vCPUs, beside the isolated stack.
+# A task that declares a wide agent tree (catalog min_agent_count >= 20) runs
+# backend + Postgres + the primary worker beside every agent's request loop on
+# ONE guest. descend-full69 P3: on shared-cpu-2x that guest was throttled (every
+# process starved, loop lag 5-10 s, Agent.findUnique 640 ms vs 14 ms for the same
+# tree on dedicated cores). Dedicated vCPUs (performance) are not throttled.
+FLEET_FANOUT_MIN_AGENT_COUNT=20
+FLEET_FANOUT_VM_SIZE="${CLOUDBENCH_FLEET_FANOUT_VM_SIZE:-performance-2x}"
+FLEET_FANOUT_VM_MEMORY="${CLOUDBENCH_FLEET_FANOUT_VM_MEMORY:-4096}"
 FLEET_SIM_VM_SIZE="${CLOUDBENCH_FLEET_SIM_VM_SIZE:-performance-8x}"
 FLEET_SIM_VM_MEMORY="${CLOUDBENCH_FLEET_SIM_VM_MEMORY:-65536}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
@@ -972,9 +987,20 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
     return 1
 }
 
+bench_declares_fanout() {  # bench_declares_fanout <task>; catalog min_agent_count
+    [ "${INFRA_PROBE:-0}" = "1" ] && return 1
+    local fanout_task
+    for fanout_task in "${CATALOG_FANOUT_TASKS[@]:-}"; do
+        [ "$fanout_task" = "$1" ] && return 0
+    done
+    return 1
+}
+
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
     if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_SIZE"
+    elif bench_declares_fanout "$1"; then
+        printf '%s\n' "$FLEET_FANOUT_VM_SIZE"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     else
@@ -985,6 +1011,8 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
     if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_MEMORY"
+    elif bench_declares_fanout "$1"; then
+        printf '%s\n' "$FLEET_FANOUT_VM_MEMORY"
     elif bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
     else
@@ -1474,6 +1502,7 @@ fi
 _catalog_modes_for_batch() {
     CATALOG_PATH="$ROOT_DIR/agents/benchmarks/tasks.json" \
     CATALOG_MODULE_DIR="$CLOUDBENCH_SCRIPT_SNAPSHOT" \
+    FANOUT_MIN_AGENT_COUNT="$FLEET_FANOUT_MIN_AGENT_COUNT" \
     python3 - "$@" <<'PY'
 import os
 import sys
@@ -1498,6 +1527,11 @@ for row in rows:
     if browser_required is not None and not isinstance(browser_required, bool):
         print(f"invalid browser requirement for {row['name']}", file=sys.stderr)
         raise SystemExit(1)
+    agent_count = row.get("min_agent_count")
+    if agent_count is not None and (not isinstance(agent_count, int) or isinstance(agent_count, bool) or agent_count < 0):
+        print(f"invalid min_agent_count for {row['name']}", file=sys.stderr)
+        raise SystemExit(1)
+    fanout = agent_count is not None and agent_count >= int(os.environ["FANOUT_MIN_AGENT_COUNT"])
     timeout_seconds = row.get("timeout_seconds")
     if timeout_seconds is None:
         timeout_seconds = 0
@@ -1510,7 +1544,8 @@ for row in rows:
         raise SystemExit(1)
     print(("simulate" if world_model_mode == "simulate" else "real")
           + "\t" + ("browser" if browser_required else "plain")
-          + "\t" + str(timeout_seconds))
+          + "\t" + str(timeout_seconds)
+          + "\t" + ("fanout" if fanout else "flat"))
 PY
 }
 
@@ -1540,6 +1575,7 @@ bench_execution_budget() {  # <catalog-timeout-seconds> <budget-seconds> <operat
 CATALOG_MODES=()
 CATALOG_TIMEOUTS=()
 CATALOG_BROWSER_REQUIRED_TASKS=()
+CATALOG_FANOUT_TASKS=()
 if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
         echo "❌ benchmark catalog preflight failed before Fly provisioning" >&2
@@ -1549,7 +1585,7 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
         echo "❌ cold primary bootstrap requires REAL tasks" >&2; exit 2
     fi
     catalog_index=0
-    while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout; do
+    while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout catalog_fanout; do
         [ -n "$catalog_mode" ] || continue
         if [ "$QUALIFY_WORKER" = 1 ] && [ "$catalog_mode" != real ]; then
             echo "❌ --qualify-worker requires a REAL task" >&2; exit 2
@@ -1562,6 +1598,11 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
             browser) CATALOG_BROWSER_REQUIRED_TASKS+=("${BENCHES[$catalog_index]}") ;;
             plain) ;;
             *) echo "❌ benchmark catalog returned invalid browser requirement: $browser_requirement" >&2; exit 1 ;;
+        esac
+        case "$catalog_fanout" in
+            fanout) CATALOG_FANOUT_TASKS+=("${BENCHES[$catalog_index]}") ;;
+            flat) ;;
+            *) echo "❌ benchmark catalog returned invalid fan-out declaration: $catalog_fanout" >&2; exit 1 ;;
         esac
         case "$catalog_timeout" in
             ''|*[!0-9]*) echo "❌ benchmark catalog returned invalid timeout: $catalog_timeout" >&2; exit 1 ;;
@@ -2563,6 +2604,17 @@ PY
     fi
 }
 
+cloudbench_primary_runtime_evidence_prelaunch() {  # <bench-output>
+    python3 - "$1/remote-logs/runtime-evidence/manifest.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+if not os.path.isfile(path) or os.path.islink(path):
+    raise SystemExit(1)
+with open(path, 'rb') as manifest:
+    raise SystemExit(0 if json.loads(manifest.read(1048577)).get('prelaunch') is True else 1)
+PY
+}
+
 cloudbench_validate_primary_runtime_evidence() {  # <bench-output> <machine> <run-token>
     python3 - "$@" <<'PY'
 import hashlib, json, os, re, stat, sys
@@ -2594,16 +2646,26 @@ assert owner['version'] == manifest['version'] == 1
 assert re.fullmatch(r'[0-9a-f]+', owner['machine_id'])
 assert re.fullmatch(r'[A-Za-z0-9._-]+', owner['run_token'])
 assert all(owner[k] == manifest[k] for k in ('run_token', 'machine_id'))
-services = json.loads(read(root / 'services.json'))
-count = services['env']['worker_processes']
-assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024
-cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
-expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
-            'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
-assert set(manifest['files']) - {'wmh-serve-log.txt'} == expected
-assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
-cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
-assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
+prelaunch = manifest.get('prelaunch') is True
+if prelaunch:
+    # The guest stopped before launching any driver or stack: its exact
+    # bench.log is the complete runtime evidence.
+    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', 'prelaunch'}
+    assert set(manifest['files']) == {'bench.log'}
+    stamp = ('RUNSTAMP-' + owner['run_token'] + '\n').encode()
+    with open(root / 'bench.log', 'rb') as log:
+        assert log.read(len(stamp)) == stamp
+else:
+    services = json.loads(read(root / 'services.json'))
+    count = services['env']['worker_processes']
+    assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024
+    cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
+    expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
+                'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
+    assert set(manifest['files']) - {'wmh-serve-log.txt', 'guest-diagnostics.jsonl'} == expected
+    assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
+    cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
+    assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
 total = 0
 for name, row in manifest['files'].items():
     assert type(row['bytes']) is int and row['bytes'] >= 0
@@ -2625,7 +2687,7 @@ for name, row in manifest['files'].items():
         assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
         assert digest.hexdigest() == row['sha256']
         os.fsync(f.fileno())
-for directory in (root / 'logs', root, root.parent, out):
+for directory in ((root, root.parent, out) if prelaunch else (root / 'logs', root, root.parent, out)):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -9878,6 +9940,17 @@ PY
                         --stopped-proof "$stopped_proof"; then
                     rm -f "$machine_status_temporary"
                     echo "❌ [$bench] stopped exact Machine has no sealed provider-state proof" >&2
+                    if [ ! -e "$manifest" ] && [ -f "$output/guest-native-stop.json" ]; then
+                        # The controller natively stopped this guest before its
+                        # shutdown was delivered, so its provider-session log
+                        # exists only on the stopped volume. Name the exact
+                        # supported capture, or the reason it is refused.
+                        stopped_volume_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("volume_id", ""))' \
+                            "$output/guest-native-stop.json" 2>/dev/null)"
+                        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" \
+                            --next-step --registry "$registry" --bench "$bench" \
+                            --machine-id "$machine_id" --volume-id "${stopped_volume_id:-unknown}" >&2 || true
+                    fi
                     failed=1
                     continue
                 fi
@@ -10782,6 +10855,23 @@ PY
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
                     "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}" --driver-log; then
+                # A guest cancelled before launch by an older status server
+                # cannot seal a bundle; preserve its pre-service originals.
+                if [ -e "$output/post-config-start.accepted" ]; then
+                    if fleet_recovery_capture_startup_failure "$registry" "$output" \
+                        "${recovery_machine_ids[$recovery_index]}" "${recovery_guest_tokens[$recovery_index]}"; then
+                        continue
+                    fi
+                    # A launched guest is not pre-service. Keep its rejected
+                    # capture as evidence, outside the path whose presence
+                    # marks a verified startup archive to later recovery plans.
+                    if [ -d "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -L "$output/failed-startup-runtime-archive" ] \
+                        && [ ! -e "$output/failed-startup-runtime-archive/verified.json" ]; then
+                        mv "$output/failed-startup-runtime-archive" \
+                            "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
+                    fi
+                fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
             else
@@ -11644,6 +11734,14 @@ PY
         fi
         CHILD_OUT[$index]="$out"
         CHILD_MACHINE[$index]="$machine"
+        # A guest stopped before launch has no result to bind; its validated
+        # pre-launch bundle already released the latch.
+        if cloudbench_primary_runtime_evidence_prelaunch "$out"; then
+            cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
+                && [ ! -e "$out/runtime-evidence.pending" ] && [ ! -L "$out/runtime-evidence.pending" ] \
+                || status=1
+            continue
+        fi
         if ! cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
             || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py" \
                 "$out/remote-logs/runtime-evidence/run.json" --expected-task "$bench" \
@@ -14200,10 +14298,10 @@ normalize_current_pool_shape() {
     # An explicit admission already forbids normalization of a Machine. Read
     # every pool row's admission proof in one process (one spawn per row cost
     # ~10s at 447 rows), with the same key-presence test as before.
-    local -A explicit_ids=()
-    local explicit_id
+    # Newline-delimited set: the script snapshot keeps the Bash 3.2 contract.
+    local explicit_ids=$'\n' explicit_id
     while IFS= read -r explicit_id; do
-        [ -n "$explicit_id" ] && explicit_ids["$explicit_id"]=1
+        [ -n "$explicit_id" ] && explicit_ids+="$explicit_id"$'\n'
     done < <(python3 - "$POOL_IDS_FILE" "$GIT_COMMON_DIR/cloudbench-pool-reuse" <<'PY' 2>/dev/null
 import json, sys
 from pathlib import Path
@@ -14220,7 +14318,7 @@ PY
 )
     while read -r id; do
         [ -n "$id" ] || continue
-        [ -z "${explicit_ids[$id]+x}" ] || continue
+        case "$explicit_ids" in *$'\n'"$id"$'\n'*) continue ;; esac
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
@@ -15023,6 +15121,7 @@ CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
 CHILD_RUN_TOKEN=()
+CHILD_BENCH_INDEX=()
 
 
 fleet_billing_stop_retained_idle() {  # <positive-owned-joins>; billing only, never evidence/claim release
@@ -17721,6 +17820,19 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local runtime_run_token="$7"
     [ ! -e "$out/benchmark-child.finished" ] \
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
+    # Autoscaled workers replay the shared cache under the guest's write policy.
+    local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()
+    IFS=, read -r -a shared_cache_tasks <<< "$bench"
+    python3 -B "$ROOT_DIR/scripts/cloudbench_catalog.py" shared-demo-cache-read-only \
+        "$ROOT_DIR/agents/benchmarks/tasks.json" "${shared_cache_tasks[@]}" >/dev/null || shared_cache_status=$?
+    case "$shared_cache_status" in
+        0) shared_cache_read_only=1 ;;
+        10) ;;
+        *)
+            printf 'DEMO cache write policy failed (exit %s)\n' "$shared_cache_status" > "$out/autoscaler.failed"
+            return 1
+            ;;
+    esac
     local wid="" borrowed_worker=0
     if [ "${DISPOSABLE_LIFECYCLE:-0}" != 1 ] && declare -F claim_reusable_worker >/dev/null; then
         wid="$(claim_reusable_worker "$out" "$primary_id" "$ws" "$runtime_run_token" "$pip")" || {
@@ -17909,7 +18021,7 @@ PY
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         # Simulated tool boundaries on autoscaled workers name the served model.
         echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
-        # ...and its execution policy, which partitions the fast cache like the primary's.
+        # ...and its execution policy, which partitions the DEMO cache like the primary's.
         echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
@@ -17918,6 +18030,7 @@ PY
             echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
             echo "export BENCHMARK_ISOLATED_RUN=true"
         fi
+        [ "$shared_cache_read_only" = 0 ] || echo "export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1"
         echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
         echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
@@ -18920,8 +19033,13 @@ fi
 BOOT_CONFIG_BARRIER="$FLEET_DIR/.boot-config-barrier"
 rm -rf "$BOOT_CONFIG_BARRIER" 2>/dev/null || true
 mkdir -p "$BOOT_CONFIG_BARRIER/ready"
-i=0
-for bench in "${BENCHES[@]}"; do
+# One bench's run-bench-cloud child (and its mandatory autoscaler) for the
+# Machine recorded in <out>/.cid. Appends a new child slot, or reuses an
+# existing slot (same bench, port and run token; new PID and Machine) when a
+# host-unresponsive primary is replaced before the boot-config barrier
+# releases. Bash 3.2 portable: no namerefs.
+launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
+    local i="$1" bench="$2" slot="${3:-}"
     # Default from the batch's preflighted catalog snapshot; --sim-on is an
     # explicit override. No mutable catalog read happens after provisioning.
     catalog_wmm="${CATALOG_MODES[$i]}"
@@ -18940,7 +19058,7 @@ for bench in "${BENCHES[@]}"; do
     echo ""
     if [ -z "$cid" ]; then
         echo "❌ [$bench] provisioning failed (no machine) — skipping"
-        i=$((i + 1)); continue
+        return 1
     fi
     cold_primary=0
     if [ "$src" = archived-reuse ]; then cold_primary=1; fi
@@ -19042,6 +19160,7 @@ for bench in "${BENCHES[@]}"; do
             --ref "$BENCH_REF" \
             --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
+    if [ -z "$slot" ]; then
     CHILD_PIDS+=("$!")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
@@ -19049,6 +19168,11 @@ for bench in "${BENCHES[@]}"; do
     CHILD_PORT+=("$port")
     CHILD_MACHINE+=("$cid")
     CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
+    CHILD_BENCH_INDEX+=("$i")
+    else
+    CHILD_PIDS[$slot]="$!"
+    CHILD_MACHINE[$slot]="$cid"
+    fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
     # into that parallel bring-up at four launches/second, so all 30 are submitted
@@ -19083,7 +19207,11 @@ for bench in "${BENCHES[@]}"; do
         rm -f "$out/autoscaler.pid" "$out/autoscaler.acceptance-failed"
         ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" "$FLEET_OWNER_TOKEN-$i" ) >> "$out/autoscaler.log" 2>&1 &
         autoscaler_pid="$!"
-        AUTOSCALER_PIDS+=("$autoscaler_pid")
+        if [ -z "$slot" ]; then
+            AUTOSCALER_PIDS+=("$autoscaler_pid")
+        else
+            AUTOSCALER_PIDS[$slot]="$autoscaler_pid"
+        fi
         autoscaler_pid_tmp="$out/autoscaler.pid.tmp.$$"
         autoscaler_started=""
         for _ in $(seq 1 50); do
@@ -19098,6 +19226,11 @@ for bench in "${BENCHES[@]}"; do
             rm -f "$autoscaler_pid_tmp"
         fi
     fi
+    return 0
+}
+i=0
+for bench in "${BENCHES[@]}"; do
+    launch_fleet_bench_child "$i" "$bench" || true
     i=$((i + 1))
 done
 
@@ -19138,26 +19271,110 @@ wait_for_mandatory_autoscaler_startup() {
 # width made later config-only updates hit cpu_overcommit_exceeded even though
 # the final 37-machine shape fit. Each child publishes its completed update and
 # waits here; one release then lets every explicit start proceed concurrently.
-boot_config_failed_child() {
+boot_config_failed_child() {  # prints the failed child slot
     local j out mid
     for j in "${!CHILD_OUT[@]}"; do
         out="${CHILD_OUT[$j]}"
         mid="${CHILD_MACHINE[$j]}"
         if [ -f "$out/benchmark-child.finished" ] \
             && [ ! -f "$BOOT_CONFIG_BARRIER/ready/$mid" ]; then
-            printf '%s\n' "${CHILD_BENCH[$j]}"
+            printf '%s\n' "$j"
             return 0
         fi
     done
     return 1
+}
+# A Fly Machine never leaves its host. When run-bench-cloud proves that host
+# stopped answering same-ID boot-config updates (consecutive 408s), replace
+# that one disposable clone instead of aborting every copy in the fleet. The
+# old Machine stays in this fleet's exact registry and per-bench ledger, so the
+# normal exact-owner teardown destroys it; nothing is guessed or reclaimed.
+# Each child slot gets one replacement, inside the unchanged barrier deadline;
+# pool claims, archived reuse and a second failure keep the strict abort.
+fleet_replace_host_unresponsive_child() {  # <child-slot> <barrier-deadline>
+    local j="$1" deadline="$2" out bench mid src cid archive name pcid
+    local -a moved=()
+    out="${CHILD_OUT[$j]}"
+    bench="${CHILD_BENCH[$j]}"
+    mid="${CHILD_MACHINE[$j]}"
+    [ -f "$out/boot-config-host-unresponsive" ] \
+        && [ "$(head -1 "$out/boot-config-host-unresponsive" 2>/dev/null)" = "$mid" ] || return 1
+    if [ -e "$out/boot-config-host-replaced" ]; then
+        echo "❌ [$bench] replacement Machine $mid also hit an unresponsive Fly host; no second replacement" >&2
+        return 1
+    fi
+    src=""; cid=""
+    read -r src cid < "$out/.cid" 2>/dev/null || true
+    if [ "$src" != clone ] || [ "$cid" != "$mid" ]; then
+        echo "❌ [$bench] host-unresponsive Machine $mid is not this run's disposable clone ($src); no replacement" >&2
+        return 1
+    fi
+    # The mandatory autoscaler observes the same finished marker and exits. A
+    # replacement must not inherit its workers or race its completion proof.
+    while [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && fleet_job_running "${AUTOSCALER_PIDS[$j]}"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ [$bench] autoscaler for $mid did not exit before the boot-config deadline; no replacement" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
+    if [ -s "$out/worker-clones.ids" ]; then
+        echo "❌ [$bench] autoscaler for $mid owns worker clones; no replacement" >&2
+        return 1
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    # Both processes already exited (finished marker / loop above); reap them
+    # before their slots are reused so no stale PID remains owned.
+    wait "${CHILD_PIDS[$j]}" 2>/dev/null || true
+    [ -z "${AUTOSCALER_PIDS[$j]:-}" ] || wait "${AUTOSCALER_PIDS[$j]}" 2>/dev/null || true
+    # Everything the failed child and autoscaler left that names the old
+    # Machine moves aside, including the pre-boot runtime-evidence ownership
+    # the relaunched child would otherwise refuse to reuse.
+    archive="$out/host-replaced-$mid"
+    mkdir "$archive" || return 1
+    for name in .cid .startup-state.json fleet-child.log benchmark-child.finished \
+        boot-config-unapplied boot-config-host-unresponsive cloudbench-boot-update.log \
+        runtime-evidence.pending runtime-evidence.owner.json remote-logs \
+        autoscaler.log autoscaler.pid autoscaler.ready autoscaler.failed \
+        autoscaler.completed-after-child desired-worker-count; do
+        if [ -e "$out/$name" ] || [ -L "$out/$name" ]; then
+            mv "$out/$name" "$archive/$name" || return 1
+            moved+=("$name")
+        fi
+    done
+    echo "🔁 [$bench] Fly host for Machine $mid stopped answering boot-config updates; cloning a replacement (old Machine retained for exact-owner teardown)" >&2
+    # Always a fresh clone: a pool claim or archived reuse cannot be taken
+    # here and then abandoned. A failed clone restores the exact failed state
+    # so the strict abort and startup-failure archive see the original owner.
+    if pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" \
+        "$(primary_vm_size_for_bench "$bench")" "$(primary_vm_memory_for_bench "$bench")" \
+        "$SNAP_ID" "$(primary_clone_storage_mode "$bench")")" \
+        && [ -n "$pcid" ] && [ "$pcid" != "$mid" ]; then
+        printf 'clone %s\n' "$pcid" > "$out/.cid" || return 1
+    else
+        echo "❌ [$bench] replacement clone for $mid failed; keeping the original failure" >&2
+        for name in "${moved[@]}"; do mv "$archive/$name" "$out/$name" || true; done
+        rmdir "$archive" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$mid" > "$out/boot-config-host-replaced" || return 1
+    launch_fleet_bench_child "${CHILD_BENCH_INDEX[$j]}" "$bench" "$j" || return 1
+    if [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
+        && [ "${SKIP_AUTOSCALER:-0}" != 1 ]; then
+        wait_for_mandatory_autoscaler_startup "$j" || return 1
+    fi
+    return 0
 }
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
     boot_config_deadline=$((SECONDS + BOOT_CONFIG_BARRIER_WAIT_SECONDS))
     while :; do
         boot_config_ready="$(find "$BOOT_CONFIG_BARRIER/ready" -type f 2>/dev/null | wc -l | tr -d ' ')"
         [ "$boot_config_ready" = "${#CHILD_PIDS[@]}" ] && break
-        if boot_config_failed_bench="$(boot_config_failed_child)"; then
-            echo "❌ boot config failed before barrier release: $boot_config_failed_bench exited without a ready marker (${boot_config_ready:-0}/${#CHILD_PIDS[@]} ready)" >&2
+        if boot_config_failed_slot="$(boot_config_failed_child)"; then
+            if fleet_replace_host_unresponsive_child "$boot_config_failed_slot" "$boot_config_deadline"; then
+                continue
+            fi
+            echo "❌ boot config failed before barrier release: ${CHILD_BENCH[$boot_config_failed_slot]} exited without a ready marker (${boot_config_ready:-0}/${#CHILD_PIDS[@]} ready)" >&2
             exit 1
         fi
         if [ "$SECONDS" -ge "$boot_config_deadline" ]; then

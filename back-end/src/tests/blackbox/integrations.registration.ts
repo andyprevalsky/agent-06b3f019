@@ -13,7 +13,7 @@ const expected = {
   },
   pooledSequentialTests: {
     count: 29,
-    hash: 'bec615b739122b8fa8f958262e8e4db926bf6d03cb86408bbf28dcf299e3b3ac',
+    hash: 'e93a5afc4cdf6c8eccdfe0624a3b4a2a8169db906e407ff81b7b72c321ea3d2d',
   },
   boundarySequentialTests: {
     count: 7,

@@ -1,6 +1,14 @@
 import https from 'node:https';
 import { retryWithBackoff } from '../retry';
 
+/**
+ * Per-attempt budget for DELETE /browsers/:id. Matches the Kernel SDK's own
+ * request default (Kernel.DEFAULT_TIMEOUT, 60s). On 2026-10-26 Kernel answered
+ * single-browser GET/DELETE in ~10.6s (even 404s), so the former 10s budget
+ * failed every release attempt and left sessions running.
+ */
+export const KERNEL_SESSION_DELETE_TIMEOUT_MS = 60_000;
+
 export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
   await retryWithBackoff(
     async () => {
@@ -20,7 +28,7 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
             response.once('end', () => resolve(response.statusCode ?? 0));
           }
         );
-        request.setTimeout(10_000, () => {
+        request.setTimeout(KERNEL_SESSION_DELETE_TIMEOUT_MS, () => {
           request.destroy(new Error('Kernel session delete timed out'));
         });
         request.once('error', reject);

@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
+import agentGraphRouter from './domains/agents/routes.graph';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
@@ -21,16 +22,25 @@ import inviteCodesRouter from './domains/invite-codes/routes';
 import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
 import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
+import { HOLD_STREAM_PATH } from './domains/vapi/config';
+import localDevicesRouter from './domains/local-devices/routes';
+import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
+import browserWorldRouter from './domains/browser-world/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import authRouter from './domains/auth/routes';
 import authOptionsRouter from './domains/auth-options/routes';
 import authAssistanceRouter from './domains/auth-assistance/routes';
+import iphoneRouter from './domains/iphone/routes';
 import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
+import codeAgentDirectChatRouter, {
+  sessionScopedRouter as codeSessionDirectChatRouter,
+} from './domains/claude-code/routesDirectChat';
+import previewHandoffRouter from './domains/claude-code/routes.previewHandoff';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
@@ -43,11 +53,9 @@ import testPaymentRouter from './domains/test-payment/routes';
 import authTestSiteRouter from './domains/auth-test-site/routes';
 import { AUTH_TEST_SITE_BASE_PATH } from './domains/auth-test-site/config';
 import {
-  setSupervisorFixtureOverride,
-  clearSupervisorFixtureOverride,
-  runProactiveSmsOutreachJob,
-  runProactiveSmsOutreachJobWithLease,
-} from './providers/smsSupervisor';
+  createProactiveSmsTestRouter,
+  createSupervisorFixtureTestRouter,
+} from './providers/smsSupervisor/testRoutes';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
@@ -57,9 +65,12 @@ import dataRouter from './domains/data/routes';
 import externalHttpRouter from './domains/external-http/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
-import fastCacheRouter from './domains/fast-cache/routes';
+import demoCacheRouter from './domains/demo-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import plannerMemoryRouter from './domains/planner-memory/routes';
+import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
+import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
+import projectsRouter from './domains/projects/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -68,7 +79,7 @@ import { installGrantRecovery } from './domains/compute-grants/service';
 import { releaseAllConnectSessions } from './domains/compute-grants/connectSession.shutdown';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
-import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
+import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
@@ -162,6 +173,17 @@ app.use(
   })
 ); // Increased to handle large encrypted payloads
 
+// Published rose_user_ui files: public, credential-free, immutable. Mounted
+// before CORS because sandboxed iframes request them with Origin: null. In prod
+// USERCONTENT_BASE_URL must route these to a separate origin.
+app.use('/usercontent', usercontentRouter);
+
+// One-time preview sign-in redeem (Rose-in-Rose, L-APPS2): called from code-agent
+// preview origins (E2B port hosts, loopback). Mounted before the global CORS so
+// its own CORS answers those origins; the global middleware would answer their
+// preflight with no allow header.
+app.use('/api/preview-handoff', previewHandoffRouter);
+
 // Production must explicitly authorize both public web origins. A missing or
 // partial value aborts startup so Render cannot promote a login-breaking release.
 const allowedOrigins = resolveAllowedOrigins(process.env);
@@ -226,80 +248,8 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
   const captureRouter = installFetchCapture();
   app.use('/api/test/captures', captureRouter);
 
-  // Per-user SMS supervisor LLM-response fixture. Lets blackbox tests swap the
-  // fixture between cases without rebooting the backend. POST { userId,
-  // fixture } registers; DELETE ?userId clears.
-  const fixtureRouter = express.Router();
-  fixtureRouter.post('/', express.json(), (req, res) => {
-    const { userId, fixture } = req.body as { userId?: unknown; fixture?: unknown };
-    if (typeof userId !== 'string' || typeof fixture !== 'string') {
-      res.status(400).json({ error: 'userId and fixture must be strings' });
-      return;
-    }
-    setSupervisorFixtureOverride(userId, fixture);
-    res.json({ ok: true });
-  });
-  fixtureRouter.delete('/', (req, res) => {
-    const userId = req.query.userId;
-    if (typeof userId !== 'string') {
-      res.status(400).json({ error: 'userId query param required' });
-      return;
-    }
-    clearSupervisorFixtureOverride(userId);
-    res.json({ ok: true });
-  });
-  app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
-
-  const proactiveSmsRouter = express.Router();
-  const parseProactiveSmsJobOptions = (body: unknown) => {
-    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-      return null;
-    }
-    const { now: nowValue, userIds: userIdsValue } = body as {
-      now?: unknown;
-      userIds?: unknown;
-    };
-    const now =
-      nowValue === undefined
-        ? new Date()
-        : typeof nowValue === 'string'
-          ? new Date(nowValue)
-          : null;
-    const userIds =
-      userIdsValue === undefined
-        ? undefined
-        : Array.isArray(userIdsValue) &&
-            userIdsValue.every((value): value is string => typeof value === 'string')
-          ? userIdsValue
-          : null;
-    return now === null || Number.isNaN(now.getTime()) || userIds === null
-      ? null
-      : { now, candidateUserIds: userIds };
-  };
-  const rejectInvalidProactiveSmsOptions = (res: express.Response): void => {
-    res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
-  };
-  proactiveSmsRouter.post('/run', (req, res, next) => {
-    const options = parseProactiveSmsJobOptions(req.body);
-    if (options === null) {
-      rejectInvalidProactiveSmsOptions(res);
-      return;
-    }
-    runProactiveSmsOutreachJob(options)
-      .then((summary) => res.json(summary))
-      .catch(next);
-  });
-  proactiveSmsRouter.post('/run-leased', (req, res, next) => {
-    const options = parseProactiveSmsJobOptions(req.body);
-    if (options === null) {
-      rejectInvalidProactiveSmsOptions(res);
-      return;
-    }
-    runProactiveSmsOutreachJobWithLease(options)
-      .then((result) => res.json(result))
-      .catch(next);
-  });
-  app.use('/api/test/proactive-sms', proactiveSmsRouter);
+  app.use('/api/test/sms-supervisor-fixture', createSupervisorFixtureTestRouter());
+  app.use('/api/test/proactive-sms', createProactiveSmsTestRouter());
 
   // Signals the in-memory blackbox Temporal fake recorded for one workflow, so
   // HTTP route contracts can assert which signal (if any) a route delivered.
@@ -522,11 +472,16 @@ if (x402ReceivingWallet) {
 
 // Routes with authentication
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
+app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-tools domain)
+// Direct chat with a code agent: /api/agents/:id/code-agent/:taskId/* (per-route hybridAuth).
+app.use('/api/agents', codeAgentDirectChatRouter);
 app.use('/api/agents', agentsRouter);
+app.use('/api/agent-graph', agentGraphRouter);
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
 app.use('/api/auth-assistance', authAssistanceRouter);
+app.use('/api/iphone', iphoneRouter);
 app.use('/api/credential-propagation', credentialPropagationRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);
@@ -539,7 +494,10 @@ app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
 app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/browser-world', browserWorldRouter);
+app.use('/api/claude-code-session', codeSessionDirectChatRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
+app.use('/api/local-devices', localDevicesRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
@@ -558,9 +516,12 @@ app.use('/api/purchases', purchasesRouter);
 app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use(AUTH_TEST_SITE_BASE_PATH, authTestSiteRouter); // Dev-only hosted sign-in site for auth benchmarks
-app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
+app.use('/api/fast-cache', demoCacheRouter); // DEMO cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
+app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
+app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
+app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
@@ -668,6 +629,8 @@ const server = app.listen(PORT, () => {
 });
 // wait_for_human: Twilio streams parked calls' hold audio to this server.
 attachHoldStreamServer(server);
+// C14: Rose Mac app control channels and per-session local code relays.
+attachLocalDeviceServer(server, [HOLD_STREAM_PATH]);
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

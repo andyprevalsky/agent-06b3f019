@@ -609,6 +609,42 @@ reconciliation, rereads the controller Machine and workspace Volume, and writes
 benchmark credit. Each step journals once and is never replayed.
 
 
+### Recover a stopped controller's retained export
+
+A host suspension can lose the gate's export download after the on-host
+collector already finished; the controller then stops (restart policy `no`)
+and every supervisor probe fails. Within about a minute of failed probes after
+the gate joins, the runner reads the exact native controller. When the same
+instance is `stopped` or `destroyed` and the export is unverified, it writes
+`export-recovery-required.json` (`EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED`)
+once and stays alive as the cleanup owner. Do not start the controller: its
+init reruns the gate script against the evidence volume.
+
+1. Fork the retained workspace volume (`flyctl volumes fork <volume> -a <app>`)
+   and mount the fork on a short-lived Machine of the same
+   image with an inert init (`sleep`), `auto_destroy` and restart `no`.
+2. Download `controller-host-custody/{originals.tar.gz,manifest.json,launch.json}`
+   from the fork. Require `sha256(originals.tar.gz)` to equal
+   `manifest.archive_sha256`; keep copies under `export/retained-volume-recovery/`.
+3. Copy the three files (single-link regular files) into the run's `export/`
+   and run the pinned helper with the run's own authority:
+   `cloudbench-disposable-controller.py export-ready --authority <run>/authority.private.json --root <source> --directory <run>/export --machine <id> --image <launch.json image>`.
+   The unchanged collector `verify()` writes `disposable-export.verified.json`.
+4. The live runner re-reads the stopped controller and invokes its canonical
+   `cleanup` once, ending with `CONTROLLER_STOPPED_RELEASE_VERIFIED`. Destroy the
+   scratch Machine and the fork, then confirm native `destroyed`/`pending_destroy`.
+
+A missing or mismatched archive keeps the receipt open; it never grants credit.
+
+A startup deadline can also fire after the controller was created, before the
+gate seals ownership. Its `cleanup-workspace` then refuses the existing
+allocation. The runner resolves that exact Machine by its create-intent name,
+runs the pinned `seal` once, preserves the refused intent as
+`cleanup-call.workspace-refused.json`, resumes probing and writes
+`export-recovery-required.json` (`EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED`).
+While the controller is still started, download the same three custody files
+directly from it (steps 2–3, no fork). The runner then releases it once.
+
 Within a live strict cohort, the fleet shares one successful read-only app-secret
 verification. The proof is bound to the campaign owner and process births,
 cohort membership, app, source, verifier bytes, complete environment hashes and

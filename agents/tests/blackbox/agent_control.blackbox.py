@@ -446,7 +446,7 @@ async def test_handlers_send_and_metadata():
 
         # A finished task too old to keep its wake context: stored, not woken (actionable reason).
         wf._background_finished["toolu_old"] = {
-            "agent_type": "browser",
+            "agent_type": "explore",
             "address": "/root/booker",
             "status": "completed",
             "path": "/root/booker",
@@ -456,6 +456,157 @@ async def test_handlers_send_and_metadata():
         assert status.value == "FINISHED" and "was not woken" in text and "spawn a new one" in text, text
 
         bg_gate.set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+
+_SCHEMA = {"fields": [{"name": "result", "type": "str", "description": "d", "required": True}]}
+BROWSER_ARGS = {
+    "type": "browser",
+    "task_name": "booker",
+    "goal": "Find the member number on the shop site.",
+    "start_url": "https://shop.example.com/",
+    "output_schema": _SCHEMA,
+}
+CODE_ARGS = {"type": "code", "task_name": "coder", "goal": "Add a README badge.", "output_schema": _SCHEMA}
+
+
+async def test_send_to_browser_and_code_tasks_follows_their_lifecycle():
+    """W3 (Andy 2026-10-23): completed browser/code agents cannot be messaged; paused ones resume explicitly.
+
+    Completed/failed → the send fails with the reason and nothing is stored.
+    Paused (a user pause ended the run; workflow state, not result text) →
+    continue_conversation is required; true keeps the conversation (browser:
+    same inbox + archived transcript marker; code: the message is the next CLI
+    turn), false starts fresh (code: new CLI conversation in the same session).
+    """
+    from domains.agent_messaging.handler import send_message_to_agent
+    from helpers.agent_addressing import background_tree_entries
+    from helpers.background_agents import CHILD_WORKFLOW_AGENT_TYPES
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        gates = {}
+        runs = []
+        outcomes = {}
+
+        async def _executor(tool_name, tool_args, tool_call_id):
+            runs.append((tool_call_id, dict(tool_args)))
+            gate = gates.setdefault(tool_call_id, asyncio.Event())
+            await gate.wait()
+            gate.clear()
+            return outcomes.get(tool_call_id, {"success": True, "message": "done"})
+
+        wf._execute_tool = _executor
+        await wf._execute_tool_once("spawn_agent", dict(BROWSER_ARGS), "toolu_b")
+        await wf._execute_tool_once("spawn_agent", dict(CODE_ARGS), "toolu_c")
+        for _ in range(200):
+            if len(runs) == 2:
+                break
+            await asyncio.sleep(0.002)
+
+        # 1. Completed browser and code tasks: listed as completed; a send fails before storing.
+        for task_id in ("toolu_b", "toolu_c"):
+            gates[task_id].set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        entries = background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
+        assert sorted((e["path"], e["type"], e["status"]) for e in entries) == [
+            ("/root/booker", "browser", "completed"),
+            ("/root/coder", "code", "completed"),
+        ], entries
+        for path, kind in (("/root/booker", "browser"), ("/root/coder", "code")):
+            stored_before = len(harness.activities)
+            status, text = await send_message_to_agent(
+                wf, {"to": path, "message": "One more thing."}, f"toolu_send_{kind}"
+            )
+            assert status.value == "ERROR", text
+            assert text == (
+                f"{path} is a completed {kind} agent; completed browser and code agents cannot be "
+                f"messaged. Spawn a new {kind} agent for new work."
+            ), text
+            assert len(harness.activities) == stored_before, "a refused send stores nothing"
+            assert harness.tool_rows(f"toolu_send_{kind}")[-1]["metadata"]["toolStatus"] == "ERROR"
+        assert len(runs) == 2, "no run was started"
+
+        # 2. A user pause ends a running browser/code run as "paused" (not failed).
+        await wf._execute_tool_once("spawn_agent", {**BROWSER_ARGS, "task_name": "booker2"}, "toolu_pb")
+        await wf._execute_tool_once("spawn_agent", {**CODE_ARGS, "task_name": "coder2"}, "toolu_pc")
+        for _ in range(200):
+            if len(runs) == 4:
+                break
+            await asyncio.sleep(0.002)
+        await wf.pause()
+        for task_id in ("toolu_pb", "toolu_pc"):
+            outcomes[task_id] = {"error": True, "message": "Run cancelled"}
+            gates[task_id].set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        await wf.resume()
+        statuses = {k: v["status"] for k, v in wf._background_finished.items()}
+        assert statuses["toolu_pb"] == "paused" and statuses["toolu_pc"] == "paused", statuses
+        entries = background_tree_entries(wf._background_tasks, CHILD_WORKFLOW_AGENT_TYPES, wf._background_finished)
+        assert {e["path"]: e["status"] for e in entries}["/root/booker2"] == "paused", entries
+
+        # Paused without continue_conversation: refused with the reason, nothing stored.
+        stored_before = len(harness.activities)
+        status, text = await send_message_to_agent(wf, {"to": "/root/booker2", "message": "Go on."}, "toolu_s0")
+        assert status.value == "ERROR" and "set continue_conversation" in text, text
+        assert len(harness.activities) == stored_before
+
+        # 3. continue_conversation=true on the browser: same inbox, archived-transcript marker, goal unchanged.
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-b", "delivered": False}
+        status, text = await send_message_to_agent(
+            wf, {"to": "/root/booker2", "message": "Use the second login.", "continue_conversation": True}, "toolu_s1"
+        )
+        assert status.value == "FINISHED" and "its prior conversation continues" in text, text
+        sends = [a for a in harness.activities if a[0] == "send_agent_message_activity"]
+        assert sends[-1][1][4] == "toolu_pb" and sends[-1][1][6] is True, sends[-1]
+        record = wf._background_tasks["toolu_pb"]
+        assert (record["run"], record["inbox_address"]) == (2, "toolu_pb"), record
+        for _ in range(200):
+            if len(runs) == 5:
+                break
+            await asyncio.sleep(0.002)
+        browser_args = runs[-1][1]
+        assert browser_args["_resume_paused_conversation"] == {"inbox_address": "toolu_pb"}, browser_args
+        assert browser_args["goal"] == BROWSER_ARGS["goal"], "the restored conversation keeps its goal"
+
+        # 4. continue_conversation=false on the code agent: fresh CLI conversation, same session.
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-c", "delivered": False}
+        status, text = await send_message_to_agent(
+            wf, {"to": "/root/coder2", "message": "Also add a license.", "continue_conversation": False}, "toolu_s2"
+        )
+        assert status.value == "FINISHED" and "fresh conversation" in text, text
+        for _ in range(200):
+            if len(runs) == 6:
+                break
+            await asyncio.sleep(0.002)
+        code_args = runs[-1][1]
+        assert code_args["_fresh_conversation"] is True and "_resume_paused_conversation" not in code_args
+        assert code_args["goal"].startswith("Also add a license.\n\n") and CODE_ARGS["goal"] in code_args["goal"]
+        assert wf._background_tasks["toolu_pc"]["inbox_address"] == "toolu_pc.run2"
+
+        # 5. Another agent's message reaches the owner as a signal carrying the flag.
+        for task_id in ("toolu_pb", "toolu_pc"):
+            gates[task_id].set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+        wf._background_finished["toolu_pc"]["status"] = "paused"
+        await wf.receive_agent_message(
+            {
+                "message_id": "m-peer",
+                "from_agent_path": "/root/peer",
+                "wake_task_id": "toolu_pc.run2",
+                "message": "Continue please.",
+                "continue_conversation": True,
+            }
+        )
+        for _ in range(200):
+            if len(runs) == 7:
+                break
+            await asyncio.sleep(0.002)
+        assert runs[-1][1]["goal"] == "Continue please.", "code continue: the message is the next CLI turn"
+        assert "_fresh_conversation" not in runs[-1][1]
+        gates["toolu_pc"].set()
         await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
 
 
@@ -770,6 +921,10 @@ async def run_all_tests():
         "carried_child_killed_notifies_failed", test_carried_child_killed_by_other_agent_notifies_failed
     )
     await r.record_async("handlers_send_metadata", test_handlers_send_and_metadata)
+    await r.record_async(
+        "send_browser_code_lifecycle_completed_refused_paused_resumes",
+        test_send_to_browser_and_code_tasks_follows_their_lifecycle,
+    )
     await r.record_async("send_wakes_finished_explore_task", test_send_to_finished_explore_task_wakes_its_next_run)
     await r.record_async("message_guard_refusals_reach_tool_result", test_message_guard_refusals_reach_the_tool_result)
     r.record("prompts_schemas_registration", test_prompts_schemas_and_registration)

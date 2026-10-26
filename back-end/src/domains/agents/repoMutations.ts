@@ -1,3 +1,4 @@
+import { createLogicalBrowserInTransaction } from '../../providers/browser/logicalSession';
 /**
  * Agents domain repo mutations — create, update, delete operations.
  */
@@ -45,9 +46,15 @@ function optionalAgentCreateFields(params: {
   memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
+  githubRepoUrl?: string;
+  originDeviceId?: string;
+  projectId?: string | null;
   taskPath?: string | null;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
+    ...(params.projectId !== undefined && params.projectId !== null
+      ? { projectId: params.projectId }
+      : {}),
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
       : {}),
@@ -73,6 +80,8 @@ function optionalAgentCreateFields(params: {
     ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
+    ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
+    ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
     ...(params.taskPath !== undefined && params.taskPath !== null
       ? { taskPath: params.taskPath }
       : {}),
@@ -128,6 +137,11 @@ export interface CreateAgentParams {
   workflowContextGates?: Record<string, boolean>;
   workflowStartPhase?: string;
   workflowTaskQueue?: string;
+  /** Repository code sessions in this tree clone (set before the workflow starts). */
+  githubRepoUrl?: string;
+  /** Rose Mac app device that started this root agent (C14 local code agents). */
+  originDeviceId?: string;
+  projectId?: string | null;
   taskPath?: string | null;
 }
 
@@ -171,6 +185,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
         ...optionalAgentCreateFields(params),
       },
     });
+
+    await createLogicalBrowserInTransaction(tx, params.userId, newAgent.id);
 
     await tx.verifier.create({
       data: {
@@ -265,6 +281,9 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         ...optionalAgentCreateFields(params),
       })),
     });
+
+    for (const item of items)
+      await createLogicalBrowserInTransaction(tx, item.userId, item.agentId);
 
     await tx.verifier.createMany({
       data: items.map((params) => ({

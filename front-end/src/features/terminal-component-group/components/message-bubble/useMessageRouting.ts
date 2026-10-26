@@ -5,6 +5,7 @@
  */
 import { isAgentMessageMetadata, isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
+import { isBrowserAgentResult } from '../browserAgentResult';
 import { isAgentWait } from './agentToolData';
 
 const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
@@ -95,15 +96,7 @@ export function useMessageRouting(message: Message): MessageRouting {
   // "✓ Write permission granted") becomes the chip anchor mid-run; without this
   // check it renders the still-running browser agent as "Done"
   // (prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f).
-  const isBrowserTerminalActionType =
-    metadata?.action_type === 'task_complete' || metadata?.action_type === 'session_paused';
-  const isBrowserAgentChipMessage = Boolean(
-    isTool &&
-    metadata?.toolName === 'spawn_browser_agent' &&
-    !metadata?.subAgentId &&
-    (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR') &&
-    (isBrowserTerminalActionType || (!metadata?.task_id && metadata?.action_type == null)),
-  );
+  const isBrowserAgentChipMessage = isBrowserAgentResult(message);
 
   return {
     isUser,

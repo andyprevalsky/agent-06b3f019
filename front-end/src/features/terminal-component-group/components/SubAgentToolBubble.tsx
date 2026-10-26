@@ -121,7 +121,7 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
     <button
       onClick={handleClick}
       type="button"
-      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors cursor-pointer max-w-full"
+      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 dark:border-white/[0.09] bg-gray-50 dark:bg-[#2f2f2c] hover:bg-gray-100 dark:hover:bg-[#383835] transition-colors cursor-pointer max-w-full"
     >
       <ProgressRing progressOffset={progressOffset} isComplete={isComplete} />
       <span

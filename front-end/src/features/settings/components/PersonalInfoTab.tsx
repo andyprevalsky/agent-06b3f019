@@ -8,35 +8,19 @@
  *    |                                      |
  *    +---------- after 3 seconds -----------+ error -> [DIRTY]
  *
- * FAST MODE CARD (admin phone on this form only):
- * [HIDDEN] --canUseFastMode({ phone })--> [VISIBLE]
- *    [ON] <---> [OFF]  (session-only; shared with the chat query box)
- *
  * The verified phone is read-only. Personal identity and delivery recipient
  * are edited independently, then persisted together by the parent settings flow.
- *
- * Admin operators (verified admin phone on this form, or a live admin session)
- * also see a session-only Fast Mode card — the same control as the chat query box.
  *
  * Fields live inside a single <form> so the browser groups the shipping-address
  * inputs (autoComplete="shipping ...") and offers native address autofill.
  * Submitting the form (Save button or Enter) triggers the parent save handler.
  */
 
-import { useEffect, useState } from 'react';
-import { Loader2, Save, Check, Zap } from 'lucide-react';
+import { Loader2, Save, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { canUseFastMode } from '@/lib/fastModeAccounts';
-import {
-  getFastModeSessionOverride,
-  setFastModeSessionOverride,
-  subscribeFastModeSession,
-} from '@/lib/fastModeSession';
-import { cn } from '@/lib/utils';
-
 import type { UserData } from '../types';
 
 interface PersonalInfoTabProps {
@@ -220,54 +204,6 @@ function DeliveryLocationFields({
   );
 }
 
-function FastModeSettingsCard({ phone }: { phone: string }) {
-  const [enabled, setEnabled] = useState(() => getFastModeSessionOverride() ?? true);
-
-  useEffect(() => {
-    return subscribeFastModeSession(() => {
-      const next = getFastModeSessionOverride();
-      if (next !== null) setEnabled(next);
-    });
-  }, []);
-
-  if (!canUseFastMode({ phone })) return null;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Fast Mode</CardTitle>
-        <CardDescription>
-          Record and replay cached third-party responses so repeated runs of the same goal skip slow
-          external calls. Session-only; this is the same control as the chat query box.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <button
-          type="button"
-          onClick={() => {
-            const next = !enabled;
-            setEnabled(next);
-            setFastModeSessionOverride(next);
-          }}
-          aria-label={enabled ? 'Fast Mode On' : 'Fast Mode Off'}
-          aria-pressed={enabled}
-          data-state={enabled ? 'on' : 'off'}
-          data-testid="fast-mode-toggle"
-          className={cn(
-            'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors',
-            enabled
-              ? 'border-amber-500/70 bg-amber-400/20 text-amber-700 shadow-sm ring-1 ring-amber-400/40 dark:text-amber-200'
-              : 'border-border bg-muted/50 text-muted-foreground',
-          )}
-        >
-          <Zap className={cn('h-3.5 w-3.5', enabled && 'fill-current')} />
-          <span className="font-medium">Fast Mode</span>
-        </button>
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function PersonalInfoTab(props: PersonalInfoTabProps) {
   return (
     <form
@@ -278,7 +214,6 @@ export default function PersonalInfoTab(props: PersonalInfoTabProps) {
       }}
     >
       <PersonalFields userData={props.userData} onFieldChange={props.onFieldChange} />
-      <FastModeSettingsCard phone={props.userData.phone} />
       <DeliveryFields {...props} />
     </form>
   );

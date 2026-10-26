@@ -1898,11 +1898,11 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
 
     Mass-agent July cache has explore + for_each populate rows. The leftover
     post-for_each GP is not in that cache. Strict read-only correctly refuses
-    a live param-populator call (FastCacheLookupError). That miss must not
+    a live param-populator call (DemoCacheLookupError). That miss must not
     become a toolStatus=ERROR chip — t10-no-tool-failures treats ERROR as a
     failed run even when execute_loop later replays the leftover from cache.
     """
-    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.demo_cache.rose_cache import DemoCacheLookupError
 
     leftover_goal = "Produce fresh tool-grounded evidence for remaining deliverables"
     plan_data = {
@@ -1917,7 +1917,7 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
     def param_tool_calls(args):
         extra = args[10] if args and len(args) > 10 else ""
         if leftover_goal in extra:
-            inner = FastCacheLookupError(
+            inner = DemoCacheLookupError(
                 "Strict read-only benchmark cache miss for dag_param_populator; live fallback is disabled"
             )
             wrapped = RuntimeError("Activity task failed")
@@ -1944,7 +1944,7 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
     terminal = [e for e in leftover_events if e["status"] not in (None, "IN_PROGRESS")]
     assert len(terminal) >= 1
     assert terminal[0]["status"] == "FINISHED"
-    assert terminal[0]["metadata"].get("fastModeCacheSkip") is True
+    assert terminal[0]["metadata"].get("demoCacheSkip") is True
     assert not any(e["status"] == "ERROR" for e in leftover_events)
 
 
@@ -2016,8 +2016,8 @@ async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
 
 
 async def test_execute_dag_transport_lookup_error_still_fails():
-    """A FastCacheLookupError that is not a clean read-only miss stays a failure."""
-    from providers.fast_cache.rose_cache import FastCacheLookupError
+    """A DemoCacheLookupError that is not a clean read-only miss stays a failure."""
+    from providers.demo_cache.rose_cache import DemoCacheLookupError
 
     plan_data = {
         "tasks": [{"goal": "search first", "tool_name": "web_search"}],
@@ -2025,7 +2025,7 @@ async def test_execute_dag_transport_lookup_error_still_fails():
     }
 
     def param_tool_calls(_args):
-        raise FastCacheLookupError("fast_cache.get_error: ReadTimeout after retries")
+        raise DemoCacheLookupError("demo_cache.get_error: ReadTimeout after retries")
 
     result, events, dag = await _run_execute_dag(plan_data, param_tool_calls=param_tool_calls)
 

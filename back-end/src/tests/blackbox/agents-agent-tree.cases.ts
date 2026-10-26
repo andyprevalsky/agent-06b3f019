@@ -62,7 +62,7 @@ export interface TreeView {
   nodes: TreeNode[];
   next_cursor: string | null;
   sibling_next_cursor: string | null;
-  matches?: Array<PathEntry & { ancestor_ids: string[] }>;
+  matches?: Array<PathEntry & { ancestor_ids: string[]; type?: string }>;
 }
 
 const LONG_GOAL = `Coordinate venue outreach ${'and follow-ups '.repeat(25)}`;
@@ -387,6 +387,56 @@ test('GET /:id/tree — depth and limit clamp to their bounds', async () => {
     const narrow = await getView(fx.userId, ids.root, { node: ids.fanout, depth: '0', limit: '0' });
     assert(narrow.nodes.length === 2, `limit/depth clamp to 1, got ${narrow.nodes.length}`);
     assert(narrow.next_cursor !== null, 'more children remain after a 1-row page');
+  } finally {
+    await deleteFixture(fx);
+  }
+});
+
+test('GET /:id/tree — node naming a background task lists that task (status, no children)', async () => {
+  const fx = await createFixture('tree-task-node');
+  const { ids } = fx;
+  try {
+    await prisma.agent.update({
+      where: { id: ids.root },
+      data: {
+        backgroundTasks: [
+          {
+            address: 'bg_member',
+            type: 'browser',
+            goal: 'Read the member number',
+            status: 'completed',
+            task_name: 'member_number',
+            path: '/root/member_number',
+          },
+        ],
+      },
+    });
+    for (const address of ['/root/member_number', `${ids.root}/bg_member`]) {
+      const res = await getTree(fx.userId, ids.research, { node: address });
+      assertStatus(res.status, 200, res.data);
+      const view = res.data as TreeView;
+      const last = view.node_path[view.node_path.length - 1];
+      assert(
+        last?.agent_id === '/root/member_number' && last.status === 'completed',
+        `node_path ends at the task with its status, got ${JSON.stringify(view.node_path)}`
+      );
+      assert(
+        same(
+          view.node_path.slice(0, -1).map((entry) => entry.agent_id),
+          [ids.root]
+        ),
+        `task breadcrumbs run through its owner, got ${JSON.stringify(view.node_path)}`
+      );
+      const node = view.nodes.find((entry) => entry.agent_id === '/root/member_number');
+      assert(
+        view.nodes.length === 1 &&
+          node?.status === 'completed' &&
+          node.child_count === 0 &&
+          node.parent_agent_id === ids.root,
+        `the task is listed alone as a completed leaf, got ${JSON.stringify(view.nodes)}`
+      );
+      assert(view.next_cursor === null, 'a task has no child pages');
+    }
   } finally {
     await deleteFixture(fx);
   }

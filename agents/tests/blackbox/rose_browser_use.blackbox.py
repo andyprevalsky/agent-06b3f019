@@ -27,7 +27,7 @@ from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 import httpx
 
 from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool, gpt_auth_from_token
-from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
     _ACTION_NAME_MAP,
@@ -2194,8 +2194,8 @@ async def test_complete_browser_use_cancellation_skips_failure_capture():
     await _assert_failed_browser_context_capture(cancelled=True)
 
 
-async def test_complete_browser_use_bypasses_fast_cache_context():
-    """Browser-use LLM calls must not read or write provider fast-cache."""
+async def test_complete_browser_use_bypasses_demo_cache_context():
+    """Browser-use LLM calls must not read or write provider demo-cache."""
     sse_body = _openai_sse(
         [
             {
@@ -2224,13 +2224,13 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.cerebras.ai" in url:
             return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected endpoint")
 
     set_mock_handler(handler)
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         client = RoseClient(openrouter_key="ork-x")
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
@@ -2241,7 +2241,7 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
                 available_actions=["click", "click_coordinates"],
                 include_screenshot=False,
                 gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
-                agent_id="agent-fast-cache-bypass",
+                agent_id="agent-demo-cache-bypass",
                 call_site="browser_use_step_1",
             )
     finally:
@@ -2377,7 +2377,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         url = str(req.url)
         captured.append(url)
         if "fast-cache" in url:
-            return httpx.Response(500, text="browser-use should bypass fast-cache")
+            return httpx.Response(500, text="browser-use should bypass demo-cache")
         if "api.anthropic.com" in url:
             anthropic_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
@@ -2389,7 +2389,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
     dump_root = ROOT.parent / ".llm-dumps" / "unbound"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
-    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test", "GPT_API_KEY": ""}, clear=False):
             result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
@@ -2609,6 +2609,19 @@ async def run_all_tests():
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
+    await r.record_async("native_autofill_actual_enabled_request", test_native_autofill_preference_reaches_actual_enabled_request)
+    r.record("native_autofill_fixture_current_dto", test_native_autofill_control_fixture_matches_current_backend_dto)
+    await r.record_async("native_autofill_fixture_real_history", test_native_autofill_control_history_matches_real_serializer)
+    await r.record_async("native_autofill_real_model_controls", test_native_autofill_real_model_synthetic_controls)
+    r.record("phone_off_matches_prephone_bytes", test_phone_off_matches_prephone_bytes)
+    await r.record_async("phone_off_actual_rose_request", test_phone_off_actual_rose_request)
+    r.record("phone_setup_verification_targets_schema", test_phone_setup_verification_targets_schema_and_isolation)
+    await r.record_async("phone_setup_settings_actual_handler", test_phone_setup_settings_actual_handler_observation)
+    r.record("phone_setup_schema_and_forged_context", test_phone_setup_schema_and_forged_context)
+    await r.record_async("phone_setup_actual_provider_observation", test_phone_setup_actual_provider_observation)
+    r.record("native_auth_typed_schema_and_normalization", test_native_auth_typed_schema_and_normalization)
+    r.record("native_auth_schema_account_isolation", test_native_auth_schema_account_isolation)
+    await r.record_async("native_auth_real_provider_tool_request", test_native_auth_real_provider_tool_request)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
     r.record(
         "normalize_provider_tool_call_coercion",
@@ -2685,7 +2698,7 @@ async def run_all_tests():
         "complete_browser_use_cancellation_no_capture", test_complete_browser_use_cancellation_skips_failure_capture
     )
     await r.record_async(
-        "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
+        "complete_browser_use_bypasses_demo_cache", test_complete_browser_use_bypasses_demo_cache_context
     )
     await r.record_async(
         "complete_browser_use_cerebras_failure_preserves_tools",
@@ -2724,7 +2737,479 @@ async def run_all_tests():
         "normalize_request_payment_card_parses_tool_string_arguments",
         test_normalize_request_payment_card_parses_tool_string_arguments,
     )
+    r.record("phone_schema_and_per_invocation_capability_gate", test_phone_schema_and_per_invocation_capability_gate)
+    r.record("phone_profile_guidance_is_conditional", test_phone_profile_guidance_is_conditional)
+    r.record("phone_native_call_normalizes_and_observation_is_visible", test_phone_native_call_normalizes_and_observation_is_visible)
     return r.summary()
+
+
+
+
+
+def test_phone_schema_and_per_invocation_capability_gate():
+    from browser_tools.schemas import AVAILABLE_ACTIONS, validate_browser_tool_args, BrowserToolArgsValidationError
+    from domains.spawn_browser_agent_v3.phone import phone_actions
+    original = list(AVAILABLE_ACTIONS)
+    assert 'phone' in phone_actions(original, {'enabled': True})
+    assert 'phone' not in phone_actions(original, {'enabled': False})
+    assert AVAILABLE_ACTIONS == original
+    assert validate_browser_tool_args('phone', {'mode': 'status'}) == {'mode': 'status', 'args': {}}
+    for key in ('user_id', 'agentId', 'browserTaskId', 'leaseId', 'cursor', 'operationId'):
+        try:
+            validate_browser_tool_args('phone', {'mode': 'status', key: 'forged'})
+        except BrowserToolArgsValidationError:
+            pass
+        else:
+            raise AssertionError(f'accepted routing field {key}')
+    assert any(t['name'] == 'phone' for t in build_browser_use_tools(['phone']))
+
+
+def test_phone_profile_guidance_is_conditional():
+    from helpers.user_profile import build_user_profile_sections
+    assert 'cloud iPhone' not in '\n'.join(build_user_profile_sections({}))
+    assert 'cloud iPhone' in '\n'.join(build_user_profile_sections({'iphoneCapability': {'enabled': True}}))
+
+
+
+
+
+def test_phone_native_call_normalizes_and_observation_is_visible():
+    normalized = normalize_browser_use_tool_call({'id':'streamed','name':'phone','arguments':{'mode':'status'}})
+    assert normalized['action'] == 'phone'
+    assert normalized['params']['mode'] == 'status'
+    state={'enabled':True,'interaction':{'cursor':4,'pendingOperation':{'status':'UNKNOWN','id':'input-old'},'lastOperation':{'status':'SUCCEEDED','id':'read-new'}}}
+    messages=build_browser_use_messages(task='task',browser_state={'phone':state},action_history=[],available_actions=['phone'],turn_messages=[])
+    content=json.dumps(messages)
+    assert 'observed_phone_state' in content and 'input-old' in content and 'read-new' in content
+    hidden=build_browser_use_messages(task='task',browser_state={'phone':state},action_history=[],available_actions=['wait'],turn_messages=[])
+    assert 'observed_phone_state' not in json.dumps(hidden)
+
+
+
+def test_native_auth_typed_schema_and_normalization():
+    from browser_tools.schemas import validate_browser_tool_args
+    name = "request_user_assistance_for_authentication"
+    for reason in ("password", "verification_code", "device_passcode", "manual_verification"):
+        args = {"targetKind": "iphone", "criticalReason": reason}
+        for action in ({name: args}, {"action_name": name, **args}):
+            assert normalize_browser_use_response({"action": [action]})["params"] == args
+        assert normalize_browser_use_tool_call({"name": name, "arguments": json.dumps(args)})["params"] == args
+    assert normalize_browser_use_response({"action": [{name: {}}]})["params"] == {}
+    for args in ({"targetKind":"iphone"}, {"targetKind":"android","criticalReason":"password"},
+                 {"targetKind":"iphone","criticalReason":"queue"},
+                 {"targetKind":"iphone","criticalReason":"password","leaseId":"forged"},
+                 {"targetKind":"iphone","criticalReason":"password","password":"CANARY"},
+                 {"targetKind":"browser","criticalReason":"password"}):
+        try:
+            validate_browser_tool_args(name,args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid or forged native assistance accepted")
+
+
+def test_native_auth_schema_account_isolation():
+    name = "request_user_assistance_for_authentication"
+    before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+    enabled = next(t for t in build_browser_use_tools([name,"phone"]) if t["name"]==name)
+    assert enabled["input_schema"]["properties"]["targetKind"]["enum"] == ["browser","iphone"]
+    assert "criticalReason" in enabled["input_schema"]["properties"]
+    assert "targetKind=iphone" in enabled["description"]
+    disabled = build_browser_use_tools([name])[0]
+    assert "targetKind" not in disabled["input_schema"]["properties"]
+    assert "criticalReason" not in disabled["input_schema"]["properties"]
+    assert json.dumps(BROWSER_USE_TOOLS, sort_keys=True) == before
+
+
+async def test_native_auth_real_provider_tool_request():
+    name = "request_user_assistance_for_authentication"
+    params = {"targetKind": "iphone", "criticalReason": "verification_code"}
+    sse = _openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "native-decision-1", "type": "function", "function": {"name": name, "arguments": json.dumps(params)}}]}, "finish_reason": "tool_calls"}]}])
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai", "Synthetic replay must stay on the expected mocked provider path"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="synthetic-native-key").complete_browser_use(
+                task="Inspect the cloud phone verification screen",
+                browser_state={**_browser_state(), "phone": {"enabled": True, "interaction": {"cursor": 7}}},
+                action_history=[], available_actions=[name, "phone"], include_screenshot=False,
+                call_site="test-native-phone-auth",
+            )
+        assert result["action"]["params"] == params
+        assert result["action"]["action"] == name
+        assert len(captured) == 1
+        advertised = next(t["function"] for t in captured[0]["tools"] if t["function"]["name"] == name)
+        assert advertised["parameters"]["properties"]["targetKind"]["enum"] == ["browser", "iphone"]
+        assert "targetKind=iphone" in advertised["description"]
+        assert "This authentication ladder applies to targetKind=browser" in json.dumps(captured[0]["messages"])
+    finally:
+        teardown_mock()
+
+
+def test_phone_setup_schema_and_forged_context():
+    import pytest
+    from browser_tools.schemas import validate_browser_tool_args
+    for action, extra in (("defer", {"reasonCode": "user_constraint"}), ("block", {"reasonCode": "unsupported"}), ("verify", {"evidenceOperationIds": ["observation-1"]})):
+        params = {"mode": "setup", "action": action, **extra}
+        normalized = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps(params)})["params"]
+        assert all(normalized[key] == value for key, value in params.items())
+    for forged in ("attemptId", "expectedRevision", "setupAttemptId", "setupRevision", "expectedCursor", "requestKey", "userId", "leaseId", "expectedAccountIdentifier", "password", "ready", "verdict"):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", {"mode": "setup", "action": "defer", "reasonCode": "user_constraint", forged: "CANARY"})
+    for params in ({"mode": "setup"}, {"mode": "setup", "action": "ready"},
+                   {"mode": "setup", "action": "verify", "args": {"ready": True}},
+                   {"mode": "setup", "action": "verify", "operation": "input.text"},
+                   {"mode": "operation", "operation": "screen.text", "action": "defer"},
+                   {"mode": "status", "evidenceOperationIds": ["other"]}):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", params)
+    before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+    assert "setup" in next(t for t in build_browser_use_tools(["phone"]) if t["name"] == "phone")["input_schema"]["properties"]["mode"]["enum"]
+    assert not any(t["name"] == "phone" for t in build_browser_use_tools(["wait"]))
+    assert before == json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+
+
+async def test_phone_setup_actual_provider_observation():
+    params = {"mode": "setup", "action": "defer", "reasonCode": "user_constraint"}
+    setup = {"attemptId": "attempt-owned", "revision": 3, "state": "in_progress", "expectedAccountIdentifier": "synthetic-account@example.test"}
+    state = {"enabled": True, "interaction": {"cursor": 7, "setup": setup}}
+    sse = _openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "setup-decision", "type": "function", "function": {"name": "phone", "arguments": json.dumps(params)}}]}, "finish_reason": "tool_calls"}]}])
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="synthetic").complete_browser_use(task="Inspect only; do not sign in", browser_state={**_browser_state(), "phone": state}, action_history=[], available_actions=["phone"], include_screenshot=False, call_site="test-phone-setup")
+        assert result["action"]["params"]["action"] == "defer"
+        observed = [m for m in captured[0]["messages"] if "<observed_phone_state>" in str(m.get("content"))]
+        assert len(observed) == 1 and json.dumps(setup) in observed[0]["content"]
+        assert "Inspect only; do not sign in" in json.dumps(captured[0]["messages"])
+    finally:
+        teardown_mock()
+
+
+def test_phone_off_matches_prephone_bytes():
+    """Phone-off tools/system/messages must equal the pre-Phone prompt, byte for byte.
+
+    Golden SHA256s were captured from canonical c28f801be before the Phone proposal.
+    Re-pinned at 042d82196 for exactly one deliberate, mode-independent change:
+    a05e1beb7 (Q3b, approved) added the shared browser_auth_contract line "Sign in or
+    sign up only with identities listed in Auth Options. ..." to both modes. The tools
+    hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
+    reviewed text that also reaches phone-on mode, and record the commit here.
+    """
+    import hashlib
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    expected = {'0': ('ad32df749a6a2d7bd52cdd71beba6847813e3f65de4b9e121f0af2d159f10ec5', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('9bd995b7f5e4d24462806f7e2f34db7a1330fcd80b3c9b6fbef79dfe6a69ef84', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
+    for flag, hashes in expected.items():
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
+            values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
+        actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
+
+
+async def test_phone_off_actual_rose_request():
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler as h, phone
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    captured = []
+    def provider(request):
+        assert request.url.host == "openrouter.ai", "off trajectory performed extra discovery HTTP"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "ordinary-decision", "type": "function", "function": {"name": "wait", "arguments": '{"time_ms":1}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        client = RoseClient(openrouter_key="synthetic")
+        state = {**_browser_state(), "timestamp": "2026-10-01T00:00:00Z"}
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}), patch.object(phone, "observe_phone", AsyncMock(side_effect=AssertionError("off discovery"))) as observe, patch.object(client, "complete_browser_use", wraps=client.complete_browser_use) as actual:
+            result = await h._call_browser_use_with_rotation(rose_client=client, task="Original task", dynamic_system_context="Original context", turn_messages=[], browser_state=state, action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="ordinary", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task")
+        observe.assert_not_awaited()
+        assert "_phone_snapshot" not in result and actual.call_args.kwargs["browser_state"] == state
+        assert actual.call_args.kwargs["dynamic_system_context"] == "Original context"
+        assert len(captured) == 1
+        wire = captured[0]
+        assert all(t["function"]["name"] != "phone" for t in wire["tools"])
+        auth = next(t["function"] for t in wire["tools"] if t["function"]["name"] == "request_user_assistance_for_authentication")
+        assert auth["parameters"] == {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        assert "iphone" not in json.dumps(wire).lower() and "phone_snapshot" not in json.dumps(wire)
+        assert "Original task" in json.dumps(wire["messages"])
+    finally:
+        teardown_mock()
+
+
+async def test_native_autofill_preference_reaches_actual_enabled_request():
+    """Instruction-delivery contract, not evidence of a model choosing an action."""
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    captured = []
+    def provider(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "observe-only", "type": "function", "function": {"name": "phone", "arguments": '{"mode":"status"}'}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        for screen in ("Matching account AutoFill suggestion, password remains masked", "No matching credential available", "Face ID required to use saved credential", "Saved credential rejected by Apple Account", "App Store requests the configured Apple Account existing password to install Gmail; no matching native suggestion is available"):
+            state = {"enabled": True, "interaction": {"cursor": 2, "lastOperation": {"operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": screen}]}}}
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+                await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Continue my authorized Apple Account sign-in", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation=state)
+            prompt = json.dumps(captured[-1]["messages"])
+            assert "try an already available native AutoFill suggestion" in prompt
+            assert "credentials.fill_saved" in prompt and "phone_credential_unavailable" in prompt
+            assert "Never reveal, extract, copy, or transcribe" in prompt
+            assert "Supply no password, credential ref/ID, account, realm," in prompt
+            assert "credentials.fill_saved requires a current successful screen.text result." in prompt
+            assert "Before credentials.fill_saved obtain fresh screen.text." not in prompt
+            assert "with empty args after fresh" not in prompt
+            assert "and fresh observations before password help" not in prompt
+            assert "current observation rule above" in prompt
+            assert "Continue supported signed-out Apple/Google authentication" in prompt
+            assert "App Store password prompt" in prompt and "same saved-credential waterfall" in prompt
+            assert "distinct from the Google identity" in prompt
+            assert "no caller realm, account, or credential ref" in prompt
+            assert screen in prompt
+    finally:
+        teardown_mock()
+
+
+def _native_autofill_control_state(screen, setup=None):
+    import copy
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    return {"enabled": True, "interaction": {"cursor": 3, "lease": {"id": "synthetic-lease", "agentId": "synthetic-agent", "browserTaskId": "synthetic-task", "status": "ACTIVE", "queuePosition": None, "queueDeadlineAt": (now + timedelta(seconds=300)).isoformat(), "leaseExpiresAt": (now + timedelta(seconds=120)).isoformat(), "controlOwner": "agent", "attentionRequestId": None, "revision": 1}, "setup": copy.deepcopy(setup if setup is not None else _native_autofill_server_setup_projection()), "lastOperation": {"id": "synthetic-read", "cursor": 3, "operation": "screen.text", "status": "SUCCEEDED", "errorCode": None, "result": [{"text": screen, "source": "pixels", "confidence": 1, "x": 50, "y": 180, "w": 100, "h": 40}]}, "pendingOperation": None}}
+
+
+def _native_autofill_server_setup_projection():
+    """Call the actual pure backend DTO projector with synthetic owned state."""
+    import subprocess
+    script = """
+import {setupDto} from './src/domains/iphone/repo.setup.ts';
+const lease={id:'synthetic-lease',browserTaskId:'synthetic-task',status:'ACTIVE',releaseRequestedAt:null};
+const state={version:1,profileRevision:1,claimRevision:1,expectedAppleIdentity:'synthetic@example.invalid',expectedPhone:'+15550000000',attempt:{id:'synthetic-attempt',revision:1,leaseId:lease.id,taskId:lease.browserTaskId,agentId:'synthetic-agent',workflowId:'synthetic-workflow',floorCursor:0,floorAt:'2026-10-19T00:00:00Z'}};
+process.stdout.write(JSON.stringify(setupDto({setupState:'in_progress',providerEpoch:1},state,lease)));
+"""
+    env = dict(os.environ)
+    env.update(DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:9/victoria_phone_control", DIRECT_URL="postgresql://postgres:postgres@127.0.0.1:9/victoria_phone_control", BACKEND_API_URL="http://127.0.0.1:9")
+    env.pop("PHONE_HARNESS_API_KEY", None)
+    result = subprocess.run(["node", "--import", "tsx", "--input-type=module", "-e", script], cwd=ROOT.parent / "back-end", env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, "Synthetic pure backend DTO projection failed"
+    return json.loads(result.stdout)
+
+
+def test_native_autofill_control_fixture_matches_current_backend_dto():
+    state = _native_autofill_control_state("Synthetic current password screen")
+    view = state["interaction"]
+    assert view["setup"] == _native_autofill_server_setup_projection(), "Control uses obsolete setup DTO"
+    assert view["lease"]["browserTaskId"] == "synthetic-task"
+    assert view["lastOperation"]["cursor"] == view["cursor"]
+    assert view["lastOperation"]["errorCode"] is None
+
+
+async def _native_autofill_record_read(history, chosen, receipt):
+    import copy
+    from types import SimpleNamespace
+    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result={"success": True, "operation": copy.deepcopy(receipt)})
+
+
+async def test_native_autofill_control_history_matches_real_serializer():
+    import copy
+    from browser_tools.dom_service import ActionHistory
+    from providers.rose.browser_use import _format_action_history
+    chosen = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {}}}
+    receipt = {"id": "read-1", "cursor": 1, "operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": "Synthetic"}]}
+    history = ActionHistory()
+    await _native_autofill_record_read(history, chosen, receipt)
+    actual = ActionHistory()
+    from types import SimpleNamespace
+    await actual.record_action(SimpleNamespace(), action="phone", thinking=None, params=chosen["params"], result={"success": True, "operation": copy.deepcopy(receipt)})
+    assert history.get_entries() == actual.get_entries(), "Control bypasses real ActionHistory serialization"
+    receipt["id"] = "read-2"
+    assert history.get_entries()[0]["result"]["operation"]["id"] == "read-1", "Prior receipt mutated with current observation"
+    rendered = _format_action_history(history.get_entries())
+    assert "Step 1: phone" in rendered and "Step None" not in rendered
+
+
+async def test_native_autofill_real_model_synthetic_controls():
+    """Real canonical decisions on synthetic OCR; no device execution or secrets."""
+    from _test_utils import live_funded_azure
+    from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+    scenarios = {
+        "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
+        "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+        "missing": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
+        "presence": "Apple Account synthetic@example.invalid. Saved password selected. Face ID authentication required to use this saved password. Only the account owner can approve Face ID. No alternative autonomous approval is available.",
+        "rejected": "Apple Account synthetic@example.invalid. The matching saved password was already selected once using native AutoFill. Apple Account rejected it: Incorrect password. Password is still required to continue.",
+    }
+    from browser_tools.dom_service import ActionHistory
+    from types import SimpleNamespace
+    import copy
+    setup_projection = _native_autofill_server_setup_projection()
+    async def decide(name, screen):
+        state = _native_autofill_control_state(screen, setup_projection)
+        history = ActionHistory()
+        if name == "missing":
+            await history.record_action(SimpleNamespace(), action="phone", params={"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, result={"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}})
+        for observation_round in range(3):
+            result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
+            chosen = result.get("action", {})
+            print("Native AutoFill actual choice:", name, observation_round, json.dumps(chosen), flush=True)
+            if chosen.get("action") != "phone" or chosen.get("params", {}).get("operation") != "screen.text":
+                break
+            # The real model requested a read; the synthetic host exposes the same
+            # screen. Preserve its chosen action and returned observation, never
+            # substitute a desired tap/attention decision.
+            receipt = copy.deepcopy(state["interaction"]["lastOperation"])
+            receipt.update(id="synthetic-read-" + str(observation_round + 2), cursor=state["interaction"]["cursor"] + 1)
+            await _native_autofill_record_read(history, chosen, receipt)
+            state["interaction"]["cursor"] = receipt["cursor"]
+            state["interaction"]["lastOperation"] = receipt
+        action = result.get("action", {})
+        params = action.get("params", {})
+        assert not (action.get("action") == "phone" and params.get("operation") == "input.text"), (name, action)
+        if name == "server_available":
+            assert action.get("action") == "phone" and params.get("operation") == "credentials.fill_saved" and params.get("args") == {}, (name, action)
+        elif name == "available":
+            assert action.get("action") == "phone" and params.get("operation") == "input.tap", (name, action)
+            assert params.get("args") == {"x": 100, "y": 200}, (name, action)
+        else:
+            assert action.get("action") == "request_user_assistance_for_authentication" and params.get("targetKind") == "iphone", (name, action)
+            assert params.get("criticalReason") == ("manual_verification" if name == "presence" else "password"), (name, action)
+        usage = result.get("usage", {})
+        print("Native AutoFill real synthetic control:", name, "model:", result.get("actual_model"), "usage:", json.dumps(usage), flush=True)
+    teardown_mock()
+    with live_funded_azure():
+        outcomes = await asyncio.wait_for(asyncio.gather(*(decide(name, screen) for name, screen in scenarios.items()), return_exceptions=True), timeout=120)
+        errors = [str(value) for value in outcomes if isinstance(value, BaseException)]
+        assert not errors, errors
+
+
+def test_phone_setup_verification_targets_schema_and_isolation():
+    import pytest
+    from browser_tools.schemas import validate_browser_tool_args
+    targets = ["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "google_passcode_exception", "runtime"]
+    from browser_tools.schemas import PhoneBrowserTool
+    schema = PhoneBrowserTool.model_json_schema()["properties"]
+    assert schema["evidenceOperationIds"].get("description") == "Use only for mode=setup and action=verify: 1..8 current observation IDs. Omit or null for block, defer, and all other modes."
+    assert schema["verificationTarget"].get("description") == "Use only for mode=setup and action=verify. Omit or null for block, defer, and all other modes."
+    with pytest.raises(ValueError):
+        validate_browser_tool_args("phone", {"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable", "verificationTarget": "google_passcode_exception", "evidenceOperationIds": ["no_admin-read-1"]})
+    before = json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+    for target in targets:
+        params = {"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"], "verificationTarget": target}
+        normalized = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps(params)})["params"]
+        assert normalized["verificationTarget"] == target
+    for params in (
+        {"mode": "setup", "action": "verify", "evidenceOperationIds": ["owned-read"], "verificationTarget": "messages_delivered"},
+        {"mode": "setup", "action": "defer", "reasonCode": "user_constraint", "verificationTarget": "imessage"},
+        {"mode": "setup", "action": "block", "reasonCode": "unsupported", "verificationTarget": "imessage"},
+        {"mode": "operation", "operation": "screen.text", "verificationTarget": "runtime"},
+        {"mode": "status", "verificationTarget": "runtime"},
+        {"mode": "release", "verificationTarget": "runtime"},
+    ):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", params)
+    for proof_field in ("enabled", "orientation", "controlState", "requirementsVersion", "expectedGoogleAccountIdentifier", "expectedGoogleIdentity", "installed", "signedIn", "googlePasscodeExceptionAllowed", "securityDisposition", "adminPermission"):
+        with pytest.raises(ValueError):
+            validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock", "evidenceOperationIds": ["read"], proof_field: True})
+    nullable_block = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps({"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable", "verificationTarget": None})})["params"]
+    omitted_block = normalize_browser_use_tool_call({"name": "phone", "arguments": json.dumps({"mode": "setup", "action": "block", "reasonCode": "configuration_unavailable"})})["params"]
+    assert nullable_block == omitted_block and "verificationTarget" not in nullable_block, "Declared nullable target must normalize like omission"
+    legacy = validate_browser_tool_args("phone", {"mode": "setup", "action": "verify", "evidenceOperationIds": ["read"]})
+    assert "verificationTarget" not in legacy, "Legacy default must remain omitted on the wire"
+    assert not any(tool["name"] == "phone" for tool in build_browser_use_tools(["wait"]))
+    assert before == json.dumps(BROWSER_USE_TOOLS, sort_keys=True)
+
+
+async def test_phone_setup_settings_actual_handler_observation():
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+    verification = {"requirementsVersion": 6, "checks": {"gmail": {"status": "unknown", "current": True}, "icloud_messages": {"status": "confirmed", "observedAt": "2026-10-19T00:00:00Z", "current": False}, "imessage": {"status": "unknown", "current": True}, "portrait_lock": {"status": "unknown", "current": True}}, "configurationReady": False, "operationalStatus": "degraded", "securityDisposition": "blocked", "expectedReceiveAddress": "+15550000000"}
+    setup = {"identityVerified": True, "state": "in_progress", "attemptId": "owned-attempt", "revision": 7, "expectedGoogleAccountIdentifier": "synthetic-google@example.test", "googlePasscodeExceptionAllowed": True, "verification": verification}
+    captured = []
+    def provider(request):
+        captured.append(json.loads(request.content))
+        args = {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock", "evidenceOperationIds": ["owned-read"]}
+        return httpx.Response(200, text=_openai_sse([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "settings-decision", "type": "function", "function": {"name": "phone", "arguments": json.dumps(args)}}]}, "finish_reason": "tool_calls"}]}]), headers={"Content-Type": "text/event-stream"})
+    set_mock_handler(provider)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Preserve the original authorized phone task", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation={"enabled": True, "interaction": {"cursor": 12, "setup": setup}})
+        assert result["action"]["params"]["verificationTarget"] == "portrait_lock"
+        observed = [m for m in captured[0]["messages"] if "<observed_phone_state>" in str(m.get("content"))]
+        assert len(observed) == 1 and json.dumps(verification) in observed[0]["content"]
+        wire = json.dumps(captured[0]["messages"])
+        assert "Labels alone" in wire and "configurationReady" in wire and "operationalStatus" in wire
+        assert "Portrait Orientation Lock" in wire and "portrait frame alone" in wire
+        assert "iCloud Contacts" in wire and "contact names or counts" in wire
+        assert "expectedGoogleAccountIdentifier" in wire and "synthetic-google@example.test" in wire
+        assert "App Store" in wire and "install Gmail" in wire
+        assert "verificationTarget=gmail" in wire
+        assert "credentials.fill_device_passcode" in wire and "verificationTarget=device_passcode" in wire
+        assert "Passcode Options" in wire and "4-Digit Numeric Code" in wire
+        assert "acknowledged" in wire and "standard weak-code warning" in wire
+        assert "never enterprise or provider policy" in wire
+        assert "Do not change an existing passcode" in wire
+        assert "Do not remove or weaken provider/MDM profiles" in wire
+        assert "current Gmail passcode conflict and provider-blocked passcode creation" in wire
+        assert "verified required admin privilege" in wire
+        assert "Open https://admin.google.com/ in the ordinary browser when not already at the" in wire
+        assert "user-authorized scope" in wire
+        assert "Admin privilege alone is not authorization" in wire
+        assert "preserve all other security settings" in wire
+        assert "policy exception is not proof that a device passcode is enabled" in wire
+        assert "googlePasscodeExceptionAllowed" in wire and "google_passcode_exception" in wire
+        assert "securityDisposition" in wire
+        assert "if this marker is absent or false, report setup" in wire
+        assert "Repeated unchanged reads" in wire and "cannot grant authorization" in wire
+        assert "does not prove admin policy authority or a policy write" in wire
+        assert "configuration_unavailable" in wire and "passcode modification is restricted" in wire
+        assert "never guess, reset, or bypass" in wire
+        assert "private acknowledgment alone is not enabled-state proof" in wire
+        assert "1234" not in wire
+        assert "Supported bindings are Apple Account and Google sign-in" in wire
+        assert "actual Google form" in wire and "separately configured Google identity" in wire
+        assert "supports Apple Account binding only" not in wire
+        assert "installation alone" in wire and "device approval" in wire
+        assert "Apple Account identifier is not the Google account" in wire
+        assert "current sign-in challenge" in wire and "return to the browser" in wire
+        assert "unrelated or ambiguous" in wire
+        assert "current matching Messages" in wire and "current challenge timestamp" in wire
+        assert "browser or native phone SMS/OTP challenges" in wire
+        assert "including during boot setup" in wire
+        assert "before starting Gmail sign-in that may need SMS" in wire
+        assert "Do not wait for historical message downloads" in wire
+        assert "do not consume codes for unrelated tasks" in wire
+        assert "verify continuation on the original browser or phone screen" in wire
+        assert "Never submit an ambiguous, stale, unrelated, or already used code" in wire
+        assert "never" in wire and "old or unrelated code" in wire
+        assert "Text Message Forwarding" in wire and "generic assistance" in wire
+        assert "Do not disable iCloud" in wire and "Historical download completion" in wire
+        assert "Do not wait for configurationReady to sign in" in wire
+        assert "latest successful operation is screen.text for the current interaction" in wire
+        assert "Preserve the original authorized phone task" in wire
+        import hashlib
+        from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "9c830fa34b5b32887395809af480a9a7a25bcfcbb095848ef32bfba5481d1db8", "Ordinary enabled guide must match pre-exception HEAD bytes"
+        for marker in (None, False, "true"):
+            plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
+            if marker is not None:
+                plain_setup["googlePasscodeExceptionAllowed"] = marker
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+                await h._call_browser_use_with_rotation(rose_client=RoseClient(openrouter_key="synthetic"), task="Ordinary enabled phone task", dynamic_system_context="Original context", turn_messages=[], browser_state=_browser_state(), action_entries=[], config=SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic")), user_id="enabled", agent_id="agent", iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None, gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, browser_task_id="task", phone_observation={"enabled": True, "interaction": {"cursor": 12, "setup": plain_setup}})
+            systems = [message["content"] if isinstance(message["content"], str) else "".join(block.get("text", "") for block in message["content"]) for message in captured[-1]["messages"] if message["role"] == "system"]
+            assert any(("Original context\n\n" + PHONE_GUIDANCE).rstrip() in content for content in systems), "Provider may merge system messages but must preserve exact ordinary dynamic bytes"
+            assert not any("Open https://admin.google.com/" in content or "Admin privilege alone is not authorization" in content for content in systems)
+
+    finally:
+        teardown_mock()
 
 
 if __name__ == "__main__":

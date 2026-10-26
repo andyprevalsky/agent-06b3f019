@@ -30,7 +30,8 @@ export function useAgentTree(busId: string | null): ReadonlyMap<string, TreeNode
   useEffect(() => {
     if (!busId) return;
     return listenToAgentTree(busId, (nodes) => {
-      setTreeState({ busId, nodes: new Map(nodes) });
+      // Publisher replaces maps rather than mutating them; retain that immutable snapshot.
+      setTreeState({ busId, nodes });
     });
   }, [busId]);
 

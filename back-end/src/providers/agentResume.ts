@@ -202,6 +202,8 @@ export interface AgentMessageSignalPayload {
   from_agent_path?: string;
   wake_task_id?: string;
   message?: string;
+  /** Resuming a paused browser/code task: continue its conversation or start fresh. */
+  continue_conversation?: boolean;
 }
 
 export async function signalAgentMessage(
@@ -214,6 +216,7 @@ export async function signalAgentMessage(
     /** A finished own background task to start the next run of, with the message text. */
     wake_task_id?: string;
     message?: string;
+    continue_conversation?: boolean;
   } = {},
   send: (workflowId: string, payload: AgentMessageSignalPayload) => Promise<void> = async (
     id,
@@ -230,6 +233,8 @@ export async function signalAgentMessage(
     if (sender.wake_task_id !== undefined && sender.message !== undefined) {
       payload.wake_task_id = sender.wake_task_id;
       payload.message = sender.message;
+      if (sender.continue_conversation !== undefined)
+        payload.continue_conversation = sender.continue_conversation;
     }
     await send(workflowId, payload);
     return true;

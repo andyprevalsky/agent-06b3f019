@@ -55,7 +55,9 @@ function creatorHintFromGoal(goal: string): string {
 }
 
 async function main() {
-  const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+  const url =
+    (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+    process.env.DATABASE_URL;
   if (!url) throw new Error('FAST_MODE_CACHE_DATABASE_URL required');
   const prisma = new PrismaClient({ datasources: { db: { url } } });
 
@@ -89,7 +91,10 @@ async function main() {
 
   // Resolve creator hints from July execute_loop explore tool_calls that hash to dest
   const execRows = await prisma.$queryRawUnsafe<
-    Array<{ goalHash: string; value: { tool_calls?: Array<{ arguments?: string | Record<string, unknown> }> } }>
+    Array<{
+      goalHash: string;
+      value: { tool_calls?: Array<{ arguments?: string | Record<string, unknown> }> };
+    }>
   >(`
     SELECT "goalHash", value
     FROM "FastModeCacheEntry"
@@ -129,9 +134,7 @@ async function main() {
       continue;
     }
     if (!EXPAND_EXEC) continue;
-    const stats = await prisma.$queryRawUnsafe<
-      Array<{ july_ex: number; july_swf: number }>
-    >(
+    const stats = await prisma.$queryRawUnsafe<Array<{ july_ex: number; july_swf: number }>>(
       `
       SELECT
         count(*) FILTER (WHERE key LIKE '%:explore_agent:%' AND "createdAt" < '2026-08-01')::int AS july_ex,
@@ -161,10 +164,12 @@ async function main() {
   for (const d of dests) {
     const tokens = d.creatorHint
       .split(/\s+/)
-      .filter((t) => t.length > 2 && !/^(the|and|for|of|as|only|public|research|creator|content)$/i.test(t))
+      .filter(
+        (t) =>
+          t.length > 2 && !/^(the|and|for|of|as|only|public|research|creator|content)$/i.test(t)
+      )
       .slice(0, 3);
-    const like =
-      tokens.length > 0 ? `%${tokens.join('%')}%` : `%${d.creatorHint.slice(0, 12)}%`;
+    const like = tokens.length > 0 ? `%${tokens.join('%')}%` : `%${d.creatorHint.slice(0, 12)}%`;
 
     // Prefer richest July namespace with BOTH explore + swf mentioning creator
     const sources = await prisma.$queryRawUnsafe<

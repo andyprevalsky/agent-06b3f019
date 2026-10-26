@@ -198,9 +198,9 @@ async def test_manager_execute_tool_happy():
     assert first_metadata["title"] == "Searching the web for AI trends"
 
 
-async def test_manager_execute_tool_fast_cache_hit_has_no_service_cost():
+async def test_manager_execute_tool_demo_cache_hit_has_no_service_cost():
     """Fast Mode cache hits should not be billed as live Parallel searches."""
-    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, WebSearchManager
+    from tools.web_search.handler import DEMO_CACHE_HIT_FIELD, WebSearchManager
 
     calls = []
     manager = WebSearchManager()
@@ -211,7 +211,7 @@ async def test_manager_execute_tool_fast_cache_hit_has_no_service_cost():
                 "results": [{"title": "cached"}],
                 "answer": "cached answer",
                 "query": "q",
-                FAST_CACHE_HIT_FIELD: True,
+                DEMO_CACHE_HIT_FIELD: True,
             },
         ),
         tool_call={"query": "AI trends", "max_tokens": 1000},
@@ -221,21 +221,21 @@ async def test_manager_execute_tool_fast_cache_hit_has_no_service_cost():
     )
 
     assert out["result"]["answer"] == "cached answer"
-    assert FAST_CACHE_HIT_FIELD not in out["result"]
+    assert DEMO_CACHE_HIT_FIELD not in out["result"]
     assert out["usage"]["service"] == []
 
     finished = [c for c in calls if c["activity"] == "post_agent_message"][-1]
     assert "**Cost:** $0.0000" in finished["kwargs"]["args"][1]
-    assert FAST_CACHE_HIT_FIELD not in finished["kwargs"]["args"][1]
+    assert DEMO_CACHE_HIT_FIELD not in finished["kwargs"]["args"][1]
 
 
-async def test_web_search_activity_fast_cache_hit_marks_cached_result():
+async def test_web_search_activity_demo_cache_hit_marks_cached_result():
     """Activity returns a cache-hit marker so the manager can skip service billing."""
-    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, web_search_activity
+    from tools.web_search.handler import DEMO_CACHE_HIT_FIELD, web_search_activity
 
     cached = {"results": [{"title": "cached"}], "answer": "cached answer", "query": "q"}
     with (
-        patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)),
+        patch("tools.web_search.handler.demo_cache_client.cache_get", new=AsyncMock(return_value=cached)),
         patch("tools.web_search.handler.execute_search", new=AsyncMock(side_effect=AssertionError("live call"))),
     ):
         result = await web_search_activity(
@@ -246,12 +246,12 @@ async def test_web_search_activity_fast_cache_hit_marks_cached_result():
         )
 
     assert result["answer"] == "cached answer"
-    assert result[FAST_CACHE_HIT_FIELD] is True
+    assert result[DEMO_CACHE_HIT_FIELD] is True
 
 
-async def test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_enabled():
+async def test_web_search_activity_ignores_unavailable_demo_cache_when_fallback_enabled():
     """Benchmark fallback mode treats unavailable WMH observations as cache misses."""
-    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, web_search_activity
+    from tools.web_search.handler import DEMO_CACHE_HIT_FIELD, web_search_activity
 
     cached = {
         "answer": '{"result_unavailable": true}',
@@ -268,8 +268,8 @@ async def test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_
             },
             clear=False,
         ),
-        patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)),
-        patch("tools.web_search.handler.fast_cache_client.cache_set", new=AsyncMock(return_value=True)) as set_cache,
+        patch("tools.web_search.handler.demo_cache_client.cache_get", new=AsyncMock(return_value=cached)),
+        patch("tools.web_search.handler.demo_cache_client.cache_set", new=AsyncMock(return_value=True)) as set_cache,
         patch("tools.web_search.handler.execute_search", new=AsyncMock(return_value=live)) as execute_search,
     ):
         result = await web_search_activity(
@@ -281,7 +281,7 @@ async def test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_
 
     execute_search.assert_awaited_once_with(query="AI trends", max_tokens=1000)
     assert result == live
-    assert FAST_CACHE_HIT_FIELD not in result
+    assert DEMO_CACHE_HIT_FIELD not in result
     assert set_cache.await_count == 1
 
 
@@ -739,13 +739,13 @@ async def run_all_tests():
         test_manager_passes_cache_write_agent_without_changing_world_model_args,
     )
     await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
-    await r.record_async("manager_fast_cache_no_cost", test_manager_execute_tool_fast_cache_hit_has_no_service_cost)
+    await r.record_async("manager_demo_cache_no_cost", test_manager_execute_tool_demo_cache_hit_has_no_service_cost)
     await r.record_async(
-        "activity_fast_cache_marks_result", test_web_search_activity_fast_cache_hit_marks_cached_result
+        "activity_demo_cache_marks_result", test_web_search_activity_demo_cache_hit_marks_cached_result
     )
     await r.record_async(
-        "activity_fast_cache_ignores_unavailable",
-        test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
+        "activity_demo_cache_ignores_unavailable",
+        test_web_search_activity_ignores_unavailable_demo_cache_when_fallback_enabled,
     )
     await r.record_async("manager_execute_tool_raises", test_manager_execute_tool_raises_on_error)
     await r.record_async("manager_long_query_truncates", test_manager_execute_tool_long_query_truncates)

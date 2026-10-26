@@ -1,6 +1,7 @@
 import { AuthService } from '../../services/auth';
 import { IMessageReader } from '../../services/iMessageReader';
 import { BatchUploader } from '../../services/batchUploader';
+import { IntegrationProgress, type ProgressRun } from '../../services/integrationProgress';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { sessionForLocalMachineData } from '../../base/impersonation';
 import type {
@@ -68,6 +69,13 @@ export async function getIntegration(name: string): Promise<Integration | undefi
  */
 export async function isIntegrationConnected(name: string): Promise<boolean> {
   return IntegrationCache.isConnected(name);
+}
+
+/**
+ * Start a best-effort sync-progress run for the `imessage` Integration row.
+ */
+export function startImessageProgressRun(): ProgressRun {
+  return IntegrationProgress.startRun('imessage');
 }
 
 /**

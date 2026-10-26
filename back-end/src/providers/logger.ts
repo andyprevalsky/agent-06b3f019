@@ -69,10 +69,21 @@ function redact(value: unknown, depth = 0): unknown {
   return out;
 }
 
+/**
+ * One log event is one line. Prisma errors begin with a newline, so a raw value
+ * rendered as `error=` followed by the cause on later lines, which line-based
+ * readers (guest evidence triage, agent_logs) recorded as an empty error.
+ * Quote and escape any multi-line value instead of dropping or truncating it.
+ */
+function singleLine(text: string): string {
+  return /[\r\n]/.test(text) ? JSON.stringify(text.trim()) : text;
+}
+
 function formatValue(value: unknown): string {
   // Error message/stack are non-enumerable, so JSON.stringify would emit `{}`
   // and throw away the only part worth logging.
-  if (value instanceof Error) return value.stack ?? `${value.name}: ${value.message}`;
+  if (value instanceof Error) return singleLine(value.stack ?? `${value.name}: ${value.message}`);
+  if (typeof value === 'string') return singleLine(value);
   if (value === null || typeof value !== 'object') return String(value);
   try {
     const serialized = JSON.stringify(redact(value)) ?? String(value);

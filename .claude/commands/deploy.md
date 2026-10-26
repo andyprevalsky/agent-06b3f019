@@ -204,6 +204,35 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
+### Whole-devbox collection and parallel-thread cross-validation
+
+This command obeys **Whole-devbox deploy ownership** in `CLAUDE.md`. Invoking
+`/deploy` in any thread makes that thread the coordinator for the entire devbox's
+Rose work, or joins the existing coordinator. The invoking thread is never the
+scope boundary. Before change detection or freezing gate inputs:
+
+1. Resolve the canonical shared source checkout (or the recorded
+   `ROSE_DEPLOY_SOURCE_WORKSPACE` for a prepared deploy worktree). Discover
+   same-devbox Rose threads by `devboxId`, read their handoffs, and cross-validate
+   active owners plus UI Main / Code Main when present using the read/message
+   skills. Record unavailable discovery explicitly.
+2. Inventory `git worktree list --porcelain` and `git status --short`, including
+   committed, staged, unstaged and untracked non-ignored source. Integrate each
+   outstanding current deliverable from parallel isolated worktrees into that
+   shared source. Use owner receipts and history to distinguish deliverables
+   from historical branches and disposable test copies; never merge every old
+   branch blindly or silently omit known unfinished integration.
+3. Keep one deploy owner; join an existing run instead of racing its Git or
+   production mutations. Agree a source freeze with editors, then record the
+   combined SHA/source digest, included paths, owners and blockers in the
+   existing deploy-run receipt. Preserve all work and required approvals.
+4. Run the normal gates on that combined snapshot. Prior subset-only green
+   receipts do not cover newly included changes. Reconcile any later edits
+   before merge and rerun affected gates; do not claim an older snapshot includes
+   the whole devbox. Never stage secrets, ignored env files, caches, dependencies,
+   raw research datasets or generated evidence as source.
+
+
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
@@ -415,7 +444,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
      `CHANGED_BACKEND` is empty)
    - Step 4b: front-end blackbox + structural tests under coverage (skip if
      `CHANGED_FRONTEND` is empty)
-   - Step 4g: agents blackbox + fast-cache + unit tests under coverage (skip if
+   - Step 4g: agents blackbox + DEMO cache + unit tests under coverage (skip if
      `CHANGED_AGENTS` is empty)
    - Step 4m-coverage: mac-app blackbox tests under coverage (skip if
      `CHANGED_MAC_APP` is empty)
@@ -550,8 +579,11 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
-`bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
+`python3 scripts/tests/jev-progress-core.test.py`,
+`python3 scripts/tests/benchmark-history-latest-only.test.py`,
+`python3 scripts/tests/cloudbench-full-selection.test.py`,
+`python3 -m unittest discover -s scripts/live_display -p test_*.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
@@ -565,6 +597,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
 `python3 scripts/tests/cloudbench-staged-boot.test.py`,
+`python3 scripts/tests/cloudbench-prelaunch-cancel.test.py`,
 `python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py`,
 `python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/cloudbench-scorecard.test.py`,
@@ -597,9 +630,9 @@ cannot be silently dropped from the deploy path. `run-deploy-structural-gates.te
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
 
-The descend and auto-RCA gates own their behavioral fixtures. The semantic
-deploy gate verifies their registration and documented commands without
-recursively executing them, so each runs once in the complete registry.
+The descend gate owns its behavioral fixtures. The semantic deploy gate
+verifies its registration and documented command without recursively executing
+it, so it runs once in the complete registry.
 
 The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
@@ -740,7 +773,7 @@ cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-p
       bash scripts/run-coverage.sh
 ```
 
-This one command runs every agents blackbox plus fast-cache and unit tests under
+This one command runs every agents blackbox plus DEMO cache and unit tests under
 coverage. Every test must pass and coverage must meet `agents/pyproject.toml`.
 Never loosen the threshold or rerun the blackbox suite separately.
 
@@ -2695,3 +2728,35 @@ rows, follow-ups); `❌` when the deploy is not complete.
 That example is the PR #1456 deploy. Keep the layout and replace every value. For
 a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
 failing lane is listed first, and lanes that never ran are omitted.
+
+
+### Required post-deploy: cloud-origin local Mac execution and computer use
+
+This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
+owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+Do not start a new database, migrate production, replace encryption keys, or reset
+sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
+
+1. Start a WEB/cloud-origin Rose root using the deployed revision. Explicitly call
+   `spawn_agent(type="code", target="local", ...)`. Resolve the intended owned Mac:
+   one registered Mac may resolve automatically; multiple Macs require explicit
+   selection. Preserve that device ID through recorded target resolution, session
+   creation, reconnect and replay. Never fall back to E2B or another device.
+2. Record root/child/task/device IDs (no credentials), the granted project folder,
+   `uname -s` = `Darwin`, actual working directory and checked-out revision. Verify
+   commands travel through the authenticated local relay to this same Mac.
+3. Exercise a harmless local computer-use action through the supported relay and
+   verify its visible effect on that Mac. Record the actual transport, permission
+   state and evidence. Terminal command success alone does not pass computer use;
+   absent screen/control support or missing macOS consent is a precise blocker.
+4. Build the current Rose native Mac app in the granted existing checkout using
+   its existing production backend/auth configuration and authoritative Mac setup
+   instructions. Retain the user's existing keys, credentials, account, app data
+   and database. Capture build command, exit status and native artifact path/hash;
+   launch/verify that artifact against the intended production account.
+5. Record disconnect, denied-folder and foreign-device rejection; no session or
+   cloud fallback may be created. Close only the test-owned session and preserve
+   the Mac app, granted files, data, user services and Freedom.
+
+Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
+report that prerequisite instead of marking a mocked or Linux-only run successful.

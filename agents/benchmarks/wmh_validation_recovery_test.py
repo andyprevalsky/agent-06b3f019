@@ -15,8 +15,8 @@ import pytest
 from benchmarks import wmh_rose_provider as wmh
 from benchmarks.experiential_bridge import native_python
 from benchmarks.wmh_provider_capture import REJECTION_RECORDER
-from providers.fast_cache import client as cache
-from providers.fast_cache.context import FastCacheContext
+from providers.demo_cache import client as cache
+from providers.demo_cache.context import DemoCacheContext
 from providers.rose.client import RoseClient
 from providers.rose.types import StreamChunk
 
@@ -72,7 +72,7 @@ def _setup_validation_recovery(monkeypatch, mode, tmp_path):
     monkeypatch.setattr(
         cache,
         "ensure_context",
-        AsyncMock(return_value=FastCacheContext(enabled=False, goal="offline source boundary", write_enabled=True)),
+        AsyncMock(return_value=DemoCacheContext(enabled=False, goal="offline source boundary", write_enabled=True)),
     )
 
     async def store(*args):

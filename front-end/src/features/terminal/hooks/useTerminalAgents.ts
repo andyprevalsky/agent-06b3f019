@@ -9,12 +9,14 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { useAuth } from '@/features/auth';
+import { readQueryPreferences } from '@/lib/queryPreferences';
 import { getClientSource } from '@/lib/clientSource';
+import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
 import type { TerminalView } from '../types';
-import { DEFAULT_MODEL } from '../config';
+import { DEFAULT_MODEL, ROSE_DESKTOP_DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
 import type { useAgentActions } from './useAgentActions';
@@ -44,24 +46,39 @@ export function useSelectedAgentModel(
   model: string | undefined,
   setSelectedModel: (model: string) => void,
   isInitialLoadRef: React.MutableRefObject<boolean>,
+  defaultModel: string = DEFAULT_MODEL,
 ) {
   useEffect(() => {
-    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? DEFAULT_MODEL) : DEFAULT_MODEL);
+    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? defaultModel) : defaultModel);
     isInitialLoadRef.current = true;
-  }, [isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+  }, [defaultModel, isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+}
+
+/** New-agent model default: rose-flash for signed-in Rose Desktop accounts. */
+export function defaultModelForAccount(auth: {
+  isAnonymous: boolean;
+  isFullySignedIn: boolean;
+  user: { id?: string } | null;
+}): string {
+  const user = auth.isFullySignedIn ? auth.user : null;
+  const saved = readQueryPreferences(user?.id).model;
+  if (saved) return saved;
+  return !auth.isAnonymous && isRoseDesktopUser(user) ? ROSE_DESKTOP_DEFAULT_MODEL : DEFAULT_MODEL;
 }
 
 function useContextSelectedAgentModel(
   ctx: ReturnType<typeof useAgentContext>,
   messaging: ReturnType<typeof useMessageSending>,
   isInitialLoadRef: React.MutableRefObject<boolean>,
+  defaultModel: string,
 ) {
   useSelectedAgentModel(
     ctx.selectedAgentId,
     ctx.agent?.agent_id,
     ctx.agent?.model,
-    messaging.setSelectedModel,
+    messaging.syncSelectedModel,
     isInitialLoadRef,
+    defaultModel,
   );
 }
 
@@ -99,7 +116,7 @@ export function useTerminalAgents(
   const isInitialLoadRef = useRef(false);
   const { setIsSendingMessage, setMessageInput } = messaging;
   const { setSelectedAgentId } = ctx;
-  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef);
+  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef, defaultModelForAccount(auth));
 
   const cleanupAgentState = useCallback(() => {
     setSelectedAgentId(null);
@@ -185,13 +202,32 @@ function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
   return { handleLoginClick, handleJoinWaitlist };
 }
 
-function buildReturn(a: BuildArgs) {
-  const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
-  const handleCreateNewAgent = () => {
+/** New-agent entry points; each makes the next goal create a fresh agent. */
+function buildNewAgentHandlers(a: BuildArgs) {
+  const openNewAgent = (projectId: string | null, shareWith: string | null = null) => {
     a.cleanupAgentState();
     a.resetAnimationState();
     a.setCurrentView('agents');
+    a.messaging.setNewAgentProjectId(projectId);
+    a.messaging.setNewAgentShareWith(shareWith);
   };
+  return {
+    /** New Super Agent: the next goal creates a Home agent. */
+    handleCreateNewAgent: () => openNewAgent(null),
+    /** A project's "+" (Rose Desktop): the next goal creates the agent in that project. */
+    handleCreateNewAgentInProject: (project: { id: string }) => openNewAgent(project.id),
+    /**
+     * Agent menu "New agent in this branch" (Rose Desktop): the next goal creates an
+     * agent in that agent's project that works in its code session (same branch).
+     */
+    handleCreateNewAgentInBranch: (agent: { agent_id: string; project_id?: string | null }) =>
+      openNewAgent(agent.project_id ?? null, agent.agent_id),
+  };
+}
+
+function buildReturn(a: BuildArgs) {
+  const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
+  const newAgent = buildNewAgentHandlers(a);
   return {
     user: a.auth.isFullySignedIn ? a.auth.user : null,
     authUser: a.auth.user,
@@ -254,7 +290,8 @@ function buildReturn(a: BuildArgs) {
     handleLogout: a.handleLogout,
     handleLoginClick,
     handleJoinWaitlist,
-    handleCreateNewAgent,
+    ...newAgent,
+    newAgentProjectId: a.messaging.newAgentProjectId,
     handleSubmitFeedback: a.actions.handleSubmitFeedback,
     resetAnimationState: a.resetAnimationState,
   };

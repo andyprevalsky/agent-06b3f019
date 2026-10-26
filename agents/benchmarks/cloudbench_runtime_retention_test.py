@@ -714,6 +714,7 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
     "case",
     [
         "wmh-serve-log",
+        "guest-diagnostics",
         "seal-transition",
         "manifest-url",
         "manifest-timeout",

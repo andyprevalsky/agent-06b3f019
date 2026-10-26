@@ -1,0 +1,44 @@
+[
+  {
+    "message_id": "918e31f6-94cd-4d2d-a091-27c90e189caf",
+    "role": "TOOL",
+    "timestamp": "2026-10-21T07:04:33.39",
+    "text": "Ending hunger worldwide requires coordinated action over years. What would you like me to produce or do first, and what budget or authority do you want me to work within?",
+    "metadata": {
+      "phase": "PLAN",
+      "title": "Attn: User",
+      "toolName": "send_message_to_user",
+      "toolCallId": "90c73163-57a2-4b8d-8095-01f78cdeb19f",
+      "toolStatus": "IN_PROGRESS",
+      "attentionMessage": "Ending hunger worldwide requires coordinated action over years. What would you like me to produce or do first, and what budget or authority do you want me to work within?",
+      "sendMessageToUser": {
+        "isQuestion": true,
+        "attentionKind": "question",
+        "isWaitingForUser": true
+      },
+      "workflowGeneration": "5d9ff625-60fa-4bf6-8288-503266d50ee6:start:ec98d468-af44-463c-8427-2022f47ee461",
+      "isUserAttentionMessage": true
+    }
+  },
+  {
+    "message_id": "e700a18c-143a-42b7-a4cf-52df49cf59aa",
+    "role": "TOOL",
+    "timestamp": "2026-10-21T07:10:13.149",
+    "text": "Ending hunger worldwide requires coordinated action over years. What would you like me to produce or do first, and what budget or authority do you want me to work within?",
+    "metadata": {
+      "phase": "PLAN",
+      "title": "User response received",
+      "toolName": "send_message_to_user",
+      "toolCallId": "90c73163-57a2-4b8d-8095-01f78cdeb19f",
+      "toolStatus": "FINISHED",
+      "attentionMessage": "Ending hunger worldwide requires coordinated action over years. What would you like me to produce or do first, and what budget or authority do you want me to work within?",
+      "sendMessageToUser": {
+        "isQuestion": true,
+        "attentionKind": "question",
+        "isWaitingForUser": false
+      },
+      "workflowGeneration": "5d9ff625-60fa-4bf6-8288-503266d50ee6:start:ec98d468-af44-463c-8427-2022f47ee461",
+      "isUserAttentionMessage": true
+    }
+  }
+]

@@ -54,19 +54,19 @@ from helpers.messages import (
 from helpers.model_info import _DEFAULT_CONTEXT_WINDOW
 from helpers.tracing import backend_api_headers, current_request_id, span, traced
 from helpers.workflow_generation import workflow_generation_headers
-from providers.fast_cache import client as fast_cache_client
-from providers.fast_cache.client import (
-    ensure_position_context as ensure_fast_cache_position_context,
+from providers.demo_cache import client as demo_cache_client
+from providers.demo_cache.client import (
+    ensure_position_context as ensure_demo_cache_position_context,
 )
-from providers.fast_cache.context import (
-    FastCacheContext,
+from providers.demo_cache.context import (
+    DemoCacheContext,
     write_through_enabled_for_user,
 )
-from providers.fast_cache.context import (
-    current_context as current_fast_cache_context,
+from providers.demo_cache.context import (
+    current_context as current_demo_cache_context,
 )
-from providers.fast_cache.context import (
-    set_context as set_fast_cache_context,
+from providers.demo_cache.context import (
+    set_context as set_demo_cache_context,
 )
 from providers.planner_memory.inject import (
     build_memory_fork,
@@ -102,10 +102,13 @@ from utils.response_schema_constraints import (
     explicitly_allows_empty_value,
     value_satisfies_output_field_constraints,
 )
+from utils.rose_desktop import is_rose_desktop_user
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
+    get_tool_models,
 )
+from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
 logger = structlog.get_logger()
 
@@ -550,7 +553,7 @@ def _build_claude_auth_context(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
@@ -582,7 +585,7 @@ def _build_claude_auth_context(
             lineage_key=lineage_key,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
         )
         if not result or not result.get("accessToken"):
             return None
@@ -591,7 +594,7 @@ def _build_claude_auth_context(
             fetch_user_id,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
             max_rotations=max_rotations,
         )
 
@@ -621,7 +624,7 @@ def _build_gpt_auth_context(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
@@ -653,7 +656,7 @@ def _build_gpt_auth_context(
             lineage_key=lineage_key,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
         )
         if not result or not result.get("accessToken"):
             return None
@@ -662,7 +665,7 @@ def _build_gpt_auth_context(
             fetch_user_id,
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key,
+            demo_cache_affinity_key=demo_cache_affinity_key,
             max_rotations=max_rotations,
         )
 
@@ -689,7 +692,7 @@ def _build_compute_auth_context(
     *,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ComputeAuthContext]:
     """Build a direct auth context from the unified compute-token endpoint."""
@@ -706,7 +709,7 @@ def _build_compute_auth_context(
             lineage_key=result.get("lineageKey"),
             agent_id=agent_id,
             root_agent_id=root_agent_id,
-            fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
+            demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
             max_rotations=max_rotations,
         )
     return _build_gpt_auth_context(
@@ -718,7 +721,7 @@ def _build_compute_auth_context(
         lineage_key=result.get("lineageKey"),
         agent_id=agent_id,
         root_agent_id=root_agent_id,
-        fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
+        demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
 
@@ -741,7 +744,7 @@ def _build_compute_auth_context_from_payload(
             user_id,
             agent_id=compute_auth.get("agentId"),
             root_agent_id=compute_auth.get("rootAgentId"),
-            fast_cache_affinity_key=compute_auth.get("fastCacheAffinityKey"),
+            demo_cache_affinity_key=compute_auth.get("fastCacheAffinityKey"),
         )
         if isinstance(ctx, ClaudeAuthContext):
             return ctx, None
@@ -1155,29 +1158,13 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            #
-            # Declared-evaluator evidence is pre-bounded (~320k) and often carries
-            # the full structured deliverable (e.g. top-100 repos). Applying the
-            # generic 12k tool cap here head+tails that card and fails the judge
-            # even when the agent completed correctly.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
             if str(call_site or "") == "benchmark_declared_evaluator":
-                # Evidence builders already bound content (~320k), but
-                # json.dumps(tool_payload) re-serializes and can exceed that.
-                # Cap across ALL declared-evaluator TOOL rows (e.g. DoorDash
-                # supplemental cart evidence) so the combined prompt stays
-                # inside the single-turn budget (CodeRabbit #1260).
-                _declared_total_cap = 320_000
-                _marker = "...[declared-evaluator truncated]"
-                _remaining = _declared_total_cap - _tool_result_chars_used
-                if _remaining <= 0:
-                    tool_text, truncated = "", True
-                elif len(dumped) > _remaining:
-                    _keep = max(0, _remaining - len(_marker))
-                    tool_text = dumped[:_keep] + _marker
-                    truncated = True
-                else:
-                    tool_text, truncated = dumped, False
+                # Declared-evaluator evidence carries the runtime per-tool-result
+                # cap, and the caller sends any prompt that would overflow the
+                # model to the agentic judge. A second, grader-only cut here
+                # would drift from the runtime (grep-agent-trajectories-cross-surface).
+                tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
                     dumped,
@@ -1757,12 +1744,128 @@ def collapse_duplicate_tool_results(context: List[Dict[str, Any]]) -> List[Dict[
     return [msg for index, msg in enumerate(context) if _terminal_tool_call_id(msg) is None or index in kept]
 
 
+async def resolve_message_attachments(
+    msg: Dict[str, Any],
+    pre_resolved_ids: Optional[set] = None,
+    *,
+    render_text: Callable[[PreparedTextAttachment], str] = lambda item: item.inline,
+    require_inline: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Resolve one context row's file attachments into LLM content.
+
+    Returns (multimodal blocks for images/PDFs, text parts for inline text files
+    and metadata fallbacks). Attachments live on the top-level ``file_pointer`` /
+    ``filePointer`` (one file per row) and legacy ``metadata.attachments``.
+    Resolution order: module cache, live download inside an activity, metadata.
+    """
+    metadata = msg.get("metadata", {}) or {}
+    file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+    attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
+    if file_pointer and isinstance(file_pointer, dict):
+        attachments_data = [file_pointer] + list(attachments_data)
+
+    content: List[Dict[str, Any]] = []  # multimodal content blocks (images, PDFs)
+    metadata_texts: List[str] = []  # text-based content (inline text files, metadata fallbacks)
+    for att_data in attachments_data:
+        fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+        if not fp:
+            continue
+
+        # Large files or binary files -> metadata only
+        if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+            if require_inline:
+                raise AttachmentContextLimitError(f"Required text attachment cannot be inlined: {fp.original_filename}")
+            metadata_texts.append(build_attachment_metadata_text(fp))
+            continue
+
+        # Resolve file content: cache first, then live download, then metadata fallback
+        file_content = None
+        cached = get_cached_file(fp.id) if (pre_resolved_ids and fp.id in pre_resolved_ids) else None
+        if cached:
+            file_content = cached[0]
+        elif activity.in_activity():
+            # Live download (activity context — e.g., reasoning, param_populator)
+            try:
+                file_content, _ = await get_file_from_pointer(fp)
+            except Exception as e:
+                logger.warning(f"Failed to download attachment {fp.original_filename}: {e}")
+        else:
+            logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
+
+        if file_content is None:
+            if require_inline:
+                raise AttachmentContextLimitError(f"Required text attachment could not be read: {fp.original_filename}")
+            metadata_texts.append(build_attachment_metadata_text(fp))
+            continue
+
+        try:
+            base64_data = base64.b64encode(file_content).decode("utf-8")
+
+            if fp.is_image():
+                content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
+                )
+                # Filename must travel with the inline image — spawn_agent
+                # attachments match on exact original_filename only.
+                metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
+            elif fp.is_pdf():
+                content.append(
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": fp.original_filename,
+                            "file_data": f"data:{fp.mime_type};base64,{base64_data}",
+                        },
+                    }
+                )
+            elif fp.is_text():
+                try:
+                    text_content = file_content.decode("utf-8")
+                    metadata_texts.append(
+                        render_text(
+                            PreparedTextAttachment(
+                                build_attachment_text_content(fp, text_content),
+                                build_attachment_metadata_text(fp),
+                                fp.original_filename,
+                            )
+                        )
+                    )
+                except UnicodeDecodeError:
+                    if require_inline:
+                        raise AttachmentContextLimitError(f"Required text attachment is not UTF-8: {fp.original_filename}")
+                    metadata_texts.append(build_attachment_metadata_text(fp))
+        except Exception as e:
+            if require_inline:
+                raise AttachmentContextLimitError(
+                    f"Required text attachment could not be decoded: {fp.original_filename}"
+                ) from e
+            logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
+            metadata_texts.append(build_attachment_metadata_text(fp))
+    return content, metadata_texts
+
+
+async def resolve_context_attachments(
+    context: List[Dict[str, Any]],
+    pre_resolved_ids: Optional[set] = None,
+) -> Dict[str, Tuple[List[Dict[str, Any]], List[str]]]:
+    """Resolve every row's attachments, keyed for ``convert_context_to_messages``."""
+    resolved: Dict[str, Tuple[List[Dict[str, Any]], List[str]]] = {}
+    for msg in context:
+        if not isinstance(msg, dict):
+            continue
+        blocks, texts = await resolve_message_attachments(msg, pre_resolved_ids)
+        if blocks or texts:
+            resolved[_verifier_file_evidence_key(msg)] = (blocks, texts)
+    return resolved
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
     # Default False: including assistant messages is prone to reward hacking
     # (agent can bias verifier with its own reasoning)
     include_assistant: bool = False,
+    attachments: Optional[Dict[str, Tuple[List[Dict[str, Any]], List[str]]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Convert workflow context to OpenAI/OpenRouter message format.
@@ -1771,7 +1874,7 @@ def convert_context_to_messages(
     - SYSTEM messages (blueprints): included if include_system=True
     - ASSISTANT messages: included if include_assistant=True (default False to prevent reward hacking)
     - ASSISTANT messages with tool_calls metadata: converted to proper OpenAI format
-    - TOOL messages with verifierMessage=True: converted to ASSISTANT role for conversation flow
+    - TOOL messages with verifierMessage=True: the tool result of their declared call, else ASSISTANT feedback
     - TOOL messages: converted to tool role only if preceded by matching ASSISTANT tool_call,
       otherwise converted to SYSTEM role
     - Skips IN_PROGRESS tool messages (only sends FINISHED results)
@@ -1783,6 +1886,8 @@ def convert_context_to_messages(
         context: List of message dicts with role/text/metadata
         include_system: Whether to include SYSTEM messages (e.g. blueprints)
         include_assistant: Whether to include ASSISTANT messages (default False to prevent reward hacking)
+        attachments: ``resolve_context_attachments`` output; USER/ASSISTANT rows carry
+            their attachment blocks and text exactly as build_llm_messages sends them
 
     Returns:
         List of OpenAI-formatted messages in chronological order
@@ -1894,10 +1999,20 @@ def convert_context_to_messages(
 
     # Excluded / sub-agent-internal / cloud-lifecycle rows were already removed by
     # drop_rows_never_sent_to_model above — do not re-filter them here.
+    def _with_attachments(msg: Dict[str, Any], text: Any) -> Any:
+        parts = (attachments or {}).get(_verifier_file_evidence_key(msg))
+        if not parts:
+            return text
+        blocks, texts = parts
+        full_text = text + "\n\n" + "\n\n".join(texts) if texts else text
+        return [{"type": "text", "text": full_text}, *blocks] if blocks else full_text
+
     for msg in sorted_context:
         role = msg.get("role", "ASSISTANT")
         content = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
+        if role in ("USER", "ASSISTANT"):
+            content = _with_attachments(msg, content)
 
         if role == "SYSTEM":
             if include_system:
@@ -1908,6 +2023,10 @@ def convert_context_to_messages(
             if agent_text is not None:
                 # Agent-to-agent content is assistant-role (Codex); the pairing
                 # pass below keeps it after the tool results of its turn.
+                # Attachment text travels with it, as in build_llm_messages.
+                _blocks, texts = (attachments or {}).get(_verifier_file_evidence_key(msg), ([], []))
+                if texts:
+                    agent_text = agent_text + "\n\n" + "\n\n".join(texts)
                 messages.append(inter_agent_message(agent_text))
                 continue
             messages.append({"role": "user", "content": content})
@@ -1983,16 +2102,18 @@ def convert_context_to_messages(
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
 
-            # Special handling for verifier messages: convert to ASSISTANT
-            # These need to be in the conversation flow for the agent to see them
-            if metadata.get("verifierMessage"):
+            tool_call_id = str(metadata.get("toolCallId") or "")
+
+            # Verifier rows without a declared call ride as ASSISTANT feedback.
+            # A verifier row that answers a declared attempt_completion is that
+            # call's tool result (as in build_llm_messages); converting it to
+            # assistant text would orphan the tool_use.
+            if metadata.get("verifierMessage") and tool_call_id not in declared_tool_calls:
                 assistant_content = content
                 if metadata.get("title"):
                     assistant_content = f"{metadata['title']}: {content}"
                 messages.append({"role": "assistant", "content": assistant_content})
                 continue
-
-            tool_call_id = str(metadata.get("toolCallId") or "")
 
             # Only use tool role if this tool_call_id was declared by a preceding ASSISTANT message
             if tool_call_id and tool_call_id in declared_tool_calls:
@@ -2175,13 +2296,8 @@ async def _render_llm_messages(
         text = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}
 
-        # Check for file attachments in multiple places:
-        # 1. file_pointer / filePointer - top-level field from DB (OAI-style: each file is a separate message)
-        # 2. metadata.attachments - legacy format
         file_pointer = msg.get("file_pointer") or msg.get("filePointer")
         attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
-
-        # If this message has a file_pointer, treat it as an attachment
         if file_pointer and isinstance(file_pointer, dict):
             attachments_data = [file_pointer] + list(attachments_data)
 
@@ -2191,76 +2307,9 @@ async def _render_llm_messages(
             continue
 
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
-        content = []  # multimodal content blocks (images, PDFs)
-        metadata_texts = []  # text-based content (inline text files, metadata fallbacks)
-
-        for att_data in attachments_data:
-            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
-            if not fp:
-                continue
-
-            # Large files or binary files -> metadata only
-            if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
-                if require_inline_attachments:
-                    raise AttachmentContextLimitError(f"Required text attachment cannot be inlined: {fp.original_filename}")
-                metadata_texts.append(build_attachment_metadata_text(fp))
-                continue
-
-            # Resolve file content: cache first, then live download, then metadata fallback
-            file_content = None
-            cached = get_cached_file(fp.id) if (pre_resolved_ids and fp.id in pre_resolved_ids) else None
-            if cached:
-                file_content = cached[0]
-            elif activity.in_activity():
-                # Live download (activity context — e.g., reasoning, param_populator)
-                try:
-                    file_content, _ = await get_file_from_pointer(fp)
-                except Exception as e:
-                    logger.warning(f"Failed to download attachment {fp.original_filename}: {e}")
-            else:
-                logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
-
-            if file_content is None:
-                if require_inline_attachments:
-                    raise AttachmentContextLimitError(f"Required text attachment could not be read: {fp.original_filename}")
-                metadata_texts.append(build_attachment_metadata_text(fp))
-                continue
-
-            try:
-                base64_data = base64.b64encode(file_content).decode("utf-8")
-
-                if fp.is_image():
-                    content.append(
-                        {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
-                    )
-                    # Filename must travel with the inline image — spawn_agent
-                    # attachments match on exact original_filename only.
-                    metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
-                elif fp.is_pdf():
-                    content.append(
-                        {
-                            "type": "file",
-                            "file": {
-                                "filename": fp.original_filename,
-                                "file_data": f"data:{fp.mime_type};base64,{base64_data}",
-                            },
-                        }
-                    )
-                elif fp.is_text():
-                    try:
-                        text_content = file_content.decode("utf-8")
-                        metadata_texts.append(render_text(PreparedTextAttachment(
-                            build_attachment_text_content(fp, text_content), build_attachment_metadata_text(fp), fp.original_filename
-                        )))
-                    except UnicodeDecodeError:
-                        if require_inline_attachments:
-                            raise AttachmentContextLimitError(f"Required text attachment is not UTF-8: {fp.original_filename}")
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-            except Exception as e:
-                if require_inline_attachments:
-                    raise AttachmentContextLimitError(f"Required text attachment could not be decoded: {fp.original_filename}") from e
-                logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
-                metadata_texts.append(build_attachment_metadata_text(fp))
+        content, metadata_texts = await resolve_message_attachments(
+            msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
+        )
 
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)
@@ -2816,7 +2865,7 @@ async def call_llm_structured_streaming(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
@@ -2929,7 +2978,7 @@ async def call_llm_structured_streaming(
             lineage_key=compute_token_lineage_key,
             agent_id=agent_id,
             root_agent_id=agent_id,
-            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
         gpt_auth_context = _build_gpt_auth_context(
             gpt_token,
@@ -2940,7 +2989,7 @@ async def call_llm_structured_streaming(
             lineage_key=compute_token_lineage_key,
             agent_id=agent_id,
             root_agent_id=agent_id,
-            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
 
         def _native_visible_text() -> str:
@@ -2970,26 +3019,26 @@ async def call_llm_structured_streaming(
         if idle_timeout_s is not None:
             rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
 
-        deferred_fast_cache_key: Optional[str] = None
-        deferred_fast_cache_goal_hash: Optional[str] = None
-        deferred_fast_cache_goal_str: Optional[str] = None
-        deferred_fast_cache_root_goal_str: Optional[str] = None
-        deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
-        fast_cache_accumulate = None
+        deferred_demo_cache_key: Optional[str] = None
+        deferred_demo_cache_goal_hash: Optional[str] = None
+        deferred_demo_cache_goal_str: Optional[str] = None
+        deferred_demo_cache_root_goal_str: Optional[str] = None
+        deferred_demo_cache_acc: Optional[Dict[str, Any]] = None
+        demo_cache_accumulate = None
         try:
-            from providers.fast_cache.rose_cache import (
-                accumulate_chunk as fast_cache_accumulate,
+            from providers.demo_cache.rose_cache import (
+                accumulate_chunk as demo_cache_accumulate,
             )
-            from providers.fast_cache.rose_cache import (
-                empty_response as fast_cache_empty_response,
+            from providers.demo_cache.rose_cache import (
+                empty_response as demo_cache_empty_response,
             )
-            from providers.fast_cache.rose_cache import (
-                request_key_material as fast_cache_request_key_material,
+            from providers.demo_cache.rose_cache import (
+                request_key_material as demo_cache_request_key_material,
             )
 
-            fast_cache_context = current_fast_cache_context()
-            if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
-                fast_cache_complete_kwargs: Dict[str, Any] = {
+            demo_cache_context = current_demo_cache_context()
+            if demo_cache_context is not None and demo_cache_context.active and demo_cache_context.should_write:
+                demo_cache_complete_kwargs: Dict[str, Any] = {
                     "pool": pool,
                     "messages": messages,
                     "response_model": response_model,
@@ -3005,21 +3054,21 @@ async def call_llm_structured_streaming(
                     "request_id": request_id,
                     "thinking": thinking,
                     "effort": effort,
-                    "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                    "provider_fast_mode": bool(demo_cache_context.provider_fast_mode),
                     "cache_namespace": cache_sequence_id,
                     "_exclude_anthropic_family": _exclude_anthropic_family,
                     **rose_kwargs,
                 }
-                deferred_fast_cache_key = fast_cache_context.llm_key(
+                deferred_demo_cache_key = demo_cache_context.llm_key(
                     call_site,
-                    fast_cache_request_key_material(fast_cache_complete_kwargs),
+                    demo_cache_request_key_material(demo_cache_complete_kwargs),
                 )
-                deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
-                deferred_fast_cache_goal_str = fast_cache_context.goal
-                deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
-                deferred_fast_cache_acc = fast_cache_empty_response()
+                deferred_demo_cache_goal_hash = demo_cache_context.goal_hash
+                deferred_demo_cache_goal_str = demo_cache_context.goal
+                deferred_demo_cache_root_goal_str = demo_cache_context.root_goal
+                deferred_demo_cache_acc = demo_cache_empty_response()
         except Exception as exc:
-            logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
+            logger.warning("demo_cache.defer_setup_error", call_site=call_site, error=str(exc))
 
         # Per-stream wall-time profiler: splits stream duration into time spent in
         # inline per-chunk callbacks (broadcasts / tool-progress events, which do
@@ -3033,7 +3082,7 @@ async def call_llm_structured_streaming(
         # from per-chunk processing, regardless of the `continue`s in the body.
         # Fast Mode record/replay: transparent passthrough when off; on a cache
         # hit this re-streams the stored response without touching Rose/Anthropic.
-        from providers.fast_cache.rose_cache import cached_complete
+        from providers.demo_cache.rose_cache import cached_complete
 
         _stream_iter = cached_complete(
             rose_client,
@@ -3067,8 +3116,8 @@ async def call_llm_structured_streaming(
                 finally:
                     _await_s += _safe_time() - _t_await
                 chunk_count += 1
-                if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
-                    fast_cache_accumulate(deferred_fast_cache_acc, chunk)
+                if deferred_demo_cache_acc is not None and demo_cache_accumulate is not None:
+                    demo_cache_accumulate(deferred_demo_cache_acc, chunk)
 
                 if not ttft_logged:
                     ttft_ms = int((_safe_time() - request_start_time) * 1000)
@@ -3444,7 +3493,7 @@ async def call_llm_structured_streaming(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 cache_sequence_id=cache_sequence_id,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
@@ -3728,7 +3777,7 @@ async def call_llm_structured_streaming(
                     gpt_token_pool_id=gpt_token_pool_id,
                     gpt_token_user_id=gpt_token_user_id,
                     compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                     cache_sequence_id=cache_sequence_id,
                     on_model_detected=on_model_detected,
                     skip_cache_write=skip_cache_write,
@@ -3799,44 +3848,44 @@ async def call_llm_structured_streaming(
             }
 
         if (
-            deferred_fast_cache_key
-            and deferred_fast_cache_goal_hash
-            and deferred_fast_cache_acc is not None
+            deferred_demo_cache_key
+            and deferred_demo_cache_goal_hash
+            and deferred_demo_cache_acc is not None
             and not usage.get("from_fast_cache")
         ):
             try:
-                stored_ok = await fast_cache_client.cache_set(
-                    deferred_fast_cache_key,
+                stored_ok = await demo_cache_client.cache_set(
+                    deferred_demo_cache_key,
                     "llm",
-                    deferred_fast_cache_goal_hash,
-                    deferred_fast_cache_acc,
-                    goal=deferred_fast_cache_goal_str,
-                    root_goal=deferred_fast_cache_root_goal_str,
+                    deferred_demo_cache_goal_hash,
+                    deferred_demo_cache_acc,
+                    goal=deferred_demo_cache_goal_str,
+                    root_goal=deferred_demo_cache_root_goal_str,
                 )
                 # Diagnostic: the goal STRING behind the goal_hash. A trajectory whose
                 # terminal call caches under a run-unique goal (timestamp/uuid leaking
                 # into the goal) never replays — see explore-final-call-cache-miss.
-                goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+                goal_preview = (deferred_demo_cache_goal_str or "")[:160]
                 if stored_ok:
                     logger.info(
                         "llm.cache.stored",
                         call_site=call_site,
-                        key=deferred_fast_cache_key,
-                        goal_hash=deferred_fast_cache_goal_hash,
+                        key=deferred_demo_cache_key,
+                        goal_hash=deferred_demo_cache_goal_hash,
                         goal_preview=goal_preview,
                     )
                 else:
                     # cache_set returns False (never raises) on a non-200/timeout write.
                     # Previously we logged "stored" unconditionally, masking dropped writes.
                     logger.warning(
-                        "fast_cache.write_dropped",
+                        "demo_cache.write_dropped",
                         call_site=call_site,
-                        key=deferred_fast_cache_key,
-                        goal_hash=deferred_fast_cache_goal_hash,
+                        key=deferred_demo_cache_key,
+                        goal_hash=deferred_demo_cache_goal_hash,
                         goal_preview=goal_preview,
                     )
             except Exception as exc:
-                logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
+                logger.warning("demo_cache.set_error", key=deferred_demo_cache_key, error=str(exc))
 
         # Deduplicate single-call-per-step tools (keep only first occurrence)
         # These tools should never be called more than once in the same response
@@ -4146,7 +4195,7 @@ async def call_llm(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
@@ -4208,7 +4257,7 @@ async def call_llm(
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
                 root_agent_id=agent_id,
-                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             gpt_auth_context = _build_gpt_auth_context(
                 gpt_token,
@@ -4219,7 +4268,7 @@ async def call_llm(
                 lineage_key=compute_token_lineage_key,
                 agent_id=agent_id,
                 root_agent_id=agent_id,
-                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             try:
                 rose_response = await rose_client.collect(
@@ -4316,7 +4365,7 @@ async def call_llm(
                     gpt_token_pool_id=gpt_token_pool_id,
                     gpt_token_user_id=gpt_token_user_id,
                     compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                     cache_sequence_id=cache_sequence_id,
                     skip_cache_write=skip_cache_write,
                     call_site=call_site,
@@ -4327,11 +4376,11 @@ async def call_llm(
                 )
 
             if response_model is not None and not skip_cache_write and not usage.get("from_fast_cache"):
-                ctx = current_fast_cache_context()
+                ctx = current_demo_cache_context()
                 if ctx is not None and ctx.active and ctx.should_write:
-                    from providers.fast_cache.rose_cache import request_key_material as fast_cache_request_key_material
+                    from providers.demo_cache.rose_cache import request_key_material as demo_cache_request_key_material
 
-                    fast_cache_kwargs = {
+                    demo_cache_kwargs = {
                         "pool": pool,
                         "messages": messages,
                         "response_model": response_model,
@@ -4340,8 +4389,8 @@ async def call_llm(
                         "provider_fast_mode": bool(ctx.provider_fast_mode),
                         "cache_namespace": cache_sequence_id,
                     }
-                    key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
-                    stored_ok = await fast_cache_client.cache_set(
+                    key = ctx.llm_key(call_site, demo_cache_request_key_material(demo_cache_kwargs))
+                    stored_ok = await demo_cache_client.cache_set(
                         key,
                         "llm",
                         ctx.goal_hash,
@@ -4369,7 +4418,7 @@ async def call_llm(
                         )
                     else:
                         logger.warning(
-                            "fast_cache.write_dropped",
+                            "demo_cache.write_dropped",
                             call_site=call_site,
                             key=key,
                             structured=True,
@@ -4444,7 +4493,7 @@ async def call_llm(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 cache_sequence_id=cache_sequence_id,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -4555,7 +4604,7 @@ async def _call_llm_verifier(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
@@ -4613,7 +4662,7 @@ async def _call_llm_verifier(
         lineage_key=compute_token_lineage_key,
         agent_id=agent_id,
         root_agent_id=agent_id,
-        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+        demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
     )
     gpt_auth_context = _build_gpt_auth_context(
         gpt_token,
@@ -4624,32 +4673,32 @@ async def _call_llm_verifier(
         lineage_key=compute_token_lineage_key,
         agent_id=agent_id,
         root_agent_id=agent_id,
-        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+        demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
     )
-    deferred_fast_cache_key: Optional[str] = None
-    deferred_fast_cache_goal_hash: Optional[str] = None
-    deferred_fast_cache_goal_str: Optional[str] = None
-    deferred_fast_cache_root_goal_str: Optional[str] = None
-    deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
-    fast_cache_accumulate = None
+    deferred_demo_cache_key: Optional[str] = None
+    deferred_demo_cache_goal_hash: Optional[str] = None
+    deferred_demo_cache_goal_str: Optional[str] = None
+    deferred_demo_cache_root_goal_str: Optional[str] = None
+    deferred_demo_cache_acc: Optional[Dict[str, Any]] = None
+    demo_cache_accumulate = None
     try:
-        from providers.fast_cache.rose_cache import (
-            accumulate_chunk as fast_cache_accumulate,
+        from providers.demo_cache.rose_cache import (
+            accumulate_chunk as demo_cache_accumulate,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             cached_complete,
         )
-        from providers.fast_cache.rose_cache import (
-            empty_response as fast_cache_empty_response,
+        from providers.demo_cache.rose_cache import (
+            empty_response as demo_cache_empty_response,
         )
-        from providers.fast_cache.rose_cache import (
-            request_key_material as fast_cache_request_key_material,
+        from providers.demo_cache.rose_cache import (
+            request_key_material as demo_cache_request_key_material,
         )
 
         verifier_max_tokens = max_tokens_for_verifier_call_site(call_site)
-        fast_cache_context = current_fast_cache_context()
-        if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
-            fast_cache_complete_kwargs: Dict[str, Any] = {
+        demo_cache_context = current_demo_cache_context()
+        if demo_cache_context is not None and demo_cache_context.active and demo_cache_context.should_write:
+            demo_cache_complete_kwargs: Dict[str, Any] = {
                 "pool": pool,
                 "messages": messages,
                 "response_model": response_model,
@@ -4660,19 +4709,19 @@ async def _call_llm_verifier(
                 "agent_id": agent_id,
                 "request_id": verifier_request_id,
                 "dump_extra": dump_extra,
-                "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                "provider_fast_mode": bool(demo_cache_context.provider_fast_mode),
             }
-            deferred_fast_cache_key = fast_cache_context.llm_key(
+            deferred_demo_cache_key = demo_cache_context.llm_key(
                 call_site,
-                fast_cache_request_key_material(fast_cache_complete_kwargs),
+                demo_cache_request_key_material(demo_cache_complete_kwargs),
             )
-            deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
-            deferred_fast_cache_goal_str = fast_cache_context.goal
-            deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
-            deferred_fast_cache_acc = fast_cache_empty_response()
+            deferred_demo_cache_goal_hash = demo_cache_context.goal_hash
+            deferred_demo_cache_goal_str = demo_cache_context.goal
+            deferred_demo_cache_root_goal_str = demo_cache_context.root_goal
+            deferred_demo_cache_acc = demo_cache_empty_response()
     except Exception as exc:
-        logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
-        from providers.fast_cache.rose_cache import cached_complete
+        logger.warning("demo_cache.defer_setup_error", call_site=call_site, error=str(exc))
+        from providers.demo_cache.rose_cache import cached_complete
 
     try:
         # Fast Mode record/replay (verifier path).
@@ -4694,8 +4743,8 @@ async def _call_llm_verifier(
             idle_timeout_s=VERIFIER_IDLE_TIMEOUT_S,
         ):
             chunk_count += 1
-            if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
-                fast_cache_accumulate(deferred_fast_cache_acc, chunk)
+            if deferred_demo_cache_acc is not None and demo_cache_accumulate is not None:
+                demo_cache_accumulate(deferred_demo_cache_acc, chunk)
             if chunk_count % 10 == 0:
                 _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
 
@@ -4787,7 +4836,12 @@ async def _call_llm_verifier(
         response_schema,
         messages,
     )
-    parsed = _validate_verifier_response(response_model, parsed_json)
+    verdict_model = (
+        response_model
+        if _verifier_verdict_claims_completion(parsed_json)
+        else _build_verifier_response_model(response_schema, completion_verdict=False)
+    )
+    parsed = _validate_verifier_response(verdict_model, parsed_json)
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -4807,41 +4861,55 @@ async def _call_llm_verifier(
     }
 
     if (
-        deferred_fast_cache_key
-        and deferred_fast_cache_goal_hash
-        and deferred_fast_cache_acc is not None
+        deferred_demo_cache_key
+        and deferred_demo_cache_goal_hash
+        and deferred_demo_cache_acc is not None
         and not usage.get("from_fast_cache")
     ):
         try:
-            stored_ok = await fast_cache_client.cache_set(
-                deferred_fast_cache_key,
+            stored_ok = await demo_cache_client.cache_set(
+                deferred_demo_cache_key,
                 "llm",
-                deferred_fast_cache_goal_hash,
-                deferred_fast_cache_acc,
-                goal=deferred_fast_cache_goal_str,
-                root_goal=deferred_fast_cache_root_goal_str,
+                deferred_demo_cache_goal_hash,
+                deferred_demo_cache_acc,
+                goal=deferred_demo_cache_goal_str,
+                root_goal=deferred_demo_cache_root_goal_str,
             )
-            goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+            goal_preview = (deferred_demo_cache_goal_str or "")[:160]
             if stored_ok:
                 logger.info(
                     "llm.cache.stored",
                     call_site=call_site,
-                    key=deferred_fast_cache_key,
-                    goal_hash=deferred_fast_cache_goal_hash,
+                    key=deferred_demo_cache_key,
+                    goal_hash=deferred_demo_cache_goal_hash,
                     goal_preview=goal_preview,
                 )
             else:
                 logger.warning(
-                    "fast_cache.write_dropped",
+                    "demo_cache.write_dropped",
                     call_site=call_site,
-                    key=deferred_fast_cache_key,
-                    goal_hash=deferred_fast_cache_goal_hash,
+                    key=deferred_demo_cache_key,
+                    goal_hash=deferred_demo_cache_goal_hash,
                     goal_preview=goal_preview,
                 )
         except Exception as exc:
-            logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
+            logger.warning("demo_cache.set_error", key=deferred_demo_cache_key, error=str(exc))
 
     return parsed, usage
+
+
+def _verifier_verdict_claims_completion(parsed_json: Any) -> bool:
+    """True unless the verdict reports a numeric score below 1.0.
+
+    Unscored or malformed verdicts are checked against the full completion
+    contract, so their validation errors are unchanged.
+    """
+    if not isinstance(parsed_json, dict):
+        return True
+    score = parsed_json.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return True
+    return score >= 1.0
 
 
 def _iter_verifier_message_text_parts(message: Dict[str, Any]) -> List[str]:
@@ -5468,8 +5536,17 @@ def _completed_child_task_structured_response(
 
 def _build_verifier_response_model(
     response_schema: Optional[Dict[str, Any]] = None,
+    *,
+    completion_verdict: bool = True,
 ) -> Type[BaseModel]:
-    """Build the verifier's Pydantic contract for RoseClient.complete."""
+    """Build the verifier's Pydantic contract for RoseClient.complete.
+
+    The default model is the request contract: a completion verdict carries
+    every schema-required output key. The rubric defines a score below 1.0 as a
+    verdict in which some required field is not grounded and forbids inventing
+    it, so those verdicts are parsed with ``completion_verdict=False``: required
+    keys may be omitted while present values keep their types and bounds.
+    """
     fields: Dict[str, Any] = {}
     openai_strict = True
 
@@ -5482,11 +5559,11 @@ def _build_verifier_response_model(
                 or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field))
             ):
                 openai_strict = False
-            annotation = _verifier_field_annotation_for_field(field)
+            annotation = _verifier_field_annotation_for_field(field, completion_verdict=completion_verdict)
             output_fields[field["name"]] = (
                 annotation,
                 Field(
-                    ... if field.get("required", True) else None,
+                    ... if field.get("required", True) and completion_verdict else None,
                     description=field.get("description", ""),
                     **_pydantic_field_bounds(field),
                 ),
@@ -5515,13 +5592,19 @@ def _build_verifier_response_model(
     return model
 
 
-def _verifier_field_annotation_for_field(field: Dict[str, Any]) -> Any:
+def _verifier_field_annotation_for_field(field: Dict[str, Any], *, completion_verdict: bool = True) -> Any:
     field_type = field.get("type")
     nested_fields = _nested_fields_for_object_field(field)
     if field_type == "object" and nested_fields:
-        annotation = _build_nested_verifier_model(field.get("name") or "object", nested_fields)
+        annotation = _build_nested_verifier_model(
+            field.get("name") or "object", nested_fields, completion_verdict=completion_verdict
+        )
     elif field_type == "list[object]" and nested_fields:
-        annotation = List[_build_nested_verifier_model(field.get("name") or "item", nested_fields)]
+        annotation = List[
+            _build_nested_verifier_model(
+                field.get("name") or "item", nested_fields, completion_verdict=completion_verdict
+            )
+        ]
     else:
         annotation = _verifier_field_annotation(field_type)
     return Optional[annotation] if field.get("nullable") is True else annotation
@@ -5537,7 +5620,12 @@ def _pydantic_field_bounds(field: Dict[str, Any]) -> Dict[str, int]:
     return {pydantic_key: field[key] for key, pydantic_key in keys if isinstance(field.get(key), int)}
 
 
-def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]]) -> Type[BaseModel]:
+def _build_nested_verifier_model(
+    name: str,
+    nested_fields: List[Dict[str, Any]],
+    *,
+    completion_verdict: bool = True,
+) -> Type[BaseModel]:
     safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") or "Object"
     model_fields: Dict[str, Any] = {}
     for nested in nested_fields:
@@ -5545,9 +5633,9 @@ def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]])
         if not isinstance(nested_name, str) or not nested_name:
             continue
         model_fields[nested_name] = (
-            _verifier_field_annotation_for_field(nested),
+            _verifier_field_annotation_for_field(nested, completion_verdict=completion_verdict),
             Field(
-                ... if nested.get("required", True) else None,
+                ... if nested.get("required", True) and completion_verdict else None,
                 description=nested.get("description", ""),
                 **_pydantic_field_bounds(nested),
             ),
@@ -5901,7 +5989,7 @@ async def check_progress(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -5985,12 +6073,12 @@ async def check_progress(
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
-    fast_cache_should_write = fast_mode_cache_enabled or write_through_enabled
-    if fast_mode_goal and fast_cache_should_write:
+    demo_cache_should_write = fast_mode_cache_enabled or write_through_enabled
+    if fast_mode_goal and demo_cache_should_write:
         root_goal = fast_mode_goal
         if agent_id:
             try:
-                from providers.fast_cache.client import resolve_agent_fast_mode as _resolve_fm
+                from providers.demo_cache.client import resolve_agent_fast_mode as _resolve_fm
 
                 _e, _g, _w, _r, resolved_root_goal, provider_fast_mode = await _resolve_fm(agent_id)
                 if resolved_root_goal:
@@ -5999,19 +6087,19 @@ async def check_progress(
                 provider_fast_mode = True
         else:
             provider_fast_mode = True
-        set_fast_cache_context(
-            FastCacheContext(
+        set_demo_cache_context(
+            DemoCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
-                write_enabled=fast_cache_should_write,
+                write_enabled=demo_cache_should_write,
                 root_goal=root_goal,
                 provider_fast_mode=provider_fast_mode,
             )
         )
 
-    # B2: Force verifier model and ignore the caller-passed model arg.
-    forced_model = VERIFIER_MODEL
+    # B2: Force Ultra except for the explicit fail-closed local pool.
+    forced_model = "rose-labs/rose-local" if model == "rose-labs/rose-local" else VERIFIER_MODEL
     if model != forced_model:
         logger.debug(
             "check_progress overriding caller model",
@@ -6055,9 +6143,9 @@ async def check_progress(
             "verifier_execute",
             "verifier_post_dag",
         ) and _verifier_context_has_successful_browser_result(context)
-        if browser_success_context and fast_mode_goal and fast_cache_should_write:
-            set_fast_cache_context(
-                FastCacheContext(
+        if browser_success_context and fast_mode_goal and demo_cache_should_write:
+            set_demo_cache_context(
+                DemoCacheContext(
                     enabled=False,
                     goal=fast_mode_goal,
                     base_step=fast_mode_step,
@@ -6065,7 +6153,7 @@ async def check_progress(
                 )
             )
             logger.info(
-                "Verifier fast-cache read disabled for browser-success context",
+                "Verifier demo-cache read disabled for browser-success context",
                 call_site=call_site,
                 fast_mode_step=fast_mode_step,
             )
@@ -6166,7 +6254,7 @@ async def check_progress(
                         gpt_token_pool_id=gpt_token_pool_id,
                         gpt_token_user_id=gpt_token_user_id,
                         compute_token_lineage_key=compute_token_lineage_key,
-                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                         call_site=call_site,
                         agent_id=agent_id,
                         dump_extra=verifier_dump_extra or None,
@@ -6181,12 +6269,12 @@ async def check_progress(
                     # LLM. That path was the verify8/10 cost bleed when a cache
                     # miss/parse failure exhausted the warm trajectory. Soft-pass
                     # instead so hits stay at 100% and tree cost stays ~$0.
-                    from providers.fast_cache.context import current_context as _fm_ctx
-                    from providers.fast_cache.rose_cache import soft_complete_on_miss
+                    from providers.demo_cache.context import current_context as _fm_ctx
+                    from providers.demo_cache.rose_cache import SOFT_PASS_VERIFIER_REASONING, soft_complete_on_miss
 
                     # Gate on Fast Mode *read* (not merely goal / write-through).
                     # Soft-pass stubs are further restricted to exact-match
-                    # fast_cache:on bench trees (mass-agent OAi demo) via context.
+                    # demo_cache:on bench trees (mass-agent OAi demo) via context.
                     _ctx = _fm_ctx()
                     if (
                         fast_mode_cache_enabled
@@ -6201,15 +6289,8 @@ async def check_progress(
                         )
                         return {
                             "score": 1.0,
-                            "reasoning": (
-                                "Fast Mode cache trajectory ended; prior tool "
-                                "evidence is sufficient to treat the goal as complete."
-                            ),
-                            "message": (
-                                "Fast Mode cache trajectory ended; prior tool "
-                                "evidence is sufficient to treat the goal as complete.\n\n"
-                                "Score: 1.0"
-                            ),
+                            "reasoning": SOFT_PASS_VERIFIER_REASONING,
+                            "message": f"{SOFT_PASS_VERIFIER_REASONING}\n\nScore: 1.0",
                             "structured_response": None,
                             "usage": {
                                 "prompt_tokens": 0,
@@ -6240,7 +6321,7 @@ async def check_progress(
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         delay=round(sleep_s, 3),
-                        fast_cache_read_enabled=True if fast_mode_cache_enabled else None,
+                        demo_cache_read_enabled=True if fast_mode_cache_enabled else None,
                         error=extract_error_message(e),
                     )
                     await asyncio.sleep(sleep_s)
@@ -6275,8 +6356,8 @@ async def check_progress(
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
         if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
-            from providers.fast_cache.context import current_context as _fm_ctx
-            from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
+            from providers.demo_cache.context import current_context as _fm_ctx
+            from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
             _ctx = _fm_ctx()
             if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
@@ -6288,15 +6369,8 @@ async def check_progress(
                 )
                 return {
                     "score": 1.0,
-                    "reasoning": (
-                        "Fast Mode cache trajectory ended; prior tool "
-                        "evidence is sufficient to treat the goal as complete."
-                    ),
-                    "message": (
-                        "Fast Mode cache trajectory ended; prior tool "
-                        "evidence is sufficient to treat the goal as complete.\n\n"
-                        "Score: 1.0"
-                    ),
+                    "reasoning": reasoning,
+                    "message": f"{reasoning}\n\nScore: 1.0",
                     "structured_response": structured_response,
                     "usage": {
                         **(usage or {}),
@@ -6320,8 +6394,9 @@ async def check_progress(
         logger.error("Failed to check progress", error=error_message)
         # Fast Mode: never return the 0.5 error soft-fail that keeps browser/
         # execute loops spinning on soft-complete trajectories (verify15).
-        from providers.fast_cache.context import current_context as _fm_ctx
-        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
+        from providers.demo_cache.context import current_context as _fm_ctx
+        from providers.demo_cache.rose_cache import SOFT_PASS_VERIFIER_REASONING
+        from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
         _ctx = _fm_ctx()
         if (
@@ -6331,13 +6406,8 @@ async def check_progress(
         ):
             return {
                 "score": 1.0,
-                "reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as complete."
-                ),
-                "message": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is "
-                    "sufficient to treat the goal as complete.\n\nScore: 1.0"
-                ),
+                "reasoning": SOFT_PASS_VERIFIER_REASONING,
+                "message": f"{SOFT_PASS_VERIFIER_REASONING}\n\nScore: 1.0",
                 "usage": {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
@@ -6401,7 +6471,7 @@ async def call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -6414,6 +6484,7 @@ async def call_llm_activity(
     environment_tail: Optional[Dict[str, Any]] = None,
     max_context_tokens: int = _DEFAULT_CONTEXT_WINDOW,
     require_inline_attachments: bool = False,
+    user_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6449,6 +6520,8 @@ async def call_llm_activity(
         pending_context_token: Identity of the workflow's pending-context write for
             this call. A same-agent slot with a different token is stale (left by a
             workflow that migrated off this worker) and is treated as a miss.
+        user_tools: Pinned user-tool declarations (name, description, input_schema)
+            for a root agent. Appended last so older replayed histories default to None.
         cache_before_extra_user_message: Mark the latest stable conversation
             block before appending extra_user_message. This lets productive
             param calls create/read one shared prefix without caching the unique
@@ -6470,11 +6543,11 @@ async def call_llm_activity(
     # Keys are canonical request fingerprints, so prompt/schema/message changes miss.
     write_through_enabled = write_through_enabled_for_user(user_id)
     if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
-        from providers.fast_cache.client import resolve_soft_complete_root_goal
+        from providers.demo_cache.client import resolve_soft_complete_root_goal
 
         root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
-        set_fast_cache_context(
-            FastCacheContext(
+        set_demo_cache_context(
+            DemoCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
@@ -6483,12 +6556,23 @@ async def call_llm_activity(
             )
         )
     elif fast_mode_step is not None:
-        await ensure_fast_cache_position_context(agent_id, fast_mode_step)
+        await ensure_demo_cache_position_context(agent_id, fast_mode_step)
 
     try:
         _safe_heartbeat("Calling LLM for structured output")
 
-        AgentActionModel = create_agent_action_model(tool_names)
+        # Create dynamic action model. Rose Desktop accounts get their tool schemas
+        # (utils.rose_desktop); every other account the stock ones.
+        # Pinned user tools (root agent) are declared after the built-ins, sorted.
+        tool_registry = get_tool_models(rose_desktop=is_rose_desktop_user(user_id))
+        user_tool_decls = llm_declarations(user_tools)
+        if user_tool_decls:
+            AgentActionModel = create_agent_action_model(
+                [*tool_names, *(decl["name"] for decl in user_tool_decls)],
+                tool_registry={**tool_registry, **build_user_tool_registry(user_tool_decls)},
+            )
+        else:
+            AgentActionModel = create_agent_action_model(tool_names, tool_registry=tool_registry)
         attachment_overhead = attachment_request_overhead(AgentActionModel, extra_user_message)
 
         # Resolve messages: either pre-built or build from shared context
@@ -6702,7 +6786,7 @@ async def call_llm_activity(
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 on_model_detected=on_model_detected,
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
@@ -6932,12 +7016,12 @@ async def set_response_schema_activity(
             compute_auth.get("user_id") or compute_auth.get("userId")
         )
     if not write_through_enabled and agent_id:
-        from providers.fast_cache import client as _fc_client
+        from providers.demo_cache import client as _fc_client
 
         _, _, write_through_enabled, _, _, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
     if goal and (fast_mode_cache_enabled or write_through_enabled):
-        from providers.fast_cache import client as _fc_client
-        from providers.fast_cache import normalize as _fc_norm
+        from providers.demo_cache import client as _fc_client
+        from providers.demo_cache import normalize as _fc_norm
 
         # Content key includes the pool name. Dual-read rose-1-flash + legacy
         # rose-1-lite so the warm July/Aug response_schema row still hits after
@@ -6968,7 +7052,7 @@ async def set_response_schema_activity(
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
-            # 1. Generate schema in-process (or replay from the Fast Mode cache) so the
+            # 1. Generate schema in-process (or replay from the DEMO cache) so the
             # stable agents-side Rose routing owns claudeAuth/gptAuth selection,
             # waterfall, and token rotation.
             generate_start = time.perf_counter()
@@ -6976,7 +7060,7 @@ async def set_response_schema_activity(
                 schema = _fc_cached.get("schema", {})
                 title = _fc_cached.get("title") if include_title else None
                 if include_title:
-                    from providers.fast_cache.rose_cache import meaningful_response_schema_title
+                    from providers.demo_cache.rose_cache import meaningful_response_schema_title
 
                     title = meaningful_response_schema_title(schema, title)
                 usage = _fc_cached.get("usage", {})
@@ -6988,8 +7072,8 @@ async def set_response_schema_activity(
                     include_title=include_title,
                 )
                 if _fc_key is not None:
-                    from providers.fast_cache import client as _fc_client
-                    from providers.fast_cache import normalize as _fc_norm
+                    from providers.demo_cache import client as _fc_client
+                    from providers.demo_cache import normalize as _fc_norm
 
                     await _fc_client.cache_set(
                         _fc_key,
@@ -7158,7 +7242,7 @@ async def fetch_compute_token_activity(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Fetch one provider-typed compute token across Claude/GPT from the backend.
@@ -7190,8 +7274,8 @@ async def fetch_compute_token_activity(
                 params["agentId"] = agent_id
             if root_agent_id:
                 params["rootAgentId"] = root_agent_id
-            if fast_cache_affinity_key:
-                params["fastCacheAffinityKey"] = fast_cache_affinity_key
+            if demo_cache_affinity_key:
+                params["fastCacheAffinityKey"] = demo_cache_affinity_key
             if pinned_benchmark_type:
                 # Pin wins over callers (including _rotate_compute_token).
                 params["tokenType"] = pinned_benchmark_type
@@ -7233,7 +7317,7 @@ async def fetch_compute_token_activity(
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
                         "lineageKey": data.get("lineageKey"),
-                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or fast_cache_affinity_key,
+                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
                     }
             elif response.status_code == 404:
                 logger.info(f"Compute credentials not found for user {user_id}")
@@ -7512,7 +7596,7 @@ async def call_planner_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
@@ -7549,13 +7633,14 @@ async def call_planner_llm_activity(
     from utils.tool_schemas import get_planner_response_model
 
     planner_response_model = get_planner_response_model()
-    if model != PLANNER_MODEL:
+    if model != PLANNER_MODEL and model != "rose-labs/rose-local":
         logger.info(
             "planner.model_override",
             requested_model=model,
             planner_model=PLANNER_MODEL,
         )
-    model = PLANNER_MODEL
+    if model != "rose-labs/rose-local":
+        model = PLANNER_MODEL
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
@@ -7582,11 +7667,11 @@ async def call_planner_llm_activity(
         # request fingerprint. call_site "planner" keeps it distinct.
         write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
         if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
-            from providers.fast_cache.client import resolve_soft_complete_root_goal
+            from providers.demo_cache.client import resolve_soft_complete_root_goal
 
             root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
-            set_fast_cache_context(
-                FastCacheContext(
+            set_demo_cache_context(
+                DemoCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=fast_mode_goal,
                     base_step=fast_mode_step,
@@ -7710,13 +7795,13 @@ async def call_planner_llm_activity(
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
             compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             skip_cache_write=False,
             call_site="planner",
             effort="max",
             # Constant declared-only toolset: the phase tools (so real tool history in
             # the pre-plan context stays native) + get_memories. Never callable here.
-            context_tools=planner_context_tools(),
+            context_tools=planner_context_tools(rose_desktop=is_rose_desktop_user(planner_user_id)),
             deadline_s=220.0,
             ttft_timeout_s=120.0,
         )
@@ -7760,7 +7845,7 @@ async def call_planner_llm_activity(
                         "tokens_out": tokens_out,
                         "model": actual_model,
                         "provider": "Rose Planner",
-                        # Propagate fast-cache replay + cache-token fields so the
+                        # Propagate demo-cache replay + cache-token fields so the
                         # workflow cost aggregator zeroes a replayed planner call
                         # instead of billing the replayed output tokens.
                         "from_fast_cache": usage.get("from_fast_cache", False),

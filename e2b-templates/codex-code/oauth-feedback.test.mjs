@@ -7,7 +7,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("./ws-server.mjs", import.meta.url), "utf8");
 const producer = source.slice(source.indexOf('let outputBuffer = "";'), source.indexOf("async function shutdown("));
-const fallback = source.slice(source.indexOf("let { code, signal } = await runCodex("), source.indexOf("\nexitCode = code ?? 1;"));
+const fallback = source.slice(source.indexOf("let { code, signal } = await runCodex("), source.indexOf("exitCode = code ?? 1;"));
 const workerPath = new URL("../../agents/domains/spawn_claude_code_agent/service.py", import.meta.url);
 
 // Execute the real formatter and fallback block, replacing only sandbox/process IO.
@@ -34,7 +34,7 @@ async function replay(event) {
     };
     ${fallback}
     return JSON.stringify({ output: outputBuffer, events: eventBuffer, runs });
-  })()`, { input: event, PORT: 0, WebSocketServer: class {} }).then(JSON.parse);
+  })()`, { input: event, PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] }).then(JSON.parse);
 }
 
 function workerFeedback(events) {
@@ -93,7 +93,7 @@ test("command, tool, prose, raw output and generic auth/quota words do not trigg
   }
   // Non-JSON stdout takes the renderer's raw-text branch, without classification.
   const rawProducer = producer + '\nappendCodexStdout("invalid_grant\\n"); JSON.stringify({ reason: oauthFallbackReason, events: eventBuffer });';
-  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: class {} })), { reason: null, events: [] });
+  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] })), { reason: null, events: [] });
 });
 
 test("pure OpenAI plan quota diagnostics retain quota classification", async () => {

@@ -51,6 +51,56 @@ Task-specific DB deltas remain separate from the base image. The dedicated gate-
 
 Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` benchmark entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
 
+### Code bench (`code-bench-*`, plan C8)
+
+Seven `rose-bench` code-capability tasks (`deploy_category: "claude-code"`):
+Python and JavaScript bug fixes, a feature with tests, a behaviour-preserving
+refactor, stack-trace debugging, commit-locally-without-pushing and a front-end
+component build. Each fixture lives in `fixtures/code_bench/<id>/` (`repo/`
+start state, `hidden/` tests the agent never sees, `reference/` known-good
+overlay). `code_bench.py` builds a byte-identical one-commit git archive that is
+uploaded as the task attachment; the code agent returns `result.tar.gz` as a
+Task Complete file_pointer, and the `code_bench_hidden_tests` static check runs
+the visible and hidden tests on it in a scratch copy with a minimal environment.
+Only the front-end task adds an LLM judge (`code_bench_screenshot_judge`, one
+Chromium screenshot). `code_bench_test.py` proves every grader fails the
+unmodified repo and passes the reference; the agents `benchmark` blackbox
+domain runs it.
+
+Raw-CLI parity runs the same tasks through Claude Code or Codex directly, with
+the template flags, the same model and the same archive, in an isolated CLI
+config outside the repository:
+
+```bash
+scripts/run-bench code-parity --skip-rose -k 3 --raw-concurrency 2 --out-dir .context/code-bench-parity/raw
+scripts/run-bench code-parity --rose-records agents/benchmarks/runs/<r1>.json <r2>.json <r3>.json \
+  --raw-results .context/code-bench-parity/raw/parity.json -k 3 --publish-evidence
+# or both legs in one command (Rose leg = K sequential --local runs):
+scripts/run-bench code-parity --run-rose local -k 3 --raw-concurrency 2 --publish-evidence
+```
+
+The report gives per-task x/K, per-run passes, stdev and flaky tasks for each
+leg; `parity_ok` is mean(Rose) >= mean(raw) - max(1 task, 5%), and `c8_ok` also
+requires both legs to reproduce within that tolerance. Raw-leg credentials are
+the template variables (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
+`CODEX_AUTH_JSON`/`OPENAI_API_KEY`) or the CLI's managed login. Each attempt
+records loaded host hooks/plugins/MCP servers; on boxes.dev devboxes the managed
+settings add a SessionStart hook and platform skills to the raw leg.
+Without a Claude credential the Rose sandbox routes Claude Code through
+OpenRouter's Anthropic gateway; pass `--openrouter-gateway` so the raw leg uses
+the same transport and served model (`--lease-claude-token` leases from the
+backend pool instead).
+
+INFRA is never a task verdict. A raw attempt whose CLI reports an API error
+status (for example 400 "Credit balance is too low") is rerun with
+`--raw-results <parity.json> --rerun-infra`. Rose rows that were interrupted or
+failed owned cleanup after the local backend died are excluded and rerun
+(`--rose-retry-infra`, default 2). On a shared 15 GB devbox the memory watchdog
+TERMs the largest workload process, often the local stack's ~2 GB backend; run
+the Rose leg in a bounded scope outside the workload slice, for example
+`sudo systemd-run --scope -p MemoryHigh=4G --uid=$USER --gid=$USER -- <script>`
+with HOME and PATH set in the script.
+
 ## Quick Start
 
 ### Process Bench and continuous learning
@@ -495,7 +545,7 @@ The curated tag vocabulary (each task carries zero or more):
 | `attachments`       | Tasks with file attachments or document handling                        |
 | `auth`              | Tasks needing authenticated sessions (cookie, minted, or anon accounts) |
 | `browser`           | Browser agent tasks                                                     |
-| `cache`             | Fast-mode cache record/replay tasks                                     |
+| `cache`             | DEMO cache record/replay tasks                                          |
 | `chat`              | Chat mode only                                                          |
 | `code-agent`        | Claude Code sandbox tasks                                               |
 | `grep`              | User-data grep/search tasks                                             |
@@ -1060,10 +1110,10 @@ that live-query requirement. Choose compatible smoke tasks for the proof.
 Shared asynchronous cache requests have one HTTP owner. A cancelled waiter must
 not cancel the shared result; owner cancellation must release the exact entry so
 live followers can retry. Keep actual request failures typed and visible, and
-account for settled shared exceptions. Existing Fast Cache regressions cover
+account for settled shared exceptions. Existing DEMO cache regressions cover
 waiter/owner cancellation and HTTP-error propagation without longer deadlines.
 The existing `BENCHMARK_FAST_MODE_CACHE` A/B setting controls the Fast Mode provider-speed button;
-it does not disable DEMO cache replay. Catalog `fast_cache: on/off` declarations
+it does not disable DEMO cache replay. Catalog `demo_cache: on/off` (legacy `fast_cache`) declarations
 still win at request construction, and simulation forces provider Fast Mode off.
 Live-query selection also excludes goals admitted by the runtime's DEMO replay
 policy, including an identity-bound creator child without a DEMO tag or
@@ -1667,10 +1717,11 @@ ceiling, shared-CPU governor or production headroom. `--strict-barrier` coordina
 all surviving eligible copies in one ready cohort. Keep the original requested
 50-copy count alongside `released_count` and `failed_count`; a partial release
 never earns full-width credit. Controller occupancy does not prove execution overlap.
-The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
-uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
-The unchanged governor keeps 20 of 160 shared units for production, leaving
-140 for this app. Native CPU kinds/counts and live workstream reservations
+The default mass-task primary uses `shared-cpu-4x` / 4 GB; its optional worker
+uses `performance-1x` / 2 GB (`shared-cpu-2x` primaries were throttled to 81-93%
+CPU steal in descend-full69 proof 2). Fifty primaries add 200 active shared CPU
+units, above the default 160-unit governor less its 20 production units; the
+campaign planner derives the required governor from the actual task shapes. Native CPU kinds/counts and live workstream reservations
 must fit as well as the Machine count; the CLI rechecks both during admission.
 
 Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30

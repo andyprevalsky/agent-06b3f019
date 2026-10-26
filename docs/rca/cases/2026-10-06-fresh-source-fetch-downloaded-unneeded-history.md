@@ -8,19 +8,27 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: an explicitly fresh checkout with no HEAD fetched every reachable earlier source version despite requiring one exact source tree
 symptoms:
-  - "[cloudbench] git-fetch 166s"
   - "[cloudbench] git-fetch 197s"
-  - "[cloudbench] git-checkout 27s"
+  - "[cloudbench] git-fetch 260s"
+  - "[cloudbench] git-checkout 68s"
+  - "worker did not reach queue readiness within 300s"
 tags:
   - cloudbench
   - exact-source
   - fresh-volume
   - git-history
   - startup
+  - autoscaled-worker
+  - history-ledger
+  - test-mass-agent-run-0
 sources:
   - commit c214f5199646cb3bb51a81ef243df8ee01991536
   - fleet run 20261006-205802-14851
   - fleet run 20261006-205741-10814
+  - benchmark run original600-1792722242636117810 (descend-full69-20261023)
+  - fleet run 20261023-024011-28210
+  - fleet run 20261023-024011-28265
+  - task test-mass-agent-run-0
 repro: bash scripts/tests/cloudbench-fetch-ref.test.sh
 status: open
 ---
@@ -126,6 +134,55 @@ passes 25 controls in 47.908 seconds and pre-service recovery passes 13 controls
 in 0.791 seconds. The final affected source/auth/reuse controls pass 26 cases in
 12.629 seconds. No new phase or generic validator bypass was introduced.
 
+## Recurrence 2026-10-23 (descend-full69-20261023, cluster K5)
+
+Member: `test-mass-agent-run-0`, both copies (r001-j0004, r002-j0039), FAILED
+`Timeout after 918s` / `907s` with root ACTIVE and 51 tree agents. Every
+autoscaled performance-1x worker clone (`mode=fresh` in `worker-clones.log`, so
+the 2026-10-06 `--depth=1` branch DID run) logged `[cloudbench] git-fetch
+224-273s` plus `git-checkout 68s` for cbbf3dd0c and was removed after
+`did not reach queue readiness within 300s`; the tree ran on the primary alone.
+The triage hypothesis of a stale Oct-13 Git HEAD fetching intermediate history
+was wrong for this run: the clones had no HEAD.
+
+Why the earlier guardrail did not hold: it bounded commit *history*, not the
+size of the one requested *tree*. That tree grew from 1.905 GB (1.433 GB of
+`agents/benchmarks/history/*.jsonl`) at c214 to 3.221 GB at cbbf3dd0c, of
+which 2.706 GB is 150 history ledgers. Wire bytes stay small (a full depth-1
+pack is 331 MB locally) but upload-pack, index-pack inflation and checkout
+still process 3.2 GB. Autoscaled workers never read those ledgers: agent
+runtime code outside `agents/benchmarks`/tests/scripts imports no benchmark
+module, the primary's runner owns ledger reads/appends, and
+`scripts/create-worktree-patch.sh` already excludes them from the patch.
+
+Local measurement on this devbox (file:// transport, both sides local): the
+unchanged fresh depth-1 fetch of cbbf3dd0c took 125s before any checkout; the
+fixed helper completed fetch 1s + checkout 22s (826 MB worktree), verified HEAD.
+
+Fix: `cloudbench-worker.sh` requests `CLOUDBENCH_SOURCE_SCOPE=worker-runtime`.
+Only on the explicit fresh no-HEAD branch, `cloudbench-fetch-ref.sh` sets a
+non-cone sparse definition omitting exactly `agents/benchmarks/history/*.jsonl`
+and adds `--filter=blob:none`; checkout fetches the remaining blobs once under
+the request-scoped credential. After checkout it fails closed if any other path
+is skip-worktree. Unknown scopes fail closed. Primary/retained paths, the
+readiness gate (300s), task timeouts and patch/dependency verification are
+unchanged. If a server ignored the filter, git falls back to the full depth-1
+transfer (correct but slow), visible in the `git-fetch` timing line.
+
+Repro: `bash scripts/tests/cloudbench-fetch-ref.test.sh` (deploy structural gate
+`cloudbench-fetch-ref`, `scripts/test.sh` "Cloud Benchmark Git Fetch"). On
+b84475d38 it fails `FAIL: fresh worker checkout wrote an unused benchmark
+history ledger`; with the fix it passes 5/5. Outcome: not reproducible locally
+(autoscaled Fly workers do not exist in `--local`); outcome proof is the
+parent's cloud rerun `scripts/run-bench test-mass-agent-run-0` (5 passing runs).
+Archive searches: `git-fetch git-checkout worker queue readiness 300s fresh
+volume depth`, `benchmark history ledger size checkout tree growth
+span_durations jsonl`, `grep -rl "did not reach queue readiness"`.
+Recurrence of this case (same boundary class: fresh exact-source bootstrap
+transfers content its consumer never reads). The separate `unable to start
+machine from current state: 'created'` clone-start failures were contributing
+and are not addressed here.
+
 ## Human feedback
 
 The user requested parallel diagnostics and supported startup improvements.
@@ -136,4 +193,4 @@ and recovery qualification. Existing task/model/evaluator semantics remain.
 
 ## Reusable lesson
 
-Fetch only the history an ephemeral exact-source consumer needs while preserving the source and dependency contracts and existing retained-history readers.
+Fetch only the history and tree paths an ephemeral exact-source consumer reads while preserving the source and dependency contracts and existing retained-history readers.

@@ -26,6 +26,7 @@ import contextlib
 import copy
 import contextvars
 import importlib.util
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -166,6 +167,9 @@ class _Backend:
                 return httpx.Response(200, json={"agent": {"id": agent_id}, "messages": rows})
         if request.method == "GET" and path.startswith("/api/browser-session/task/") and path.endswith("/control"):
             return httpx.Response(200, json={"state": "agent"})
+        if request.method == "GET" and path == "/api/claude-code-session/credential-availability":
+            # C15: a fresh code-agent spawn asks which provider has a leasable credential.
+            return httpx.Response(200, json={"claude": True, "codex": True})
         if request.method == "POST" and path == "/realtime/v1/api/broadcast":
             return httpx.Response(202, json={})
         self.unexpected.append(f"{request.method} {request.url}")
@@ -207,7 +211,8 @@ async def _deploy_environment(backend: _Backend):
     reset_live_queue_cache()
     setup_mock_fn(backend.handle)
     try:
-        with _replay_stable_workflow_clock():
+        # Browser activities schedule JEV estimates in-process; without a key they stay offline.
+        with _replay_stable_workflow_clock(), patch.dict(os.environ, {"TYPESAFE_API_KEY": ""}):
             async with await WorkflowEnvironment.start_time_skipping() as env:
                 yield env
     finally:
@@ -546,8 +551,9 @@ def _assert_browser_task_resumed(agent_id: str, browser: _BrowserServices, old: 
         f"{new} must reattach to the same live browser; got {browser.cdp_connections}"
     )
     session_id = _BrowserServices.SESSION["session_id"]
-    assert browser.session_closes == [(new, session_id, False)], (
-        f"the Steel session must close once, when the task finishes; got {browser.session_closes}"
+    # A finished browser sub-agent pauses its session; teardown waits for the root's completion.
+    assert browser.session_closes == [(new, session_id, True)], (
+        f"the Steel session must pause once, when the task finishes; got {browser.session_closes}"
     )
 
     billed_prompt_tokens = [
@@ -673,6 +679,7 @@ def _code_sandbox_services(recorder):
         patch.object(service, "create_e2b_session", side_effect=recorder.create_session),
         patch.object(service, "close_e2b_session", side_effect=recorder.close_session),
         patch.object(service, "save_claude_code_message", side_effect=recorder.save_message),
+        patch.object(service, "save_code_transcript_batch", side_effect=recorder.save_transcript),
         patch.object(service, "persist_terminal_output", side_effect=recorder.persist_output),
         patch.object(service, "_run_verifier", side_effect=recorder.verifier),
         patch.object(service, "_log_code_agent_event", side_effect=lambda event, **kw: recorder.logged.append(event)),
@@ -710,6 +717,17 @@ def _assert_code_task_reattached(agent_id: str, recorder) -> None:
     assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], (
         f"the sandbox must close once, after the run finished; closed={recorder.closed}"
     )
+    # The transcript survives the move: the new worker persists only the event
+    # range the old one had not, and the rows end on the run's final records.
+    ranges = [(batch["events_from"], batch["events_to"]) for batch in recorder.transcripts]
+    assert ranges and ranges[0][0] == 0, ranges
+    assert all(ranges[i][1] == ranges[i + 1][0] for i in range(len(ranges) - 1)), ranges
+    latest: dict = {}
+    for batch in recorder.transcripts:
+        for record in batch["records"]:
+            latest[record["id"]] = record
+    texts = [r["text"] for r in sorted(latest.values(), key=lambda r: r["seq"]) if r["type"] == "message"]
+    assert texts[-2:] == cc._CC_STEP_TEXTS, texts
 
 
 async def test_rolling_deploy_reattaches_claude_code_on_the_new_machine() -> None:

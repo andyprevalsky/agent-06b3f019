@@ -1,3 +1,6 @@
+export { browserUseProxyCountry } from './resumeRecovery';
+import * as resumeRecovery from './resumeRecovery';
+import { browserResumeScope } from '../steel/lifecycleClaim';
 /** Browser Use Cloud V4 sessions, exposed through the same CDP contract as Steel and Kernel. */
 import { createHash, randomUUID } from 'node:crypto';
 import type { Browser } from 'playwright';
@@ -8,7 +11,6 @@ import { request } from './browserUseClient';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
-import { browserUseEnabled } from './config';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
@@ -23,15 +25,6 @@ const log = createLogger('BrowserUse');
 const profileCreationByContext = new Map<string, Promise<{ id: string; source: string }>>();
 const benchmarkProfilesByAgent = new Map<string, Promise<string>>();
 const initialStorageHashes = new Map<string, string>();
-
-type BrowserUseSession = {
-  id: string;
-  status: string;
-  cdpUrl: string | null;
-  liveUrl: string | null;
-  startedAt: string;
-  timeoutAt: string;
-};
 
 type BrowserUseProfile = { updatedAt: string };
 
@@ -70,16 +63,6 @@ async function waitForProfileSave(profileId: string, before: string): Promise<vo
     await new Promise((resolve) => setTimeout(resolve, 500));
   } while (Date.now() < deadline);
   throw new Error('Browser Use profile did not finish saving browser state after stop');
-}
-
-export function browserUseProxyCountry(location: ProxyGeoLocation): string {
-  // Browser Use's API enumerates UK, while the rest of Rose stores ISO GB.
-  const raw = location.country.trim().toLowerCase();
-  const country = raw === 'gb' ? 'uk' : raw;
-  if (!/^[a-z]{2}$/.test(country)) {
-    throw new Error(`Browser Use requires a two-letter proxy country, got ${location.country}`);
-  }
-  return country;
 }
 
 async function profileForContext(
@@ -158,22 +141,8 @@ export async function cleanupBenchmarkBrowserUseProfiles(): Promise<void> {
 async function createRemote(
   location: ProxyGeoLocation,
   profileId: string | null
-): Promise<{ session: BrowserUseSession; browser: Browser }> {
-  if (!browserUseEnabled()) {
-    throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
-  }
-  const session = await request<BrowserUseSession>('/browsers', {
-    method: 'POST',
-    body: JSON.stringify({
-      ...(profileId ? { profileId } : {}),
-      proxyCountryCode: browserUseProxyCountry(location),
-      timeout: 240,
-      browserScreenWidth: 1280,
-      browserScreenHeight: 800,
-      solveCaptchas: true,
-      enableRecording: true,
-    }),
-  });
+): Promise<{ session: resumeRecovery.BrowserUseSession; browser: Browser }> {
+  const session = await resumeRecovery.allocateBrowserUseSession(location, profileId);
   try {
     if (!session.id || !session.cdpUrl || !session.liveUrl) {
       throw new Error('Browser Use create response omitted id, cdpUrl, or liveUrl');
@@ -200,7 +169,7 @@ export async function releaseBrowserUseRemoteSession(sessionId: string): Promise
   try {
     await retryWithBackoff(
       () =>
-        request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
+        request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`, {
           method: 'PATCH',
           body: JSON.stringify({ action: 'stop' }),
         }),
@@ -294,6 +263,7 @@ export async function closeBrowserUseSession(
   const initialHash = initialStorageHashes.get(sessionId);
   let profileBefore: string | null = null;
   let unknownBaseline = false;
+  let checkpointConfirmed = false;
   if (row?.providerProfileId && row.wsUrl) {
     try {
       const { chromium } = await import('playwright');
@@ -301,6 +271,7 @@ export async function closeBrowserUseSession(
       try {
         const currentHash = await storageHash(browser);
         unknownBaseline = initialHash === undefined;
+        checkpointConfirmed = !unknownBaseline && currentHash === initialHash;
         if (unknownBaseline || currentHash !== initialHash) {
           const profile = await request<BrowserUseProfile>(
             `/profiles/${encodeURIComponent(row.providerProfileId)}`
@@ -320,6 +291,19 @@ export async function closeBrowserUseSession(
       });
     }
   }
+  // A grace period is not evidence that a profile was saved. If inspection
+  // failed, obtain a pre-stop version so pause can verify the provider save.
+  // Refuse to release a live browser when no checkpoint can be established.
+  if (pause && !checkpointConfirmed && !profileBefore) {
+    if (!row?.providerProfileId) {
+      throw new Error('Cannot pause Browser Use session without a persistent profile');
+    }
+    const profile = await request<BrowserUseProfile>(
+      `/profiles/${encodeURIComponent(row.providerProfileId)}`
+    );
+    profileBefore = profile.updatedAt;
+    if (!profileBefore) throw new Error('Cannot verify Browser Use profile before pause');
+  }
   let releaseError: unknown = null;
   let stopped = false;
   try {
@@ -332,11 +316,12 @@ export async function closeBrowserUseSession(
     try {
       if (profileBefore) {
         await waitForProfileSave(row.providerProfileId, profileBefore);
+        checkpointConfirmed = true;
       } else {
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
     } catch (error) {
-      if (!unknownBaseline) releaseError = error;
+      if (pause || !unknownBaseline) releaseError = error;
       else
         log.warn('Browser Use profile save could not be confirmed after stop', {
           sessionId,
@@ -348,7 +333,15 @@ export async function closeBrowserUseSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: stopped ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      status: stopped
+        ? pause
+          ? checkpointConfirmed && releaseError === null
+            ? 'PAUSED'
+            : 'ERROR'
+          : 'CLOSED'
+        : pause
+          ? 'ACTIVE'
+          : 'ERROR',
       closedAt: stopped && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
@@ -362,7 +355,7 @@ async function replaceSession(
   options: { keepValidationConnection?: boolean } = {}
 ): Promise<
   BrowserProviderResumeSession & {
-    previousSessionId: string;
+    previousSessionId: string | null;
     previousProvider: 'browser-use' | 'kernel' | 'steel';
   }
 > {
@@ -371,7 +364,13 @@ async function replaceSession(
   });
   // Browser Use writes persistent profile state asynchronously after stop.
   // Reusing the profile while the old browser is still active loses fresh login state.
-  if (old.provider === 'browser-use' && old.status === 'ACTIVE') {
+  if (
+    old.provider === 'browser-use' &&
+    old.status === 'ACTIVE' &&
+    old.sessionId !== null &&
+    !browserResumeScope()?.recovering() &&
+    !browserResumeScope()?.sourceEnded()
+  ) {
     await closeBrowserUseSession(old.sessionId, true, old.currentUrl ?? undefined);
   }
   const agent = await prisma.agent.findUnique({
@@ -385,18 +384,21 @@ async function replaceSession(
         ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
       }
     : DEFAULT_GEOLOCATION;
-  const profile = await profileForContext(old.contextId, old.agentId);
+  const profile = old.logicalOwnerKey
+    ? { id: null, source: 'logical_checkpoint' }
+    : await profileForContext(old.contextId, old.agentId);
   const { session, browser } = await createRemote(location, profile.id);
   let handedOff = false;
   try {
     await rememberInitialStorage(session.id, browser);
+    await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: old.sessionId },
+      where: resumeRecovery.replacementBinding(taskId, old),
       data: {
         sessionId: session.id,
         debugUrl: session.liveUrl,
         wsUrl: session.cdpUrl,
-        status: 'ACTIVE',
+        status: old.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'browser-use',
         providerProfileId: profile.id,
@@ -408,7 +410,7 @@ async function replaceSession(
     if (replaced.count !== 1) throw new Error(`Browser task ${taskId} changed during replacement`);
     await announceBrowserSessionBinding({ id: taskId });
     const savedUrl = old.currentUrl || old.startUrl || undefined;
-    if (savedUrl) {
+    if (savedUrl && !old.logicalOwnerKey) {
       try {
         const context = browser.contexts()[0];
         const page = context.pages()[0] ?? (await context.newPage());
@@ -453,7 +455,9 @@ export const resumeBrowserUseSession = replaceSession;
 export const rotateBrowserUseSession = replaceSession;
 
 export async function getBrowserUseSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await request<BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
+  const session = await request<resumeRecovery.BrowserUseSession>(
+    `/browsers/${encodeURIComponent(sessionId)}`
+  );
   const expiresAt = new Date(session.timeoutAt).getTime();
   const createdAt = new Date(session.startedAt).getTime();
   return {
@@ -489,6 +493,7 @@ export async function pressBrowserUseKeys(sessionId: string, keys: string[]): Pr
 }
 
 type Download = BrowserFileInfo & { url?: string | null; lastModified: string };
+type DownloadPage = { files: Download[]; hasMore: boolean; nextCursor: string | null };
 
 export async function listBrowserUseSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const files: BrowserFileInfo[] = [];
@@ -496,11 +501,9 @@ export async function listBrowserUseSessionFiles(sessionId: string): Promise<Bro
   do {
     const params = new URLSearchParams({ limit: '100' });
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{
-      files: Download[];
-      hasMore: boolean;
-      nextCursor: string | null;
-    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
+    const page = await request<DownloadPage>(
+      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
+    );
     files.push(
       ...page.files.map(({ path, size, lastModified }) => ({
         path,
@@ -518,11 +521,9 @@ export async function readBrowserUseSessionFile(sessionId: string, path: string)
   let cursor: string | null = null;
   do {
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{
-      files: Download[];
-      hasMore: boolean;
-      nextCursor: string | null;
-    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
+    const page = await request<DownloadPage>(
+      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
+    );
     const found = page.files.find((file) => file.path === path);
     if (found) {
       if (!found.url) throw new Error(`Browser Use download URL unavailable: ${path}`);

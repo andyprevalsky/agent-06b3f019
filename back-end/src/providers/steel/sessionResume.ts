@@ -161,7 +161,7 @@ export interface RecreatedSteelSession {
   proxyLocation: ProxyGeoLocation;
   steelProfileId: string | null;
   profileSource: string;
-  previousSessionId: string;
+  previousSessionId: string | null;
   previousProvider: BrowserProviderName;
   previousSessionReleased: boolean;
 }
@@ -342,9 +342,9 @@ async function recreateSessionWithinClaim(
     steelRecordedProfileId !== null &&
     oldSession.providerProfilePersist;
   let writerReleased = false;
-  if (finishWriter) {
+  if (finishWriter && oldSession.sessionId !== null) {
     await finishSteelProfileWriter(
-      { ...oldSession, providerProfileId: steelRecordedProfileId },
+      { ...oldSession, sessionId: oldSession.sessionId, providerProfileId: steelRecordedProfileId },
       dependencies
     );
     writerReleased = true;
@@ -455,7 +455,8 @@ async function recreateSessionWithinClaim(
           throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
         }
 
-        await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
+        if (!oldSession.logicalOwnerKey)
+          await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
         await dependencies.verifyLifecycleOwnership?.();
         const mutate: SteelLifecycleMutation =
           dependencies.mutateLifecycle ?? (async (callback) => callback(prisma));
@@ -478,7 +479,7 @@ async function recreateSessionWithinClaim(
               sessionId: session.id,
               debugUrl,
               wsUrl,
-              status: 'ACTIVE',
+              status: oldSession.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
               closedAt: null,
               provider: 'steel',
               kernelProxySource: null,

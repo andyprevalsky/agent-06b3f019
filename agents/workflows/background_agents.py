@@ -74,6 +74,10 @@ from domains.spawn_agent.service import validate_spawn_params
 from helpers.agent_addressing import child_task_path, task_name_in_use
 from helpers.background_agents import (
     CHILD_WORKFLOW_AGENT_TYPES,
+    PAUSED_TASK_STATUS,
+    RESUMABLE_TASK_TYPES,
+    RESUME_CONVERSATION_KEYS,
+    background_message_refusal,
     agent_notification_metadata,
     background_execution_metadata,
     build_agent_notification_text,
@@ -511,6 +515,8 @@ class BackgroundAgentsMixin:
         if isinstance(resume, dict):
             self._background_resume_hints[task_id] = resume
         result: Any = None
+        # A user pause during this run ends it as "paused" (workflow state, never result text).
+        pause_sequence = getattr(self, "_pause_signal_sequence", 0)
         try:
             result = await self._execute_tool("spawn_agent", args, task_id)
         except Exception as exc:  # the record must still finish (one failed notification)
@@ -530,7 +536,11 @@ class BackgroundAgentsMixin:
             # Wake an idle parent wait so it continues as new now (no poll needed).
             note_generation_handoff(self, result.get("handoff_task_queue"))
             return
-        await self._finish_background_task(task_id, result)
+        paused = (
+            record.get("agent_type") in RESUMABLE_TASK_TYPES
+            and getattr(self, "_pause_signal_sequence", 0) != pause_sequence
+        )
+        await self._finish_background_task(task_id, result, paused=paused)
 
     def _relaunch_background_tasks(self) -> None:
         """Resume records carried by a continuation without blocking the turn."""
@@ -576,6 +586,7 @@ class BackgroundAgentsMixin:
         summary: Optional[str] = None,
         failed: Optional[bool] = None,
         structured_response: Any = None,
+        paused: bool = False,
     ) -> None:
         record = self._background_tasks.get(task_id)
         if record is None:
@@ -605,6 +616,8 @@ class BackgroundAgentsMixin:
         # A user pause / cost limit cancels activity-backed work exactly like a
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
         status = "failed" if failed else "completed"
+        if failed and paused and not kill_reason:
+            status = PAUSED_TASK_STATUS
         record["status"] = status
         record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
@@ -690,7 +703,13 @@ class BackgroundAgentsMixin:
         return None
 
     async def _wake_background_task(
-        self, task_id: str, message: str, *, message_id: Optional[str], sender: Optional[str]
+        self,
+        task_id: str,
+        message: str,
+        *,
+        message_id: Optional[str],
+        sender: Optional[str],
+        continue_conversation: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """send_message_to_agent to a finished explore/browser/code task: start its next run.
 
@@ -709,6 +728,9 @@ class BackgroundAgentsMixin:
         if message_id and message_id in (record.get("wake_message_ids") or []):
             return {"woke": True, "already_running": True}
         wake = record.get("wake")
+        refusal = background_message_refusal(record, continue_conversation)
+        if refusal is not None:
+            return {"woke": False, "reason": refusal}
         if record.get("agent_type") not in WAKEABLE_TASK_TYPES or not isinstance(wake, dict):
             return {"woke": False, "reason": "it is too old to continue; spawn a new one"}
         refusal = self._background_wake_refusal()
@@ -716,13 +738,27 @@ class BackgroundAgentsMixin:
             return {"woke": False, "reason": refusal}
         run = self._background_run(task_id) + 1
         base_goal = str(wake.get("base_goal") or record.get("goal") or "")
-        args = dict(wake.get("tool_args") or {})
-        args["goal"] = build_background_wake_goal(
-            message=message,
-            base_goal=base_goal,
-            previous_status=str(record.get("status") or "completed"),
-            previous_result=str(wake.get("result") or ""),
-        )
+        args = {
+            key: value for key, value in (wake.get("tool_args") or {}).items() if key not in RESUME_CONVERSATION_KEYS
+        }
+        inbox_address = f"{task_id}.run{run}"
+        if continue_conversation is True and record.get("agent_type") == "browser":
+            # Same LLM conversation: the paused run's transcript is restored and
+            # this message (stored on that run's inbox) arrives as its next step.
+            inbox_address = str(record.get("inbox_address") or task_id)
+            args["_resume_paused_conversation"] = {"inbox_address": inbox_address}
+        elif continue_conversation is True:
+            # Code: the CLI resumes its own conversation; the message is its next turn.
+            args["goal"] = message
+        else:
+            args["goal"] = build_background_wake_goal(
+                message=message,
+                base_goal=base_goal,
+                previous_status=str(record.get("status") or "completed"),
+                previous_result=str(wake.get("result") or ""),
+            )
+            if continue_conversation is False and record.get("agent_type") == "code":
+                args["_fresh_conversation"] = True
         self._background_finished.pop(task_id, None)
         self._background_tasks[task_id] = {
             **{key: record.get(key) for key in FINISHED_RECORD_KEYS if key not in ("status", "finished_at")},
@@ -731,7 +767,7 @@ class BackgroundAgentsMixin:
             "base_goal": base_goal,
             "status": "running",
             "run": run,
-            "inbox_address": f"{task_id}.run{run}",
+            "inbox_address": inbox_address,
             "started_at": workflow.now().isoformat(),
             "goal": str(message)[:BACKGROUND_GOAL_RECORD_LEN],
             "child_agent_ids": [],
@@ -759,11 +795,13 @@ class BackgroundAgentsMixin:
         record = self._background_task_for_address(address)
         if record is None or record.get("child_workflow"):
             return
+        continue_conversation = data.get("continue_conversation")
         result = await self._wake_background_task(
             record["background_task_id"],
             message,
             message_id=message_id if isinstance(message_id, str) else None,
             sender=data.get("from_agent_path") if isinstance(data.get("from_agent_path"), str) else None,
+            continue_conversation=continue_conversation if isinstance(continue_conversation, bool) else None,
         )
         if not result.get("woke"):
             # Refused (paused / killed / cost limit): the id stays unseen so a retry after the owner recovers wakes it.

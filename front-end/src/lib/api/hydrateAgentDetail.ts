@@ -1,3 +1,4 @@
+import { hydrateProgressEstimate } from '../progressEstimate';
 /**
  * Hub archives on older backends omit `agent.response_schema` even when Task
  * Complete already carries the final outputs. Hydrate Agent Settings from those
@@ -37,8 +38,9 @@ function inferFieldType(value: unknown): ResponseSchemaField['type'] {
 }
 
 export function hydrateAgentDetail(data: AgentDetailResponse): AgentDetailResponse {
-  const agent = data.agent;
-  if (!agent) return data;
+  if (!data.agent) return data;
+  const agent = hydrateProgressEstimate(data.agent);
+  data = { ...data, agent };
   const existing = agent.response_schema?.fields ?? [];
   if (existing.length > 0) return data;
 

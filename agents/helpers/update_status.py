@@ -125,3 +125,15 @@ async def update_agent_status(
     except Exception as e:
         logger.error("Failed to update agent status", agent_id=agent_id, error=str(e))
         # Non-fatal - just log and continue
+
+
+async def publish_progress_estimate(agent_id: str, estimate: Dict) -> None:
+    """Estimate-only PATCH; backend fences terminal state, generation and sequence."""
+    config = load_config()
+    response = await get_http_client().patch(
+        f"{config.backend.api_url}/api/agents/{agent_id}/progress-estimate",
+        json={"progressEstimate": estimate},
+        headers={"X-API-Key": config.backend.api_key, **workflow_generation_headers()},
+        timeout=5.0,
+    )
+    response.raise_for_status()

@@ -6,6 +6,7 @@
  */
 
 import { prisma } from './database';
+import { hydrateProgressEstimates } from './agentProgressEstimates';
 
 interface ToolUsageItem {
   type: string;
@@ -43,7 +44,7 @@ function computeToolTokens(toolUsages: { totalCostCents: number; usageItems: unk
  * called with no userId/since. Returns null when the agent is not found.
  */
 export async function getAgentDetailForPreview(agentId: string) {
-  const agent = await prisma.agent.findFirst({
+  const rawAgent = await prisma.agent.findFirst({
     where: {
       id: agentId,
       deletedAt: null,
@@ -58,6 +59,7 @@ export async function getAgentDetailForPreview(agentId: string) {
     },
   });
 
+  const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
   if (!agent) {
     return null;
   }
@@ -102,6 +104,8 @@ export async function getAgentDetailForPreview(agentId: string) {
       source: agent.source,
       reasoning_max_tokens: agent.reasoningMaxTokens,
       progress: agent.progress,
+      progressEstimate: agent.progressEstimate ?? null,
+      taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
       temporal_workflow_id: agent.temporalWorkflowId,

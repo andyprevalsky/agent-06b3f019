@@ -703,7 +703,7 @@ async def test_generate_completion_summary_happy():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": m.get("text", "")} for m in context]
 
     context = [
@@ -741,7 +741,7 @@ async def test_generate_completion_summary_forwards_compute_auth():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -772,9 +772,9 @@ async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
     """Fast Mode summary caching is owned by call_llm; no outer summary cache."""
     from helpers import summarize
     import helpers.llm as llm_mod
-    import providers.fast_cache.client as fast_cache_client
+    import providers.demo_cache.client as demo_cache_client
 
-    from providers.fast_cache.context import current_context
+    from providers.demo_cache.context import current_context
 
     observed_kwargs = []
     observed_contexts = []
@@ -787,17 +787,17 @@ async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
             "usage": {"total_tokens": 10, "prompt_tokens": 0, "completion_tokens": 10},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": "done"}]
 
     async def fail_outer_cache(*args, **kwargs):
-        raise AssertionError("generate_completion_summary should not call fast-cache directly")
+        raise AssertionError("generate_completion_summary should not call demo-cache directly")
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
             with patch.object(llm_mod, "convert_context_to_messages", fake_convert):
-                with patch.object(fast_cache_client, "cache_get", fail_outer_cache):
-                    with patch.object(fast_cache_client, "cache_set", fail_outer_cache):
+                with patch.object(demo_cache_client, "cache_get", fail_outer_cache):
+                    with patch.object(demo_cache_client, "cache_set", fail_outer_cache):
                         out = await summarize.generate_completion_summary(
                             context=[
                                 {"role": "TOOL", "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"}}
@@ -826,7 +826,7 @@ async def test_generate_completion_summary_on_error():
     async def boom(*a, **kw):
         raise RuntimeError("LLM boom")
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -850,7 +850,7 @@ async def test_generate_completion_summary_no_structured_response():
     async def fake_llm(messages, **kwargs):
         return {"content": "Summary.", "usage": {"total_tokens": 10}}
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -891,7 +891,7 @@ async def test_generate_completion_summary_retries_length_truncation():
             "usage": {"total_tokens": 80, "prompt_tokens": 40, "completion_tokens": 40},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):

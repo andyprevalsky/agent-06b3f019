@@ -666,7 +666,7 @@ def verify_bootstrap_current(
             and not any(
                 marker in stack
                 for marker in (
-                    "🧠 Re-ensuring Fast Mode cache schema (post-restore)...",
+                    "🧠 Re-ensuring DEMO cache schema (post-restore)...",
                     "🗜️  Saving seed dump for fast future warm-starts",
                     "📦 Installing front-end dependencies...",
                     "📦 Ensuring Playwright browser assets...",

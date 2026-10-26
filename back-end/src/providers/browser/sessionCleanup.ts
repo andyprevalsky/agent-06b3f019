@@ -9,7 +9,7 @@ const log = createLogger('BrowserProvider');
 export interface SupersededBrowserRelease {
   taskId: string;
   previousProvider: BrowserProviderName;
-  previousSessionId: string;
+  previousSessionId: string | null;
   operation: 'resume' | 'rotation';
 }
 
@@ -30,6 +30,7 @@ export async function releaseSupersededBrowser(
   release: SupersededBrowserRelease,
   dependencies: SupersededBrowserReleaseDependencies = defaultDependencies
 ): Promise<boolean> {
+  if (release.previousSessionId === null) return true;
   try {
     if (release.previousProvider === 'kernel') {
       await dependencies.releaseKernel(release.previousSessionId);

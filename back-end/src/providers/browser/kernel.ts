@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { KernelSessionValidationError, resetKernelSessionTabs } from './kernelTabs';
+export { resetKernelSessionTabs } from './kernelTabs';
+import { browserResumeScope, resumeNativeCreate } from '../steel/lifecycleClaim';
+import { kernelResumeTags, replacementBinding } from './resumeRecovery';
 import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
@@ -70,28 +73,8 @@ export {
 
 const log = createLogger('Kernel');
 
-class KernelSessionValidationError extends Error {}
-
 export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
   await cleanupIsolatedKernelProfiles(kernelClient());
-}
-
-/**
- * Kernel profiles persist Chromium's open pages along with cookies and storage.
- * Replace restored pages with one clean bootstrap tab. Kernel destroys the
- * Playwright context when its final page closes, so creating the clean tab
- * first is required for the caller to reuse this validated connection for
- * credential injection.
- */
-export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const primaryContext = browser.contexts()[0];
-  if (primaryContext === undefined) {
-    throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
-  }
-  const pages = browser.contexts().flatMap((context) => context.pages());
-  await primaryContext.newPage();
-  await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
-  return pages.length;
 }
 
 type KernelProxySelection = {
@@ -219,29 +202,31 @@ async function createRemoteSession(
           agentId,
           proxySource: proxy.proxySource,
         });
-        const session = await client.browsers.create(
-          {
-            headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
-            stealth,
-            telemetry: kernelCaptchaTelemetryConfig(),
-            gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
-            // Do not let Chromium reopen the profile's previous window. The new-tab
-            // page created by this policy is replaced below along with any unexpected
-            // restored pages, leaving one clean bootstrap tab.
-            chrome_policy: { RestoreOnStartup: 5 },
-            timeout_seconds: kernelTimeoutSeconds(),
-            viewport: { width: 1280, height: 800, refresh_rate: 60 },
-            ...(profile.profileId !== null
-              ? { profile: { id: profile.profileId, save_changes: true } }
-              : {}),
-            ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
-            tags: {
-              rose_agent_id: agentId,
-              rose_session_request: randomUUID(),
-            },
-          },
-          KERNEL_CREATE_REQUEST_OPTIONS
-        );
+        const intent = await browserResumeScope()?.beforeCreate('kernel');
+        const session = intent?.recoveredId
+          ? await client.browsers.retrieve(intent.recoveredId, {}, KERNEL_CREATE_REQUEST_OPTIONS)
+          : await resumeNativeCreate(() =>
+              client.browsers.create(
+                {
+                  headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
+                  stealth,
+                  telemetry: kernelCaptchaTelemetryConfig(),
+                  gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+                  // Do not let Chromium reopen the profile's previous window. The new-tab
+                  // page created by this policy is replaced below along with any unexpected
+                  // restored pages, leaving one clean bootstrap tab.
+                  chrome_policy: { RestoreOnStartup: 5 },
+                  timeout_seconds: kernelTimeoutSeconds(),
+                  viewport: { width: 1280, height: 800, refresh_rate: 60 },
+                  ...(profile.profileId !== null
+                    ? { profile: { id: profile.profileId, save_changes: true } }
+                    : {}),
+                  ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
+                  tags: kernelResumeTags(agentId, intent),
+                },
+                KERNEL_CREATE_REQUEST_OPTIONS
+              )
+            );
         log.info('Kernel browser creation completed', {
           agentId,
           sessionId: session.session_id,
@@ -263,7 +248,9 @@ async function createRemoteSession(
         if (validationBrowser !== null) {
           try {
             await ensureKernelSessionFileDirectories(session.session_id);
-            const closedTabCount = await resetKernelSessionTabs(validationBrowser);
+            const closedTabCount = intent?.recoveredId
+              ? 0
+              : await resetKernelSessionTabs(validationBrowser);
             // Visible live-view cue while Kernel's stealth auto-solver runs.
             // Agent CDP attach re-installs this — validation connections close
             // before the worker attaches (see captchaSolveIndicator.ts).
@@ -542,6 +529,7 @@ async function recreateKernelSession(
   // location would silently move the session back.
   const recordedLocation =
     opts.forceManagedProxyType === undefined &&
+    previousSessionId !== null &&
     managedKernelProxyFromSource(oldSession.kernelProxySource) !== undefined
       ? await recordedKernelProxyLocation(kernelClient(), previousSessionId)
       : undefined;
@@ -563,6 +551,9 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
+      // Logical browsers keep their bound Kernel profile too: its saved state is
+      // what carries a live sign-in across rotate_ip, which (unlike pause) takes
+      // no checkpoint before replacing the provider session.
       ...kernelRecreateProxySelection(
         oldSession.kernelProxySource,
         oldSession.proxyTier,
@@ -579,13 +570,14 @@ async function recreateKernelSession(
   try {
     if (!opts.keepValidationConnection) await remote.validationBrowser.close().catch(() => {});
 
+    await browserResumeScope()?.assertOwned();
     const replaced = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: previousSessionId },
+      where: replacementBinding(taskId, oldSession),
       data: {
         sessionId: remote.sessionId,
         debugUrl: remote.debugUrl,
         wsUrl: remote.wsUrl,
-        status: 'ACTIVE',
+        status: oldSession.logicalOwnerKey ? 'PAUSED' : 'ACTIVE',
         closedAt: null,
         provider: 'kernel',
         kernelProxySource: remote.proxySource,
@@ -612,6 +604,7 @@ async function recreateKernelSession(
     // tolerates 404); on the rotate path it is still live and must be reaped.
     if (
       oldSession.provider === 'kernel' &&
+      previousSessionId !== null &&
       previousSessionId !== '' &&
       previousSessionId !== remote.sessionId
     ) {
@@ -626,6 +619,7 @@ async function recreateKernelSession(
     const savedUrl = oldSession.currentUrl || oldSession.startUrl || undefined;
     if (
       savedUrl &&
+      !oldSession.logicalOwnerKey &&
       (opts.keepValidationConnection || (await validateSessionConnection(remote.wsUrl)))
     ) {
       const { chromium } = await import('playwright');

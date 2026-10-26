@@ -18,7 +18,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         spawn_agent,
     )
     from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+    from domains.user_tools.handler import declared_user_tools, pin_user_tools, run_user_tool
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers import (
         check_user_usage,
@@ -105,12 +106,13 @@ with workflow.unsafe.imports_passed_through():
         _verifier_superseded_by_user_feedback,
         run_agent,
     )
-    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
+    from providers.demo_cache.google_oauth_demo_fixture import matches_demo_goal, normalize_completion_notice
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
     from tools.call_phone_number import get_manager as get_call_phone_manager
+    from tools.display import display
     from tools.gate import (
         GateRejectedError,
         build_subscription_gate,
@@ -144,11 +146,28 @@ with workflow.unsafe.imports_passed_through():
         build_verifier_prompt,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.user_tool_models import is_user_tool_name
     from workflows.agent_control import AgentControlMixin
     from workflows.background_agents import BackgroundAgentsMixin
     from workflows.environment_context import EnvironmentContextMixin
 
 logger = structlog.get_logger()
+
+# Loop-critical control-plane read (poll_new_messages), modelled on Claude
+# Code's session-transcript ingress client: 20 s per request
+# (claude-code-src/src/services/api/sessionIngress.ts:428), 10 attempts
+# (:25), 500 ms base delay (:26) doubling to an 8 s cap (:178). Worst case is
+# about 10 x 20 s + 47.5 s of backoff, enough to ride out a saturated-worker
+# burst (RCA P9: 30 s x 3 gave up after ~94 s) before the run() wrapper ends
+# the agent FAILED with the real error. Permanent 4xx responses are raised
+# non-retryable by the activity itself.
+CONTROL_PLANE_POLL_TIMEOUT = timedelta(seconds=20)
+CONTROL_PLANE_POLL_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=500),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=8),
+    maximum_attempts=10,
+)
 
 # Consecutive transient parent-state read failures (while paused-by-parent) after
 # which a child treats its parent as gone and aborts. Backstop for when the parent
@@ -197,7 +216,7 @@ ATTENTION_CONTROL_RESPONSES = frozenset(
 def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
     """Return durable provider provenance for usage accounting.
 
-    Legacy Fast Mode cache entries serialize the literal ``unknown`` when the
+    Legacy DEMO cache entries serialize the literal ``unknown`` when the
     original transport model was not stored. Treating that sentinel as a model
     creates an unactionable ``unclassified`` bucket in benchmark artifacts.
     The requested pool alias is still known and encodes the credential path, so
@@ -207,7 +226,7 @@ def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> s
     return requested_model if not candidate or candidate == "unknown" else candidate
 
 
-def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
+def _demo_cache_compute_affinity_key(user_id: str, goal: str) -> str:
     material = _json.dumps(
         {"version": 1, "user_id": user_id, "goal": goal},
         sort_keys=True,
@@ -227,6 +246,7 @@ TOOL_EXECUTORS = {
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
+    "display": display,
     "web_search": web_search,
     "web_fetch": web_fetch,
     "message_person": message_person,
@@ -409,7 +429,7 @@ def strip_fast_mode_card_narration(text: str) -> str:
     """Drop Fast Mode lead-in sentences; keep extracted report text.
 
     July Fast Mode sometimes prefixes a valid Extracted Output block with
-    ``Fast Mode cache trajectory ended...``. T7 forbids that substring even
+    ``DEMO cache trajectory ended...``. T7 forbids that substring even
     when the rest of the card is a real 200+ character summary.
     """
     raw = str(text or "").strip()
@@ -546,12 +566,61 @@ def _section_matches_field(title: str, field_name: str) -> bool:
     return False
 
 
+def _schema_field_types(schema: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    return {
+        str(field.get("name")): str(field.get("type") or "")
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    }
+
+
+def _may_fill(current: Dict[str, Any], name: str, value: Any, field_type: str) -> bool:
+    """Whether a transcript-derived value may fill ``name``.
+
+    An absent key is filled as before (a demo root's report text is materialized
+    into files later). A key the verifier returned empty ([] / "") was judged
+    ungrounded; only a value of the field's own type may replace it.
+    """
+    if value in (None, "", [], {}):
+        return False
+    if name not in current or current[name] is None:
+        return True
+    return current[name] in ("", [], {}) and _fits_field_type(value, field_type)
+
+
+def _fits_field_type(value: Any, field_type: str) -> bool:
+    """True when a transcript-derived value has the field's declared response_schema type."""
+    if not field_type:
+        return True  # untyped legacy schema field
+    if field_type == "str":
+        return isinstance(value, str)
+    if field_type == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if field_type == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if field_type == "bool":
+        return isinstance(value, bool)
+    if field_type in ("object", "file_pointer"):
+        return isinstance(value, dict)
+    if field_type.startswith("list["):
+        if not isinstance(value, list):
+            return False
+        item_type = field_type[len("list[") : -1]
+        return all(_fits_field_type(item, item_type) for item in value)
+    return True
+
+
 def _fill_from_row_and_sections(
     merged: Dict[str, Any],
     names: List[str],
     context: List[Dict[str, Any]],
+    types: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     empty = (None, "", [], {})
+    types = types or {}
+
+    def fits(name: str, value: Any) -> bool:
+        return _may_fill(merged, name, value, types.get(name, ""))
 
     def missing() -> List[str]:
         return [name for name in names if name not in merged or merged[name] in empty]
@@ -563,10 +632,15 @@ def _fill_from_row_and_sections(
             for raw_key, value in obj.items():
                 target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
                 if target and target in names and merged.get(target) in empty + (None,):
-                    if value not in empty:
+                    if value not in empty and fits(target, value):
                         merged[target] = value
             for name in names:
-                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                if (
+                    name in obj
+                    and obj[name] not in empty
+                    and merged.get(name) in empty + (None,)
+                    and fits(name, obj[name])
+                ):
                     merged[name] = obj[name]
             items = obj.get("items")
             if (
@@ -602,7 +676,7 @@ def _fill_from_row_and_sections(
             if title in used_titles:
                 continue
             for name in missing():
-                if not _section_matches_field(title, name):
+                if not _section_matches_field(title, name) or not fits(name, body):
                     continue
                 merged[name] = body
                 used_titles.add(title)
@@ -639,6 +713,8 @@ def coalesce_structured_response(
         empty = (None, "", [], {})
         return [name for name in names if name not in current or current[name] in empty]
 
+    field_types = _schema_field_types(schema)
+
     if not _missing(merged):
         return merged
     for message in reversed(context or []):
@@ -652,7 +728,7 @@ def coalesce_structured_response(
         if not extracted:
             continue
         for key, value in extracted.items():
-            if key not in merged or merged[key] in (None, "", [], {}):
+            if _may_fill(merged, key, value, field_types.get(key, "")):
                 merged[key] = value
         if not _missing(merged):
             break
@@ -673,7 +749,7 @@ def structured_response_from_evidence(
         if isinstance(field, dict) and field.get("name")
     ]
     if names:
-        merged = _fill_from_row_and_sections(merged, names, context)
+        merged = _fill_from_row_and_sections(merged, names, context, _schema_field_types(schema))
     return merged or structured_response
 
 
@@ -757,16 +833,21 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
-        # Fast Mode cache namespace goal — the persisted Agent-row goal, which may
+        # DEMO cache namespace goal — the persisted Agent-row goal, which may
         # differ from the workflow-input goal (chat escalation passes an LLM-refined
         # goal that varies run to run). All cache keying threads this, never self.goal.
-        self.fast_cache_goal: Optional[str] = None
+        self.demo_cache_goal: Optional[str] = None
         # Tree-root goal for DEMO inheritance. Child cache keys stay on
-        # fast_cache_goal; wait_for / spawn gates read this when the child's
+        # demo_cache_goal; wait_for / spawn gates read this when the child's
         # own spawn goal is not the catalog prefix.
         self.root_goal: Optional[str] = None
+        self._browser_activity_cleanup_unknown: bool = False
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
+        # User-authored tools pinned once per run (domains/user_tools); carried
+        # across continue_as_new so a mid-run publish never changes the toolset.
+        self.user_tools: Dict[str, Any] = {}
+        self.user_tools_pinned: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
@@ -813,6 +894,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
+        # The startup agent-config read failed, so output_schema is unknown
+        # (not known-absent) until a later read succeeds.
+        self._agent_config_unavailable: bool = False
+        # Getter reloads back off across turns while the read keeps failing.
+        self._agent_config_retry_count: int = 0
+        self._agent_config_retry_at: Optional[datetime] = None
         self._response_schema_applied_revision: int = 0
         self._response_schema_accepted_revision: int = 0
         self._response_schema_initialized: bool = False
@@ -906,7 +993,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
-        self.compute_token_fast_cache_affinity_key: Optional[str] = None
+        self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
@@ -1024,6 +1111,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             }
         if isinstance(state.get("memory_enabled"), bool):
             self.memory_enabled = state["memory_enabled"]
+        if isinstance(state.get("user_tools"), dict):
+            self.user_tools = dict(state["user_tools"])
+            self.user_tools_pinned = True
         self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
@@ -1127,6 +1217,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._has_credits = runtime.get("has_credits", self._has_credits) is True
         self._last_credit_check = int(runtime.get("last_credit_check", 0))
         self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
+        self._browser_activity_cleanup_unknown = runtime.get("browser_activity_cleanup_unknown") is True
         self._signup_completed = runtime.get("signup_completed") is True
         self._signup_dismissed = runtime.get("signup_dismissed") is True
         if isinstance(runtime.get("context"), list):
@@ -1177,18 +1268,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
         last_parent_state = runtime.get("last_parent_state")
         self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
-        for field_name in (
-            "compute_token_lineage_key",
-            "compute_token_fast_cache_affinity_key",
-            "actual_model",
-            "system_name",
-            "custom_system_prompt",
-            "agent_source",
-            "user_context_section",
-            "fast_cache_goal",
-            "root_goal",
+        # Runtime keys are persisted across continuation runs, so the DEMO cache
+        # fields keep their original stored names (fast_cache_*).
+        for runtime_key, field_name in (
+            ("compute_token_lineage_key", "compute_token_lineage_key"),
+            ("compute_token_fast_cache_affinity_key", "compute_token_demo_cache_affinity_key"),
+            ("actual_model", "actual_model"),
+            ("system_name", "system_name"),
+            ("custom_system_prompt", "custom_system_prompt"),
+            ("agent_source", "agent_source"),
+            ("user_context_section", "user_context_section"),
+            ("fast_cache_goal", "demo_cache_goal"),
+            ("root_goal", "root_goal"),
         ):
-            value = runtime.get(field_name)
+            value = runtime.get(runtime_key)
             if isinstance(value, str):
                 setattr(self, field_name, value)
         if isinstance(runtime.get("model_pricing_cache"), dict):
@@ -1319,6 +1412,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "max_iterations": self.max_iterations,
             "context_gates": dict(self.context_gates),
             "memory_enabled": bool(getattr(self, "memory_enabled", False)),
+            **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
@@ -1357,6 +1451,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "has_credits": self._has_credits,
                 "last_credit_check": self._last_credit_check,
                 "write_lock_enabled": self.write_lock_enabled,
+                **({"browser_activity_cleanup_unknown": True}
+                   if self._browser_activity_cleanup_unknown else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
                 "context": list(context or self.context),
@@ -1377,7 +1473,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
                 "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
-                "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
+                "compute_token_fast_cache_affinity_key": (self.compute_token_demo_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
                 "output_cents_per_1k": self.output_cents_per_1k,
                 "model_pricing_cache": dict(self.model_pricing_cache),
@@ -1386,7 +1482,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
-                "fast_cache_goal": self.fast_cache_goal,
+                "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
@@ -1437,7 +1533,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """Keep iteration/cache history across replacement and continuation runs."""
         values = {
             "iteration_offset": self.iteration_offset,
-            "fast_cache_position_offset": self.iteration_offset,
+            "demo_cache_position_offset": self.iteration_offset,
         }
         if self.max_iterations is not None:
             values["max_iterations"] = self.max_iterations
@@ -1636,7 +1732,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if not self._response_schema_baseline_initialized:
             first_user = next((message for message in messages if _real_user_requirement_keys([message])), None)
             if first_user is not None:
-                if first_user.get("text") in (self.goal, self.fast_cache_goal):
+                if first_user.get("text") in (self.goal, self.demo_cache_goal):
                     self._response_schema_feedback_rows.update(_real_user_requirement_keys([first_user]))
                 self._response_schema_baseline_initialized = True
         for message in messages:
@@ -1959,6 +2055,67 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
         memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
     ) -> Dict:
+        """Execute agent task; an escaping activity failure ends the agent FAILED."""
+        try:
+            return await self._run_phases(
+                agent_id,
+                user_id,
+                goal,
+                model,
+                reasoning_max_tokens,
+                verifier,
+                context,
+                parent_workflow_id,
+                parent_agent_id,
+                depth,
+                bus_id,
+                start_phase,
+                max_iterations,
+                price_limit_cents,
+                context_gates,
+                fast_mode_cache_enabled,
+                resume_state,
+                world_model_mode,
+                memory_enabled,
+            )
+        except FailureError as e:
+            # Only Temporal failures (ActivityError, ApplicationError, ...) end the
+            # execution; other exceptions fail just the workflow task, which
+            # Temporal retries without a terminal status. An escaping activity
+            # failure (e.g. poll_new_messages timing out on a saturated worker)
+            # would otherwise close the execution with the agent row still ACTIVE,
+            # and the parent would wait on it indefinitely. End it FAILED instead.
+            if self._is_finished or any(
+                error_chain_has_type(e, kind)
+                for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested")
+            ):
+                raise
+            message = f"Execution stopped by an unrecoverable error: {extract_error_message(e)}"
+            await self._mark_failed(context=self.context, reason="workflow_error", message=message)
+            return {"status": "failed", "reason": "workflow_error", "goal": goal}
+
+    async def _run_phases(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+        model: str,
+        reasoning_max_tokens: int,
+        verifier: Dict,
+        context: Optional[List[Dict]] = None,
+        parent_workflow_id: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        depth: int = 0,
+        bus_id: Optional[str] = None,
+        start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
+        max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
+        price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
+        context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
+        fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
+        resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
+        world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
+    ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
@@ -1970,8 +2127,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.root_agent_id = root_agent_id
         self.user_id = user_id
         self.goal = goal
-        self.fast_cache_goal = goal  # Overridden by the persisted row goal below
-        self.fast_cache_root_goal = goal
+        self.demo_cache_goal = goal  # Overridden by the persisted row goal below
+        self.demo_cache_root_goal = goal
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -1982,7 +2139,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         # Arg is the Fast Mode button (LLM provider speed). Cache replay is
-        # DEMO-prompt only and ignores the button. Catalog DEMO / fast_cache:on
+        # DEMO-prompt only and ignores the button. Catalog DEMO / demo_cache:on
         # goals (incl. small fleet-concurrency probes) share the same gate via
         # is_demo_cache_task; mass-agent-only spawn rules stay on
         # is_oai_demo_mass_agent_task.
@@ -1995,18 +2152,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
-        # continue_as_new / deployment resume may restore fast_cache_goal from
+        # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
         # so a non-demo input goal cannot leave cache replay disabled when the
         # durable goal is demo (the persisted-goal resolver below no-ops when
         # the restored goal already matches).
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
-        self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or goal)
+        self.compute_token_demo_cache_affinity_key = (
+            _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal or goal)
             if self.fast_mode_cache_enabled
             else None
         )
@@ -2174,19 +2331,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             persisted_goal = cache_context.get("goal") if isinstance(cache_context, dict) else None
             root_goal = cache_context.get("root_goal") if isinstance(cache_context, dict) else None
             if persisted_goal:
-                if persisted_goal != self.fast_cache_goal:
+                if persisted_goal != self.demo_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
-                self.fast_cache_goal = persisted_goal
+                self.demo_cache_goal = persisted_goal
             if root_goal:
-                self.fast_cache_root_goal = root_goal
+                self.demo_cache_root_goal = root_goal
                 self.root_goal = root_goal
             if isinstance(cache_context, dict) and cache_context.get("resolved", isinstance(persisted_goal, str)):
                 self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
                 self.provider_fast_mode = bool(cache_context.get("provider_fast_mode", self.provider_fast_mode))
-            self.compute_token_fast_cache_affinity_key = (
-                _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal)
+            self.compute_token_demo_cache_affinity_key = (
+                _demo_cache_compute_affinity_key(user_id, self.demo_cache_goal)
                 if self.fast_mode_cache_enabled
                 else None
             )
@@ -2269,6 +2426,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 )
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                self._agent_config_unavailable = True
                 return {}
 
         (
@@ -2329,6 +2487,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # startup generation establishes the initial contract; later genuine user
         # feedback refreshes the accepted native schema asynchronously.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
+        # Pin the user's published tools once (root, real world only; restored on continue_as_new).
+        await pin_user_tools(
+            self,
+            is_root=not is_sub_agent and self.depth == 0 and self.world_model_mode == "real",
+            wf_api=workflow,
+        )
         startup_execute_context: Optional[List[Dict[str, Any]]] = None
         # Chat re-escalation after a terminal run starts a new workflow with
         # plan|execute and no resume_state. continue_as_new / deploy resume
@@ -2340,8 +2504,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             startup_execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
@@ -2363,7 +2527,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         # this text, so the stable goal keeps it cacheable (and
                         # matches the TS-side setResponseSchema, which reads the
                         # Agent row).
-                        [self.fast_cache_goal],
+                        [self.demo_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
                         True,
@@ -2527,9 +2691,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 get_gpt_token_source=self._active_gpt_source,
                 get_gpt_token_pool_id=self._active_gpt_pool_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                goal_text=self.fast_cache_goal,
+                goal_text=self.demo_cache_goal,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -2567,8 +2731,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             execute_context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             execute_context = filter_internal_subagent_messages(execute_context)
 
@@ -2761,9 +2925,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             get_gpt_token_source=self._active_gpt_source,
             get_gpt_token_pool_id=self._active_gpt_pool_id,
             compute_token_lineage_key=self.compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-            goal_text=self.fast_cache_goal,
+            goal_text=self.demo_cache_goal,
             **self._iteration_resume_kwargs(),
         )
 
@@ -2825,8 +2989,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             context = filter_internal_subagent_messages(context)
 
@@ -2852,11 +3016,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 gpt_token_pool_id=self._active_gpt_pool_id(),
                 gpt_token_user_id=user_id,
                 compute_token_lineage_key=self.compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=self.compute_token_demo_cache_affinity_key,
                 is_plan_loop=False,
                 tool_call_id=tool_call_id,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                fast_mode_goal=self.fast_cache_goal,
+                fast_mode_goal=self.demo_cache_goal,
                 fast_mode_step=0,
                 interrupts=self._dag_hooks(),
             )
@@ -2919,8 +3083,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             return {
                 "score": 0.0,
@@ -2943,6 +3107,41 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
 
         return generate
 
+    async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
+        """Read output_schema from the agent row while it is missing.
+
+        ``poll_until_present`` keeps polling a successful read that returns no
+        schema yet (async schema generation at completion); otherwise the first
+        successful read is final: no schema then means the task has none.
+        """
+        attempt = 0
+        while self.output_schema is None and attempt < max_attempts:
+            attempt += 1
+            try:
+                agent_config = await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[self.agent_id],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch output_schema (attempt {attempt}): {e}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                continue
+            self._agent_config_unavailable = False
+            self._agent_config_retry_count = 0
+            self._agent_config_retry_at = None
+            self.output_schema = agent_config.get("response_schema")
+            workflow.logger.info(
+                f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
+            )
+            if self.output_schema is not None or not poll_until_present:
+                return
+            if attempt < max_attempts:
+                workflow.logger.info("Schema not ready, waiting 1s...")
+                await asyncio.sleep(1)
+
     def _make_response_schema_getter(self):
         """Create a getter that returns the current output_schema.
 
@@ -2953,9 +3152,30 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         async def get_schema() -> Optional[Dict]:
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
+            if self.output_schema is None and self._agent_config_unavailable:
+                await self._reload_output_schema_with_backoff()
             return self.output_schema
 
         return get_schema
+
+    async def _reload_output_schema_with_backoff(self) -> None:
+        """One config read per turn; failures back off exponentially across turns.
+
+        The getter runs every main-loop turn, so retries must not stack inside a
+        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
+        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
+        correlated backend outage. workflow.now()/random() keep it deterministic.
+        """
+        now = workflow.now()
+        if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
+            return
+        await self._load_output_schema(poll_until_present=False, max_attempts=1)
+        if not self._agent_config_unavailable:
+            return
+        self._agent_config_retry_count += 1
+        base = min(2.0 ** (self._agent_config_retry_count - 1), 60.0)
+        delay = base + workflow.random().random() * 0.25 * base
+        self._agent_config_retry_at = now + timedelta(seconds=delay)
 
     def _require_current_response_schema_acceptance(self) -> None:
         """Do not certify a processed failure as acceptance of new requirements."""
@@ -2968,7 +3188,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
     async def _response_schema_user_messages(self) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
-        goal = self._response_schema_task_base or (self.fast_cache_goal or self.goal or "").strip()
+        goal = self._response_schema_task_base or (self.demo_cache_goal or self.goal or "").strip()
         if goal:
             messages.append(goal)
         if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
@@ -2984,8 +3204,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             persisted_messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
         except Exception as e:
             if any(
@@ -3563,6 +3783,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
+            # Read the latest known schema without waiting for async schema regeneration.
+            run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
+            run_agent_kwargs["jev_goal"] = self.goal
+            run_agent_kwargs["jev_agent_kind"] = "normal_child" if self.parent_agent_id else "normal_root"
             run_agent_kwargs["get_pending_background_status"] = self._pending_background_status_text
             run_agent_kwargs["verifier_interrupts"] = self._dag_hooks()
             run_agent_kwargs["sync_environment_context"] = self._sync_environment_context
@@ -3718,7 +3943,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     self.compute_token_lineage_key,
                     self.agent_id,
                     self.agent_id,
-                    self.compute_token_fast_cache_affinity_key,
+                    self.compute_token_demo_cache_affinity_key,
                     token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
@@ -3788,7 +4013,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         if self.compute_token_provider == "gpt" and self.gpt_code_token:
             return {
@@ -3801,7 +4026,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
-                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
+                "fastCacheAffinityKey": self.compute_token_demo_cache_affinity_key,
             }
         return None
 
@@ -3879,8 +4104,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         messages = await workflow.execute_activity(
             poll_new_messages,
             args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+            retry_policy=CONTROL_PLANE_POLL_RETRY,
         )
 
         terminal_tool_call_ids = set()
@@ -4019,8 +4244,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, last_checked],  # Use run_agent's timestamp, not self.last_message_check
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             note_context_snapshot(self, snapshot_mark)
 
@@ -4121,6 +4346,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # Leftover-safe: Fast Mode waits for explore like live, so this
             # is a no-op unless something still tracked a handle.
             await self._drain_fast_mode_explores()
+        if is_user_tool_name(tool_name):
+            # Pinned user-authored tool: runs its own activity and posts its own
+            # FINISHED/ERROR TOOL message (never raises).
+            return await run_user_tool(self, tool_name, tool_args, tool_call_id, wf_api=workflow)
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(
@@ -4225,7 +4454,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     self.fast_mode_cache_enabled or fast_mode_write_through
                 ):
                     extra_executor_kwargs["fast_mode_cache_enabled"] = self.fast_mode_cache_enabled
-                    extra_executor_kwargs["fast_mode_goal"] = self.fast_cache_goal
+                    extra_executor_kwargs["fast_mode_goal"] = self.demo_cache_goal
                     extra_executor_kwargs["fast_mode_cache_write_enabled"] = (
                         self.fast_mode_cache_enabled or fast_mode_write_through
                     )
@@ -4464,10 +4693,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 self._active_gpt_pool_id(),
                 self.user_id,
                 self.compute_token_lineage_key,
-                self.compute_token_fast_cache_affinity_key,
+                self.compute_token_demo_cache_affinity_key,
                 self.user_id,
                 self.fast_mode_cache_enabled,
-                self.fast_cache_goal,
+                self.demo_cache_goal,
                 None,
                 True,
                 True,
@@ -5230,7 +5459,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     f"in={tokens_in_delta}, out={tokens_out_delta}{cache_info})"
                 )
 
-        # Token aggregation is independent of price. Direct-token and fast-cache
+        # Token aggregation is independent of price. Direct-token and demo-cache
         # calls must still update the child subtree reported to the parent.
         await self._update_cost_and_signal_parent()
 
@@ -5483,6 +5712,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # order, so an older snapshot must never be in flight beside a newer one.
         background_changed = self._background_tree_snapshot() != getattr(self, "_persisted_background_tasks", [])
         if not self.bus_id:
+            if status is not None:
+                # No bus to broadcast on, but an explicit transition (e.g. paused
+                # awaiting the user's auth help) must still reach the DB, exactly
+                # as it does for a tree member; otherwise the root reads ACTIVE.
+                async with self._background_tasks_write_lock:
+                    payload: Dict[str, Any] = {"status": status, "_statusExplicit": True}
+                    background_tasks = self._background_tree_snapshot()
+                    carries_background = background_tasks != getattr(self, "_persisted_background_tasks", [])
+                    if carries_background:
+                        payload["backgroundTasks"] = background_tasks
+                    if await self._send_tree_state(list(self.tools_in_use), payload) and carries_background:
+                        self._persisted_background_tasks = background_tasks
+                return
             if background_changed:
                 await self._persist_background_tasks()
             return
@@ -6139,29 +6381,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._persist_tree_cost()
 
         # Poll for output_schema if missing (handles race condition with async schema generation)
-        max_schema_attempts = 5
-        schema_attempt = 0
-        while self.output_schema is None and schema_attempt < max_schema_attempts:
-            schema_attempt += 1
-            try:
-                agent_config = await workflow.execute_activity(
-                    fetch_agent_config,
-                    args=[self.agent_id],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                self.output_schema = agent_config.get("response_schema")
-                workflow.logger.info(
-                    f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}"
-                )
-
-                if self.output_schema is None and schema_attempt < max_schema_attempts:
-                    workflow.logger.info("Schema not ready, waiting 1s...")
-                    await asyncio.sleep(1)
-            except Exception as e:
-                workflow.logger.warning(f"Failed to fetch output_schema (attempt {schema_attempt}): {e}")
-                if schema_attempt < max_schema_attempts:
-                    await asyncio.sleep(1)
+        await self._load_output_schema(poll_until_present=True)
 
         tool_counts = {}
         summary = ""
@@ -6194,8 +6414,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     args=[
                         context,
                         # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                        # GOAL" and it doubles as the Fast Mode cache namespace.
-                        self.fast_cache_goal,
+                        # GOAL" and it doubles as the DEMO cache namespace.
+                        self.demo_cache_goal,
                         self.model,
                         structured_response,
                         self.output_schema,
@@ -6211,7 +6431,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         self.user_id,
                         self.agent_id,
                         self.compute_token_lineage_key,
-                        self.compute_token_fast_cache_affinity_key,
+                        self.compute_token_demo_cache_affinity_key,
                         self.fast_mode_cache_enabled,
                         0,  # Fast Mode step — one completion summary per agent
                     ],

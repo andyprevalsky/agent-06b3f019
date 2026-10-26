@@ -4,7 +4,9 @@
  *
  *   caller ──▶ resolve node (default = caller; must share caller's root + owner)
  *                │
- *                ├─ q? ──▶ goal search in this tree (LIMIT) + ancestor breadcrumbs
+ *                ├─ q / path_prefix? ──▶ goal/path search in this tree (LIMIT) +
+ *                │    ancestor breadcrumbs; the loaded agents' background tasks
+ *                │    match too, so search covers what the node view lists
  *                │
  *                └─ node view: node + `depth` levels of children (`limit` per node,
  *                   keyset `cursor` over node's direct children) and, for the
@@ -23,26 +25,23 @@
  */
 
 import { TERMINAL_STATUSES } from './statusBroadcastWorkflowId';
-import { ROOT_TASK_PATH, agentTaskPath, rootOf } from './agentTaskPath';
+import { rootOf } from './agentTaskPath';
 import { resolveTreeAddress } from './agentAddressResolver';
-import { backgroundTaskNodes, type BackgroundTaskNode } from './agentTreeBackgroundTasks';
+import {
+  backgroundTaskNodes,
+  listedBackgroundTasks,
+  type BackgroundTaskNode,
+} from './agentTreeBackgroundTasks';
+import { loadAncestors, pathEntry, pathTo, type Row, type TreePathEntry } from './agentTreePaths';
+import { searchMatches, type TreeMatch } from './agentTreeSearch';
 import type { AgentTreeQuery } from './types';
 import * as repo from './repoAgentTree';
 
-const MAX_ANCESTOR_LEVELS = 64;
+export type { TreeMatch, TreePathEntry };
+
 export const MAX_TREE_NODES = 150;
 
-type Row = repo.TreeNodeRow;
 type ServiceError = { error: string; status: number };
-
-export interface TreePathEntry {
-  agent_id: string;
-  /** Task path ("/root/outreach/draft_a"); null for agents created before paths. */
-  path: string | null;
-  goal: string;
-  status: string;
-  depth: number;
-}
 
 export interface TreeNode extends TreePathEntry {
   /** 'agent' for agents; explore/browser/code for background tasks (`<owner>/<task>`). */
@@ -53,13 +52,6 @@ export interface TreeNode extends TreePathEntry {
   active_child_count: number;
   /** Tools the agent is running now (the FE banner's toolsInUse). */
   tools_in_use: string[];
-}
-
-export interface TreeMatch extends TreePathEntry {
-  /** Ancestor agent ids root→parent (breadcrumb, also for path-less agents). */
-  ancestor_ids: string[];
-  child_count: number;
-  active_child_count: number;
 }
 
 export interface AgentTreeView {
@@ -90,49 +82,6 @@ function decodeCursor(cursor: string): repo.ChildCursor | null {
   }
 }
 
-/** Load every missing ancestor of `starts` into `known`, one PK query per level. */
-async function loadAncestors(starts: Row[], known: Map<string, Row>): Promise<void> {
-  for (const row of starts) known.set(row.id, row);
-  const missingParents = (rows: Row[]) => [
-    ...new Set(
-      rows
-        .map((row) => row.parentAgentId)
-        .filter((id): id is string => id !== null && !known.has(id))
-    ),
-  ];
-  let frontier = missingParents(starts);
-  for (let level = 0; level < MAX_ANCESTOR_LEVELS && frontier.length > 0; level += 1) {
-    const rows = await repo.findTreeNodesByIds(frontier);
-    for (const row of rows) known.set(row.id, row);
-    frontier = missingParents(rows);
-  }
-}
-
-/** Rows root→`row` from the loaded ancestors (stops at a missing or cyclic parent). */
-function pathTo(row: Row, known: Map<string, Row>): Row[] {
-  const chain: Row[] = [row];
-  const seen = new Set([row.id]);
-  let parentId = row.parentAgentId;
-  while (parentId !== null && !seen.has(parentId)) {
-    const parent = known.get(parentId);
-    if (parent === undefined) break;
-    chain.unshift(parent);
-    seen.add(parent.id);
-    parentId = parent.parentAgentId;
-  }
-  return chain;
-}
-
-function pathEntry(row: Row): TreePathEntry {
-  return {
-    agent_id: row.id,
-    path: agentTaskPath(row),
-    goal: row.goal.slice(0, repo.TREE_GOAL_MAX_CHARS),
-    status: row.status,
-    depth: row.depth,
-  };
-}
-
 function byDepthThenAge(a: Row, b: Row): number {
   return (
     a.depth - b.depth ||
@@ -141,51 +90,51 @@ function byDepthThenAge(a: Row, b: Row): number {
   );
 }
 
-/** `node` is any address (path, "parent", "/root", agent id) in the caller's tree. */
-async function resolveNode(caller: Row, address: string | undefined): Promise<Row | ServiceError> {
-  if (address === undefined || address === caller.id) return caller;
-  const resolved = await resolveTreeAddress(caller, address);
-  if ('error' in resolved) return resolved;
-  if (resolved.recipient_task_id !== null) {
-    return {
-      error: `${address} is a background task (no children); message it with send_message_to_agent`,
-      status: 400,
-    };
-  }
-  if (resolved.agent_id === caller.id) return caller;
-  const [node] = await repo.findTreeNodesByIds([resolved.agent_id]);
-  return node ?? { error: `No agent at ${address}`, status: 404 };
+interface ResolvedNode {
+  row: Row;
+  /** Set when the address names one of `row`'s background tasks (a leaf). */
+  taskId: string | null;
 }
 
-async function searchMatches(
-  rootAgentId: string,
-  ownerId: string,
-  query: AgentTreeQuery,
-  known: Map<string, Row>
-): Promise<TreeMatch[]> {
-  const tokens = (query.q ?? '')
-    .split(/\s+/)
-    .filter((token) => token !== '')
-    .slice(0, 8);
-  const prefix =
-    query.path_prefix === undefined || query.path_prefix === ROOT_TASK_PATH
-      ? null
-      : query.path_prefix.replace(/\/+$/, '');
-  const rows = await repo.searchTreeByGoal(rootAgentId, ownerId, tokens, query.limit, prefix);
-  await loadAncestors(rows, known);
-  const counts = await repo.countDirectChildren(
-    rows.map((row) => row.id),
-    ownerId,
-    TERMINAL_STATUSES
-  );
-  return rows.map((row) => ({
-    ...pathEntry(row),
-    ancestor_ids: pathTo(row, known)
-      .slice(0, -1)
-      .map((ancestor) => ancestor.id),
-    child_count: counts.get(row.id)?.total ?? 0,
-    active_child_count: counts.get(row.id)?.active ?? 0,
-  }));
+/** `node` is any address (path, "parent", "/root", agent id, task) in the caller's tree. */
+async function resolveNode(
+  caller: Row,
+  address: string | undefined
+): Promise<ResolvedNode | ServiceError> {
+  if (address === undefined || address === caller.id) return { row: caller, taskId: null };
+  const resolved = await resolveTreeAddress(caller, address);
+  if ('error' in resolved) return resolved;
+  const taskId = resolved.recipient_task_id;
+  if (resolved.agent_id === caller.id) return { row: caller, taskId };
+  const [row] = await repo.findTreeNodesByIds([resolved.agent_id]);
+  return row === undefined ? { error: `No agent at ${address}`, status: 404 } : { row, taskId };
+}
+
+/** A background task's view: breadcrumbs through its owner and the task alone (no children). */
+function taskView(
+  base: Pick<AgentTreeView, 'root_agent_id' | 'caller_path' | 'node_path'>,
+  owner: Row,
+  taskId: string,
+  address: string
+): AgentTreeView | ServiceError {
+  const entries = listedBackgroundTasks(owner).filter((entry) => entry.address === taskId);
+  const [task] = backgroundTaskNodes([{ ...owner, backgroundTasks: entries }]);
+  if (task === undefined)
+    return { error: `No agent or background task at ${address}`, status: 404 };
+  const crumb: TreePathEntry = {
+    agent_id: task.agent_id,
+    path: task.path,
+    goal: task.goal,
+    status: task.status,
+    depth: task.depth,
+  };
+  return {
+    ...base,
+    node_path: [...base.node_path, crumb],
+    nodes: [task],
+    next_cursor: null,
+    sibling_next_cursor: null,
+  };
 }
 
 interface Expansion {
@@ -255,8 +204,9 @@ export async function getAgentTreeView(
   if (userId !== undefined && caller.userId !== userId) {
     return { error: 'Agent not found', status: 404 };
   }
-  const node = await resolveNode(caller, query.node);
-  if ('error' in node) return node;
+  const resolved = await resolveNode(caller, query.node);
+  if ('error' in resolved) return resolved;
+  const node = resolved.row;
   const after = query.cursor !== undefined ? decodeCursor(query.cursor) : undefined;
   if (after === null) return { error: 'Invalid cursor', status: 400 };
 
@@ -270,8 +220,11 @@ export async function getAgentTreeView(
     node_path: pathTo(node, known).map(pathEntry),
   };
   if (query.q !== undefined || query.path_prefix !== undefined) {
-    const matches = await searchMatches(rootAgentId, caller.userId, query, known);
+    const matches = await searchMatches(caller, rootAgentId, query, known);
     return { ...base, nodes: [], next_cursor: null, sibling_next_cursor: null, matches };
+  }
+  if (resolved.taskId !== null) {
+    return taskView(base, node, resolved.taskId, query.node ?? node.id);
   }
 
   const listed = new Map<string, Row>();

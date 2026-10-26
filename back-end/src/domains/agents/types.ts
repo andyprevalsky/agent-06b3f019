@@ -3,13 +3,10 @@
  */
 
 import { z } from 'zod';
-import {
-  BACKGROUND_TASKS_MAX,
-  agentAddressSchema,
-  backgroundTaskEntrySchema,
-} from './typesAgentTree';
+import { BACKGROUND_TASKS_MAX, backgroundTaskEntrySchema } from './typesAgentTree';
 
 export * from './typesAgentTree';
+export * from './typesAgentMessages';
 export * from './typesAgentControl';
 export type { Prisma } from '@prisma/client';
 
@@ -173,16 +170,22 @@ const createAgentBaseSchema = z.object({
     .optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
-  // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
+  // DEMO cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
   // Planner memory: retrieve compressed past trajectories for similar goals and
   // fork a get_memories tool call into the planner context. Own first-class
   // flag (not a context gate). Default off; sub-agents inherit their parent's.
   memory_enabled: z.boolean().optional(),
+  /** Owning Project (left-bar grouping); sub-agents inherit the parent's when omitted. */
+  project_id: z.string().uuid().nullable().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
+  // "New agent in this branch": this agent's code-agent spawns work in the
+  // named agent's code session (same worktree, branch and CLI conversation)
+  // instead of getting their own branch. Must be an agent the caller owns.
+  share_code_session_with: z.string().uuid().optional(),
 });
 
 function validateParentWorkflowPair(
@@ -221,6 +224,20 @@ export const postMessageSchema = z.object({
       since: z.coerce.date().optional(),
     })
     .optional(),
+});
+
+export const progressEstimateSchema = z.object({
+  progress: z.number().min(0).max(1),
+  etaSeconds: z.number().min(60).max(31536000),
+  observedAt: z.string().datetime(),
+  sequence: z.number().int().nonnegative(),
+  model: z.literal('jev-1.13.0'),
+  promptVersion: z.string(),
+  taskId: z.string().optional(),
+});
+
+export const updateProgressEstimateSchema = z.object({
+  progressEstimate: progressEstimateSchema.nullable(),
 });
 
 export const updateStatusSchema = z.object({
@@ -326,34 +343,3 @@ export type BatchCreateAgentsBody = z.infer<typeof batchCreateAgentsSchema>;
 export type PostMessageBody = z.infer<typeof postMessageSchema>;
 export type UpdateStatusBody = z.infer<typeof updateStatusSchema>;
 export type UpdateAgentBody = z.infer<typeof updateAgentSchema>;
-
-// ---------------------------------------------------------------------------
-// Agent-to-agent messages (same agent tree only)
-// ---------------------------------------------------------------------------
-
-export const AGENT_MESSAGE_MAX_CHARS = 20_000;
-export const agentMessageSchema = z.object({
-  from_agent_id: z.string().uuid(),
-  message: z
-    .string()
-    .max(AGENT_MESSAGE_MAX_CHARS)
-    .refine((text) => text.trim().length > 0, 'message must not be blank'),
-  idempotency_key: z.string().min(1).max(200),
-  recipient_task_id: z.string().min(1).max(200).optional(),
-});
-export const agentInboxQuerySchema = z.object({
-  task_id: z.string().min(1).max(200),
-  since: z.coerce.date().optional(),
-});
-// POST /:sender/send-agent-message: like agentMessageSchema, addressed by `to`.
-export const agentAddressMessageSchema = z.object({
-  to: agentAddressSchema,
-  message: z
-    .string()
-    .max(AGENT_MESSAGE_MAX_CHARS)
-    .refine((text) => text.trim().length > 0, 'message must not be blank'),
-  idempotency_key: z.string().min(1).max(200),
-});
-export type AgentAddressMessageBody = z.infer<typeof agentAddressMessageSchema>;
-export type AgentMessageBody = z.infer<typeof agentMessageSchema>;
-export type AgentInboxQuery = z.infer<typeof agentInboxQuerySchema>;

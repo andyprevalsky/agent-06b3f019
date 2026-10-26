@@ -36,6 +36,8 @@ export interface DripStyles {
 }
 
 export interface QueryInputProps {
+  /** Real terminal composers sit above app panels and their icon category. */
+  liftAboveApps?: boolean;
   /**
    * Rendered flush on top of the input box (same column + edges), e.g. the
    * "Running N agents" banner. When it renders, the box's top corners square
@@ -44,7 +46,7 @@ export interface QueryInputProps {
   topAttachment?: React.ReactNode;
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (attachments?: FilePointer[]) => void;
+  onSubmit: (attachments?: FilePointer[]) => void | Promise<boolean>;
   disabled?: boolean;
   placeholder?: string;
   selectedModel?: string;
@@ -70,6 +72,13 @@ export interface QueryInputProps {
   agentId?: string;
   pendingPriceLimitCents?: number;
   onPendingPriceLimitChange?: (cents: number) => void;
+  /**
+   * Rose Desktop code-agent view: native direct delivery with attachments and
+   * session controls; excludes the Rose-only nub tab and pinned tools.
+   */
+  directChannel?: boolean;
+  draftKey?: string;
+  sessionControls?: React.ReactNode;
 }
 
 export const DEFAULT_DRIP_STYLES: DripStyles = {

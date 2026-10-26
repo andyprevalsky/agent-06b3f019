@@ -503,21 +503,26 @@ def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, pe
     assignments = []
     for key in ("FLEET_PRIMARY_VM_SIZE", "FLEET_PRIMARY_VM_MEMORY",
                 "FLEET_BUNDLED_FRONTEND_VM_SIZE", "FLEET_BUNDLED_FRONTEND_VM_MEMORY",
-                "FLEET_SIM_VM_SIZE", "FLEET_SIM_VM_MEMORY"):
+                "FLEET_SIM_VM_SIZE", "FLEET_SIM_VM_MEMORY",
+                "FLEET_FANOUT_MIN_AGENT_COUNT", "FLEET_FANOUT_VM_SIZE", "FLEET_FANOUT_VM_MEMORY"):
         matches = [line for line in source.splitlines() if line.startswith(key + "=")]
         if len(matches) != 1:
             raise ValueError("ambiguous actual VM profile")
         assignments.extend(matches)
     functions = [next(line for line in source.splitlines() if line.startswith("is_sim_on() {"))]
-    for name in ("bench_simulates", "bench_needs_large_primary", "primary_vm_size_for_bench",
+    for name in ("bench_simulates", "bench_needs_large_primary", "bench_declares_fanout", "primary_vm_size_for_bench",
                  "primary_vm_memory_for_bench"):
         start = source.index(name + "() {")
         functions.append(source[start:source.index("\n}\n", start) + 3])
     browser_names = [row["name"] for row in rows if row.get("requires_browser_agent")]
+    fanout_threshold = int(next(a for a in assignments if a.startswith("FLEET_FANOUT_MIN_AGENT_COUNT=")).split("=", 1)[1])
+    fanout_names = [row["name"] for row in rows
+                    if type(row.get("min_agent_count")) is int and row["min_agent_count"] >= fanout_threshold]
     # A catalog simulate task serves the native WMH on a large guest; plan it so.
     modes = ["simulate" if str(row.get("world_model_mode") or "").lower() == "simulate" else "real" for row in rows]
     script = "set -euo pipefail\nINFRA_PROBE=0\nSIM_ON_CSV=\n" + "\n".join(assignments + functions)
     script += "\nCATALOG_BROWSER_REQUIRED_TASKS=(" + " ".join(shlex.quote(name) for name in browser_names) + ")\n"
+    script += "CATALOG_FANOUT_TASKS=(" + " ".join(shlex.quote(name) for name in fanout_names) + ")\n"
     script += "BENCHES=(" + " ".join(shlex.quote(name) for name in names) + ")\n"
     script += "CATALOG_MODES=(" + " ".join(modes) + ")\n"
     for name in names:
@@ -658,28 +663,58 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def terminal_task(root: Path, job: dict[str, object]) -> tuple[Path, dict, dict] | None:
+    """The job's physical fleet handle, run record and its one task row, without regrading."""
+    fleet = None
+    with Path(str(job["log"])).open(errors="replace") as stream:
+        for line in stream:
+            if "/scripts/run-bench monitor " not in line:
+                continue
+            fields = shlex.split(line.strip())
+            if len(fields) >= 3 and fields[0] == str(root / "scripts/run-bench") and fields[1] == "monitor":
+                fleet = Path(fields[2]).resolve()
+                break
+    if fleet is None or not fleet.is_relative_to(root / ".context"):
+        return None
+    record = json.loads((fleet / "_batch/run.json").read_text())
+    tasks = record.get("tasks") or []
+    if len(tasks) != 1 or tasks[0].get("name") != job["task"]:
+        raise ValueError("terminal task binding changed")
+    return fleet, record, tasks[0]
+
+
+def task_verdict(task: dict) -> dict[str, object]:
+    """The recorded task status and whether it is a confirmed infrastructure failure."""
+    status = str(task.get("benchmark_status") or task.get("status") or "").upper()
+    return {"task_status": status,
+            "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
+            "terminal_task": isinstance(task.get("passed"), bool) and status in {
+                "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED",
+                "SKIPPED"}}
+
+
+def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
+    """The exited attempt's recorded verdict; empty (unknown) when no run record exists."""
+    try:
+        found = terminal_task(root, job)
+        return {} if found is None else task_verdict(found[2])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
     """Read the existing physical result and full-release seal, without regrading."""
     try:
-        fleet = None
-        with Path(str(job["log"])).open(errors="replace") as stream:
-            for line in stream:
-                if "/scripts/run-bench monitor " not in line:
-                    continue
-                fields = shlex.split(line.strip())
-                if len(fields) >= 3 and fields[0] == str(root / "scripts/run-bench") and fields[1] == "monitor":
-                    fleet = Path(fields[2]).resolve()
-                    break
-        if fleet is None or not fleet.is_relative_to(root / ".context"):
+        found = terminal_task(root, job)
+        if found is None:
             return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
-        record = json.loads((fleet / "_batch/run.json").read_text())
-        lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
-        tasks = record.get("tasks") or []
-        if len(tasks) != 1 or tasks[0].get("name") != job["task"]:
-            raise ValueError("terminal task binding changed")
-        task = tasks[0]
-        status = str(task.get("benchmark_status") or task.get("status") or "").upper()
+        fleet, record, task = found
+        verdict = task_verdict(task)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+    try:
         run_id = fleet.name
+        lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
         owner = lifecycle["fleet_owner_token"]
         audit = Path((fleet / "teardown-ownership.path").read_text().strip()).resolve()
         meta_bytes = (audit / "meta").read_bytes()
@@ -704,14 +739,48 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
         # The fleet's lifecycle verdict also covers execution completion, the
         # mandatory autoscaler and the controller exit; release alone does not.
         return {"run_id": run_id, "fleet_dir": str(fleet), "fleet_owner_token": owner,
-                "task_status": status, "resources_released": closed,
+                **verdict, "resources_released": closed,
                 "lifecycle_verified": closed and lifecycle.get("status") == "verified",
-                "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
-                "terminal_task": isinstance(task.get("passed"), bool) and status in {
-                    "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"},
                 "released_at_epoch": float(epoch_bytes) if closed else None}
     except (OSError, ValueError, KeyError, TypeError):
-        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+        # The recorded verdict stands; only release remains unverified.
+        return {**verdict, "resources_released": False,
+                "retry_blocked": "terminal result or release remains unverified"}
+
+
+def infra_stop_policy() -> str:
+    """The explicit infrastructure-stop policy (operator override); enabled by default."""
+    policy = os.environ.get("CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP") or "enabled"
+    if policy not in ("enabled", "disabled"):
+        raise ValueError("invalid infrastructure early-stop policy")
+    return policy
+
+
+def infra_stop_predicate() -> Callable[[int, int], bool]:
+    """The one fixed-total infra stop predicate, shared with the sharded operator."""
+    coordinator = runpy.run_path(str(Path(__file__).with_name("cloudbench-shard-coordinator.py")))
+    return coordinator["infra_stop_reached"]
+
+
+def infra_stop_receipt(jobs: list[dict[str, object]], scheduled_total: int, policy: str,
+                       reached: Callable[[int, int], bool] | None = None) -> dict[str, object] | None:
+    """The fixed-total infra stop breach, or None.
+
+    Each scheduled job counts once when one of its own terminal, non-cancelled
+    attempts is a confirmed infrastructure failure. Unknown verdicts and
+    cancellations never count, and the denominator is the frozen schedule.
+    """
+    if policy == "disabled":
+        return None
+    infra = sorted(
+        str(job["job_id"]) for job in jobs
+        if any(attempt.get("infra_failure") is True and attempt.get("status") != "cancelled"
+               for attempt in (job.get("attempts") or [job]))
+    )
+    if not (reached or infra_stop_predicate())(len(infra), scheduled_total):
+        return None
+    return {"policy": policy, "infra_jobs": len(infra), "scheduled_total": scheduled_total,
+            "infra_job_ids": infra}
 
 
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
@@ -797,9 +866,50 @@ def archive_shared_relay(directory: Path, archive: Path) -> None:
     shutil.copytree(directory, archive, dirs_exist_ok=True, ignore=non_records)
 
 
+def claim_home_wireguard_peer(campaign_dir: Path) -> int:
+    """Claim this HOME's single Fly WireGuard peer for one campaign agent.
+
+    Every flyctl agent started in one HOME loads the same wire_guard_state peer.
+    A second campaign's private agent opens another session on that peer and
+    stalls both tunnels (descend-full69-20261023: lost guest /shutdown replies,
+    retained Machines). The claim is an open file lock, so a dead holder releases
+    it; the caller hands it to the agent's bootstrap so it ends with that agent.
+    """
+    directory = Path(os.environ.get('HOME') or Path.home()) / '.fly'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / 'rose-campaign-wireguard-peer.lock'
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = os.read(descriptor, 4096).decode(errors='replace').strip() or 'unknown holder'
+        os.close(descriptor)
+        raise ValueError(f'another campaign already owns this HOME\'s Fly WireGuard peer ({holder}); '
+                         'a second Fly agent on that peer stalls both tunnels. Run these tasks in that '
+                         'campaign, wait for it to finish, or use a sharded campaign') from None
+    except BaseException:
+        os.close(descriptor)
+        raise
+    os.ftruncate(descriptor, 0)
+    os.pwrite(descriptor, f'pid={os.getpid()} campaign={campaign_dir}\n'.encode(), 0)
+    return descriptor
+
+
 def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                        inventory: Path, deadline: float | None) -> dict:
     """Own one canonical Fly bootstrap and one relay until all children join."""
+    peer_claim = claim_home_wireguard_peer(campaign_dir)
+    try:
+        value = _start_shared_relay(root, campaign_dir, workspace, inventory, deadline, peer_claim)
+    except BaseException:
+        os.close(peer_claim)
+        raise
+    value['peer_claim'] = peer_claim
+    return value
+
+
+def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
+                        inventory: Path, deadline: float | None, peer_claim: int) -> dict:
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
     for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
@@ -861,7 +971,8 @@ def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         value['bootstrap'] = subprocess.Popen(['flyctl', 'proxy', '0:1', '::1', '-a', app,
                                                '--bind-addr', '127.0.0.1', '-q'],
                                               cwd=workspace, env=environment, stdout=bootstrap_log,
-                                              stderr=subprocess.STDOUT, start_new_session=True)
+                                              stderr=subprocess.STDOUT, start_new_session=True,
+                                              pass_fds=(peer_claim,))
         write_json_atomic(directory / 'bootstrap-owner.json', {'pid': value['bootstrap'].pid, 'birth': identity.birth(value['bootstrap'].pid), 'parent_pid': os.getpid(), 'parent_start': parent_start})
         bootstrap_deadline = min(deadline or math.inf, time.monotonic() + 180)
         while True:
@@ -941,6 +1052,7 @@ def stop_shared_relay(value: dict) -> bool:
         except FileNotFoundError: break
         if state in ('Z', 'X'): break
         time.sleep(.1)
+    os.close(value['peer_claim'])
     value['log'].close(); value['bootstrap_log'].close()
     archive_shared_relay(value['directory'], value['archive'])
     return acknowledged and process.returncode == 0
@@ -1418,6 +1530,13 @@ def main() -> int:
     holdout_margin_seconds = float(raw_margin)
     first_failure = 0
     barrier_failure = False
+    # The infra stop denominator is frozen from the schedule (the shared group
+    # for a shard), never from finished attempts.
+    infra_scheduled_total = int(shard["group_total"] or len(jobs))
+    infra_policy = infra_stop_policy()
+    # Resolved before any controller launches, so a missing predicate cannot
+    # interrupt a running campaign.
+    infra_reached = infra_stop_predicate()
     current_cohort: dict[str, object] | None = None
 
     def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
@@ -1703,12 +1822,12 @@ def main() -> int:
                 }
             # Startup reads (flyctl status, git show, owner records) can also
             # raise these before any controller starts; fail the campaign normally.
-            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as startup_error:
                 first_failure = 1
                 barrier_failure = True
                 state["shared_inventory_failed"] = True
                 print(
-                    "Campaign inventory did not initialize; see private publisher log"
+                    f"Campaign inventory did not initialize; see private publisher log ({type(startup_error).__name__}: {startup_error})"
                 )
             write_json_atomic(summary_path, state)
         while pending or active:
@@ -2202,6 +2321,27 @@ def main() -> int:
                         first_failure = first_failure or exit_code or 1
                 elif exit_code and not first_failure:
                     first_failure = exit_code
+                if not args.retry_infra:
+                    job.update(attempt_verdict(workspace, job))
+                if "infra_stop" not in state and not stop_signal:
+                    breach = infra_stop_receipt(jobs, infra_scheduled_total, infra_policy, infra_reached)
+                    if breach is not None:
+                        state["infra_stop"] = {
+                            "job_id": job["job_id"], "task": job["task"], "attempt": job.get("attempt", 1),
+                            "task_status": job.get("task_status"), **breach,
+                            "observed_at": utc_now(), "breached_at_epoch": time.time(),
+                        }
+                        print(
+                            f"🛑 INFRA STOP: {breach['infra_jobs']}/{infra_scheduled_total} scheduled jobs are "
+                            f"confirmed infrastructure failures (>= 5%); breach at {job['job_id']} "
+                            f"({job.get('task_status')}). Cancelling the remaining jobs through their owned teardown.",
+                            file=sys.stderr, flush=True,
+                        )
+                        first_failure = first_failure or exit_code or 1
+                        barrier_failure = True
+                        if current_cohort:
+                            abort_startup_cohort(current_cohort, "infrastructure stop threshold reached")
+                        terminate_owned_children(active)
                 print(
                     f"{'✅' if exit_code == 0 else '❌'} {job['job_id']} "
                     f"task={job['task']} exit={exit_code} "

@@ -83,6 +83,14 @@ describe('agent tree snapshot ordering', () => {
         agentId: 'root',
         parentAgentId: null,
         goal: 'newer realtime state',
+        progressEstimate: {
+          progress: 0.6,
+          etaSeconds: 60,
+          sequence: 2,
+          observedAt: '2026-10-21T01:00:00Z',
+          model: 'jev',
+          promptVersion: 'v1',
+        },
         status: 'ACTIVE',
         progress: 0.5,
         toolsInUse: [],
@@ -91,11 +99,32 @@ describe('agent tree snapshot ordering', () => {
       });
     });
     expect(result.current.get('root')?.goal).toBe('newer realtime state');
+    act(() => {
+      handlers.onAgentStateChanged?.({
+        agentId: 'root',
+        parentAgentId: null,
+        goal: 'newer realtime state',
+        status: 'ACTIVE',
+        progress: 0.1,
+        toolsInUse: [],
+        messageCount: 1,
+        progressEstimate: {
+          progress: 0.1,
+          etaSeconds: 600,
+          sequence: 1,
+          observedAt: '2026-10-21T00:00:00Z',
+          model: 'jev',
+          promptVersion: 'v1',
+        },
+      });
+    });
+    expect(result.current.get('root')?.progressEstimate?.progress).toBe(0.6);
 
     releaseSnapshot();
     await snapshotReturned;
     await waitFor(() => expect(result.current.has('snapshot-only')).toBe(true));
     expect(result.current.get('root')?.goal).toBe('newer realtime state');
+    expect(result.current.get('root')?.progressEstimate?.progress).toBe(0.6);
     unmount();
   });
 
@@ -189,6 +218,165 @@ describe('agent tree snapshot ordering', () => {
 
     await waitFor(() => expect(result.current.has('reconnect-snapshot-only')).toBe(true));
     expect(result.current.get('root')?.goal).toBe('newer realtime state');
+    unmount();
+  });
+});
+
+describe('prediction updates on the existing tree bus', () => {
+  it('retains a prediction received before the initial snapshot', async () => {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'user-1' } }),
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, async () => {
+        await blocked;
+        return HttpResponse.json({
+          agents: [
+            {
+              agent_id: 'early',
+              taskProgressEstimates: {
+                task: {
+                  taskId: 'task',
+                  progress: 0.2,
+                  etaSeconds: 60,
+                  sequence: 1,
+                  observedAt: '2026-10-21T01:00:00Z',
+                  model: 'jev',
+                  promptVersion: 'test',
+                },
+              },
+              parent_agent_id: null,
+              goal: 'goal',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'wf',
+              progress: 0,
+              tools_in_use: [],
+              message_count: 1,
+              tree_cost_cents: 0,
+            },
+          ],
+        });
+      }),
+    );
+    let handlers: Parameters<typeof RealtimeMod.subscribeToBus>[1] = {};
+    vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_id, value) => {
+      handlers = value;
+      return fakeChannel();
+    });
+    const { result, unmount } = renderHook(() => useAgentTree('early'));
+    await waitFor(() => expect(handlers.onUpdate).toBeTypeOf('function'));
+    const progressEstimate = {
+      progress: 0.7,
+      etaSeconds: 60,
+      sequence: 2,
+      observedAt: '2026-10-21T01:00:00Z',
+      model: 'jev',
+      promptVersion: 'test',
+    };
+    act(() =>
+      handlers.onUpdate?.({ agentId: 'early', temporalWorkflowId: 'wf', progressEstimate }),
+    );
+    release();
+    await waitFor(() =>
+      expect(result.current.get('early')?.progressEstimate).toEqual(progressEstimate),
+    );
+    expect(result.current.get('early')?.taskProgressEstimates?.task.progress).toBe(0.2);
+    unmount();
+  });
+  it('patches the existing node without a snapshot request and rejects stale generations', async () => {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'user-1' } }),
+    );
+    let requests = 0;
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, () => {
+        requests++;
+        return HttpResponse.json({
+          agents: [
+            {
+              agent_id: 'prediction-root',
+              parent_agent_id: null,
+              goal: 'goal',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'wf',
+              progress: 0,
+              tools_in_use: [],
+              message_count: 1,
+              tree_cost_cents: 0,
+            },
+          ],
+        });
+      }),
+    );
+    let handlers: Parameters<typeof RealtimeMod.subscribeToBus>[1] = {};
+    vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_id, value) => {
+      handlers = value;
+      return fakeChannel();
+    });
+    const { result, unmount } = renderHook(() => useAgentTree('prediction-root'));
+    await waitFor(() => expect(result.current.size).toBe(1));
+    expect(handlers.onUpdate).toBeTypeOf('function');
+    const prediction = {
+      progress: 0.6,
+      etaSeconds: 60,
+      sequence: 2,
+      observedAt: '2026-10-21T01:00:00Z',
+      model: 'jev',
+      promptVersion: 'v1',
+    };
+    act(() =>
+      handlers.onUpdate?.({
+        agentId: 'prediction-root',
+        temporalWorkflowId: 'wf',
+        progressEstimate: prediction,
+      }),
+    );
+    expect(result.current.get('prediction-root')?.progressEstimate).toEqual(prediction);
+    const unchanged = result.current;
+    act(() =>
+      handlers.onUpdate?.({
+        agentId: 'prediction-root',
+        temporalWorkflowId: 'wf',
+        progressEstimate: prediction,
+      }),
+    );
+    expect(result.current).toBe(unchanged);
+    act(() =>
+      handlers.onUpdate?.({
+        agentId: 'prediction-root',
+        temporalWorkflowId: 'old',
+        progressEstimate: { ...prediction, sequence: 3 },
+      }),
+    );
+    expect(result.current).toBe(unchanged);
+    act(() =>
+      handlers.onAgentStateChanged?.({
+        agentId: 'prediction-root',
+        parentAgentId: null,
+        temporalWorkflowId: 'new-wf',
+        goal: 'resumed',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+      }),
+    );
+    expect(result.current.get('prediction-root')?.progressEstimate).toBeNull();
+    act(() =>
+      handlers.onUpdate?.({
+        agentId: 'prediction-root',
+        temporalWorkflowId: 'new-wf',
+        progressEstimate: { ...prediction, sequence: 3 },
+      }),
+    );
+    expect(result.current.get('prediction-root')?.progressEstimate?.sequence).toBe(3);
+    expect(requests).toBe(1);
     unmount();
   });
 });

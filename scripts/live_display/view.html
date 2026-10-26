@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Live Display Studio</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui;
+        background: #070b10;
+        color: #edf4f9;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        max-width: 1400px;
+        margin: auto;
+        padding: 20px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+      }
+      h1 {
+        font-size: 18px;
+        letter-spacing: -0.04em;
+        margin: 0;
+      }
+      small,
+      p {
+        color: #9aaab9;
+      }
+      #status {
+        font-size: 12px;
+      }
+      .stage {
+        position: relative;
+        margin: 18px 0;
+        border: 1px solid #273747;
+        border-radius: 20px;
+        overflow: hidden;
+        height: clamp(180px, 42vh, 420px);
+        background: #05090c;
+      }
+      canvas,
+      #frame {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #frame {
+        position: absolute;
+        inset: 0;
+        object-fit: contain;
+        background: #05090c;
+      }
+      #frame[hidden] {
+        display: none;
+      }
+      .badge {
+        position: absolute;
+        left: 18px;
+        bottom: 16px;
+        color: #b1c4d0;
+        font: 11px ui-monospace;
+        letter-spacing: 0.12em;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        align-items: center;
+        padding: 15px;
+        border: 1px solid #25323f;
+        border-radius: 14px;
+        background: #101821;
+      }
+      label {
+        font-size: 12px;
+        display: grid;
+        gap: 7px;
+        flex: 1;
+        min-width: 110px;
+      }
+      button {
+        border: 1px solid #415264;
+        border-radius: 9px;
+        color: #e7f4ff;
+        background: #1c2b39;
+        padding: 9px 13px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      button[aria-pressed="true"] {
+        background: #1f5b65;
+        border-color: #63d5df;
+      }
+      input {
+        accent-color: #65d5dc;
+        max-width: 100%;
+      }
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid #e4c67e;
+        outline-offset: 3px;
+      }
+      #prompt {
+        font-size: 13px;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+        margin-bottom: 0;
+      }
+      #error {
+        color: #f1b893;
+        font-size: 12px;
+        min-height: 18px;
+      }
+      @media (max-width: 500px) {
+        main {
+          padding: 12px;
+        }
+        .stage {
+          height: clamp(160px, 36vh, 360px);
+        }
+        .controls {
+          gap: 12px;
+        }
+        h1 {
+          font-size: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Live Display Studio</h1>
+          <small>Agent-directed • continuously rendered</small>
+        </div>
+        <span id="status" role="status">Connecting…</span>
+      </header>
+      <div class="stage">
+        <canvas
+          id="canvas"
+          aria-label="Live procedural watch-inspired visual"
+        ></canvas
+        ><img
+          id="frame"
+          hidden
+          alt="Latest StreamDiffusion generated image"
+        /><span class="badge" id="engine">WEBGL · LIVE</span>
+      </div>
+      <div class="controls">
+        <label
+          >Color<input
+            id="hue"
+            type="range"
+            min="0"
+            max="360"
+            value="205" /></label
+        ><label
+          >Motion<input
+            id="speed"
+            type="range"
+            min="0.1"
+            max="3"
+            step="0.1"
+            value="1" /></label
+        ><button id="webgl" aria-pressed="true">WebGL</button
+        ><button id="diffusion" disabled aria-pressed="false">
+          StreamDiffusion</button
+        ><button id="pause" aria-pressed="false">Pause</button>
+      </div>
+      <p id="prompt"></p>
+      <p id="error" role="status"></p>
+    </main>
+    <script>
+      "use strict";
+      const BASE = __DISPLAY_BASE__;
+      const $ = (id) => document.getElementById(id),
+        canvas = $("canvas"),
+        gl = canvas.getContext("webgl", {
+          alpha: false,
+          preserveDrawingBuffer: true,
+        });
+      let state = {
+          revision: -1,
+          hue: 205,
+          speed: 1,
+          mode: "webgl",
+          prompt: "",
+        },
+        mode = "webgl",
+        paused = false,
+        alive = true,
+        time = 0,
+        last = performance.now(),
+        controller = new AbortController();
+      const shader = (type, source) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, source);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+          throw Error("WebGL shader failed");
+        return s;
+      };
+      let program;
+      if (gl) {
+        try {
+          program = gl.createProgram();
+          gl.attachShader(
+            program,
+            shader(
+              gl.VERTEX_SHADER,
+              "attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}",
+            ),
+          );
+          gl.attachShader(
+            program,
+            shader(
+              gl.FRAGMENT_SHADER,
+              `
+precision highp float;uniform vec2 res;uniform float t,hue;
+#define PI 3.14159265359
+vec3 palette(float h){return .52+.48*cos(6.28318*(h+vec3(0.,.34,.67)));}
+float ring(float r,float radius,float width){return 1.-smoothstep(width,width+.006,abs(r-radius));}
+void main(){vec2 p=(2.*gl_FragCoord.xy-res)/min(res.x,res.y);p.x*=1.02;float r=length(p),a=atan(p.y,p.x);vec3 accent=palette(hue);vec3 c=vec3(.018,.028,.039)+accent*.012/(.08+abs(r-.72));
+float dial=1.-smoothstep(.59,.61,r);c+=dial*vec3(.017,.025,.032);float brushed=.5+.5*sin(a*370.+r*1250.);float metal=ring(r,.65,.041);c+=metal*(vec3(.09,.12,.14)+brushed*.024+pow(max(0.,cos(a-.8)),12.)*vec3(.55,.59,.56));
+c+=ring(r,.704,.003)*accent*.34+ring(r,.606,.004)*vec3(.4,.5,.54);
+float ticks=pow(max(0.,cos(a*60.)),65.)*step(.535,r)*step(r,.582);c+=ticks*vec3(.43,.52,.57);
+float majors=pow(max(0.,cos(a*12.)),100.)*step(.508,r)*step(r,.58);c+=majors*vec3(.6,.68,.69);
+for(int i=0;i<3;i++){float q=float(i)*2.094+1.57;vec2 sub=p-vec2(cos(q),sin(q))*.29;float rr=length(sub),aa=atan(sub.y,sub.x);c+=ring(rr,.145,.002)*accent*.26;c+=pow(max(0.,cos(aa*20.)),30.)*step(.118,rr)*step(rr,.139)*vec3(.2,.28,.31);float hand=abs(sin(aa-t*.1-float(i)));c+=(1.-smoothstep(0.,.035,hand))*step(.02,rr)*step(rr,.105)*vec3(.4,.5,.54);}
+vec2 d=vec2(sin(t*.055),cos(t*.055));float along=dot(p,d),crossed=abs(p.x*d.y-p.y*d.x);c+=(1.-smoothstep(.006,.013,crossed))*step(-.10,along)*step(along,.43)*accent;
+vec2 e=vec2(sin(t*.009+1.),cos(t*.009+1.));along=dot(p,e);crossed=abs(p.x*e.y-p.y*e.x);c+=(1.-smoothstep(.012,.025,crossed))*step(-.08,along)*step(along,.31)*vec3(.75,.77,.7);
+c+=ring(r,.026,.007)*vec3(.55,.66,.67);float light=pow(max(0.,1.-abs(p.y*.5+p.x*.3-sin(t*.09)*.4)),18.);c+=dial*light*.025;c*=1.-smoothstep(.9,1.8,r)*.7;gl_FragColor=vec4(pow(c,vec3(.85)),1.);}`,
+            ),
+          );
+          gl.linkProgram(program);
+          if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+            throw Error("WebGL link failed");
+          gl.useProgram(program);
+          const buffer = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+          gl.bufferData(
+            gl.ARRAY_BUFFER,
+            new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+            gl.STATIC_DRAW,
+          );
+          const loc = gl.getAttribLocation(program, "p");
+          gl.enableVertexAttribArray(loc);
+          gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+        } catch (e) {
+          $("error").textContent = e.message;
+          program = null;
+        }
+      } else $("error").textContent = "WebGL is unavailable in this browser.";
+      function selectMode(next) {
+        mode = next;
+        $("webgl").setAttribute("aria-pressed", String(mode === "webgl"));
+        $("diffusion").setAttribute(
+          "aria-pressed",
+          String(mode === "diffusion"),
+        );
+        $("frame").hidden = mode !== "diffusion";
+        $("engine").textContent =
+          mode === "webgl" ? "WEBGL · LIVE" : "STREAMDIFFUSION · LIVE IMAGES";
+      }
+      $("frame").onerror = () => {
+        $("error").textContent = "Generated frame could not be decoded.";
+      };
+      $("hue").oninput = (e) => {
+        state.hue = Number(e.target.value);
+      };
+      $("speed").oninput = (e) => {
+        state.speed = Number(e.target.value);
+      };
+      $("webgl").onclick = () => selectMode("webgl");
+      $("diffusion").onclick = () => selectMode("diffusion");
+      $("pause").onclick = () => {
+        paused = !paused;
+        $("pause").textContent = paused ? "Resume" : "Pause";
+        $("pause").setAttribute("aria-pressed", String(paused));
+      };
+      function draw(now) {
+        if (!alive) return;
+        const dt = Math.min((now - last) / 1000, 0.05);
+        last = now;
+        if (!paused && !document.hidden) time += dt * state.speed;
+        if (gl && program && !document.hidden) {
+          const rect = canvas.getBoundingClientRect(),
+            ratio = Math.min(devicePixelRatio, 2),
+            w = Math.round(rect.width * ratio),
+            h = Math.round(rect.height * ratio);
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+          }
+          gl.viewport(0, 0, w, h);
+          gl.uniform2f(gl.getUniformLocation(program, "res"), w, h);
+          gl.uniform1f(gl.getUniformLocation(program, "t"), time);
+          gl.uniform1f(gl.getUniformLocation(program, "hue"), state.hue / 360);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+      async function json(path) {
+        const r = await fetch(BASE + path, {
+          cache: "no-store",
+          credentials: "omit",
+          signal: controller.signal,
+        });
+        if (!r.ok)
+          throw Error((await r.json()).error || "Display request failed");
+        return r.json();
+      }
+      async function poll() {
+        if (!alive) return;
+        try {
+          if (!document.hidden) {
+            const next = await json("/state");
+            if (next.revision !== state.revision) {
+              state = next;
+              $("hue").value = state.hue;
+              $("speed").value = state.speed;
+              $("prompt").textContent = state.prompt;
+              selectMode(
+                state.mode === "diffusion" && !next.diffusionConfigured
+                  ? "webgl"
+                  : state.mode,
+              );
+            }
+            $("diffusion").disabled = !next.diffusionConfigured;
+            $("status").textContent =
+              "Controls connected · revision " + state.revision;
+            $("error").textContent = next.diffusionConfigured
+              ? ""
+              : "StreamDiffusion not connected. WebGL remains available.";
+          }
+        } catch (e) {
+          if (alive) {
+            $("status").textContent = "Disconnected";
+            $("error").textContent = e.message;
+          }
+        } finally {
+          if (alive) setTimeout(poll, 500);
+        }
+      }
+      poll();
+      async function frames() {
+        if (!alive) return;
+        try {
+          if (mode === "diffusion" && !paused && !document.hidden) {
+            const next = await json("/frame");
+            if (next.revision === state.revision)
+              $("frame").src = "data:image/jpeg;base64," + next.base64_image;
+          }
+        } catch (e) {
+          if (alive) $("error").textContent = e.message;
+        } finally {
+          if (alive) setTimeout(frames, 500);
+        }
+      }
+      frames();
+      addEventListener("pagehide", () => {
+        alive = false;
+        controller.abort();
+      });
+    </script>
+  </body>
+</html>

@@ -171,3 +171,42 @@ export async function searchTreeByGoal(
     select: NODE_SELECT,
   });
 }
+
+function likePattern(text: string): string {
+  return text.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * Live agents in one tree owning a background task (Agent.backgroundTasks entry)
+ * whose goal contains every token (case-insensitive) and, with `pathPrefix`,
+ * whose path is that path or below it. Same busId-scoped tree read and LIMIT as
+ * searchTreeByGoal; the task predicate runs over that tree's rows only.
+ */
+export async function searchTreeTaskOwners(
+  rootAgentId: string,
+  userId: string,
+  tokens: string[],
+  limit: number,
+  pathPrefix: string | null
+): Promise<TreeNodeRow[]> {
+  const goalClauses = tokens.map(
+    (token) => Prisma.sql`AND task->>'goal' ILIKE ${`%${likePattern(token)}%`}`
+  );
+  const pathClause =
+    pathPrefix === null
+      ? Prisma.empty
+      : Prisma.sql`AND (task->>'path' = ${pathPrefix} OR task->>'path' LIKE ${`${likePattern(pathPrefix)}/%`})`;
+  const owners = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT a."id" FROM "Agent" a
+    WHERE (a."id" = ${rootAgentId} OR a."busId" = ${rootAgentId})
+      AND a."userId" = ${userId}
+      AND a."deletedAt" IS NULL
+      AND jsonb_typeof(a."backgroundTasks"::jsonb) = 'array'
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(a."backgroundTasks"::jsonb) AS task
+        WHERE jsonb_typeof(task) = 'object' ${Prisma.join([...goalClauses, pathClause], ' ')}
+      )
+    ORDER BY a."depth" ASC, a."createdAt" ASC, a."id" ASC
+    LIMIT ${limit}`);
+  return findTreeNodesByIds(owners.map((owner) => owner.id));
+}

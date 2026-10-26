@@ -32,6 +32,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from browser_tools.secret_refs import (
@@ -41,6 +42,11 @@ from browser_tools.secret_refs import (
     secret_placeholder,
 )
 from config import load_config
+from domains.spawn_browser_agent_v3.service_activity_queue import (
+    await_owned_browser_cleanup,
+    browser_activity_turn,
+    cancel_and_join_browser_activity,
+)
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.background_agents import is_agent_authored_user_metadata
@@ -54,6 +60,7 @@ from helpers.generation_handoff import (
     park_pending_tool,
     take_tool_resume,
 )
+from helpers.jev_progress import JEVSession, browser_prefix_events
 from helpers.messages import poll_new_messages, stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tool_interrupts import tool_stop_requested
@@ -67,8 +74,8 @@ from helpers.wait_condition_or_handoff import (
 from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
-from providers.fast_cache.browser_use_cache import cached_browser_decision
-from providers.fast_cache.context import write_through_enabled_for_user
+from providers.demo_cache.browser_use_cache import cached_browser_decision
+from providers.demo_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
@@ -132,6 +139,7 @@ from .config import (
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
 from .recording import (
+    _redact_url_query,
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
@@ -163,8 +171,15 @@ from .repo import (
     save_browser_credential_ref_message,
     save_minted_account_password,
     upload_file_to_session,
+    world_state_receipt_summary,
 )
-from .resume_store import hydrate_resume_context, persist_resume_context
+from .resume_store import (
+    BrowserResumeStoreError,
+    hydrate_resume_context,
+    load_paused_conversation,
+    persist_paused_conversation,
+    persist_resume_context,
+)
 from .service import (
     AuthRuntimeState,
     accumulate_model_usage,
@@ -208,6 +223,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
     mask_secret_values,
+    signed_in_realm_for_secret_refs,
 )
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
@@ -221,14 +237,9 @@ AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
-def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
-    """Allocate the browser ownership ID before its cancellable activity starts."""
-    return str(
-        uuid_module.uuid5(
-            uuid_module.NAMESPACE_URL,
-            f"rose-browser-task:{agent_id}:{tool_call_id}",
-        )
-    )
+def _logical_browser_task_id(agent_id: str) -> str:
+    """One browser identity per GP; activity/tool IDs remain separate."""
+    return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
 
 
 def _browser_task_terminal_metadata(
@@ -771,7 +782,7 @@ def _remap_cached_browser_action_target(
         params["index"] = best_index
         remapped["params"] = params
     logger.info(
-        "fast_cache.browser_use_replay_target_remapped",
+        "demo_cache.browser_use_replay_target_remapped",
         old_index=action_index,
         new_index=best_index,
         score=best_score,
@@ -2797,6 +2808,54 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     return yielded
 
 
+def _native_phone_auth_metadata(result: Dict[str, Any]) -> Dict[str, Any]:
+    target = result.get("auth_target")
+    if not isinstance(target, dict) or target.get("kind") != "iphone":
+        return {}
+    return {"target": target, "criticalReason": result.get("critical_reason"),
+            "steelSessionId": None, "liveViewUrl": None, "handoffMode": "manual_step"}
+
+
+async def _native_phone_auth_pause(
+    *, config, user_id, agent_id, task_id, decision_id, snapshot, critical_reason,
+    action_history, dom_service, unified_action, browser_turn_messages,
+    continuity_state, runtime,
+):
+    """Native handoff returns through the existing exact-request workflow pause."""
+    from .phone import _identity, request_native_phone_authentication
+    outcome = await request_native_phone_authentication(
+        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+        decision_id=decision_id, snapshot=snapshot, critical_reason=critical_reason,
+    )
+    info = outcome.get("request_info") or {}
+    request = info.get("request") or {}
+    result = ({"success": True, "request_id": request["id"], "target": request["target"],
+               "criticalReason": critical_reason} if outcome.get("success") else outcome)
+    await action_history.record_action(
+        dom_service=dom_service, action="request_user_assistance_for_authentication",
+        thinking=unified_action.get("thinking"), params=unified_action.get("params") or {}, result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages, unified_action=unified_action, result=result,
+        tool_call_id=decision_id or _identity("native-auth-tool", task_id, (snapshot or {}).get("interaction", {}).get("cursor")),
+    )
+    if not outcome.get("success"):
+        return outcome
+    target = request["target"]
+    state = {**continuity_state(), "auth_target": target, "critical_reason": critical_reason}
+    return {
+        **runtime, "status": "awaiting_auth_assistance", "request_id": request["id"],
+        "auth_assistance_request": info, "auth_target": target, "critical_reason": critical_reason,
+        "task_id": task_id, "auth_realm": "iphone", "base_site": "Cloud iPhone",
+        "handoff_mode": "native_phone",
+        **(await persist_resume_context(
+            agent_id=agent_id, task_id=task_id,
+            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+            state=state,
+        )),
+    }
+
+
 def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     """Return the one streamed tool-call id used for an action's full lifecycle."""
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
@@ -3182,6 +3241,7 @@ async def _call_browser_use_with_rotation(
     pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
     dom_service: Any = None,
+    phone_observation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
 
@@ -3191,7 +3251,19 @@ async def _call_browser_use_with_rotation(
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
     exhaust (or there's no token to start), fall through to the waterfall.
     """
+    from .phone import GOOGLE_POLICY_GUIDANCE, PHONE_GUIDANCE, phone_actions
+    # Discovery belongs to the trusted profile-gated decision loop. Ordinary
+    # browser calls must preserve their pre-phone request and cache inputs.
+    phone_snapshot = phone_observation if isinstance(phone_observation, dict) and phone_observation.get("enabled") is True else {}
     browser_state_for_llm = dict(browser_state)
+    available_actions = phone_actions(AVAILABLE_ACTIONS, phone_snapshot)
+    if phone_snapshot.get("enabled"):
+        browser_state_for_llm["phone"] = phone_snapshot
+        dynamic_system_context = dynamic_system_context + "\n\n" + PHONE_GUIDANCE
+        interaction = phone_snapshot.get("interaction")
+        setup = interaction.get("setup") if isinstance(interaction, dict) else None
+        if isinstance(setup, dict) and setup.get("googlePasscodeExceptionAllowed") is True:
+            dynamic_system_context += "\n\n" + GOOGLE_POLICY_GUIDANCE
     if extra_user_messages:
         browser_state_for_llm["_extra_user_messages"] = extra_user_messages
 
@@ -3202,7 +3274,7 @@ async def _call_browser_use_with_rotation(
         action_history=action_entries,
         available_actions=[
             action
-            for action in AVAILABLE_ACTIONS
+            for action in available_actions
             if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
         ],
         dynamic_system_context=dynamic_system_context,
@@ -3282,10 +3354,13 @@ async def _call_browser_use_with_rotation(
         else None
     )
 
-    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
+    from .phone import with_phone_heartbeat
+    model_work = rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
+    llm_result = (await with_phone_heartbeat(model_work, config, user_id, phone_snapshot)
+                  if phone_snapshot.get("enabled") else await model_work)
 
     if not use_claude:
-        return llm_result
+        return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
     rotations = 0
     while (
@@ -3346,9 +3421,11 @@ async def _call_browser_use_with_rotation(
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
         )
-        llm_result = await rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+        model_work = rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+        llm_result = (await with_phone_heartbeat(model_work, config, user_id, phone_snapshot)
+                      if phone_snapshot.get("enabled") else await model_work)
 
-    return llm_result
+    return {**llm_result, "_phone_snapshot": phone_snapshot} if phone_snapshot.get("enabled") else llm_result
 
 
 def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
@@ -3396,6 +3473,11 @@ def _append_browser_turn_messages(
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
+    if action_name == "phone":
+        from browser_tools.secret_refs import redact_current_secret_values
+        args = redact_current_secret_values(args)
+        thinking = redact_current_secret_values(thinking)
+        result = redact_current_secret_values(result)
     # The provider normalizes click_coordinates to an internal click + coordinates.
     # Reconstruct the advertised tool name here so the next LLM turn does not see
     # a successful but invalid-looking click({}) and try to correct a valid action.
@@ -4792,7 +4874,7 @@ async def _install_fast_mode_network_cache(
 
     Failures degrade to live (never break the session).
     """
-    from providers.fast_cache.browser_http import BrowserHttpCache
+    from providers.demo_cache.browser_http import BrowserHttpCache
 
     http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled)
 
@@ -4863,6 +4945,19 @@ def _recording_part_metadata(browser_recorder: Any) -> Dict[str, Any]:
     """
     started_at = getattr(browser_recorder, "started_at", None)
     return {"recording_started_at": started_at} if isinstance(started_at, str) and started_at else {}
+
+
+async def _stop_kernel_replay_before_session_close(browser_recorder: Optional[Any]) -> None:
+    """Stop Kernel's native replay while its browser is still open.
+
+    Kernel rejects ``POST .../replays/{id}/stop`` with HTTP 400 once the session
+    is paused or closed, and every terminal path closes the session before the
+    background FE finalizer runs. Stopping here makes that finalizer's own stop a
+    no-op (``stop_kernel_replay`` is idempotent) while it still saves the replay.
+    """
+    if browser_recorder is None or not getattr(browser_recorder, "uses_kernel_replay", False):
+        return
+    await browser_recorder.stop_kernel_replay()
 
 
 async def _finalize_kernel_replay_for_fe(
@@ -5582,6 +5677,7 @@ async def spawn_browser_agent_activity_v3(
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
+    await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -5645,6 +5741,7 @@ async def spawn_browser_agent_activity_v3(
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         browser_pool=browser_pool,
         inbox_address=inbox_address,
+        await_owner_cleanup=await_owner_cleanup,
     )
 
 
@@ -6075,6 +6172,8 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
+    "auth_target",
+    "critical_reason",
     "secret_values_used",
     "browser_resume_context_ref",
     "user_instruction_messages",
@@ -6619,6 +6718,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 browser_session_metadata={"provider": "wmh", "simulated": True},
             )
 
+    jev_session = JEVSession(agent_id, task_id, "browser")
     try:
         if not browser_state:
             # Seed the server-side WMH session with the same neutral start page
@@ -6730,6 +6830,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             )
 
         while iteration < MAX_ITERATIONS:
+            jev_session.schedule(goal, output_schema, browser_prefix_events(action_entries))
             iteration += 1
             if not await sync_user_instructions():
                 await sync_user_instructions(require_confirmed_read=True)
@@ -7105,6 +7206,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "simulated_browser_steps": iteration,
             "simulated_latest_frame": latest_frame,
         }
+    finally:
+        jev_session.close()
+
 
 
 async def _publish_browser_session_metadata_message(
@@ -7211,6 +7315,7 @@ async def _spawn_browser_agent_activity_v3_real(
     fast_mode_cache_enabled: bool = False,
     browser_pool: str = BROWSER_USE_PRICING_POOL,
     inbox_address: Optional[str] = None,
+    await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -7221,8 +7326,8 @@ async def _spawn_browser_agent_activity_v3_real(
     # finalize for dozens of children (verify20). Soft-complete the tool
     # without a provider session so warm paths stay ~$0 and finish. Write-lock
     # / resume still need the live browser. Restricted to exact-match
-    # fast_cache:on bench trees (test-mass-agent-run-0 / OAi demo).
-    from providers.fast_cache.client import soft_complete_allowed_for_agent
+    # demo_cache:on bench trees (test-mass-agent-run-0 / OAi demo).
+    from providers.demo_cache.client import soft_complete_allowed_for_agent
 
     if (
         fast_mode_cache_enabled
@@ -7281,6 +7386,31 @@ async def _spawn_browser_agent_activity_v3_real(
             "output_files": [],
         }
 
+    paused_conversation = (write_lock_resume_state or {}).get("_resume_paused_conversation")
+    if isinstance(paused_conversation, dict):
+        # send_message_to_agent(continue_conversation=true) to a user-paused
+        # browser: restore that run's exact conversation; the message itself
+        # arrives through the same inbox address at the first step.
+        try:
+            restored = await load_paused_conversation(
+                agent_id=agent_id,
+                inbox_address=str(paused_conversation.get("inbox_address") or inbox_address or tool_call_id),
+            )
+        except BrowserResumeStoreError as error:
+            return {
+                "status": "failed",
+                "success": False,
+                "error": True,
+                "message": str(error),
+                "task_id": task_id,
+                "session_id": None,
+                "structured_response": None,
+                "usage_items": [],
+            }
+        restored.pop("browser_resume_context_ref", None)
+        write_lock_resume_state = restored
+        is_resume = True
+
     private_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
         hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
@@ -7330,6 +7460,7 @@ async def _spawn_browser_agent_activity_v3_real(
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
+    jev_session = JEVSession(agent_id, task_id, "browser")
 
     def _redact_activity_value(value: Any) -> Any:
         # Private hydration can precede DOM binding, and cleanup can outlive
@@ -7343,6 +7474,16 @@ async def _spawn_browser_agent_activity_v3_real(
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
         trusted_credential_ref = (kwargs.get("extra_metadata") or {}).get("credential_ref")
         trusted_coordinates = (kwargs.get("auxiliary") or {}).get("coordinates")
+        if isinstance(current_url, str) and current_url.lower().startswith(("https://", "http://")):
+            kwargs["auxiliary"] = {
+                **(kwargs.get("auxiliary") or {}),
+                "current_url": _redact_url_query(current_url),
+            }
+        if isinstance(current_model, str) and current_model.strip():
+            kwargs["auxiliary"] = {
+                **(kwargs.get("auxiliary") or {}),
+                "actual_model": current_model.strip(),
+            }
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
                 kwargs[key] = _redact_activity_value(kwargs[key])
@@ -7496,6 +7637,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 "browserSessionId",
                 "steelSessionId",
                 "mode",
+                "target",
+                "criticalReason",
             )
             visible_auth = result["auth_assistance_request"]
             for key in request_ids:
@@ -7503,7 +7646,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     visible_auth[key] = auth_response[key]
             for key, protocol_keys in (
                 ("request", request_ids),
-                ("handoff", ("type", "steelSessionId", "liveViewUrl")),
+                ("handoff", ("type", "steelSessionId", "liveViewUrl", "target", "criticalReason")),
             ):
                 original = auth_response.get(key)
                 if isinstance(original, dict):
@@ -7515,6 +7658,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
     browser_url = None
     current_url = ""
+    current_model = None
     latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
     start_time = safe_time()
@@ -7720,6 +7864,9 @@ async def _spawn_browser_agent_activity_v3_real(
         for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
         if isinstance(credential_id, str) and credential_id
     }
+    # Sites where this task typed a saved password or asserted a passkey: sign-in
+    # evidence that validates those logins in the user's browser template (A6).
+    credential_signin_realms: set[str] = set()
 
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
@@ -7733,6 +7880,7 @@ async def _spawn_browser_agent_activity_v3_real(
         # before the return write_lock. Pre-action
         # ensure_browser_overlays_suppressed() already re-arms before
         # ceremony-capable clicks/typing; usage readback must not race that.
+        asserted_before = len(recorded_passkey_credential_ids)
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,
@@ -7741,6 +7889,9 @@ async def _spawn_browser_agent_activity_v3_real(
             task_id=task_id,
             browser_url=browser_url or "",
         )
+        passkey_realm = auth_realm_from_url(browser_url or "")
+        if len(recorded_passkey_credential_ids) > asserted_before and passkey_realm:
+            credential_signin_realms.add(passkey_realm)
 
     async def sync_passkeys_onto_target(
         new_passkeys: Optional[List[Dict[str, Any]]] = None,
@@ -7797,11 +7948,22 @@ async def _spawn_browser_agent_activity_v3_real(
         exact_session_id: str, pause: bool = False, current_url: str = ""
     ) -> None:
         nonlocal cleanup_failure
+        await _stop_kernel_replay_before_session_close(browser_recorder)
         try:
-            options = {"pause": pause}
+            options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url
-            await close_browser_session(config, exact_session_id, **options)
+            if credential_signin_realms:
+                options["signed_in_sites"] = sorted(credential_signin_realms)
+            world_state = await close_browser_session(config, exact_session_id, **options)
+            receipt_sites = world_state_receipt_summary(world_state)
+            if receipt_sites:
+                logger.info(
+                    "Browser world state merge receipt",
+                    task_id=task_id,
+                    session_id=exact_session_id,
+                    sites=receipt_sites,
+                )
         except BrowserSessionCloseError as cleanup_error:
             cleanup_failure = cleanup_error.receipt()
         except asyncio.CancelledError:
@@ -7867,7 +8029,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     error=str(lookup_error),
                 )
             if declined_session_id:
-                await _close_browser_with_cleanup_receipt(declined_session_id, pause=False)
+                await _close_browser_with_cleanup_receipt(declined_session_id, pause=True)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
             return _visible_activity_result(
                 {
@@ -8110,6 +8272,7 @@ async def _spawn_browser_agent_activity_v3_real(
             auth_realm = auth_options.get("realm") or auth_realm
         elif not auth_options:
             auth_options = {"realm": "this site"}
+
         if auth_options_prefetch is not None:
             if not auth_options_prefetch.done():
                 auth_options_prefetch.cancel()
@@ -8445,7 +8608,7 @@ async def _spawn_browser_agent_activity_v3_real(
             if skip_browser_network_recording(fast_mode=fast_mode_cache_enabled, goal=goal):
                 return None
             if fast_mode_cache_enabled:
-                from providers.fast_cache.client import soft_complete_allowed_for_agent
+                from providers.demo_cache.client import soft_complete_allowed_for_agent
 
                 if await soft_complete_allowed_for_agent(agent_id, goal):
                     return None
@@ -8813,6 +8976,9 @@ async def _spawn_browser_agent_activity_v3_real(
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
+        # Set when the loop stops early on repeated model-call failures, so the
+        # terminal result names that cause instead of a step-budget exhaustion.
+        loop_abort_reason: Optional[str] = None
         user_instruction_messages = _append_browser_user_instructions(write_lock_resume_state, browser_turn_messages)
         user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor")
         user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
@@ -9111,6 +9277,9 @@ async def _spawn_browser_agent_activity_v3_real(
         async def _execute_action(*args: Any, **kwargs: Any) -> Dict[str, Any]:
             """Observe every real action and retain its secrets through redaction."""
             nonlocal action_redaction_refs
+            action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+            if action.get("action") == "phone" and not (kwargs.get("phone_snapshot") or {}).get("enabled"):
+                return {"success": False, "error": "Phone unavailable for this decision"}
             redaction_refs = [dict(secret_refs)]
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
@@ -9124,6 +9293,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 result = await execute_action(*args, **kwargs)
                 if len(action_history) > before_actions:
                     result["action_step"] = action_history.last_action_step()
+                signed_in_realm = signed_in_realm_for_secret_refs(successful_secret_refs, credential_url or "")
+                if signed_in_realm:
+                    credential_signin_realms.add(signed_in_realm)
                 if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
                     try:
                         await save_minted_account_password(config, user_id, credential_url)
@@ -9147,6 +9319,20 @@ async def _spawn_browser_agent_activity_v3_real(
                 else:
                     for refs in redaction_refs:
                         result = mask_secret_values(result, refs)
+                action = kwargs.get("action") or (args[2] if len(args) > 2 else {})
+                if action.get("action") == "phone":
+                    # Phone dispatch bypasses DOM action implementations, which
+                    # normally record execution. Preserve the same real result
+                    # for completion verification and encrypted resume history.
+                    safe_params = action.get("params") or {}
+                    safe_thinking = action.get("thinking")
+                    for refs in redaction_refs:
+                        safe_params = mask_secret_values(safe_params, refs)
+                        safe_thinking = mask_secret_values(safe_thinking, refs)
+                    await action_history.record_action(
+                        dom_service=dom_service, action="phone", thinking=safe_thinking,
+                        params=safe_params, result=result,
+                    )
                 return result
             finally:
                 action_redaction_refs = None
@@ -9188,6 +9374,11 @@ async def _spawn_browser_agent_activity_v3_real(
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         tab_focus_cache = TabFocusCache()
         while iteration < MAX_ITERATIONS:
+            jev_session.schedule(
+                _redact_activity_value(goal),
+                _model_visible_browser_output_schema(response_schema, _redact_activity_value),
+                browser_prefix_events(_redact_activity_value(action_history.get_entries())),
+            )
             # Drain checkpoint. Between steps, with no approved action still
             # owed, the task is fully captured by the same resume payload a
             # write-lock pause returns, so the manager can restart it at this
@@ -9521,6 +9712,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 if not observe_needs_dom:
                     state_prefetch.start(dom_service)
 
+                from .phone import observe_phone, phone_profile_enabled
+                phone_before_decision = (await observe_phone(config, user_id, task_id)
+                                         if phone_profile_enabled(user_profile) else {})
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
                 # action — only the LLM "what next" decision is cached.
@@ -9563,6 +9757,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         ),
                         pool=browser_pool,
                         dom_service=dom_service_snapshot,
+                        phone_observation=phone_before_decision,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -9582,13 +9777,13 @@ async def _spawn_browser_agent_activity_v3_real(
                     fm_write_through = write_through_enabled_for_user(user_id)
                     llm_result = await asyncio.wait_for(
                         cached_browser_decision(
-                            enabled=bool(fast_mode_cache_enabled),
+                            enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled"),
                             goal=goal,
                             request={
                                 "task": task_prompt,
                                 "dynamic_system_context": dynamic_system_context,
                                 "turn_messages": browser_turn_messages,
-                                # url/title enter the Fast Mode cache key via
+                                # url/title enter the DEMO cache key via
                                 # canonical_browser_use_request — empty {} would
                                 # replay a stale decision after a page change.
                                 "browser_state": {
@@ -9601,7 +9796,9 @@ async def _spawn_browser_agent_activity_v3_real(
                                 },
                             },
                             call_llm=_live_browser_decision,
-                            write_enabled=bool(fast_mode_cache_enabled or fm_write_through),
+                            write_enabled=bool(
+                                (fast_mode_cache_enabled or fm_write_through) and not phone_before_decision.get("enabled")
+                            ),
                             agent_id=agent_id,
                         ),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -9626,6 +9823,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     llm_from_fast_cache=bool((llm_result.get("usage") or {}).get("from_fast_cache")),
                 )
                 llm_result = {**llm_result, "_thinking_stream_id": browser_stream.stream_id}
+                current_model = llm_result.get("actual_model")
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
                     browser_use_mode = None
@@ -9663,6 +9861,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     await asyncio.sleep(1)
                     continue
                 if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                    loop_abort_reason = (
+                        f"Browser model failed {MAX_CONSECUTIVE_API_FAILURES} consecutive steps "
+                        f"(decision timeout after {BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s)"
+                    )
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
@@ -9731,6 +9933,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     iteration=iteration,
                 )
                 if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                    loop_abort_reason = (
+                        f"Browser model failed {MAX_CONSECUTIVE_API_FAILURES} consecutive steps "
+                        f"({type(e).__name__}: {extract_error_message(e)})"
+                    )
                     logger.error(
                         f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive Rose API failures",
                         last_error=str(e),
@@ -9847,6 +10053,32 @@ async def _spawn_browser_agent_activity_v3_real(
 
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
+                if (unified_action.get("params") or {}).get("targetKind", "browser") == "iphone":
+                    native_pause = await _native_phone_auth_pause(
+                        config=config, user_id=user_id, agent_id=agent_id, task_id=task_id,
+                        decision_id=str(llm_result.get("tool_call_id") or ""),
+                        snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
+                        critical_reason=(unified_action.get("params") or {}).get("criticalReason"),
+                        action_history=action_history, dom_service=dom_service,
+                        unified_action=unified_action, browser_turn_messages=browser_turn_messages,
+                        continuity_state=_pause_continuity_state,
+                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": browser_url,
+                                 "step_count": iteration},
+                    )
+                    if native_pause.get("status") != "awaiting_auth_assistance":
+                        continue
+                    execution_time_ms = (safe_time() - start_time) * 1000
+                    native_pause["recorded_passkey_credential_ids"] = sorted(recorded_passkey_credential_ids)
+                    native_pause["execution_time_ms"] = execution_time_ms
+                    native_pause["usage_items"] = build_usage_items(
+                        total_input_tokens, total_output_tokens, model_pricing, execution_time_ms,
+                        usage_by_model, pricing_pool=browser_pool,
+                        fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                        provider=browser_session_metadata.get("provider"),
+                    )
+                    browser_task_paused_for_resume = True
+                    await browser_stream.finish_tools(status="FINISHED")
+                    return _visible_activity_result(native_pause)
                 tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
                 base_site = auth_realm or get_domain_from_url(current_url) or "Current Site"
                 logger.info(
@@ -10065,6 +10297,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     or (request_info.get("request") or {}).get("id")
                 )
 
+                retained_phone = llm_result.get("_phone_snapshot") or {}
+                if (request_id and phone_profile_enabled(user_profile)
+                    and retained_phone.get("enabled") is True
+                    and ((retained_phone.get("interaction") or {}).get("lease") or {}).get("status") == "ACTIVE"):
+                    from .phone import retain_phone_for_auth
+                    await retain_phone_for_auth(config, user_id, task_id, request_id, snapshot=retained_phone)
                 success_result = {"success": True, "request_id": request_id}
                 if dom_service is not None:
                     await action_history.record_action(
@@ -10881,7 +11119,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
-                        await _close_browser_with_cleanup_receipt(session_id, pause=False)
+                        await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
                         context_message = build_context_summary(
                             success=True,
@@ -11137,6 +11375,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     password_origins=password_origins,
                     credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                     user_id=user_id,
+                    agent_id=agent_id,
+                    browser_task_id=task_id,
+                    tool_call_id_decision=str(llm_result.get("tool_call_id") or ""),
+                    phone_snapshot=llm_result.get("_phone_snapshot") if phone_profile_enabled(user_profile) else None,
                     current_url=current_url,
                     trusted_page_urls=visited_urls,
                     write_lock_enabled=write_lock_enabled,
@@ -11150,10 +11392,21 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
             )
             try:
-                result = await asyncio.wait_for(
-                    action_task,
-                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
-                )
+                if action_name == "phone":
+                    # Phone owns its deadlines; never classify a physical operation as a CDP stall.
+                    try:
+                        result = await action_task
+                    except asyncio.TimeoutError:
+                        result = {
+                            "success": False,
+                            "status": "UNKNOWN",
+                            "error": "Phone outcome unconfirmed; inspect owned receipt",
+                        }
+                else:
+                    result = await asyncio.wait_for(
+                        action_task,
+                        timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                    )
             except asyncio.TimeoutError:
                 from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
 
@@ -11798,8 +12051,9 @@ Based on this feedback, I need to continue working on the task and address the i
             step_timer.mark("post_action_bookkeeping")
 
         step_timer.finish()
-        # Max iterations reached
-        logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
+        # Step budget exhausted, or the loop stopped early on repeated model failures.
+        terminal_reason = loop_abort_reason or f"Max iterations ({MAX_ITERATIONS}) reached"
+        logger.warning(terminal_reason if loop_abort_reason else f"Max iterations reached: {MAX_ITERATIONS}")
 
         # Final synthesis pass — mirror run_agent's max-iterations handling
         # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
@@ -11922,11 +12176,11 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
-        await _close_browser_with_cleanup_receipt(session_id, pause=False)
+        await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
         context_message = build_context_summary(
             success=False,
-            close_reasoning=f"Max iterations ({MAX_ITERATIONS}) reached",
+            close_reasoning=terminal_reason,
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,
@@ -11935,10 +12189,10 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await _save_browser_action_message(
             agent_id=agent_id,
-            title="Task Incomplete - Max Steps Reached",
+            title="Task Failed - Browser Model Errors" if loop_abort_reason else "Task Incomplete - Max Steps Reached",
             task_id=task_id,
             message=context_message,
-            status=MessageStatus.FINISHED,
+            status=MessageStatus.ERROR if loop_abort_reason else MessageStatus.FINISHED,
             browser_url=browser_url,
             action_type="task_complete",
             tool_call_id=tool_call_id,
@@ -11964,7 +12218,7 @@ Based on this feedback, I need to continue working on the task and address the i
             agent_id=agent_id,
             task_id=task_id,
             browser_url=browser_url,
-            status="max_iterations",
+            status="error" if loop_abort_reason else "max_iterations",
             success=False,
             message=context_message,
         )
@@ -11981,7 +12235,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         return _visible_activity_result(
             {
-                "status": "max_iterations",
+                "status": "failed" if loop_abort_reason else "max_iterations",
                 "success": False,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": context_message,
@@ -12031,6 +12285,24 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+
+        if task_id and browser_turn_messages:
+            # A user pause: keep this run's exact conversation so a later
+            # continue_conversation=true resume restores it (resume_store.py).
+            try:
+                await persist_paused_conversation(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    inbox_address=inbox_address or tool_call_id,
+                    state={**_pause_continuity_state(), "session_id": session_id},
+                )
+            except Exception as snapshot_error:
+                logger.warning(
+                    "Paused browser conversation was not saved",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(snapshot_error),
+                )
 
         if task_id:
             with _suppress_browser_cleanup_errors():
@@ -12085,11 +12357,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 dom_service = None
 
         if session_id and cleanup_failure is None:
-            retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
             await _close_browser_with_cleanup_receipt(
                 session_id,
-                pause=retryable_notification_error,
-                current_url=current_url if retryable_notification_error else None,
+                pause=True,
+                current_url=current_url,
             )
 
         error_context = f"Failed during: {last_action}"
@@ -12181,6 +12452,7 @@ Based on this feedback, I need to continue working on the task and address the i
         raise safe_error from None
 
     finally:
+        jev_session.close()
         try:
             generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
             if generation_sealed and otp_poll_task is not None:
@@ -12257,7 +12529,7 @@ Based on this feedback, I need to continue working on the task and address the i
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
-            _schedule_browser_cleanup(
+            owned_cleanup = _schedule_browser_cleanup(
                 agent_id=agent_id,
                 preparation_cancellation=preparation_cancellation,
                 cleanup_failure=cleanup_failure,
@@ -12288,6 +12560,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 local_only_recorders=locally_owned_recorders,
                 local_only_setup_tasks=(download_persister_task,),
             )
+            if await_owner_cleanup:
+                await await_owned_browser_cleanup(owned_cleanup)
             playwright_browser = None
             playwright_instance = None
             input_page = None
@@ -12395,6 +12669,18 @@ class SpawnBrowserAgentManagerV3(ToolManager):
     tool_name = "spawn_browser_agent"
 
     async def execute_tool(
+        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
+    ) -> AsyncGenerator[ToolEvent, None]:
+        async with browser_activity_turn(workflow_instance):
+            if getattr(workflow_instance, "_browser_activity_cleanup_unknown", False):
+                raise RuntimeError("Previous browser activity cleanup is unconfirmed")
+            async with contextlib.aclosing(self._execute_tool(
+                workflow_instance, tool_call, tool_call_id
+            )) as events:
+                async for event in events:
+                    yield event
+
+    async def _execute_tool(
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
@@ -12522,6 +12808,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 current_start_url = resume_hint.get("current_start_url") or start_url
                 parked_result = resume_hint.get("parked_result")
                 parked_approval = resume_hint.get("approval")
+            elif isinstance(tool_call.get("_resume_paused_conversation"), dict):
+                # continue_conversation=true resume of a user-paused run: the
+                # activity restores that run's archived conversation.
+                write_lock_resume_state = {
+                    "_resume_paused_conversation": dict(tool_call["_resume_paused_conversation"])
+                }
 
             def park_browser_task(phase: str, resume_state: Optional[Dict[str, Any]], **parked: Any) -> bool:
                 return park_pending_tool(
@@ -12556,12 +12848,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # (approval / auth wait) without running the activity again.
                     result, parked_result = parked_result, None
                     was_cancelled = False
-                    known_task_id = result.get("task_id") or _stable_browser_task_id(agent_id, tool_call_id)
+                    known_task_id = result.get("task_id") or _logical_browser_task_id(agent_id)
                     activity_task_id = known_task_id
                 else:
                     known_task_id = (
                         write_lock_resume_state.get("task_id") if isinstance(write_lock_resume_state, dict) else None
-                    ) or _stable_browser_task_id(agent_id, tool_call_id)
+                    ) or _logical_browser_task_id(agent_id)
                     activity_args = [
                         user_id,
                         agent_id,
@@ -12587,8 +12879,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                     activity_args.append(world_model_mode if world_model_mode != "real" else None)
                     activity_args.append(getattr(workflow_instance, "model", None))
-                    if inbox_address:
-                        activity_args.append(inbox_address)
+                    activity_args.append(inbox_address)
+                    activity_args.append(True)
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,
@@ -12609,21 +12901,25 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             args=activity_args,
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                             retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
                         )
                         activity_task_id = known_task_id
 
                         was_cancelled = False
                         # The workflow allocates task_id before starting the activity,
-                        # so TRY_CANCEL cannot erase the ownership key along with the
+                        # so cancellation cannot erase the ownership key along with the
                         # activity return value.
                         # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
-                        await workflow.wait_condition(
-                            lambda handle=activity_handle: (
-                                handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                        try:
+                            await workflow.wait_condition(
+                                lambda handle=activity_handle: (
+                                    handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
+                                )
                             )
-                        )
+                        except asyncio.CancelledError:
+                            await cancel_and_join_browser_activity(activity_handle)
+                            raise
                         # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
                         if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -13411,12 +13707,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "action_type": "auth_assistance",
                                 "browser_page_observation": result.get("browser_page_observation"),
                                 "task_id": result.get("task_id"),
+                                **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
                                 "requestUserAuthentication": {
                                     "requestId": request_id,
                                     "authRealm": result.get("auth_realm"),
                                     "steelSessionId": result.get("session_id"),
                                     "taskId": result.get("task_id"),
                                     "handoffMode": result.get("handoff_mode"),
+                                    **_native_phone_auth_metadata(result),
                                     "browserUrl": result.get("browser_url"),
                                     "liveViewUrl": (
                                         auth_request.get("liveViewUrl")
@@ -13494,7 +13795,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
-                        "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
+                        "approval_type": (AUTH_ASSISTANCE_DECLINED if user_declined else
+                                          "native_auth_assistance" if (result.get("auth_target") or {}).get("kind") == "iphone" else "auth_assistance"),
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
@@ -13521,12 +13823,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "toolName": "spawn_browser_agent",
                             "action_type": "auth_assistance",
                             "task_id": result.get("task_id"),
-                            "requestUserAuthentication": {
+                            **({"authAssistance": {
+                                    "requestId": request_id, "mode": "manual_step",
+                                    **_native_phone_auth_metadata(result),
+                                }} if _native_phone_auth_metadata(result) else {}),
+                                "requestUserAuthentication": {
                                 "requestId": request_id,
                                 "authRealm": result.get("auth_realm"),
                                 "steelSessionId": result.get("session_id"),
                                 "taskId": result.get("task_id"),
                                 "handoffMode": result.get("handoff_mode"),
+                                **_native_phone_auth_metadata(result),
                             },
                         },
                     )
@@ -13633,6 +13940,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
             raise
         except Exception as e:
+            if isinstance(e, ActivityError) and isinstance(e.cause, TemporalTimeoutError):
+                # A server timeout does not acknowledge the worker's cleanup.
+                # Fail later same-GP turns closed until workflow reconciliation.
+                workflow_instance._browser_activity_cleanup_unknown = True
             if isinstance(e, asyncio.CancelledError):
                 raise
 

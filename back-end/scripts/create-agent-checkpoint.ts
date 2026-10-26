@@ -79,7 +79,7 @@ Options:
   --task-name NAME              Benchmark task name to record in the manifest.
   --user-id UUID                User id for exports that omit it. Defaults to
                                 BENCHMARK_USER_ID, TEST_USER_ID, or the dev benchmark user.
-  --fast-mode-cache true|false  Fast cache flag for the resumed workflow. Default false.
+  --fast-mode-cache true|false  DEMO cache flag for the resumed workflow. Default false.
   --price-limit-cents N         Override cloned price limit.
   --task-queue NAME             Temporal task queue. Defaults to TEMPORAL_TASK_QUEUE.
   --no-start                    Clone only, do not start Temporal.

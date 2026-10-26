@@ -7,6 +7,10 @@
  *   results carry the agent's task path (location.agent_path; `agent_path:` in content)
  *   a background-task path narrows to its owner; an unknown path → 404 AGENT_PATH_NOT_FOUND
  *   a path is resolved only inside the caller's tree; a missing agent_id → 400
+ *   agent_network rows are stored messages, so record_kind message/all reads them;
+ *   order is accepted and ignored on a sole agent_network search (newest first);
+ *   a model-record kind, surface, until, page_after or non-task trace_path → 400
+ *   naming that parameter; order with another source → 400 order/page_after
  *
  * Registered by data.blackbox.ts.
  */
@@ -116,11 +120,14 @@ async function createTree(userId: string): Promise<Tree> {
       status: 'COMPLETED',
     },
   });
+  // One second apart, in creation order, so read order is deterministic.
+  const start = Date.now() - 60_000;
   await prisma.message.createMany({
-    data: [root, child, grandchild, sibling, otherChild].map((agent) => ({
+    data: [root, child, grandchild, sibling, otherChild].map((agent, index) => ({
       agentId: agent.id,
       role: 'ASSISTANT' as const,
       text: `${marker} evidence from ${agent.taskPath}`,
+      createdAt: new Date(start + index * 1000),
     })),
   });
   return {
@@ -234,6 +241,81 @@ async function proveTrajectoryScope(headers: Record<string, string>, tree: Tree)
 }
 
 /**
+ * Reading a sibling's trajectory the way list_agents advertises it, with the
+ * schema's record_kind selector. agent_network holds only stored messages, so
+ * message and all select every row; model-record kinds live only in
+ * agent_trajectories and are rejected by name.
+ */
+async function proveAgentNetworkRecordKind(
+  headers: Record<string, string>,
+  tree: Tree
+): Promise<void> {
+  for (const recordKind of ['all', 'message']) {
+    const res = await grep(headers, {
+      source: 'agent_network',
+      record_kind: recordKind,
+      trace_path: '/root/outreach/napa',
+      agent_id: tree.siblingId,
+    });
+    assert(
+      res.status === 200,
+      `agent_network record_kind=${recordKind} reads the stored messages, got ${res.status} ${JSON.stringify(res.data)}`
+    );
+    assert(
+      JSON.stringify(agentIds(res.data)) === JSON.stringify([tree.grandchildId]) &&
+        res.data.matches.some((m) => m.content.includes(tree.marker)),
+      `agent_network record_kind=${recordKind} keeps the trace_path scope, got ${JSON.stringify(res.data)}`
+    );
+  }
+  for (const order of ['oldest_first', 'newest_first']) {
+    const res = await grep(headers, {
+      pattern: tree.marker,
+      sources: ['agent_network'],
+      order,
+      trace_path: '/root',
+      agent_id: tree.siblingId,
+    });
+    assert(
+      res.status === 200 &&
+        res.data.matches[0]?.location.agent_id === tree.siblingId &&
+        (res.data as unknown as { display_order?: string }).display_order === 'newest_first',
+      `agent_network ignores order=${order} and reads newest first, got ${res.status} ${JSON.stringify(res.data)}`
+    );
+  }
+  for (const [key, value] of [
+    ['record_kind', 'llm_output'],
+    ['surface', 'WEB'],
+    ['until', '2026-10-25T00:00:00Z'],
+    [
+      'page_after',
+      `agent_trajectories/${tree.rootId}/depth-0/${tree.rootId}/ASSISTANT/${tree.rootId}`,
+    ],
+    ['trace_path', `agent_trajectories/${tree.rootId}`],
+  ] as const) {
+    const res = await grep(headers, {
+      sources: ['agent_network'],
+      trace_path: '/root/outreach/napa',
+      agent_id: tree.siblingId,
+      [key]: value,
+    });
+    assert(
+      res.status === 400 && JSON.stringify(res.data).includes(`'${key}'`),
+      `agent_network rejects ${key}=${value} by name, got ${res.status} ${JSON.stringify(res.data)}`
+    );
+  }
+  const mixed = await grep(headers, {
+    pattern: tree.marker,
+    sources: ['agent_network', 'messages'],
+    order: 'oldest_first',
+    agent_id: tree.siblingId,
+  });
+  assert(
+    mixed.status === 400 && JSON.stringify(mixed.data).includes("'order/page_after'"),
+    `order with another source is rejected, got ${mixed.status} ${JSON.stringify(mixed.data)}`
+  );
+}
+
+/**
  * Task paths are unique only among live agents, so an archived agent can share
  * /root/outreach with the live one. A path scope must resolve to live agents.
  */
@@ -291,6 +373,7 @@ export async function testGrepAgentTaskPaths(
   try {
     await proveAgentNetworkScope(headers, tree);
     await proveTrajectoryScope(headers, tree);
+    await proveAgentNetworkRecordKind(headers, tree);
     await proveArchivedPathHolderExcluded(userId, headers, tree);
   } finally {
     await deleteTree(tree);

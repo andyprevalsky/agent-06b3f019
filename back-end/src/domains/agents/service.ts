@@ -31,9 +31,8 @@ export {
 
 export {
   postMessage,
-  uploadAttachment,
-  getAttachmentSignedUrl,
   getMessagesBatch,
   generateSchema,
   batchFetchMessages,
 } from './agentMessageService';
+export { uploadAttachment, getAttachmentSignedUrl } from './agentAttachmentService';

@@ -935,6 +935,86 @@ def _anthropic_tool_block_ids(messages):
     return tool_use_ids, tool_result_ids
 
 
+async def test_completion_summary_carries_attachments_to_claude():
+    """completion_summary must send attachment rows' content, not empty text (descend R4).
+
+    agent-display-revenue-chart's attached CSV reached completion_summary as two
+    empty user rows; Claude 400'd ("text content blocks must be non-empty").
+    Andy 2026-10-24: "File attachments should work and ok filter empty".
+    """
+    import base64
+
+    import helpers.llm as llm_mod
+    from helpers import summarize
+    from providers.rose import get_pool
+    from providers.rose.claude_auth import build_anthropic_body
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    csv = b"order_id,status,amount_usd\nA1,completed,10.00\n"
+    files = {"img-1": png, "csv-1": csv}
+
+    def pointer(file_id, name, mime, size):
+        return {
+            "id": file_id,
+            "storage_path": f"user/{name}",
+            "original_filename": name,
+            "mime_type": mime,
+            "size_bytes": size,
+            "created_at": "2026-10-23T23:15:00Z",
+        }
+
+    context = [
+        {"id": "m1", "role": "USER", "text": "Chart revenue from the attached files.",
+         "timestamp": "2026-10-23T23:15:00Z", "metadata": {}},
+        {"id": "m2", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:01Z", "metadata": {},
+         "file_pointer": pointer("img-1", "logo.png", "image/png", len(png))},
+        {"id": "m3", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:02Z", "metadata": {},
+         "file_pointer": pointer("csv-1", "orders.csv", "text/csv", len(csv))},
+        {"id": "m4", "role": "USER", "text": "", "timestamp": "2026-10-23T23:15:03Z", "metadata": {}},
+        {"id": "m5", "role": "ASSISTANT", "text": "Charted completed-order revenue.",
+         "timestamp": "2026-10-23T23:16:00Z", "metadata": {}},
+    ]
+    captured = []
+
+    async def fake_llm(messages, **kwargs):
+        captured.append(messages)
+        return {"content": "Charted revenue.", "usage": {}}
+
+    async def fake_download(fp, cache=None):
+        return files[fp.id], {}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.object(llm_mod.activity, "in_activity", return_value=True),
+        patch.object(llm_mod, "call_llm", fake_llm),
+        patch.object(llm_mod, "get_file_from_pointer", fake_download),
+    ):
+        await summarize.generate_completion_summary(context=context, goal="Chart revenue", model="m")
+
+    assert len(captured) == 1
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=captured[0],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=1024,
+        skip_cache_write=True,
+    )
+    blocks = []
+    for message in body["messages"]:
+        content = message["content"]
+        blocks.extend(content if isinstance(content, list) else [{"type": "text", "text": content}])
+    images = [block for block in blocks if block.get("type") == "image"]
+    png_source = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png).decode()}
+    assert images == [{"type": "image", "source": png_source}], blocks
+    text = "\n".join(block["text"] for block in blocks if block.get("type") == "text")
+    assert "A1,completed,10.00" in text and "orders.csv" in text and "logo.png" in text, text
+    assert all(block["text"].strip() for block in blocks if block.get("type") == "text"), blocks
+
+
 def test_convert_context_to_messages_one_tool_result_per_tool_use():
     """Two terminal TOOL rows sharing a toolCallId must yield ONE tool_result.
 
@@ -1048,6 +1128,62 @@ def test_convert_context_to_messages_strips_orphan_tool_use():
     assert tool_use_ids == [], f"orphan tool_use must be stripped, got {tool_use_ids}"
     assert tool_result_ids == [], f"no synthetic tool_result allowed, got {tool_result_ids}"
     assert not any(m.get("tool_call_id") == call_id for m in messages)
+
+
+def test_completion_summary_context_pairs_verifier_result_with_attempt_completion():
+    """The verifier's FINISHED row is the attempt_completion call's tool result.
+
+    Captured descend-full69 r004-j0055 (2026-10-23): every completed root's
+    completion_summary logged tool_result_pairing.repaired (12 -> 12 messages).
+    run_agent posts the verifier verdict as the attempt_completion terminal row
+    (toolCallId = the declared call, verifierMessage=True). The summary converter
+    turned it into assistant text, so the declared tool_use had no result and the
+    pairing guard stripped it. build_llm_messages pairs the same row as a tool
+    result; both converters must agree and the guard must not fire.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    call_id = "2539f237-6bf4-4196-b2e9-d366b787051c"
+    context = [
+        {"role": "USER", "text": "Did my coding agent's tool report success?", "timestamp": "2026-10-23T23:15:58.472Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-10-23T23:16:16.917Z",
+            "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Running verifier to check completion...",
+            "timestamp": "2026-10-23T23:16:16.993Z",
+            "metadata": {"toolCallId": call_id, "toolName": "attempt_completion", "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            "role": "TOOL",
+            "text": "The explore agent's FINAL_ANSWER cites tool_status FAILED.",
+            "timestamp": "2026-10-23T23:16:19.200Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+                "title": "\u2696\ufe0f Progress: 100%",
+                "verifierMessage": True,
+            },
+        },
+    ]
+
+    with patch("helpers.llm.logger") as mock_logger:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    repaired = [c for c in mock_logger.warning.call_args_list if c.args and c.args[0] == "tool_result_pairing.repaired"]
+    assert repaired == [], f"persisted order must already be paired, guard fired: {repaired}"
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id], f"attempt_completion tool_use was dropped: {tool_use_ids}"
+    assert [rid for rid, _ in tool_result_ids] == [call_id]
+    result = next(m for m in messages if m.get("tool_call_id") == call_id)
+    assert result["role"] == "tool"
+    assert "tool_status FAILED" in result["content"]
+    assert "Progress: 100%" in result["content"]
 
 
 def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
@@ -2088,7 +2224,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
             lineage_key="agent:a-1",
             agent_id="a-1",
             root_agent_id="root-1",
-            fast_cache_affinity_key="affinity-1",
+            demo_cache_affinity_key="affinity-1",
         )
     assert result == payload
     assert len(requests) == 1
@@ -2462,11 +2598,11 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get_first",
+            "providers.demo_cache.client.cache_get_first",
             AsyncMock(
                 return_value=(
                     {"schema": schema, "title": "Task Output", "usage": {}},
@@ -2534,10 +2670,10 @@ async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-lite-alias", "goal", True)),
         ),
-        patch("providers.fast_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
+        patch("providers.demo_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
         patch("helpers.llm.RoseClient") as rose_client,
     ):
         from helpers.llm import set_response_schema_activity
@@ -2601,12 +2737,12 @@ async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(True, "goal", False, "agent-cache-fail", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get_first",
-            AsyncMock(side_effect=RuntimeError("fast-cache get-first failed: backend down")),
+            "providers.demo_cache.client.cache_get_first",
+            AsyncMock(side_effect=RuntimeError("demo-cache get-first failed: backend down")),
         ),
         patch("helpers.llm.RoseClient", FakeRoseClient),
     ):
@@ -2670,7 +2806,7 @@ async def test_schema_refresh_reuses_native_activity_retry_after_initial_generat
         with (
             patch("helpers.llm.load_config", return_value=config),
             patch("helpers.llm.RoseClient", SchemaClient),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
             patch("temporalio.activity.heartbeat"),
         ):
             initial = await call_temporal_activity_from_activity(
@@ -2721,7 +2857,7 @@ async def test_schema_generation_exhaustion_propagates_through_native_retry_budg
         patch("helpers.llm.load_config", return_value=config),
         patch("helpers.llm.RoseClient", SchemaClient),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(False, "", False, "", "", False)),
         ),
         patch("temporalio.activity.heartbeat"),
@@ -2764,7 +2900,7 @@ async def test_schema_generation_does_not_retry_or_swallow_lifecycle_stops():
             patch("helpers.llm.load_config", return_value=config),
             patch("helpers.llm.RoseClient", SchemaClient),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 AsyncMock(return_value=(False, "", False, "", "", False)),
             ),
             patch("temporalio.activity.heartbeat"),
@@ -3920,7 +4056,7 @@ async def test_structured_escalation_keeps_anthropic_exclusion():
     async def on_chunk(_text: str, _tokens: int):
         pass
 
-    with patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete):
+    with patch("providers.demo_cache.rose_cache.cached_complete", new=fake_cached_complete):
         response, _usage, _detected = await call_llm_structured_streaming(
             messages=[{"role": "user", "content": "finish this"}],
             model="rose-labs/rose-1-flash",
@@ -3940,12 +4076,12 @@ async def test_structured_escalation_keeps_anthropic_exclusion():
 async def test_structured_deferred_cache_key_matches_excluded_read():
     """A rerouted response must be stored under the same excluded-policy key it read."""
     from helpers.llm import call_llm_structured_streaming
-    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
+    from providers.demo_cache.rose_cache import request_key_material
     from providers.rose.types import StreamChunk
     from utils.tool_schemas import create_agent_action_model
 
-    ctx = FastCacheContext(enabled=True, goal="excluded-policy-key-parity")
+    ctx = DemoCacheContext(enabled=True, goal="excluded-policy-key-parity")
     captured = []
 
     async def fake_cached_complete(*_args, **kwargs):
@@ -3962,8 +4098,8 @@ async def test_structured_deferred_cache_key_matches_excluded_read():
     cache_set = AsyncMock(return_value=True)
     try:
         with (
-            patch("providers.fast_cache.rose_cache.cached_complete", new=fake_cached_complete),
-            patch("helpers.llm.fast_cache_client.cache_set", new=cache_set),
+            patch("providers.demo_cache.rose_cache.cached_complete", new=fake_cached_complete),
+            patch("helpers.llm.demo_cache_client.cache_set", new=cache_set),
         ):
             await call_llm_structured_streaming(
                 messages=[{"role": "user", "content": "same request"}],
@@ -4099,7 +4235,7 @@ async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
         )
         yield StreamChunk(kind="done", data={})
 
-    import providers.fast_cache.rose_cache as rose_cache_module
+    import providers.demo_cache.rose_cache as rose_cache_module
 
     original = rose_cache_module.cached_complete
     rose_cache_module.cached_complete = fake_cached_complete
@@ -4365,7 +4501,7 @@ async def test_call_llm_verifier_bounds_provider_stream_time():
 
     with (
         patch("temporalio.activity.heartbeat"),
-        patch("providers.fast_cache.rose_cache.cached_complete", fake_cached_complete),
+        patch("providers.demo_cache.rose_cache.cached_complete", fake_cached_complete),
     ):
         result, _usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "x"}],
@@ -4604,6 +4740,116 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
+    """Required output keys gate a completion verdict, not a partial one.
+
+    The verifier rubric defines 0.5 and 0.0 as verdicts in which a required
+    field is not grounded, and forbids inventing it. When an optional field
+    turns OpenAI strict mode off, the provider no longer forces every key, so
+    such a verdict omits the field (agent 9698df4f, 2026-10-20). That verdict
+    is valid. A 1.0 verdict that omits a required key is not, and present
+    values keep their declared types at every score.
+    """
+    from config import load_config
+    from helpers.llm import _call_llm_verifier
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.types import StreamChunk
+
+    schema = {
+        "fields": [
+            {"name": "game_file", "type": "str", "required": True},
+            {"name": "view_name", "type": "str", "required": False},
+            {"name": "description", "type": "str", "required": True},
+            {
+                "name": "selected",
+                "type": "object",
+                "required": False,
+                "properties": [
+                    {"name": "title", "type": "str"},
+                    {"name": "price_usd", "type": "float"},
+                ],
+            },
+        ]
+    }
+    replies: list[dict] = []
+    request_formats: list[dict] = []
+
+    class OneVerdictRose:
+        async def complete(self, **kwargs):
+            request_formats.append(build_openai_response_format(kwargs["response_model"])["json_schema"])
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6-sol-gpt", "pool_name": "gpt-token"})
+            yield StreamChunk(kind="content", data={"text": json.dumps(replies[-1])})
+            yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+            yield StreamChunk(kind="done", data={})
+
+    async def judge(verdict: dict) -> dict:
+        replies.append(verdict)
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", OneVerdictRose):
+            parsed, _usage = await _call_llm_verifier(
+                messages=[{"role": "user", "content": "Goal: make a game"}],
+                model="rose-labs/rose-1-ultra",
+                config=load_config(),
+                response_schema=schema,
+            )
+        return parsed
+
+    partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "view_name": "game"},
+            "reasoning": "The description of the controls is not grounded in any tool result.",
+            "score": 0.5,
+        }
+    )
+    assert partial["score"] == 0.5
+    assert partial["output"] == {"game_file": "/home/user/output/game.html", "view_name": "game"}
+    assert partial["reasoning"].startswith("The description of the controls")
+
+    nested_partial = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "selected": {"title": "Neon"}},
+            "reasoning": "The price is not shown.",
+            "score": 0.5,
+        }
+    )
+    assert nested_partial["output"]["selected"] == {"title": "Neon"}
+    assert "description" not in nested_partial["output"]
+
+    rejected = (
+        # A completion verdict must contain every required key at every level.
+        {"output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
+        {
+            "output": {
+                "game_file": "/home/user/output/game.html",
+                "description": "Dodge and collect.",
+                "selected": {"title": "Neon"},
+            },
+            "reasoning": "done",
+            "score": 1.0,
+        },
+        # Partial verdicts still type-check the values they do report.
+        {"output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
+        {"output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
+    )
+    for verdict in rejected:
+        # An output that breaks the schema is a rejection with feedback, never an
+        # accepted completion (_validate_verifier_response).
+        parsed = await judge(verdict)
+        assert parsed["score"] <= 0.5 and "output" not in parsed, (verdict, parsed)
+        assert "does not meet the required output schema" in parsed["reasoning"], parsed["reasoning"]
+
+    complete = await judge(
+        {
+            "output": {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."},
+            "reasoning": "done",
+            "score": 1.0,
+        }
+    )
+    assert complete["output"] == {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."}
+    # Every request carried the same provider-facing contract.
+    assert all(fmt == request_formats[0] for fmt in request_formats)
+    assert request_formats[0]["schema"]["properties"]["output"]["required"] == ["game_file", "description"]
+
+
 def test_filter_context_for_execute_verifier_uses_execute_boundary():
     """Execute verifier context keeps the goal but excludes plan/research rows before the execute boundary."""
     from helpers.llm import _filter_context_for_execute_verifier
@@ -4768,10 +5014,10 @@ def _soft_complete_bench_goal() -> str:
     return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
-async def test_check_progress_propagates_resolved_fast_cache_tree_context():
+async def test_check_progress_propagates_resolved_demo_cache_tree_context():
     """Verifier activities retain the tree root goal and provider speed mode."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     child_goal = "Select exactly 20 creators"
     root_goal = _soft_complete_bench_goal()
@@ -4796,7 +5042,7 @@ async def test_check_progress_propagates_resolved_fast_cache_tree_context():
             patch("temporalio.activity.heartbeat"),
             patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 AsyncMock(return_value=(True, child_goal, True, "root-agent", root_goal, False)),
             ),
         ):
@@ -4816,10 +5062,10 @@ async def test_check_progress_propagates_resolved_fast_cache_tree_context():
     assert seen_contexts == [(child_goal, root_goal, False)]
 
 
-async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
+async def test_check_progress_disables_demo_cache_read_after_verifier_parse_failure():
     """Verifier retries should not replay the same invalid cached response repeatedly."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     seen_contexts = []
 
@@ -4863,7 +5109,7 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
 async def test_check_progress_soft_passes_cached_fast_mode_reject():
     """Cached verifier rejects under Fast Mode soft-pass so soft-complete execute loops exit."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import set_context
+    from providers.demo_cache.context import set_context
 
     async def fake_call_llm_verifier(*_args, **_kwargs):
         return (
@@ -4898,9 +5144,69 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
         set_context(None)
 
     assert result["score"] == 1.0
-    assert "Fast Mode cache trajectory ended" in result["reasoning"]
+    assert result["reasoning"] == "No grounded tool-result evidence was provided."
     assert (result.get("usage") or {}).get("from_fast_cache") is True
     assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
+
+
+async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy():
+    """descend-full69 MA: a DEMO soft-pass verdict is a visible transcript row.
+
+    Every first-level GP in test-mass-agent-run-0 replays a recorded 0.5
+    verifier verdict and soft-passes. The visible "Progress: 100%" row shows
+    the recorded reasoning byte for byte; only code-generated stand-ins (no
+    recorded verdict, exhausted trajectory) use the fixed neutral constants.
+    """
+    from helpers.llm import check_progress
+    from providers.demo_cache.context import set_context
+    from providers.demo_cache.rose_cache import (
+        SOFT_COMPLETE_RESULT,
+        SOFT_PASS_VERIFIER_REASONING,
+        soft_complete_on_miss,
+    )
+
+    recorded = "The spawned-agent tool result is a dense, well-sourced research report on Dr. Gabrielle Lyon."
+
+    async def replayed_reject(*_args, **_kwargs):
+        return (
+            {"score": 0.5, "reasoning": recorded},
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "from_fast_cache": True},
+        )
+
+    async def unparseable(*_args, **_kwargs):
+        raise json.JSONDecodeError("bad cached verifier payload", "", 0)
+
+    results = []
+    for verifier in (replayed_reject, unparseable):
+        try:
+            with (
+                patch("temporalio.activity.heartbeat"),
+                patch("helpers.llm._call_llm_verifier", verifier),
+            ):
+                results.append(
+                    await check_progress(
+                        context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
+                        verifier_system_prompt="VERIFY",
+                        model="rose",
+                        call_site="verifier_execute",
+                        fast_mode_cache_enabled=True,
+                        fast_mode_goal=_soft_complete_bench_goal(),
+                        fast_mode_step=0,
+                    )
+                )
+        finally:
+            set_context(None)
+
+    assert [r["score"] for r in results] == [1.0, 1.0]
+    assert results[0]["reasoning"] == recorded
+    assert results[0]["message"] == f"{recorded}\n\nScore: 1.0"
+    assert results[1]["reasoning"] == SOFT_PASS_VERIFIER_REASONING
+    assert json.loads(soft_complete_on_miss("verifier_execute")["content"])["reasoning"] == (
+        SOFT_PASS_VERIFIER_REASONING
+    )
+    for site in ("execute_loop", "plan_loop"):
+        (call,) = soft_complete_on_miss(site)["tool_calls"]
+        assert json.loads(call["arguments"]) == {"result": SOFT_COMPLETE_RESULT}
 
 
 async def test_check_progress_fences_the_entire_verifier_retry_loop():
@@ -4934,10 +5240,10 @@ async def test_check_progress_fences_the_entire_verifier_retry_loop():
     assert calls == 1
 
 
-async def test_check_progress_browser_success_uses_fast_cache_write_only():
+async def test_check_progress_browser_success_uses_demo_cache_write_only():
     """Live browser evidence must not be overwritten by a stale verifier cache replay."""
     from helpers.llm import check_progress
-    from providers.fast_cache.context import current_context, set_context
+    from providers.demo_cache.context import current_context, set_context
 
     seen_contexts = []
 
@@ -5477,7 +5783,7 @@ async def test_simulated_planner_date_is_the_agents_world_time_cursor():
     with (
         patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
         patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
+            "providers.demo_cache.client.resolve_agent_fast_mode",
             AsyncMock(return_value=(False, None, False, "root", None, False)),
         ),
         patch.object(
@@ -6100,7 +6406,7 @@ async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_work
     """
     from helpers import llm as llm_mod
     from loop import run_agent as run_mod
-    from providers.fast_cache.rose_cache import _prior_explore_spawn_tool_call_ids
+    from providers.demo_cache.rose_cache import _prior_explore_spawn_tool_call_ids
 
     agent_id = "agent-evicted-pending-ctx"
     worker_w_slots = llm_mod._pending_llm_context  # the process the turn-4 activity lands on
@@ -7638,7 +7944,7 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
 
     # helpers.llm imports cached_complete lazily inside the function, so patch
     # the source module — the lazy import resolves this attribute at call time.
-    import providers.fast_cache.rose_cache as rose_cache_module
+    import providers.demo_cache.rose_cache as rose_cache_module
 
     original_cached_complete = rose_cache_module.cached_complete
     rose_cache_module.cached_complete = fake_cached_complete
@@ -8642,8 +8948,8 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
 
 async def test_july_gp_execute_caps_distinct_explores_then_completes():
     """Cached GP replay emits at most three distinct explores, then its completion."""
-    from providers.fast_cache.context import FastCacheContext
-    from providers.fast_cache import rose_cache
+    from providers.demo_cache.context import DemoCacheContext
+    from providers.demo_cache import rose_cache
 
     goal = (
         "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
@@ -8710,7 +9016,7 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
         patch.object(rose_cache.cache_client, "cache_get_position_fallback", by_position),
     ):
         for base_step in range(1, 4):
-            ctx = FastCacheContext(enabled=True, goal=goal, base_step=base_step)
+            ctx = DemoCacheContext(enabled=True, goal=goal, base_step=base_step)
             stored, _ = await rose_cache.lookup_llm_cache(ctx, "execute_loop", {"messages": messages})
             if stored is None:
                 break
@@ -8759,14 +9065,14 @@ async def test_july_gp_execute_caps_distinct_explores_then_completes():
     ]
 
 
-async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
+async def test_call_llm_structured_streaming_demo_cache_writes_only_after_validation():
     """Structured LLM responses are cached only after AgentAction validation succeeds."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
-    from providers.fast_cache import client as fast_cache_client
-    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
-    from providers.fast_cache import rose_cache
+    from providers.demo_cache import client as demo_cache_client
+    from providers.demo_cache.context import DemoCacheContext, reset_context, set_context
+    from providers.demo_cache import rose_cache
     from utils.tool_schemas import create_agent_action_model
 
     store = {}
@@ -8781,14 +9087,14 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
         store[key] = value
         return True
 
-    original_client_get = fast_cache_client.cache_get
-    original_client_set = fast_cache_client.cache_set
+    original_client_get = demo_cache_client.cache_get
+    original_client_set = demo_cache_client.cache_set
     original_rose_get = rose_cache.cache_client.cache_get
     original_rose_set = rose_cache.cache_client.cache_set
-    token = set_context(FastCacheContext(enabled=True, goal="structured cache validation"))
+    token = set_context(DemoCacheContext(enabled=True, goal="structured cache validation"))
     try:
-        fast_cache_client.cache_get = cache_get
-        fast_cache_client.cache_set = cache_set
+        demo_cache_client.cache_get = cache_get
+        demo_cache_client.cache_set = cache_set
         rose_cache.cache_client.cache_get = cache_get
         rose_cache.cache_client.cache_set = cache_set
 
@@ -8861,8 +9167,8 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
         assert len(store) == 2, "structured cache keys must remain isolated by sequence"
     finally:
         reset_context(token)
-        fast_cache_client.cache_get = original_client_get
-        fast_cache_client.cache_set = original_client_set
+        demo_cache_client.cache_get = original_client_get
+        demo_cache_client.cache_set = original_client_set
         rose_cache.cache_client.cache_get = original_rose_get
         rose_cache.cache_client.cache_set = original_rose_set
 
@@ -9541,7 +9847,7 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
     from utils.tool_schemas import create_agent_action_model
-    import providers.fast_cache.rose_cache as cache_module
+    import providers.demo_cache.rose_cache as cache_module
 
     class TypedTool(BaseModel):
         tool: Literal["typed_lookup"]
@@ -9882,7 +10188,7 @@ async def test_rose_client_settles_a_trailing_inter_agent_message_before_any_tra
     note = inter_agent_message("Message Type: FAILED\nTask name: /root\nSender: /root/a\nPayload:\nboom")
     with (
         patch.object(RoseClient, "_complete_impl", _impl),
-        patch("providers.fast_cache.client.ensure_context", AsyncMock(return_value=None)),
+        patch("providers.demo_cache.client.ensure_context", AsyncMock(return_value=None)),
     ):
         async for _ in RoseClient().complete(
             messages=[{"role": "user", "content": "go"}, note],
@@ -9956,6 +10262,7 @@ def test_verifier_keeps_a_childs_whole_final_answer():
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",
         test_structured_validation_exhausted_candidate_preserves_typed_error,
@@ -9977,9 +10284,17 @@ async def run_all_tests():
         "convert_context_to_messages_one_tool_result_per_tool_use",
         test_convert_context_to_messages_one_tool_result_per_tool_use,
     )
+    await r.record_async(
+        "completion_summary_carries_attachments_to_claude",
+        test_completion_summary_carries_attachments_to_claude,
+    )
     r.record(
         "convert_context_to_messages_strips_orphan_tool_use",
         test_convert_context_to_messages_strips_orphan_tool_use,
+    )
+    r.record(
+        "completion_summary_context_pairs_verifier_result_with_attempt_completion",
+        test_completion_summary_context_pairs_verifier_result_with_attempt_completion,
     )
     r.record(
         "convert_context_to_messages_subagent_row_cannot_win_the_dedup",
@@ -10306,6 +10621,10 @@ async def run_all_tests():
         test_check_progress_below_threshold_returns_partial_structured_response,
     )
     await r.record_async(
+        "call_llm_verifier_required_output_keys_bind_only_completion_verdicts",
+        test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
+    )
+    await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",
         test_check_progress_accepts_completed_code_task_structured_response,
     )
@@ -10322,24 +10641,28 @@ async def run_all_tests():
         test_check_progress_accepts_completed_browser_task_structured_response,
     )
     await r.record_async(
-        "check_progress_propagates_resolved_fast_cache_tree_context",
-        test_check_progress_propagates_resolved_fast_cache_tree_context,
+        "check_progress_propagates_resolved_demo_cache_tree_context",
+        test_check_progress_propagates_resolved_demo_cache_tree_context,
     )
     await r.record_async(
-        "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
-        test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
+        "check_progress_disables_demo_cache_read_after_verifier_parse_failure",
+        test_check_progress_disables_demo_cache_read_after_verifier_parse_failure,
     )
     await r.record_async(
         "check_progress_soft_passes_cached_fast_mode_reject",
         test_check_progress_soft_passes_cached_fast_mode_reject,
     )
     await r.record_async(
+        "check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy",
+        test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy,
+    )
+    await r.record_async(
         "check_progress_fences_the_entire_verifier_retry_loop",
         test_check_progress_fences_the_entire_verifier_retry_loop,
     )
     await r.record_async(
-        "check_progress_browser_success_uses_fast_cache_write_only",
-        test_check_progress_browser_success_uses_fast_cache_write_only,
+        "check_progress_browser_success_uses_demo_cache_write_only",
+        test_check_progress_browser_success_uses_demo_cache_write_only,
     )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     await r.record_async(
@@ -10521,8 +10844,8 @@ async def run_all_tests():
         test_july_gp_execute_caps_distinct_explores_then_completes,
     )
     await r.record_async(
-        "stream_fast_cache_writes_only_after_validation",
-        test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
+        "stream_demo_cache_writes_only_after_validation",
+        test_call_llm_structured_streaming_demo_cache_writes_only_after_validation,
     )
     await r.record_async(
         "set_response_schema_persists_model_fields_for_offer_goal",
@@ -10685,3 +11008,25 @@ if __name__ == "__main__":
     # only ever misled direct invocation. Branch on the count, not the dict.
     _summary = asyncio.run(run_all_tests())
     raise SystemExit(0 if _summary["failed"] == 0 else 1)
+
+async def test_captured_desktop_display_native_json_array_reaches_typed_action():
+    """Exact root446016aa native arguments must preserve the intended display call."""
+    from helpers.llm import call_llm_structured_streaming, MAX_STRUCTURED_PARSE_RETRIES
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model, ROSE_DESKTOP_TOOL_MODELS
+    import providers.demo_cache.rose_cache as cache
+
+    captured = {"id": "ea35eb045", "name": "display", "arguments": '{"paths": "[\\"game.html\\"]", "caption": "Neon Starfall: move with Arrow keys or WASD, shoot with Space, press Enter to start"}'}
+    calls = 0
+    async def native(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "qwen-3.8-27b", "pool_name": "cerebras-direct"})
+        yield StreamChunk(kind="tool_call", data=captured)
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 291, "completion_tokens": 179, "finish_reason": "tool_calls"})
+        yield StreamChunk(kind="done", data={})
+    model = create_agent_action_model(["display"], tool_registry=ROSE_DESKTOP_TOOL_MODELS)
+    with patch.object(cache, "cached_complete", native):
+        result, _usage, _detected = await call_llm_structured_streaming(messages=[{"role": "user", "content": "Make me a game"}], model="rose-labs/rose-1-flash", temperature=1, max_tokens=512, response_model=model, on_chunk=AsyncMock(), call_site="captured_display_regression", _parse_retry_attempt=MAX_STRUCTURED_PARSE_RETRIES, skip_cache_write=True)
+    assert result.tool_calls[0].paths == ["game.html"]
+    assert calls == 1, "the recorded display call should not need a provider retry"

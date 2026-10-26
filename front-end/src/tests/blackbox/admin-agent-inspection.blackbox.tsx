@@ -200,7 +200,7 @@ describe('admin agent inspection', () => {
     await user.click(await screen.findByText('Test agent'));
 
     expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
-    const ownControls = screen.getByTestId('terminal-input-area');
+    const ownControls = screen.getByTestId('query-input-layer');
     expect(ownControls.querySelector('svg.lucide-square')).toBeInTheDocument();
     expect(ownControls.querySelector('svg.lucide-settings')).toBeInTheDocument();
     expect(screen.queryByTestId('inspection-account-badge')).not.toBeInTheDocument();

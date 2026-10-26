@@ -25,7 +25,6 @@ import {
   type Fixture,
   createFixture,
   deleteFixture,
-  getTree,
   getView,
   idsOf,
   same,
@@ -223,6 +222,78 @@ test("POST /:id/send-agent-message — path delivery to an agent and to another 
   }
 });
 
+test('POST /:sender/send-agent-message — completed browser/code tasks refuse; paused ones need continue_conversation', async () => {
+  const fx = await createFixture('addr-resumable');
+  const { ids } = fx;
+  const task = (task_name: string, type: string, status: string) => ({
+    ...SCAN_TASK,
+    address: `bg_${task_name}`,
+    type,
+    status,
+    task_name,
+    path: `/root/outreach/${task_name}`,
+  });
+  try {
+    await prisma.agent.update({
+      where: { id: ids.outreach },
+      data: {
+        backgroundTasks: [
+          task('booker', 'browser', 'completed'),
+          task('coder', 'code', 'failed'),
+          task('paused_booker', 'browser', 'paused'),
+        ],
+      },
+    });
+    const stored = () => prisma.message.count({ where: { agentId: ids.outreach } });
+    const before = await stored();
+    for (const [path, kind, status] of [
+      ['/root/outreach/booker', 'browser', 'completed'],
+      ['/root/outreach/coder', 'code', 'failed'],
+    ] as const) {
+      const res = await sendTo(fx.userId, ids.draftA, path, 'One more thing.');
+      assertStatus(res.status, 409, res.data);
+      const error = (res.data as { error: string }).error;
+      assert(
+        error ===
+          `${path} is a ${status} ${kind} agent; completed browser and code agents cannot be ` +
+            `messaged. Spawn a new ${kind} agent for new work.`,
+        `refusal names the reason: ${error}`
+      );
+    }
+    const missing = await sendTo(fx.userId, ids.draftA, '/root/outreach/paused_booker', 'Go on.');
+    assertStatus(missing.status, 400, missing.data);
+    assert(
+      String((missing.data as { error: string }).error).includes('set continue_conversation'),
+      `paused task asks for the flag: ${JSON.stringify(missing.data)}`
+    );
+    assert((await stored()) === before, 'refused sends store nothing');
+
+    const resumed = await request(`${BASE_URL}/api/agents/${ids.draftA}/send-agent-message`, {
+      method: 'POST',
+      headers: apiKeyHeaders(fx.userId),
+      body: JSON.stringify({
+        to: '/root/outreach/paused_booker',
+        message: 'Use the second login.',
+        idempotency_key: `addr-${randomUUID()}`,
+        continue_conversation: true,
+      }),
+    });
+    assertStatus(resumed.status, 201, resumed.data);
+    const body = resumed.data as { message_id: string; woke: boolean; wake_error: string };
+    assert(
+      body.woke === false && body.wake_error === 'its owner agent is not running',
+      `paused task resume is a wake request: ${JSON.stringify(body)}`
+    );
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: body.message_id } });
+    assert(
+      (row.metadata as Record<string, unknown>).recipientTaskId === 'bg_paused_booker',
+      'resume message stored on the paused run inbox'
+    );
+  } finally {
+    await deleteFixture(fx);
+  }
+});
+
 test('GET /:id/tree — paths, path nodes and background tasks (running and finished) of listed agents', async () => {
   const fx = await withScanTask('addr-tree');
   const { ids } = fx;
@@ -254,13 +325,44 @@ test('GET /:id/tree — paths, path nodes and background tasks (running and fini
     const byPath = await getView(fx.userId, ids.aKid, { node: '/root/outreach', depth: '2' });
     assert(byPath.node_path.at(-1)?.agent_id === ids.outreach, 'node accepts a path');
     assert(idsOf(byPath.nodes).includes(ids.aKid), 'path node expands');
-    const taskNode = await getTree(fx.userId, ids.aKid, { node: '/root/outreach/scan' });
-    assertStatus(taskNode.status, 400, taskNode.data);
+    // A task address lists the task itself (a running leaf), not an error.
+    const taskNode = await getView(fx.userId, ids.aKid, { node: '/root/outreach/scan' });
+    assert(
+      same(
+        taskNode.nodes.map((node) => [node.agent_id, node.status, node.parent_agent_id]),
+        [['/root/outreach/scan', 'running', ids.outreach]]
+      ) && taskNode.node_path.at(-1)?.agent_id === '/root/outreach/scan',
+      `task node view, got ${JSON.stringify(taskNode)}`
+    );
 
+    // Search covers the same subtree the node view lists, background tasks included.
     const prefix = await getView(fx.userId, ids.root, { path_prefix: '/root/outreach' });
     assert(
-      same(idsOf(prefix.matches ?? []), [ids.outreach, ids.draftA, ids.draftB, ids.aKid]),
+      same(idsOf(prefix.matches ?? []), [
+        ids.outreach,
+        ids.draftA,
+        ids.draftB,
+        '/root/outreach/scan',
+        '/root/outreach/old',
+        ids.aKid,
+      ]),
       `path_prefix lists that subtree only: ${JSON.stringify(idsOf(prefix.matches ?? []))}`
+    );
+    // A prefix naming a task (here from another branch) finds it, finished or not.
+    const exact = await getView(fx.userId, ids.aKid, { path_prefix: '/root/outreach/old' });
+    const [old] = exact.matches ?? [];
+    assert(
+      exact.matches?.length === 1 &&
+        old.agent_id === '/root/outreach/old' &&
+        old.type === 'explore' &&
+        old.status === 'completed' &&
+        same(old.ancestor_ids, [ids.root, ids.outreach]),
+      `path_prefix naming a task finds it: ${JSON.stringify(exact.matches)}`
+    );
+    const byGoal = await getView(fx.userId, ids.draftA, { q: 'venue NEWS' });
+    assert(
+      same(idsOf(byGoal.matches ?? []), ['/root/outreach/scan', '/root/outreach/old']),
+      `goal search matches task goals: ${JSON.stringify(idsOf(byGoal.matches ?? []))}`
     );
 
     await prisma.agent.update({ where: { id: ids.outreach }, data: { status: 'COMPLETED' } });
@@ -269,6 +371,62 @@ test('GET /:id/tree — paths, path nodes and background tasks (running and fini
       !idsOf(ended.nodes).includes('/root/outreach/scan') &&
         idsOf(ended.nodes).includes('/root/outreach/old'),
       'a terminal owner lists no stale running task, only its finished ones'
+    );
+  } finally {
+    await deleteFixture(fx);
+  }
+});
+
+test('GET /:id/tree — search filters tasks before the per-owner cap and finds tasks of unloaded owners', async () => {
+  const fx = await createFixture('addr-search-cap');
+  const { ids } = fx;
+  // The owner array: running first, then finished oldest-first. With 12 entries
+  // the newest finished task sits past the 10-per-owner listing cap.
+  const finished = Array.from({ length: 11 }, (_, index) => ({
+    ...SCAN_TASK,
+    address: `bg_done_${index}`,
+    task_name: `done_${index}`,
+    path: `/root/outreach/done_${index}`,
+    goal: index === 10 ? 'Read the member number page' : `Finished check ${index}`,
+    status: 'completed',
+  }));
+  try {
+    await prisma.agent.update({
+      where: { id: ids.outreach },
+      data: { backgroundTasks: [SCAN_TASK, ...finished] },
+    });
+    await prisma.agent.update({
+      where: { id: ids.aKid },
+      data: {
+        backgroundTasks: [
+          {
+            ...SCAN_TASK,
+            address: 'bg_z',
+            task_name: 'zebra',
+            path: '/root/outreach/draft_a/lookup/zebra',
+            goal: 'Find zebra permits',
+          },
+        ],
+      },
+    });
+    const exact = await getView(fx.userId, ids.draftB, { path_prefix: '/root/outreach/done_10' });
+    assert(
+      same(idsOf(exact.matches ?? []), ['/root/outreach/done_10']),
+      `path_prefix finds the newest finished task past the cap: ${JSON.stringify(exact.matches)}`
+    );
+    const byGoal = await getView(fx.userId, ids.draftB, { q: 'member NUMBER' });
+    assert(
+      same(idsOf(byGoal.matches ?? []), ['/root/outreach/done_10']),
+      `query finds the task past the cap: ${JSON.stringify(byGoal.matches)}`
+    );
+    // aKid is in another branch, its own goal does not match, and it is not on the caller path.
+    const unloaded = await getView(fx.userId, ids.rKid, { q: 'zebra' });
+    const [zebra] = unloaded.matches ?? [];
+    assert(
+      unloaded.matches?.length === 1 &&
+        zebra.agent_id === '/root/outreach/draft_a/lookup/zebra' &&
+        same(zebra.ancestor_ids, [ids.root, ids.outreach, ids.draftA, ids.aKid]),
+      `query finds a task whose owner the search did not otherwise load: ${JSON.stringify(unloaded.matches)}`
     );
   } finally {
     await deleteFixture(fx);

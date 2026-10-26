@@ -14,7 +14,6 @@ When is_question=True:
 
 from __future__ import annotations
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -24,15 +23,21 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.send_message_to_user.config import SMS_FALLBACK_TIMEOUT_MINUTES, SUB_AGENT_AUTO_RESPONSE
-from domains.send_message_to_user.service import is_sub_agent, validate_tool_call
+from domains.send_message_to_user.service import (
+    is_sub_agent,
+    validate_inline_view,
+    validate_tool_call,
+)
 from domains.send_message_to_user.types import build_attention_metadata
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
+from utils.rose_desktop import is_rose_desktop_user
 
 # Import activities (executed via workflow.execute_activity)
 with workflow.unsafe.imports_passed_through():
@@ -40,6 +45,7 @@ with workflow.unsafe.imports_passed_through():
         get_agent_source,
         notify_sms_event_activity,
     )
+    from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 
 logger = structlog.get_logger()
 
@@ -75,6 +81,17 @@ class SendMessageToUserManager(ToolManager):
         message: str = result["message"]
         is_question: bool = result["is_question"]
 
+        # ── 0b. Optional inline view, pinned to the user's ACTIVE published UI ──
+        inline_view, inline_error = await _resolve_inline_view(workflow_instance, tool_call.get("inline_view"))
+        if inline_error is not None:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="❌ Invalid inline view",
+                message=inline_error,
+                status=MessageStatus.ERROR,
+            )
+            return
+
         # ── 1. Emit attention / info event ──
         initial_status = MessageStatus.IN_PROGRESS if is_question else MessageStatus.FINISHED
         yield ToolEvent(
@@ -82,7 +99,7 @@ class SendMessageToUserManager(ToolManager):
             title="Attn: User" if is_question else "FYI for User",
             message=message,
             status=initial_status,
-            metadata=build_attention_metadata(message, is_question, is_waiting=is_question),
+            metadata=build_attention_metadata(message, is_question, is_waiting=is_question, inline_view=inline_view),
         )
 
         if not is_question:
@@ -101,7 +118,7 @@ class SendMessageToUserManager(ToolManager):
                 title="Auto-response (sub-agent)",
                 message=message,
                 status=MessageStatus.FINISHED,
-                metadata=build_attention_metadata(message, is_question, is_waiting=False),
+                metadata=build_attention_metadata(message, is_question, is_waiting=False, inline_view=inline_view),
             )
             return
 
@@ -163,7 +180,7 @@ class SendMessageToUserManager(ToolManager):
                     title="Waiting for reply",
                     message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
                     status=MessageStatus.FINISHED,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True),
+                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
                 )
                 raise
             except (TimeoutError, TemporalTimeoutError):
@@ -205,7 +222,7 @@ class SendMessageToUserManager(ToolManager):
                     title="Waiting for reply",
                     message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
                     status=MessageStatus.FINISHED,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True),
+                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
                 )
                 raise
             except Exception as e:
@@ -215,7 +232,7 @@ class SendMessageToUserManager(ToolManager):
                     title="❌ Error waiting for response",
                     message=str(e),
                     status=MessageStatus.ERROR,
-                    metadata=build_attention_metadata(message, is_question, is_waiting=True),
+                    metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
                 )
                 return
 
@@ -233,8 +250,40 @@ class SendMessageToUserManager(ToolManager):
             title="User response received",
             message=message,
             status=MessageStatus.FINISHED,
-            metadata=build_attention_metadata(message, is_question, is_waiting=False),
+            metadata=build_attention_metadata(message, is_question, is_waiting=False, inline_view=inline_view),
         )
+
+
+async def _resolve_inline_view(
+    workflow_instance: Any, raw: Any
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate `inline_view` and pin it to the user's active published version.
+
+    Inline views are a Rose Desktop feature (utils.rose_desktop): for every other
+    account the argument is ignored, exactly as the stock schema's parse drops it.
+    """
+    if not is_rose_desktop_user(getattr(workflow_instance, "user_id", None)):
+        return None, None
+    normalized, error = validate_inline_view(raw)
+    if error is not None or normalized is None:
+        return None, error
+    try:
+        resolved = await workflow.execute_activity(
+            resolve_user_ui_inline_view_activity,
+            args=[workflow_instance.user_id, normalized["view"]],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except Exception as e:  # activity failure after retries → tool error, not a crash
+        logger.error("Failed to resolve inline view", view=normalized["view"], error=str(e))
+        return None, f"Could not resolve inline view '{normalized['view']}': {e}"
+    if not resolved.get("ok"):
+        return None, str(resolved.get("error") or "Inline view is not available.")
+    return {
+        "view": normalized["view"],
+        "versionId": resolved["version_id"],
+        "props": normalized["props"],
+    }, None
 
 
 # ── Singleton ──

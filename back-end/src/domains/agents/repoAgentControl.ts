@@ -43,6 +43,8 @@ export async function restoreTerminalAgentAfterFailedWake(
     responseSchema: jsonColumn(before.responseSchema),
     structuredResponse: jsonColumn(before.structuredResponse),
     progress: before.progress,
+    progressEstimate: jsonColumn(before.progressEstimate),
+    progressEstimateGeneration: before.progressEstimateGeneration,
     toolsInUse: before.toolsInUse,
     statusMessage: before.statusMessage,
   } satisfies Record<WakeRewrittenField, unknown>;

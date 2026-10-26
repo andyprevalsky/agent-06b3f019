@@ -20,9 +20,14 @@
  * Usage:
  *   npx tsx scripts/seed-dump-cache.ts get <token> <out-file>
  *   npx tsx scripts/seed-dump-cache.ts put <token> <in-file>
+ *   npx tsx scripts/seed-dump-cache.ts head <token>
  *
- * Exit codes: 0 = success (get wrote the file / put uploaded); 1 = miss,
- * unconfigured, or any error (caller cold-syncs). Never throws uncaught.
+ * Exit codes: 0 = success (get wrote the file / put uploaded / head found a
+ * non-empty object); 1 = miss, unconfigured, or any error (caller cold-syncs).
+ * `head` alone distinguishes a definite absence (exit 3) from an unreadable
+ * cache (exit 1), so a preflight can refuse a missing canonical base without
+ * downloading it and without treating a transport failure as a miss.
+ * Never throws uncaught.
  */
 import fs from 'fs';
 import { resolve } from 'path';
@@ -32,6 +37,7 @@ import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
@@ -272,10 +278,35 @@ async function put(token: string, inFile: string): Promise<number> {
   return 0;
 }
 
+export const HEAD_ABSENT_EXIT = 3;
+
+// Existence probe on the short request budget: a HEAD never transfers the
+// ~150MB body. An empty object is as unusable as a missing one (get() refuses it).
+export async function head(token: string): Promise<number> {
+  try {
+    const response = await client().send(
+      new HeadObjectCommand({
+        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+        Key: objectKey(token),
+      })
+    );
+    return (response.ContentLength ?? 0) > 0 ? 0 : HEAD_ABSENT_EXIT;
+  } catch (error) {
+    const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (failure.$metadata?.httpStatusCode === 404 || failure.name === 'NotFound') {
+      return HEAD_ABSENT_EXIT;
+    }
+    process.stderr.write(
+      `seed-dump-cache: head failed: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    return 1;
+  }
+}
+
 async function main(): Promise<number> {
   const [mode, token, file] = process.argv.slice(2);
-  if (!mode || !token || !file) {
-    process.stderr.write('usage: seed-dump-cache.ts <get|put> <token> <file>\n');
+  if (!mode || !token || (mode !== 'head' && !file)) {
+    process.stderr.write('usage: seed-dump-cache.ts <get|put> <token> <file> | head <token>\n');
     return 1;
   }
   loadEnv();
@@ -283,6 +314,7 @@ async function main(): Promise<number> {
     process.stderr.write('seed-dump-cache: R2 not configured — skipping\n');
     return 1;
   }
+  if (mode === 'head') return head(token);
   if (mode === 'get') return get(token, file);
   if (mode === 'put') return put(token, file);
   process.stderr.write(`seed-dump-cache: unknown mode '${mode}'\n`);

@@ -8,6 +8,7 @@ const assetsDir = path.resolve(projectRoot, process.argv[2] || 'dist', 'assets')
 const devToolMarkers = ['react-grab.com', 'data-react-grab', 'React Grab v'];
 const offenders = [];
 const jsonPayloadHashes = new Set();
+const payloadFilesByHash = new Map();
 
 /** Read a generated JavaScript string literal without evaluating bundle code. */
 function readStringLiteral(source, start) {
@@ -69,7 +70,13 @@ for (const entry of await readdir(assetsDir, { withFileTypes: true })) {
     } catch {
       continue;
     }
-    if (payload && typeof payload === 'object') jsonPayloadHashes.add(payloadHash(payload));
+    if (payload && typeof payload === 'object') {
+      const hash = payloadHash(payload);
+      jsonPayloadHashes.add(hash);
+      const files = payloadFilesByHash.get(hash) ?? new Set();
+      files.add(entry.name);
+      payloadFilesByHash.set(hash, files);
+    }
   }
 }
 
@@ -106,3 +113,37 @@ for (const file of animationFiles) {
 }
 
 process.stdout.write('Production animation payloads preserve every frame and metadata value\n');
+
+// STATE MACHINE: manifest entry -> static imports only -> startup assets.
+// Dynamic imports retain desktop frames without charging mobile startup for them.
+let manifest;
+try {
+  manifest = JSON.parse(
+    await readFile(path.join(assetsDir, '..', '.vite', 'manifest.json'), 'utf8'),
+  );
+} catch {
+  throw new Error('Production startup manifest is required');
+}
+const startupAssets = new Set();
+const visited = new Set();
+function visitStaticImport(key) {
+  if (visited.has(key)) return;
+  visited.add(key);
+  const entry = manifest[key];
+  if (!entry?.file) throw new Error(`Production manifest has an unresolved startup entry: ${key}`);
+  startupAssets.add(path.basename(entry.file));
+  for (const imported of entry.imports ?? []) visitStaticImport(imported);
+}
+const entries = Object.keys(manifest).filter((key) => manifest[key].isEntry);
+if (entries.length === 0)
+  throw new Error('Production startup manifest is required to contain an entry');
+entries.forEach(visitStaticImport);
+for (const file of animationFiles.filter((file) => /animation-\d+-pixels\.json$/.test(file))) {
+  const hash = payloadHash(JSON.parse(await readFile(file, 'utf8')));
+  if ([...payloadFilesByHash.get(hash)].some((file) => startupAssets.has(file))) {
+    throw new Error(
+      `Desktop animation payload must be deferred from app startup: ${path.basename(file)}`,
+    );
+  }
+}
+process.stdout.write('Desktop animation payloads are deferred from app startup\n');

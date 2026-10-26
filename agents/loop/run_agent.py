@@ -46,6 +46,7 @@ from helpers.llm import (
     check_progress,
     fetch_compute_token_activity,
 )
+from helpers.jev_progress import JEVSession, prefix_events, with_jev_session
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 from helpers.summarize import (
@@ -68,7 +69,9 @@ from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
+from utils.rose_desktop import is_rose_desktop_user
+from utils.tool_schemas import create_agent_action_model, get_tool_models
+from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
 logger = structlog.get_logger()
 
@@ -100,6 +103,16 @@ CREDIT_CHECK_INTERVAL = 5
 # Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
 # Reserve room for output + a safety buffer before the model's hard limit, so
 # the next LLM call still fits inside the window even after the trigger fires.
+
+
+def compaction_trigger_tokens(max_context_tokens: int) -> int:
+    """Estimated context size at which a context overflows ``max_context_tokens``.
+
+    For Sonnet 200k → effective=180k → trigger=167k. The benchmark grader uses
+    this same trigger to decide when judge evidence no longer fits one call.
+    """
+    return max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION - AUTOCOMPACT_BUFFER_TOKENS
+
 
 # _estimate_tokens is a chars-÷-4 heuristic that under-counts JSON-heavy tool
 # results (observed 308k actual Anthropic tokens reported as <80k). Multiply
@@ -167,6 +180,7 @@ def _resolve_cache_sequence_id(
 
 
 @traced("run_agent")
+@with_jev_session
 async def run_agent(
     # Identity
     agent_id: str,
@@ -232,7 +246,7 @@ async def run_agent(
     reasoning_max_tokens: int = 256,
     # State tracking (for continue_as_new)
     iteration_offset: int = 0,
-    fast_cache_position_offset: Optional[int] = None,
+    demo_cache_position_offset: Optional[int] = None,
     # Blueprint control (skip for EXECUTE phase since PLAN already queried)
     skip_blueprint_query: bool = True,
     # Skip LLM verification call
@@ -261,19 +275,26 @@ async def run_agent(
     get_gpt_token_source: Optional[Callable[[], Optional[str]]] = None,
     get_gpt_token_pool_id: Optional[Callable[[], Optional[str]]] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     # Override the call_site label used when emitting llm.cache. Defaults to
     # "plan_loop"/"execute_loop" based on is_plan_loop. Sub-agents that share
     # this loop (e.g. explore_agent) set this to surface as their own row in
     # cache reports instead of merging with the parent's execute_loop.
     call_site_override: Optional[str] = None,
-    # Fast Mode aggressive cache: when enabled, LLM calls record/replay through the
+    # DEMO cache: when enabled, LLM calls record/replay through the
     # backend store keyed by (goal, call_site, iteration). goal_text is the cache
     # namespace (exact-match). Both flow from the workflow; default off = no-op.
     fast_mode_cache_enabled: bool = False,
     goal_text: Optional[str] = None,
+    # Pinned user-authored tools (root agent only; see domains/user_tools). Declared
+    # after the built-in tools, sorted by name, so the cached tool prefix is stable.
+    user_tools: Optional[List[Dict[str, Any]]] = None,
+    jev_goal: Optional[str] = None,
+    jev_agent_kind: Optional[str] = None,
+    get_jev_response_schema: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     require_inline_attachments: bool = False,
+    _jev_session: Optional[JEVSession] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -319,9 +340,9 @@ async def run_agent(
     remembered_gpt_token_source: Optional[str] = None
     remembered_gpt_token_pool_id: Optional[str] = None
     iteration = iteration_offset
-    # Fast-cache position tracks committed LLM turns, not attempted loop
+    # DEMO-cache position tracks committed LLM turns, not attempted loop
     # iterations. A transient transport failure must retry the same cache key.
-    fast_cache_llm_position = fast_cache_position_offset if fast_cache_position_offset is not None else iteration_offset
+    demo_cache_llm_position = demo_cache_position_offset if demo_cache_position_offset is not None else iteration_offset
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
@@ -385,13 +406,21 @@ async def run_agent(
 
     # Create dynamic action model for structured output. Custom response_model
     # wins (e.g., browser agent). During PLAN we narrow spawn_agent to the
-    # explore-only variant via PLAN_TOOL_MODELS so the LLM can't pick an
+    # explore-only variant (get_tool_models(phase="plan")) so the LLM can't pick an
     # invalid `type` — runtime validation was burning 4 retries per error.
-    AgentAction = (
-        response_model
-        if response_model
-        else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
-    )
+    # Rose Desktop accounts get their tool schemas (utils.rose_desktop); every
+    # other account the stock ones.
+    base_registry = get_tool_models(phase="plan" if is_plan_loop else None, rose_desktop=is_rose_desktop_user(user_id))
+    user_tool_decls = llm_declarations(user_tools) if not response_model else []
+    if user_tool_decls:
+        AgentAction = create_agent_action_model(
+            [*tools, *(decl["name"] for decl in user_tool_decls)],
+            tool_registry={**base_registry, **build_user_tool_registry(user_tool_decls)},
+        )
+    else:
+        AgentAction = (
+            response_model if response_model else create_agent_action_model(tools, tool_registry=base_registry)
+        )
 
     async def _adopt_served_compute_lease(attempt_usage: Dict[str, Any]) -> None:
         """Adopt the lease RoseClient rotated to inside a successful call.
@@ -434,7 +463,7 @@ async def run_agent(
                 user_id,
                 lineage_key=identity.get("lineageKey") or compute_token_lineage_key,
                 agent_id=agent_id,
-                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 token_type=identity.get("type"),
             )
             if user_id
@@ -782,7 +811,7 @@ async def run_agent(
 
         # Only increment iteration when we're actually going to do work
         iteration += 1
-        fast_cache_step = fast_cache_llm_position + 1
+        demo_cache_step = demo_cache_llm_position + 1
 
         # 1.4. Graceful wind-down (opt-in via winddown_window). On the final turn(s)
         # before the cap, inject ONE message into the conversation tail (NOT the
@@ -913,7 +942,7 @@ async def run_agent(
         #   compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
         # For Sonnet 200k → effective=180k → trigger=167k.
         effective_window = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
-        compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
+        compaction_trigger = compaction_trigger_tokens(max_context_tokens)
         async with span(
             "run_loop.context_token_estimate",
             agent_id=agent_id,
@@ -980,7 +1009,7 @@ async def run_agent(
                 gpt_token_source=compression_gpt_token_source,
                 gpt_token_pool_id=compression_gpt_token_pool_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
 
             if success:
@@ -1101,6 +1130,16 @@ async def run_agent(
                     agent_id=agent_id,
                     iteration=iteration,
                     output_fields=sorted(completed_child_output),
+                )
+
+            # Only history visible before this turn; prediction runs beside the decision.
+            if _jev_session is not None:
+                current_jev_goal = jev_goal or goal_text or next(
+                    (m.get("text", "") for m in context if m.get("role", "").upper() == "USER"), ""
+                )
+                _jev_session.schedule(
+                    current_jev_goal, get_jev_response_schema() if get_jev_response_schema else response_schema,
+                    prefix_events(context, task_id),
                 )
 
             # 6. Build system prompt (calls API for fresh shared memory each iteration)
@@ -1319,16 +1358,16 @@ async def run_agent(
                 # set the cache context itself. Keys are canonical request fingerprints;
                 # goal+enabled auto-resolve from the agent row when not threaded explicitly.
                 # Lazy import — this branch only runs inside an activity (explore/
-                # browser), never in the workflow sandbox, so keep fast_cache out of
+                # browser), never in the workflow sandbox, so keep demo_cache out of
                 # run_agent's module-level import graph.
-                from providers.fast_cache.client import ensure_position_context
-                from providers.fast_cache.context import (
-                    FastCacheContext,
+                from providers.demo_cache.client import ensure_position_context
+                from providers.demo_cache.context import (
+                    DemoCacheContext,
                     set_context,
                 )
 
                 if goal_text and fast_mode_cache_enabled:
-                    from providers.fast_cache.client import (
+                    from providers.demo_cache.client import (
                         resolve_agent_fast_mode,
                         resolve_soft_complete_root_goal,
                     )
@@ -1338,17 +1377,17 @@ async def run_agent(
                         await resolve_agent_fast_mode(agent_id) if agent_id else (False, None, False, None, None, True)
                     )
                     set_context(
-                        FastCacheContext(
+                        DemoCacheContext(
                             enabled=True,
                             goal=goal_text,
-                            base_step=fast_cache_step,
+                            base_step=demo_cache_step,
                             write_enabled=True,
                             root_goal=root_goal,
                             provider_fast_mode=provider_fast_mode,
                         )
                     )
                 else:
-                    await ensure_position_context(agent_id, fast_cache_step)
+                    await ensure_position_context(agent_id, demo_cache_step)
 
                 # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy).
                 # The try/finally guarantees the broadcaster's background drainer is
@@ -1394,7 +1433,7 @@ async def run_agent(
                                     gpt_token_pool_id=current_gpt_token_pool_id,
                                     gpt_token_user_id=user_id,
                                     compute_token_lineage_key=compute_token_lineage_key,
-                                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                                    compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                                     cache_sequence_id=resolved_cache_sequence_id,
                                     call_site=cache_call_site,
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
@@ -1430,10 +1469,10 @@ async def run_agent(
                                     # bypass reads/writes. Transport retries keep
                                     # the original trajectory position.
                                     set_context(
-                                        FastCacheContext(
+                                        DemoCacheContext(
                                             enabled=False,
                                             goal=goal_text or "",
-                                            base_step=fast_cache_step,
+                                            base_step=demo_cache_step,
                                             write_enabled=False,
                                         )
                                     )
@@ -1526,11 +1565,11 @@ async def run_agent(
                         current_gpt_token_pool_id,
                         user_id,
                         compute_token_lineage_key,
-                        compute_token_fast_cache_affinity_key,
+                        compute_token_demo_cache_affinity_key,
                         user_id,
                         fast_mode_cache_enabled and not bypass_fast_mode_cache_on_llm_retry,
                         goal_text,
-                        fast_cache_step,
+                        demo_cache_step,
                         False,
                         False,
                         resolved_cache_sequence_id,
@@ -1542,6 +1581,7 @@ async def run_agent(
                         get_environment_tail() if get_environment_tail else None,
                         max_context_tokens,
                         require_inline_attachments,
+                        user_tool_decls or None,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1598,7 +1638,7 @@ async def run_agent(
                     return _paused_after_cost_result()
 
             if completed_child_output is None:
-                fast_cache_llm_position = fast_cache_step
+                demo_cache_llm_position = demo_cache_step
 
             # Persist + broadcast own tokens after each LLM call. Descendant
             # subtree totals have their own durable maps in AgentWorkflow.
@@ -1841,9 +1881,9 @@ async def run_agent(
         if processed_tools and execute_tool:
             if is_inside_temporal_activity and fast_mode_cache_enabled:
                 try:
-                    from providers.fast_cache import client as fast_cache_client
-                    from providers.fast_cache import normalize as fast_cache_normalize
-                    from providers.fast_cache.context import current_context
+                    from providers.demo_cache import client as demo_cache_client
+                    from providers.demo_cache import normalize as demo_cache_normalize
+                    from providers.demo_cache.context import current_context
                     from tools.web_search.config import DEFAULT_MAX_TOKENS as WEB_SEARCH_DEFAULT_MAX_TOKENS
 
                     ctx = current_context()
@@ -1853,7 +1893,7 @@ async def run_agent(
                         for tool_name, tool_args, _tool_call_id in processed_tools:
                             if tool_name == "web_search":
                                 prewarm_keys.append(
-                                    fast_cache_normalize.web_search_key(
+                                    demo_cache_normalize.web_search_key(
                                         prewarm_goal,
                                         str(tool_args.get("query", "")),
                                         tool_args.get("max_tokens", WEB_SEARCH_DEFAULT_MAX_TOKENS),
@@ -1861,16 +1901,16 @@ async def run_agent(
                                 )
                             elif tool_name == "web_fetch":
                                 prewarm_keys.append(
-                                    fast_cache_normalize.web_fetch_key(
+                                    demo_cache_normalize.web_fetch_key(
                                         prewarm_goal,
                                         str(tool_args.get("url", "")),
                                     )
                                 )
                     if prewarm_keys:
-                        await fast_cache_client.prefetch_cache_records(prewarm_keys, reason="tool_dispatch")
+                        await demo_cache_client.prefetch_cache_records(prewarm_keys, reason="tool_dispatch")
                 except Exception as exc:
                     logger.warning(
-                        "fast_cache.tool_prewarm_failed",
+                        "demo_cache.tool_prewarm_failed",
                         agent_id=agent_id,
                         iteration=iteration,
                         error=str(exc)[:200],
@@ -2303,12 +2343,12 @@ async def run_agent(
                         gpt_token_pool_id=verifier_gpt_token_pool_id,
                         gpt_token_user_id=user_id,
                         compute_token_lineage_key=compute_token_lineage_key,
-                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                         is_plan_loop=is_plan_loop,
                         tool_call_id=tool_call_id,
                         fast_mode_cache_enabled=fast_mode_cache_enabled,
                         fast_mode_goal=goal_text,
-                        fast_mode_step=fast_cache_step,
+                        fast_mode_step=demo_cache_step,
                         pending_background_status=(
                             get_pending_background_status() if get_pending_background_status else None
                         ),
@@ -2592,7 +2632,7 @@ async def run_agent(
                 gpt_token_pool_id=final_verifier_gpt_token_pool_id,
                 gpt_token_user_id=user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 is_plan_loop=is_plan_loop,
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 fast_mode_goal=goal_text,
@@ -2732,7 +2772,7 @@ async def _compress_context(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
 ) -> Tuple[List[Dict], bool]:
     """Compress context using the head/tail-protected compactor.
 
@@ -2758,7 +2798,7 @@ async def _compress_context(
                 user_id,
                 agent_id,
                 compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key,
             ],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
@@ -2974,7 +3014,7 @@ async def _run_verifier(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     is_plan_loop: bool = False,
     tool_call_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
@@ -2995,8 +3035,7 @@ async def _run_verifier(
 
     # Post IN_PROGRESS
     # Post the in-progress verifier row as the active attempt_completion tool
-    # result. The finished feedback row below is tagged as verifierMessage so
-    # the next LLM turn receives it as ordinary assistant feedback.
+    # result. The finished feedback row below is that call's terminal result.
     if post_message:
         await post_message(
             "",
@@ -3076,7 +3115,7 @@ async def _run_verifier(
 
     # C7: dead `phase` positional arg has been removed from check_progress;
     # callers no longer pass it. `model` is kept as a positional but ignored
-    # internally (verifier always forces rose-1-ultra). All other args are
+    # internally (verifier forces Ultra except for Rose Local). All other args are
     # passed positionally because Temporal activities only accept `args=`.
     # C14: context is already agent-scoped — `context` here is the calling
     # agent's own visible conversation, accumulated from `poll_messages`
@@ -3099,7 +3138,7 @@ async def _run_verifier(
         gpt_token_pool_id,
         gpt_token_user_id,
         compute_token_lineage_key,
-        compute_token_fast_cache_affinity_key,
+        compute_token_demo_cache_affinity_key,
         None,  # dump_extra
         fast_mode_cache_enabled,
         fast_mode_goal,
@@ -3202,10 +3241,9 @@ async def _run_verifier(
             )
         message_text = f"Verifier score: {score:.0%}\n\nReasoning: {message_text}\n\n{guidance}"
 
-    # Post FINISHED. Surface verifier feedback as the completed
-    # attempt_completion result for UI continuity, and mark it with
-    # verifierMessage so the next LLM turn receives the feedback as assistant
-    # conversation instead of as an opaque tool output.
+    # Post FINISHED. The verifier feedback is the attempt_completion call's
+    # tool result: both converters pair it with the declared tool_use.
+    # verifierMessage marks it for UI and tool-count filtering.
     if post_message:
         await post_message(
             message_text,

@@ -40,6 +40,8 @@ class CampaignTickets(unittest.TestCase):
             for name in (
                 "run-bench-campaign.py",
                 "cloudbench-cleanup-tickets.py",
+                # The campaign's fixed-total infra stop predicate.
+                "cloudbench-shard-coordinator.py",
                 "cloudbench-infra-canary-preflight.py",
                 "cloudbench-provider-capacity.py",
                 "cloudbench-provider-limits.json",
@@ -333,6 +335,9 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 env.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="1", CLOUDBENCH_CAMPAIGN_SHARED_RELAY="0", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1")
                 if mode.startswith("relay"):
                     env.update(CLOUDBENCH_CAMPAIGN_SHARED_RELAY="1", CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="0", FLY_API_TOKEN="offline-fixture", PATH=str(root / "bin") + os.pathsep + env["PATH"])
+                    # The relay claims its HOME's single WireGuard peer; never the operator's.
+                    (root / "home").mkdir(mode=0o700, exist_ok=True)
+                    env["HOME"] = str(root / "home")
             if "external" in mode:
                 barrier = root / "external-barrier"
                 barrier.mkdir(mode=0o700)

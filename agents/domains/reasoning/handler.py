@@ -48,7 +48,7 @@ async def execute_reasoning_activity(
     # Fast Mode: set a cache context so this reasoning node uses canonical request
     # fingerprinting (enabled+goal auto-resolve from the agent row).
     if fast_mode_step is not None:
-        from providers.fast_cache.client import ensure_position_context
+        from providers.demo_cache.client import ensure_position_context
 
         await ensure_position_context(agent_id, fast_mode_step)
 

@@ -184,19 +184,25 @@ export class WhatsAppClient extends EventEmitter {
   }
 
   /** Collect normalized messages from a raw Baileys batch, skipping broadcasts. */
-  private normalizeAndEmit(messages: WAMessage[], label: string): void {
+  private normalizeAndEmit(
+    messages: WAMessage[],
+    label: string,
+    history?: SyncEvent['history']
+  ): void {
     const normalized: NormalizedMessage[] = [];
     for (const msg of messages) {
       if (isSkippableJid(msg.key?.remoteJid)) continue;
       const n = normalizeMessage(msg as WABaileysMessage);
       if (n !== null) normalized.push(n);
     }
-    if (normalized.length > 0) {
+    // A history batch is emitted even when empty, so its progress still reaches the bar.
+    if (normalized.length > 0 || history !== undefined) {
       console.log(`[WhatsAppClient] ${label} ${normalized.length} messages`);
       this.emit('sync', {
         type: 'new_messages',
         channel: 'WHATSAPP',
         messages: normalized,
+        ...(history !== undefined && { history }),
       } satisfies SyncEvent);
     }
   }
@@ -331,9 +337,11 @@ export class WhatsAppClient extends EventEmitter {
     if (isLatest === true) {
       console.log('[WhatsAppClient] History sync complete (isLatest=true)');
     }
-    if (messages.length === 0) return;
 
-    this.normalizeAndEmit(messages, '📜 Normalized historical');
+    this.normalizeAndEmit(messages, '📜 Normalized historical', {
+      progress: progress ?? null,
+      isLatest: isLatest === true,
+    });
   }
 
   /** Set connection state. */

@@ -1,0 +1,88 @@
+<!doctype html>
+<!--
+  Example: OffscreenCanvas particle system in a Web Worker, simulated at 120 Hz.
+
+  The canvas is transferred to particles.worker.js, which owns simulation and
+  rendering. The main thread stays idle (only size, pointer and pause/resume
+  messages), so a busy page can't drop the animation's frames.
+
+  Starting a worker inside the Rose sandbox: the frame's origin is opaque, so
+  `new Worker('particles.worker.js')` is refused as cross-origin. Fetch the script
+  and start it from a blob: URL instead (the usercontent CSP allows
+  worker-src blob:), as below.
+
+  Use it as a background or dashboard slot, e.g.
+    "slots": { "background": { "entry": "root/slots/particles/index.html" } }
+
+  Budgets: DPR-aware backing store capped at 1.5 MP, fixed 120 Hz steps with an
+  accumulator (frame-rate independent, no spiral after a stall), paused when
+  hidden or offscreen, one settled still frame under prefers-reduced-motion.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>particles-worker</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #08080f; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Particles following a flow field; move the pointer to attract them"></canvas>
+<script type="module">
+  const PIXEL_BUDGET = 1_500_000;
+  const canvas = document.getElementById('c');
+  const root = document.documentElement;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+  function size() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const w = canvas.clientWidth * dpr;
+    const h = canvas.clientHeight * dpr;
+    const scale = Math.min(1, Math.sqrt(PIXEL_BUDGET / Math.max(1, w * h)));
+    return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)), dpr: dpr * scale };
+  }
+
+  if (!('transferControlToOffscreen' in canvas)) {
+    root.dataset.renderer = 'unsupported';
+  } else {
+    const source = await (await fetch('particles.worker.js')).text();
+    const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+    const worker = new Worker(url);
+    URL.revokeObjectURL(url);
+    const offscreen = canvas.transferControlToOffscreen();
+    const area = canvas.clientWidth * canvas.clientHeight;
+    const count = Math.round(Math.min(10000, Math.max(2000, area / 110)));
+    worker.postMessage({ type: 'init', canvas: offscreen, count, ...size() }, [offscreen]);
+    worker.onmessage = (e) => {
+      if (e.data.type === 'ready') {
+        root.dataset.renderer = e.data.mode;
+        root.dataset.particles = String(count);
+        update();
+      }
+    };
+    worker.onerror = (e) => { root.dataset.renderer = `error: ${e.message}`; };
+
+    let onscreen = true;
+    let lastRunning = null;
+    function update() {
+      const running = !document.hidden && onscreen && !reduceMotion.matches;
+      if (running !== lastRunning) worker.postMessage({ type: 'run', running });
+      lastRunning = running;
+    }
+    new ResizeObserver(() => worker.postMessage({ type: 'resize', ...size() })).observe(canvas);
+    new IntersectionObserver(([entry]) => { onscreen = entry.isIntersecting; update(); }).observe(canvas);
+    document.addEventListener('visibilitychange', update);
+    reduceMotion.addEventListener('change', update);
+    const sendPointer = (e, active) => {
+      const r = canvas.getBoundingClientRect();
+      worker.postMessage({ type: 'pointer', pointer: { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, active } });
+    };
+    canvas.addEventListener('pointermove', (e) => sendPointer(e, true));
+    canvas.addEventListener('pointerleave', (e) => sendPointer(e, false));
+  }
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

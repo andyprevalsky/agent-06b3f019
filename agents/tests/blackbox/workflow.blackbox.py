@@ -317,6 +317,16 @@ CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + record
 CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
 
 
+# agent_id -> number of poll_new_messages calls that succeed before every later
+# call fails (a worker-saturation activity timeout, RCA P9).
+POLL_FAILURE_AFTER: Dict[str, int] = {}
+# agent_id -> (successful polls, retryable failures that follow, after which
+# polls succeed again; None = never recover): a transient saturation burst.
+POLL_TRANSIENT_BURST: Dict[str, tuple] = {}
+# agent_id -> every status passed to update_agent_status, in order.
+WORKFLOW_ENV_STATUSES: Dict[str, List[str]] = {}
+
+
 def _record_workflow_env_activity(agent_id: Optional[str], activity_name: str) -> None:
     if not agent_id:
         return
@@ -344,6 +354,7 @@ async def mock_update_agent_status(
     iteration_offset: Optional[int] = None,
 ) -> None:
     _record_workflow_env_activity(agent_id, "update_agent_status")
+    WORKFLOW_ENV_STATUSES.setdefault(agent_id, []).append(status)
     return None
 
 
@@ -414,7 +425,7 @@ async def mock_fetch_compute_token_activity(
     lineage_key: Optional[str] = None,
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
-    fast_cache_affinity_key: Optional[str] = None,
+    demo_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     return None
@@ -479,6 +490,18 @@ async def mock_poll_new_messages(
     include_internal_subagent: bool = False,
 ) -> List[Dict[str, Any]]:
     _record_workflow_env_activity(agent_id, "poll_new_messages")
+    if agent_id in POLL_FAILURE_AFTER:
+        if WORKFLOW_ENV_ACTIVITY_COUNTS[agent_id]["poll_new_messages"] > POLL_FAILURE_AFTER[agent_id]:
+            from temporalio.exceptions import ApplicationError
+
+            raise ApplicationError("Activity task timed out (simulated)", non_retryable=True)
+    if agent_id in POLL_TRANSIENT_BURST:
+        ok_before, burst = POLL_TRANSIENT_BURST[agent_id]
+        call = WORKFLOW_ENV_ACTIVITY_COUNTS[agent_id]["poll_new_messages"]
+        if call > ok_before and (burst is None or call <= ok_before + burst):
+            from temporalio.exceptions import ApplicationError
+
+            raise ApplicationError("Activity task timed out (simulated saturation burst)")
     if agent_id in CUTOVER_MESSAGES:
         # Time-skipping moves workflow time ahead of wall time, so return every
         # durable row; run_agent dedupes by message id exactly as in prod.
@@ -533,7 +556,7 @@ async def mock_generate_completion_summary(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -571,11 +594,11 @@ async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: i
     return None
 
 
-# Captures the Fast Mode cache args the workflow threads into LLM activities,
+# Captures the DEMO cache args the workflow threads into LLM activities,
 # keyed by agent_id. Tests clear their agent's entry before starting.
 FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
-RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
+RESOLVE_DEMO_CACHE_GOAL_CALLS: List[str] = []
 LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
 LEFTOVER_CHILD_GOAL = "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
 # A finished drafting sub-agent woken by its parent's send_message_to_agent
@@ -593,7 +616,7 @@ VERIFIER_SCHEMA_CAPTURE: Dict[str, List[Optional[Dict[str, Any]]]] = {}
 async def mock_resolve_fast_cache_goal_activity(
     agent_id: str,
 ) -> Optional[dict[str, Optional[str]]]:
-    RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
+    RESOLVE_DEMO_CACHE_GOAL_CALLS.append(agent_id)
     if agent_id == LEFTOVER_CHILD_AGENT_ID:
         from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
@@ -609,7 +632,7 @@ async def mock_resolve_fast_cache_goal_activity(
 @activity.defn(name="resolve_fast_cache_context_activity")
 async def mock_resolve_fast_cache_context_activity(agent_id: str) -> dict:
     persisted = await mock_resolve_fast_cache_goal_activity(agent_id)
-    enabled = agent_id in {"agent-test-fastcache", LEFTOVER_CHILD_AGENT_ID}
+    enabled = agent_id in {"agent-test-democache", LEFTOVER_CHILD_AGENT_ID}
     return {
         "enabled": enabled,
         "goal": persisted["goal"] if enabled else None,
@@ -645,7 +668,7 @@ async def mock_call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -909,6 +932,7 @@ async def mock_spawn_browser_agent_activity_v3(
     world_model_mode: Optional[str] = None,
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
+    await_owner_cleanup: bool = False,
 ) -> Dict[str, Any]:
     """Browser task that checkpoints once (drain yield or write approval), then completes.
 
@@ -993,6 +1017,16 @@ async def mock_resolve_code_agent_provider_activity(default_provider: str) -> st
     return default_provider
 
 
+@activity.defn(name="resolve_user_tools_activity")
+async def mock_resolve_user_tools_activity(agent_id: str, user_id: str) -> dict:
+    return {"version_id": None, "base_url": None, "tools": [], "skipped": [], "disabled_reason": "workflow blackbox"}
+
+
+@activity.defn(name="predict_jev_progress")
+async def mock_predict_jev_progress(snapshot: dict) -> None:
+    return None
+
+
 CUTOVER_CODE_SESSION = {
     "task_id": "cc-task-1",
     "sandbox_id": "sb-1",
@@ -1021,6 +1055,10 @@ async def mock_spawn_claude_code_activity(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
+    code_session_request: Optional[Dict[str, Any]] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    local_device_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Claude Code run that a deploy drains once mid-run, then finishes in the same sandbox.
 
@@ -1109,6 +1147,8 @@ MOCK_ACTIVITIES = [
     mock_spawn_browser_agent_activity_v3,
     mock_resolve_code_agent_provider_activity,
     mock_spawn_claude_code_activity,
+    mock_resolve_user_tools_activity,
+    mock_predict_jev_progress,
 ]
 
 
@@ -1165,6 +1205,141 @@ async def _cancel_workflow(handle) -> None:
 # All Temporal workflow tests run inside a SINGLE shared WorkflowEnvironment
 # to avoid the overhead of starting multiple test servers.
 # ---------------------------------------------------------------------------
+
+
+async def _test_failed_execute_poll_ends_agent_terminal(env) -> None:
+    # Poll 2 is the EXECUTE-entry durable read; poll 3 is run_agent's first loop
+    # poll, the call that timed out in the reproduced mass-agent stall.
+    for successful_polls in (1, 2):
+        await _assert_failed_poll_ends_agent_terminal(env, successful_polls)
+
+
+async def _assert_failed_poll_ends_agent_terminal(env, successful_polls: int) -> None:
+    """A failed EXECUTE poll must end the agent terminal, never ACTIVE (RCA P9).
+
+    Mass-agent cloud copies stalled with a leaf ACTIVE and silent for 510s.
+    Under single-worker saturation the leaf's poll_new_messages timed out; the
+    ActivityError escaped AgentWorkflow.run, failing the Temporal execution
+    without a terminal status, so the row stayed ACTIVE and the parent waited
+    for it indefinitely.
+    """
+    from temporalio.client import WorkflowFailureError
+
+    poll_fail_id = f"agent-poll-fail-p9-{successful_polls}"
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(poll_fail_id, None)
+    WORKFLOW_ENV_STATUSES.pop(poll_fail_id, None)
+    POLL_FAILURE_AFTER[poll_fail_id] = successful_polls
+    handle = None
+    try:
+        handle = await env.client.start_workflow(
+            AgentWorkflow.run,
+            args=[
+                poll_fail_id,
+                "user-test-1",
+                "Research one creator",
+                "rose-labs/rose-1-flash",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                None,  # context
+                "parent-wf-poll-fail",  # parent_workflow_id
+                "parent-agent-poll-fail",  # parent_agent_id
+                1,  # depth
+                None,  # bus_id
+                "execute",  # start_phase
+            ],
+            id=_next_wf_id("poll-fail-terminal"),
+            task_queue=TASK_QUEUE,
+        )
+        workflow_error: Optional[BaseException] = None
+        try:
+            await asyncio.wait_for(handle.result(), timeout=60)
+        except WorkflowFailureError as exc:
+            workflow_error = exc
+        polls = WORKFLOW_ENV_ACTIVITY_COUNTS.get(poll_fail_id, {}).get("poll_new_messages", 0)
+        statuses = WORKFLOW_ENV_STATUSES.get(poll_fail_id, [])
+        assert polls > POLL_FAILURE_AFTER[poll_fail_id], f"the injected poll failure never ran (polls={polls})"
+        assert workflow_error is None, (
+            f"a failed poll must not escape AgentWorkflow.run: {workflow_error!r} (statuses={statuses})"
+        )
+        assert statuses and statuses[-1] == "FAILED", (
+            f"agent row left non-terminal after a failed poll: statuses={statuses}"
+        )
+    except BaseException:
+        if handle is not None:
+            await _cancel_workflow(handle)
+        raise
+    finally:
+        POLL_FAILURE_AFTER.pop(poll_fail_id, None)
+
+
+async def _run_poll_burst(env, agent_id: str, burst: Optional[int]) -> tuple:
+    """Run a sub-agent whose run_agent loop poll (call 3) hits a retryable burst."""
+    from temporalio.client import WorkflowFailureError
+
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(agent_id, None)
+    WORKFLOW_ENV_STATUSES.pop(agent_id, None)
+    POLL_TRANSIENT_BURST[agent_id] = (2, burst)
+    handle = None
+    try:
+        handle = await env.client.start_workflow(
+            AgentWorkflow.run,
+            args=[
+                agent_id,
+                "user-test-1",
+                "Research one creator",
+                "rose-labs/rose-1-flash",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                None,  # context
+                "parent-wf-poll-burst",  # parent_workflow_id
+                "parent-agent-poll-burst",  # parent_agent_id
+                1,  # depth
+                None,  # bus_id
+                "execute",  # start_phase
+                3,  # max_iterations: the mock loop never completes on its own
+            ],
+            id=_next_wf_id("poll-burst"),
+            task_queue=TASK_QUEUE,
+        )
+        workflow_error: Optional[BaseException] = None
+        result = None
+        try:
+            result = await asyncio.wait_for(handle.result(), timeout=120)
+        except WorkflowFailureError as exc:
+            workflow_error = exc
+        polls = WORKFLOW_ENV_ACTIVITY_COUNTS.get(agent_id, {}).get("poll_new_messages", 0)
+        return result, workflow_error, polls, WORKFLOW_ENV_STATUSES.get(agent_id, [])
+    except BaseException:
+        if handle is not None:
+            await _cancel_workflow(handle)
+        raise
+    finally:
+        POLL_TRANSIENT_BURST.pop(agent_id, None)
+
+
+async def _test_transient_poll_burst_recovers(env) -> None:
+    """A saturation burst shorter than the poll retry schedule must not fail the agent.
+
+    RCA P9: 30 s x 3 attempts gave up after ~94 s of worker saturation. The
+    golden-ref schedule (10 attempts, 0.5 s -> 8 s backoff) rides out a burst of
+    6 consecutive failures and the agent finishes normally.
+    """
+    result, workflow_error, polls, statuses = await _run_poll_burst(env, "agent-poll-burst-p9", 6)
+    assert workflow_error is None, f"transient poll burst escaped run(): {workflow_error!r}"
+    assert polls > 2 + 6 + 1, f"the loop never polled successfully after the burst (polls={polls})"
+    # The mock loop ends at its iteration cap, never on the poll failure.
+    assert (result or {}).get("reason") == "max_iterations", (
+        f"a recoverable poll burst ended the agent: result={result} statuses={statuses[-3:]}"
+    )
+
+
+async def _test_poll_exhaustion_ends_agent_failed(env) -> None:
+    """A poll that never recovers exhausts its bounded schedule, then ends the agent FAILED."""
+    result, workflow_error, polls, statuses = await _run_poll_burst(env, "agent-poll-exhaust-p9", None)
+    assert workflow_error is None, f"poll exhaustion escaped run(): {workflow_error!r} (statuses={statuses})"
+    assert polls == 2 + 10, f"poll retry schedule is not the bounded 10 attempts (polls={polls})"
+    assert statuses and statuses[-1] == "FAILED", f"exhausted poll left the agent non-terminal: {statuses}"
+    assert (result or {}).get("reason") == "workflow_error", f"unexpected terminal result: {result}"
 
 
 async def _run_all_workflow_tests() -> List[tuple]:
@@ -1259,6 +1434,30 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 for handle in cold_handles:
                     await _cancel_workflow(handle)
+                results.append((name, e))
+
+            # --- test: a failed EXECUTE poll ends the agent terminal (RCA P9) ---
+            name = "wf_failed_execute_poll_ends_agent_terminal"
+            try:
+                await _test_failed_execute_poll_ends_agent_terminal(env)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+
+            # --- test: a transient poll burst recovers within the retry schedule (RCA P9) ---
+            name = "wf_transient_poll_burst_recovers"
+            try:
+                await _test_transient_poll_burst_recovers(env)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+
+            # --- test: poll exhaustion ends the agent FAILED after the bounded schedule (RCA P9) ---
+            name = "wf_poll_exhaustion_ends_agent_failed"
+            try:
+                await _test_poll_exhaustion_ends_agent_failed(env)
+                results.append((name, None))
+            except Exception as e:
                 results.append((name, e))
 
             # --- test: pause/resume ---
@@ -1435,15 +1634,15 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
 
-            # --- test: fast cache goal comes from the persisted agent row ---
+            # --- test: DEMO cache goal comes from the persisted agent row ---
             # Chat escalation starts the workflow with an LLM-refined goal that
             # differs from the persisted Agent row and varies run to run. Cache
             # keys namespace by exact goal hash, so keying on the workflow-input
             # goal gives every chat-originated run a fresh, empty namespace.
             # The workflow must thread the DB-row goal into LLM activities.
-            name = "wf_fast_cache_goal_uses_persisted_row"
+            name = "wf_demo_cache_goal_uses_persisted_row"
             try:
-                fc_agent_id = "agent-test-fastcache"
+                fc_agent_id = "agent-test-democache"
                 FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
                 demo_prefix = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
                 persisted_goal = f"{demo_prefix} — persisted DB goal"
@@ -1467,7 +1666,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                         None,  # context_gates
                         True,  # fast_mode_cache_enabled (button; cache still DEMO-gated)
                     ],
-                    id=_next_wf_id("fast-cache-goal"),
+                    id=_next_wf_id("demo-cache-goal"),
                     task_queue=TASK_QUEUE,
                 )
                 # Wait until the workflow reaches its first LLM call.
@@ -1495,8 +1694,8 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 leftover_id = LEFTOVER_CHILD_AGENT_ID
                 FAST_MODE_GOAL_CAPTURE.pop(leftover_id, None)
                 FAST_MODE_ENABLED_CAPTURE.pop(leftover_id, None)
-                while leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
-                    RESOLVE_FAST_CACHE_GOAL_CALLS.remove(leftover_id)
+                while leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS:
+                    RESOLVE_DEMO_CACHE_GOAL_CALLS.remove(leftover_id)
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
@@ -1521,10 +1720,10 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     task_queue=TASK_QUEUE,
                 )
                 for _ in range(60):
-                    if leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                    if leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS:
                         break
                     await asyncio.sleep(0.5)
-                assert leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS, (
+                assert leftover_id in RESOLVE_DEMO_CACHE_GOAL_CALLS, (
                     "leftover child must resolve tree root_goal even when Fast Mode is off"
                 )
                 for _ in range(60):
@@ -1906,6 +2105,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
             workflow_id = _next_wf_id("cutover-code")
             handle = None
             try:
+                _assert_code_mock_mirrors_activity()
                 _opt_in_cutover_agent(
                     agent_id, workflow_id, {"new_queue": CUTOVER_NEW_QUEUE}, tool_call=CUTOVER_CODE_TOOL_CALL
                 )
@@ -1984,6 +2184,18 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 results.append((name, e))
 
     return results
+
+
+def _assert_code_mock_mirrors_activity() -> None:
+    import inspect
+
+    from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+
+    # A drifted mock signature raises TypeError on every attempt, and the
+    # unlimited spawn retry policy retries it until the test's wait expires.
+    assert list(inspect.signature(mock_spawn_claude_code_activity).parameters) == list(
+        inspect.signature(spawn_claude_code_activity).parameters
+    ), "mock_spawn_claude_code_activity must mirror the real activity signature"
 
 
 def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:
@@ -2194,7 +2406,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.gpt_code_token_source = "pool"
     wf.gpt_code_token_pool_id = "pool-1"
     wf.compute_token_lineage_key = "lineage-1"
-    wf.compute_token_fast_cache_affinity_key = "affinity-1"
+    wf.compute_token_demo_cache_affinity_key = "affinity-1"
     wf.compute_token_fetched_at = datetime(2025, 1, 1, 10, 2, tzinfo=timezone.utc)
     wf.model_pricing_cache = {"model": {"input_cents_per_1k": 1.0}}
     wf.input_cents_per_1k = 1.25
@@ -2204,7 +2416,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
-    wf.fast_cache_goal = "stable persisted goal"
+    wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
     context = [{"role": "USER", "text": "durable context"}]
@@ -2264,7 +2476,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert merged.child_tool_counts == {"web_search": 4, "web_fetch": 2}
     assert restored._iteration_resume_kwargs() == {
         "iteration_offset": 41,
-        "fast_cache_position_offset": 41,
+        "demo_cache_position_offset": 41,
     }
     restored.max_iterations = 80
     assert restored._iteration_resume_kwargs()["max_iterations"] == 80
@@ -2702,6 +2914,146 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
         "weekly_engagement_target_creators",
     ]
     assert outputs[0]["value"] == "Aman as the founder-operator."
+
+
+async def test_workflow_verifier_schema_survives_a_failed_startup_config_fetch():
+    """descend-full69 MA6: 14 of 50 cloud GPs verified without their response_schema.
+
+    On the load-starved guest, each one's startup ``fetch_agent_config`` timed
+    out ("Failed to fetch agent config for response_schema"), so the workflow ran
+    with no output schema: the verifier parsed the cached verdict as a plain
+    ProgressScore and dropped its output, and only completion re-fetched the
+    schema. Verification must load the task's schema first; an agent whose
+    config fetch succeeded with no schema pays no extra fetch.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True}]}
+
+    failed = _bare_workflow_instance()
+    failed.agent_id = "gp-khe-hy"
+    failed.output_schema = None
+    failed._agent_config_unavailable = True
+    fetch = AsyncMock(return_value={"response_schema": schema})
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        getter = failed._make_response_schema_getter()
+        assert await getter() == schema
+        assert await getter() == schema
+    assert fetch.await_count == 1, "the schema is fetched once, then kept"
+
+    healthy = _bare_workflow_instance()
+    healthy.agent_id = "agent-without-schema"
+    healthy.output_schema = None
+    untouched = AsyncMock(return_value={"response_schema": schema})
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=untouched),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+    ):
+        assert await healthy._make_response_schema_getter()() is None
+    assert untouched.await_count == 0
+
+
+async def test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff():
+    """descend-full69 MA6b: the getter runs every main-loop turn, not only at verification.
+
+    While config reads keep failing, each turn retried 5 rounds of a 10 s
+    activity plus 1 s sleeps (~100 s per turn, unbounded across turns), and in a
+    correlated backend outage every affected agent retried in lockstep. A turn
+    makes at most one read, and failures back off exponentially (bounded,
+    jittered) across turns before the next read.
+    """
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True}]}
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-outage"
+    wf.output_schema = None
+    wf._agent_config_unavailable = True
+    clock = {"now": datetime(2026, 10, 26, tzinfo=timezone.utc)}
+    fetch = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    with (
+        patch("workflows.agent_workflow.workflow.execute_activity", new=fetch),
+        patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+        patch("workflows.agent_workflow.workflow.now", side_effect=lambda: clock["now"]),
+        patch("workflows.agent_workflow.workflow.random", return_value=MagicMock(random=lambda: 0.5)),
+        patch("workflows.agent_workflow.asyncio.sleep", new=AsyncMock()) as sleep,
+    ):
+        getter = wf._make_response_schema_getter()
+        assert await getter() is None
+        assert fetch.await_count == 1, "one read per turn"
+        assert await getter() is None
+        assert fetch.await_count == 1, "no read before the backoff deadline"
+        assert sleep.await_count == 0, "the turn never sleeps for the schema"
+
+        delays = []
+        for _ in range(9):
+            delays.append(wf._agent_config_retry_at - clock["now"])
+            clock["now"] = wf._agent_config_retry_at
+            before = fetch.await_count
+            assert await getter() is None
+            assert fetch.await_count == before + 1
+        assert all(b > a for a, b in zip(delays[:5], delays[1:6])), delays
+        assert max(delays) <= timedelta(seconds=75), "bounded backoff"
+
+        fetch.side_effect = None
+        fetch.return_value = {"response_schema": schema}
+        clock["now"] = wf._agent_config_retry_at
+        assert await getter() == schema
+        assert wf._agent_config_unavailable is False
+        assert await getter() == schema
+        assert fetch.await_count == 11
+
+
+def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
+    """descend-full69 MA5: transcript fills turned list fields into markdown strings.
+
+    The verifier left ungrounded list fields empty ([]); the completion fill then
+    took a row item's / heading's markdown text for ``hook_formulas`` (list[str]),
+    so the finished output no longer satisfied its response_schema. A fill must
+    match the field's declared type; untyped fields keep the old behaviour.
+    """
+    import json as _json
+
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "hook_formulas", "type": "list[str]"},
+            {"name": "core_content_pillars", "type": "list[str]"},
+            {"name": "audience_persona", "type": "str"},
+            {"name": "legacy_note"},
+            {"name": "positioning_statement", "type": "list[object]"},
+        ]
+    }
+    row_item = {
+        "hook_formulas": "- First-person self-experiment framing\n- 30-day challenge titles",
+        "core_content_pillars": ["fitness experiments", "nutrition"],
+        "legacy_note": "kept",
+    }
+    persona = "Ambitious 25-40 knowledge workers who want practical, evidence-led health routines. " * 3
+    context = [
+        {
+            "role": "TOOL",
+            "text": f"Row item report: {_json.dumps(row_item)}",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": f"# audience_persona\n\n{persona}\n\n# positioning_statement\n\n{persona}",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+    ]
+    merged = wf._coalesce_structured_response(context, {"hook_formulas": [], "audience_persona": ""})
+
+    assert merged["hook_formulas"] == [], "a markdown string must not fill a list[str] field"
+    assert merged["core_content_pillars"] == ["fitness experiments", "nutrition"]
+    assert merged["audience_persona"].startswith("Ambitious 25-40")
+    assert merged["legacy_note"] == "kept"
+    # An absent key still takes report text: a demo root materializes it into a file.
+    assert merged["positioning_statement"].startswith("Ambitious 25-40")
 
 
 def test_workflow_coalesce_for_each_items_fills_top_creators_analysis():
@@ -3479,7 +3831,7 @@ def _user_schema_refresh_fixture():
     wf.agent_id = "schema-feedback-agent"
     wf.user_id = "schema-feedback-user"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.current_phase = "EXECUTE"
     wf.user_context_section = ""
     wf._cloud_agent_lifecycle_finished = True
@@ -3656,7 +4008,7 @@ async def test_workflow_keyed_rejection_admits_already_polled_durable_feedback()
         resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
         resumed.agent_id = wf.agent_id
         resumed.goal = wf.goal
-        resumed.fast_cache_goal = wf.goal
+        resumed.demo_cache_goal = wf.goal
         await resumed.receive_user_response(json.dumps({"request_id": "rejected-request", "response": "__REJECTED__"}))
         await resumed._wait_for_response_schema_refresh()
         assert resumed._response_schema_revision == 1, "continue-as-new admitted the same durable correction twice"
@@ -4002,7 +4354,7 @@ async def test_workflow_attention_event_ledger_survives_continue_as_new():
         wf.context_gates = {}
         resumed = _bare_workflow_instance()
         resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
-        resumed.agent_id, resumed.goal, resumed.fast_cache_goal = wf.agent_id, wf.goal, wf.goal
+        resumed.agent_id, resumed.goal, resumed.demo_cache_goal = wf.agent_id, wf.goal, wf.goal
         # A producer retry can redeliver the same event under another Message ID.
         fake.activity_returns["poll_new_messages"] = [{**row, "id": "retry-message-id"}]
         await resumed._poll_messages(datetime.fromtimestamp(0, timezone.utc))
@@ -4104,7 +4456,7 @@ async def test_workflow_refreshes_response_schema_from_user_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = "Research three venues"
+    wf.demo_cache_goal = "Research three venues"
     wf.current_phase = "EXECUTE"
     wf.user_context_section = ""
     wf._cloud_agent_lifecycle_finished = True
@@ -4177,7 +4529,7 @@ async def test_workflow_verifier_refreshes_response_schema_from_user_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = "Research three venues"
+    wf.demo_cache_goal = "Research three venues"
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4217,7 +4569,7 @@ async def test_workflow_schema_refresh_skips_context_message_when_unchanged():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4351,7 +4703,7 @@ async def test_workflow_schema_refresh_failure_remains_pending_for_native_retry(
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4438,7 +4790,7 @@ async def test_workflow_failed_schema_continuation_retries_original_input_withou
             resumed._restore_deployment_state(snapshot)
             assert resumed._response_schema_applied_revision == 0
             resumed.agent_id, resumed.user_id = wf.agent_id, wf.user_id
-            resumed.goal, resumed.fast_cache_goal = wf.goal, wf.fast_cache_goal
+            resumed.goal, resumed.demo_cache_goal = wf.goal, wf.demo_cache_goal
             getter = resumed._make_response_schema_getter()
             assert await getter() == replacement
             assert resumed._response_schema_feedback == [authored]
@@ -4511,7 +4863,7 @@ async def test_workflow_schema_refresh_does_not_depend_on_message_write():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4544,7 +4896,7 @@ async def test_workflow_schema_refresh_reloads_prior_feedback_after_continuation
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4589,7 +4941,7 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
     wf.goal = "Research three venues"
-    wf.fast_cache_goal = wf.goal
+    wf.demo_cache_goal = wf.goal
     wf.output_schema = {
         "fields": [{"name": "venues", "type": "list[str]", "required": True}],
     }
@@ -4709,7 +5061,7 @@ async def _exercise_schema_refresh_persistence(
             patch("helpers.llm.load_config", return_value=config),
             patch("helpers.llm._generate_response_schema_with_rose", generate_schema),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 AsyncMock(return_value=(False, "", False, "", "", False)),
             ),
         ):
@@ -5510,7 +5862,7 @@ async def test_workflow_track_llm_cost_zero_when_no_pricing():
         _restore_workflow(original)
 
 
-async def test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost():
+async def test_workflow_track_llm_cost_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -5654,7 +6006,7 @@ async def test_workflow_track_usage_foundry_is_zero_user_cost():
         _restore_workflow(original)
 
 
-async def test_workflow_track_usage_fast_cache_replay_is_zero_cost():
+async def test_workflow_track_usage_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -5979,9 +6331,35 @@ async def test_workflow_update_tree_state_skips_without_bus():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        await wf._update_tree_state(status="ACTIVE")
-        # No activity calls because bus_id missing
+        await wf._update_tree_state(progress=0.5)
+        # No bus and no status transition: nothing to broadcast or persist.
         assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_tree_state_persists_status_without_bus():
+    """A bus-less root that pauses for the user's auth help must not stay ACTIVE in the DB.
+
+    Run e0c401c1 (browser-auth-created-account-reused): the browser handler set the
+    root PAUSED awaiting authentication assistance, but the root had no bus, so the
+    status never left the workflow and the fleet reported a silent ACTIVE tree stall.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-1"
+    wf.bus_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_tree_state(status="PAUSED")
+        calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(calls) == 1, fake.activity_calls
+        args = calls[0][1]
+        assert args[0] == "root-1" and args[2] is None
+        assert args[3]["status"] == "PAUSED" and args[3]["_statusExplicit"] is True
+        await wf._update_tree_state(status="ACTIVE")
+        calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert [c[1][3]["status"] for c in calls] == ["PAUSED", "ACTIVE"]
     finally:
         _restore_workflow(original)
 
@@ -6112,7 +6490,7 @@ async def test_workflow_on_tokens_no_pricing_still_logs():
         _restore_workflow(original)
 
 
-async def test_workflow_on_tokens_fast_cache_replay_is_zero_cost():
+async def test_workflow_on_tokens_demo_cache_replay_is_zero_cost():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
@@ -9200,9 +9578,9 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
     wf.current_phase = "EXECUTE"
     wf.output_schema = {"fields": []}
     wf.fast_mode_cache_enabled = False
-    wf.fast_cache_goal = "goal"
+    wf.demo_cache_goal = "goal"
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
 
     dispatched_tools = []
     verifier_kwargs = {}
@@ -9278,7 +9656,7 @@ async def test_workflow_post_dag_verdict_detects_keyed_feedback_without_user_row
     wf, fake, replacement = _user_schema_refresh_fixture()
     wf.fast_mode_cache_enabled = False
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
     wf.context = []
 
     async def execute_tool(*args, **kwargs):
@@ -9519,9 +9897,9 @@ async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool()
     wf.current_phase = "EXECUTE"
     wf.output_schema = {"fields": []}
     wf.fast_mode_cache_enabled = False
-    wf.fast_cache_goal = "goal"
+    wf.demo_cache_goal = "goal"
     wf.compute_token_lineage_key = None
-    wf.compute_token_fast_cache_affinity_key = None
+    wf.compute_token_demo_cache_affinity_key = None
 
     dispatched_tools = []
     posted_events = []
@@ -11091,7 +11469,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     # Cache kwargs must thread the persisted-row goal, not the (possibly
     # chat-refined) workflow input goal.
     wf.goal = "refined workflow input goal"
-    wf.fast_cache_goal = "root goal"
+    wf.demo_cache_goal = "root goal"
     wf.fast_mode_cache_enabled = True
     captured_kwargs: Dict[str, Any] = {}
 
@@ -11181,7 +11559,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
     wf.model = "rose-labs/rose-1-flash"
     wf.current_phase = "EXECUTE"
     wf.fast_mode_cache_enabled = True
-    wf.fast_cache_goal = "Call the restaurant and book dinner"
+    wf.demo_cache_goal = "Call the restaurant and book dinner"
     wf._current_tools = ["call_phone_number", "web_search", "attempt_completion"]
     wf.context = [
         {
@@ -11995,6 +12373,18 @@ async def run_all_tests():
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
     )
     r.record(
+        "wf_coalesce_fills_only_values_of_the_schema_field_type",
+        test_workflow_coalesce_fills_only_values_of_the_schema_field_type,
+    )
+    await r.record_async(
+        "wf_verifier_schema_survives_a_failed_startup_config_fetch",
+        test_workflow_verifier_schema_survives_a_failed_startup_config_fetch,
+    )
+    await r.record_async(
+        "wf_schema_reload_is_one_attempt_per_turn_with_backoff",
+        test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff,
+    )
+    r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",
         test_workflow_coalesce_for_each_items_fills_top_creators_analysis,
     )
@@ -12320,8 +12710,8 @@ async def run_all_tests():
         test_workflow_track_llm_cost_foundry_is_zero_user_cost,
     )
     await r.record_async(
-        "wf_track_llm_cost_fast_cache_replay",
-        test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost,
+        "wf_track_llm_cost_demo_cache_replay",
+        test_workflow_track_llm_cost_demo_cache_replay_is_zero_cost,
     )
     await r.record_async("wf_track_usage_empty", test_workflow_track_usage_empty_is_no_op)
     await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
@@ -12334,8 +12724,8 @@ async def run_all_tests():
         test_workflow_track_usage_foundry_is_zero_user_cost,
     )
     await r.record_async(
-        "wf_track_usage_fast_cache_replay",
-        test_workflow_track_usage_fast_cache_replay_is_zero_cost,
+        "wf_track_usage_demo_cache_replay",
+        test_workflow_track_usage_demo_cache_replay_is_zero_cost,
     )
     await r.record_async(
         "wf_track_usage_browser_pool_pricing",
@@ -12362,6 +12752,7 @@ async def run_all_tests():
         test_workflow_cost_limit_flushes_tree_cost_before_pausing,
     )
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
+    await r.record_async("wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus)
     await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
     await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
     await r.record_async("wf_query_parent_state_empty", test_workflow_query_parent_state_returns_empty_without_parent)
@@ -12369,7 +12760,7 @@ async def run_all_tests():
     await r.record_async("wf_refresh_claude_token_fresh", test_workflow_refresh_claude_token_still_fresh_returns_early)
     await r.record_async("wf_on_tokens_with_pricing", test_workflow_on_tokens_calculates_cost_with_pricing)
     await r.record_async("wf_on_tokens_no_pricing", test_workflow_on_tokens_no_pricing_still_logs)
-    await r.record_async("wf_on_tokens_fast_cache_replay", test_workflow_on_tokens_fast_cache_replay_is_zero_cost)
+    await r.record_async("wf_on_tokens_demo_cache_replay", test_workflow_on_tokens_demo_cache_replay_is_zero_cost)
     await r.record_async("wf_wait_for_messages_timeout", test_workflow_wait_for_messages_timeout_returns_false)
     await r.record_async("wf_get_model_pricing_primary", test_workflow_get_model_pricing_returns_primary_when_matches)
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)

@@ -25,6 +25,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
+import { isPhoneHarnessExchange, credentialMetadataUrl } from './fetchCapturePrivacy';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -150,6 +151,7 @@ export function outboundReplayCacheKey(url: string, method: string, body: string
 
 function isCredentialExchange(url: string): boolean {
   try {
+    if (isPhoneHarnessExchange(url)) return true;
     const path = new URL(url).pathname.replace(/\/+$/, '');
     return (
       path === '/oauth/token' ||
@@ -161,12 +163,6 @@ function isCredentialExchange(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-function credentialMetadataUrl(url: string): string {
-  const parsed = new URL(url);
-  for (const field of ['search', 'hash', 'username', 'password'] as const) parsed[field] = '';
-  return parsed.toString();
 }
 
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
@@ -514,6 +510,40 @@ export function installFetchCapture(): Router {
       return new globalThis.Response(body, {
         status,
         statusText: unavailable ? 'Service Unavailable' : 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    if (
+      process.env.BLACKBOX_TEST_FAKE_SLACK === '1' &&
+      new URL(url).hostname === 'slack.com' &&
+      new URL(url).pathname.startsWith('/api/') &&
+      method.toUpperCase() === 'POST'
+    ) {
+      // Slack Web API writes (chat.postMessage, reactions.add) answer like Slack:
+      // HTTP 200 with `ok`, plus a message handle for posts. Tests assert the
+      // captured request bodies; no call leaves the machine.
+      let channel = 'C0BLACKBOX0';
+      try {
+        const parsed: unknown = JSON.parse(requestBody ?? '{}');
+        if (parsed !== null && typeof parsed === 'object' && 'channel' in parsed) {
+          channel = String((parsed as { channel: unknown }).channel);
+        }
+      } catch {
+        // Non-JSON bodies keep the placeholder channel.
+      }
+      const body = JSON.stringify({
+        ok: true,
+        channel,
+        ts: `1800000000.${String(id % 1_000_000).padStart(6, '0')}`,
+      });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      publishCapture(entry);
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
         headers: { 'content-type': 'application/json' },
       });
     }

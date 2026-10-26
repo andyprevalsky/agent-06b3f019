@@ -17,6 +17,9 @@ every such call:
        ▼
     whatever attempt 3 returns is final
 
+A provider refusal after partial output is abandoned the same way, straight to
+the next model: a larger limit cannot change a refusal.
+
 Each abandoned attempt is followed by one ``restart`` chunk telling the consumer
 to drop what it accumulated. Only consumers that understand ``restart`` opt in
 (``RoseClient.collect`` does, for every collected call); a plain-text reply is
@@ -34,7 +37,7 @@ from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 import structlog
 
-from providers.rose.errors import RoseError
+from providers.rose.errors import RoseError, RoseRefusalError
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger(__name__)
@@ -171,7 +174,12 @@ async def _recover_structured_truncation(
                         continue
                     yield chunk
         except RoseError as exc:
-            if not retry_partial_errors or not actual_model or saw_tool_call:
+            # A refusal is the model's verdict on this request, so a partial tool
+            # call it streamed first is never the result: drop it and ask the
+            # pool's next model, as client.complete() does for a refusal before
+            # the first chunk. Other mid-stream errors keep the opt-in policy.
+            refused = isinstance(exc, RoseRefusalError) and bool(actual_model)
+            if not refused and (not retry_partial_errors or not actual_model or saw_tool_call):
                 raise
             failure = exc
             remaining = [stage for stage in remaining if stage != "larger_limit"]

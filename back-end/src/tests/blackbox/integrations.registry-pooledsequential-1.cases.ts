@@ -82,7 +82,7 @@ export function pooledSequentialTestsPart1() {
       fn: testComputeTokenLineageSemaphore_capsLiveGptLeases,
     },
     {
-      name: 'compute token fast-cache affinity -- pins provider family',
+      name: 'compute token demo-cache affinity -- pins provider family',
       fn: testComputeTokenFastCacheAffinity_pinsProviderFamily,
     },
     {

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from tools.people_search.types import ExecuteActivityCallable
 
 logger = structlog.get_logger()
-FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
+DEMO_CACHE_HIT_FIELD = "_fast_cache_hit"
 
 
 def _safe_time() -> float:
@@ -156,9 +156,9 @@ class PeopleSearchManager(ToolManager):
             )
 
             elapsed_time = _safe_time() - start_time
-            cache_hit = isinstance(result, dict) and bool(result.get(FAST_CACHE_HIT_FIELD))
+            cache_hit = isinstance(result, dict) and bool(result.get(DEMO_CACHE_HIT_FIELD))
             if cache_hit:
-                result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
+                result = {k: v for k, v in result.items() if k != DEMO_CACHE_HIT_FIELD}
             provider_used = result.get("provider_used", "") if isinstance(result, dict) else ""
             simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
             total_cost_cents = 0.0 if cache_hit or simulated else _cost_for_provider(provider_used)
@@ -322,12 +322,12 @@ async def people_search_activity(
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
     """
-    from providers.fast_cache.client import soft_complete_allowed_for_agent
+    from providers.demo_cache.client import soft_complete_allowed_for_agent
 
     read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
     if read_cache and await soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
         logger.info(
-            "fast_cache.people_search_soft_complete",
+            "demo_cache.people_search_soft_complete",
             query=query[:120],
             mode=mode,
             provider=provider,
@@ -339,7 +339,7 @@ async def people_search_activity(
             "providers_attempted": [],
             "results": [],
             "warnings": ["Fast Mode cache miss for people_search. Returning without a live provider call."],
-            FAST_CACHE_HIT_FIELD: True,
+            DEMO_CACHE_HIT_FIELD: True,
         }
 
     async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:

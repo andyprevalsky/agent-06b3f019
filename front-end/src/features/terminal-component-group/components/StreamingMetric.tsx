@@ -17,8 +17,9 @@ import { cn } from '@/lib/utils';
 
 interface StreamingMetricProps {
   startedAtMs?: number;
-  tokenCount: number;
-  animatedTokenCount: number;
+  tokenCount?: number;
+  animatedTokenCount?: number;
+  tokensPerSecond?: number;
   className?: string;
   iconClassName?: string;
 }
@@ -41,12 +42,17 @@ export function StreamingMetric({
   startedAtMs,
   tokenCount,
   animatedTokenCount,
+  tokensPerSecond,
   className,
   iconClassName,
 }: StreamingMetricProps) {
   const elapsedSeconds = useElapsedSeconds(startedAtMs);
 
-  if (!startedAtMs && tokenCount <= 0) return null;
+  const hasTokens =
+    typeof tokenCount === 'number' && Number.isFinite(tokenCount) && tokenCount >= 0;
+  const hasRate =
+    typeof tokensPerSecond === 'number' && Number.isFinite(tokensPerSecond) && tokensPerSecond >= 0;
+  if (!startedAtMs && !(hasTokens && tokenCount > 0) && !hasRate) return null;
 
   return (
     <span
@@ -55,12 +61,26 @@ export function StreamingMetric({
         className,
       )}
     >
-      {elapsedSeconds.toFixed(1)}s<span className="mx-1 text-muted-foreground/35">·</span>
-      <ArrowDown
-        aria-hidden="true"
-        className={cn('mr-0.5 h-2.5 w-2.5 flex-shrink-0 text-muted-foreground/35', iconClassName)}
-      />
-      {animatedTokenCount.toLocaleString()} tokens
+      {(startedAtMs || hasTokens) && <>{elapsedSeconds.toFixed(1)}s</>}
+      {hasTokens && (
+        <>
+          <span className="mx-1 text-muted-foreground/35">·</span>
+          <ArrowDown
+            aria-hidden="true"
+            className={cn(
+              'mr-0.5 h-2.5 w-2.5 flex-shrink-0 text-muted-foreground/35',
+              iconClassName,
+            )}
+          />
+          {(animatedTokenCount ?? tokenCount).toLocaleString()} tokens
+        </>
+      )}
+      {hasRate && (
+        <>
+          <span className="mx-1 text-muted-foreground/35">·</span>
+          {tokensPerSecond.toFixed(1)} tok/s
+        </>
+      )}
     </span>
   );
 }

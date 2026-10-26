@@ -297,6 +297,14 @@ export function orderForCart(site: AuthTestSite, cartToken: string | null): Site
   return undefined;
 }
 
+/** The orders this viewer may read, newest first: what the cart and account pages list. */
+export function ordersFor(
+  site: AuthTestSite,
+  viewer: { session: SiteSession | null; cartToken: string | null }
+): SiteOrder[] {
+  return site.orders.filter((order) => canViewOrder(order, viewer)).reverse();
+}
+
 /**
  * Whether this request may read a receipt: a member order belongs to the
  * signed-in purchaser, a guest order to the browser holding the cart that paid

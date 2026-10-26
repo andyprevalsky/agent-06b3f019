@@ -2,6 +2,7 @@
 
 import { Prisma, type Message } from '@prisma/client';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { idempotentMessageId } from './messageIdempotency';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 import {
@@ -14,7 +15,6 @@ import {
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
-import { idempotentMessageId } from './messageIdempotency';
 import { type CreateMessageParams, storableMessageParams, withoutNulJson } from './messageParams';
 
 const log = createLogger('Messages');
@@ -163,11 +163,18 @@ export async function createUserMessageInTransaction(
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */
-export async function createMessage(input: CreateMessageParams): Promise<Message> {
+export async function createMessage(params: CreateMessageParams): Promise<Message> {
+  return (await createMessageOnce(params)).message;
+}
+
+/** Persist once after canonical authored-input normalization; signal only on creation. */
+export async function createMessageOnce(
+  input: CreateMessageParams
+): Promise<{ message: Message; created: boolean }> {
   const params = storableMessageParams(input);
   const idempotentId = idempotentMessageId(params);
   const idempotentDuplicate = await findIdempotentMessage(params);
-  if (idempotentDuplicate !== null) return idempotentDuplicate;
+  if (idempotentDuplicate !== null) return { message: idempotentDuplicate, created: false };
 
   const lifecycle = toolLifecycleIdentity(params);
   const result =
@@ -176,13 +183,13 @@ export async function createMessage(input: CreateMessageParams): Promise<Message
       : await persistToolLifecycleMessage(params, lifecycle);
   if (!result.created) {
     logUncreatedMessageWrite(params, result.message);
-    return result.message;
+    return { message: result.message, created: false };
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
   // Browser (and other tool) completions carry structured_response on the FINISHED
   // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
   scheduleMessageGmvCapture(params);
-  return result.message;
+  return { message: result.message, created: true };
 }
 
 export interface WorkflowMessageGroupResult {

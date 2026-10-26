@@ -31,7 +31,9 @@ type ExecRow = {
   createdAt: Date;
 };
 
-function parseArgs(raw: string | Record<string, unknown> | undefined): Record<string, unknown> | null {
+function parseArgs(
+  raw: string | Record<string, unknown> | undefined
+): Record<string, unknown> | null {
   if (!raw) return null;
   if (typeof raw === 'object') return raw as Record<string, unknown>;
   try {
@@ -54,7 +56,9 @@ function rewriteKey(key: string, fromGh: string, toGh: string): string {
 }
 
 async function main() {
-  const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+  const url =
+    (process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL) ||
+    process.env.DATABASE_URL;
   if (!url) throw new Error('FAST_MODE_CACHE_DATABASE_URL required');
   const prisma = new PrismaClient({ datasources: { db: { url } } });
 
@@ -92,7 +96,9 @@ async function main() {
       seenDest.add(destHash);
       // Heuristic creator hint from goal text
       const m =
-        goal.match(/Research(?: the(?: creator| public content of)?| public data for(?: creator)?| only)?\s+([A-Z][A-Za-z .'-]{1,60}?)(?:'s|\s+\(|\s+content|\s+for|\s+\/|,)/) ||
+        goal.match(
+          /Research(?: the(?: creator| public content of)?| public data for(?: creator)?| only)?\s+([A-Z][A-Za-z .'-]{1,60}?)(?:'s|\s+\(|\s+content|\s+for|\s+\/|,)/
+        ) ||
         goal.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}).{0,40}(?:Huberman Lab|YouTube|Instagram)/);
       const creatorHint = (m?.[1] || goal.slice(0, 40)).trim();
       targets.push({
@@ -132,9 +138,7 @@ async function main() {
     // Skip only if dest already has a *rich* warm July explore+swf namespace.
     // Sparse namespaces (2–5 explore, 0 swf) look "warm" but fail after early
     // turns — those must still be enriched from a richer July source.
-    const destWarm = await prisma.$queryRawUnsafe<
-      Array<{ explore: number; swf: number }>
-    >(
+    const destWarm = await prisma.$queryRawUnsafe<Array<{ explore: number; swf: number }>>(
       `
       SELECT
         count(*) FILTER (WHERE key LIKE '%:explore_agent:%')::int AS explore,
@@ -232,7 +236,13 @@ async function main() {
     report,
   };
   writeFileSync('/tmp/oai-demo-explore-rekey-report.json', JSON.stringify(out, null, 2));
-  console.log(JSON.stringify({ apply: APPLY, targets: targets.length, copied, reportN: report.length }, null, 2));
+  console.log(
+    JSON.stringify(
+      { apply: APPLY, targets: targets.length, copied, reportN: report.length },
+      null,
+      2
+    )
+  );
   await prisma.$disconnect();
 }
 

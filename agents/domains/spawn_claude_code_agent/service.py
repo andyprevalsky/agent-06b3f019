@@ -20,29 +20,37 @@ from temporalio.exceptions import ApplicationError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
+    CODE_AGENT_RESIZE_YIELD_REASON,
+    CODE_SESSION_RESIZE_HEARTBEAT_S,
+    CODE_AGENT_ERROR_RETRY_LIMIT,
+    CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
+    CODE_SESSION_IDLE_PAUSE_S,
+    CODE_SESSION_KEEPALIVE_INTERVAL_S,
     DRAIN_CHECK_INTERVAL_S,
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
     FATAL_ERROR_PATTERNS,
-    MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     REATTACH_PROBE_ATTEMPTS,
     REATTACH_PROBE_BACKOFF_S,
-    SDK_IDLE_TIMEOUT_S,
     SDK_POST_RESULT_EXIT_GRACE_S,
-    SDK_POST_RESULT_STRETCH_TOOL_NAMES,
-    SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-    SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
-    code_agent_verifier_disabled,
+    TRANSCRIPT_FLUSH_INTERVAL_S,
+    code_agent_verifier_enabled,
 )
 from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
     close_e2b_session,
     create_e2b_session,
+    fetch_code_credential_availability,
+    keepalive_e2b_session,
     persist_terminal_output,
+    report_code_usage_limit,
+    resize_e2b_session,
     save_claude_code_message,
+    save_code_transcript_batch,
 )
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
@@ -52,6 +60,12 @@ from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.tracing import traced
 from tools.base import MessageStatus
+from utils.code_transcript import (
+    CodeTranscriptBuilder,
+    TranscriptRecord,
+    render_transcript_text,
+    to_ui_record,
+)
 from utils.error_utils import extract_error_message
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from utils.response_schema_constraints import explicitly_allows_empty_value, value_satisfies_output_field_constraints
@@ -219,6 +233,23 @@ def _tool_detail_from_event(event: dict[str, Any]) -> str:
     return ""
 
 
+def _project_startup_line(event: Dict[str, Any]) -> str | None:
+    """One line for a finished project startup (ws-server ``project_startup`` event)."""
+    status = str(event.get("status") or "").strip().lower()
+    if status in {"", "running", "skipped"}:
+        return None
+    project = str(event.get("project") or "").strip()
+    label = f"Project startup ({project})" if project else "Project startup"
+    duration_ms = event.get("durationMs")
+    has_duration = isinstance(duration_ms, (int, float)) and duration_ms > 0
+    seconds = f" in {duration_ms / 1000:.1f}s" if has_duration else ""
+    if status == "ok":
+        return f"{label}: ok{seconds}"
+    if status == "timeout":
+        return f"{label}: timed out after {event.get('timeoutS') or '?'}s"
+    return f"{label}: failed (exit {event.get('exitCode')}){seconds}"
+
+
 def format_code_events_transcript(
     code_events: list[Dict[str, Any]] | None = None,
     action_summary: list[str] | None = None,
@@ -241,6 +272,12 @@ def format_code_events_transcript(
             cwd = event.get("cwd") or event.get("working_directory")
             detail = f"Session started in {cwd}" if cwd else "Session started"
             lines.append(f"[{provider}] {detail}")
+            continue
+
+        if event_type == "project_startup":
+            line = _project_startup_line(event)
+            if line:
+                lines.append(f"[{provider}] {line}")
             continue
 
         if event_type in {"agent_message", "assistant"}:
@@ -292,6 +329,14 @@ def format_code_events_transcript(
             text = event.get("text") or event.get("error") or event.get("message")
             if isinstance(text, str) and text.strip():
                 lines.append(f"[{provider} result] {text.strip()[:800]}")
+            continue
+
+        if event_type == "user_turn":
+            # Direct chat: the user (or another agent) typed to this CLI.
+            text = event.get("text")
+            who = "Agent" if event.get("sender") == "agent" else "User"
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{who} → {provider}] {text.strip()}")
             continue
 
     summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
@@ -351,11 +396,17 @@ def build_context_summary(
     close_reasoning: str,
     action_summary: list[str],
     error_context: Optional[str] = None,
+    verified: bool = True,
 ) -> str:
-    """Build detailed execution context summary for main agent."""
+    """Build detailed execution context summary for main agent.
+
+    ``verified=False`` marks a result nobody judged (the code-agent verifier is
+    disabled and some declared fields have no mechanical evidence): it is
+    neither a success nor a failure.
+    """
     summary_parts: list[str] = []
 
-    status = "✅ SUCCESS" if success else "❌ FAILED"
+    status = "✅ SUCCESS" if success else ("⚠️ UNVERIFIED" if not verified else "❌ FAILED")
     summary_parts.append(f"**Status**: {status}")
 
     if close_reasoning:
@@ -647,6 +698,7 @@ def _log_code_agent_event(
                 cached_input_pct=cached_pct,
                 output_tokens=usage.get("output_tokens") or 0,
                 reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
+                **({"usage_scope": event["usage_scope"]} if isinstance(event.get("usage_scope"), str) else {}),
             )
             return
 
@@ -675,10 +727,14 @@ def is_codex_completed_turn_event(event: dict[str, Any]) -> bool:
         return False
     if event.get("raw_type") == "turn.completed":
         return True
+    if event.get("type") == "turn_ended" and event.get("raw_type") == "turn/completed":
+        return event.get("turn_outcome", event.get("status")) == "completed"
     return event.get("type") == "turn" and event.get("status") == "completed"
 
 
 def codex_completed_turn_event_key(event: dict[str, Any], fallback_index: int) -> str:
+    if isinstance(event.get("turn_id"), str):
+        return f"turn:{event['turn_id']}"
     timestamp = event.get("timestamp")
     if timestamp is None:
         return f"event:{fallback_index}"
@@ -713,6 +769,14 @@ class CodeSessionDrained(Exception):
         super().__init__(reason)
 
 
+class CodeSessionResizeRequested(CodeSessionDrained):
+    """C16: the code agent asked for another sandbox size; detach so the activity applies it."""
+
+    def __init__(self, request: Dict[str, Any]):
+        self.request = request
+        super().__init__(CODE_AGENT_RESIZE_YIELD_REASON)
+
+
 _CODE_SESSION_FIELDS = (
     "task_id",
     "sandbox_id",
@@ -724,6 +788,20 @@ _CODE_SESSION_FIELDS = (
     # Sandbox events already logged by an earlier attachment; the reattached
     # attempt logs only the ones that arrived while nobody was attached.
     "logged_events",
+    # Persistent code session (C1/C2): a retry after a failed attempt resumes
+    # the same session even when the sandbox itself has been paused.
+    "code_session_id",
+    "branch",
+    "merge_target",
+    # A local (Mac) run: a reattaching attempt keeps the same target, device and folder.
+    "target",
+    "device_id",
+    "device_name",
+    "folder",
+    # Sandbox events whose transcript records are already persisted.
+    "transcript_events",
+    # vCPUs / memory of the sandbox (C16); the code_agent block reports it.
+    "sandbox_size",
 )
 
 
@@ -809,6 +887,7 @@ async def _run_agentic_loop(
     loop_started_at: Optional[float] = None,
     generation_yield: bool = True,
     code_session: Optional[Dict[str, Any]] = None,
+    loop_outcome: Optional[Dict[str, Any]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -821,9 +900,12 @@ async def _run_agentic_loop(
 
     Raises ``CodeSessionDrained`` when the worker drains (or, with
     ``generation_yield``, its generation is superseded) before Claude Code
-    exits. ``loop_started_at`` keeps MAX_RUNTIME_S cumulative across reattaches.
-    ``code_session["logged_events"]`` is kept current so each sandbox event is
-    logged once across every attachment to the session.
+    exits. There is no runtime limit (C11): liveness is the activity heartbeat.
+    A CLI that sends nothing for ``CODE_SESSION_IDLE_PAUSE_S`` with no tool in
+    flight and no SDK result ends the loop with ``loop_outcome["idle_paused"]``
+    set, and the caller pauses (never fails) the session. A tool in flight keeps
+    the loop attached indefinitely. ``code_session["logged_events"]`` is kept
+    current so each sandbox event is logged once across every attachment.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -840,15 +922,32 @@ async def _run_agentic_loop(
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
-    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use and
-    # while any tool is in-flight (tool_use awaiting tool_result).
-    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-    wait_tool_armed = False
+    # Tools awaiting their tool_result: while any is in flight the session is
+    # working and never idle-paused, however long the tool runs.
     in_flight_tool_count = 0
-    # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
-    # grace backstop ends the monitor if the CLI never exits.
+    # Wall-clock of first SDK type=result; the exit-grace backstop ends the
+    # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Direct chat: while the user holds the session (ws-server `direct_chat`
+    # held → released), the user's turns drive the CLI. The monitor must not
+    # end the session on post-result grace / SDK idle, and never writes to
+    # stdin, so no parent instruction competes with the user.
+    direct_chat_active = False
+    # Structured transcript (utils/code_transcript.py): records derive from the sandbox's
+    # append-only event history, so `transcript_events` (events already
+    # persisted) survives reattaches the same way `logged_events` does.
+    transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+    transcript_flushed = int((code_session or {}).get("transcript_events") or 0)
+    transcript_pending: dict[str, TranscriptRecord] = {}
+    last_transcript_flush = 0.0
+    # Every delivered user turn (direct chat or an agent-graph message) adds
+    # one more SDK `result` before the CLI is done: a message that arrives
+    # mid-run makes the first result an intermediate one, so the post-result
+    # exit grace arms only once results catch up with turns.
+    user_turns_seen = 0
+    sdk_results_seen = 0
+    native_codex_terminal: dict[str, Any] | None = None
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -893,13 +992,18 @@ async def _run_agentic_loop(
     async def on_events_replay(events: list[dict[str, Any]]) -> None:
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
-        nonlocal completed_codex_turns, effective_idle_timeout_s, wait_tool_armed, in_flight_tool_count
+        nonlocal completed_codex_turns, in_flight_tool_count
+        nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
         code_events.clear()
+        native_codex_terminal = None
+        direct_chat_active = False
+        user_turns_seen = 0
+        sdk_results_seen = 0
+        transcript = CodeTranscriptBuilder(code_provider, goal=goal)
+        transcript_pending.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
         in_flight_tool_count = 0
-        wait_tool_armed = False
-        effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         for event in events:
             await on_event(event)
         logger.info(
@@ -907,91 +1011,68 @@ async def _run_agentic_loop(
         )
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
-        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal completed_codex_turns, last_output_time
+        nonlocal in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
         last_output_time = safe_time()
         code_events.append(event)
+        usage_limit = usage_limit_from_event(event)
+        if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
+            loop_outcome["usage_limit"] = usage_limit
+        event_index = len(code_events) - 1
+        for record in transcript.feed(event, event_index):
+            if event_index >= transcript_flushed:
+                transcript_pending[record["id"]] = record
+        if event.get("provider") == "codex":
+            if event.get("type") == "turn_started":
+                native_codex_terminal = None
+            elif event.get("type") == "user_turn" and (
+                native_codex_terminal is not None
+                and event.get("turn_id") != native_codex_terminal.get("turn_id")
+            ):
+                native_codex_terminal = None
+            elif (
+                event.get("type") == "turn_ended"
+                and event.get("raw_type") == "turn/completed"
+                and event.get("turn_outcome", event.get("status")) in {"completed", "failed", "interrupted"}
+            ):
+                native_codex_terminal = event
+        if event.get("type") == "direct_chat":
+            direct_chat_active = event.get("status") == "held"
+            if not direct_chat_active and sdk_result_at is not None:
+                # Released after a finished turn: the CLI is told to exit now,
+                # so restart the post-result grace from the hand back.
+                sdk_result_at = safe_time()
+        elif event.get("type") == "user_turn":
+            # A new turn: the next SDK result belongs to it.
+            user_turns_seen += 1
+            sdk_result_at = None
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
             if key not in completed_codex_turn_keys:
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
         event_type = event.get("type")
-        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         # Count every tool_use toward in-flight, even when name is missing /
         # non-string — tool_result always decrements, and a name-gated
         # increment made those paths asymmetric (CodeRabbit #1260).
         if event_type == "tool_use":
             in_flight_tool_count += 1
-            if not isinstance(tool_name, str):
-                # Nameless tool_use: still stretch the in-flight idle window.
-                if sdk_result_at is not None:
-                    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-                elif effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    logger.info(
-                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=str(tool_name),
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                    effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
-            elif sdk_result_at is not None:
-                # SDK already declared completion — do not re-arm the 900s
-                # stretch (r31 a2: result → Bash/ScheduleWakeup re-armed stretch
-                # → Max runtime, 0 artifacts). Keep the short idle window.
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-            elif tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
-                # Wait tools AND Bash/Task/TaskOutput: arm post-result stretch.
-                # Bash often returns tool_result while background work continues
-                # with no further WS events; without arming, tool_result snaps
-                # idle back to 180s and kills the session (cuda k=3 r24).
-                wait_tool_armed = True
-                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    reason = (
-                        "wait tool"
-                        if tool_name in SDK_WAIT_TOOL_NAMES
-                        else "post-result stretch tool"
-                    )
-                    logger.info(
-                        f"[ClaudeCode] Extending SDK idle timeout for {reason}",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=tool_name,
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
-            else:
-                # Non-wait tool (e.g. Write) — stretch while in-flight so
-                # silence during execution is not mistaken for a hung CLI.
-                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup/Bash often
-                # precede follow-on tools, and the post-result stretch must
-                # survive those (otherwise tool_result restores the short
-                # 180s window and kills the wait/background work).
-                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
-                    logger.info(
-                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        tool_name=tool_name,
-                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
-                    )
-                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
         elif event_type == "tool_result":
             if in_flight_tool_count > 0:
                 in_flight_tool_count -= 1
-            if sdk_result_at is not None:
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
-            elif in_flight_tool_count == 0 and not wait_tool_armed:
-                # All tools finished and no post-wait stretch armed — restore
-                # the short hung-CLI window.
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         elif event_type == "result":
-            # SDK declared completion — drop wait arm so a hung process after
-            # result is reaped on the short idle window, not 900s. Record the
-            # first result time for the exit-grace backstop (r31 a2/a3).
-            wait_tool_armed = False
-            if sdk_result_at is None:
+            # The result of the latest delivered turn arms the exit-grace
+            # backstop (r31 a2/a3); an earlier turn's result does not.
+            sdk_results_seen += 1
+            # The ws-server knows when the CLI has caught up: Claude Code merges
+            # a turn written mid-turn into the running one (one result for two
+            # writes) and reports its queue. Older sandboxes: count results.
+            pending_turns = event.get("pending_turns")
+            caught_up = (
+                pending_turns == 0 if isinstance(pending_turns, int) else sdk_results_seen > user_turns_seen
+            )
+            if sdk_result_at is None and caught_up:
                 sdk_result_at = safe_time()
                 logger.info(
                     "[ClaudeCode] SDK result observed; arming post-result exit grace",
@@ -1000,7 +1081,6 @@ async def _run_agentic_loop(
                     grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
                     status=event.get("status"),
                 )
-            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         # code_events mirrors the sandbox's append-only event history, so an
         # event's index identifies it across reconnect replays and reattaches.
         if len(code_events) <= logged_events:
@@ -1016,6 +1096,39 @@ async def _run_agentic_loop(
             event_type=event_type,
             provider=event.get("provider"),
         )
+
+    async def flush_transcript(force: bool = False) -> None:
+        nonlocal transcript_flushed, last_transcript_flush
+        if not transcript_pending:
+            return
+        if not force and safe_time() - last_transcript_flush < TRANSCRIPT_FLUSH_INTERVAL_S:
+            return
+        batch = dict(transcript_pending)
+        events_to = len(code_events)
+        records = sorted(batch.values(), key=lambda record: (record["seq"], record["rev"]))
+        last_transcript_flush = safe_time()
+        saved = await save_code_transcript_batch(
+            agent_id=agent_id,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            code_provider=code_provider,
+            records=[to_ui_record(record) for record in records],
+            events_from=transcript_flushed,
+            events_to=events_to,
+            text=render_transcript_text(records),
+        )
+        if not saved:
+            return  # keep the batch; the next flush retries it
+        for record_id, record in batch.items():
+            # A newer revision that arrived during the save stays pending.
+            if transcript_pending.get(record_id) is record:
+                del transcript_pending[record_id]
+        transcript_flushed = events_to
+        if code_session is not None:
+            code_session["transcript_events"] = events_to
+            # Carry the new mark in a heartbeat so a retry after a drain or a
+            # crash does not re-persist this range.
+            safe_heartbeat("Code transcript persisted")
 
     ws_client = ClaudeCodeWsClient(
         ws_url=ws_url,
@@ -1037,6 +1150,7 @@ async def _run_agentic_loop(
     loop_start = loop_started_at if loop_started_at is not None else safe_time()
     last_status_update = safe_time()
     last_drain_check = 0.0
+    last_keepalive = safe_time()
 
     async def on_chunk(text: str, tokens: int) -> None:
         pass  # Parent LLM streaming not needed
@@ -1060,18 +1174,69 @@ async def _run_agentic_loop(
                     )
                     raise CodeSessionDrained(drain_reason)
 
-            if elapsed > MAX_RUNTIME_S:
-                logger.warning("[ClaudeCode] Max runtime exceeded", agent_id=agent_id, task_id=task_id, elapsed=elapsed)
-                action_summary.append(f"Max runtime exceeded ({int(elapsed)}s)")
+            # C15: a provider usage limit ends this run; the session is saved
+            # and the parent retries on the next available credential.
+            if loop_outcome is not None and loop_outcome.get("usage_limit"):
+                logger.warning(
+                    "[ClaudeCode] Provider usage limit reached; saving the session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    usage_limit=loop_outcome["usage_limit"],
+                )
+                action_summary.append("Provider usage limit reached; session saved for a retry")
+                break
+
+            # No runtime limit (C11). While attached, keep the sandbox's idle
+            # window open; once keepalives stop it pauses on its own.
+            if safe_time() - last_keepalive >= CODE_SESSION_KEEPALIVE_INTERVAL_S:
+                last_keepalive = safe_time()
+                keepalive = await keepalive_e2b_session(task_id, code_provider)
+                awaiting = keepalive.get("awaiting_parent") if isinstance(keepalive, dict) else None
+                if isinstance(awaiting, dict) and awaiting.get("question") and not direct_chat_active:
+                    # The spawning agent is blocked inside this spawn: pause the
+                    # session and hand it the question instead of both waiting.
+                    logger.info(
+                        "[ClaudeCode] Code agent asked its spawner a question; pausing the session",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        message_id=awaiting.get("message_id"),
+                    )
+                    action_summary.append("Code agent asked its parent a question; session paused for the answer")
+                    if loop_outcome is not None:
+                        loop_outcome["awaiting_parent"] = awaiting
+                    break
+                resize = keepalive.get("resize_requested") if isinstance(keepalive, dict) else None
+                if isinstance(resize, dict) and resize.get("request_id") and not direct_chat_active:
+                    # C16: the code agent asked for another sandbox size. Detach (the
+                    # final transcript flush still runs); the activity applies it.
+                    logger.info(
+                        "[ClaudeCode] Code agent asked for another sandbox size; detaching to apply it",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        request_id=resize.get("request_id"),
+                        to=resize.get("to"),
+                    )
+                    action_summary.append(f"Sandbox resize requested: {resize.get('to')}")
+                    raise CodeSessionResizeRequested(resize)
+
+            # Codex app-server deliberately stays alive between native turns.
+            # Its terminal lifecycle, rather than process exit or a silence
+            # timeout, completes this attachment. A later start invalidates it;
+            # a direct-chat hold keeps the attachment open until hand-back.
+            if code_provider == "codex" and native_codex_terminal is not None and not direct_chat_active:
+                outcome = native_codex_terminal.get("turn_outcome", native_codex_terminal.get("status"))
+                exit_code = 0 if outcome == "completed" else 1
+                action_summary.append(f"Codex native turn ended: {outcome}")
                 break
 
             # After the first SDK result, healthy CLIs exit in <1s. If the
             # process is still alive past the grace window (stdout may keep
-            # refreshing last_output_time so short idle never fires), end the
-            # session so the parent can retry inside the bench budget.
+            # refreshing last_output_time), end the monitor: the run is
+            # verified on its result and closing pauses (not kills) the sandbox.
             if (
                 sdk_result_at is not None
                 and exit_code is None
+                and not direct_chat_active
                 and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
             ):
                 grace_elapsed = safe_time() - sdk_result_at
@@ -1092,30 +1257,35 @@ async def _run_agentic_loop(
 
             silence_duration = safe_time() - last_output_time
 
-            # Autonomous CC waits for SDK exit after the first silence observation
-            # (parent-LLM nudge is intentionally skipped). If the CLI then goes
-            # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
-            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup
-            # and while any tool is in-flight (awaiting tool_result).
+            # Idle → pause, never fail (C11). A tool in flight is work, so only a
+            # CLI with nothing in flight and no SDK result is idle.
             if (
-                silence_duration >= effective_idle_timeout_s
+                silence_duration >= CODE_SESSION_IDLE_PAUSE_S
+                and in_flight_tool_count == 0
+                and sdk_result_at is None
                 and not pending_output
                 and ws_connected
                 and exit_code is None
+                and not direct_chat_active
             ):
-                logger.warning(
-                    "[ClaudeCode] SDK idle timeout waiting for exit",
+                logger.info(
+                    "[ClaudeCode] Code session idle; pausing it (resumable)",
                     agent_id=agent_id,
                     task_id=task_id,
                     silence_s=silence_duration,
-                    idle_limit_s=effective_idle_timeout_s,
+                    idle_pause_s=CODE_SESSION_IDLE_PAUSE_S,
                 )
                 action_summary.append(
-                    f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"
+                    f"Session idle for {int(silence_duration)}s with no tool in flight; pausing it (resumable)"
                 )
+                if loop_outcome is not None:
+                    loop_outcome["idle_paused"] = True
+                    loop_outcome["idle_s"] = int(silence_duration)
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
+                # (The parent-LLM relay below is unreachable: every branch
+                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 
@@ -1270,6 +1440,8 @@ async def _run_agentic_loop(
                             code_provider=code_provider,
                         )
 
+            await flush_transcript()
+
             if safe_time() - last_status_update >= 30:
                 elapsed_int = int(elapsed)
                 await save_claude_code_message(
@@ -1296,6 +1468,15 @@ async def _run_agentic_loop(
         # and would otherwise keep buffering broadcasts for a dead reader.
         with contextlib.suppress(Exception):
             await ws_client.disconnect()
+        try:
+            await flush_transcript(force=True)
+        except Exception as flush_err:  # never mask the loop's own outcome
+            logger.warning(
+                "[ClaudeCode] Final transcript flush failed",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(flush_err)[:200],
+            )
 
     logger.info(
         "[ClaudeCode] Agentic loop finished",
@@ -1315,6 +1496,103 @@ async def _run_agentic_loop(
         total_output_tokens,
         code_events,
     )
+
+
+def _size_label(size: Any) -> str:
+    if isinstance(size, dict) and size.get("cpu") and size.get("memory_gb"):
+        return f"{size['cpu']} vCPU, {size['memory_gb']} GB RAM"
+    return "a new size"
+
+
+async def _apply_sandbox_resize(
+    *,
+    agent_id: str,
+    tool_call_id: str,
+    task_id: str,
+    code_provider: str,
+    request: Dict[str, Any],
+    session_record: Dict[str, Any],
+    code_agent_meta: Dict[str, Any],
+    started_at: float,
+    facts: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """C16: have the backend move the session into a sandbox of the requested size.
+
+    Heartbeats while the backend checkpoints, creates and restores. Returns the
+    session record of the task that continues the session (new sandbox, or the
+    old size when the move failed), or None when the backend could not apply it;
+    the caller then reattaches to the old sandbox as after a drain.
+    """
+    call = asyncio.create_task(resize_e2b_session(task_id, str(request["request_id"]), code_provider))
+    while not call.done():
+        safe_heartbeat("Resizing the code-agent sandbox")
+        await asyncio.wait({call}, timeout=CODE_SESSION_RESIZE_HEARTBEAT_S)
+    resized = call.result()
+    continuing = code_session_record(resized)
+    if not isinstance(resized, dict) or continuing is None:
+        logger.warning("[ClaudeCode] Sandbox resize not applied; reattaching", agent_id=agent_id, task_id=task_id)
+        return None
+    size = resized.get("sandbox_size") if isinstance(resized.get("sandbox_size"), dict) else None
+    applied = resized.get("resized") is True
+    # The record the next attempt reattaches to (also what later heartbeats carry).
+    session_record.update(
+        {
+            "task_id": continuing["task_id"],
+            "sandbox_id": continuing["sandbox_id"],
+            "ws_url": continuing["ws_url"],
+            "logged_events": 0,
+            "transcript_events": 0,
+            "sandbox_size": size or session_record.get("sandbox_size"),
+            "code_session_id": resized.get("code_session_id") or session_record.get("code_session_id"),
+        }
+    )
+    if size is not None:
+        code_agent_meta["sandbox_size"] = size
+    view = resized.get("request") if isinstance(resized.get("request"), dict) else {}
+    title = (
+        f"Environment resized to {_size_label(size)}"
+        if applied
+        else f"Environment resize failed; still on {_size_label(size)}"
+    )
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title=title,
+        task_id=continuing["task_id"],
+        message=str(view.get("reason") or title),
+        status=MessageStatus.FINISHED if applied else MessageStatus.ERROR,
+        action_type="environment_resized",
+        tool_call_id=tool_call_id,
+        ws_url=continuing["ws_url"],
+        code_provider=code_provider,
+        code_agent={
+            **build_code_agent_metadata(
+                target_meta=code_agent_meta,
+                task_id=continuing["task_id"],
+                provider=code_provider,
+                state="live",
+                started_at=started_at,
+                facts=facts,
+            ),
+            "environment_resize": {
+                "request_id": request.get("request_id"),
+                "status": "done" if applied else "failed",
+                "from": view.get("from") or request.get("from"),
+                "to": view.get("to") or request.get("to"),
+                "reason": view.get("reason"),
+                "error": view.get("error"),
+                "from_task_id": task_id,
+            },
+        },
+    )
+    logger.info(
+        "[ClaudeCode] Session continues in a resized sandbox" if applied else "[ClaudeCode] Resize failed; continuing",
+        agent_id=agent_id,
+        from_task_id=task_id,
+        task_id=continuing["task_id"],
+        sandbox_id=continuing["sandbox_id"],
+        sandbox_size=size,
+    )
+    return dict(session_record)
 
 
 async def _handle_reconnect_exhausted(
@@ -1603,29 +1881,66 @@ def _structured_response_satisfies_declared_schema(
     if not isinstance(structured_response, dict):
         return False
     for field in fields:
-        if not isinstance(field, dict):
+        if not isinstance(field, dict) or not field.get("name"):
             return False
-        name = field.get("name")
-        if not name:
-            return False
-        if name not in structured_response:
-            if field.get("required", True) is False:
-                continue
-            return False
-        value = structured_response[name]
-        if value is None and field.get("nullable") is True:
-            continue
-        # A present empty value only satisfies a required field when its bounds
-        # explicitly allow it; an optional field may be present and empty.
-        if (
-            field.get("required", True) is not False
-            and (value is None or value == "" or value == [] or value == {})
-            and not explicitly_allows_empty_value(value, field)
-        ):
-            return False
-        if not value_satisfies_output_field_constraints(value, field):
+        if not _declared_field_satisfied(field, structured_response):
             return False
     return True
+
+
+def _declared_field_satisfied(field: Dict[str, Any], structured_response: Dict[str, Any]) -> bool:
+    """Return true when one declared field satisfies its output contract."""
+    name = field["name"]
+    if name not in structured_response:
+        return field.get("required", True) is False
+    value = structured_response[name]
+    if value is None and field.get("nullable") is True:
+        return True
+    # A present empty value only satisfies a required field when its bounds
+    # explicitly allow it; an optional field may be present and empty.
+    if (
+        field.get("required", True) is not False
+        and (value is None or value == "" or value == [] or value == {})
+        and not explicitly_allows_empty_value(value, field)
+    ):
+        return False
+    return value_satisfies_output_field_constraints(value, field)
+
+
+def _disabled_verifier_outcome(
+    output_schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+    *,
+    attempt_completion: bool,
+    exit_code: Optional[int],
+) -> tuple[str, list[str]]:
+    """Classify a session that no LLM verifier judged.
+
+    Returns ``(outcome, field_names)``. ``failed``: no process/completion
+    success signal. ``incomplete``: a declared output file was not extracted.
+    ``unverified``: the session succeeded and its files are present, but these
+    declared fields have no mechanical evidence; only a verifier could have
+    judged them. ``complete``: every declared field is satisfied.
+    """
+    if not (attempt_completion or exit_code == 0):
+        return "failed", []
+    if _structured_response_satisfies_declared_schema(output_schema, structured_response):
+        return "complete", []
+    fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
+    structured = structured_response if isinstance(structured_response, dict) else {}
+    unsatisfied = [
+        field
+        for field in fields
+        if not isinstance(field, dict) or not field.get("name") or not _declared_field_satisfied(field, structured)
+    ]
+    missing_files = [
+        str(field.get("name"))
+        for field in unsatisfied
+        if not isinstance(field, dict) or not field.get("name") or "file_pointer" in str(field.get("type") or "")
+    ]
+    if missing_files:
+        return "incomplete", missing_files
+    return "unverified", [str(field["name"]) for field in unsatisfied]
 
 
 def _code_event_text_evidence(code_events: list[Dict[str, Any]]) -> list[str]:
@@ -1717,6 +2032,115 @@ def _structured_response_from_code_evidence(
     return structured or None
 
 
+# The code agent returns its result to the parent in one JSON file (Andy,
+# 2026-10-24); the declared output_schema fixes its structure. Keep in sync with
+# CODE_AGENT_HANDOFF_PATH in back-end/src/providers/codeAgentPrompt.ts.
+CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json"
+# Structure used when the parent declared no output fields.
+DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"summary": {"type": "string", "description": "What you did and the result."}},
+    "required": ["summary"],
+    "additionalProperties": False,
+}
+# Close responses without a ``handoff`` key come from sessions outside E2B (a
+# Mac folder or the local billing fallback); they keep the session-output result.
+_NO_HANDOFF_CONTRACT = object()
+
+
+def _with_field_descriptions(schema: Dict[str, Any], field: Dict[str, Any]) -> Dict[str, Any]:
+    """Carry each declared field description into its JSON Schema, nested fields included."""
+    from helpers.llm import _nested_fields_for_object_field
+
+    description = field.get("description")
+    if isinstance(description, str) and description.strip() and "description" not in schema:
+        schema["description"] = description
+    target = schema.get("items") if isinstance(schema.get("items"), dict) else schema
+    nested_properties = target.get("properties") if isinstance(target, dict) else None
+    if isinstance(nested_properties, dict) and field.get("type") in ("object", "list[object]"):
+        for nested in _nested_fields_for_object_field(field):
+            if isinstance(nested_properties.get(nested.get("name")), dict):
+                _with_field_descriptions(nested_properties[nested["name"]], nested)
+    return schema
+
+
+def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """JSON Schema of the handoff file; file fields are ``{"path": ...}`` sandbox paths."""
+    from helpers.llm import _json_schema_for_response_field
+
+    remote_schema = transform_schema_for_remote_session(output_schema) or {}
+    properties: Dict[str, Any] = {}
+    required: list[str] = []
+    for field in remote_schema.get("fields", []):
+        name = field.get("name") if isinstance(field, dict) else None
+        if not isinstance(name, str) or not name:
+            continue
+        field_schema, _open_shape = _json_schema_for_response_field(field)
+        properties[name] = _with_field_descriptions(field_schema, field)
+        if field.get("required", True):
+            required.append(name)
+    if not properties:
+        return DEFAULT_HANDOFF_SCHEMA
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+
+
+def handoff_task_text(goal: str, output_schema: Optional[Dict[str, Any]]) -> str:
+    """The task sent to the code agent: the goal plus its result schema."""
+    schema = json.dumps(handoff_json_schema(output_schema), sort_keys=True)
+    return f"{goal}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+
+
+def _read_handoff(
+    handoff: Optional[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``."""
+    import jsonschema
+
+    status = handoff.get("status") if isinstance(handoff, dict) else "missing"
+    if status == "unreadable":
+        return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} could not be read: {handoff.get('error')}."
+    if status != "present" or not isinstance(handoff.get("content"), str):
+        return None, f"The code agent wrote no handoff file at {CODE_AGENT_HANDOFF_PATH}."
+    try:
+        result = json.loads(handoff["content"])
+    except json.JSONDecodeError as exc:
+        return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} is not valid JSON: {exc}."
+    validator = jsonschema.Draft202012Validator(handoff_json_schema(output_schema))
+    errors = sorted(validator.iter_errors(result), key=lambda error: list(error.absolute_path))
+    if errors:
+        problems = "; ".join(
+            f"{'/'.join(str(part) for part in error.absolute_path) or '(root)'}: {error.message}" for error in errors
+        )
+        return None, (
+            f"The handoff file at {CODE_AGENT_HANDOFF_PATH} does not match the declared output schema: {problems}."
+        )
+    return result, None
+
+
+def _latest_stream_snapshots(code_events: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Drop partial stream events superseded by a later event for the same item.
+
+    Partial ``agent_message``/``thinking`` events carry the cumulative text, so
+    every earlier snapshot is a prefix of the latest one (the same upsert-by-item
+    rule ``utils.code_transcript`` applies). The judge evidence would otherwise
+    grow quadratically with the streamed answer.
+    """
+    latest: Dict[tuple[Any, str], int] = {}
+    for index, event in enumerate(code_events):
+        item_id = event.get("item_id")
+        if isinstance(item_id, str):
+            latest[(event.get("type"), item_id)] = index
+    return [
+        event
+        for index, event in enumerate(code_events)
+        if not (
+            event.get("partial") is True
+            and isinstance(event.get("item_id"), str)
+            and latest[(event.get("type"), event["item_id"])] != index
+        )
+    ]
+
+
 def _build_code_event_context(
     *,
     code_events: list[Dict[str, Any]],
@@ -1724,7 +2148,7 @@ def _build_code_event_context(
     action_summary: list[str],
 ) -> str:
     evidence = {
-        "code_agent_events": code_events[-200:],
+        "code_agent_events": _latest_stream_snapshots(code_events)[-200:],
         "extracted_output_files": [
             {
                 "original_filename": fp.get("original_filename"),
@@ -1803,6 +2227,81 @@ async def _persist_code_agent_judge_evidence(
     )
 
 
+async def _handoff_result(
+    *,
+    agent_id: str,
+    task_id: str,
+    output_schema: Optional[Dict[str, Any]],
+    handoff: Optional[Dict[str, Any]],
+    attempt_completion: bool,
+    exit_code: Optional[int],
+    code_provider: str,
+    code_events: list[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+    action_summary: list[str],
+) -> tuple[float, str, Optional[Dict[str, Any]], int, int]:
+    """Verifier-off result: the code agent's handoff file, validated against its schema.
+
+    The handoff is the result the parent sees. Terminal output and SDK events are
+    evidence for judges only and never enter the tool result.
+    """
+    result, handoff_error = _read_handoff(handoff, output_schema)
+    has_fields = bool(isinstance(output_schema, dict) and output_schema.get("fields"))
+    structured = result if has_fields else None
+    outcome, outcome_fields = _disabled_verifier_outcome(
+        output_schema,
+        structured if result is not None else None,
+        attempt_completion=attempt_completion,
+        exit_code=exit_code,
+    )
+    complete = result is not None and outcome == "complete"
+    score = 1.0 if complete else 0.5
+    header = (
+        f"Code-agent verifier off (provider={code_provider}, exit_code={exit_code}, "
+        f"artifacts={len(output_files)})."
+    )
+    if outcome == "failed":
+        header += " The session ended without a success signal."
+    if result is not None:
+        reasoning = (
+            f"{header} Handoff from {CODE_AGENT_HANDOFF_PATH}, validated against the declared output schema:\n\n"
+            f"{json.dumps(result, ensure_ascii=False, indent=2)}"
+        )
+        if outcome == "incomplete":
+            reasoning += f"\n\nDeclared output files were not extracted: {', '.join(outcome_fields)}."
+    else:
+        reasoning = f"{header} {handoff_error}"
+    logger.info(
+        "[ClaudeCode] Verifier skipped; returning handoff",
+        agent_id=agent_id,
+        task_id=task_id,
+        code_provider=code_provider,
+        exit_code=exit_code,
+        handoff_status=handoff.get("status") if isinstance(handoff, dict) else None,
+        handoff_valid=result is not None,
+        outcome=outcome,
+        score=score,
+    )
+    if complete:
+        try:
+            await _persist_code_agent_judge_evidence(
+                agent_id=agent_id,
+                task_id=task_id,
+                code_provider=code_provider,
+                code_events=code_events,
+                output_files=output_files,
+                action_summary=action_summary,
+            )
+        except Exception as evidence_err:
+            logger.warning(
+                "[ClaudeCode] judge evidence persist failed; continuing verifier-disabled completion",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(evidence_err)[:200],
+            )
+    return score, reasoning, structured, 0, 0
+
+
 async def _run_verifier(
     *,
     agent_id: str,
@@ -1826,14 +2325,16 @@ async def _run_verifier(
     code_provider: str = "claude",
     code_events: Optional[list[Dict[str, Any]]] = None,
     output_files: Optional[list[Dict[str, Any]]] = None,
+    handoff: Any = _NO_HANDOFF_CONTRACT,
 ) -> tuple[float, str, Optional[Dict[str, Any]], int, int]:
     """Run the verifier to confirm completion.
 
     Returns (score, reasoning, structured_response, input_tokens, output_tokens).
 
-    When ``ROSE_DISABLE_CODE_AGENT_VERIFIER`` is set, skip the dual-agent LLM
-    verifier entirely (Claude Code and Codex). The session result is returned
-    as-is so the parent tool call finishes when the code agent ends.
+    The dual-agent LLM verifier is off by default (Claude Code and Codex); it
+    runs only when ``ROSE_ENABLE_CODE_AGENT_VERIFIER`` opts in. Otherwise the
+    session result is returned as-is so the parent tool call finishes when the
+    code agent ends.
     """
     from helpers.llm import check_progress
     from loop.activity_helper import call_temporal_activity_from_activity
@@ -1854,7 +2355,21 @@ async def _run_verifier(
         output_schema, evidence_structured
     )
 
-    if code_agent_verifier_disabled():
+    if not code_agent_verifier_enabled() and handoff is not _NO_HANDOFF_CONTRACT:
+        return await _handoff_result(
+            agent_id=agent_id,
+            task_id=task_id,
+            output_schema=output_schema,
+            handoff=handoff,
+            attempt_completion=attempt_completion,
+            exit_code=exit_code,
+            code_provider=code_provider,
+            code_events=code_events or [],
+            output_files=extracted_output_files,
+            action_summary=action_summary,
+        )
+
+    if not code_agent_verifier_enabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
         # both extracted /home/user/output artifacts and a process/completion
         # success signal. A crashed process can leave stale partial files
@@ -1865,18 +2380,30 @@ async def _run_verifier(
         # The schema is the contract: file-only, primitive-only, and mixed
         # schemas all require every declared field before the disabled verifier
         # may report success or persist successful judge evidence.
+        # A declared field with no mechanical evidence is unverified, not
+        # missing: only output files can be checked without the verifier.
         has_artifacts = schema_complete
         has_success_signal = attempt_completion or exit_code == 0
         score = 1.0 if has_artifacts and has_success_signal else 0.5
+        outcome, outcome_fields = _disabled_verifier_outcome(
+            output_schema,
+            evidence_structured,
+            attempt_completion=attempt_completion,
+            exit_code=exit_code,
+        )
+        outcome_note = {
+            "complete": "",
+            "failed": " The session ended without a success signal." if not has_artifacts else "",
+            "incomplete": " Required output artifacts were not completely extracted - incomplete.",
+            "unverified": (
+                " The session completed, but these declared fields were not verified: "
+                f"{', '.join(outcome_fields)}. Read them from the session output below."
+            ),
+        }[outcome]
         v_reasoning = (
-            "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
+            "Code-agent verifier off. "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
-            f", artifacts={len(extracted_output_files)})."
-            + (
-                ""
-                if has_artifacts
-                else " Required output artifacts were not completely extracted - incomplete."
-            )
+            f", artifacts={len(extracted_output_files)})." + outcome_note
         )
         if terminal_output:
             v_reasoning = f"{v_reasoning}\n\nTerminal output:\n\n{terminal_output}"
@@ -1888,7 +2415,7 @@ async def _run_verifier(
         if event_context:
             v_reasoning = f"{v_reasoning}\n\nCode-agent SDK event JSON:\n\n{event_context}"
         logger.info(
-            "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
+            "[ClaudeCode] Verifier skipped (off by default)",
             agent_id=agent_id,
             task_id=task_id,
             code_provider=code_provider,
@@ -2163,6 +2690,302 @@ def build_usage_items(
 
 
 # ---------------------------------------------------------------------------
+# Persistent code-session facts (C1-C5, C13)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_code_session_facts(session_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Facts from the create response: session id, branch, merge target, resume source."""
+    if not session_data.get("code_session_id"):
+        return None
+    return {
+        "code_session_id": session_data.get("code_session_id"),
+        "branch": session_data.get("branch"),
+        "base_branch": session_data.get("base_branch"),
+        "merge_target": session_data.get("merge_target"),
+        "parent_code_session_id": session_data.get("parent_code_session_id"),
+        "resumed_from": session_data.get("resumed_from"),
+    }
+
+
+def _merge_close_code_session_facts(
+    facts: Optional[Dict[str, Any]], close_data: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Add the close response's checkpoint and merge facts to the spawn facts."""
+    closed = close_data.get("code_session")
+    if not isinstance(closed, dict):
+        return facts
+    merged = dict(facts or {})
+    merge = closed.get("merge") if isinstance(closed.get("merge"), dict) else {}
+    repo = closed.get("repo") if isinstance(closed.get("repo"), dict) else {}
+    merged.update(
+        {
+            "code_session_id": closed.get("code_session_id") or merged.get("code_session_id"),
+            "state": closed.get("state"),
+            "checkpoint_seq": closed.get("checkpoint_seq"),
+            "branch": closed.get("branch") or merged.get("branch"),
+            "merge_target": closed.get("merge_target") or merged.get("merge_target"),
+            "head": merge.get("head") or repo.get("head"),
+            "local_commits": merge.get("local_commits", repo.get("localCommits")),
+            "pushed": merge.get("pushed", repo.get("pushed")),
+            "dirty_files": repo.get("dirtyFiles"),
+            "files": repo.get("files") or [],
+            "pr": merge.get("pr"),
+            # True only when GitHub confirms the PR merged and the target contains head (C4).
+            "merged": merge.get("merged") is True,
+            "merge_target_contains_head": merge.get("merge_target_contains_head"),
+        }
+    )
+    return merged
+
+
+def iso_utc(epoch_s: Optional[float]) -> Optional[str]:
+    """``2026-10-20T16:50:00Z`` for an epoch (the ``code_agent`` timestamp format)."""
+    if epoch_s is None:
+        return None
+    return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_code_agent_metadata(
+    *,
+    task_id: Optional[str],
+    provider: str,
+    state: str,
+    started_at: Optional[float],
+    ended_at: Optional[float] = None,
+    facts: Optional[Dict[str, Any]] = None,
+    failure_message: Optional[str] = None,
+    target_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The ``code_agent`` message metadata block the UI thread renders.
+
+    ``state`` is spinning_up | live | completed | failed | paused (paused =
+    idle, user-paused, waiting on its parent or stopped by a usage limit;
+    resumable, never failed). ``summary.merged_into`` is set only when the
+    merge was confirmed (C4). ``failure_message`` is the human-readable reason
+    for the user when state is failed or paused (e.g. the usage-limit reset).
+    ``target_meta`` carries the run target ('cloud' | 'local'), device_name and
+    folder (owned by the local-target lane); cloud when omitted. It also carries
+    ``preview_url``: the session's live dev-server preview (Rose dev accounts, A1).
+    """
+    facts = facts or {}
+    block: Dict[str, Any] = {
+        "task_id": task_id,
+        "provider": "codex" if provider == "codex" else "claude",
+        "target": "cloud",
+        **(target_meta or {}),
+        "branch": facts.get("branch"),
+        # Where this branch merges back: the parent's branch for sub-agents,
+        # the project/repo default branch for new agents (C13).
+        "base_branch": facts.get("merge_target") or facts.get("base_branch"),
+        "state": state,
+        "started_at": iso_utc(started_at),
+    }
+    if ended_at is not None:
+        block["ended_at"] = iso_utc(ended_at)
+    if state in ("failed", "paused") and failure_message:
+        block["failure_message"] = failure_message
+    if facts.get("head"):
+        summary: Dict[str, Any] = {
+            "commit": facts.get("head"),
+            "branch": facts.get("branch"),
+            "files": facts.get("files") or [],
+        }
+        if facts.get("merged") is True and facts.get("merge_target"):
+            summary["merged_into"] = facts.get("merge_target")
+        block["summary"] = summary
+    return block
+
+
+def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A provider usage limit from structured CLI events only (C15; no prose matching).
+
+    Claude Code: ``rate_limit_event`` whose ``rate_limit_info.status`` is
+    ``rejected``. Codex: an error event carrying the ws-server's ``usage_limit``
+    (Codex's own rate-limit snapshot reports the window exhausted).
+    """
+    if event.get("type") == "cli_message" and event.get("raw_type") == "rate_limit_event":
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        info = message.get("rate_limit_info") if isinstance(message.get("rate_limit_info"), dict) else {}
+        if info.get("status") == "rejected":
+            return {"provider": "claude", "resets_at": info.get("resetsAt"), "limit_type": info.get("rateLimitType")}
+    if event.get("type") == "error" and isinstance(event.get("usage_limit"), dict):
+        usage = event["usage_limit"]
+        return {"provider": "codex", "resets_at": usage.get("resets_at"), "limit_type": usage.get("reached_type")}
+    return None
+
+
+def _provider_label(code_provider: str) -> str:
+    return "Codex" if code_provider == "codex" else "Claude Code"
+
+
+def local_workspace_place(target_meta: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Where a local (Mac) run's work lives, e.g. "~/Developer/rose on Andy's MacBook"."""
+    if not target_meta or target_meta.get("target") != "local":
+        return None
+    folder = target_meta.get("folder") or "the shared folder"
+    return f"{folder} on {target_meta.get('device_name') or 'the Mac'}"
+
+
+def _account_line(account: Dict[str, Any]) -> str:
+    """``- Claude Code me@example.com: limited until <reset> (this run)``."""
+    if account.get("status") == "limited":
+        state = f"limited until {account.get('limited_until')}"
+    elif account.get("status") == "reconnect":
+        state = "disconnected (the user must reconnect it)"
+    else:
+        state = "available"
+    this_run = " (this run)" if account.get("this_run") else ""
+    return f"- {_provider_label(str(account.get('provider')))} {account.get('label')}: {state}{this_run}"
+
+
+def _usage_accounts_block(accounts: Optional[List[Dict[str, Any]]]) -> str:
+    """The user's connected accounts as stored (the backend's usage-limit answer)."""
+    if accounts is None:
+        return ""
+    if not accounts:
+        return "\nConnected accounts: none."
+    return "\nConnected accounts:\n" + "\n".join(_account_line(account) for account in accounts)
+
+
+def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool) -> str:
+    """What a respawn leases: an account that is not rate-limited, else the earliest reset."""
+    then = "continues from the files in that folder" if local else "resumes from the latest checkpoint"
+    free = "one of your own logins" if local else "an account"
+    verb = "uses" if local else "leases"
+    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+        return f"the respawn {verb} {free} that is not rate-limited and {then}."
+    provider = _provider_label(str(next_lease["provider"]))
+    label = next_lease.get("label")
+    if next_lease.get("available_now"):
+        now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+        return f"the respawn {verb} {free} that is not rate-limited ({now}) and {then}."
+    return (
+        f"no {'login' if local else 'account'} is free until {next_lease.get('available_at')} "
+        f"(the earliest reset: {provider} {label}); a respawn after that {verb} it and {then}."
+    )
+
+
+def format_usage_limit_message(
+    *,
+    code_provider: str,
+    resets_at_iso: Optional[str],
+    facts: Optional[Dict[str, Any]],
+    local_place: Optional[str] = None,
+    accounts: Optional[List[Dict[str, Any]]] = None,
+    next_lease: Optional[Dict[str, Any]] = None,
+) -> str:
+    """The parent's tool error for a usage limit (C15): what stopped, every account, the respawn.
+
+    The activity never fails over on its own: the parent decides. ``accounts``
+    and ``next_lease`` are the backend's stored view (no provider calls), so a
+    respawn leases an account that is not rate-limited, else the earliest reset.
+    ``local_place`` (a Mac run): the work stays in that folder and the run used
+    the user's own CLI login, so the respawn targets the Mac again.
+    """
+    facts = facts or {}
+    resets = f" (resets {resets_at_iso})" if resets_at_iso else ""
+    limited = next((a for a in accounts or [] if a.get("this_run")), None)
+    on_account = f" {limited.get('label')}" if limited else ""
+    block = _usage_accounts_block(accounts)
+    if local_place:
+        return (
+            f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login"
+            f"{on_account} was reached{resets}. Its files and commits stay in {local_place}.{block}\n"
+            "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            + _respawn_clause(next_lease, local=True)
+        )
+    saved = "Its work is saved"
+    if facts.get("branch"):
+        saved += f" on branch {facts['branch']}"
+    if facts.get("checkpoint_seq"):
+        saved += f" (checkpoint {facts['checkpoint_seq']})"
+    return (
+        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached"
+        f"{' on' + on_account if on_account else ''}{resets}. {saved}.{block}\n"
+        f"Respawn with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False)
+    )
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _reset_label(resets_at_iso: Optional[str], now: float) -> Optional[str]:
+    """``4:50 PM UTC`` within 24 h of ``now``, otherwise ``Oct 3, 12:50 AM UTC``."""
+    if not resets_at_iso:
+        return None
+    try:
+        reset = datetime.fromisoformat(resets_at_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    clock = f"{reset.hour % 12 or 12}:{reset.minute:02d} {'AM' if reset.hour < 12 else 'PM'} UTC"
+    if 0 <= reset.timestamp() - now < 24 * 3600:
+        return clock
+    return f"{_MONTHS[reset.month - 1]} {reset.day}, {clock}"
+
+
+def format_usage_limit_user_message(
+    *,
+    code_provider: str,
+    resets_at_iso: Optional[str],
+    local_place: Optional[str] = None,
+    now: Optional[float] = None,
+) -> str:
+    """The user's one line for a usage-limit pause (``code_agent.failure_message``).
+
+    The parent gets ``format_usage_limit_message`` (the exact retry) instead.
+    """
+    reset = _reset_label(resets_at_iso, safe_time() if now is None else now)
+    provider = "Codex" if code_provider == "codex" else "Claude"
+    resets = f" (resets {reset})" if reset else ""
+    saved = f"Work stays in {local_place}." if local_place else "Work is saved."
+    return f"Paused: {provider} usage limit reached{resets}. {saved}"
+
+
+def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
+    """One factual block for the tool result: session, branch, commits, PR, merged."""
+    if not facts or not facts.get("code_session_id"):
+        return ""
+    lines = [f"Code session: {facts['code_session_id']} ({facts.get('state') or 'active'})"]
+    if facts.get("branch"):
+        target = facts.get("merge_target") or "the default branch"
+        lines.append(f"Branch: {facts['branch']} (merges into {target})")
+    if facts.get("head"):
+        pushed = "yes" if facts.get("pushed") else "no"
+        lines.append(
+            f"HEAD: {str(facts['head'])[:12]} | local commits not on the remote: "
+            f"{facts.get('local_commits') or 0} | pushed: {pushed} | uncommitted files: "
+            f"{facts.get('dirty_files') or 0}"
+        )
+    pr = facts.get("pr")
+    if isinstance(pr, dict) and pr.get("number"):
+        lines.append(f"PR: #{pr['number']} {pr.get('state') or ''} {pr.get('url') or ''}".rstrip())
+    if facts.get("branch"):
+        lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
+    return "\n".join(lines)
+
+
+def _raise_bounded_activity_error(error: BaseException) -> None:
+    """Re-raise an activity error; stop Temporal retrying it after the error limit.
+
+    Retries are otherwise unlimited (worker crashes and deploys never end a code
+    session), so a deterministic failure must not loop forever.
+    """
+    if (
+        activity.in_activity()
+        and activity.info().attempt >= CODE_AGENT_ERROR_RETRY_LIMIT
+        and not (isinstance(error, ApplicationError) and error.non_retryable)
+    ):
+        raise ApplicationError(
+            extract_error_message(error),
+            type=type(error).__name__,
+            non_retryable=True,
+        ) from error
+    raise error
+
+
+# ---------------------------------------------------------------------------
 # Temporal activity
 # ---------------------------------------------------------------------------
 
@@ -2210,6 +3033,10 @@ async def spawn_claude_code_activity(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     resume_session: Optional[Dict[str, Any]] = None,
+    code_session_request: Optional[Dict[str, Any]] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    local_device_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -2237,6 +3064,17 @@ async def spawn_claude_code_activity(
         resume_session: Session returned by a drained attempt; its sandbox is reattached
             when still reachable. ``generation_yield=False`` keeps the run on this worker
             when its generation is superseded (no parked handoff is available).
+        target: "cloud" (E2B sandbox) or "local" (the same ws-server on the agent's Mac,
+            relayed by the backend; ``ws_url`` is then the backend relay URL). Everything
+            after session create is identical for both targets.
+        local_device_id / local_device_name: the Mac resolved by
+            ``resolve_code_agent_target_activity`` for a local run.
+        code_session_request: ``{"code_session_id": ...}`` to resume a specific
+            persistent code session; omitted, the backend resumes the spawning
+            agent's latest session for the repo (or creates one on a new branch).
+
+    No runtime limit (C11): the activity runs while the CLI works and heartbeats.
+    An idle CLI is paused (status ``paused``, resumable), never failed.
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
 
@@ -2253,6 +3091,15 @@ async def spawn_claude_code_activity(
     # A retry's heartbeat session is newer than the scheduled resume_session: the
     # earlier attempt may have replaced an unreachable sandbox with a fresh one.
     attached = _code_session_from_heartbeat() or code_session_record(resume_session)
+    # The persistent session survives a paused/unreachable sandbox: a retry
+    # resumes it by id even when its attached record must be discarded (C2).
+    requested_code_session_id = (code_session_request or {}).get("code_session_id")
+    code_session_id: Optional[str] = (attached or {}).get("code_session_id") or (
+        requested_code_session_id if isinstance(requested_code_session_id, str) else None
+    )
+    lease_owner = f"tool:{agent_id}:{tool_call_id}"
+    code_session_facts: Optional[Dict[str, Any]] = None
+    loop_outcome: Dict[str, Any] = {}
 
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2264,6 +3111,20 @@ async def spawn_claude_code_activity(
         raise ValueError(
             "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
         )
+
+    if isinstance(attached, dict) and attached.get("target") == "local":
+        target = "local"
+        local_device_id = attached.get("device_id") or local_device_id
+        local_device_name = attached.get("device_name") or local_device_name
+    code_agent_meta: Dict[str, Any] = {"target": "local" if target == "local" else "cloud"}
+    if target == "local" and local_device_name:
+        code_agent_meta["device_name"] = local_device_name
+    if isinstance(attached, dict) and attached.get("folder"):
+        code_agent_meta["folder"] = attached["folder"]
+    if isinstance(attached, dict) and attached.get("preview_url"):
+        code_agent_meta["preview_url"] = attached["preview_url"]
+    if isinstance(attached, dict) and isinstance(attached.get("sandbox_size"), dict):
+        code_agent_meta["sandbox_size"] = attached["sandbox_size"]
 
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
@@ -2318,6 +3179,23 @@ async def spawn_claude_code_activity(
             )
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
 
+        if attached is None:
+            # C15: continue on the other provider when this one has no
+            # leasable credential left (the session itself is provider-neutral).
+            # A Mac run only ever gets the user's own CLI login, never a pool token.
+            available = await fetch_code_credential_availability(user_id, own_only=target == "local")
+            other_provider = "codex" if code_provider == "claude" else "claude"
+            if available is not None and not available.get(code_provider) and available.get(other_provider):
+                logger.warning(
+                    "[ClaudeCode] No leasable credential for provider; continuing on the other one",
+                    agent_id=agent_id,
+                    from_provider=code_provider,
+                    to_provider=other_provider,
+                    code_session_id=code_session_id,
+                )
+                action_summary.append(f"No {code_provider} credential available; continuing on {other_provider}")
+                code_provider = other_provider
+
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
         if attached is None:
@@ -2331,19 +3209,36 @@ async def spawn_claude_code_activity(
 
             session_data = await create_e2b_session(
                 agent_id=agent_id,
-                goal=goal,
+                # A Mac folder has no sandbox handoff file; it keeps the session-output result.
+                goal=goal if target == "local" else handoff_task_text(goal, output_schema),
                 user_id=user_id,
                 attachments=attachments,
                 github_repo_url=github_repo_url,
                 code_provider=code_provider,
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
+                code_session_id=code_session_id,
+                lease_owner=lease_owner,
+                target=target,
+                local_device_id=local_device_id,
+                fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
             )
+            code_session_id = session_data.get("code_session_id") or code_session_id
+            code_session_facts = _spawn_code_session_facts(session_data)
             task_id = session_data["task_id"]
             sandbox_id = session_data["sandbox_id"]
             ws_url = session_data["ws_url"]
             uploaded_files = session_data.get("uploaded_files", [])
             actual_github_repo_url = session_data.get("github_repo_url")
             loop_started_at = None
+            if target == "local" and session_data.get("folder"):
+                # Display path of the folder the Mac granted (e.g. "~/Developer/rose").
+                code_agent_meta["folder"] = session_data["folder"]
+            if session_data.get("preview_url"):
+                # Live dev-server preview of this session (Rose dev accounts, A1).
+                code_agent_meta["preview_url"] = session_data["preview_url"]
+            if isinstance(session_data.get("sandbox_size"), dict):
+                # vCPUs / memory of the E2B sandbox (C16).
+                code_agent_meta["sandbox_size"] = session_data["sandbox_size"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -2353,7 +3248,11 @@ async def spawn_claude_code_activity(
                 ws_url=ws_url[:100] if ws_url else None,
                 uploaded_files=len(uploaded_files),
             )
-            action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+            action_summary.append(
+                f"Started local session on {local_device_name or 'the Mac'}: {sandbox_id}"
+                if target == "local"
+                else f"Created E2B sandbox: {sandbox_id}"
+            )
 
         session_record = {
             "task_id": task_id,
@@ -2364,7 +3263,30 @@ async def spawn_claude_code_activity(
             "started_at": start_time,
             "loop_started_at": loop_started_at,
             "logged_events": int((attached or {}).get("logged_events") or 0),
+            "code_session_id": code_session_id,
+            "branch": (code_session_facts or {}).get("branch") or (attached or {}).get("branch"),
+            "merge_target": (code_session_facts or {}).get("merge_target")
+            or (attached or {}).get("merge_target"),
+            "transcript_events": int((attached or {}).get("transcript_events") or 0),
+            "preview_url": code_agent_meta.get("preview_url"),
+            "sandbox_size": code_agent_meta.get("sandbox_size"),
         }
+        if code_session_facts is None and code_session_id:
+            code_session_facts = {
+                "code_session_id": code_session_id,
+                "branch": session_record["branch"],
+                "merge_target": session_record["merge_target"],
+            }
+        if target == "local":
+            # A drained/retried attempt must reattach to the same Mac, never the cloud.
+            session_record.update(
+                {
+                    "target": "local",
+                    "device_id": local_device_id,
+                    "device_name": local_device_name,
+                    "folder": code_agent_meta.get("folder"),
+                }
+            )
         # An attempt's first heartbeat goes out at once and later ones only every
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
@@ -2393,6 +3315,15 @@ async def spawn_claude_code_activity(
                 output_schema=output_schema,
                 github_repo_url=actual_github_repo_url,
                 code_provider=code_provider,
+                code_session=code_session_facts,
+                code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="live",
+                    started_at=start_time,
+                    facts=code_session_facts,
+                ),
             )
 
             await save_claude_code_message(
@@ -2404,6 +3335,14 @@ async def spawn_claude_code_activity(
                 action_type="task_started",
                 tool_call_id=tool_call_id,
                 code_provider=code_provider,
+                code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="live",
+                    started_at=start_time,
+                    facts=code_session_facts,
+                ),
             )
             action_summary.append(f"Started task: {goal[:100]}")
 
@@ -2445,6 +3384,7 @@ async def spawn_claude_code_activity(
                 loop_started_at=loop_started_at,
                 generation_yield=generation_yield,
                 code_session=session_record,
+                loop_outcome=loop_outcome,
             )
         except CodeSessionDrained as drained:
             # Cleared before awaiting so a cancel landing in stop() reaches the
@@ -2452,6 +3392,27 @@ async def spawn_claude_code_activity(
             collector, log_collector = log_collector, None
             if collector:
                 await collector.stop()
+            if isinstance(drained, CodeSessionResizeRequested):
+                resized = await _apply_sandbox_resize(
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    task_id=task_id,
+                    code_provider=code_provider,
+                    request=drained.request,
+                    session_record=session_record,
+                    code_agent_meta=code_agent_meta,
+                    started_at=start_time,
+                    facts=code_session_facts,
+                )
+                if resized is not None:
+                    # The next attempt reattaches to the task that continues the session.
+                    return {
+                        "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+                        "yield_reason": CODE_AGENT_RESIZE_YIELD_REASON,
+                        "code_session": resized,
+                        "task_id": resized["task_id"],
+                        "code_provider": code_provider,
+                    }
             return {
                 "status": CODE_AGENT_DRAIN_YIELD_STATUS,
                 "yield_reason": drained.reason,
@@ -2488,6 +3449,104 @@ async def spawn_claude_code_activity(
                 task_id=task_id,
             )
 
+        usage_limit = loop_outcome.get("usage_limit")
+        if isinstance(usage_limit, dict):
+            # C15: save the session (checkpoint + pause), rate-limit the token,
+            # and hand the parent the exact retry. Never a Temporal retry: the
+            # same exhausted credential would fail again.
+            close_data = await close_e2b_session(
+                task_id=task_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                additional_paths=[],
+                code_provider=code_provider,
+                reason="usage_limit",
+            )
+            code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
+            marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+            session_heartbeats.close()
+            if log_collector:
+                await log_collector.stop()
+            resets_at_iso = (marked or {}).get("resets_at")
+            local_place = local_workspace_place(code_agent_meta)
+            # The parent reads the error with every connected account and what a
+            # respawn leases (the backend's stored view); the user reads a
+            # resumable pause. The parent decides; nothing fails over here.
+            accounts = (marked or {}).get("accounts")
+            accounts = accounts if isinstance(accounts, list) else None
+            next_lease = (marked or {}).get("next_lease")
+            next_lease = next_lease if isinstance(next_lease, dict) else None
+            message = format_usage_limit_message(
+                code_provider=code_provider,
+                resets_at_iso=resets_at_iso,
+                facts=code_session_facts,
+                local_place=local_place,
+                accounts=accounts,
+                next_lease=next_lease,
+            )
+            user_message = format_usage_limit_user_message(
+                code_provider=code_provider,
+                resets_at_iso=resets_at_iso,
+                local_place=local_place,
+            )
+            code_agent = build_code_agent_metadata(
+                target_meta=code_agent_meta,
+                task_id=task_id,
+                provider=code_provider,
+                state="paused",
+                started_at=start_time,
+                ended_at=safe_time(),
+                facts=code_session_facts,
+                failure_message=user_message,
+            )
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Code agent hit a usage limit",
+                task_id=task_id,
+                message=user_message,
+                status=MessageStatus.FINISHED,
+                action_type="usage_limit",
+                tool_call_id=tool_call_id,
+                code_provider=code_provider,
+                code_session=code_session_facts,
+                code_agent=code_agent,
+            )
+            return {
+                "status": CODE_AGENT_USAGE_LIMIT_STATUS,
+                "success": False,
+                "failure_kind": "usage_limit",
+                "retryable": True,
+                "message": message,
+                "usage_limit": {
+                    "provider": code_provider,
+                    "resets_at": resets_at_iso,
+                    "limit_type": usage_limit.get("limit_type"),
+                    "credential_marked": (marked or {}).get("marked"),
+                    "accounts": accounts,
+                    "next_lease": next_lease,
+                },
+                # A Mac run has no code session: its retry targets the same Mac folder.
+                "retry": (
+                    {"tool": "spawn_agent", "type": "code", "target": "local"}
+                    if local_place
+                    else {
+                        "tool": "spawn_agent",
+                        "type": "code",
+                        "code_session_id": (code_session_facts or {}).get("code_session_id"),
+                    }
+                ),
+                "task_id": task_id,
+                "ws_url": ws_url,
+                "execution_time_ms": (safe_time() - start_time) * 1000,
+                "usage_items": [],
+                "structured_response": None,
+                "output_files": close_data.get("output_files", []),
+                "code_provider": code_provider,
+                "code_session": code_session_facts,
+                "code_agent": code_agent,
+                "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            }
+
         # A fast CLI failure can set ``exit_code`` before the one-second silence
         # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
         # Re-check the final snapshot here so a revoked OAuth token is surfaced
@@ -2510,16 +3569,97 @@ async def spawn_claude_code_activity(
 
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
+        # A persistent session is checkpointed and paused, never killed.
+        awaiting_parent = loop_outcome.get("awaiting_parent")
+        idle_paused = loop_outcome.get("idle_paused") is True or isinstance(awaiting_parent, dict)
         close_data = await close_e2b_session(
             task_id=task_id,
             user_id=user_id,
             agent_id=agent_id,
             additional_paths=[],
             code_provider=code_provider,
+            reason="awaiting_parent" if isinstance(awaiting_parent, dict) else "idle" if idle_paused else "close",
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
+        code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
         session_heartbeats.close()
+
+        if idle_paused:
+            # Idle is not failure (C11): report the paused, resumable session.
+            if log_collector:
+                await log_collector.stop()
+            local_place = local_workspace_place(code_agent_meta)
+            if isinstance(awaiting_parent, dict) and local_place:
+                message = (
+                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
+                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
+                    f"again with target='local' and your answer as the goal to continue in {local_place}."
+                )
+            elif isinstance(awaiting_parent, dict):
+                message = (
+                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
+                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
+                    "again with this code_session_id and your answer as the goal to resume it."
+                )
+            elif local_place:
+                # A Mac session cannot be E2B-paused: its CLI is stopped and the
+                # work stays in the user's folder; the next spawn continues there.
+                message = (
+                    f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
+                    f"(not failed). Its files and commits stay in {local_place}; spawn the code agent "
+                    "again with target='local' to continue there."
+                )
+            else:
+                message = (
+                    f"Code session paused after {loop_outcome.get('idle_s', 0)}s with no activity "
+                    "(not failed). Its files, commits and conversation are kept; spawn the code "
+                    "agent again to resume it."
+                )
+            summary = format_code_session_summary(code_session_facts)
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="Code session paused",
+                task_id=task_id,
+                message=message,
+                status=MessageStatus.FINISHED,
+                action_type="session_paused",
+                tool_call_id=tool_call_id,
+                code_provider=code_provider,
+                code_session=code_session_facts,
+                code_agent=build_code_agent_metadata(
+                    target_meta=code_agent_meta,
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="paused",
+                    started_at=start_time,
+                    ended_at=safe_time(),
+                    facts=code_session_facts,
+                ),
+            )
+            return {
+                "status": CODE_AGENT_PAUSED_STATUS,
+                "success": False,
+                "message": f"{message}\n{summary}" if summary else message,
+                "task_id": task_id,
+                "ws_url": ws_url,
+                "execution_time_ms": (safe_time() - start_time) * 1000,
+                "usage_items": [],
+                "structured_response": None,
+                "output_files": output_files,
+                "code_provider": code_provider,
+                "code_session": code_session_facts,
+                "code_agent": build_code_agent_metadata(
+                    target_meta=code_agent_meta,
+                    task_id=task_id,
+                    provider=code_provider,
+                    state="paused",
+                    started_at=start_time,
+                    ended_at=safe_time(),
+                    facts=code_session_facts,
+                ),
+                "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            }
         safe_heartbeat("Verifying Claude Code result")
 
         logger.info(
@@ -2556,9 +3696,20 @@ async def spawn_claude_code_activity(
             code_provider=code_provider,
             code_events=code_events,
             output_files=output_files,
+            handoff=close_data["handoff"] if "handoff" in close_data else _NO_HANDOFF_CONTRACT,
         )
         total_input_tokens += v_input
         total_output_tokens += v_output
+        # Judged before file-pointer resolution rewrites the response below.
+        verified = code_agent_verifier_enabled() or (
+            _disabled_verifier_outcome(
+                output_schema,
+                structured_response,
+                attempt_completion=attempt_completion,
+                exit_code=exit_code,
+            )[0]
+            != "unverified"
+        )
 
         # 7. Add any verifier-selected extra paths to the structured response
         # contract, but do not use them for sandbox extraction. The canonical
@@ -2592,7 +3743,11 @@ async def spawn_claude_code_activity(
             success=success,
             close_reasoning=v_reasoning,
             action_summary=action_summary,
+            verified=verified,
         )
+        code_session_summary = format_code_session_summary(code_session_facts)
+        if code_session_summary:
+            context_message = f"{context_message}\n\n{code_session_summary}"
 
         # Log Claude Code LLM usage (not charged)
         if claude_code_usage:
@@ -2629,6 +3784,16 @@ async def spawn_claude_code_activity(
             "output_files": output_files,
             "code_provider": code_provider,
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
+            "code_session": code_session_facts,
+            "code_agent": build_code_agent_metadata(
+                target_meta=code_agent_meta,
+                task_id=task_id,
+                provider=code_provider,
+                state="completed",
+                started_at=start_time,
+                ended_at=safe_time(),
+                facts=code_session_facts,
+            ),
         }
         return result
 
@@ -2666,6 +3831,16 @@ async def spawn_claude_code_activity(
                     )
             raise
 
+        # A user pause is resumable: the chip ends paused, never failed.
+        paused_code_agent = build_code_agent_metadata(
+            target_meta=code_agent_meta,
+            task_id=task_id,
+            provider=code_provider,
+            state="paused",
+            started_at=start_time,
+            ended_at=safe_time(),
+            facts=code_session_facts,
+        )
         if task_id:
             try:
                 # Persist terminal output before closing (skip if already written)
@@ -2701,9 +3876,10 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
+                    code_agent=paused_code_agent,
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="cancel")
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on cancel",
@@ -2717,6 +3893,8 @@ async def spawn_claude_code_activity(
             "task_id": task_id,
             "message": "Claude Code agent cancelled by user",
             "code_provider": code_provider,
+            "code_session": code_session_facts,
+            "code_agent": paused_code_agent,
         }
 
     except Exception as e:
@@ -2778,9 +3956,19 @@ async def spawn_claude_code_activity(
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
+                    code_agent=build_code_agent_metadata(
+                        target_meta=code_agent_meta,
+                        task_id=task_id,
+                        provider=code_provider,
+                        state="failed",
+                        started_at=start_time,
+                        ended_at=safe_time(),
+                        facts=code_session_facts,
+                        failure_message=extract_error_message(e),
+                    ),
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider)
+                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on error",
@@ -2789,7 +3977,7 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        raise
+        _raise_bounded_activity_error(e)
 
     finally:
         session_heartbeats.close()

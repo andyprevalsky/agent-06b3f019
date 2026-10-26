@@ -188,6 +188,16 @@ export class InitialBroadcastDispatcher<
   }
 }
 
+/** A definite HTTP refusal of these bytes; transient statuses are retried instead. */
+function isContentRejection(outcome: BroadcastOutcome): boolean {
+  return (
+    typeof outcome.status === 'number' &&
+    outcome.status >= 400 &&
+    outcome.status < 500 &&
+    !outcome.retryable
+  );
+}
+
 function topicShardIndex(topic: string): number {
   let hash = 0;
   for (let index = 0; index < topic.length; index += 1) {
@@ -215,10 +225,30 @@ export class CommittedMessageDelivery<
     ) => void,
     private readonly resend: (values: T[]) => Promise<BroadcastOutcome>,
     private readonly batchLimit: number,
-    private readonly firstBudget: (topic: string) => { messages: number; bytes: number }
+    private readonly firstBudget: (topic: string) => { messages: number; bytes: number },
+    /**
+     * Ordered substitutes for a deterministically refused INSERT, one send each:
+     * the same record in another encoding, then a bounded notice to fetch it.
+     */
+    private readonly rejectionFallbacks: ReadonlyArray<{ name: string; map: (value: T) => T }>,
+    /** Bounded stand-in for one record larger than a whole agent lane. */
+    private readonly oversizeSubstitute: (value: T) => T
   ) {}
 
-  enqueue(value: T, bytes: number): void {
+  enqueue(original: T, originalBytes: number): void {
+    let value = original;
+    let bytes = originalBytes;
+    if (bytes > MAX_AGENT_BYTES) {
+      log.error('Committed INSERT delivery rejected', {
+        topic: value.topic,
+        message_id: value.payload.id,
+        reason: 'oversize',
+        bytes,
+        substitute: 'INSERT_DEFERRED',
+      });
+      value = this.oversizeSubstitute(value);
+      bytes = Buffer.byteLength(JSON.stringify(value.payload)) + Buffer.byteLength(value.topic);
+    }
     const shard = this.shards[topicShardIndex(value.topic)];
     let lane = shard.lanes.get(value.topic);
     if (
@@ -302,6 +332,26 @@ export class CommittedMessageDelivery<
           component: 'CommittedMessageDelivery',
         }
       );
+      if (!result.ok && isContentRejection(result)) {
+        // Resending identical bytes cannot pass a deterministic rejection such
+        // as an edge WAF rule. Try each substitute frame once, in order.
+        for (const fallback of this.rejectionFallbacks) {
+          const outcome = await this.resendBounded(
+            shard,
+            cohort.map((member) => ({ ...member, value: fallback.map(member.value) }))
+          );
+          for (const member of cohort) {
+            log.warn('Committed INSERT content rejected; sent substitute frame', {
+              topic: member.value.topic,
+              message_id: member.value.payload.id,
+              status: result.status,
+              substitute: fallback.name,
+              substitute_status: outcome.status,
+            });
+          }
+          if (outcome.ok) return;
+        }
+      }
       if (!result.ok) {
         for (const member of cohort) {
           log.error('Committed INSERT delivery exhausted', {

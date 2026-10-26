@@ -146,6 +146,15 @@ class AuthTestSiteFixtureError(RuntimeError):
     """The hosted site could not be prepared exactly as the scenario requires."""
 
 
+class AuthTestSiteFirstRunFailed(AuthTestSiteFixtureError):
+    """The task's own first-run agent finished without completing its goal.
+
+    That is the agent's outcome on this task (a graded failure), not a fixture
+    or infrastructure fault: the graded run would score the same agent result
+    FAILED, so the first run must not be reported as a retryable ERROR.
+    """
+
+
 # Parallel lanes share one BenchmarkTask object per name (k=3 runs of the same
 # task are concurrent), so the per-run manifest lives in the lane's asyncio
 # context rather than on the task.

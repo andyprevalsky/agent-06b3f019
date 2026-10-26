@@ -5,13 +5,19 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
+import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
+import { isLocalDeviceSandboxId } from './localDevices/hub';
+import { closeLocalDeviceCodeSession } from './localDevices/session';
 
 const log = createLogger('Cleanup');
 
 export interface BrowserSessionReleaseDependencies {
-  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
+  findActiveSessions: (
+    agentId: string
+  ) => Promise<Array<{ id?: string; sessionId: string | null }>>;
   closeSession: (sessionId: string, pause: boolean) => Promise<void>;
+  retireUnmaterializedSession: (agentId: string, taskId: string) => Promise<boolean>;
 }
 
 interface ActiveCodeSession {
@@ -57,7 +63,7 @@ const TERMINAL_BROWSER_RELEASE_LEASE_MS = 5 * 60 * 1000;
 const TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE = 500;
 const TERMINAL_BROWSER_RELEASE_MAX_RUN_MS = 50_000;
 
-function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
+function browserSessionReleaseDependencies(retire = false): BrowserSessionReleaseDependencies {
   return {
     findActiveSessions: async (agentId: string) =>
       prisma.browserSession.findMany({
@@ -65,12 +71,31 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
           agentId,
           // ERROR is the durable retry marker written when a provider release
           // fails. Excluding it would turn the first transient provider outage
-          // into a permanent paid-browser leak.
-          status: { in: ['ACTIVE', 'PAUSED', 'ERROR'] },
+          // into a permanent paid-browser leak. A confirmed pause already
+          // released compute; revisit it only for explicit retirement.
+          status: { in: retire ? ['ACTIVE', 'PAUSED', 'ERROR'] : ['ACTIVE', 'ERROR'] },
         },
-        select: { sessionId: true },
+        select: { id: true, sessionId: true },
       }),
-    closeSession,
+    retireUnmaterializedSession: (agentId, taskId) =>
+      withSteelLifecycleClaim(taskId, async (_assertOwned, _runNative, mutateOwned) =>
+        mutateOwned(async (transaction) => {
+          const retired = await transaction.browserSession.updateMany({
+            where: {
+              id: taskId,
+              agentId,
+              logicalOwnerKey: `agent:${agentId}`,
+              sessionId: null,
+              status: 'PAUSED',
+            },
+            data: { status: 'CLOSED', closedAt: new Date() },
+          });
+          return retired.count === 1;
+        })
+      ),
+    closeSession: async (sessionId, pause) => {
+      await closeSession(sessionId, pause);
+    },
   };
 }
 
@@ -84,6 +109,10 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
     killSandbox: async (session) => {
       if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
         await closeLocalClaudeCodeSession(session.id);
+        return;
+      }
+      if (isLocalDeviceSandboxId(session.sandboxId)) {
+        await closeLocalDeviceCodeSession(session.id, session.sandboxId);
         return;
       }
       // false means E2B no longer has the sandbox, which is as released as a kill.
@@ -105,14 +134,24 @@ function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencie
         SELECT DISTINCT browser_session."agentId" AS "agentId"
         FROM "BrowserSession" AS browser_session
         INNER JOIN "Agent" AS agent ON agent.id = browser_session."agentId"
-        WHERE browser_session.status::text IN ('ACTIVE', 'PAUSED', 'ERROR')
+        WHERE browser_session.status::text IN ('ACTIVE', 'ERROR')
           AND agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
         ORDER BY browser_session."agentId" ASC
         LIMIT ${batchSize}
       `);
       return agents.map((agent) => agent.agentId);
     },
-    releaseBrowserSessions: releaseAgentBrowserSessions,
+    // Retry with the same policy as the terminal transition: a root's
+    // completion tears its sessions down, a child's only pauses them.
+    releaseBrowserSessions: async (agentId, overrides) => {
+      const agent = await prisma.agent.findUnique({
+        where: { id: agentId },
+        select: { parentAgentId: true },
+      });
+      return releaseAgentBrowserSessions(agentId, overrides, {
+        retire: agent !== null && agent.parentAgentId === null,
+      });
+    },
   };
 }
 
@@ -257,12 +296,15 @@ export async function runTerminalAgentBrowserReleaseReconcileWithLease(
  */
 export async function releaseAgentBrowserSessions(
   agentId: string,
-  overrides: Partial<BrowserSessionReleaseDependencies> = {}
+  overrides: Partial<BrowserSessionReleaseDependencies> = {},
+  // Deleting an agent or completing a root retires its sessions (closeSession
+  // saves signed-in state first); a child's shutdown only pauses them.
+  options: { retire?: boolean } = {}
 ): Promise<number> {
-  const dependencies = { ...browserSessionReleaseDependencies(), ...overrides };
+  const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };
   let released = 0;
   const failures: unknown[] = [];
-  let activeBrowserSessions: Array<{ sessionId: string }>;
+  let activeBrowserSessions: Array<{ id?: string; sessionId: string | null }>;
   try {
     activeBrowserSessions = await dependencies.findActiveSessions(agentId);
   } catch (error) {
@@ -278,7 +320,18 @@ export async function releaseAgentBrowserSessions(
 
   for (const session of activeBrowserSessions) {
     try {
-      await dependencies.closeSession(session.sessionId, false);
+      if (session.sessionId === null) {
+        if (options.retire === true) {
+          if (
+            session.id === undefined ||
+            !(await dependencies.retireUnmaterializedSession(agentId, session.id))
+          )
+            throw new Error('Unmaterialized browser binding changed during retirement');
+          released += 1;
+        }
+        continue;
+      }
+      await dependencies.closeSession(session.sessionId, options.retire !== true);
       released += 1;
       log.info(`Closed browser session ${session.sessionId}`);
     } catch (error) {
@@ -312,7 +365,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
   }
 
   try {
-    await releaseAgentBrowserSessions(agentId);
+    await releaseAgentBrowserSessions(agentId, {}, { retire: true });
   } catch (error) {
     log.warn(`Failed to release browser sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),

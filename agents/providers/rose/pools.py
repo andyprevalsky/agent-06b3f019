@@ -73,6 +73,7 @@ PoolName = Literal[
     "rose-1-ultra",
     "rose-1-browser-use",
     "rose-1-oss",
+    "rose-local",
     "rose-wmh-gpt61",
 ]
 
@@ -132,6 +133,14 @@ class PoolSpec:
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
+    "rose-local": PoolSpec(
+        name="rose-local",
+        # Inert required fields: the local branch returns before any remote leg.
+        claude_auth_model="claude-opus-5-5",
+        gpt_auth_model="gpt-6-sol",
+        waterfall=(),
+        direct_auth_enabled=False,
+    ),
     # Explicit WMH diagnostic runner; other agent pools retain their defaults.
     "rose-wmh-gpt61": PoolSpec(
         name="rose-wmh-gpt61",

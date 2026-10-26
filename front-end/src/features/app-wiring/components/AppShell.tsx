@@ -3,7 +3,7 @@
  *
  * This component is stateless - it only provides routing and context providers.
  *
- * [MOUNTED] --> renders route based on URL path
+ * [MOUNTED] --> app route immediately; public routes [LOADING] -> [READY]
  *   |
  *   +--> "/" --> <Terminal />
  *   +--> "/privacy" --> <Privacy />
@@ -25,8 +25,11 @@
  * TopRightControls overlays every route and owns the layout of the inspection
  * and admin account pills. AdminSwitcherMount stays reachable from every route,
  * while an inspected run can add its read-only identity without overlapping it.
+ * Rose Desktop accounts keep the switcher in Settings instead; their pill only
+ * appears here while impersonating (the exit).
  */
 
+import { Suspense } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { SpeedInsights } from '@vercel/speed-insights/react';
@@ -55,11 +58,19 @@ const AppShell = () => (
             <TopRightControls>
               <AdminSwitcherMount />
             </TopRightControls>
-            <Routes>
-              {ROUTE_TABLE.map(({ path, component: Page }) => (
-                <Route key={path} path={path} element={<Page />} />
-              ))}
-            </Routes>
+            <Suspense
+              fallback={
+                <div role="status" className="p-6 text-sm text-muted-foreground">
+                  Loading…
+                </div>
+              }
+            >
+              <Routes>
+                {ROUTE_TABLE.map(({ path, component: Page }) => (
+                  <Route key={path} path={path} element={<Page />} />
+                ))}
+              </Routes>
+            </Suspense>
           </BrowserRouter>
         </TooltipProvider>
       </AppDataProvider>

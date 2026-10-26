@@ -244,11 +244,11 @@ def _build_early_tool_event(
 def _is_strict_readonly_cache_miss(exc: BaseException) -> bool:
     """True when Fast Mode refused a live populate because the slot is absent.
 
-    Transport/lookup faults also raise FastCacheLookupError; those stay
+    Transport/lookup faults also raise DemoCacheLookupError; those stay
     failures. Only the clean read-only miss ("no row, live fallback disabled")
     is a skip — replay what is cached, do not invent a live DAG node.
     """
-    if not error_chain_has_type(exc, "FastCacheLookupError"):
+    if not error_chain_has_type(exc, "DemoCacheLookupError"):
         return False
     return "Strict read-only benchmark cache miss" in extract_error_message(exc)
 
@@ -317,7 +317,7 @@ def _fast_mode_skip_event(task: "DAGTask", *, message: str) -> ToolEvent:
         metadata={
             "dagTaskIndex": task.index,
             "plannedToolName": task.tool_name,
-            "fastModeCacheSkip": True,
+            "demoCacheSkip": True,
         },
     )
 
@@ -1450,6 +1450,7 @@ async def _execute_single_task(
                     params.pop("output_schema", None)
                     params.pop("start_url", None)
                     params.pop("github_repo_link", None)
+                    params.pop("code_session_id", None)
                     # Clamp planner/DAG explores to a fast breadth-scan. The param-populator
                     # LLM tends to pick depth="deep" for "comprehensive" goals, turning a
                     # gating "identify the list" explore into a 50-turn crawl that blocks

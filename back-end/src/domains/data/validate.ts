@@ -96,17 +96,47 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+/** agent_network rows are stored messages, so these kinds select all of them. */
+const AGENT_NETWORK_RECORD_KINDS = new Set(['message', 'all']);
+
+/**
+ * Trajectory selectors on an agent_network search. agent_network reads the
+ * stored messages of the caller's tree: an agent task path scopes it and the
+ * message/all kinds select every row. `order` is an agent_trajectories selector,
+ * so a sole agent_network search accepts and ignores it (results stay newest
+ * first, as display_order reports). Anything else names itself, so the caller
+ * can drop that one parameter.
+ */
+function validateAgentNetworkSelectors(params: GrepParams, sources: ValidSource[]): void {
+  if (
+    params.record_kind !== undefined &&
+    !AGENT_NETWORK_RECORD_KINDS.has(String(params.record_kind).toLowerCase())
+  ) {
+    throw new InvalidGrepParamError('record_kind');
+  }
+  if (params.trace_path !== undefined && agentTaskPathParam(params.trace_path) === undefined) {
+    throw new InvalidGrepParamError('trace_path');
+  }
+  for (const key of ['surface', 'until', 'page_after'] as const) {
+    if (params[key] !== undefined) throw new InvalidGrepParamError(key);
+  }
+  if (params.order !== undefined && sources.length !== 1) {
+    throw new InvalidGrepParamError('order/page_after');
+  }
+}
+
 function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
   const hasTrajectories = sources.includes('agent_trajectories');
-  // An agent task path (/root/...) also scopes agent_network.
-  const networkTracePath =
-    sources.includes('agent_network') && agentTaskPathParam(params.trace_path) !== undefined;
+  if (!hasTrajectories && sources.includes('agent_network')) {
+    validateAgentNetworkSelectors(params, sources);
+    return;
+  }
   if (
     !hasTrajectories &&
     [
       params.record_kind,
       params.surface,
-      networkTracePath ? undefined : params.trace_path,
+      params.trace_path,
       params.until,
       params.order,
       params.page_after,
@@ -114,7 +144,7 @@ function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]
   ) {
     throw new InvalidGrepParamError('agent_trajectories source');
   }
-  if (params.role !== undefined && !hasTrajectories && !sources.includes('agent_network')) {
+  if (params.role !== undefined && !hasTrajectories) {
     throw new InvalidGrepParamError('role');
   }
   if (

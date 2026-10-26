@@ -2615,7 +2615,7 @@ def test_demo_filter_purges_previously_indexed_steps_without_ingestion_failure()
             restore()
 
 
-def test_load_transitions_drops_fast_cache_replays_from_corpus():
+def test_load_transitions_drops_demo_cache_replays_from_corpus():
     from benchmarks.world_model_harness import load_transitions
     from helpers.trace_archive import archive_json
 
@@ -3169,7 +3169,7 @@ async def test_runtime_world_clock_long_polls_waits_and_skips_without_a_world():
         with (
             patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
             patch.object(runtime.activity, "heartbeat", lambda *args: heartbeats.append(args)),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
         ):
             assert (await runtime.world_clock_activity("register", "child-1", "root-1"))["time_ms"] == 0
             waited = await runtime.world_clock_activity("wait", "child-1", None, {"wait_id": "w1", "duration_ms": day})
@@ -3225,7 +3225,7 @@ async def test_runtime_world_time_reads_the_agent_clock_or_reports_no_world():
     try:
         with (
             patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
         ):
             assert await runtime.world_time_ms("child-1") == 7_000
             # An agent the clock has not seen yet starts at shared time.
@@ -3253,7 +3253,7 @@ async def test_runtime_world_time_nonobject_clock_is_unavailable():
     try:
         with (
             patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
         ):
             # A world that answers with an unusable clock is unavailable, not "no world":
             # the planner must not fall back to the real date.
@@ -3298,7 +3298,7 @@ async def test_runtime_world_time_retries_then_fails_instead_of_wall_clock():
     try:
         with (
             patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
-            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+            patch("providers.demo_cache.client.resolve_agent_fast_mode", resolve),
             patch.object(runtime, "_WORLD_TIME_RETRY_DELAY_S", 0),
         ):
             # Transient transport and server errors retry the same clock read.
@@ -3517,7 +3517,7 @@ def test_canonical_action_categories_cover_agent_tool_families():
         "request_payment_card": "payment",
         "call_phone_number": "vapi",
         "grep": "grep",
-        "fast_cache_write": "fast_cache",
+        "fast_cache_write": "fast_cache",  # stored WMH category (wire name unchanged by the DEMO rename)
         "request_user_approval": "auth_approval",
     }
     for tool_name, category in cases.items():
@@ -3574,9 +3574,9 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
 
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
-    from providers.fast_cache.context import current_context
-    from providers.fast_cache.normalize import demo_cache_allowed
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.context import current_context
+    from providers.demo_cache.normalize import demo_cache_allowed
+    from providers.demo_cache.rose_cache import request_key_material
     from providers.rose import RoseResponse
 
     # The DEMO allowlist is the hash of each DEMO-tagged catalog prompt, so read
@@ -5291,7 +5291,7 @@ async def test_runtime_world_model_session_is_shared_by_root_agent_tree():
             patch.object(runtime, "WMHHttpClient", return_value=FakeClient()),
             patch.object(runtime.activity, "in_activity", return_value=True),
             patch(
-                "providers.fast_cache.client.resolve_agent_fast_mode",
+                "providers.demo_cache.client.resolve_agent_fast_mode",
                 new=AsyncMock(return_value=(False, "child goal", False, "root-tree-1", "root goal", True)),
             ),
         ):
@@ -5514,7 +5514,7 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
         assert is_world_model_environment_boundary("call_phone_number") is True
         assert is_world_model_environment_boundary("payment_mint") is True
         assert is_world_model_environment_boundary("send_direct_sms") is True
-        # Fast cache stays live under simulation — isolated by key scope
+        # DEMO cache stays live under simulation — isolated by key scope
         # (world_model_cache_scope), never by WMH interception.
         assert is_world_model_environment_boundary("fast_cache_read") is False
         assert is_world_model_environment_boundary("fast_cache_write") is False
@@ -5872,7 +5872,7 @@ def test_wmh_rose_provider_shares_one_event_loop_across_parallel_calls():
     assert [observation.text for observation in observations] == ['{"output":"ok"}'] * 2
 
 
-def test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups():
+def test_wmh_parallel_calls_finish_real_demo_cache_batch_lookups():
     """Two served LLM calls must both leave the actual Fast Cache future queue."""
     import itertools
     import threading
@@ -5880,7 +5880,7 @@ def test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups():
     from wmh.providers.base import Message
 
     from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
-    from providers.fast_cache import client as cache_client
+    from providers.demo_cache import client as cache_client
     from providers.rose import RoseResponse
 
     async def fake_fetch(keys):
@@ -6323,8 +6323,8 @@ async def run_all_tests():
         test_prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity,
     )
     r.record(
-        "load_transitions_drops_fast_cache_replays_from_corpus",
-        test_load_transitions_drops_fast_cache_replays_from_corpus,
+        "load_transitions_drops_demo_cache_replays_from_corpus",
+        test_load_transitions_drops_demo_cache_replays_from_corpus,
     )
     r.record(
         "build_world_model_from_archives_runs_actual_upstream_build_with_fake_provider",
@@ -6518,8 +6518,8 @@ async def run_all_tests():
         test_simulated_provider_activities_call_wmh_instead_of_live_services,
     )
     r.record(
-        "wmh_parallel_calls_finish_real_fast_cache_batch_lookups",
-        test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups,
+        "wmh_parallel_calls_finish_real_demo_cache_batch_lookups",
+        test_wmh_parallel_calls_finish_real_demo_cache_batch_lookups,
     )
     await r.record_async(
         "simulated_payment_approval_finishes_pending_tool",

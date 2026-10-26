@@ -260,3 +260,23 @@ db_port_conflict_owner() {
     index($0, pat) { if ($1 != self) { print $1; exit } }
   '
 }
+
+# Sandboxes (E2B code agents) reach this backend at ROSE_UI_PUBLISH_BASE_URL:
+# `rose display`, `rose-ui` publish/pull, the agent graph and code previews all
+# call <base>/api/... . Without it the backend falls back to BACKEND_URL, a
+# loopback a sandbox can never reach, so a local code agent's display failed
+# (agent-display-revenue-chart, 2026-10-23). When a public tunnel is up, route
+# sandboxes through it (the tunnel's Vite server proxies /api to the backend).
+# Agent Display iframes keep loading /usercontent from the loopback backend the
+# local frontend already uses. An explicit ROSE_UI_PUBLISH_BASE_URL wins.
+export_sandbox_backend_base_url() {
+  [ -n "${ROSE_UI_PUBLISH_BASE_URL:-}" ] && return 0
+  case "${PUBLIC_BASE_URL:-}" in
+    https://*) ;;
+    *) return 0 ;;
+  esac
+  export ROSE_UI_PUBLISH_BASE_URL="${PUBLIC_BASE_URL%/}"
+  if [ -z "${USERCONTENT_BASE_URL:-}" ] && [ -n "${BACKEND_URL:-}" ]; then
+    export USERCONTENT_BASE_URL="$BACKEND_URL"
+  fi
+}

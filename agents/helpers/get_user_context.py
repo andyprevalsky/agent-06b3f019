@@ -359,6 +359,8 @@ async def _fetch_user_settings_with_status(client: httpx.AsyncClient, config, us
             timeout=30.0,
         )
         response.raise_for_status()
+        # Eligibility piggybacks on this existing server-owned profile read.
+        # Off/noneligible profiles omit the marker; never discover phone here.
         return response.json(), True
     except Exception as e:
         logger.warning("Failed to fetch user settings", user_id=user_id, error=str(e))
@@ -663,6 +665,7 @@ def _format_user_context(
     section_order = [
         "## Personal Information",
         "## Delivery Address",
+        "## Dedicated cloud iPhone",
         "## Distilled User Snapshot",
         "## Connected Integrations",
         "## Authenticated Browser Sessions",
@@ -755,7 +758,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
                 if settings_read_succeeded:
                     profile_context = _render_profile_context(user_settings)
                     if cached.get("profile_refresh_generation") == refresh_generation:
-                        cached["profile_context"] = profile_context
+                        cached["profile_context"] = _render_profile_context({**user_settings, "iphoneCapability": None})
                 else:
                     profile_context = cached.get("profile_context", "")
                 logger.info(
@@ -836,7 +839,9 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
         if not gates:
             _user_context_cache[user_id] = {
                 "base_context": base_context,
-                "profile_context": profile_context,
+                # Entitlement/guidance is fresh only; the fallback retains
+                # personal profile without any phone permission or guidance.
+                "profile_context": _render_profile_context({**user_settings, "iphoneCapability": None}),
                 "profile_refresh_generation": 0,
                 "fetched_at": now,
             }

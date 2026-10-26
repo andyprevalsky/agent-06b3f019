@@ -242,6 +242,7 @@ export async function searchAndPromoteBrowserConfig(
       });
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
       await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
+      if (current.sessionId === null) return;
       if (current.provider === 'kernel') {
         await dependencies.releaseKernel(current.sessionId).catch(() => {});
       } else if (current.provider === 'browser-use') {

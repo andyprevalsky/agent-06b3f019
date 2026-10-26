@@ -1,6 +1,6 @@
 ---
 description: "Run benchmark tasks through the isolated cloud fleet by default; use --local explicitly for local benchmarks and evals."
-argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] [--timeout S] [--check] | --local <task...|--full|--rerun-failed latest>"
+argument-hint: "list | full [-k K] | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <slice-or-task...> [-k K --concurrency N] [--timeout S] [--check] | --local <task...|--full|--rerun-failed latest>"
 ---
 
 # Benchmark Runner
@@ -54,6 +54,7 @@ smaller slices.
 Behavior:
 
 - `scripts/run-bench list` prints the benchmark catalog.
+- `scripts/run-bench full` runs every cloud task whose last 3 recorded runs passed, at `-k 2` by default with all copies at once (the sharded route, so HEAD must be fetchable from origin). When those copies exceed the measured Fly organization capacity, it keeps the tasks most relevant to this branch's changes and lists the dropped ones. Pass `-k K` to change the repetitions and `--check` for a dry run.
 - `scripts/run-bench <slice-or-task...>` runs one isolated cloud fleet, with every resolved task running concurrently in its own Machine, database, backend and Temporal queue.
 - `scripts/run-bench --local <task-name...>` explicitly selects `agents/benchmarks/local.py` and its isolated local stack.
 - `scripts/run-bench eval ...` runs `agents/benchmarks/run_eval_suite.py` through the isolated local stack.
@@ -233,7 +234,7 @@ birth before any exact-owner signal. Audit retention is separate from liveness.
 These are 50 independent one-task controllers, each retaining the task's 50
 first-level general-purpose children: 2,500, with existing explore allowances unchanged.
 They are not 50 distinct tasks. The explicit flag requires an existing DEMO task
-admitted by runtime replay policy with `fast_cache:on`; task agents stay read-only
+admitted by runtime replay policy with `demo_cache:on`; task agents stay read-only
 and refuse live fallback on misses or unresolved context. The separate harness
 keeps genuine evaluation, including declared LLM judges that may call providers.
 Do not claim a recorded hit for existing cold-terminal passthrough, total zero

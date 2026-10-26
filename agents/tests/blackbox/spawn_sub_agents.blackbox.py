@@ -454,7 +454,7 @@ class _FakeParentWorkflow:
         self.is_paused = False
         self.bus_id = bus_id
         self.goal = "generic parent goal"
-        self.fast_cache_goal = None
+        self.demo_cache_goal = None
         self.fast_mode_cache_enabled = False
         self.model = "rose-labs/rose-1-flash"
         self.agent_source = "WEB"
@@ -1329,7 +1329,7 @@ def test_tokyo_wait_for_llm_call_repro_reconstructs_the_bad_turn():
     assert messages[-1]["role"] == "tool"
 
 
-def test_spawn_sub_agents_benchmark_forces_fast_cache_off():
+def test_spawn_sub_agents_benchmark_forces_demo_cache_off():
     """spawn-sub-agents must not replay Fast Mode traces; the Tokyo wait_for stall was a live Codex call."""
     import os
 
@@ -1340,7 +1340,7 @@ def test_spawn_sub_agents_benchmark_forces_fast_cache_off():
     os.environ["BENCHMARK_FAST_MODE_CACHE"] = "true"
     try:
         task = get_task_by_name("spawn-sub-agents")
-        assert task.fast_cache == "off"
+        assert task.demo_cache == "off"
         assert _resolved_fast_mode_cache(task) is False
     finally:
         if previous is None:
@@ -1422,8 +1422,8 @@ async def run_all_tests():
         test_tokyo_wait_for_llm_call_repro_reconstructs_the_bad_turn,
     )
     r.record(
-        "spawn_sub_agents_fast_cache_off",
-        test_spawn_sub_agents_benchmark_forces_fast_cache_off,
+        "spawn_sub_agents_demo_cache_off",
+        test_spawn_sub_agents_benchmark_forces_demo_cache_off,
     )
     teardown_mock()
     return r.all_passed

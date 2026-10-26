@@ -87,6 +87,9 @@ vi.mock('../../main/domains/auto-updater/runtime', () => ({
   registerUpdateIpc: registerUpdateIpcMock,
 }));
 
+vi.mock('../../main/domains/local-code-runner/runtime', () => ({
+  startLocalCodeRunner: vi.fn(),
+}));
 vi.mock('../../main/domains/auth/runtime', () => ({
   AuthService: { getSession: getSessionMock },
 }));

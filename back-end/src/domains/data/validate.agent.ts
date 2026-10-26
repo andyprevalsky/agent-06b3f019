@@ -129,7 +129,7 @@ export function parseAgentTrajectoryFilters(
   }
   if (
     recordKind !== undefined &&
-    !['all', 'message', 'llm_output', 'llm_context'].includes(recordKind)
+    !['all', 'message', 'llm_output', 'llm_context', 'code_event'].includes(recordKind)
   ) {
     throw new InvalidGrepParamError('filters.record_kind');
   }

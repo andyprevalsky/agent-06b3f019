@@ -599,8 +599,8 @@ def test_prod_worker_posts_encrypted_artifact_to_backend():
         teardown_mock()
 
 
-async def test_fast_cache_write_archives_without_replay_reads_or_backend_success():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_write_archives_without_replay_reads_or_backend_success():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import decrypt_and_validate_artifact, read_local_artifact
 
     class _Response:
@@ -618,11 +618,11 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        token = structlog.contextvars.bind_contextvars(agent_id="agent-fast-cache", span_id="span-fast-cache")
+        old_client = demo_cache_client._client
+        token = structlog.contextvars.bind_contextvars(agent_id="agent-demo-cache", span_id="span-demo-cache")
         try:
-            fast_cache_client._client = _Client()
-            ok = await fast_cache_client.cache_set(
+            demo_cache_client._client = _Client()
+            ok = await demo_cache_client.cache_set(
                 "provider-request-key",
                 "web_fetch",
                 "goal-hash",
@@ -631,7 +631,7 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             assert ok is False
             expected_hash = hashlib.sha256(b"provider-request-key").hexdigest()
             stored = read_local_artifact(
-                root_agent_id="agent-fast-cache",
+                root_agent_id="agent-demo-cache",
                 path=f"provider/fast-cache/web_fetch/{expected_hash}.json.gz.enc",
             )
             assert stored is not None
@@ -640,17 +640,17 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             assert payload["key"] == "provider-request-key"
             assert payload["kind"] == "web_fetch"
             assert payload["goal_hash"] == "goal-hash"
-            assert payload["span_id"] == "span-fast-cache"
+            assert payload["span_id"] == "span-demo-cache"
             assert payload["value"]["request"]["url"] == "https://example.com"
             assert payload["value"]["response"]["status"] == 200
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
+            demo_cache_client._client = old_client
             restore()
 
 
-async def test_fast_cache_read_archives_hit_response_for_replay():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_read_archives_hit_response_for_replay():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import (
         decrypt_and_validate_artifact,
         list_local_artifact_paths,
@@ -676,29 +676,29 @@ async def test_fast_cache_read_archives_hit_response_for_replay():
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        token = structlog.contextvars.bind_contextvars(agent_id="agent-fast-cache", span_id="span-read")
+        old_client = demo_cache_client._client
+        token = structlog.contextvars.bind_contextvars(agent_id="agent-demo-cache", span_id="span-read")
         try:
-            fast_cache_client._client = _Client()
-            record = await fast_cache_client.cache_get_record("provider-read-key")
+            demo_cache_client._client = _Client()
+            record = await demo_cache_client.cache_get_record("provider-read-key")
             assert record["hit"] is True
             expected_hash = hashlib.sha256(b"provider-read-key").hexdigest()
             paths = [
                 path
-                for path in list_local_artifact_paths("agent-fast-cache")
+                for path in list_local_artifact_paths("agent-demo-cache")
                 if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
             ]
             for _ in range(100):
-                if paths and read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0]) is not None:
+                if paths and read_local_artifact(root_agent_id="agent-demo-cache", path=paths[0]) is not None:
                     break
                 await asyncio.sleep(0.05)
                 paths = [
                     path
-                    for path in list_local_artifact_paths("agent-fast-cache")
+                    for path in list_local_artifact_paths("agent-demo-cache")
                     if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
                 ]
             assert len(paths) == 1
-            stored = read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0])
+            stored = read_local_artifact(root_agent_id="agent-demo-cache", path=paths[0])
             assert stored is not None
             ciphertext, metadata = stored
             payload = json.loads(decrypt_and_validate_artifact(ciphertext, metadata).decode("utf-8"))
@@ -710,12 +710,12 @@ async def test_fast_cache_read_archives_hit_response_for_replay():
             assert payload["value"]["response"]["answer"] == "cached"
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
+            demo_cache_client._client = old_client
             restore()
 
 
-async def test_fast_cache_archive_uses_resolved_root_agent_id():
-    import providers.fast_cache.client as fast_cache_client
+async def test_demo_cache_archive_uses_resolved_root_agent_id():
+    import providers.demo_cache.client as demo_cache_client
     from helpers.trace_archive import list_local_artifact_paths
 
     class _Response:
@@ -744,13 +744,13 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
-        old_client = fast_cache_client._client
-        old_memo = dict(fast_cache_client._AGENT_FASTMODE)
+        old_client = demo_cache_client._client
+        old_memo = dict(demo_cache_client._AGENT_FASTMODE)
         token = structlog.contextvars.bind_contextvars(agent_id="child-agent-for-cache", span_id="span-root")
         try:
-            fast_cache_client._client = _Client()
-            fast_cache_client._AGENT_FASTMODE.clear()
-            ok = await fast_cache_client.cache_set(
+            demo_cache_client._client = _Client()
+            demo_cache_client._AGENT_FASTMODE.clear()
+            ok = await demo_cache_client.cache_set(
                 "root-resolved-key",
                 "llm",
                 "goal-hash",
@@ -762,9 +762,9 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
             assert any(path.startswith("provider/fast-cache/llm/") for path in root_paths)
         finally:
             structlog.contextvars.reset_contextvars(**token)
-            fast_cache_client._client = old_client
-            fast_cache_client._AGENT_FASTMODE.clear()
-            fast_cache_client._AGENT_FASTMODE.update(old_memo)
+            demo_cache_client._client = old_client
+            demo_cache_client._AGENT_FASTMODE.clear()
+            demo_cache_client._AGENT_FASTMODE.update(old_memo)
             restore()
 
 
@@ -1569,7 +1569,7 @@ def test_prod_local_root_uses_fallback_for_repo_context_path():
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
-    from providers.fast_cache import client as fast_cache_client
+    from providers.demo_cache import client as demo_cache_client
 
     calls: list[str] = []
 
@@ -1577,30 +1577,30 @@ async def test_browser_http_cache_ops_do_not_archive():
         calls.append(kwargs["path"])
         return {"ref": kwargs["path"], "metadata": None}
 
-    old_deferred_archive = fast_cache_client.archive_json_deferred
-    old_resolver = fast_cache_client.resolve_archive_root_agent_id
+    old_deferred_archive = demo_cache_client.archive_json_deferred
+    old_resolver = demo_cache_client.resolve_archive_root_agent_id
 
     async def fake_resolver():
         return "root-agent"
 
-    fast_cache_client.archive_json_deferred = fake_archive_json_deferred
-    fast_cache_client.resolve_archive_root_agent_id = fake_resolver
+    demo_cache_client.archive_json_deferred = fake_archive_json_deferred
+    demo_cache_client.resolve_archive_root_agent_id = fake_resolver
     try:
-        await fast_cache_client._archive_cache_write(
+        await demo_cache_client._archive_cache_write(
             "fastmode:v42:browser_http:global:GET:abc:public:no-body", "browser_http", "gh", {"v": 1}, None
         )
-        await fast_cache_client._archive_cache_read(
+        await demo_cache_client._archive_cache_read(
             "fastmode:v42:browser_http:global:GET:abc:public:no-body", hit=True, value={"v": 1}, blob_path=None
         )
         assert calls == []
-        await fast_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
-        await fast_cache_client._archive_cache_read(
+        await demo_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
+        await demo_cache_client._archive_cache_read(
             "fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None
         )
         assert len(calls) == 2
     finally:
-        fast_cache_client.archive_json_deferred = old_deferred_archive
-        fast_cache_client.resolve_archive_root_agent_id = old_resolver
+        demo_cache_client.archive_json_deferred = old_deferred_archive
+        demo_cache_client.resolve_archive_root_agent_id = old_resolver
 
 
 def test_oversized_artifact_is_dropped_with_warning():
@@ -1839,14 +1839,14 @@ async def run_all_tests():
     )
     r.record("prod_worker_posts_encrypted_artifact_to_backend", test_prod_worker_posts_encrypted_artifact_to_backend)
     await r.record_async(
-        "fast_cache_write_archives_without_replay_reads_or_backend_success",
-        test_fast_cache_write_archives_without_replay_reads_or_backend_success,
+        "demo_cache_write_archives_without_replay_reads_or_backend_success",
+        test_demo_cache_write_archives_without_replay_reads_or_backend_success,
     )
     await r.record_async(
-        "fast_cache_read_archives_hit_response_for_replay", test_fast_cache_read_archives_hit_response_for_replay
+        "demo_cache_read_archives_hit_response_for_replay", test_demo_cache_read_archives_hit_response_for_replay
     )
     await r.record_async(
-        "fast_cache_archive_uses_resolved_root_agent_id", test_fast_cache_archive_uses_resolved_root_agent_id
+        "demo_cache_archive_uses_resolved_root_agent_id", test_demo_cache_archive_uses_resolved_root_agent_id
     )
     await r.record_async(
         "worker_async_writes_defer_off_event_loop_and_complete",

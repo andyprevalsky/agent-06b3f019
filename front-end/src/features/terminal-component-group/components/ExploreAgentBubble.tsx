@@ -24,7 +24,7 @@
  *
  * RESULT (always visible when FINISHED/ERROR, fixed max-height):
  *   The concrete result from attempt_completion (plain text, no icon).
- *   Fast Mode / fast-cache plumbing copy is stripped before render.
+ *   Fast Mode / demo-cache plumbing copy is stripped before render.
  *
  * EXPANDED CONTENT (visible when expanded):
  *   TASK: Full untruncated task text, shown first.

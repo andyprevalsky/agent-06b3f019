@@ -24,7 +24,6 @@ RUN_PREDEPLOY_CLOUD="$ROOT_DIR/scripts/run-predeploy-cloud"
 RUN_BENCH_CLOUD="$ROOT_DIR/scripts/run-bench-cloud"
 CLOUDBENCH_RUN="$ROOT_DIR/scripts/cloudbench-run.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
-AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 AGENTCARD_LIFECYCLE_SCRIPT="$ROOT_DIR/scripts/run-agentcard-lifecycle-task.sh"
 
 fail() {
@@ -49,7 +48,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -261,6 +260,8 @@ require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor s
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
 require_text "$RUN_SH" 'if ! $BENCHMARK_MODE && $IS_MAC; then' "benchmark stacks must not install unused mac-app dependencies"
 require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false \' "bundled local frontends must not request production-only private realtime authorization"
+require_text "$RUN_SH" 'ROSE_E2E_FIXTURES=true npx vite build' "bundled semantic stacks must build the dev-only overlay-layers fixture page into the preview"
+require_text "$ROOT_DIR/front-end/vite.config.ts" "process.env.ROSE_E2E_FIXTURES === 'true'" "only the opt-in fixture build adds semantic fixture pages"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
@@ -272,12 +273,12 @@ require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP
 require_text "$ROOT_DIR/agents/benchmarks/run_benchmark.py" 'resolve_hub_upload_url(base_url)' "local smoke must register Hub against the local stack, not hard-default to prod (prod-outage deadlock)"
 require_text "$ROOT_DIR/agents/benchmarks/hub_upload.py" 'def resolve_hub_upload_url(' "hub_upload must expose localhost-aware Hub URL resolution"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local predeploy smoke must pin one provider for repeatable cache measurement"
-require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
+require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote demo-cache database"
 require_text "$RUN_PREDEPLOY_LOCAL" 'grep -E '\''^DATABASE_URL='\''' "local predeploy must derive the shared July cache from prod DATABASE_URL when FAST_MODE_CACHE_DATABASE_URL is missing"
-require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"
+require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate demo-cache schema startup from the production pooler"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_FAST_MODE_CACHE=0 \' "local-cache predeploy smoke must force Fast Mode off so seeded users cannot omit the create-body flag"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1' "local predeploy must disable Andy write-through when the July cache is shared"
-require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate fast_cache:on smoke onto the shared July cache batch"
+require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate demo_cache:on smoke onto the shared July cache batch"
 require_text "$ROOT_DIR/agents/benchmarks/tasks.json" '"name": "test-mass-agent-run-0"' "OAi mass-agent bench must remain in the catalog"
 MASS_AGENT_SMOKE="$(
   python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
@@ -430,10 +431,9 @@ require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
-# /descend is part of the deploy orchestration surface. Its behavior and the
-# auto-RCA lifecycle have independent owners; this suite checks their wiring.
+# /descend is part of the deploy orchestration surface. Its behavior has an
+# independent owner; this suite checks its wiring.
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/descend-command.test.sh' "/deploy must run the descend behavior owner"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/auto-rca-workflow.test.sh' "/deploy must run the auto-RCA behavior owner"
 python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY'
 import importlib.util
 import sys
@@ -444,7 +444,6 @@ sys.modules[spec.name] = registry
 spec.loader.exec_module(registry)
 for name, command in (
     ("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
-    ("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
 ):
     owners = [gate for gate in registry.GATES if gate.name == name or gate.command == command]
     if len(owners) != 1 or owners[0].name != name or owners[0].command != command:
