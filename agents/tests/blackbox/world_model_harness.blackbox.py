@@ -3517,7 +3517,7 @@ def test_canonical_action_categories_cover_agent_tool_families():
         "request_payment_card": "payment",
         "call_phone_number": "vapi",
         "grep": "grep",
-        "fast_cache_write": "demo_cache",
+        "fast_cache_write": "fast_cache",  # stored WMH category (wire name unchanged by the DEMO rename)
         "request_user_approval": "auth_approval",
     }
     for tool_name, category in cases.items():

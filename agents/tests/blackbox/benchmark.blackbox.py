@@ -18332,7 +18332,7 @@ def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
 
 
-def test_claude_code_only_run_withholds_gpt_compute_credentials():
+async def test_claude_code_only_run_withholds_gpt_compute_credentials():
     """A run of requires_claude_code tasks leases only Claude credentials.
 
     claude-code-agent (descend-full69 K4/K8) leased type=gpt, so every code
@@ -18396,7 +18396,7 @@ def test_claude_code_only_run_withholds_gpt_compute_credentials():
                 patch.dict(os.environ, {}, clear=False),
             ):
                 os.environ.pop("CODEX_AUTH_PATH", None)
-                asyncio.run(bench._refresh_local_compute_tokens_for_run("http://localhost:3001", tasks=tasks))
+                await bench._refresh_local_compute_tokens_for_run("http://localhost:3001", tasks=tasks)
                 # A later per-task overlay sync must not hand the GPT credential back.
                 assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True)
             observed[label] = (leasable("claude_code"), leasable("gpt_code"))
@@ -26232,7 +26232,7 @@ async def run_all_tests():
         "cloudbench_demo_cache_on_guest_read_only_like_local",
         test_cloudbench_demo_cache_on_guest_is_read_only_like_local,
     )
-    r.record(
+    await r.record_async(
         "claude_code_only_run_withholds_gpt_compute_credentials",
         test_claude_code_only_run_withholds_gpt_compute_credentials,
     )

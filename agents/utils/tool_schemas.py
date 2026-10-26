@@ -63,6 +63,14 @@ RUN_IN_BACKGROUND_DESCRIPTION = (
     "or pass it to the agent with send_message_to_agent. A foreground agent (false) holds your turn, "
     "so messages the user sends meanwhile are read only after it returns."
 )
+# The planner reads spawn_agent's schema only as documentation (plan tasks carry
+# no arguments) and cannot assign send_message_to_agent, so its copy keeps the
+# tool-neutral wording.
+PLANNER_RUN_IN_BACKGROUND_DESCRIPTION = (
+    "Default true: the call returns immediately with the agent's address and the agent keeps "
+    "working while you continue. Set false only when you need this agent's result before you can "
+    "do anything else."
+)
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
@@ -1277,6 +1285,18 @@ class SpawnAgentRoseDesktopTool(SpawnAgentTool):
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
         description=SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP
     )
+
+
+class PlannerSpawnAgentTool(SpawnAgentTool):
+    run_in_background: bool = Field(default=True, description=PLANNER_RUN_IN_BACKGROUND_DESCRIPTION)
+
+
+class PlannerSpawnAgentRoseDesktopTool(SpawnAgentRoseDesktopTool):
+    run_in_background: bool = Field(default=True, description=PLANNER_RUN_IN_BACKGROUND_DESCRIPTION)
+
+
+PLANNER_TOOL_MODEL_OVERRIDES = {"spawn_agent": PlannerSpawnAgentTool}
+PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES = {"spawn_agent": PlannerSpawnAgentRoseDesktopTool}
 
 
 class SpawnAgentToolNoGP(BaseModel):

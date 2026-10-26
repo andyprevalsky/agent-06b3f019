@@ -29,7 +29,14 @@ from providers.rose.inter_agent_context import inter_agent_message, settle_trail
 from providers.rose.pools import PLANNER_MODEL
 from tools.prompts import tool_prompts_for
 from utils.simulated_clock import world_time_cursor_ms
-from utils.tool_schemas import PLAN_PHASE_TOOLS, PLANNER_EXECUTE_TOOLS, ROSE_DESKTOP_TOOL_MODELS, TOOL_MODELS
+from utils.tool_schemas import (
+    PLAN_PHASE_TOOLS,
+    PLANNER_EXECUTE_TOOLS,
+    PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES,
+    PLANNER_TOOL_MODEL_OVERRIDES,
+    ROSE_DESKTOP_TOOL_MODELS,
+    TOOL_MODELS,
+)
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
 PLANNER_CONTEXT_HEAD_CHARS = 3000
@@ -332,7 +339,11 @@ def get_planner_tools_description(*, rose_desktop: bool = False) -> str:
     ``rose_desktop`` (``utils.rose_desktop``) renders the Rose Desktop schemas
     and fragments; the default is the stock text.
     """
-    models = {**TOOL_MODELS, **ROSE_DESKTOP_TOOL_MODELS} if rose_desktop else TOOL_MODELS
+    models = (
+        {**TOOL_MODELS, **ROSE_DESKTOP_TOOL_MODELS, **PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES}
+        if rose_desktop
+        else {**TOOL_MODELS, **PLANNER_TOOL_MODEL_OVERRIDES}
+    )
     prompts = tool_prompts_for(rose_desktop=rose_desktop)
     sections = []
     for name in PLANNER_EXECUTE_TOOLS:
