@@ -335,10 +335,34 @@ test('GET /:id/tree — paths, path nodes and background tasks (running and fini
       `task node view, got ${JSON.stringify(taskNode)}`
     );
 
+    // Search covers the same subtree the node view lists, background tasks included.
     const prefix = await getView(fx.userId, ids.root, { path_prefix: '/root/outreach' });
     assert(
-      same(idsOf(prefix.matches ?? []), [ids.outreach, ids.draftA, ids.draftB, ids.aKid]),
+      same(idsOf(prefix.matches ?? []), [
+        ids.outreach,
+        ids.draftA,
+        ids.draftB,
+        '/root/outreach/scan',
+        '/root/outreach/old',
+        ids.aKid,
+      ]),
       `path_prefix lists that subtree only: ${JSON.stringify(idsOf(prefix.matches ?? []))}`
+    );
+    // A prefix naming a task (here from another branch) finds it, finished or not.
+    const exact = await getView(fx.userId, ids.aKid, { path_prefix: '/root/outreach/old' });
+    const [old] = exact.matches ?? [];
+    assert(
+      exact.matches?.length === 1 &&
+        old.agent_id === '/root/outreach/old' &&
+        old.type === 'explore' &&
+        old.status === 'completed' &&
+        same(old.ancestor_ids, [ids.root, ids.outreach]),
+      `path_prefix naming a task finds it: ${JSON.stringify(exact.matches)}`
+    );
+    const byGoal = await getView(fx.userId, ids.draftA, { q: 'venue NEWS' });
+    assert(
+      same(idsOf(byGoal.matches ?? []), ['/root/outreach/scan', '/root/outreach/old']),
+      `goal search matches task goals: ${JSON.stringify(idsOf(byGoal.matches ?? []))}`
     );
 
     await prisma.agent.update({ where: { id: ids.outreach }, data: { status: 'COMPLETED' } });

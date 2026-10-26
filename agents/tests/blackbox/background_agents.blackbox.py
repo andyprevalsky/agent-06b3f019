@@ -437,6 +437,8 @@ async def test_parent_finish_stops_pending_background_agents():
         activities.append(name)
         if name == "generate_completion_summary":
             return {"summary": "Trip planned", "tool_counts": {}, "usage": {}}
+        if name == "fetch_agent_config":
+            return {}  # completion re-reads the agent row's output schema; this task has none
         return None
 
     with (
@@ -968,6 +970,12 @@ def test_list_agents_marks_deep_caller_and_renders_search_breadcrumbs():
         "matches": [
             {**chain[2], "ancestor_ids": ["id-root", "id-out"], "child_count": 1, "active_child_count": 1},
             {**_view_node("id-legacy", None, "id-x", 2, "Sequoia follow-up"), "ancestor_ids": ["id-root", "id-x"]},
+            # A background task matches as itself, not as an agent (backend search covers tasks).
+            {
+                **_view_node("/root/outreach/scan", "/root/outreach/scan", "id-out", 2, "Scan Sequoia news", "completed"),
+                "type": "browser",
+                "ancestor_ids": ["id-root", "id-out"],
+            },
         ],
     }
     lines = render_agent_view(search, self_agent_id="id-out", query={"q": "sequoia"}).splitlines()
@@ -975,6 +983,7 @@ def test_list_agents_marks_deep_caller_and_renders_search_breadcrumbs():
         'Matches for "sequoia" (shallowest first):',
         '- /root/outreach/draft_a [your child] agent ACTIVE: Draft email to Sequoia (1 child, 1 active) → list_agents(node="/root/outreach/draft_a")',
         "- id-legacy [other branch] agent ACTIVE: Sequoia follow-up (under id-root › id-x)",
+        "- /root/outreach/scan [your task] browser completed: Scan Sequoia news",
     ], lines
     empty = render_agent_view({**search, "matches": []}, self_agent_id="id-out", query={"path_prefix": "/root/budget"})
     assert empty.splitlines()[-1] == "No agents in this tree match under /root/budget."

@@ -62,7 +62,7 @@ export interface TreeView {
   nodes: TreeNode[];
   next_cursor: string | null;
   sibling_next_cursor: string | null;
-  matches?: Array<PathEntry & { ancestor_ids: string[] }>;
+  matches?: Array<PathEntry & { ancestor_ids: string[]; type?: string }>;
 }
 
 const LONG_GOAL = `Coordinate venue outreach ${'and follow-ups '.repeat(25)}`;
