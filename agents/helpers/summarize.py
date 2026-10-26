@@ -835,8 +835,8 @@ Output the summary only — no preamble."""
 # Main-content markdown can omit facts a page declares only in its <head>
 # (the RFC Editor states a publication date only in citation_publication_date).
 # Like Hermes and OpenClaw, keep an explicit allowlist: the title, then one
-# validated publication date and one validated modified date. Every other
-# provider key (og:*, citation_reference lists, extract/session IDs) is dropped.
+# validated publication date. Every other provider key (og:*, citation_reference
+# lists, extract/session IDs) is dropped.
 # Lookups are case-insensitive because HTML meta names are; earlier names win.
 _PAGE_TITLE_KEYS = ("title",)
 _PAGE_PUBLISHED_KEYS = (
@@ -849,10 +849,11 @@ _PAGE_PUBLISHED_KEYS = (
     "publishedTime",
     "publish_date",  # Parallel Extract
 )
-_PAGE_MODIFIED_KEYS = ("article:modified_time", "dateModified", "modifiedTime")
-# OpenClaw web_fetch bounds: 256 chars per field, 512 for all metadata.
+# OpenClaw web_fetch bounds (src/agents/tools/web-fetch.ts:75-76): 256 chars
+# per field, 512 for all metadata.
 _PAGE_METADATA_VALUE_CHARS = 256
 _PAGE_METADATA_BLOCK_CHARS = 512
+# ISO dates plus slash dates: citation_publication_date uses YYYY/MM/DD (or YYYY).
 _PAGE_DATE_RE = re.compile(
     r"^(?P<year>\d{4})(?:(?P<sep>[-/])(?P<month>\d{1,2})(?:(?P=sep)(?P<day>\d{1,2})(?P<time>[T ][\d:.+Z-]{1,20})?)?)?$"
 )
@@ -883,8 +884,8 @@ def _is_page_metadata_date(value: str) -> bool:
 def select_page_metadata(metadata: Any) -> Dict[str, str]:
     """The allowlisted page facts from scrape metadata, title first.
 
-    Returns at most ``title``, one publication date and one modified date,
-    keyed by the matching allowlist name. Dates must parse; values are
+    Returns at most ``title`` and one publication date, keyed by the
+    matching allowlist name. Dates must parse; values are
     sanitized to one line and bounded to the OpenClaw-like caps.
     """
     if not isinstance(metadata, dict):
@@ -907,7 +908,6 @@ def select_page_metadata(metadata: Any) -> Dict[str, str]:
     for found in (
         first(_PAGE_TITLE_KEYS, lambda _value: True),
         first(_PAGE_PUBLISHED_KEYS, _is_page_metadata_date),
-        first(_PAGE_MODIFIED_KEYS, _is_page_metadata_date),
     ):
         if found is None:
             continue

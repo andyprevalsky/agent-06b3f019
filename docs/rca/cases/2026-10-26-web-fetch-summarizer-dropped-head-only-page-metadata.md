@@ -48,8 +48,9 @@ reproduced by the new blackbox tests, which fail on fcf75dcff.
 ## Solution
 
 `select_page_metadata` keeps an explicit allowlist. It returns the title first,
-then one publication date and one modified date that parse as dates, picked
-from well-known keys. Values are limited to 256 characters each and 512 in
+then one publication date that parses as a date, picked from well-known keys
+(no modified date: no reference shows one, and it could be misreported as the
+publication month). Values are limited to 256 characters each and 512 in
 total, with control characters removed. The handler sends only this subset.
 The prompt is byte-identical when no listed field exists. The
 summarize_web_fetch demo-cache content key leaves out the PAGE METADATA block,

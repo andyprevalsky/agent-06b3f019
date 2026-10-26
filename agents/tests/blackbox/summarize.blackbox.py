@@ -1060,7 +1060,7 @@ async def test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_pag
 
     A scholarly page carries dozens of citation_* tags, og:/twitter: copies,
     keywords, robots, verification tokens and app IDs. The summarizer must see
-    exactly the title, one publication date and one modified date; a sorted
+    exactly the title and one publication date; a sorted
     denylist dropped the title once earlier keys filled the budget.
     """
     metadata = {
@@ -1093,11 +1093,7 @@ async def test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_pag
     block = _metadata_block(await _summarizer_prompt(metadata))
 
     assert block.split("\n", 1)[0] == "title: RFC 9110: HTTP Semantics", block[:300]
-    assert block == (
-        "title: RFC 9110: HTTP Semantics\n"
-        "citation_publication_date: 2022/06/06\n"
-        "article:modified_time: 2023-01-02T03:04:05+00:00"
-    ), block
+    assert block == "title: RFC 9110: HTTP Semantics\ncitation_publication_date: 2022/06/06", block
 
 
 async def test_summarize_page_metadata_excludes_parallel_extract_ids():
@@ -1187,17 +1183,17 @@ async def test_summarize_page_metadata_keeps_demo_cache_content_key():
         return normalize.content_key("demo goal", "summarize_web_fetch", material)
 
     without = await _summarizer_prompt()
-    with_title_and_dates = await _summarizer_prompt(
+    with_title_and_date = await _summarizer_prompt(
         {
             "title": "RFC 9110: HTTP Semantics",
             "citation_publication_date": "2022/06/06",
-            "article:modified_time": "2023-01-02T03:04:05+00:00",
+            "dateModified": "2023-01-02",
         }
     )
     title_only = await _summarizer_prompt({"title": "RFC 9110: HTTP Semantics"})
 
-    assert with_title_and_dates != without
-    assert key(with_title_and_dates) == key(without)
+    assert with_title_and_date != without
+    assert key(with_title_and_date) == key(without)
     assert key(title_only) == key(without)
     assert key(without.replace("Internet Standard", "Proposed Standard")) != key(without)
 

@@ -74,14 +74,14 @@ _SECRET_FIELDS = {
 _REQUEST_PARTITION_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
 _SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 _USER_CONTEXT_PREFIX = "# User Context"
-# summarize_web_fetch prompts carry a PAGE METADATA block (title and dates)
+# summarize_web_fetch prompts carry a PAGE METADATA block (title and date)
 # derived from the same replayed web_fetch row as their PAGE CONTENT. It is
 # excluded from the key so rows recorded before the block existed still hit.
 # Bound to helpers/summarize.py by the summarize blackbox key-parity test.
 _SWF_PROMPT_PREFIX = "You are filtering a fetched web page for an autonomous agent."
 _SWF_PAGE_METADATA_BLOCK_RE = re.compile(
     r"\nPAGE METADATA \(declared by the page, e\.g\. <meta> tags\):\n---\n"
-    r"[^\n]*(?:\n[^\n]*){0,2}\n---\n\n(?=PAGE CONTENT \(markdown\):\n)"
+    r"[^\n]*(?:\n[^\n]*){0,1}\n---\n\n(?=PAGE CONTENT \(markdown\):\n)"
 )
 # Planner memories are a live-history fork, so their presence and contents must
 # not key otherwise-identical planner replays.
