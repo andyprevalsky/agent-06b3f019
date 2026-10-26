@@ -1055,7 +1055,15 @@ async def _load_browser_resume_user_instructions(
         row_metadata = row.get("metadata") or {}
         if str(row.get("role") or "").upper() != "USER" or row_metadata.get("hidden"):
             continue
-        if is_agent_authored_user_metadata(row_metadata) or row_metadata.get("excludeFromModel"):
+        # A Browser-composer message names this task (browserTaskId) and is hidden
+        # from the owner's model (excludeFromModel); it is this browser's input.
+        addressed_here = (
+            resume_state.get("task_id") is not None
+            and row_metadata.get("browserTaskId") == resume_state.get("task_id")
+        )
+        if is_agent_authored_user_metadata(row_metadata) or (
+            row_metadata.get("excludeFromModel") and not addressed_here
+        ):
             # Agent notifications / agent messages on the owner are never user input.
             if row_metadata.get("agentMessage") is True and row_metadata.get("recipientTaskId"):
                 agent_message_rows.append(row)

@@ -43,7 +43,13 @@ import { CODE_SESSION_SHARE_TARGET_NOT_FOUND, CreateAgentError } from '@/lib/api
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
-import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
+import type {
+  FilePointer,
+  AgentDetail,
+  MessageTarget,
+  PendingAgentCreationInput,
+  TerminalView,
+} from '../types';
 
 export interface UseMessageSendingArgs {
   selectedAgentId: string | null;
@@ -223,7 +229,7 @@ export function useMessageSending({
   }, [agentDetail?.model]);
 
   const handleSendMessage = useCallback(
-    async (attachments?: FilePointer[]) => {
+    async (attachments?: FilePointer[], target?: MessageTarget) => {
       const trimmed = messageInput.trim();
       if (!trimmed && (!attachments || attachments.length === 0)) return;
 
@@ -303,7 +309,8 @@ export function useMessageSending({
 
         // The backend lifts a user pause after delivering the message, so the
         // woken workflow always has it; resuming here first would not.
-        await postMessage(selectedAgentId, messageInput, attachments);
+        // A Browser-composer target goes straight to that browser task.
+        await postMessage(selectedAgentId, messageInput, attachments, target);
         setMessageInput('');
         if (agentDetail?.status === 'PAUSED') {
           toast({

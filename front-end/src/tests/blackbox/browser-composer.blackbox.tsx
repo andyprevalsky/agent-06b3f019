@@ -8,6 +8,7 @@ import {
   RoseAppsContext,
   type RoseAppsValue,
 } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
+import { postMessage } from '@/lib/api/messages';
 import { renderWithProviders } from './test-wrapper';
 
 vi.mock('@/lib/api/messages', async (original) => ({
@@ -122,6 +123,45 @@ it('does not attach the agents-running header to the Browser composer', () => {
   expect(screen.getByTestId('background-agents-banner')).toBeInTheDocument();
 });
 
+it('sends from the Browser composer straight to its browser task', async () => {
+  const onSubmit = vi.fn();
+  const tree = (open: boolean) => (
+    <RoseAppsContext.Provider value={browser(open ? {} : { openApp: null })}>
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        value="go to instacart instead"
+        onChange={vi.fn()}
+        onSubmit={onSubmit}
+      />
+    </RoseAppsContext.Provider>
+  );
+  const view = renderWithProviders(tree(true));
+  fireEvent.click(
+    within(screen.getByTestId('browser-query-input')).getByRole('button', { name: 'Send' }),
+  );
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(undefined, { browserTaskId: 'browser-task' });
+  // The owner's own composer keeps addressing the agent itself.
+  onSubmit.mockClear();
+  view.rerender(tree(false));
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(undefined);
+
+  const fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response(JSON.stringify({ message_id: 'm1' }), { status: 201 }));
+  await postMessage('owner', 'go to instacart instead', undefined, {
+    browserTaskId: 'browser-task',
+  });
+  const [url, init] = fetchSpy.mock.calls[0];
+  expect(String(url)).toMatch(/\/agents\/owner\/messages$/);
+  expect(JSON.parse(String(init?.body))).toEqual({
+    message: 'go to instacart instead',
+    browser_task_id: 'browser-task',
+  });
+  fetchSpy.mockRestore();
+});
+
 it('keeps the root composer controls when the Browser drawer is closed', () => {
   renderWithProviders(
     <RoseAppsContext.Provider value={browser({ openApp: null })}>
@@ -155,9 +195,10 @@ it('retains draft files when moving between the owner composer and Browser, and 
   expect(box.getByText('notes.txt')).toBeVisible();
   expect(box.getByRole('textbox')).toHaveValue('draft');
   fireEvent.click(box.getByRole('button', { name: 'Send' }));
-  expect(onSubmit).toHaveBeenCalledExactlyOnceWith([
-    { id: 'file-pointer', original_filename: 'notes.txt' },
-  ]);
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+    [{ id: 'file-pointer', original_filename: 'notes.txt' }],
+    { browserTaskId: 'browser-task' },
+  );
 });
 
 it('keeps the native code composer usable on its original direct channel in Browser', () => {

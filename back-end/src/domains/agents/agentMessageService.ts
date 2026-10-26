@@ -174,6 +174,59 @@ export async function deliverAgentGraphMessage(
 // Post message
 // ---------------------------------------------------------------------------
 
+/** The agent exists (and is the caller's, for user writes) and attachments fit. */
+async function validatePostTarget(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  userId?: string
+): Promise<{ error: string; status: number } | null> {
+  const agent = isInternal
+    ? await repo.findAgentById(agentId)
+    : await repo.findAgent(agentId, userId);
+  if (!agent) return { error: 'Agent not found', status: 404 };
+  if (body.attachments !== undefined && body.attachments.length > 0) {
+    try {
+      validateTotalSize(body.attachments as FilePointer[]);
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Invalid attachments',
+        status: 400,
+      };
+    }
+  }
+  return null;
+}
+
+const ENDED_BROWSER_TASK_STATUSES = new Set(['CLOSED', 'ERROR']);
+
+/**
+ * `browser_task_id` (user Browser composer) addresses one running browser task
+ * of this agent. The stored row carries `browserTaskId` (the tag the browser's
+ * instruction read already filters on) and `excludeFromModel` (the owner's
+ * model and loop skip it). One primary-key read per message.
+ */
+async function resolveBrowserTarget(
+  agentId: string,
+  body: PostMessageBody,
+  role: string,
+  isInternal: boolean
+): Promise<{ metadata: Record<string, unknown> } | { error: string; status: number } | null> {
+  const browserTaskId = body.browser_task_id;
+  if (browserTaskId === undefined) return null;
+  if (isInternal || role !== 'USER') {
+    return { error: 'browser_task_id is only valid on user messages', status: 400 };
+  }
+  const task = await repo.findAgentBrowserTask(agentId, browserTaskId);
+  if (task === null) return { error: 'Browser task not found', status: 404 };
+  if (ENDED_BROWSER_TASK_STATUSES.has(task.status)) {
+    return { error: 'Browser task has ended', status: 409 };
+  }
+  return {
+    metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
+  };
+}
+
 /**
  * A stale TOOL write must TELL the worker it is dead.
  *
@@ -224,36 +277,18 @@ export async function postMessage(
   }
   const { role } = roleResult;
 
-  // Verify agent exists
-  if (isInternal) {
-    const agent = await repo.findAgentById(agentId);
-    if (!agent) {
-      return { error: 'Agent not found', status: 404 };
-    }
-  } else {
-    const agent = await repo.findAgent(agentId, userId);
-    if (!agent) {
-      return { error: 'Agent not found', status: 404 };
-    }
-  }
+  const invalid = await validatePostTarget(agentId, body, isInternal, userId);
+  if (invalid !== null) return invalid;
 
-  // Validate attachments if provided
-  if (body.attachments !== undefined && body.attachments.length > 0) {
-    try {
-      validateTotalSize(body.attachments as FilePointer[]);
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : 'Invalid attachments',
-        status: 400,
-      };
-    }
-  }
+  const browserTarget = await resolveBrowserTarget(agentId, body, role, isInternal);
+  if (browserTarget !== null && 'error' in browserTarget) return browserTarget;
+  const metadata = browserTarget === null ? body.metadata : browserTarget.metadata;
 
   const messageParams = {
     agentId,
     text: body.message,
     role,
-    metadata: body.metadata,
+    metadata,
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
   };
   let message;
@@ -292,6 +327,7 @@ export async function postMessage(
           text: '',
           role,
           filePointer: attachment as Record<string, unknown>,
+          ...(browserTarget === null ? {} : { metadata: browserTarget.metadata }),
         });
       }
     }
@@ -300,7 +336,13 @@ export async function postMessage(
   // Agent-authored USER rows (background-agent notifications, agent-to-agent
   // messages) are polled by the owning workflow, which already woke itself;
   // echoing them back as receive_user_response would read as user feedback.
-  if (role === 'USER' && !(isInternal && isAgentAuthoredRow(body.metadata))) {
+  // A Browser-composer message belongs to that browser task: the browser reads
+  // it at its next step, so the owner's loop is never signalled for it.
+  if (
+    role === 'USER' &&
+    browserTarget === null &&
+    !(isInternal && isAgentAuthoredRow(body.metadata))
+  ) {
     await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
   }
 

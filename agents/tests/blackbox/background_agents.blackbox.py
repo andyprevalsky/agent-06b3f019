@@ -2288,11 +2288,57 @@ def test_browser_and_code_background_waits_use_the_pause_check():
         assert "or tool_stop_requested(workflow_instance, tool_call_id)" in source, module.__name__
 
 
+async def test_browser_composer_message_reaches_its_browser_not_the_root():
+    """A Browser-composer row (browserTaskId + excludeFromModel) is that browser's next-step input only."""
+    from unittest.mock import AsyncMock
+
+    from _test_utils import native_browser_start_source
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.context_compaction import is_excluded_from_model
+    from loop.dag_executor import is_dag_interrupt_message
+    from loop.run_agent import _real_user_requirement_keys
+
+    start = await native_browser_start_source("2026-10-26T15:59:09+00:00")
+    direct = {
+        "id": "direct",
+        "timestamp": "2026-10-26T15:59:40Z",
+        "role": "USER",
+        "text": "go to instacart instead",
+        "metadata": {"browserTaskId": "task-1", "excludeFromModel": True},
+    }
+    executor_row = {
+        "id": "executor",
+        "timestamp": "2026-10-26T15:59:41Z",
+        "role": "USER",
+        "text": "UI-only background executor row",
+        "metadata": {"excludeFromModel": True},
+    }
+    task = {"tool_call_id": "tool-1"}
+    poll = AsyncMock(return_value=[start, direct, executor_row])
+    with patch.object(h, "poll_new_messages", poll):
+        state = await h._load_browser_resume_user_instructions("agent-1", {**task, "task_id": "task-1"})
+    assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "go to instacart instead"}], state
+    assert state["user_instruction_message_ids"] == ["direct"]
+    # Another browser of the same owner does not take it as its instruction.
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[start, direct])):
+        other = await h._load_browser_resume_user_instructions("agent-1", {**task, "task_id": "task-2"})
+    assert other["user_instruction_messages"] == []
+    # The owner: hidden from its model, no DAG interrupt (no new root turn), no new requirement.
+    assert is_excluded_from_model(direct)
+    assert is_dag_interrupt_message(direct) is False
+    assert _real_user_requirement_keys([direct]) == set()
+
+
 async def run_all_tests():
     print("background_agents blackbox tests:")
     r = BlackboxResult()
     await r.record_async(
         "bg_spawn_returns_immediately_notifies_once", test_background_spawn_returns_immediately_and_notifies_once
+    )
+    await r.record_async(
+        "browser_composer_message_reaches_browser_not_root",
+        test_browser_composer_message_reaches_its_browser_not_the_root,
     )
     await r.record_async(
         "bg_notification_keeps_run_during_wake",
