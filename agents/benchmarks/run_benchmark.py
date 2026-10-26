@@ -362,6 +362,12 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     "agent-payment-setup-resume",
     "sms-supervisor-fill-form-searches-then-delegates",
 }
+# Trajectory-recall tasks answer from prior agent runs in the canonical base
+# image. A local batch shares one stack DB, so a task that finished earlier in
+# the batch (claude-code-agent's fresh Collatz run) becomes the newest prior
+# trajectory and changes the correct answer. These tasks run in the serial
+# exclusive phase, and each starts from the base image's trajectory index.
+BASE_TRAJECTORY_HISTORY_SOURCE = "feature:agent-trajectories"
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
 MESSAGE_PERSON_AGENT_SMS_TASK_NAME = "message-person-agent-sms"
@@ -7816,6 +7822,58 @@ def _grep_base_snapshot_path() -> Path:
     if configured:
         return Path(configured).expanduser()
     return REPO_ROOT / ".context" / "benchmarks" / "grep-base-snapshot.sql"
+
+
+def _reads_base_trajectory_history(task: BenchmarkTask) -> bool:
+    return BASE_TRAJECTORY_HISTORY_SOURCE in (getattr(task, "source", None) or [])
+
+
+def _isolated_stack_database_url() -> Optional[str]:
+    """Return the active per-run stack DB, never a workspace or prod fallback."""
+    try:
+        services = json.loads((_benchmark_context_path() / "services.json").read_text())
+        if not isinstance(services, dict) or not _services_manifest_is_active(services):
+            return None
+        return manifest_database_url(services)
+    except (OSError, ValueError):
+        return None
+
+
+def _restore_base_trajectory_history(batch_started_at: datetime) -> Optional[int]:
+    """Drop trajectory-index rows this batch wrote; base-image rows predate it.
+
+    Returns the number of removed rows, or None when no isolated stack DB is
+    active (a reused or remote stack cannot be scoped this way).
+    """
+    database_url = _isolated_stack_database_url()
+    if database_url is None:
+        return None
+    sql = (
+        'WITH removed AS (DELETE FROM "AgentTrajectorySearch" '
+        # createdAt is a UTC TIMESTAMP(3); compare in UTC regardless of server TimeZone.
+        f'WHERE "createdAt" >= ({_sql_literal(batch_started_at.isoformat())}::timestamptz AT TIME ZONE \'UTC\') '
+        "RETURNING 1) "
+        "SELECT COUNT(*) FROM removed;"
+    )
+    result = subprocess.run(
+        ["psql", database_url, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Trajectory history restore failed: {result.stderr.strip()}")
+    return int(result.stdout.strip().splitlines()[-1])
+
+
+def _prepare_base_trajectory_history(task: BenchmarkTask, base_url: str, batch_started_at: datetime) -> None:
+    if not _reads_base_trajectory_history(task) or not _is_local_base_url(base_url):
+        return
+    removed = _restore_base_trajectory_history(batch_started_at)
+    if removed is None:
+        print(f"    ⚠ {task.name}: no isolated stack DB; earlier runs stay visible to trajectory recall")
+    else:
+        print(f"    🧹 {task.name}: restored base trajectory history ({removed} batch row(s) removed)")
 
 
 def _run_local_db_process(args: List[str], *, stdin_path: Optional[Path] = None, timeout: int = 120) -> str:
@@ -17002,6 +17060,8 @@ def _parallel_task_phases(
     root future settles therefore is not isolated: the descendant can recreate
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
+    Trajectory-recall tasks join it for the same reason: no sibling may finish
+    and become a prior run while they search history.
 
     ``browser-biometrics-webdecoy`` stays exclusive even when
     ``BENCHMARK_ISOLATED_BROWSER_PROFILES`` is on: isolation protects saved
@@ -17009,8 +17069,13 @@ def _parallel_task_phases(
     pointer timing and produce the timeout-on-retry class.
     """
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
-    exclusive = [task for task in tasks if task.name in exclusive_names]
-    parallel = [task for task in tasks if task.name not in exclusive_names]
+
+    def is_exclusive(task: BenchmarkTask) -> bool:
+        # A sibling that finishes mid-run would become a newer prior trajectory.
+        return task.name in exclusive_names or _reads_base_trajectory_history(task)
+
+    exclusive = [task for task in tasks if is_exclusive(task)]
+    parallel = [task for task in tasks if not is_exclusive(task)]
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
@@ -17407,6 +17472,7 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
+            await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)
             sms_options = {}
             if getattr(task, "runner", "agent") == "sms":
                 sms_options["other_task_roots"] = lambda: {aid for ids in _live_task_agent_ids.values()
@@ -17437,6 +17503,7 @@ async def main_async(args):
             pass
 
     owned_batch_cleanup = cloud_batch_cleanup.contract() is not None
+    batch_started_at = datetime.now(timezone.utc)
     if owned_batch_cleanup:
         _begin_interrupt_cleanup()
     _report_ticker_task = asyncio.create_task(_report_ticker())
@@ -17475,7 +17542,7 @@ async def main_async(args):
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Running {len(exclusive_db_tasks)} destructive DB fixture task(s) before the parallel phase: {names}"
+                    f"\n  Running {len(exclusive_db_tasks)} exclusive task(s) before the parallel phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
@@ -17496,7 +17563,7 @@ async def main_async(args):
             pending: set[asyncio.Task] = set()
             try:
                 for task in exclusive_db_tasks:
-                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
+                    print(f"\n  Running exclusive task serially: {task.name}")
                     result = await _run_with_sandbox_payment_lock(
                         task,
                         lambda: _run_reported_task(
