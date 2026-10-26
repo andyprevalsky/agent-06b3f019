@@ -33,6 +33,7 @@ import {
   withAgentTools,
 } from '../../providers/agentTools/workspace';
 import { MOBBIN_MCP_TOKEN_ENV, MOBBIN_MCP_URL } from '../../providers/agentTools/mobbin';
+import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
 import { localHomeFromWorkspace } from '../../providers/localDevices/homeFiles';
 import type { UserUiWorkspace } from '../../providers/userUi/workspace';
 
@@ -272,4 +273,16 @@ test('with MOBBIN_MCP_TOKEN: Codex gets the Mobbin server by env bearer, search 
     overrides.some((o) => o.startsWith('mcp_servers.rose.command')),
     'rose MCP kept'
   );
+});
+
+test('the code-agent prompt points at Mobbin only when the session has it', () => {
+  const line = /search the mobbin MCP tools/;
+  assert.match(buildCodeAgentSystemPrompt({ mobbin: true }), line);
+  assert.doesNotMatch(buildCodeAgentSystemPrompt({ mobbin: false }), line);
+  // Default: the backend's token, the same signal that installs the server.
+  process.env[MOBBIN_MCP_TOKEN_ENV] = SECRET;
+  assert.match(buildCodeAgentSystemPrompt({}), line);
+  assert.ok(!buildCodeAgentSystemPrompt({}).includes(SECRET), 'the prompt never holds the token');
+  delete process.env[MOBBIN_MCP_TOKEN_ENV];
+  assert.doesNotMatch(buildCodeAgentSystemPrompt({}), line);
 });
