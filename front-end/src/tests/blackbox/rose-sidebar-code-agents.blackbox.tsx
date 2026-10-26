@@ -333,11 +333,6 @@ describe('Rose left bar code agents (flag on)', () => {
     await openCodeRow('cc-sub');
     await openCodeRow('cc-fix');
     expect(barRowOrder()).toEqual([
-      'agent:home-run',
-      'code-agent:cc-build',
-      'code-agent:cc-fix',
-      'agent:orphan',
-      'agent:home-done',
       'project:p-rose',
       'agent:rose-run',
       'agent:rose-sub',
@@ -345,6 +340,11 @@ describe('Rose left bar code agents (flag on)', () => {
       'agent:rose-fail',
       'project:p-habits',
       'agent:habits-done',
+      'agent:home-run',
+      'code-agent:cc-build',
+      'code-agent:cc-fix',
+      'agent:orphan',
+      'agent:home-done',
     ]);
     expect(codeAgentRequests()).toHaveLength(1);
     expect(new Set(codeAgentRequests()[0])).toEqual(new Set(AGENTS.map((a) => a.agent_id)));

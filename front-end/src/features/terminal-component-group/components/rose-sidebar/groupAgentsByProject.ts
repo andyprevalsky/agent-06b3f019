@@ -1,8 +1,8 @@
 /**
- * Pure grouping for the Rose Desktop left bar (UI ledger row 57):
- * Home (root project) agents first, then one group per project in the order the
- * Projects API returns them, with Rose first. An agent whose `project_id` is missing, null or
- * not a known project belongs to Home.
+ * Pure grouping for the Rose Desktop left bar (UI ledger row 57): one group per
+ * project in the order the Projects API returns them, with Rose first, plus the
+ * Home (root project) agents. The bar renders the projects above Home. An agent
+ * whose `project_id` is missing, null or not a known project belongs to Home.
  */
 
 import type { Project } from '@/lib/api/projects';

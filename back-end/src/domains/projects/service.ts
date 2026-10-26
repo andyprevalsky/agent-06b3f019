@@ -12,10 +12,13 @@
  *
  * 10k-agent behaviour: every call touches one user's project rows (bounded by
  * PROJECT_LIST_LIMIT / MAX_ENV_FILES); listing uses one query with counts.
+ * Rose dev accounts get their "Rose" project set up on list (roseProject.ts).
  */
+import { createLogger } from '../../providers/logger';
 import type { EnvVariableMeta } from '../../providers/projects/envFile';
 import { sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
+import { applyRoseProjectSetup, planRoseProjectSetup } from './roseProject';
 import type { CreateProjectBody, UpdateProjectBody } from './types';
 
 export class ProjectError extends Error {
@@ -170,12 +173,32 @@ function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2002';
 }
 
+const log = createLogger('Projects');
+
 export async function listProjects(userId: string): Promise<{ projects: ProjectDto[] }> {
-  const rows = await repo.listProjects(userId);
-  const connected = await repo.findGithubConnectedRepoUrls(
+  let rows = await repo.listProjects(userId);
+  let connected = await repo.findGithubConnectedRepoUrls(
     userId,
     rows.map((row) => row.repoUrl)
   );
+  const rosePlan = planRoseProjectSetup(userId, rows, connected);
+  if (rosePlan !== null) {
+    log.info('Setting up the Rose project', { userId, ...rosePlan });
+    try {
+      await applyRoseProjectSetup(userId, rosePlan);
+    } catch (error) {
+      // Listing never depends on the setup; the next list retries it.
+      log.error('Rose project setup failed', {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    rows = await repo.listProjects(userId);
+    connected = await repo.findGithubConnectedRepoUrls(
+      userId,
+      rows.map((row) => row.repoUrl)
+    );
+  }
   return {
     projects: rows.map((row) =>
       toProjectDto(row, row._count.envFiles, row.repoUrl !== null && connected.has(row.repoUrl))

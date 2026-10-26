@@ -95,6 +95,19 @@ describe('Rose projects in the left bar', () => {
     ).toBeInTheDocument();
   });
 
+  it('Projects sit at the top: project rows and + New project come before Home agents', async () => {
+    api = mockProjectsApi([makeProject({ id: 'p-site', name: 'Website' }), makeProject()]);
+    renderBar();
+    const rose = await screen.findByTestId('rose-project-row-p-rose');
+    const home = screen.getByTestId('rose-agent-row-a-home');
+    const precedesHome = (node: Element) =>
+      (node.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(precedesHome(rose)).toBe(true);
+    expect(precedesHome(screen.getByTestId('rose-project-row-p-site'))).toBe(true);
+    expect(precedesHome(screen.getByTestId('rose-agent-row-a-rose'))).toBe(true);
+    expect(precedesHome(screen.getByRole('button', { name: '+ New project' }))).toBe(true);
+  });
+
   it('+ New project creates inline: Enter creates, Escape cancels', async () => {
     const user = userEvent.setup();
     renderBar();
@@ -256,6 +269,12 @@ describe('Rose projects in the left bar', () => {
     );
     expect(lifecycle).toHaveTextContent('Startup script');
     expect(lifecycle).toHaveTextContent('set');
+    // No checkout-import/setup-helper block (Andy, 2026-10-26: "wtf is this part?").
+    expect(within(panel).queryByRole('region', { name: 'Development environment' })).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Download setup helper' })).toBeNull();
+    expect(panel).not.toHaveTextContent(
+      /Import your working checkout|Not imported yet|Checkout imported/,
+    );
 
     // Working in the panel collapses the bar (pointer left it); hover back to reach ⚙.
     expandBar();
