@@ -21,15 +21,18 @@
  *               terminal view), steer input, commit summary, paused state; see
  *               codeAgentChip.desktop.tsx). Maximize opens the code-agent view; no
  *               terminal and no saved-output read.
- * Flag off, or no snapshot → the stock branches below, unchanged.
+ * [DESKTOP, no snapshot] (older sessions) → status-only CollapsedChip: no terminal,
+ *               no Maximize / fullscreen, no saved-output read.
+ * Flag off → the stock branches below, unchanged.
  *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
  * presentational router: it picks one renderer branch per state.
  */
 
+import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { desktopChipState, useDesktopCodeAgent } from '../hooks/codeAgentSteering';
 import { type ClaudeCodeChipProps } from '../types';
-import { useClaudeCodeChip } from './claudeCodeChip.hooks';
+import { useClaudeCodeChip, type ClaudeCodeChipVM } from './claudeCodeChip.hooks';
 import { DesktopCodeAgentChip } from './codeAgentChip.desktop';
 import {
   CollapsedChip,
@@ -38,6 +41,25 @@ import {
   SpinningUpChip,
 } from './claudeCodeChip.renderers';
 
+/** Rose Desktop, an older session without a snapshot: status only, never a terminal view. */
+function DesktopStatusChip({ vm }: { vm: ClaudeCodeChipVM }) {
+  return (
+    <CollapsedChip
+      state={vm.chipState}
+      isExpanded={vm.isExpanded}
+      outputSchema={vm.outputSchema}
+      structuredResponse={vm.structuredResponse}
+      failureMessage={vm.failureMessage}
+      githubRepoUrl={vm.githubRepoUrl}
+      codeProvider={vm.codeProvider}
+      terminalTranscript=""
+      terminalContainerRef={vm.terminalContainerRef}
+      onToggleExpand={vm.toggleExpand}
+      terminal={false}
+    />
+  );
+}
+
 export default function ClaudeCodeChip({
   taskId,
   wsUrl,
@@ -45,12 +67,15 @@ export default function ClaudeCodeChip({
   forceShow = false,
   toolCallId,
 }: ClaudeCodeChipProps) {
+  const roseDesktop = useRoseDesktop();
   const desktop = useDesktopCodeAgent(taskId, toolCallId);
   const desktopMeta = desktop.meta;
-  // Rose Desktop shows no terminal output: it never reads the saved terminal output.
-  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow, desktopMeta?.provider ?? codeProvider, {
-    savedOutput: desktopMeta === null,
-  });
+  // A Rose Desktop snapshot drives the chip and shows no terminal output: no terminal
+  // WebSocket (an unbounded byte sink per live chip) and no saved-output read.
+  const socket = desktopMeta === null ? wsUrl : undefined;
+  const savedOutput = desktopMeta === null && !roseDesktop;
+  const provider = desktopMeta?.provider ?? codeProvider;
+  const vm = useClaudeCodeChip(taskId, socket, forceShow, provider, { savedOutput });
 
   if (vm.isFullscreen) {
     return (
@@ -76,6 +101,8 @@ export default function ClaudeCodeChip({
       />
     );
   }
+
+  if (roseDesktop) return <DesktopStatusChip vm={vm} />;
 
   if (vm.chipState === 'completed' || vm.chipState === 'failed') {
     return (

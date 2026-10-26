@@ -62,6 +62,9 @@ beforeEach(() => {
   signIn();
 });
 
+const FRAMED_REPLY =
+  '[Message from Root agent, agent_id root-agent-1. Reply with: rose-agents send root-agent-1 "<text>"]\n\nThanks, close the session.';
+
 describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
   const SENT = () => a2aTimelineMessage('sent', 'Tests pass; ready to merge.', 'm-sent');
   const RECEIVED = () => a2aTimelineMessage('received', 'Merge it after the scorecard.', 'm-recv');
@@ -309,6 +312,8 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     const mirror = { ...sent, message_id: 'a2a-1-mirror' };
     const reply = a2aTimelineMessage('received', 'Thanks, close the session.', 'a2a-2');
     reply.timestamp = new Date(1700).toISOString();
+    // deliverToCodeAgent: the received row names the CLI turn it was delivered as.
+    (reply.metadata as Record<string, unknown>).code_turn_id = 'a2a-77c1';
     const messages = [
       eventsMessage([
         {
@@ -343,6 +348,18 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
           ts: 2000,
           turn_outcome: 'completed',
         },
+        // The session's own copy of Rose's reply: a sender-agent user turn, LLM-framed.
+        {
+          id: 'turn:a2a-77c1',
+          seq: 4,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          client_message_id: 'a2a-77c1',
+          turn_id: 'two',
+          text: FRAMED_REPLY,
+          ts: 2100,
+        },
       ]),
       sent,
       mirror,
@@ -367,14 +384,55 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(
       within(transcript).getByText('Chart BTC').closest('[data-message-role="USER"]'),
     ).not.toBeNull();
-    const slot = within(transcript).getByTestId('code-work-slot');
     expect(within(transcript).queryByTestId('a2a-row')).toBeNull();
-    fireEvent.click(within(slot).getByRole('button', { name: /Worked/ }));
-    const rows = within(slot).getAllByTestId('a2a-row');
-    expect(rows.map((r) => [r.getAttribute('data-a2a-direction'), r.textContent])).toEqual([
-      ['sent', 'Codex → RoseChart pushed to main.'],
-      ['received', 'Rose → CodexThanks, close the session.'],
+    // Codex's send folds into turn one; Rose's reply starts turn two (its CLI turn).
+    const [one, two] = within(transcript).getAllByTestId('code-work-slot');
+    fireEvent.click(within(one).getByRole('button', { name: /Worked/ }));
+    fireEvent.click(within(two).getByRole('button', { name: /Work/ }));
+    const row = (slot: HTMLElement) =>
+      within(slot)
+        .getAllByTestId('a2a-row')
+        .map((r) => [r.getAttribute('data-a2a-direction'), r.textContent]);
+    expect(row(one)).toEqual([['sent', 'Codex → RoseChart pushed to main.']]);
+    expect(row(two)).toEqual([['received', 'Rose → CodexThanks, close the session.']]);
+    // One copy only: the framed native record never renders.
+    expect(screen.queryByText(/Message from Root agent/)).toBeNull();
+    expect(screen.getAllByText('Thanks, close the session.')).toHaveLength(1);
+  });
+
+  it('the chip transcript shows a Rose → Codex message once, unframed, and the goal as Rose', () => {
+    const reply = a2aTimelineMessage('received', 'Thanks, close the session.', 'a2a-2');
+    (reply.metadata as Record<string, unknown>).code_turn_id = 'a2a-77c1';
+    renderChip([
+      chipMessage(),
+      eventsMessage([
+        {
+          id: 'goal',
+          seq: 0,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          text: 'Chart BTC',
+          ts: '2026-10-20T12:00:01.000Z',
+        },
+        {
+          id: 'turn:a2a-77c1',
+          seq: 1,
+          type: 'message',
+          role: 'user',
+          sender: 'agent',
+          client_message_id: 'a2a-77c1',
+          text: FRAMED_REPLY,
+          ts: '2026-10-20T12:00:30.000Z',
+        },
+      ]),
+      reply,
     ]);
+    const transcript = screen.getByTestId('code-agent-transcript');
+    expect(within(transcript).queryByText(/Message from Root agent/)).toBeNull();
+    expect(within(transcript).getAllByText(/Thanks, close the session\./)).toHaveLength(1);
+    expect(within(transcript).queryByText(/You → Codex/)).toBeNull();
+    expect(transcript).toHaveTextContent('Rose → Codex: Chart BTC');
   });
 
   it('keeps successful native send payloads behind details and leaves errors visible', () => {

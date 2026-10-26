@@ -14,8 +14,7 @@
  *                   backend has no user-callable retry/resume route).
  *
  * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
- *   else "Cloud". Mac app only (window.api.localCode) + local + running →
- *   "Open in Terminal" → window.api.localCode.openTerminal(taskId); hidden on web.
+ *   else "Cloud". No terminal affordances (no "Open in Terminal").
  *
  * BODY: [OPEN] (default) ⇄ [CLOSED] via header click
  *   live:      transcript (no terminal view) + "Message <agent> directly…" steer input
@@ -58,8 +57,8 @@ import { CodeResourcesIndicator } from './CodeResourcesIndicator';
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
 
-/** `flush`: the code-agent view's rows sit on the transcript's left edge (no chip icon inset). */
-const ROW_INSET = 'pl-11 pr-3.5';
+/** Chip rows share the transcript / steer input inset; `flush` (the view): its left edge. */
+const ROW_INSET = 'px-3.5';
 
 export function Summary({ summary, flush }: { summary: CodeAgentSummary; flush?: boolean }) {
   const tests =
@@ -198,29 +197,11 @@ export function PausedNote({ meta, className }: { meta: CodeAgentMeta; className
   );
 }
 
-/** Mac app only: open this local session in Terminal.app (window.api.localCode). */
-function OpenInTerminal({ taskId }: { taskId: string }) {
-  const localCode = typeof window === 'undefined' ? undefined : window.api?.localCode;
-  if (!localCode || taskId === 'pending') return null;
-  return (
-    <button
-      type="button"
-      onClick={(event) => {
-        event.stopPropagation();
-        void localCode.openTerminal(taskId);
-      }}
-      className="whitespace-nowrap text-xs font-semibold text-[#e8507f] hover:underline"
-    >
-      Open in Terminal
-    </button>
-  );
-}
-
 /** Maximize → this session's code-agent view (its owner is the chat that holds the chip). */
 function useOpenViewAction(meta: CodeAgentMeta): (() => void) | null {
   const view = useCodeAgentView();
   const { selectedAgentId } = useAgentContext();
-  if (view === null || !selectedAgentId) return null;
+  if (view === null || !selectedAgentId || meta.task_id === 'pending') return null;
   return () =>
     view.open({
       taskId: meta.task_id,
@@ -283,7 +264,6 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
         >
           {codeAgentTargetLabel(meta)}
         </span>
-        {isLive && meta.target === 'local' && <OpenInTerminal taskId={meta.task_id} />}
         {meta.preview_url && (
           <OpenAppButton
             taskId={meta.task_id}
@@ -320,7 +300,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
       </div>
 
       {state === 'failed' && <FailureBox meta={meta} fallback={vm.failureMessage} />}
-      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 pb-2.5 pl-11 pr-3.5" />}
+      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 px-3.5 pb-2.5" />}
 
       {isLive && (
         <div className={open ? 'border-t border-border dark:border-white/[0.07]' : 'hidden'}>

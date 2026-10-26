@@ -154,6 +154,8 @@ export interface CodeAgentTranscriptEvent {
   tool?: CodeAgentToolCall;
   /** 'user' = a steering message echoed back by the session (default 'assistant'). */
   role?: 'assistant' | 'user';
+  /** Who sent a 'user' message: the person, or Rose (the goal / an agent message). */
+  sender?: 'user' | 'agent';
   a2a?: AgentToAgentMessage;
 }
 

@@ -300,13 +300,21 @@ export function renderChip(messages: Message[], roseDesktop = true) {
 }
 
 /** The chip inside a code-agent view provider (Rose Desktop terminal); `open` spies Maximize. */
-export function renderChipWithView(messages: Message[], open: (agent: OpenCodeAgent) => void) {
+export function renderChipWithView(
+  messages: Message[],
+  open: (agent: OpenCodeAgent) => void,
+  taskId = 'task-1',
+) {
   const value = { openCodeAgent: null, open, close: () => {} };
   return renderWithProviders(
     createElement(
       CodeAgentViewContext.Provider,
       { value },
-      createElement(WithAgent, { messages }, createElement(ClaudeCodeChip, { taskId: 'task-1' })),
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(ClaudeCodeChip, { taskId, toolCallId: `call-${taskId}` }),
+      ),
     ),
     { roseDesktop: true },
   );

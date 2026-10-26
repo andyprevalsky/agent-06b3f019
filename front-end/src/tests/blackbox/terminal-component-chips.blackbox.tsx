@@ -102,8 +102,8 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByAltText('Codex')).toBeInTheDocument();
   });
 
-  it('renders spinning_up with forceShow terminal surface', () => {
-    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
+  it('renders spinning_up with forceShow terminal surface (flag off)', () => {
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />, { roseDesktop: false });
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
     // Turn-count chip temporarily removed (code-agent verifier kill-switch work).
     expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
@@ -532,7 +532,7 @@ describe('ClaudeCodeChip', () => {
         },
       }),
     ];
-    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />, { roseDesktop: false });
 
     const buttons = screen.getAllByRole('button');
     // first button inside the chip is the Maximize2 trigger (stops propagation)
@@ -540,6 +540,27 @@ describe('ClaudeCodeChip', () => {
 
     // Fullscreen renders status and the close X button (via portal → still in document)
     expect(screen.getAllByText('Claude Code Completed Successfully').length).toBeGreaterThan(0);
+  });
+
+  it('Rose Desktop, no snapshot (older session): status only, no terminal, no Maximize', async () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: { task_id: 'task-1', action_type: 'task_complete', title: 'Task Completed' },
+      }),
+    ];
+    const { container, unmount } = renderWithProviders(<ClaudeCodeChip taskId="task-1" />, {
+      roseDesktop: true,
+    });
+    expect(screen.getByText('Claude Code Completed Successfully')).toBeInTheDocument();
+    expect(container.querySelector('svg.lucide-maximize2, svg.lucide-maximize-2')).toBeNull();
+    await userEvent.setup().click(screen.getByText('Claude Code Completed Successfully'));
+    expect(container.querySelector('.code-agent-terminal-mount')).toBeNull();
+    unmount();
+    messagesRef.current = [];
+    const live = renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />, {
+      roseDesktop: true,
+    });
+    expect(live.container.querySelector('.code-agent-terminal-mount')).toBeNull();
   });
 
   it('hovering the schema chip reveals the output schema tooltip', async () => {

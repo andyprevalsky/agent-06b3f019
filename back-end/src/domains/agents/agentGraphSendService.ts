@@ -177,6 +177,8 @@ async function recordCodeTimelineRow(args: {
   text: string;
   a2a: Record<string, unknown>;
   direction: 'sent' | 'received';
+  /** The CLI turn id this row was delivered as: the UI folds the session's own copy of it. */
+  codeTurnId?: string;
 }): Promise<void> {
   await createMessage({
     agentId: args.ownerAgentId,
@@ -189,6 +191,7 @@ async function recordCodeTimelineRow(args: {
       task_id: args.sessionId,
       subAgentId: args.sessionId,
       action_type: 'agent_message',
+      ...(args.codeTurnId !== undefined ? { code_turn_id: args.codeTurnId } : {}),
       ...(args.provider !== null ? { code_provider: args.provider } : {}),
       ...(args.toolCallId !== null
         ? { toolCallId: args.toolCallId, toolName: 'spawn_claude_code_agent' }
@@ -261,10 +264,11 @@ async function deliverToCodeAgent(args: {
   if (target.streamUrl === null || target.status !== 'ACTIVE') {
     throw new AgentGraphError(409, 'Code agent session is not running');
   }
+  const turnId = codeTurnId(args.key);
   const delivery = await deliverUserTurnToCodeSession({
     wsUrl: target.streamUrl,
     taskId: target.id,
-    turnId: codeTurnId(args.key),
+    turnId,
     text: args.text,
     sender: 'agent',
   });
@@ -281,6 +285,7 @@ async function deliverToCodeAgent(args: {
     text: args.original,
     a2a: args.a2a,
     direction: 'received',
+    codeTurnId: turnId,
   });
   return delivery.status;
 }

@@ -85,7 +85,10 @@ export function useCodeAgentConversation(open: OpenCodeAgent): CodeAgentConversa
   const toolCallId = useMemo(() => codeAgentToolCallId(messages, taskId), [messages, taskId]);
   const wsUrl = useMemo(() => sessionWsUrl(messages, taskId), [messages, taskId]);
   const provider: CodeAgentProvider = meta?.provider ?? open.provider ?? 'claude';
-  const vm = useClaudeCodeChip(taskId, wsUrl, false, provider, { savedOutput: false });
+  // A snapshot drives the view: no terminal WebSocket (nothing displays its bytes).
+  const vm = useClaudeCodeChip(taskId, meta ? undefined : wsUrl, false, provider, {
+    savedOutput: false,
+  });
   const chipState = meta
     ? desktopChipState(meta, vm.chipState)
     : vm.chipState === 'spinning_up'

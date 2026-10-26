@@ -22,7 +22,8 @@
  *   display media / send_message_to_user of THIS code agent
  *                        → as-is, outside the slot
  *
- * TURNS (key provider:task:turn): a person/Rose message while no turn runs
+ * TURNS (key provider:task:<turn id, else nN> fixed when the slot is created, so a
+ * turn id arriving later never remounts it): a person/Rose message while no turn runs
  * starts one; while one runs it is a steer and the same slot keeps updating.
  * `turn_id` on records, when the backend sends it, decides instead. A result /
  * error record ends the turn: duration = turn start (turn_started_at, else the
@@ -42,6 +43,8 @@ import {
 } from './codeAgentContract';
 import type { LocalEcho } from './codeAgentLocalState';
 import {
+  agentRecordTurnId,
+  deliveredAgentTurnIds,
   foldSessionTranscript,
   type TranscriptEntry,
   type TurnOutcome,
@@ -390,11 +393,10 @@ class SessionBuilder {
       this.finish('interrupted', entry.at);
     if (!this.open) this.startTurn(entry.turnStartedAt ?? entry.at, entry.turnId);
     if (this.open) {
+      // The slot keeps the key it was created with: a turn id arriving later never
+      // remounts it (its expand and page state survive).
       this.open.turnId = entry.turnId;
-      this.open.turn.key = `${this.input.provider}:${this.input.taskId}:${entry.turnId ?? `n${this.turnCount}`}`;
       this.open.turn.startedAt = entry.turnStartedAt ?? this.open.turn.startedAt;
-      const slot = this.out.find((item) => item.kind === 'work' && item.turn === this.open?.turn);
-      if (slot) slot.key = this.open.turn.key;
     }
   }
 
@@ -405,12 +407,7 @@ class SessionBuilder {
       this.startTurn(entry.turnStartedAt ?? entry.at ?? entry.firstSeenAt, entry.turnId);
     const open = this.open as OpenTurn;
     if (entry.turnStartedAt != null) open.turn.startedAt = entry.turnStartedAt;
-    if (entry.turnId && !open.turnId) {
-      open.turnId = entry.turnId;
-      open.turn.key = `${this.input.provider}:${this.input.taskId}:${entry.turnId}`;
-      const slot = this.out.find((item) => item.kind === 'work' && item.turn === open.turn);
-      if (slot) slot.key = open.turn.key;
-    }
+    if (entry.turnId && !open.turnId) open.turnId = entry.turnId;
     if (!open.emitted) {
       open.emitted = true;
       this.out.push({ kind: 'work', key: open.turn.key, turn: open.turn });
@@ -544,9 +541,27 @@ function roseMessage(input: CodeSessionInput, id: string, entry: TranscriptEntry
 export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   const records = foldSessionTranscript(input.messages, input.taskId);
   const builder = new SessionBuilder(input);
+  // A Rose → code-agent message is one row: its clean a2a row (code_turn_id) placed
+  // where the session's own framed copy of the turn sits; the framed copy never renders.
+  const delivered = deliveredAgentTurnIds(input.messages, input.taskId);
+  const canonicalByTurn = new Map<string, Message>();
+  for (const message of input.messages) {
+    const id = message.metadata?.code_turn_id;
+    if (typeof id === 'string' && delivered.has(id)) canonicalByTurn.set(id, message);
+  }
+  const placedTurns = new Set(
+    records.flatMap((entry) =>
+      entry.type === 'message' && entry.role === 'user' && entry.sender === 'agent'
+        ? (agentRecordTurnId(entry, delivered) ?? [])
+        : [],
+    ),
+  );
   for (const item of buildTimeline(input, records)) {
     if (item.kind === 'row') {
-      if ((item.message.metadata?.action_type as string) === 'agent_message') {
+      const turnId = item.message.metadata?.code_turn_id;
+      if (typeof turnId === 'string' && placedTurns.has(turnId)) {
+        // Placed at the session's own record of that turn (below).
+      } else if ((item.message.metadata?.action_type as string) === 'agent_message') {
         builder.coordination(item.message, item.at, null, false);
       } else {
         builder.out.push({ kind: 'message', key: item.message.message_id, message: item.message });
@@ -560,7 +575,11 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
         const key = entry.clientMessageId ? `turn:${entry.clientMessageId}` : entry.key;
         const id = `code:${input.taskId}:${key}`;
         const at = entry.at ?? item.at;
-        if (entry.sender === 'agent' && !builder.empty) {
+        const deliveredAs = entry.sender === 'agent' ? agentRecordTurnId(entry, delivered) : null;
+        const canonical = deliveredAs !== null ? canonicalByTurn.get(deliveredAs) : undefined;
+        if (canonical) {
+          builder.coordination(canonical, at, entry.turnId, true);
+        } else if (entry.sender === 'agent' && !builder.empty) {
           builder.coordination(roseMessage(input, id, entry), at, entry.turnId, true);
         } else {
           builder.person(personMessage(id, entry.text, at), at, entry.turnId, entry.turnStartedAt);
