@@ -3,8 +3,11 @@
  *
  * Stock: top toolbar, attachments, textarea and model/send controls.
  * Rose Desktop: nub toolbar, pinned tools, attachments, model/speed/send.
- * Browser: existing owner-agent input, files and Send only; read-only model
- *   label stays unknown until the browser task reports its actual model.
+ * Browser: owner-agent input, files and Send only; Send targets the shown
+ *   browser task (onSubmit target.browserTaskId → straight to that browser); no top attachment
+ *   (the agents-running header belongs to the owner's own composer); read-only
+ *   model label is the Rose pool the browser runs on (from the owner agent's
+ *   model), never the served provider model; unknown owner model → unknown.
  *
  * Sub-state lives in hooks:
  *   - useAttachments     : attachment lifecycle + paste/drag
@@ -19,7 +22,7 @@
  *   [CLOSED 4px lip] --hover/focus/tap--> [OPEN 18px strip] --leave/tap--> [CLOSED]
  *
  * TOP ATTACHMENT (props.topAttachment, e.g. BackgroundAgentsBanner):
- *   [NONE]     -> box has all corners rounded
+ *   [NONE | BROWSER] -> box has all corners rounded (Browser never renders it)
  *   [RENDERED] -> attachment sits flush above (same column/edges), box top
  *                 corners square off via `data-query-input-attachment`
  *
@@ -86,14 +89,16 @@ export default function QueryInput(props: QueryInputProps) {
     onPendingPriceLimitChange: props.onPendingPriceLimitChange,
     onAgentUpdate: props.onAgentUpdate,
   });
-  const handleSubmit = useSubmitHandler(attachments, props.onSubmit, directChannel);
+  const apps = useRoseApps();
+  const browserTarget =
+    !directChannel && props.liftAboveApps ? browserComposerTarget(apps, props.agentId) : null;
+  const browserTaskId = browserTarget?.dataset.taskId;
+  const handleSubmit = useSubmitHandler(attachments, props.onSubmit, directChannel, browserTaskId);
   const topBarProps = useTopBarProps(props, attachments, priceLimit, textareaRef);
   const reveal = useToolbarReveal();
   const roseDesktop = useRoseDesktop();
   const roseDark = useRoseTheme().isDark;
-  const apps = useRoseApps();
-  const browser =
-    !!browserComposerTarget(apps, props.agentId) && !!props.liftAboveApps && !directChannel;
+  const browser = browserTarget !== null;
 
   return (
     <QueryInputLayer enabled={roseDesktop && !!props.liftAboveApps} ownerAgentId={props.agentId}>
@@ -110,7 +115,7 @@ export default function QueryInput(props: QueryInputProps) {
               <NubToolbar {...topBarProps} />
             </NubTab>
           )}
-          {props.topAttachment}
+          {!browser && props.topAttachment}
           <QueryInputShell
             dripStyles={dripStyles}
             drippiness={drippiness}
@@ -128,7 +133,9 @@ export default function QueryInput(props: QueryInputProps) {
               roseDesktop={roseDesktop}
               roseDark={roseDark}
               browser={browser}
-              browserModelLabel={browser ? browserComposerModel(apps, props.agentId) : undefined}
+              browserModelLabel={
+                browser ? browserComposerModel(props.agentDetail?.model) : undefined
+              }
             />
           </QueryInputShell>
         </div>
@@ -141,6 +148,7 @@ function useSubmitHandler(
   attachments: ReturnType<typeof useAttachments>,
   onSubmit: QueryInputProps['onSubmit'],
   directChannel: boolean,
+  browserTaskId: string | undefined,
 ) {
   const { toast } = useToast();
   return () => {
@@ -159,7 +167,9 @@ function useSubmitHandler(
     const pointers = directChannel
       ? attachments.collectDonePointers()
       : attachments.collectDonePointersAndClear();
-    const result = onSubmit(pointers.length > 0 ? pointers : undefined);
+    const files = pointers.length > 0 ? pointers : undefined;
+    // The Browser composer messages its browser task directly, not the owner agent.
+    const result = browserTaskId ? onSubmit(files, { browserTaskId }) : onSubmit(files);
     if (directChannel)
       void Promise.resolve(result).then((delivered) => {
         if (delivered === true) attachments.collectDonePointersAndClear();

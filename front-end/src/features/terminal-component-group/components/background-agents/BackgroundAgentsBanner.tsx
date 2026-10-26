@@ -13,6 +13,12 @@
  *             chip, shimmer goal, StatusLine activity, ├─ └─ tree lines)
  *             + collapsed output-schema disclosures (DockSchema): per agent,
  *             or one results table per for_each cluster
+ *     | click an agent row  -> onNavigate(agentId)
+ *     | click an explore/browser task row (selected agent's own task)
+ *     v
+ * [EXPANDED + TASK OPEN] that task's trajectory unfolds under its row
+ *             (MessageList subAgentId=<task id>, the rows the client already
+ *             holds — no request); click the row again -> folded
  *
  * [COLLAPSED|EXPANDED] -- running drops to 0 --> [FINISHED FLASH]
  *     "All agents finished" for FINISHED_FLASH_MS, then [HIDDEN]
@@ -21,10 +27,11 @@
  * Data: useAgentsPanelData (shared per-root bus subscription + the selected
  * agent's own background rows). Remount per selected agent resets all state.
  */
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Bot, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Message, TreeNode } from '../../hooks';
+import { MessageList } from '../MessageList';
 import { TreeHeader } from '../subAgentTree/TreeHeader';
 import { ForEachResultsDisclosure, NodeSchemaDisclosure } from './DockSchema';
 import { TreeNodeRow } from '../subAgentTree/TreeNodeRow';
@@ -57,6 +64,25 @@ function useFinishedFlash(running: number): boolean {
   return flash;
 }
 
+/** Open explore/browser task rows → their trajectory ids (unknown tasks never open). */
+function useOpenTrajectories(trajectories: ReadonlyMap<string, string>) {
+  const [openIds, setOpenIds] = useState<ReadonlySet<string>>(new Set());
+  const open = new Map<string, string>();
+  for (const id of openIds) {
+    const taskId = trajectories.get(id);
+    if (taskId) open.set(id, taskId);
+  }
+  const toggle = (nodeId: string) => {
+    if (!trajectories.has(nodeId)) return;
+    setOpenIds((ids) => {
+      const next = new Set(ids);
+      if (!next.delete(nodeId)) next.add(nodeId);
+      return next;
+    });
+  };
+  return { open, toggle };
+}
+
 function headline(running: number): string {
   if (running === 0) return 'All agents finished';
   return `Running ${running} agent${running === 1 ? '' : 's'}`;
@@ -66,14 +92,39 @@ interface PanelBodyProps {
   groups: AgentPanelModel['groups'];
   getChildren: AgentPanelModel['getChildren'];
   onNavigate: (agentId: string) => void;
+  /** Open task node id → the trajectory rows' subAgentId. */
+  openTrajectories: ReadonlyMap<string, string>;
 }
 
-/** Hierarchy in the SubAgentTree language: TreeHeader per for_each group, TreeNodeRow per agent. */
-function renderNodeSchema(node: TreeNode, childPrefix: string) {
-  return <NodeSchemaDisclosure node={node} prefix={childPrefix} />;
+/** A task's trajectory, rendered from the selected agent's loaded rows (no fetch). */
+function TaskTrajectory({ taskId }: { taskId: string }) {
+  return (
+    <div
+      className="max-h-60 overflow-y-auto overflow-x-hidden py-1 pl-6 font-sans"
+      data-testid="agent-panel-trajectory"
+      data-task-id={taskId}
+    >
+      <MessageList
+        subAgentId={taskId}
+        containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
+        showStatusBanners={false}
+        showThinkingIndicator={false}
+        compact
+      />
+    </div>
+  );
 }
 
-function PanelBody({ groups, getChildren, onNavigate }: PanelBodyProps) {
+function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelBodyProps) {
+  /** Hierarchy in the SubAgentTree language: TreeHeader per for_each group, TreeNodeRow per agent. */
+  const afterNode = (withSchema: boolean) => (node: TreeNode, childPrefix: string) => {
+    const trajectory = openTrajectories.get(node.agentId);
+    const parts: ReactNode[] = [];
+    if (withSchema)
+      parts.push(<NodeSchemaDisclosure key="schema" node={node} prefix={childPrefix} />);
+    if (trajectory) parts.push(<TaskTrajectory key="trajectory" taskId={trajectory} />);
+    return parts.length > 0 ? parts : null;
+  };
   if (groups.length === 0) {
     return <p className="px-2 py-1.5 text-xs text-muted-foreground">No agents yet.</p>;
   }
@@ -97,7 +148,7 @@ function PanelBody({ groups, getChildren, onNavigate }: PanelBodyProps) {
               getChildren={getChildren}
               onNavigate={onNavigate}
               // for_each children share the cluster's results table instead.
-              renderAfterNode={group.header ? undefined : renderNodeSchema}
+              renderAfterNode={afterNode(group.header === null)}
             />
           ))}
         </div>
@@ -111,12 +162,18 @@ export function BackgroundAgentsBanner({
   messages,
   onNavigate,
 }: BackgroundAgentsBannerProps) {
-  const { groups, getChildren, counts } = useAgentsPanelData(selectedAgentId, messages);
+  const { groups, getChildren, counts, trajectories } = useAgentsPanelData(
+    selectedAgentId,
+    messages,
+  );
   const [expanded, setExpanded] = useState(false);
+  const tasks = useOpenTrajectories(trajectories);
   const flash = useFinishedFlash(counts.running);
-  // Synthetic task rows (explore/browser/code) have no agent page to open.
+  // Synthetic task rows (explore/browser/code) have no agent page to open;
+  // the selected agent's explore/browser tasks unfold their trajectory instead.
   const navigate = (agentId: string) => {
-    if (!isTaskNodeId(agentId)) onNavigate(agentId);
+    if (isTaskNodeId(agentId)) tasks.toggle(agentId);
+    else onNavigate(agentId);
   };
 
   const visible = counts.running > 0 || flash || (expanded && groups.length > 0);
@@ -165,7 +222,12 @@ export function BackgroundAgentsBanner({
           className="max-h-72 overflow-y-auto overflow-x-hidden border-t border-border/70 px-1 py-1"
           data-testid="background-agents-panel"
         >
-          <PanelBody groups={groups} getChildren={getChildren} onNavigate={navigate} />
+          <PanelBody
+            groups={groups}
+            getChildren={getChildren}
+            onNavigate={navigate}
+            openTrajectories={tasks.open}
+          />
         </div>
       )}
     </div>

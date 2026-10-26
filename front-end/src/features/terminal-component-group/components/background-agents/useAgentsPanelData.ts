@@ -35,6 +35,7 @@ const EMPTY_MODEL: AgentPanelModel = {
   groups: [],
   getChildren: () => [],
   counts: { total: 0, running: 0 },
+  trajectories: new Map(),
 };
 
 export function useAgentsPanelData(

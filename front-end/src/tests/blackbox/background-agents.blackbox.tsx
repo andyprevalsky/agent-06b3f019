@@ -297,8 +297,17 @@ class ScanCountingMap<K, V> extends Map<K, V> {
 }
 
 function renderDock(messages: Message[], onNavigate = vi.fn()) {
+  // Production mounts the dock inside the selected agent's AgentProvider.
   return render(
-    <BackgroundAgentsBanner selectedAgentId="root-1" messages={messages} onNavigate={onNavigate} />,
+    <AgentContext.Provider value={makeAgentCtx({ selectedAgentId: 'root-1', messages })}>
+      <TooltipProvider>
+        <BackgroundAgentsBanner
+          selectedAgentId="root-1"
+          messages={messages}
+          onNavigate={onNavigate}
+        />
+      </TooltipProvider>
+    </AgentContext.Provider>,
   );
 }
 
@@ -574,6 +583,80 @@ describe('running-agents dock', () => {
     expect(within(table).getAllByRole('row')).toHaveLength(2);
     expect(table).toHaveTextContent('Fair Market');
     expect(table).toHaveTextContent('string · required');
+  });
+
+  it('expands an explore or browser task row into its trajectory from loaded rows, without fetching', async () => {
+    const browserRows = [
+      started('call_br', 'browser', '/root/order_breakfast', 'Order breakfast'),
+      row({
+        toolCallId: 'call_br',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        excludeFromModel: true,
+        task_id: 't-br',
+        action_type: 'browser',
+        browser_url: 'https://live.example/br',
+        title: 'Browser Agent In Progress',
+      }),
+      row(
+        {
+          toolCallId: 'br-step-1',
+          toolName: 'spawn_browser_agent',
+          toolStatus: 'FINISHED',
+          task_id: 't-br',
+          subAgentId: 't-br',
+          action_type: 'goto',
+          title: 'Navigated → https://www.instacart.com/',
+        },
+        'Navigated → https://www.instacart.com/',
+      ),
+    ];
+    const exploreStep = row(
+      {
+        toolCallId: 'ex-step-1',
+        toolName: 'web_search',
+        toolStatus: 'FINISHED',
+        subAgentId: 't-ex',
+        title: 'Searched the web for hotel prices',
+      },
+      'Searched the web for hotel prices',
+    );
+    const messages = [...explore(), exploreStep, ...browserRows];
+    const onNavigate = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    renderDock(messages, onNavigate);
+    await userEvent.click(screen.getByRole('button', { name: /Running 2 agents/ }));
+    const panel = screen.getByTestId('background-agents-panel');
+    expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
+    const fetchesBeforeExpand = fetchSpy.mock.calls.length;
+
+    await userEvent.click(within(panel).getByText('explore · hotel_price'));
+    const exploreTrajectory = within(panel).getByTestId('agent-panel-trajectory');
+    expect(exploreTrajectory).toHaveAttribute('data-task-id', 't-ex');
+    expect(
+      exploreTrajectory.querySelector(`[data-message-id="${exploreStep.message_id}"]`),
+    ).not.toBeNull();
+
+    await userEvent.click(within(panel).getByText('browser · order_breakfast'));
+    const trajectories = within(panel).getAllByTestId('agent-panel-trajectory');
+    const browserTrajectory = trajectories.find((el) => el.dataset.taskId === 't-br');
+    expect(browserTrajectory).toBeDefined();
+    expect(
+      browserTrajectory!.querySelector(`[data-message-id="${browserRows[2].message_id}"]`),
+    ).not.toBeNull();
+
+    // Built from rows the client already holds: no request and no navigation.
+    expect(fetchSpy.mock.calls.length).toBe(fetchesBeforeExpand);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    // Clicking the row again folds its trajectory away.
+    await userEvent.click(within(panel).getByText('explore · hotel_price'));
+    expect(
+      within(panel)
+        .getAllByTestId('agent-panel-trajectory')
+        .map((el) => el.dataset.taskId),
+    ).toEqual(['t-br']);
+    fetchSpy.mockRestore();
   });
 
   it('builds and renders a wide tree with a linear number of node scans', () => {

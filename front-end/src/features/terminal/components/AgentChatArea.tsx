@@ -312,8 +312,8 @@ function ChatQueryInputBox({
         }
         value={a.messageInput}
         onChange={a.setMessageInput}
-        onSubmit={(attachments) => {
-          void a.handleSendMessage(attachments);
+        onSubmit={(attachments, target) => {
+          void a.handleSendMessage(attachments, target);
         }}
         disabled={a.isSendingMessage}
         placeholder={a.selectedAgentId ? 'Type your message...' : 'Enter any goal'}

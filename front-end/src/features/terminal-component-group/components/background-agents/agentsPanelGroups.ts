@@ -11,7 +11,9 @@
  *
  * In-activity explore/browser/code tasks have no Agent row; they become
  * synthetic TreeNodes (`task:<address>`, never navigable) so they render with
- * the same circle/progress/status language.
+ * the same circle/progress/status language. The selected agent's own
+ * explore/browser tasks also map to their trajectory id (`trajectories`), so
+ * the dock unfolds them from rows the client already holds.
  *
  * 10k-agent note: each build indexes `parentAgentId → children` in one pass
  * over the bus tree; counts, for_each totals and every rendered row then look
@@ -48,9 +50,16 @@ export interface AgentPanelModel {
   groups: PanelGroup[];
   getChildren: (parentId: string) => TreeNode[];
   counts: PanelCounts;
+  /**
+   * Synthetic explore/browser node id → the task id its already-loaded
+   * trajectory rows carry as `subAgentId` (selected agent's own tasks only).
+   */
+  trajectories: ReadonlyMap<string, string>;
 }
 
 const IN_ACTIVITY_TYPES = new Set(['explore', 'browser', 'code']);
+/** In-activity tasks whose trajectory the dock can unfold from the selected agent's rows. */
+const TRAJECTORY_TYPES = new Set(['explore', 'browser']);
 const FAILED_TASK = new Set(['failed', 'error', 'cancelled', 'canceled', 'timeout']);
 const DONE_TASK = new Set(['completed', 'complete', 'done', 'finished', 'success']);
 
@@ -238,11 +247,15 @@ export function buildAgentPanelModel({
   }
   const loose: TreeNode[] = getChildren(selectedAgentId).filter((n) => !claimed.has(n.agentId));
   const looseIds = new Set(loose.map((n) => n.agentId));
+  const trajectories = new Map<string, string>();
   for (const spawn of spawns) {
     if (spawn.agentType === 'for_each') continue;
     if (IN_ACTIVITY_TYPES.has(spawn.agentType)) {
       const task = fromSpawn(spawn, selectedAgentId);
       if (!looseIds.has(task.agentId)) loose.push(task);
+      if (spawn.taskId && TRAJECTORY_TYPES.has(spawn.agentType)) {
+        trajectories.set(task.agentId, spawn.taskId);
+      }
       continue;
     }
     for (const id of spawn.subAgentIds) {
@@ -253,5 +266,5 @@ export function buildAgentPanelModel({
   }
   if (loose.length > 0) groups.push({ key: 'children', header: null, roots: runningFirst(loose) });
   groups.sort((a, b) => Number(b.roots.some(isRunningNode)) - Number(a.roots.some(isRunningNode)));
-  return { groups, getChildren, counts: countAll(groups, getChildren) };
+  return { groups, getChildren, counts: countAll(groups, getChildren), trajectories };
 }

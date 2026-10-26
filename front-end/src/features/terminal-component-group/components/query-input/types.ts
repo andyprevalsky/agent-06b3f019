@@ -6,6 +6,7 @@
  */
 import type React from 'react';
 
+import type { MessageTarget } from '@/lib/api';
 import type { AgentDetail, FilePointer, Model } from '../../hooks';
 
 /** Single in-flight attachment. Lifecycle: pending -> uploading -> done | error. */
@@ -46,7 +47,8 @@ export interface QueryInputProps {
   topAttachment?: React.ReactNode;
   value: string;
   onChange: (value: string) => void;
-  onSubmit: (attachments?: FilePointer[]) => void | Promise<boolean>;
+  /** `target` is set only by the Browser composer: deliver straight to that browser task. */
+  onSubmit: (attachments?: FilePointer[], target?: MessageTarget) => void | Promise<boolean>;
   disabled?: boolean;
   placeholder?: string;
   selectedModel?: string;

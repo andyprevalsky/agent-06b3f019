@@ -217,13 +217,67 @@ async function testLiveViewBinding(accessToken: string, userId: string): Promise
   }
 }
 
+/** Browser composer: a user message addressed to one running browser task of the agent. */
+async function testBrowserTargetedMessage(accessToken: string, userId: string): Promise<void> {
+  const agent = await prisma.agent.create({
+    data: { userId, goal: 'Browser composer target', status: 'ACTIVE' },
+  });
+  const context = await prisma.browserContext.upsert({
+    where: { userId },
+    create: { userId, contextId: `composer-profile-${randomUUID()}` },
+    update: {},
+  });
+  const session = (agentId: string, status: 'ACTIVE' | 'CLOSED') =>
+    prisma.browserSession.create({
+      data: { contextId: context.id, agentId, sessionId: `composer-${randomUUID()}`, status },
+    });
+  const live = await session(agent.id, 'ACTIVE');
+  const ended = await session(agent.id, 'CLOSED');
+  const foreign = await session(randomUUID(), 'ACTIVE');
+  const post = (browserTaskId: string) =>
+    request(`${BASE_URL}/api/agents/${agent.id}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ message: 'go to instacart instead', browser_task_id: browserTaskId }),
+    });
+  try {
+    const sent = await post(live.id);
+    expectStatus(sent, 201);
+    const row = await prisma.message.findUniqueOrThrow({
+      where: { id: (sent.data as { message_id: string }).message_id },
+      select: { role: true, text: true, metadata: true },
+    });
+    const metadata = row.metadata as Record<string, unknown>;
+    if (
+      row.role !== 'USER' ||
+      row.text !== 'go to instacart instead' ||
+      metadata.browserTaskId !== live.id ||
+      metadata.excludeFromModel !== true
+    ) {
+      throw new Error(`Browser-targeted message was not tagged: ${JSON.stringify(row)}`);
+    }
+    expectStatus(await post(randomUUID()), 404);
+    expectStatus(await post(foreign.id), 404);
+    expectStatus(await post(ended.id), 409);
+    const stored = await prisma.message.count({ where: { agentId: agent.id } });
+    if (stored !== 1) throw new Error(`Rejected targets stored messages: ${stored}`);
+  } finally {
+    await prisma.message.deleteMany({ where: { agentId: agent.id } });
+    await prisma.browserSession.deleteMany({
+      where: { id: { in: [live.id, ended.id, foreign.id] } },
+    });
+    await prisma.agent.delete({ where: { id: agent.id } });
+  }
+}
+
 async function runAll(): Promise<void> {
   const { accessToken, userId } = await anonymousSession();
   await testCrossUserResume(accessToken);
   await testOwnershipHandshake(accessToken, userId);
   await testLiveViewBinding(accessToken, userId);
+  await testBrowserTargetedMessage(accessToken, userId);
   await prisma.$disconnect();
-  console.log('PASS browser-session-control (3 cases)');
+  console.log('PASS browser-session-control (4 cases)');
 }
 
 runAll().catch(async (error) => {

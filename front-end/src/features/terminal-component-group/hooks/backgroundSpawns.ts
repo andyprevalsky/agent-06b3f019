@@ -35,6 +35,11 @@ export interface BackgroundSpawn {
   address: string | null;
   /** Codex-style tree path (`/root/outreach/draft_a`) when the backend sends one. */
   path: string | null;
+  /**
+   * In-activity explore/browser task id (`taskId` / `task_id` on the owner's
+   * rows); its trajectory rows carry it as `subAgentId`. Latest run wins.
+   */
+  taskId: string | null;
   goal: string;
   /** Output schema passed to spawn_agent when a row carries it (raw; normalized by the chip). */
   outputSchema: unknown;
@@ -173,6 +178,7 @@ function emptySpawn(owner: string, startedAt: string): BackgroundSpawn {
     agentType: 'agent',
     address: null,
     path: null,
+    taskId: null,
     goal: '',
     outputSchema: null,
     state: 'running',
@@ -220,6 +226,9 @@ function absorbMetadata(spawn: BackgroundSpawn, message: Message): void {
     spawn.goal ||
     (str(metadata.backgroundGoal) ?? str(metadata.fullGoal) ?? str(metadata.goal) ?? '');
   spawn.busId = spawn.busId ?? str(metadata.busId);
+  // The first foreground explore row reuses the owner id as its taskId.
+  const taskId = str(metadata.task_id) ?? str(metadata.taskId);
+  if (taskId && taskId !== spawn.ownerToolCallId) spawn.taskId = taskId;
   spawn.outputSchema =
     spawn.outputSchema ??
     metadata.backgroundOutputSchema ??
