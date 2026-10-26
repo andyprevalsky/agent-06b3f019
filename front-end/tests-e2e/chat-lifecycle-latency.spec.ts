@@ -227,8 +227,11 @@ async function waitForRoute(
   timeoutMs: number,
 ): Promise<number> {
   if (path.id === 'web_search') {
+    // Rose Desktop folds tool rows into one trajectory row carrying the same identity.
     await page
-      .locator('[data-tool-name="web_search"][data-tool-status="FINISHED"]')
+      .locator(
+        '[data-tool-name="web_search"][data-tool-status="FINISHED"], [data-testid="trajectory-work-group"][data-tool-statuses~="web_search:FINISHED"]',
+      )
       .last()
       .waitFor({ state: 'visible', timeout: timeoutMs });
     return elapsed(startedAt);
@@ -236,7 +239,7 @@ async function waitForRoute(
   if (path.terminal === 'agent_mode') {
     const cloudAgent = page
       .locator(
-        `[data-tool-name="cloud_agent"][data-agent-start-phase="${path.expectedAgentPhase}"]`,
+        `[data-tool-name="cloud_agent"][data-agent-start-phase="${path.expectedAgentPhase}"], [data-testid="trajectory-work-group"][data-agent-start-phase="${path.expectedAgentPhase}"]`,
       )
       .last();
     await cloudAgent.waitFor({ state: 'attached', timeout: timeoutMs });
@@ -393,7 +396,9 @@ test.describe('chat full-lifecycle latency', () => {
 
           if (path.id === 'direct_answer') {
             const unexpectedRouteCount = await page
-              .locator('[data-tool-name="web_search"], [data-tool-name="cloud_agent"]')
+              .locator(
+                '[data-tool-name="web_search"], [data-tool-name="cloud_agent"], [data-tool-statuses*="web_search"], [data-tool-statuses*="cloud_agent"]',
+              )
               .count();
             if (unexpectedRouteCount > 0) failures.push('direct answer used another router path');
           }

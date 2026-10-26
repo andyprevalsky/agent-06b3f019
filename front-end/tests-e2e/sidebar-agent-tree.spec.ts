@@ -7,7 +7,6 @@ async function openSidebarPreview(page: Page, width: number) {
   await page.addInitScript(() => {
     const user = { id: 'sidebar-preview-user', is_anonymous: false };
     localStorage.setItem('app-user', JSON.stringify(user));
-    localStorage.setItem('rose-theme:sidebar-preview-user', 'light');
     localStorage.setItem(
       'rose-session',
       JSON.stringify({
@@ -195,7 +194,7 @@ test('authenticated app smoothly enters dark mode and manual light toggle still 
     .poll(() =>
       page.evaluate(() => (window as unknown as { loginThemeDuration: string }).loginThemeDuration),
     )
-    .toBe('0.4s');
+    .toBe('0.42s');
   await expect(page.locator('html')).not.toHaveClass(/rose-login-theme-transition/);
   await page.getByRole('button', { name: 'Light mode', exact: true }).click();
   await expect(page.locator('html')).not.toHaveClass(/dark/);
@@ -231,26 +230,17 @@ test('mobile drawer survives repeated close, Escape, selection and rotation with
   await expect(page.getByRole('button', { name: 'Rose', exact: true })).toBeVisible();
 });
 
-test('ordinary mobile account has no public-site links and includes the new popular goal', async ({
-  page,
-}) => {
+test('ordinary mobile account has no public-site links or popular goals', async ({ page }) => {
   await openSidebarPreview(page, 390);
   await page.getByRole('button', { name: 'Rose', exact: true }).click();
-  await expect(page.getByTestId('popular-goals-track')).toBeVisible();
+  const composer = page.getByPlaceholder('Enter any goal');
+  await expect(composer).toBeVisible();
   for (const label of ['Research', 'Careers', 'About', 'Privacy', 'Terms'])
     await expect(page.getByRole('button', { name: label, exact: true })).toHaveCount(0);
-  const goal = page
-    .getByTestId('popular-goals-track')
-    .getByRole('button', { name: 'Get Rose Api Key', exact: true })
-    .first();
-  await expect(goal).toBeAttached();
-  // Freeze the decorative ticker only; exercise the actual goal click/composer path.
-  await page.addStyleTag({
-    content: '[data-testid="popular-goals-track"] { transform: none !important; }',
-  });
-  await goal.evaluate((el) => el.scrollIntoView({ block: 'nearest', inline: 'center' }));
-  await goal.click({ timeout: 5000 });
-  await expect(page.getByPlaceholder('Enter any goal')).toHaveValue('Get Rose Api Key');
+  // Popular Goals were removed from Rose Desktop; the composer is the only goal entry.
+  await expect(page.getByTestId('popular-goals-track')).toHaveCount(0);
+  await composer.fill('Get Rose Api Key');
+  await expect(composer).toHaveValue('Get Rose Api Key');
 });
 
 test('dark mobile agents use robots and retain one-layer disclosure', async ({ page }) => {

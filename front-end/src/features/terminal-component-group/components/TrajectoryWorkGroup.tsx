@@ -7,6 +7,20 @@ import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import { workLabel } from '../hooks/codeSessionTurns';
 const PAGE_SIZE = 20;
+/** The folded rows' tool identity, matching the stock row's data-tool-* attributes. */
+function toolIdentity(group: Group) {
+  const statuses = new Set<string>();
+  let startPhase: 'plan' | 'execute' | undefined;
+  for (const { message } of group.activities) {
+    const tool = message.metadata?.toolName;
+    if (typeof tool !== 'string') continue;
+    const status = message.metadata?.toolStatus;
+    statuses.add(typeof status === 'string' ? `${tool}:${status}` : tool);
+    const phase = message.metadata?.startPhase;
+    if (tool === 'cloud_agent' && (phase === 'plan' || phase === 'execute')) startPhase = phase;
+  }
+  return { statuses: [...statuses].join(' '), startPhase };
+}
 export function TrajectoryWorkGroup({
   group,
   renderMessage,
@@ -36,11 +50,14 @@ export function TrajectoryWorkGroup({
   const lastPage = Math.max(0, Math.ceil(group.activities.length / PAGE_SIZE) - 1);
   const activePage = Math.min(page, lastPage);
   const label = running ? latest.label : workLabel(group);
+  const tools = toolIdentity(group);
   return (
     <div
       data-testid="trajectory-work-group"
       data-group-key={group.key}
       data-state={group.status}
+      data-tool-statuses={tools.statuses || undefined}
+      data-agent-start-phase={tools.startPhase}
       className="min-w-0"
     >
       <button

@@ -260,6 +260,8 @@ require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor s
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
 require_text "$RUN_SH" 'if ! $BENCHMARK_MODE && $IS_MAC; then' "benchmark stacks must not install unused mac-app dependencies"
 require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false \' "bundled local frontends must not request production-only private realtime authorization"
+require_text "$RUN_SH" 'ROSE_E2E_FIXTURES=true npx vite build' "bundled semantic stacks must build the dev-only overlay-layers fixture page into the preview"
+require_text "$ROOT_DIR/front-end/vite.config.ts" "process.env.ROSE_E2E_FIXTURES === 'true'" "only the opt-in fixture build adds semantic fixture pages"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"

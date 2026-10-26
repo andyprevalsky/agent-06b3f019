@@ -95,7 +95,8 @@ test('desktop Agent Display opens real WebGL output and keeps controls in its sa
   await expect(icon).toBeVisible();
   await expect(page.getByRole('button', { name: /Open agent display/ })).toBeVisible();
   const browser = page.getByRole('button', { name: 'Browser', exact: true });
-  expect(await icon.evaluate((el) => el.previousElementSibling?.getAttribute('aria-label'))).toBe(
+  // Agent Display comes first in the app icon row, immediately before Browser.
+  expect(await icon.evaluate((el) => el.nextElementSibling?.getAttribute('aria-label'))).toBe(
     'Browser',
   );
   await expect(browser).toHaveAttribute('aria-pressed', 'false');
