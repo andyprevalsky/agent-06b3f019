@@ -2,19 +2,23 @@
  * STATE MACHINE: TrajectoryWorkGroup
  *
  *   [RUNNING, COLLAPSED] -- click --> [RUNNING, EXPANDED] -- click --> [RUNNING, COLLAPSED]
- *          |                                 |
- *          | batch compresses                | batch compresses (same instance:
- *          v                                 v  expand state and history kept)
+ *          |      ^                          |      ^
+ *  batch   |      | agent resumes   batch    |      | agent resumes
+ * compresses      | (same batch)  compresses |      | (same batch)
+ *          v      |                          v      |
  *   [DONE, COLLAPSED]   <---- click ---->  [DONE, EXPANDED]
+ *   The same instance carries expand state and history across every transition.
  *
  * RUNNING header: fixed-height live carousel (latest activity icon + label,
  *   spinning loader for tool batches, live elapsed). EXPANDED swaps the icon for
  *   a chevron.
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
- *   paged 20 at a time; new activities append while it stays open.
+ *   paged 20 at a time; opening a running batch shows its latest page, and new
+ *   activities append while it stays open. The live elapsed clock is a leaf
+ *   (BatchElapsed), so its 100 ms tick never re-renders the history rows.
  */
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, LoaderCircle, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { useBatchElapsed } from './useBatchElapsed';
@@ -22,6 +26,10 @@ import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import { workLabel } from '../hooks/codeSessionTurns';
 const PAGE_SIZE = 20;
+/** Leaf clock: its tick re-renders only this text, never the open history rows. */
+function BatchElapsed({ startedAt }: { startedAt: number | null }) {
+  return <span data-testid="trajectory-batch-elapsed">{useBatchElapsed(startedAt, true)}</span>;
+}
 /** The folded rows' kinds and tool identity, matching the stock row's data-* attributes. */
 function toolIdentity(group: Group) {
   const statuses = new Set<string>();
@@ -49,7 +57,7 @@ export function TrajectoryWorkGroup({
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(0);
   const running = group.status === 'running';
-  const elapsed = useBatchElapsed(group.startedAt, running);
+  const historyId = useId();
   const latest = group.activities.at(-1)!;
   const comms = group.activities.filter((activity) => activity.kind === 'comms').length;
   const toolName = String(latest.message.metadata?.toolName ?? '');
@@ -77,7 +85,11 @@ export function TrajectoryWorkGroup({
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
+        aria-controls={expanded ? historyId : undefined}
+        onClick={() => {
+          if (!expanded && running) setPage(lastPage);
+          setExpanded(!expanded);
+        }}
         className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
       >
         {running && !expanded ? (
@@ -117,7 +129,7 @@ export function TrajectoryWorkGroup({
                   className="animate-spin"
                 />
               )}
-              <span data-testid="trajectory-batch-elapsed">{elapsed}</span>
+              <BatchElapsed startedAt={group.startedAt} />
               {comms > 0 && <span>· {comms} exchanges</span>}
             </>
           ) : (
@@ -127,6 +139,7 @@ export function TrajectoryWorkGroup({
       </button>
       {expanded && (
         <div
+          id={historyId}
           data-testid="trajectory-work-history"
           className="mt-2 max-h-80 space-y-3 overflow-y-auto overscroll-contain border-l border-border pl-3"
         >

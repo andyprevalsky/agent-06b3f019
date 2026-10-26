@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TrajectoryWorkGroup } from '@/features/terminal-component-group/components/TrajectoryWorkGroup';
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
@@ -107,6 +107,37 @@ describe('current work batch elapsed time and ring semantics', () => {
     act(() => vi.advanceTimersByTime(5000));
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('41.7s');
     expect(group).toHaveAttribute('data-state', 'running');
+  });
+  it('ticks only the elapsed text while an open running batch shows its history', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(start + 2000);
+    const messages = Array.from({ length: 20 }, (_, i) =>
+      activity('read_file', `step-${i}`, start + i),
+    );
+    const renderMessage = vi.fn(() => null);
+    render(<TrajectoryWorkGroup group={group(messages)} renderMessage={renderMessage} />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByTestId('trajectory-work-history')).toBeInTheDocument();
+    const rendersWhenOpened = renderMessage.mock.calls.length;
+    expect(rendersWhenOpened).toBeGreaterThanOrEqual(20);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('3.0s');
+    expect(renderMessage.mock.calls.length).toBe(rendersWhenOpened);
+  });
+  it('opens a long running batch on its latest page and names the history it controls', () => {
+    const messages = Array.from({ length: 45 }, (_, i) =>
+      activity('read_file', `long-${i}`, start + i),
+    );
+    render(<TrajectoryWorkGroup group={group(messages)} renderMessage={() => null} />);
+    const toggle = screen.getByRole('button');
+    expect(toggle).not.toHaveAttribute('aria-controls');
+    fireEvent.click(toggle);
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(5);
+    expect(toggle).toHaveAttribute(
+      'aria-controls',
+      screen.getByTestId('trajectory-work-history').id,
+    );
   });
   it.each([
     ['thought', 'lightbulb'],
