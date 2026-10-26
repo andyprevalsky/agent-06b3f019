@@ -242,17 +242,11 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(transcript).toHaveTextContent('widen the existing toggle to three states');
     // The page transcript grows with the column (no 300px chip cap).
     expect(transcript.className).not.toContain('max-h-[300px]');
-    // Transcript / Terminal tabs as in the chip.
-    expect(within(page).getByRole('tab', { name: 'Transcript' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    await user.click(within(page).getByRole('tab', { name: 'Terminal' }));
-    expect(within(page).getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(transcript.parentElement).toHaveClass('hidden');
+    // No terminal view: no Transcript / Terminal tabs and no terminal surface.
+    expect(within(page).queryByRole('tablist')).toBeNull();
+    expect(within(page).queryByRole('tab', { name: 'Terminal' })).toBeNull();
+    expect(page.querySelector('.code-agent-terminal-mount')).toBeNull();
+    expect(transcript.closest('.hidden')).toBeNull();
 
     // The owner's chat is replaced (its chip and composer are gone).
     expect(screen.queryByTestId('code-agent-chip')).toBeNull();

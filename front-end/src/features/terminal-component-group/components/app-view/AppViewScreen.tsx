@@ -9,7 +9,7 @@
  *   │          ││          [ the normal query box, Popular Goals hidden ]  │
  *   └──────────┘└──────────────────────────────────────────────────────────┘
  *
- * OPENED BY: a code-agent chip's live preview card (code_agent.preview_url).
+ * OPENED BY: a code-agent chip's Open app button (code_agent.preview_url).
  * QUERY BOX (useAppComposer): every message steers that code session
  *      ("Message Claude Code directly…" / "Message Codex directly…").
  * PUBLISH (AppViewPublish): push the branch + open a PR; never merge or deploy.

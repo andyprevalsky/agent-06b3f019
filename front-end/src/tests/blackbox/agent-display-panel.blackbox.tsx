@@ -53,6 +53,9 @@ function Scene({ messages, complete = () => {} }: { messages: Message[]; complet
 function panel() {
   return screen.getByTestId('agent-display-drawer');
 }
+function chatRow() {
+  return document.querySelector<HTMLElement>('[data-message-kind="display-media"]')!;
+}
 
 describe('Agent Display destination', () => {
   it('comes first, glows for available output and unmounts frames when closed', async () => {
@@ -65,7 +68,7 @@ describe('Agent Display destination', () => {
       'Agent Display',
       'Browser',
     ]);
-    expect(screen.queryByTestId('display-html-frame')).toBeNull();
+    expect(within(panel()).queryByTestId('display-html-frame')).toBeNull();
     const displayIcon = screen.getByTestId('rose-app-display');
     await waitFor(() => expect(displayIcon).toHaveAttribute('data-displaying', 'true'));
     expect(displayIcon).toHaveStyle({ color: '#9cddff' });
@@ -77,7 +80,7 @@ describe('Agent Display destination', () => {
     expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
     expect(frame).toHaveAttribute('src', 'https://usercontent.rose.test/game.html');
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.queryByTestId('display-html-frame')).toBeNull();
+    expect(within(panel()).queryByTestId('display-html-frame')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Open agent display/ }));
     expect(within(panel()).getByTitle('game.html')).toBeInTheDocument();
   });
@@ -91,7 +94,7 @@ describe('Agent Display destination', () => {
     expect(within(panel()).getByTitle('second.html')).toBeInTheDocument();
     fireEvent.change(select, { target: { value: 'game' } });
     expect(within(panel()).getByTitle('game.html')).toBeInTheDocument();
-    expect(screen.getAllByTestId('display-html-frame')).toHaveLength(1);
+    expect(within(panel()).getAllByTestId('display-html-frame')).toHaveLength(1);
     view.rerender(<Scene messages={[output(), output('second')]} />);
     expect(within(select).getAllByRole('option')).toHaveLength(2);
   });
@@ -102,6 +105,19 @@ describe('Agent Display destination', () => {
     expect(within(panel()).getByText('No displays yet for this agent.')).toBeInTheDocument();
     expect(screen.getByTestId('rose-app-display')).not.toHaveAttribute('data-displaying');
     expect(screen.queryByTestId('display-html-frame')).toBeNull();
+  });
+
+  it('the app conversation shows the display inline in chat and still opens it full size', () => {
+    renderWithProviders(<Scene messages={[output()]} />, { selectedAgentId: 'root' });
+    // Inline in the chat row itself, before (and without) opening the panel.
+    const inline = within(chatRow()).getByTitle('game.html');
+    expect(inline).toHaveAttribute('src', 'https://usercontent.rose.test/game.html');
+    expect(inline).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
+    expect(within(chatRow()).getByText('Interactive game')).toBeInTheDocument();
+    expect(within(panel()).queryByTestId('display-html-frame')).toBeNull();
+    // The existing way to open the same output full size is kept.
+    fireEvent.click(within(chatRow()).getByRole('button', { name: 'Open agent display' }));
+    expect(within(panel()).getByTitle('game.html')).toBeInTheDocument();
   });
 
   it('preserves the existing inline renderer for non-app callers', () => {

@@ -178,15 +178,10 @@ describe('row 44: code agent chip lifecycle', () => {
   });
 });
 
-describe('row 45: transcript, terminal and direct steering', () => {
-  it('defaults to Transcript with collapsible thinking, messages and compact tool rows', async () => {
+describe('row 45: transcript and direct steering', () => {
+  it('shows the transcript with collapsible thinking, messages and compact tool rows', async () => {
     renderChip([chipMessage(), eventsMessage(LIVE_EVENTS)]);
     const user = userEvent.setup();
-    expect(screen.getByRole('tab', { name: 'Transcript' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'false');
 
     const thinking = screen.getByRole('button', { name: /Thinking · 6s/ });
     expect(thinking).toHaveAttribute('aria-expanded', 'false');
@@ -204,14 +199,13 @@ describe('row 45: transcript, terminal and direct steering', () => {
     expect(within(tools[2]).getByText('✓ 3 passed')).toHaveClass('text-green-600');
   });
 
-  it('Terminal tab shows the existing terminal surface and hides the transcript', async () => {
+  it('live chip has no terminal view: no tabs, no terminal surface, transcript visible', () => {
     const { container } = renderChip([chipMessage(), eventsMessage(LIVE_EVENTS)]);
-    await userEvent.setup().click(screen.getByRole('tab', { name: 'Terminal' }));
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
-    const terminal = container.querySelector('.code-agent-terminal-mount');
-    expect(terminal).not.toBeNull();
-    expect(terminal!.closest('.hidden')).toBeNull();
-    expect(screen.getByTestId('code-agent-transcript').closest('.hidden')).not.toBeNull();
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Terminal' })).not.toBeInTheDocument();
+    expect(container.querySelector('.code-agent-terminal-mount')).toBeNull();
+    expect(screen.getByTestId('code-agent-transcript').closest('.hidden')).toBeNull();
+    expect(screen.getByPlaceholderText('Message Codex directly…')).toBeInTheDocument();
   });
 
   it('sends a direct turn to the session and echoes it into the transcript', async () => {

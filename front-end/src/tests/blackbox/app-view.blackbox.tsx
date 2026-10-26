@@ -221,7 +221,7 @@ describe('app view', () => {
     await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
     const chip = await screen.findByTestId('code-agent-chip');
 
-    fireEvent.click(within(chip).getByRole('button', { name: 'Open Snake game preview' }));
+    fireEvent.click(within(chip).getByRole('button', { name: 'Open app' }));
     await screen.findByTestId('app-view-screen');
     fireEvent.click(screen.getByTestId('rose-agent-row-agent-001'));
     await waitFor(() => expect(screen.queryByTestId('app-view-screen')).not.toBeInTheDocument());
@@ -229,7 +229,7 @@ describe('app view', () => {
     // Below md (no left bar, no keyboard) the header's bare close icon returns too.
     fireEvent.click(
       within(await screen.findByTestId('code-agent-chip')).getByRole('button', {
-        name: 'Open Snake game preview',
+        name: 'Open app',
       }),
     );
     const view = await screen.findByTestId('app-view-screen');

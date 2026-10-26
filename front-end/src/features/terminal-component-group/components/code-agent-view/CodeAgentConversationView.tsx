@@ -1,7 +1,7 @@
 /**
  * Code-agent conversation: existing main-chat messages with one work slot per
- * native turn. Running activity updates in place; terminal history collapses
- * above its answer. User messages, displays and A2A rows stay outside the slot.
+ * native turn. Running activity updates in place; finished work collapses
+ * above its answer. No terminal view (transcript only). User messages, displays and A2A rows stay outside the slot.
  * The existing QueryInput sends directly with attachments and native settings;
  * questions and approvals sit above it without replacing the draft. Read-only
  * views keep the transcript and show a notice instead of the composer.
@@ -19,9 +19,8 @@ import ApprovalChip from '../ApprovalChip';
 import { CodeSessionMessages } from './CodeSessionMessages';
 import { CodeSessionComposer } from './CodeSessionComposer';
 import { useLocalEchoes } from '../../hooks/codeAgentLocalState';
-import { ProviderIcon, TerminalSurface } from '../claudeCodeChip.shared';
+import { ProviderIcon } from '../claudeCodeChip.shared';
 import { FailureBox, PausedNote, SessionLine, Summary } from '../codeAgentChip.desktop';
-import { ChipTabs, type ChipTab } from '../codeAgentChip.steer';
 import { PinnedQuestionMount } from '../PinnedQuestion';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
 import { useCodeAgentConversation, type CodeAgentConversation } from './useCodeAgentConversation';
@@ -74,21 +73,13 @@ function Header({ c }: { c: CodeAgentConversation }) {
 }
 
 function Body({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
-  const [tab, setTab] = useState<ChipTab>('transcript');
   const echoes = useLocalEchoes(taskId);
   const ended = c.chipState === 'completed' || c.chipState === 'failed' || c.chipState === 'paused';
   const session = ended ? c.meta?.code_session : undefined;
   return (
     <>
-      <ChipTabs tab={tab} onChange={setTab} />
-      <div className={tab === 'transcript' ? '' : 'hidden'}>
+      <div className="border-t border-border dark:border-white/[0.07]">
         <CodeSessionMessages c={c} taskId={taskId} echoes={echoes} />
-      </div>
-      <div className={tab === 'terminal' ? 'px-3 pt-2' : 'hidden'}>
-        <TerminalSurface
-          terminalContainerRef={c.vm.terminalContainerRef}
-          className="h-[60vh] rounded-lg"
-        />
       </div>
       {c.meta && session && <SessionLine session={session} meta={c.meta} />}
       {c.chipState === 'completed' && c.meta?.summary && <Summary summary={c.meta.summary} />}
