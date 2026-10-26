@@ -24,6 +24,23 @@ ROOT = Path(__file__).resolve().parents[2]
 M = runpy.run_path(str(ROOT / "scripts/cloudbench-resume-controller-export.py"))
 
 
+FAKE_FLYCTL = r"""
+import json,os,shlex,sys
+from pathlib import Path
+root=Path(os.environ['FAKE_FLYCTL_DIR']);args=sys.argv[1:]
+assert args[:3]==['ssh','console','-a'] and args[4:7]==['--machine',os.environ['FAKE_FLYCTL_MACHINE'],'-C'] and len(args)==8,args
+command=shlex.split(args[7]);assert command[:2]==['cat','--'] and len(command)==3,command
+name=Path(command[2]).name
+with open(root/'calls.log','a') as log:log.write(json.dumps(command[2])+'\n')
+control=json.loads((root/'control.json').read_text())
+if control['fail']:sys.stderr.write('fixture download failure\n');raise SystemExit(75)
+if control['flaky'].get(name):
+ control['flaky'][name]-=1;(root/'control.json').write_text(json.dumps(control))
+ sys.stdout.buffer.write(b'partial');sys.stderr.write('Error: ssh: tunnel closed during stream\n');raise SystemExit(1)
+sys.stdout.buffer.write((root/'payloads'/name).read_bytes())
+"""
+
+
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.write_text(json.dumps(value, sort_keys=True) + "\n")
@@ -1066,6 +1083,69 @@ class ExportResume(unittest.TestCase):
                 M["fetch_launch"](state, api)
             self.assertFalse((self.export / "launch.json").exists())
 
+    def test_live_owner_export_pending_gate_launch_record_is_fetched_once(self):
+        # 2026-10-22 SAME60: the live runner's gate watchdog expired across a devbox
+        # suspend, so it returned export-pending without downloading launch.json.
+        state = self.dead_state()
+        del state["dead_owner"]
+        (self.export / "launch.json").unlink()
+        workspace = write(self.export / "workspace-volume.ownership.json", {"volume_id": "vol_fixture"})
+        record = dict(self.record, image="fixture-image", workspace_ownership_sha256=M["sha"](workspace.read_bytes()),
+                      caller=dict(self.caller, pid=state["caller"]["gate_pid"], birth="gate"))
+        write(self.export / "caller.json", record["caller"])
+        state["machine"] = dict(state["machine"], config={"image": "fixture-image"})
+        self.value["state"]["machine"] = state["machine"]
+        api = self.api()
+        self.payloads["launch.json"] = json.dumps(record).encode()
+        log = self.out / "gate.private.log"
+        log.write_bytes(b"GATE_RESULT exit=1\n")
+        log.chmod(0o600)
+        with (
+            mock.patch.dict(M["fetch_launch"].__globals__, dict(validate_normal=lambda _s: True)),
+            mock.patch.object(M["subprocess"], "check_output", return_value=self.collector.read_bytes()),
+        ):
+            with self.assertRaisesRegex(ValueError, "did not positively return export pending"):
+                M["fetch_launch"](state, api)
+            self.assertFalse((self.out / "live-owner-launch-fetch").exists())
+            log.write_bytes(("GATE_EXPORT_PENDING machine=%s; host retained, no release credit\nGATE_RESULT exit=1\n" % self.mid).encode())
+            receipt = M["fetch_launch"](state, api)
+            self.assertEqual(receipt["launch_sha256"], M["sha"]((self.export / "launch.json").read_bytes()))
+            self.assertTrue((self.out / "live-owner-launch-fetch/complete.json").is_file())
+            self.assertFalse((self.out / "dead-owner-launch-fetch").exists())
+            with self.assertRaisesRegex(ValueError, "already present"):
+                M["fetch_launch"](state, api)
+
+    def test_stream_get_writes_16mib_blocks_into_a_new_private_target_without_staging(self):
+        # SAME60 2026-10-22: sftp's 32 KiB writes into the FUSE run dir missed a one-hour window.
+        payload = os.urandom(1024) * (40 * 1024)  # 40 MiB
+        self.payloads["originals.tar.gz"] = payload
+        api = self.api()
+        target = self.out / "streamed.tar.gz"
+        sizes, real_write = [], os.write
+
+        def recording_write(fd, data):
+            sizes.append(len(data))
+            return real_write(fd, data)
+
+        before = set(Path(tempfile.gettempdir()).iterdir())
+        with mock.patch.object(M["os"], "write", side_effect=recording_write):
+            rc, stdout, stderr = M["stream_get"](api, 60, self.mid, "/tmp/gate/x/originals.tar.gz", target)
+        self.assertEqual((rc, stdout), (0, "streamed %d bytes" % len(payload)))
+        self.assertEqual(M["file_sha"](target), M["sha"](payload))
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sizes, [16 << 20, 16 << 20, 8 << 20])
+        self.assertEqual(set(Path(tempfile.gettempdir()).iterdir()), before)  # no local staging
+        with self.assertRaises(FileExistsError):
+            M["stream_get"](api, 60, self.mid, "/tmp/gate/x/originals.tar.gz", target)
+        slow = self.root / "slow-flyctl"
+        slow.write_text("#!" + sys.executable + "\nimport sys,time\nsys.stdout.buffer.write(b'x');sys.stdout.flush();time.sleep(60)\n")
+        slow.chmod(0o700)
+        started = time.monotonic()
+        rc, stdout, _ = M["stream_get"](SimpleNamespace(binary=str(slow), env=dict(os.environ)), 1, self.mid, "/x", self.out / "slow")
+        self.assertEqual(rc, 124)
+        self.assertIn("timed out", stdout)
+        self.assertLess(time.monotonic() - started, 30)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -1144,6 +1224,27 @@ class ExportResume(unittest.TestCase):
             def __init__(self):
                 self.calls = []
                 self.marker = False
+
+            @property
+            def binary(self):
+                # The real stream path: an executable fake flyctl serving the current payloads.
+                test.assertFalse(self.marker)
+                self.calls.append(("ssh", "stream"))
+                fake = test.root / "fake-flyctl"
+                (fake / "payloads").mkdir(parents=True, exist_ok=True, mode=0o700)
+                for name, raw in test.payloads.items():
+                    (fake / "payloads" / name).write_bytes(raw)
+                if not (fake / "control.json").exists():
+                    (fake / "control.json").write_text(json.dumps(dict(fail=fail_download, flaky=flaky)))
+                script = fake / "flyctl"
+                if not script.exists():
+                    script.write_text("#!" + sys.executable + "\n" + FAKE_FLYCTL)
+                    script.chmod(0o700)
+                return str(script)
+
+            @property
+            def env(self):
+                return dict(os.environ, FAKE_FLYCTL_DIR=str(test.root / "fake-flyctl"), FAKE_FLYCTL_MACHINE=test.mid)
 
             def api(self, method, path, timeout, observer):
                 test.assertFalse(self.marker)
@@ -1245,7 +1346,7 @@ class ExportResume(unittest.TestCase):
                 (self.out / "controller-export-recovery/registered-orphan-drain/per-pid/intent.json").read_bytes(),
                 b"actual immutable TERM intent fixture\n",
             )
-            self.assertEqual(len([call for call in api.calls if call[:2] == ("ssh", "sftp")]), 3)
+            self.assertEqual(len([call for call in api.calls if call[:2] == ("ssh", "stream")]), 3)
             self.assertTrue(all((self.export / name).stat().st_nlink == 1 for name in self.payloads))
             write(
                 self.export / "disposable-export.verified.json",

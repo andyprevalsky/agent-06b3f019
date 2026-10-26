@@ -244,7 +244,8 @@ Do not omit `Tests:`; a command list without saying what is asserted is invalid.
 **Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation, in one sentence>; this change <converges on it | diverges from it because <reason>>.
 
 Name the implementation in a reference harness that handles the same problem:
-`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, or `codex/` (run
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, `codex/`, or
+`kimi-code/` (run
 `bash scripts/sync-reference-repos.sh` when a clone is missing). Cite a real
 `path:line` you opened in this session, one line per repo that has an analog,
 and say for each whether the proposed change moves Rose toward it. These

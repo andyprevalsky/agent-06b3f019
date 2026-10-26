@@ -416,7 +416,8 @@ applicable (no approval-gated hunk)` in the case file.
 
 The reference harnesses are heavily tested in production; this repo is not yet.
 Before settling on a fix, find how they handle the same problem:
-`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, and `codex/` (run
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, `codex/`, and
+`kimi-code/` (run
 `bash scripts/sync-reference-repos.sh` when a clone is missing).
 
 1. Search each repo for the mechanism in question (tool-output limits, retries,

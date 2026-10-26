@@ -1,7 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import { DEMO_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
-import { demoCacheWriteEnabled, demoCacheWritesDisabled } from './demoCacheAccountPolicy';
+import {
+  demoCacheWriteEnabled,
+  demoCacheWritesDisabled,
+  shouldWriteDemoCacheForUser,
+} from './demoCacheAccountPolicy';
 import { type CacheKind } from './demoCacheNormalizeConstants';
 import { stripSecrets } from './demoCacheNormalizeCore';
 import { createLogger } from './logger';
@@ -499,7 +503,7 @@ export async function agentFastMode(agentId: string): Promise<{
   return {
     enabled,
     goal,
-    writeEnabled: demoCacheWriteEnabled(enabled),
+    writeEnabled: demoCacheWriteEnabled(enabled) && shouldWriteDemoCacheForUser(agent?.userId),
     rootAgentId,
     rootGoal,
     providerFastMode,

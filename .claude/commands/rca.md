@@ -250,7 +250,7 @@ one.
   solution failed to be coherent.
 - When the fix changes an approval-gated surface, the golden-reference check
   (Step 6b in `docs/root-cause-analysis.md`) is recorded: the `path:line` in `claude-code-src/`, `openclaw/`, `hermes-agent/`,
-  or `codex/` that handles the same problem, and whether the fix converges on
+  `codex/`, or `kimi-code/` that handles the same problem, and whether the fix converges on
   it. Prefer the fix that brings Rose closer to the reference harnesses.
 
 ## Step 8 — WRITE THE CASE FILE (mandatory, every time)

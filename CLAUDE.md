@@ -450,9 +450,17 @@ prime-agent/      → Cloned Prime Intellect prime-agent (READ-ONLY reference,
                     Re-clone with
                     `git clone --depth 1 https://github.com/PrimeIntellect-ai/prime-agent.git`
                     if missing locally.
+kimi-code/        → Cloned Moonshot AI Kimi Code CLI (READ-ONLY reference,
+                    gitignored, MIT). TypeScript terminal agent harness;
+                    system prompt, overlays, reminders and tool descriptions
+                    are markdown under `packages/agent-core-v2/src/`
+                    (system prompt: `app/agentProfileCatalog/system.md`).
+                    Re-clone with
+                    `git clone --depth 1 https://github.com/MoonshotAI/kimi-code.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, and `prime-agent/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, `codex/`, `prime-agent/`, and `kimi-code/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
@@ -461,7 +469,7 @@ prime-agent/      → Cloned Prime Intellect prime-agent (READ-ONLY reference,
 
 `prompt-review/` ships a small local web app for reviewing every prompt in
 this repo against reference codebases side by side. Columns:
-**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex → Prime Agent**. Notes are
+**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex → Prime Agent → Kimi Code**. Notes are
 saved per prompt; checkpoint state persists across reloads.
 
 ```bash
@@ -471,7 +479,7 @@ PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
 
 - Catalog: `prompt-review/catalog.json` (edit to add/remove prompts).
   Each OUR entry has a `matches` field with hand-picked semantic pairings
-  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`, `prime`); a value of
+  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`, `prime`, `kimi`); a value of
   `null` means "no equivalent in that repo" and the column shows
   "no equivalent" instead of a low-quality keyword match. Edit
   `prompt-review/render/apply_explicit_mappings.py` to refine pairings.
