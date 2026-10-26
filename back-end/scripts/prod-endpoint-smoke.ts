@@ -16,8 +16,10 @@
  * alive and did not crash" — we are catching server crashes and schema/migration
  * drift, not asserting business results.
  *
- * Runs read-only GETs, one deliberately unauthenticated no-op POST, and OPTIONS
- * preflights. Safe against prod.
+ * Runs read-only GETs, one deliberately unauthenticated no-op POST, OPTIONS
+ * preflights, and a READ ONLY catalog check (scripts/verify-schema-objects.ts)
+ * that every migration-declared index/trigger/policy/RLS flag still exists.
+ * Safe against prod.
  *
  * Usage:
  *   npx tsx scripts/prod-endpoint-smoke.ts
@@ -33,6 +35,7 @@
  */
 import { config } from 'dotenv';
 import { runAuthCorsPreflights } from '../src/providers/corsSmoke';
+import { driftProblems, SCHEMA_DRIFT_HINT, verifySchemaObjects } from './verify-schema-objects';
 config();
 
 const RAW_BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
@@ -198,7 +201,29 @@ async function main(): Promise<void> {
     if (!result.ok) console.log(`       ${result.error ?? 'unknown preflight failure'}`);
   }
 
-  const totalChecks = results.length + corsResults.length;
+  // Migration-declared objects Prisma cannot restore on its own (trigram
+  // indexes, triggers, RLS) can vanish after `migrate deploy` recorded them,
+  // e.g. through a stray `prisma db push` against prod. Check them read-only.
+  let schemaChecks = 0;
+  const databaseUrl = process.env.DIRECT_URL || process.env.DATABASE_URL;
+  if (!LOCAL_BASE && databaseUrl) {
+    schemaChecks = 1;
+    try {
+      const problems = driftProblems(await verifySchemaObjects(databaseUrl));
+      if (problems.length > 0) failed++;
+      console.log(
+        `  ${problems.length > 0 ? '❌' : '✅'} ${'schema'.padEnd(18)} migration-declared objects`
+      );
+      for (const problem of problems) console.log(`       ${problem}`);
+      if (problems.length > 0) console.log(`       ${SCHEMA_DRIFT_HINT}`);
+    } catch (error) {
+      failed++;
+      console.log(`  ❌ ${'ERR'.padEnd(18)} migration-declared objects`);
+      console.log(`       ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const totalChecks = results.length + corsResults.length + schemaChecks;
   console.log(`\n${totalChecks - failed}/${totalChecks} production checks healthy.`);
   if (failed > 0) {
     console.error(

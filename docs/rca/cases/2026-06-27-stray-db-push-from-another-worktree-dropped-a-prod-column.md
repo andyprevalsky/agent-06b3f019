@@ -9,10 +9,10 @@ problem_class: fixture-environment-data-mismatch
 first_bad_boundary: back-end/.env DATABASE_URL points at PROD Supabase, so any prisma db push / migrate dev from any worktree rewrites prod DDL
 symptoms:
   - 'The column "Agent.fastModeCacheEnabled" does not exist in the current database.'
-  - "every GET /api/agents returns 500 while /health returns 200"
-  - 'component Agents logs "Failed to fetch agents"; dashboard fully broken'
   - 'prod migration-declared GIN trigram indexes ("Agent_title_trgm_idx", "Message_text_trgm_idx") missing while _prisma_migrations records them applied'
-  - "local DATABASE_URL override left production DIRECT_URL selected; Credit_userId_fkey failed during Prisma AddForeignKey"
+  - 'statement: DROP INDEX "Agent_goal_trgm_idx" followed by insert or update on table "Credit" violates foreign key constraint "Credit_userId_fkey"'
+  - "prisma migrate diff emits DROP INDEX for trigram indexes unrelated to the migration being authored"
+  - "relrowsecurity false on User, RoseApiKey, PlaidItem; anon PostgREST count on User returned */9526"
 tags:
   - prisma
   - db-push
@@ -20,12 +20,15 @@ tags:
   - schema-drift
   - supabase
   - trigram-index
+  - rls
+  - schema-object-drift
 sources:
   - memory:project_prod_agents_500_fastmodecache_jun2026
   - PR #1417
   - PR #1511
-repro: back-end/scripts/prisma-local-push.test.sh
-status: mitigated
+  - memory:scalability-audit-100-seats-20261024
+repro: back-end/src/tests/structural/migration-schema-objects.test.ts
+status: fixed
 ---
 
 ## Problem
@@ -75,6 +78,13 @@ loaded — it writes prod. Use `migrate deploy` only.
 None recorded.
 
 ## Reusable lesson
+
+Declare every index Prisma can introspect in `schema.prisma` (GIN trigram
+included) and verify migration-declared objects against the live catalog
+after each deploy; `_prisma_migrations` saying "applied" proves nothing about
+what still exists.
+
+Earlier lesson:
 
 Prod 500s with a green `/health` and a Prisma "column does not exist" mean the DB was
 mutated out from under the code — check `_prisma_migrations` says applied, then restore
@@ -197,3 +207,91 @@ remote URL is rejected and the both-local dry-run is accepted. These checks do
 not imply that a bare Prisma executable is guarded. Preserve the receipts,
 use the guarded local entry points, and obtain a trustworthy production
 before-image before attributing or repairing unrelated catalog drift.
+
+## Recurrence: the restored indexes were dropped again the next night (2026-10-08)
+
+Found by the 2026-10-24 100-seat audit: `Agent_title_trgm_idx`,
+`Agent_goal_trgm_idx`, `Message_text_trgm_idx` and
+`AgentTrajectorySearch_searchText_trgm_idx` were absent from prod while
+`_prisma_migrations` recorded them applied. Prod logs DDL (`log_statement=ddl`).
+Supabase `postgres_logs` show the 2026-10-07 04:07–04:43Z manual restore, then at
+**2026-10-08 03:30:02.675Z** a new pooled session issued uncommented
+`DROP INDEX "Agent_goal_trgm_idx"`, `"Agent_title_trgm_idx"`,
+`"Message_text_trgm_idx"`, then
+`ALTER TABLE "Credit" ADD CONSTRAINT "Credit_userId_fkey"`, which failed with
+23503. That is a `prisma db push` against prod: Prisma's DropIndex steps run
+before AddForeignKey, each statement commits separately, and the FK step then
+fails on orphan Credit rows. The same FK failure appears on 2026-10-01 16:53Z
+and 2026-10-14 22:56Z. The push came 26 minutes after PR #1417 merged, and the
+session arrived through Supavisor, so the client cannot be attributed further.
+
+**Why the 2026-10-07 guard did not hold:** it fixed the instructions (CLAUDE.md
+and the guarded `prisma:push:local` wrapper), but a bare `npx prisma db push`
+from `back-end/` still selects the production `DIRECT_URL` from `back-end/.env`.
+An agent working from an older context, or a direct executable, reaches prod.
+The owned cause underneath is in the schema. Prisma introspects plain-column
+indexes of every access method, including GIN with `gin_trgm_ops`. Because
+`schema.prisma` did not declare these four, every `db push` treated them as
+surplus and dropped them. Every `migrate diff` also emitted
+`DROP INDEX` for them; `20261020235500_browser_template_keep_best` records an
+author hand-stripping that drop. Expression and partial indexes
+(`Person_grep_contact_trgm_idx`, `Message_jev_*`, `PurchaseSpend_legacy…`)
+survived, because Prisma ignores them. That confirms the boundary.
+
+**Repro (local Postgres, ran):** scratch DB → guarded db push of the current
+schema → create the indexes from their migration SQL → `prisma migrate diff
+--from-url … --to-schema-datamodel` → guarded `db push` again
+(`/tmp/s3/repro.sh <worktree>`). On origin/main `b3679ea7b`: migrate diff
+printed 4 `DROP INDEX` lines and the second push removed all of them
+(`FAIL: schema sync drops migration-declared trigram indexes`). With the fix,
+the three declared indexes survive and are not in the diff
+(`PASS`). Permanent regression:
+`back-end/src/tests/structural/migration-schema-objects.test.ts` (in
+`npm run test:structural`, which /deploy runs). It fails on origin/main
+listing the four indexes and passes on the fix (5/5 consecutive runs).
+
+**Wider drift found by the new verifier** (`back-end/scripts/verify-schema-objects.ts`):
+it replays applied migrations and compares indexes, triggers, functions,
+policies, extensions and RLS flags against the live catalog. Prod also had RLS disabled on 20 baseline tables
+(User, RoseApiKey, PlaidItem, SteelSessionAuth, Subscription, ToolUsage, …),
+19 baseline policies missing, and 21 later tables never RLS-enabled. `anon` and
+`authenticated` hold SELECT on every public table and the Data API exposes
+`public`: an anon count probe on `User` returned `*/9526`. No `DISABLE ROW LEVEL
+SECURITY` or `DROP POLICY` appears in retained logs (2026-10-01 onward), so when
+RLS was lost between the 2026-07-07 baseline and October is an **open
+observability gap**. The parent thread contained it with approval on
+2026-10-26 17:30Z (ENABLE RLS on all 41 tables).
+
+**Solution (this recurrence):**
+- `schema.prisma` declares the three restored trigram indexes
+  (`@@index([col(ops: raw("gin_trgm_ops"))], map: …, type: Gin)`) and
+  `extensions = [vector, pg_trgm]`, so neither `db push` nor `migrate diff` can
+  drop them.
+- Migrations `20261026180002..4` rebuild them `CONCURRENTLY IF NOT EXISTS`.
+  Each is preceded by `20261026180001`, which runs a lone
+  `SET statement_timeout = 0`: `migrate deploy` applies pending migrations on
+  one session (verified locally with a 1 ms database default), and the pooled
+  session's 120 s limit is shorter than the 177 s Message build.
+- `20261026180005` drops `AgentTrajectorySearch_searchText_trgm_idx`, recording
+  the approved absence. Measured: 2.0M rows × ~494 trigrams ≈ 1e9 postings, so
+  the concurrent validation sort alone would need roughly 16 GB+ of temporary
+  space against 27 GB free on the 90 GB disk. A blocking build would stall the
+  Message trigger. Restore it in a new migration after disk headroom is
+  provisioned.
+- `20261026180000` re-enables RLS on all 41 tables and recreates the 19 baseline
+  policies verbatim. It is idempotent after the manual containment
+  (`DROP POLICY IF EXISTS` / `CREATE POLICY`, `SET LOCAL lock_timeout`).
+- `scripts/prod-endpoint-smoke.ts` (/deploy Step 13a) now runs the read-only
+  verifier. It also fails on INVALID indexes and on any public table that anon or
+  authenticated can read without RLS, so future drift fails the next deploy
+  loudly.
+
+Scale (10k agents): no hot-path change. The three GIN indexes add per-insert
+maintenance on Agent and Message (as originally designed). Every user's search
+query becomes an index scan instead of a scan of their rows. The verifier is
+one bounded catalog read per deploy.
+
+Remaining path: a bare `npx prisma db push` from `back-end/` still targets prod
+via `.env` `DIRECT_URL`. It can no longer drop these indexes, but it can still
+attempt other DDL. Closing it requires moving the prod direct URL out of the
+default `.env` variable, which is an env change needing approval.
