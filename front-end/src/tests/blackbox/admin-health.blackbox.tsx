@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -235,6 +235,45 @@ describe('AdminHealth page', () => {
     expect(embedded.container.firstElementChild).not.toHaveClass('pt-20');
     // A fixed near-black series (#111827) is invisible on the Rose dark panel (#262624).
     expect(document.querySelectorAll('[stroke="#111827"], [stop-color="#111827"]')).toHaveLength(0);
+  });
+
+  it('neutral-series tooltips use the theme popover tokens, so rows stay readable on dark', async () => {
+    renderWithProviders(<AdminHealth embedded />);
+    await screen.findByText('01 Primary Metric');
+    const charts = [
+      screen.getByText('Revenue over time'),
+      screen.getByText('Verified-User Weekly Retention'),
+      screen.getByRole('img', { name: 'GitHub commits over time' }),
+    ].map((title) => {
+      let node: HTMLElement | null = title;
+      while (node !== null && node.querySelector('.recharts-wrapper') === null) {
+        node = node.parentElement;
+      }
+      return node?.querySelector<HTMLElement>('.recharts-wrapper') ?? null;
+    });
+    let rows = 0;
+    for (const chart of charts) {
+      expect(chart).not.toBeNull();
+      fireEvent.mouseMove(chart!, { clientX: 300, clientY: 100 });
+      const box = await waitFor(() => {
+        const found = chart!.querySelector<HTMLElement>('.recharts-default-tooltip');
+        expect(found).not.toBeNull();
+        return found!;
+      });
+      // Recharts' default box is a fixed #fff; rows take the series colour
+      // (currentColor = light text on Rose dark) unless the item style is themed.
+      const style = box.getAttribute('style') ?? '';
+      expect(style).toContain('hsl(var(--popover))');
+      expect(style).not.toMatch(/rgb\(255, 255, 255\)|#fff/);
+      const label = box.querySelector<HTMLElement>('.recharts-tooltip-label');
+      expect(label?.getAttribute('style') ?? '').toContain('hsl(var(--popover-foreground))');
+      for (const row of box.querySelectorAll<HTMLElement>('.recharts-tooltip-item')) {
+        rows += 1;
+        expect(row.getAttribute('style') ?? '').toContain('hsl(var(--popover-foreground))');
+        expect(row.getAttribute('style') ?? '').not.toContain('currentcolor');
+      }
+    }
+    expect(rows).toBeGreaterThan(0);
   });
 
   it('rejects anomalous end-to-end funnel growth in current and prior periods', () => {

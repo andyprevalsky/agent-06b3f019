@@ -22,6 +22,7 @@ tags:
 sources:
   - commit a70049483
   - commit 8ceb1008c
+  - commit d80ff1e4c
 repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("Rose Desktop stacking order and composer continuity"), front-end/src/tests/blackbox/rose-sidebar.blackbox.tsx ("Biz health covers the query box full width like Browser")
 status: fixed
 ---
@@ -51,8 +52,10 @@ RoseAppPanels (Integrations only).
 ## Solution
 
 `front-end/src/lib/roseLayers.ts` defines one root scale: appPanel 66 < appIcons
-90 < composer 100 < coverPanel 101 < coverIcons 102 < popover 220. LeftPanelShell
-portals to body at coverPanel; the toolset and test-prompt popovers keep the
+90 < composer 100 < leftPanel 101 < coverPanel 102 < coverIcons 103 < popover 220.
+LeftPanelShell portals to body at leftPanel (an app opened while project
+settings stays open covers it; review follow-up) and its width ends left of the
+top-right icon row; the toolset and test-prompt popovers keep the
 popover tier; AppDrawerShell, RoseAppIcons, QueryInputLayer and ui/popover use
 the tokens; `coversComposer()` (browser, integrations, health) is the single
 list. Biz health uses the full-width variant. No data flow or per-agent cost

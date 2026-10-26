@@ -79,6 +79,7 @@ import VelocitySection from './VelocitySection';
 import { UsersDirectorySection } from './UsersSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { funnelEndToEnd, relativeChange, seriesMetricChange } from './metricComparison';
+import { THEMED_TOOLTIP } from './chartTheme';
 import type {
   AdminHealthData,
   AdminHealthFunnelStep,
@@ -490,7 +491,7 @@ function RetentionChart({ data }: { data: AdminHealthData }) {
                 axisLine={false}
                 fontSize={12}
               />
-              <Tooltip formatter={(value) => `${value}%`} />
+              <Tooltip {...THEMED_TOOLTIP} formatter={(value) => `${value}%`} />
               <Legend />
               {data.retentionCohorts.map((cohort, index) => (
                 <Line
