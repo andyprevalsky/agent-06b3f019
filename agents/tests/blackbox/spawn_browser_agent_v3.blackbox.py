@@ -13893,6 +13893,24 @@ async def test_observed_sign_in_options_reach_verifier_receipt():
     )
     assert history.get_entries()[-1]["result"].get("auth_context") == changed
 
+    # The verifier keeps a bounded 30-receipt window. Once the receipt that carried the latest
+    # inventory ages out (with an approved card request older still), both are carried forward.
+    aged = ActionHistory()
+    aged.bind_dom_service(dom)
+    aged.restore_entries(
+        [{"step": 1, "action": "request_payment_card", "result": {"success": True, "status": "approved"}},
+         {"step": 2, "action": "read_browser_state", "result": {"success": True, "auth_context": auth_context}},
+         *[{"step": i, "action": "wait", "result": {"success": True, "message": f"filler-{i}"}} for i in range(3, 43)]]
+    )
+    with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+        aged_context = await build_browser_verifier_context(
+            "Tell me my member number", url, final_state, aged, _fake_config(), "session-1"
+        )
+    aged_log = next(m["text"] for m in aged_context if m.get("metadata", {}).get("toolName") == "action_history")
+    assert "(30 actions shown" in aged_log, "carry-forward grew the verifier window"
+    assert "Auth Options for rose-shop-a1b2" in aged_log, "observed sign-in options aged out of the verifier window"
+    assert "Step 1: request_payment_card" in aged_log and "filler-42" in aged_log and "filler-14" not in aged_log
+
 
 async def test_execute_action_wait():
     from domains.spawn_browser_agent_v3.service_actions import execute_action

@@ -369,22 +369,31 @@ async def build_browser_verifier_context(
     effects on the caller.
     """
     all_action_entries = action_history.get_entries()
-    action_entries = all_action_entries[-30:]
-    # The card request can predate many form-fill actions. Keep its actual
-    # recorded result in the verifier's bounded history when it ages out.
-    if not any(
-        entry.get("action") == "request_payment_card"
-        and (entry.get("result") or {}).get("status") == "approved"
-        for entry in action_entries
-    ):
-        card_request = next(
-            (entry for entry in reversed(all_action_entries[:-30])
-             if entry.get("action") == "request_payment_card"
-             and (entry.get("result") or {}).get("status") == "approved"),
-            None,
-        )
-        if card_request is not None:
-            action_entries = [card_request, *action_entries[-29:]]
+    window, older = all_action_entries[-30:], all_action_entries[:-30]
+
+    def approved_card(entry: Dict[str, Any]) -> bool:
+        return entry.get("action") == "request_payment_card" and (entry.get("result") or {}).get("status") == "approved"
+
+    def has_auth_context(entry: Dict[str, Any]) -> bool:
+        return "auth_context" in (entry.get("result") or {})
+
+    # Some receipts prove a fact that later receipts do not repeat: the approved
+    # card request, and the observed sign-in options (stored only when they
+    # change). Carry the latest older one forward when it ages out of the
+    # verifier's bounded history, keeping the same 30-receipt size.
+    carried = []
+    for proves in (approved_card, has_auth_context):
+        if not any(proves(entry) for entry in window):
+            carrier = next((entry for entry in reversed(older) if proves(entry)), None)
+            if carrier is not None and carrier not in carried:
+                carried.append(carrier)
+    carried.sort(key=lambda entry: entry.get("step", 0))
+    # Make room by dropping the oldest receipts that prove neither fact.
+    drop = {
+        id(entry)
+        for entry in [e for e in window if not (approved_card(e) or has_auth_context(e))][: len(carried)]
+    }
+    action_entries = [*carried, *(entry for entry in window if id(entry) not in drop)]
     action_details_lines = []
     for entry in action_entries:
         step = entry.get("step", "?")
