@@ -33,7 +33,7 @@ import { sendOnChannel } from '../../providers/smsSupervisor/channelDelivery';
 import type { WhatsAppMediaAttachment } from '../../providers/smsSupervisor/inboundMedia';
 import { createLogger } from '../../providers/logger';
 import { alertError } from '../../providers/errorAlert';
-import { acquireLease, releaseLease } from '../../providers/sharedState';
+import { acquireLease, releaseLease, renewLease } from '../../providers/sharedState';
 
 const log = createLogger('WhatsApp Webhook');
 
@@ -168,14 +168,16 @@ export interface InboundWhatsAppResult {
 // Dedup of recently-handled Meta message ids, shared by every backend instance.
 // Meta re-delivers a webhook when it does not get a timely 2xx, so a slow DB
 // turn can re-run the same inbound message, and the retry may land on another
-// instance. The first delivery claims the wamid for a day.
+// instance. The first delivery claims the wamid briefly while it is handled, then
+// for a day once handled: a crash mid-handling lets Meta's retry through.
 const MESSAGE_ID_NAMESPACE = 'whatsapp-wamid';
+const MESSAGE_ID_PROCESSING_TTL_MS = 10 * 60 * 1000;
 const MESSAGE_ID_TTL_MS = 24 * 60 * 60 * 1000;
 const messageClaims = new Map<string, string>();
 
 export async function alreadyProcessedMessage(messageId: string): Promise<boolean> {
   if (messageId === '') return false;
-  const token = await acquireLease(MESSAGE_ID_NAMESPACE, messageId, MESSAGE_ID_TTL_MS);
+  const token = await acquireLease(MESSAGE_ID_NAMESPACE, messageId, MESSAGE_ID_PROCESSING_TTL_MS);
   if (token === null) return true;
   messageClaims.set(messageId, token);
   return false;
@@ -193,9 +195,12 @@ export async function releaseProcessedMessage(messageId: string): Promise<void> 
   await releaseLease(MESSAGE_ID_NAMESPACE, messageId, token);
 }
 
-/** Forget this instance's claim tokens once a delivery batch finishes. */
-function forgetMessageClaim(messageId: string): void {
+/** Keep a handled message's claim for a day and forget this instance's token. */
+async function settleMessageClaim(messageId: string): Promise<void> {
+  const token = messageClaims.get(messageId);
+  if (token === undefined) return;
   messageClaims.delete(messageId);
+  await renewLease(MESSAGE_ID_NAMESPACE, messageId, token, MESSAGE_ID_TTL_MS);
 }
 
 export async function handleInboundWhatsApp(
@@ -295,7 +300,7 @@ export async function handleInboundWhatsApp(
       await releaseProcessedMessage(messageId);
       throw error;
     }
-    forgetMessageClaim(messageId);
+    await settleMessageClaim(messageId);
   }
 
   return { ok: true };

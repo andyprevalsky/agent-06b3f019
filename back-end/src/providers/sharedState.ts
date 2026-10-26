@@ -6,17 +6,17 @@
  *   ───────────────────────────────────         ─────────────────────────────
  *   short-lived flow state (PKCE, ...)   ──►    putEphemeral / getEphemeral / takeEphemeral
  *   "first one wins" dedupe / leases     ──►    acquireLease / releaseLease
- *   per-key mutual exclusion             ──►    withSerializedLock
+ *   per-key mutual exclusion             ──►    withSerializedLock (lease, no open tx)
  *
- * Everything here is keyed per flow, user or item: one row or one advisory
- * lock per key, so cost grows with the work being coordinated, never with the
+ * Everything here is keyed per flow, user or item: one row per key, so cost grows with the work being coordinated, never with the
  * number of instances or agents. Expired rows are reaped in small batches by
  * the writers, so the table stays bounded without a cron.
  */
 
 import { Prisma } from '@prisma/client';
-import { prisma, runTransactionWithRetry } from './database';
+import { prisma } from './database';
 import { randomUUID } from './crypto';
+import { retryWithBackoff } from './retry';
 
 const REAP_BATCH = 100;
 
@@ -102,23 +102,61 @@ export async function releaseLease(namespace: string, key: string, token: string
   `;
 }
 
+/** Extend a lease `token` still owns. Returns false when it was lost or taken over. */
+export async function renewLease(
+  namespace: string,
+  key: string,
+  token: string,
+  ttlMs: number
+): Promise<boolean> {
+  const count = await prisma.$executeRaw`
+    UPDATE "SharedEphemeralState"
+    SET "expiresAt" = now() + ${ttlInterval(ttlMs)}
+    WHERE namespace = ${namespace} AND key = ${key} AND value->>'token' = ${token}
+  `;
+  return count === 1;
+}
+
+const LOCK_NAMESPACE = 'serialized-lock';
+const LOCK_TTL_MS = 60_000;
+const LOCK_HEARTBEAT_MS = 15_000;
+const LOCK_POLL_RAMP_MS = [50, 100, 200, 400];
+const LOCK_POLL_MAX_MS = 500;
+
 /**
- * Run `fn` while holding a Postgres transaction-scoped advisory lock on `key`,
- * so callers with the same key run one at a time across every instance, in
- * arrival order. The lock lives on the transaction's connection and is
- * released when it ends, including on crash. `fn` uses the normal client; the
- * transaction only carries the lock.
+ * Run `fn` while holding a cross-instance lock on `key`, so callers with the
+ * same key run one at a time across every backend instance.
+ *
+ * The lock is a lease row, not an open transaction: neither the holder nor a
+ * waiter pins a pooled connection while `fn` makes slow outside calls. The
+ * holder renews the lease while `fn` runs; a crashed holder's lease expires.
+ * Waiters poll with a capped backoff (50ms ramping to 500ms), which is cheap because locks are per user
+ * or per item. Acquisition order is not FIFO; callers that need ordering must
+ * gate inside `fn` (the SMS seq gate does).
  */
 export async function withSerializedLock<T>(
   key: string,
   fn: () => Promise<T>,
-  opts: { timeoutMs?: number; maxWaitMs?: number } = {}
+  opts: { waitMs?: number } = {}
 ): Promise<T> {
-  return runTransactionWithRetry(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
-      return fn();
-    },
-    { timeout: opts.timeoutMs ?? 120_000, maxWait: opts.maxWaitMs ?? 10_000 }
-  );
+  const waitMs = opts.waitMs ?? 120_000;
+  const steadyPolls = Math.ceil(waitMs / LOCK_POLL_MAX_MS);
+  const token = await retryWithBackoff(() => acquireLease(LOCK_NAMESPACE, key, LOCK_TTL_MS), {
+    maxRetries: LOCK_POLL_RAMP_MS.length + steadyPolls,
+    fixedDelays: [...LOCK_POLL_RAMP_MS, ...Array<number>(steadyPolls).fill(LOCK_POLL_MAX_MS)],
+    shouldRetryResult: (claimed) => claimed === null,
+    component: `SharedLock:${key}`,
+  });
+  if (token === null) throw new Error(`sharedState: timed out waiting for lock ${key}`);
+  const held = token;
+  const heartbeat = setInterval(() => {
+    void renewLease(LOCK_NAMESPACE, key, held, LOCK_TTL_MS).catch(() => undefined);
+  }, LOCK_HEARTBEAT_MS);
+  heartbeat.unref();
+  try {
+    return await fn();
+  } finally {
+    clearInterval(heartbeat);
+    await releaseLease(LOCK_NAMESPACE, key, held).catch(() => undefined);
+  }
 }

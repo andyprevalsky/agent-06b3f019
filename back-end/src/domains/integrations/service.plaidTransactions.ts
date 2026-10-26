@@ -11,7 +11,12 @@
 
 import type { Transaction } from 'plaid';
 import { createLogger } from '../../providers/logger';
-import { acquireLease, releaseLease } from '../../providers/sharedState';
+import {
+  acquireLease,
+  putEphemeral,
+  releaseLease,
+  takeEphemeral,
+} from '../../providers/sharedState';
 import { isPlaidError, syncTransactions } from '../../providers/plaid';
 import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
 import {
@@ -126,6 +131,7 @@ async function applyTransaction(
 }
 
 const PLAID_SYNC_LEASE_NAMESPACE = 'plaid-item-sync';
+const PLAID_RESYNC_NAMESPACE = 'plaid-item-resync';
 // Longer than any observed full-history sync; an expired lease is taken over,
 // so a crashed instance never wedges the item.
 const PLAID_SYNC_LEASE_TTL_MS = 15 * 60 * 1000;
@@ -138,6 +144,22 @@ export async function claimPlaidItemSync(itemRowId: string): Promise<(() => Prom
   const token = await acquireLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, PLAID_SYNC_LEASE_TTL_MS);
   if (token === null) return null;
   return () => releaseLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, token);
+}
+
+/** Release an item's sync claim, then run once more if a sync was requested meanwhile. */
+async function settlePlaidItemSyncClaim(
+  item: { id: string; plaidItemId: string },
+  releaseClaim: () => Promise<void>
+): Promise<void> {
+  await releaseClaim().catch((error: unknown) => {
+    log.warn('Plaid item sync claim release failed; it expires on its own', {
+      plaidItemId: item.plaidItemId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  if ((await takeEphemeral(PLAID_RESYNC_NAMESPACE, item.id)) !== undefined) {
+    void syncPlaidItemTransactions(item.id).catch(() => undefined);
+  }
 }
 
 async function recordPlaidSyncFailure(
@@ -189,7 +211,17 @@ export async function syncPlaidItemTransactions(
 
   const releaseClaim = await claimPlaidItemSync(item.id);
   if (releaseClaim === null) {
-    log.info('Plaid item sync already running; skipping', { plaidItemId: item.plaidItemId });
+    // The running sync may already be past its last page: ask it to go again
+    // so a webhook arriving mid-sync is never dropped.
+    await putEphemeral(
+      PLAID_RESYNC_NAMESPACE,
+      item.id,
+      { requestedAt: Date.now() },
+      PLAID_SYNC_LEASE_TTL_MS
+    );
+    log.info('Plaid item sync already running; resync requested', {
+      plaidItemId: item.plaidItemId,
+    });
     return { added: 0, modified: 0, removed: 0, cursor: item.cursor ?? null, skipped: true };
   }
   try {
@@ -241,7 +273,7 @@ export async function syncPlaidItemTransactions(
       throw err;
     }
   } finally {
-    await releaseClaim();
+    await settlePlaidItemSyncClaim(item, releaseClaim);
   }
 }
 

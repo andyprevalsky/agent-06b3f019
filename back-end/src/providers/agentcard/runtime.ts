@@ -69,7 +69,11 @@ const inFlightRefreshes = new Map<string, Promise<string>>();
  * the rotated refresh token) when the current one is expired/near-expiry or when
  * `forceRefresh` is set (used after a 401). Refreshes are single-flighted per user.
  */
-export async function getValidAccessToken(userId: string, forceRefresh = false): Promise<string> {
+export async function getValidAccessToken(
+  userId: string,
+  forceRefresh = false,
+  rejectedAccessToken?: string
+): Promise<string> {
   const token = await getUserToken(userId);
   if (token === undefined) throw new AgentCardNotConnectedError(userId);
 
@@ -79,7 +83,7 @@ export async function getValidAccessToken(userId: string, forceRefresh = false):
   if (existing !== undefined) return existing;
 
   const refreshPromise = withSerializedLock(`agentcard-refresh:${userId}`, () =>
-    refreshUserToken(userId, forceRefresh, token.accessToken)
+    refreshUserToken(userId, forceRefresh, rejectedAccessToken ?? token.accessToken)
   ).finally(() => {
     inFlightRefreshes.delete(userId);
   });
@@ -218,7 +222,7 @@ async function runForUser<T>(userId: string, op: (client: Client) => Promise<T>)
     log.warn('AgentCard MCP auth error, refreshing token and retrying', {
       user_id: maskId(userId),
     });
-    const refreshed = await getValidAccessToken(userId, true);
+    const refreshed = await getValidAccessToken(userId, true, accessToken);
     return withClient(refreshed, op);
   }
 }
