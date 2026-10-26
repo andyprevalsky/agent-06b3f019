@@ -16,7 +16,7 @@ tags:
   - trajectory-work-group
   - thought
 sources:
-  - prod rows, user 1f85ff25, 9 root agents created 2026-10-23..26 (incl. 447576b9, d324c2f0, e0799843, 0932e0ec, be86886f)
+  - agent 447576b9-f5e5-4f81-b883-865e5dad5fa9 (one of 9 replayed root agents, user 1f85ff25, 2026-10-23..26)
 repro: none — every captured prefix folds every thought (see Diagnosis)
 status: open
 ---
