@@ -170,6 +170,9 @@ class NativePool(WorkerRuntime):
         pool.operate(arguments, machine, self.client(machine["id"]))
 
     def target(self, machine, draining=False):
+        # A Machine on an unreachable host is returned with "config": null.
+        if not isinstance(machine.get("config"), dict):
+            return False
         marker = pool.metadata(machine, pool.POOL_KEY)
         env = machine["config"].get("env", {})
         return (
@@ -191,6 +194,8 @@ class NativePool(WorkerRuntime):
 
     def prepare(self, expected, previous, start=True):
         machine = self.get(expected["id"])
+        if not isinstance(machine.get("config"), dict):
+            raise ValueError("Reserved Machine config is unavailable; its host may be unreachable")
         if not self.target(machine):
             if pool.metadata(machine, pool.CUSTODY_KEY).get("rootfs_disposition") != "stateless":
                 raise ValueError("Managed banks require renewable stateless custody before image changes")
@@ -268,13 +273,20 @@ class NativePool(WorkerRuntime):
                 and pool.eligible(current, self.app, live["surfaceHash"], destination)
             ):
                 return machine_identity(current)
+            try:
+                current_identity = machine_identity(current)
+                current_queue = current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE")
+                reuse_protected = current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+            except (AttributeError, KeyError, TypeError):
+                # A null or malformed config (unreachable host) is an unverifiable bank.
+                raise ValueError("Old bank changed before its certified retirement") from None
             if (
-                machine_identity(current) != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
+                current_identity != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
                 or marker.get("job") != expected["managedJobId"]
                 or marker.get("phase") not in ("active", "draining")
                 or (marker.get("phase") == "draining" and marker.get("retiringBy") != self.ledger.job_id)
-                or current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE") != previous["taskQueue"]
-                or current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+                or current_queue != previous["taskQueue"]
+                or reuse_protected
             ):
                 raise ValueError("Old bank changed before its certified retirement")
             draining = {**marker, "phase": "draining", "retiringBy": self.ledger.job_id}

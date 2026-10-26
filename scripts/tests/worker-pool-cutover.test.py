@@ -393,6 +393,33 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             )
             self.assertEqual(request.call_count, 2)
 
+    def test_unreachable_host_null_config_blocks_preparation_and_retirement_cleanly(self):
+        # Fly returns "config": null for a Machine on an unreachable host (2026-10-26).
+        native, value, _ = self.runtime_native()
+        broken = {**copy.deepcopy(value), "config": None}
+        self.assertFalse(native.target(broken))
+        with patch.object(native, "get", return_value=broken):
+            with self.assertRaisesRegex(ValueError, "config is unavailable"):
+                native.prepare(cutover.machine_identity(value), {"taskQueue": "q", "surfaceHash": "old"})
+        value["state"] = "stopped"
+        expected = {**cutover.machine_identity(value), "managedJobId": "old"}
+
+        class Client:
+            @contextmanager
+            def lease(self):
+                yield
+
+            def request(self, method, suffix="", data=None):
+                if method == "GET":
+                    return {**copy.deepcopy(value), "config": None}
+                raise AssertionError((method, suffix))
+
+        with patch.object(native, "get", return_value=copy.deepcopy(value)), patch.object(
+            native, "client", return_value=Client()
+        ):
+            with self.assertRaisesRegex(ValueError, "Old bank changed before its certified retirement"):
+                native.retire(expected, {"taskQueue": "expected", "surfaceHash": "old"})
+
     def test_matched_bank_retirement_checks_runtime_before_lease_or_stop(self):
         native, value, _ = self.runtime_native()
         expected = {**cutover.machine_identity(value), "managedJobId": "old"}
