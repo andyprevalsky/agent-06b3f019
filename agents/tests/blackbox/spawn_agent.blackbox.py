@@ -5031,7 +5031,7 @@ async def test_explore_grep_result_over_cap_never_silently_drops_a_match():
 
 def test_fit_grep_result_resumes_keyset_page_after_last_shown_match():
     """A trajectory keyset page resumes after the last match it actually shows."""
-    from domains.grep.service import fit_grep_result_to_budget
+    from utils.grep_result_budget import fit_grep_result_to_budget
 
     matches = [{"path": f"agent_trajectories/r/TOOL/m{index}", "content": "x" * 3_000} for index in range(10)]
     page = {"matches": matches, "has_more": True, "next_offset": None, "next_page_after": matches[-1]["path"]}

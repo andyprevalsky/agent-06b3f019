@@ -16,7 +16,6 @@ import structlog.contextvars
 from temporalio import activity
 from temporalio.common import RetryPolicy
 
-from domains.grep.service import fit_grep_result_to_budget
 from domains.spawn_agent.config import (
     EXPLORE_COMPLETION_DEFERRED_FOR_MESSAGE,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
@@ -47,6 +46,7 @@ from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
+from utils.grep_result_budget import fit_grep_result_to_budget
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
