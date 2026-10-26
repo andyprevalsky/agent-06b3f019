@@ -155,6 +155,12 @@ export function verifyProxyTraceParam(
   return given.length === expected.length && timingSafeEqual(given, expected) ? traceSegment : null;
 }
 
+/** Whether this backend can mint proxy capabilities (BACKEND_API_KEY is set). */
+export function fastModeProxySigningAvailable(): boolean {
+  const secret = process.env.BACKEND_API_KEY;
+  return secret !== undefined && secret !== '';
+}
+
 function proxyPath(
   goal: string,
   readEnabled: boolean,
@@ -190,7 +196,7 @@ export function buildFastModeAnthropicEnv(
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
-  if (process.env.BACKEND_API_KEY === undefined || process.env.BACKEND_API_KEY === '') return {};
+  if (!fastModeProxySigningAvailable()) return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
@@ -219,7 +225,7 @@ export function buildFastModeCodexEnv(
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
-  if (process.env.BACKEND_API_KEY === undefined || process.env.BACKEND_API_KEY === '') return {};
+  if (!fastModeProxySigningAvailable()) return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,

@@ -19,6 +19,7 @@ import {
   codeAgentTraceHash,
   isE2bReachableProxyBaseUrl,
 } from '../../domains/demo-cache/codeAgentEnv';
+import { fastModeProxySigningAvailable } from '../../providers/codeAgentFastModeEnv';
 import { createAgentSchema } from '../../domains/agents/types';
 import { createSessionSchema as createCodexSessionSchema } from '../../domains/codex-code/types';
 import {
@@ -317,6 +318,8 @@ test('no BACKEND_API_KEY skips proxy routing instead of failing session creation
       buildFastModeCodexEnv('g', true, 'https://api.example.com/codex-proxy'),
       {}
     );
+    // e2b's "cache on but no Codex proxy" error must not fire for this case.
+    assert.strictEqual(fastModeProxySigningAvailable(), false);
   } finally {
     process.env.BACKEND_API_KEY = saved;
   }
