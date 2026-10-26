@@ -106,20 +106,30 @@ class BrowserHttpCache:
         # Resolved once per run, shared by every concurrent response record: a
         # non-DEMO child under a DEMO tree root must not write the shared
         # namespace other users' replays read.
-        self._tree_write_check: Optional[asyncio.Future[bool]] = None
+        self._tree_write_check: Optional[asyncio.Future[Optional[bool]]] = None
         self._fulfilled_keys: set[str] = set()
 
-    async def _resolve_tree_write_allowed(self) -> bool:
-        allowed = await cache_client.cache_write_allowed_for_agent(self.agent_id, self.goal)
-        if not allowed:
+    async def _resolve_tree_write_allowed(self) -> Optional[bool]:
+        """True/False once the tree root resolved; None while it could not be resolved."""
+        allowed = await cache_client.cache_write_decision_for_agent(self.agent_id, self.goal)
+        if allowed is False:
             logger.info("demo_cache.browser_http_write_skipped", agent_id=self.agent_id, reason="demo_tree_root")
         return allowed
 
     async def _write_allowed(self) -> bool:
-        if self._tree_write_check is None:
-            self._tree_write_check = asyncio.ensure_future(self._resolve_tree_write_allowed())
+        check = self._tree_write_check
+        if check is None:
+            check = asyncio.ensure_future(self._resolve_tree_write_allowed())
+            self._tree_write_check = check
         # Shield: one cancelled record must not cancel the check the others share.
-        return await asyncio.shield(self._tree_write_check)
+        allowed = await asyncio.shield(check)
+        if allowed is None:
+            # Unresolved (e.g. a transient backend failure): deny this write, but
+            # let a later record retry instead of caching the fallback denial.
+            if self._tree_write_check is check:
+                self._tree_write_check = None
+            return False
+        return allowed
 
     async def lookup(
         self,

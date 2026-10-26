@@ -380,6 +380,31 @@ def test_browser_http_concurrent_records_share_one_tree_root_check(mem, monkeypa
     asyncio.run(body())
 
 
+def test_browser_http_unresolved_tree_root_is_retried_not_cached(mem, monkeypatch):
+    """A transient resolver failure denies that write only; a later record re-checks."""
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+    calls = {"n": 0}
+
+    async def resolve(agent_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False, None, False, None, None, True  # backend unreachable
+        return False, "child browser goal", True, f"root-of-{agent_id}", "ordinary root goal", True
+
+    monkeypatch.setattr(browser_http.cache_client, "resolve_agent_fast_mode", resolve)
+
+    async def body():
+        cache = browser_http.BrowserHttpCache(
+            "child browser goal", read_enabled=False, write_enabled=True, agent_id="child-ordinary"
+        )
+        assert await cache.record("GET", "https://x.com/a", "document", 200, {}, b"live") is False
+        assert await cache.record("GET", "https://x.com/b", "document", 200, {}, b"live") is True
+        assert await cache.record("GET", "https://x.com/c", "document", 200, {}, b"live") is True
+        assert mem.set_calls == 2
+
+    asyncio.run(body())
+
+
 def test_network_cache_install_threads_agent_id(monkeypatch):
     """The handler hands the browser agent id to the HTTP cache write gate."""
     seen: dict[str, Any] = {}
