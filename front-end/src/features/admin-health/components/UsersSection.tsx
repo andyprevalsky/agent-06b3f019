@@ -15,6 +15,10 @@
  * The list comes from GET /api/admin-health/users — real accounts merged with
  * phone-bearing waitlist signups — so an admin can find anyone by name, email,
  * or phone and either pull them off the waitlist or step into their account.
+ *
+ * AdminHealth owns the directory hook (UsersDirectorySection) so this request
+ * starts with the metrics request instead of after it; the default export owns
+ * its own hook for standalone use.
  */
 
 import { ArrowLeftRight, ChevronLeft, ChevronRight, Loader2, Search, Send } from 'lucide-react';
@@ -104,7 +108,13 @@ function SearchBar({ value, onChange }: { value: string; onChange: (next: string
   );
 }
 
+export type UserDirectory = ReturnType<typeof useUserDirectory>;
+
 export default function UsersSection() {
+  return <UsersDirectorySection directory={useUserDirectory()} />;
+}
+
+export function UsersDirectorySection({ directory }: { directory: UserDirectory }) {
   const { toast } = useToast();
   const {
     people,
@@ -119,7 +129,7 @@ export default function UsersSection() {
     totalPages,
     previousPage,
     nextPage,
-  } = useUserDirectory();
+  } = directory;
   const { switchTo, switchingUserId, switchError } = useAccountSwitch();
 
   const handleInvite = (person: AdminDirectoryPerson) => {

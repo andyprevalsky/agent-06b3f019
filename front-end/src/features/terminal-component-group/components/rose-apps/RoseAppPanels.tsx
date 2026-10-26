@@ -93,7 +93,7 @@ function PanelBody({ app }: { app: PanelApp }): ReactNode {
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
-  if (app === 'health') return <AdminHealthPage />;
+  if (app === 'health') return <AdminHealthPage embedded />;
   return <SettingsBody onLogout={apps?.onLogout} />;
 }
 

@@ -33,6 +33,18 @@ export async function fetchAdminHealthData(
   }
 }
 
+/**
+ * Biz health's first open of a UTC day waits on the backend's cold build
+ * (~6-10 s in prod: Stripe, Amplitude, Linear and GitHub reads behind one
+ * Promise.all); later requests that day are served from its day cache in ~1 ms.
+ * Admin shells call this once when they mount so that build (and this feature's
+ * code chunk) is underway before the panel opens. The response is discarded:
+ * the panel still issues its own request, so nothing is cached in the browser.
+ */
+export function prewarmAdminHealth(): void {
+  fetchAdminHealthData('monthly').catch(() => undefined);
+}
+
 async function parseError(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { error?: string };

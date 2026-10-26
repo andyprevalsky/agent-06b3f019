@@ -14,6 +14,8 @@
  *         -> current model/cache pricing -> three cost-per-run scenarios + sample size
 
  *         -> active connectors grouped into six onboarding subtype adoption rates
+ *   -> GET /api/admin-health/users (user directory) starts in parallel with the
+ *      metrics request: the hook lives here, not in the post-load users section
  *      -> Primary: Revenue
  *      -> Secondary: people/tasks + GMV + GMV/task (next to output tokens/task) + funnels
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
@@ -22,6 +24,11 @@
  *
  * GMV SOURCES:
  *   PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
+ *
+ * LAYOUT: standalone view pads pt-20 under the stock top header; `embedded`
+ * (the Rose Desktop Biz health panel, which has its own header) does not.
+ * Neutral series use currentColor (the foreground), so they stay visible on
+ * Rose dark; a fixed near-black stroke vanished on #262624.
  *
  * VIEW DATA:
  * [LOADING] <-- loading: true
@@ -60,7 +67,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-import { useAdminHealthData } from '../hooks';
+import { useAdminHealthData, useUserDirectory } from '../hooks';
 import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import ConnectorAdoptionSection from './ConnectorAdoptionSection';
@@ -69,7 +76,7 @@ import GmvSection from './GmvSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import TaskCostSection from './TaskCostSection';
 import VelocitySection from './VelocitySection';
-import UsersSection from './UsersSection';
+import { UsersDirectorySection } from './UsersSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { funnelEndToEnd, relativeChange, seriesMetricChange } from './metricComparison';
 import type {
@@ -491,7 +498,7 @@ function RetentionChart({ data }: { data: AdminHealthData }) {
                   type="monotone"
                   dataKey={cohort.label}
                   name={`${cohort.label} (${cohort.size})`}
-                  stroke="#111827"
+                  stroke="currentColor"
                   strokeOpacity={
                     data.retentionCohorts.length === 1
                       ? 1
@@ -510,12 +517,13 @@ function RetentionChart({ data }: { data: AdminHealthData }) {
   );
 }
 
-export default function AdminHealth() {
+export default function AdminHealth({ embedded = false }: { embedded?: boolean } = {}) {
   const [timeSlice, setTimeSlice] = useState<AdminHealthTimeSlice>('monthly');
   const { data, loading, error } = useAdminHealthData(timeSlice);
+  const directory = useUserDirectory();
 
   return (
-    <div className="h-full overflow-y-auto pt-20">
+    <div className={cn('h-full overflow-y-auto', !embedded && 'pt-20')}>
       <div className="container mx-auto max-w-[1400px] px-4 py-8 md:px-6">
         <Header timeSlice={timeSlice} setTimeSlice={setTimeSlice} />
 
@@ -557,7 +565,7 @@ export default function AdminHealth() {
                 description="Internal execution signals that support product and operational health."
               />
               <WaitlistSignupsChart data={data} />
-              <UsersSection />
+              <UsersDirectorySection directory={directory} />
               <VelocitySection data={data} />
             </section>
           </div>

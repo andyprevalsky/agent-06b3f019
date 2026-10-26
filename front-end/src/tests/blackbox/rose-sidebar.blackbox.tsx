@@ -280,6 +280,33 @@ describe('Rose left bar (flag on)', () => {
     expect(panel).toHaveAttribute('data-state', 'closed');
   });
 
+  it('Biz health covers the query box full width like Browser; admin bars prewarm it on mount', async () => {
+    const user = userEvent.setup();
+    clearCaptures();
+    const monthly = () =>
+      capturedRequests.filter(
+        (r) => r.method === 'GET' && r.url.endsWith('/api/admin-health?timeSlice=monthly'),
+      );
+    const { unmount } = renderBar();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(monthly()).toHaveLength(0);
+    unmount();
+
+    renderBar({ showAdminHealth: true });
+    // Prewarmed before any click: the backend's cold day build starts with the bar.
+    await waitFor(() => expect(monthly()).toHaveLength(1));
+    await user.click(within(roseBar()).getByRole('button', { name: 'Biz health' }));
+    const panel = screen.getByTestId('rose-app-panel');
+    expect(panel).toHaveAttribute('data-variant', 'full');
+    expect(panel.style.left).toBe('64px');
+    expect(panel.style.right).toBe('0px');
+    expect(panel.style.width).toBe('');
+    expect(screen.queryByTestId('app-drawer-resize-handle')).toBeNull();
+    // Over the floating query box (ROSE_LAYER.composer = z-[100]).
+    expect(panel.className).toContain('z-[101]');
+    expect(panel.parentElement).toBe(document.body);
+  });
+
   it('Feedback opens in the right drawer for every user', async () => {
     const user = userEvent.setup();
     renderBar();
