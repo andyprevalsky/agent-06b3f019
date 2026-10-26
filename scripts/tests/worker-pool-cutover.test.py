@@ -420,6 +420,19 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Old bank changed before its certified retirement"):
                 native.retire(expected, {"taskQueue": "expected", "surfaceHash": "old"})
 
+    def test_null_nested_config_sections_are_not_targets_and_block_preparation_cleanly(self):
+        # A partially unavailable Machine can carry "init" or "env" as null inside a dict config.
+        native, value, _ = self.runtime_native()
+        self.assertTrue(native.target(value))
+        for section in ("init", "env", "metadata"):
+            broken = copy.deepcopy(value)
+            broken["config"][section] = None
+            self.assertFalse(native.target(broken), section)
+            with patch.object(native, "get", return_value=broken), patch.object(native, "operation") as operation:
+                with self.assertRaisesRegex(ValueError, "config is unavailable"):
+                    native.prepare(cutover.machine_identity(value), {"taskQueue": "q", "surfaceHash": "old"})
+                operation.assert_not_called()
+
     def test_matched_bank_retirement_checks_runtime_before_lease_or_stop(self):
         native, value, _ = self.runtime_native()
         expected = {**cutover.machine_identity(value), "managedJobId": "old"}
