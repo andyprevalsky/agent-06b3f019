@@ -88,7 +88,7 @@ router.get(
       res.status(404).json({ error: 'Planner memory not found' });
       return;
     }
-    if (req.isInternal !== true && row.benchmarkTaskName === null && row.userId !== req.user?.id) {
+    if (req.isInternal !== true && !service.visibleTo(row, req.user?.id)) {
       res.status(404).json({ error: 'Planner memory not found' });
       return;
     }

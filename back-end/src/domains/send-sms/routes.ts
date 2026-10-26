@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { authenticateInternal, type AuthRequest } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
@@ -17,7 +17,7 @@ const router = Router();
  */
 router.post(
   '/',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req, res) => {
     const phoneNumber = req.body.phone_number as string | undefined;
     const message = req.body.message as string | undefined;
@@ -62,7 +62,7 @@ router.post(
  */
 router.post(
   '/direct',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req, res) => {
     const userId = req.body.user_id as string | undefined;
     const message = req.body.message as string | undefined;
@@ -95,7 +95,7 @@ router.post(
  */
 router.post(
   '/notify',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req, res) => {
     try {
       const data = notifySchema.parse(req.body);

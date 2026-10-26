@@ -20,6 +20,7 @@
   --c-hermes:   #e0af68;  /* yellow */
   --c-codex:    #7dcfff;  /* cyan */
   --c-prime:    #ff9e64;  /* orange */
+  --c-kimi:     #ff007c;  /* magenta */
 
   --weak:    #5eccaf;     /* teal — weak-match flag */
   --done:    #9ece6a;     /* completed */
@@ -277,6 +278,7 @@ button { font: inherit; color: inherit; }
 .col-hermes    { border-left-color: var(--c-hermes); }
 .col-codex     { border-left-color: var(--c-codex); }
 .col-prime     { border-left-color: var(--c-prime); }
+.col-kimi      { border-left-color: var(--c-kimi); }
 /* First visible column never shows its left divider. */
 .cols > .col:not(.hidden):first-of-type { border-left-color: transparent; }
 
@@ -299,6 +301,7 @@ button { font: inherit; color: inherit; }
 .col-hermes    .col-head { border-top-color: var(--c-hermes); }
 .col-codex     .col-head { border-top-color: var(--c-codex); }
 .col-prime     .col-head { border-top-color: var(--c-prime); }
+.col-kimi      .col-head { border-top-color: var(--c-kimi); }
 
 .col-tag {
   font-family: var(--mono);
@@ -316,6 +319,7 @@ button { font: inherit; color: inherit; }
 .tag-hermes    { background: rgba(224,175,104,0.18); color: var(--c-hermes); }
 .tag-codex     { background: rgba(125,207,255,0.18); color: var(--c-codex); }
 .tag-prime     { background: rgba(255,158,100,0.18); color: var(--c-prime); }
+.tag-kimi      { background: rgba(255,0,124,0.18); color: var(--c-kimi); }
 
 .col-sub {
   font-size: 11px;

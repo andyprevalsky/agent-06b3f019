@@ -97,7 +97,7 @@ test('write-only injects ANTHROPIC_BASE_URL with record-only path when flag off'
   assert.ok(env.ANTHROPIC_BASE_URL);
   assert.match(
     env.ANTHROPIC_BASE_URL!,
-    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16}\/record-only$/
+    /^https:\/\/api\.example\.com\/anthropic-proxy\/[0-9a-f]{16}\/record-only(\.[0-9a-f]{32})?$/
   );
 });
 
@@ -141,7 +141,7 @@ test('write-only injects CODEX_FAST_MODE_PROXY_URL with record-only path when fl
   assert.ok(env.CODEX_FAST_MODE_PROXY_URL);
   assert.match(
     env.CODEX_FAST_MODE_PROXY_URL!,
-    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16}\/record-only$/
+    /^https:\/\/api\.example\.com\/codex-proxy\/[0-9a-f]{16}\/record-only(\.[0-9a-f]{32})?$/
   );
 });
 
