@@ -50,6 +50,13 @@ export async function runBrowserResumeCustodyCases() {
       let profileReads = 0;
       let nativeDead = false;
       let nativeId = `native-${randomUUID()}`;
+      // 'incompatible' and 'fresh-concurrent' must contend with an in-flight
+      // create. Hold that create open until the competing resume has observed
+      // it, instead of relying on child startup beating a fixed delay (child
+      // startup is slow under coverage instrumentation and host load).
+      const holdsCreate = scenario === 'incompatible' || scenario === 'fresh-concurrent';
+      let releaseHeldCreate = () => {};
+      const heldCreate = new Promise<void>((resolve) => (releaseHeldCreate = resolve));
       const native = () =>
         provider === 'kernel'
           ? {
@@ -89,10 +96,10 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          setTimeout(
-            () => res.end(JSON.stringify(native())),
-            scenario === 'incompatible' ? 1000 : 100
-          );
+          if (holdsCreate) {
+            await heldCreate;
+            res.end(JSON.stringify(native()));
+          } else setTimeout(() => res.end(JSON.stringify(native())), 100);
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
           res.end(
@@ -196,7 +203,12 @@ export async function runBrowserResumeCustodyCases() {
             child.kill('SIGTERM');
             reject(new Error(`fixture timeout: ${logs}`));
           }, 10000);
-          child.stdout!.on('data', (x) => (logs += x));
+          child.stdout!.on('data', (x) => {
+            logs += x;
+            // A joiner logs this only while another process holds STARTED custody.
+            if (/BrowserResumeCustody: attempt \d+\/\d+ returned a retryable result/.test(logs))
+              releaseHeldCreate();
+          });
           child.stderr!.on('data', (x) => (logs += x));
           child.once('message', (message) => {
             received = true;
@@ -239,7 +251,7 @@ export async function runBrowserResumeCustodyCases() {
             fixedDelays: Array.from({ length: 999 }, () => 10),
             shouldRetryResult: (created) => !created,
           });
-          const second = run();
+          const second = run().finally(releaseHeldCreate);
           results = await Promise.all([first, second]);
         } else {
           results = [await run()];
@@ -298,9 +310,10 @@ export async function runBrowserResumeCustodyCases() {
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
         } else if (scenario === 'incompatible' || scenario === 'manual-follow') {
-          assert(results[0]!.ok);
-          assert(!results[1]!.ok);
-          assert.equal(creates, 1);
+          const detail = JSON.stringify({ provider, scenario, creates, hydrations, results });
+          assert(results[0]!.ok, detail);
+          assert(!results[1]!.ok, detail);
+          assert.equal(creates, 1, detail);
           assert.equal(hydrations, 1);
         } else if (scenario === 'stale-binding') {
           assert.equal(creates, 1);
@@ -314,9 +327,10 @@ export async function runBrowserResumeCustodyCases() {
           assert.equal(creates, 1);
           assert.equal(hydrations, scenario === 'hydration-unknown' ? 1 : 0);
         } else if (scenario !== 'user-lease') {
-          assert(results.at(-1)!.ok, JSON.stringify(results));
-          assert.equal(creates, 1);
-          assert.equal(hydrations, 1);
+          const detail = JSON.stringify({ provider, scenario, creates, hydrations, results });
+          assert(results.at(-1)!.ok, detail);
+          assert.equal(creates, 1, detail);
+          assert.equal(hydrations, 1, detail);
           if (
             scenario === 'concurrent' ||
             scenario === 'ready-ack' ||
@@ -333,6 +347,7 @@ export async function runBrowserResumeCustodyCases() {
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } finally {
+        releaseHeldCreate();
         for (const child of children) child.kill('SIGTERM');
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
