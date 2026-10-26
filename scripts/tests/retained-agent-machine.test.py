@@ -692,7 +692,12 @@ class RetainedWorkerTests(unittest.TestCase):
         self.assertFalse(pool.eligible(machine(), "prod", "live"))
         # Fly returned a stopped gen Machine with "config": null (2026-10-26
         # cutover); it must be skipped, not abort bank preparation.
-        for broken in ({**good, "config": None}, {**good, "config": {**good["config"], "metadata": None}}):
+        for broken in (
+            {**good, "config": None},
+            {**good, "config": {**good["config"], "metadata": None}},
+            {**good, "config": "malformed"},
+            {**good, "config": {**good["config"], "metadata": "malformed"}},
+        ):
             self.assertEqual(pool.metadata(broken, pool.POOL_KEY), {})
             self.assertFalse(pool.eligible(broken, "prod", "live"))
         for change in (

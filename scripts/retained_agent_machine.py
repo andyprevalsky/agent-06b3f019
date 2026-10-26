@@ -90,7 +90,7 @@ def metadata(machine, key):
         # The Machines API can return a stopped Machine with "config": null.
         value = json.loads(((machine.get("config") or {}).get("metadata") or {}).get(key, "null"))
         return value if isinstance(value, dict) else {}
-    except (ValueError, TypeError):
+    except (AttributeError, ValueError, TypeError):
         return {}
 
 
