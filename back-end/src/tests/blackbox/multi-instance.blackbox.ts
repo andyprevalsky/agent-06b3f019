@@ -15,6 +15,7 @@
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
+ *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
  *
  * Usage: npx tsx src/tests/blackbox/multi-instance.blackbox.ts
  */
@@ -27,6 +28,8 @@ import { join } from 'node:path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { saveUserToken } from '../../providers/agentcard/store';
+import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
+import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
 
 config();
 
@@ -259,6 +262,54 @@ async function main(): Promise<void> {
       assert(holder.held === true, 'the holder must acquire the lease');
       assert(peer.acquired === false, 'a renewed lease must not be taken over after its TTL');
       assert(holder.lost === false, 'the holder must not have lost its lease');
+    });
+    await test("a Plaid sync that lost its lease cannot overwrite the newer sync's cursor", async () => {
+      const integration = await prisma.integration.create({
+        data: {
+          userId,
+          type: 'DATA_SOURCE',
+          name: 'plaid',
+          status: 'CONNECTED',
+          accountId: `mi-${randomUUID()}`,
+        },
+      });
+      integrationIds.push(integration.id);
+      const item = await prisma.plaidItem.create({
+        data: {
+          userId,
+          integrationId: integration.id,
+          plaidItemId: `mi-${randomUUID()}`,
+          encryptedAccessToken: 'mi-not-a-token',
+        },
+      });
+      const stale = await claimPlaidItemSync(item.id);
+      assert(stale !== null, 'the first sync must claim the item');
+      try {
+        // The first sync stalls past its TTL and a newer sync takes the item over.
+        await prisma.$executeRaw`
+          UPDATE "SharedEphemeralState" SET "expiresAt" = now() - interval '1 second'
+          WHERE namespace = 'plaid-item-sync' AND key = ${item.id}
+        `;
+        const fresh = await claimPlaidItemSync(item.id);
+        assert(fresh !== null, 'the newer sync must take over the expired lease');
+        try {
+          assert(
+            await markPlaidItemSyncSucceeded(item.id, 'cursor-new', undefined, fresh.fence),
+            'the lease holder must write its cursor'
+          );
+          assert(
+            !(await markPlaidItemSyncSucceeded(item.id, 'cursor-stale', undefined, stale.fence)),
+            'the superseded sync must be fenced out'
+          );
+          const row = await prisma.plaidItem.findUnique({ where: { id: item.id } });
+          assert(row?.cursor === 'cursor-new', `cursor must stay the newer sync's: ${row?.cursor}`);
+        } finally {
+          await fresh.release();
+        }
+      } finally {
+        await stale.release();
+        await prisma.plaidItem.deleteMany({ where: { id: item.id } });
+      }
     });
   } finally {
     await prisma.integration.deleteMany({ where: { userId } });

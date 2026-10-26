@@ -62,10 +62,10 @@ async function main(): Promise<unknown> {
     case 'plaid-claim': {
       const plaid = await import('../../domains/integrations/service.plaidTransactions');
       await barrier();
-      const release = await plaid.claimPlaidItemSync(args[0]);
-      if (release === null) return { claimed: false };
+      const claim = await plaid.claimPlaidItemSync(args[0]);
+      if (claim === null) return { claimed: false };
       await sleep(Number(args[1]));
-      await release();
+      await claim.release();
       return { claimed: true };
     }
     case 'lease-hold': {

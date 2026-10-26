@@ -105,6 +105,19 @@ export async function releaseLease(namespace: string, key: string, token: string
   `;
 }
 
+/**
+ * SQL predicate that is true only while `token` still owns the live lease, for
+ * fencing a write in the same statement: a holder that lost its lease (stalled
+ * past the TTL, taken over elsewhere) cannot land a late write.
+ */
+export function leaseHeldPredicate(namespace: string, key: string, token: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (
+    SELECT 1 FROM "SharedEphemeralState" lease
+    WHERE lease.namespace = ${namespace} AND lease.key = ${key}
+      AND lease.value->>'token' = ${token} AND lease."expiresAt" > now()
+  )`;
+}
+
 /** Extend a lease `token` still owns. Returns false when it was lost or taken over. */
 export async function renewLease(
   namespace: string,

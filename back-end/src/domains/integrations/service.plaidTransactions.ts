@@ -11,7 +11,13 @@
 
 import type { Transaction } from 'plaid';
 import { createLogger } from '../../providers/logger';
-import { acquireLease, holdLease, putEphemeral, takeEphemeral } from '../../providers/sharedState';
+import {
+  acquireLease,
+  holdLease,
+  leaseHeldPredicate,
+  putEphemeral,
+  takeEphemeral,
+} from '../../providers/sharedState';
 import { isPlaidError, syncTransactions } from '../../providers/plaid';
 import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
 import {
@@ -132,15 +138,25 @@ const PLAID_SYNC_LEASE_TTL_MS = 15 * 60 * 1000;
 
 /**
  * Claim exclusive sync of one Plaid item (cron and webhooks can both start one).
- * Returns a release function, or null when another sync owns the item.
+ * Returns the claim (a write fence plus its release), or null when another
+ * sync owns the item.
  */
-export async function claimPlaidItemSync(itemRowId: string): Promise<(() => Promise<void>) | null> {
+export interface PlaidItemSyncClaim {
+  /** True only while this claim still owns the item: fences the cursor write. */
+  fence: ReturnType<typeof leaseHeldPredicate>;
+  release: () => Promise<void>;
+}
+
+export async function claimPlaidItemSync(itemRowId: string): Promise<PlaidItemSyncClaim | null> {
   const token = await acquireLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, PLAID_SYNC_LEASE_TTL_MS);
   if (token === null) return null;
   // Renewed while the sync runs, so a long first sync never loses the item to
   // a second concurrent sync.
   const lease = holdLease(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, token, PLAID_SYNC_LEASE_TTL_MS);
-  return () => lease.release();
+  return {
+    fence: leaseHeldPredicate(PLAID_SYNC_LEASE_NAMESPACE, itemRowId, token),
+    release: () => lease.release(),
+  };
 }
 
 /** Release an item's sync claim, then run once more if a sync was requested meanwhile. */
@@ -157,6 +173,32 @@ async function settlePlaidItemSyncClaim(
   if ((await takeEphemeral(PLAID_RESYNC_NAMESPACE, item.id)) !== undefined) {
     void syncPlaidItemTransactions(item.id).catch(() => undefined);
   }
+}
+
+/**
+ * The running sync may already be past its last page: ask its holder to go
+ * again so a webhook arriving mid-sync is never dropped.
+ */
+async function requestPlaidResync(item: { id: string; plaidItemId: string }): Promise<void> {
+  await putEphemeral(
+    PLAID_RESYNC_NAMESPACE,
+    item.id,
+    { requestedAt: Date.now() },
+    PLAID_SYNC_LEASE_TTL_MS
+  );
+  log.info('Plaid item sync already running; resync requested', { plaidItemId: item.plaidItemId });
+}
+
+/** Write a finished sync's cursor unless this sync lost its lease to a newer one. */
+async function recordPlaidSyncSuccess(
+  item: { id: string; plaidItemId: string },
+  cursor: string | null,
+  webhookAt: Date | undefined,
+  claim: PlaidItemSyncClaim
+): Promise<boolean> {
+  if (await markPlaidItemSyncSucceeded(item.id, cursor, webhookAt, claim.fence)) return true;
+  log.warn('Plaid sync lost its lease; cursor write fenced', { plaidItemId: item.plaidItemId });
+  return false;
 }
 
 async function recordPlaidSyncFailure(
@@ -206,19 +248,9 @@ export async function syncPlaidItemTransactions(
     throw new Error(`Plaid item ${itemRowId} is not active or has no access token`);
   }
 
-  const releaseClaim = await claimPlaidItemSync(item.id);
-  if (releaseClaim === null) {
-    // The running sync may already be past its last page: ask it to go again
-    // so a webhook arriving mid-sync is never dropped.
-    await putEphemeral(
-      PLAID_RESYNC_NAMESPACE,
-      item.id,
-      { requestedAt: Date.now() },
-      PLAID_SYNC_LEASE_TTL_MS
-    );
-    log.info('Plaid item sync already running; resync requested', {
-      plaidItemId: item.plaidItemId,
-    });
+  const claim = await claimPlaidItemSync(item.id);
+  if (claim === null) {
+    await requestPlaidResync(item);
     return { added: 0, modified: 0, removed: 0, cursor: item.cursor ?? null, skipped: true };
   }
   try {
@@ -254,7 +286,9 @@ export async function syncPlaidItemTransactions(
         if (hasMore) await progress.saved(added + modified + removed);
       }
 
-      await markPlaidItemSyncSucceeded(item.id, cursor, options.webhookAt);
+      if (!(await recordPlaidSyncSuccess(item, cursor, options.webhookAt, claim))) {
+        return { added, modified, removed, cursor: item.cursor ?? null, skipped: true };
+      }
       await progress.finish(added + modified + removed);
       log.info('Plaid transaction sync complete', {
         userId: item.userId,
@@ -270,7 +304,7 @@ export async function syncPlaidItemTransactions(
       throw err;
     }
   } finally {
-    await settlePlaidItemSyncClaim(item, releaseClaim);
+    await settlePlaidItemSyncClaim(item, claim.release);
   }
 }
 
