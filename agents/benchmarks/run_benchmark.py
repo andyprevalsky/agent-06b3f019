@@ -17438,6 +17438,9 @@ async def main_async(args):
     _never_admitted_results: list[TaskResult] = []
 
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
+        # Before admission: nothing is created yet if the batch is cancelled here.
+        if _reads_base_trajectory_history(task):
+            await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)
         # The owning task preserves repeated names and retains the evaluated
         # row until the coordinator replaces it with the final cleanup result.
         token = asyncio.current_task()
@@ -17483,7 +17486,6 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
-            await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)
             sms_options = {}
             if getattr(task, "runner", "agent") == "sms":
                 sms_options["other_task_roots"] = lambda: {aid for ids in _live_task_agent_ids.values()

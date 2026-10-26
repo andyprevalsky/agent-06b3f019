@@ -2508,7 +2508,8 @@ def test_trajectory_recall_restores_base_history_before_each_task():
     prepare = run_block.index(
         "await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)"
     )
-    assert prepare < run_block.index("result = await run_single_task(")
+    # Before admission, so a cancelled waiter is still provably never admitted.
+    assert prepare < run_block.index("_admitted_tasks[token] = task") < run_block.index("await run_single_task(")
     assert "batch_started_at = datetime.now(timezone.utc)" in source
 
 
