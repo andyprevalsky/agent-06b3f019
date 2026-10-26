@@ -877,8 +877,9 @@ async def test_handler_execute_tool_happy_path():
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
     assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
-    assert summary_call["args"][-2] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
-    assert summary_call["args"][-1] == "agent:lineage-1"
+    assert summary_call["args"][-3] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    assert summary_call["args"][-2] == "agent:lineage-1"
+    assert summary_call["args"][-1] == {}
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
     assert download_call["args"] == [
         ["https://example.com/file.pdf"],
@@ -907,6 +908,48 @@ async def test_handler_execute_tool_happy_path():
     ]
     assert tool_titles[0] == "Fetching https://example.com/a for download the PDF"
     assert tool_titles[-1] == "Fetched https://example.com/a for download the PDF"
+
+
+async def test_handler_forwards_page_declared_metadata_to_summarizer():
+    """RCA 2026-10-26 background-agent-message-smoke timeout.
+
+    The RFC Editor page for RFC 9110 declares its publication date only in
+    ``<meta name="citation_publication_date">``; its main-content markdown has
+    no "June 2022". Firecrawl returns that tag in ``metadata``, but web_fetch
+    dropped it before the summarizer, so the explore agent reported the month
+    as unverifiable and the root spent a second explore run re-fetching it.
+    """
+    from domains.web_fetch.handler import WebFetchManager
+
+    page_metadata = {
+        "title": "RFC 9110: HTTP Semantics | RFC Editor",
+        "citation_title": ["HTTP Semantics", "HTTP Semantics"],
+        "citation_publication_date": ["2022/06/06", "2022/06/06"],
+        "provider": "Firecrawl scrape",
+        "scrapeId": "scrape-1",
+    }
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "web_fetch_activity":
+            return {"markdown": "# RFC9110: HTTP Semantics\nInternet Standard", "links": [], "metadata": page_metadata}
+        if name == "summarize_and_filter_links":
+            return {"summary": "RFC 9110, published June 2022.", "files_to_download": [], "usage": {}}
+        return None
+
+    out = await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://www.rfc-editor.org/rfc/rfc9110", "objective": "publication month and year"},
+        tool_call_id="tc-meta",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
+    assert summary_call["args"][-1] == page_metadata
+    assert out["result"]["content"].startswith("RFC 9110, published June 2022.")
 
 
 async def test_handler_simulator_appends_mode_only_to_boundary_activities():
@@ -1274,6 +1317,10 @@ async def run_all_tests() -> bool:
     r.record("handler_safe_time_fallback", test_handler_safe_time_fallback)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
+    await r.record_async(
+        "handler_forwards_page_declared_metadata_to_summarizer",
+        test_handler_forwards_page_declared_metadata_to_summarizer,
+    )
     await r.record_async(
         "handler_simulator_appends_mode_only_to_boundaries",
         test_handler_simulator_appends_mode_only_to_boundary_activities,

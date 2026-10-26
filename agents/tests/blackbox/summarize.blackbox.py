@@ -979,12 +979,64 @@ async def test_summarize_and_filter_links_actually_summarizes():
     assert llm.await_args.kwargs["compute_token_lineage_key"] == "agent:lineage-1"
 
 
+async def test_summarize_and_filter_links_sees_page_declared_publication_date():
+    """RCA 2026-10-26: a head-only publication date must reach the summarizer.
+
+    The RFC Editor page for RFC 9110 states "2022/06/06" only in
+    ``<meta name="citation_publication_date">``; its main-content markdown has
+    no month. The summarizer prompt must carry that declared metadata, without
+    the scrape provider's bookkeeping, and stay unchanged when none exists.
+    """
+    from unittest.mock import MagicMock
+
+    import helpers.summarize as summarize_module
+
+    llm = AsyncMock(
+        return_value={
+            "content": '{"summary": "RFC 9110 HTTP Semantics, published June 2022.", "files_to_download": []}',
+            "usage": {"total_tokens": 42},
+        }
+    )
+    page = {
+        "url": "https://www.rfc-editor.org/rfc/rfc9110",
+        "objective": "the RFC title and publication month and year",
+        "markdown": "# RFC9110: HTTP Semantics\n- R. Fielding, Ed.\nInternet Standard",
+        "links": [],
+    }
+    with patch.object(summarize_module, "activity", MagicMock()), patch("helpers.llm.call_llm", new=llm):
+        result = await summarize_module.summarize_and_filter_links(
+            **page,
+            page_metadata={
+                "citation_publication_date": ["2022/06/06", "2022/06/06"],
+                "citation_title": ["HTTP Semantics", "HTTP Semantics"],
+                "scrapeId": "scrape-1",
+                "statusCode": 200,
+                "provider": "Firecrawl scrape",
+            },
+        )
+        with_metadata = llm.await_args.kwargs["messages"][0]["content"]
+        await summarize_module.summarize_and_filter_links(**page)
+        without_metadata = llm.await_args.kwargs["messages"][0]["content"]
+
+    assert result["summarized"] is True, result
+    assert "citation_publication_date: 2022/06/06\n" in with_metadata
+    assert "citation_title: HTTP Semantics\n" in with_metadata
+    assert with_metadata.index("PAGE METADATA") < with_metadata.index("PAGE CONTENT")
+    assert "scrape-1" not in with_metadata and "statusCode" not in with_metadata
+    assert "PAGE METADATA" not in without_metadata
+    assert "2022" not in without_metadata
+
+
 async def run_all_tests():
     print("summarize blackbox tests:")
     r = BlackboxResult()
     await r.record_async(
         "summarize_and_filter_links_actually_summarizes",
         test_summarize_and_filter_links_actually_summarizes,
+    )
+    await r.record_async(
+        "summarize_and_filter_links_sees_page_declared_publication_date",
+        test_summarize_and_filter_links_sees_page_declared_publication_date,
     )
     await r.record_async("count_tool_usage", test_count_tool_usage)
     await r.record_async("count_tool_usage_empty", test_count_tool_usage_empty)
