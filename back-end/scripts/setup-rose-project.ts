@@ -17,9 +17,9 @@ import { normalizeGithubUrl } from '../src/providers/github';
 import { PROJECT_LIST_LIMIT } from '../src/providers/projects/store';
 import {
   ROSE_PROJECT_ENV_FILES,
-  ROSE_PROJECT_NAME,
   ROSE_PROJECT_REPO_URL,
   applyRoseProjectSetup,
+  findRoseProject,
   planRoseProjectSetup,
   roseStartupScript,
 } from '../src/domains/projects/roseProject';
@@ -54,7 +54,7 @@ async function readPlan(userId: string) {
         return row.repoUrl !== null && url !== null && granted.has(url) ? [row.repoUrl] : [];
       })
     );
-    const rose = rows.find((row) => row.name === ROSE_PROJECT_NAME) ?? null;
+    const rose = findRoseProject(rows) ?? null;
     const envPaths = rose
       ? (
           await tx.projectEnvFile.findMany({

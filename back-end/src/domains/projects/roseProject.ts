@@ -7,7 +7,8 @@
  *        └ plan ─► applyRoseProjectSetup ─► re-list
  *
  * The plan fills in only what was never configured, so later edits stick:
- *   - no "Rose" project            → create it fully configured
+ *   - no "Rose" project (by name,  → create it fully configured
+ *     or by the Rose repo when renamed)
  *   - pristine (name-only) "Rose"  → set repo + startup script, declare the six
  *                                     env files (paths only, no values)
  *   - Rose repo, no GitHub grant   → grant clone access (same table the public
@@ -54,6 +55,10 @@ export interface RoseProjectPlan {
   grantRepo: boolean;
 }
 
+function isRoseRepo(repoUrl: string | null): boolean {
+  return repoUrl !== null && normalizeGithubUrl(repoUrl) === ROSE_PROJECT_REPO_URL;
+}
+
 /** A Rose project nobody has configured yet (as "+ New project" creates it). */
 function isPristine(project: ProjectWithCount): boolean {
   return (
@@ -64,6 +69,16 @@ function isPristine(project: ProjectWithCount): boolean {
   );
 }
 
+/** The Rose project by name, or by the Rose repo when it was renamed (never a second one). */
+export function findRoseProject<T extends { name: string; repoUrl: string | null }>(
+  rows: T[]
+): T | undefined {
+  return (
+    rows.find((row) => row.name === ROSE_PROJECT_NAME) ??
+    rows.find((row) => isRoseRepo(row.repoUrl))
+  );
+}
+
 /** Pure: what the dev account still needs, from rows the list already read. */
 export function planRoseProjectSetup(
   userId: string,
@@ -71,14 +86,11 @@ export function planRoseProjectSetup(
   connectedRepoUrls: ReadonlySet<string>
 ): RoseProjectPlan | null {
   if (!isRoseDevUser(userId)) return null;
-  const rose = rows.find((row) => row.name === ROSE_PROJECT_NAME);
+  const rose = findRoseProject(rows);
   if (!rose) return { createProject: true, fillProjectId: null, grantRepo: true };
   const fill = isPristine(rose);
   const repoUrl = fill ? ROSE_PROJECT_REPO_URL : rose.repoUrl;
-  const grantRepo =
-    repoUrl !== null &&
-    normalizeGithubUrl(repoUrl) === ROSE_PROJECT_REPO_URL &&
-    !connectedRepoUrls.has(repoUrl);
+  const grantRepo = repoUrl !== null && isRoseRepo(repoUrl) && !connectedRepoUrls.has(repoUrl);
   if (!fill && !grantRepo) return null;
   return { createProject: false, fillProjectId: fill ? rose.id : null, grantRepo };
 }

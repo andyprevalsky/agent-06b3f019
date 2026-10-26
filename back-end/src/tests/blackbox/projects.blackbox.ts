@@ -505,6 +505,17 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     const edited = await devRose();
     assert(edited.startupScript === null, 'cleared script stays cleared');
     assert(edited.envFileCount === 5, `removed file stays removed (${edited.envFileCount})`);
+
+    // Renaming it keeps it the Rose project (by repo): no second "Rose" appears.
+    const renamed = await devCall(`/api/projects/${rose.id}`, {
+      method: 'PUT',
+      body: { name: 'Rose app' },
+    });
+    expectStatus(renamed, 200, 'rename Rose');
+    const afterRename = await devCall('/api/projects');
+    expectStatus(afterRename, 200, 'list after rename');
+    const names = (afterRename.data.projects as Project[]).map((p) => p.name);
+    assert(JSON.stringify(names) === JSON.stringify(['Rose app']), `projects ${names}`);
   } finally {
     await resetRoseDevProjects();
   }
