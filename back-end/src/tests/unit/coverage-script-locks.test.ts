@@ -313,7 +313,13 @@ try {
   const tryAcquire = (url: string) =>
     spawnSync(
       'bash',
-      ['-c', 'source "$1"; acquire_test_db_run_lock "$2" "fixture contender"', 'contender', testDbLockLibPath, url],
+      [
+        '-c',
+        'source "$1"; acquire_test_db_run_lock "$2" "fixture contender"',
+        'contender',
+        testDbLockLibPath,
+        url,
+      ],
       { env: lockEnv, encoding: 'utf8', timeout: 15_000 }
     );
 
@@ -322,7 +328,9 @@ try {
   assert.equal(blocked.status, 1, 'a second runner on the same database must fail fast');
   assert.match(
     blocked.stderr,
-    new RegExp(`localhost:5432/victoria_gate-x is in use by another backend test runner: pid=${testDbLockHolder.pid} runner=fixture holder workspace=gate-x`),
+    new RegExp(
+      `localhost:5432/victoria_gate-x is in use by another backend test runner: pid=${testDbLockHolder.pid} runner=fixture holder workspace=gate-x`
+    ),
     'the failure must name the live holder'
   );
 
@@ -337,7 +345,11 @@ try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     recovered = tryAcquire('postgresql://localhost:5432/victoria_gate-x');
   }
-  assert.equal(recovered.status, 0, `a dead holder's lock must be recoverable: ${recovered.stderr}`);
+  assert.equal(
+    recovered.status,
+    0,
+    `a dead holder's lock must be recoverable: ${recovered.stderr}`
+  );
 
   // Both runners take the lock on the selected database BEFORE any schema sync
   // and the blackbox child of coverage (BLACKBOX_TEST_SKIP_DB_SYNC=1) does not
@@ -350,7 +362,10 @@ try {
     assert.ok(lockAt > 0, `${runner} must acquire the per-database run lock`);
     assert.ok(lockAt < pushAt && lockAt < ensureAt, `${runner} must lock before its schema sync`);
   }
-  const blackboxSource = readFileSync(join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'), 'utf8');
+  const blackboxSource = readFileSync(
+    join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
+    'utf8'
+  );
   const skipBranch = blackboxSource.indexOf('if [[ "$SKIP_DB_SYNC" == "1" ]]; then');
   const skipElse = blackboxSource.indexOf('  else', skipBranch);
   assert.ok(
