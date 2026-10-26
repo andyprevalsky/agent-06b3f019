@@ -34,6 +34,7 @@ import {
   DISPLAY_SCRIPT_EXTENSIONS,
   buildDisplayBundle,
   displayBlobKey,
+  displayRelativeRefs,
   storeDisplayBundle,
   type BuiltDisplayBundle,
   type DisplayBundleKind,
@@ -144,7 +145,7 @@ function prepareBundle(
   };
 }
 
-function prepareSingle(
+export function prepareSingle(
   agent: repo.ToolAgent,
   entry: Extract<ResolvedItem, { type: 'single' }>
 ): PreparedItem {
@@ -155,6 +156,13 @@ function prepareSingle(
   if (mimeType === null) throw new DisplayFetchError(`is not a displayable file (${TYPES_HELP})`);
   if (mimeType === 'text/javascript') {
     const source = viewerSourceName(entry.filename, mimeType);
+    // A fetched script is shown alone: its relative imports would 404 inside the bundle.
+    const relative = entry.sourceUrl === undefined ? [] : displayRelativeRefs(source, entry.bytes);
+    if (relative.length > 0) {
+      throw new DisplayFetchError(
+        `imports relative modules (${relative.slice(0, 3).join(', ')}); a URL script is shown alone, so display it from a file path or a bundle that includes them`
+      );
+    }
     return prepareBundle(agent, entry.index, source, new Map([[source, entry.bytes]]), 'script');
   }
   const kind = displayKindForType(mimeType);

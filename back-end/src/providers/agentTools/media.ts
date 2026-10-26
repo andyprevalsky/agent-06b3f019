@@ -72,11 +72,20 @@ export function looksLikeHtml(bytes: Buffer): boolean {
 const DECLARED_SCRIPT_NAME = /\.m?js$/i;
 const DECLARED_SCRIPT_TYPE = /^(text|application)\/(javascript|ecmascript|x-javascript)\b/i;
 
-/** True when `bytes` are UTF-8 text without NULs that does not start like HTML (a script). */
+/**
+ * True when `bytes` are non-empty UTF-8 text without NULs that is not markup (a script).
+ * JavaScript never starts with `<`, so any markup opener (`<span>`, not only the HTML_START
+ * tags) means the file is renamed markup, not a module.
+ */
 function looksLikeScript(bytes: Buffer): boolean {
   if (sniffDisplayMediaType(bytes) !== null || looksLikeHtml(bytes)) return false;
   const text = utf8(bytes);
-  return text !== null && !text.includes('\u0000') && text.trim().length > 0;
+  return (
+    text !== null &&
+    !text.includes('\u0000') &&
+    text.trim().length > 0 &&
+    !text.trimStart().startsWith('<')
+  );
 }
 
 /**

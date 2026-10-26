@@ -168,6 +168,12 @@ function displayScriptCases(): BlackboxTest[] {
           { apiKeyUser: userA }
         );
         expectStatus(html, 400, 'markup named .js');
+        const span = await display(
+          otherA,
+          { items: [b64(Buffer.from('<span>hello</span>'), 'panel.js')] },
+          { apiKeyUser: userA }
+        );
+        expectStatus(span, 400, 'non-HTML_START markup named .js');
         const plain = await display(
           otherA,
           { items: [b64(Buffer.from("import * as THREE from 'three';"), 'scene.txt')] },
