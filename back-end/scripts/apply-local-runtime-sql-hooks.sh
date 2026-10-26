@@ -7,6 +7,8 @@ MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iterat
 UTC_CLEANUP_MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260724002500_temporal_cleanup_utc_grace/migration.sql"
 TRAJECTORY_SQL="$BACKEND_DIR/prisma/migrations/20260929120000_agent_trajectory_search/migration.sql"
 # Prisma cannot model trigram indexes, so `db push` never creates them locally.
+# Supersedes the trajectory trigger above (goals stored once per agent).
+TRAJECTORY_AGENT_SQL="$BACKEND_DIR/prisma/migrations/20261026210002_agent_trajectory_agent/migration.sql"
 TOOL_SIDE_EFFECT_TRGM_SQL="$BACKEND_DIR/prisma/migrations/20261026210001_tool_side_effect_operation_key_trgm/migration.sql"
 
 validate_local_database_url() {
@@ -57,6 +59,7 @@ WORKFLOW_SQL="$(awk '
   printf '%s\n' "$WORKFLOW_SQL"
   cat "$UTC_CLEANUP_MIGRATION_SQL"
   cat "$TRAJECTORY_SQL"
+  cat "$TRAJECTORY_AGENT_SQL"
   # CONCURRENTLY cannot run inside this hook's single transaction.
   sed 's/INDEX CONCURRENTLY/INDEX/' "$TOOL_SIDE_EFFECT_TRGM_SQL"
 } | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction

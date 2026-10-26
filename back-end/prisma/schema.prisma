@@ -230,6 +230,18 @@ model TraceArchiveManifestLease {
   @@index([expiresAt])
 }
 
+/// One row per agent in trajectory search: its goal and title, stored once
+/// instead of on every AgentTrajectorySearch message row.
+model AgentTrajectoryAgent {
+  agentId    String   @id
+  userId     String
+  agentGoal  String   @default("")
+  agentTitle String?
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+}
+
 model AgentTrajectorySearch {
   messageId   String   @id
   userId      String

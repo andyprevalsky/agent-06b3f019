@@ -181,6 +181,48 @@ export class ArchivedTraceNotFoundError extends Error {
   }
 }
 
+/**
+ * Each agent's goal and title live once in AgentTrajectoryAgent; message rows
+ * store '' / NULL (prod copied ~2.3 GB of goals onto every row). Readers join
+ * the agent row and still prefer a legacy row's own non-empty copy.
+ */
+function upsertTrajectoryAgentsSql(rows: ArchivedTrajectoryRow[]): Prisma.Sql | null {
+  const agents = new Map<string, ArchivedTrajectoryRow>();
+  for (const row of rows) agents.set(row.agentId, row);
+  if (agents.size === 0) return null;
+  return Prisma.sql`
+    INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle", "updatedAt")
+    VALUES ${Prisma.join(
+      [...agents.values()].map(
+        (row) =>
+          Prisma.sql`(${row.agentId}, ${row.userId}, ${row.agentGoal}, ${row.agentTitle}, CURRENT_TIMESTAMP)`
+      )
+    )}
+    ON CONFLICT ("agentId") DO UPDATE SET
+      "agentGoal" = EXCLUDED."agentGoal",
+      "agentTitle" = EXCLUDED."agentTitle",
+      "updatedAt" = EXCLUDED."updatedAt"
+    WHERE "AgentTrajectoryAgent"."userId" = EXCLUDED."userId"
+      AND ("AgentTrajectoryAgent"."agentGoal", "AgentTrajectoryAgent"."agentTitle")
+        IS DISTINCT FROM (EXCLUDED."agentGoal", EXCLUDED."agentTitle")
+  `;
+}
+
+type SqlExecutor = { $executeRaw(query: Prisma.Sql): Promise<number> };
+
+async function writeTrajectoryRows(
+  db: SqlExecutor,
+  rows: ArchivedTrajectoryRow[],
+  rowsSql: (batch: ArchivedTrajectoryRow[]) => Prisma.Sql
+): Promise<void> {
+  for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+    const batch = rows.slice(start, start + WRITE_BATCH_SIZE);
+    const agentsSql = upsertTrajectoryAgentsSql(batch);
+    if (agentsSql !== null) await db.$executeRaw(agentsSql);
+    await db.$executeRaw(rowsSql(batch));
+  }
+}
+
 function insertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
   return Prisma.sql`
       INSERT INTO "AgentTrajectorySearch" (
@@ -191,7 +233,7 @@ function insertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
           (row) => Prisma.sql`(
         ${row.messageId}, ${row.userId}, ${row.rootAgentId}, ${row.agentId},
         ${row.surface}, ${row.role}, ${row.createdAt}, ${row.searchText},
-        ${row.agentGoal}, ${row.agentTitle}, ${row.archivePath}, ${row.traceKind}
+        '', NULL, ${row.archivePath}, ${row.traceKind}
       )`
         )
       )}
@@ -209,7 +251,7 @@ function upsertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
           (row) => Prisma.sql`(
         ${row.messageId}, ${row.userId}, ${row.rootAgentId}, ${row.agentId},
         ${row.surface}, ${row.role}, ${row.createdAt}, ${row.searchText},
-        ${row.agentGoal}, ${row.agentTitle}, ${row.archivePath}, ${row.traceKind}
+        '', NULL, ${row.archivePath}, ${row.traceKind}
       )`
         )
       )}
@@ -254,9 +296,7 @@ async function replaceArchivedRows(
   await runTransactionWithRetry(
     async (tx) => {
       await tx.$executeRaw(deleteArchivedBundleRowsSql(userId, rootAgentId));
-      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-        await tx.$executeRaw(upsertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
-      }
+      await writeTrajectoryRows(tx, rows, upsertRowsSql);
     },
     { timeout: 60_000 }
   );
@@ -264,9 +304,7 @@ async function replaceArchivedRows(
 
 /** Idempotent upsert of derived rows (e.g. code-session code_event rows). */
 export async function upsertTrajectoryRows(rows: ArchivedTrajectoryRow[]): Promise<void> {
-  for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-    await prisma.$executeRaw(upsertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
-  }
+  await writeTrajectoryRows(prisma, rows, upsertRowsSql);
 }
 
 /** Index one finalized bundle. Grep then reads PostgreSQL, never scans R2. */
@@ -360,9 +398,7 @@ export async function indexLateArchivedLlmArtifact(
           AND "rootAgentId" = ${rootAgentId}
           AND "archivePath" = ${objectPath}
       `;
-      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-        await tx.$executeRaw(insertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
-      }
+      await writeTrajectoryRows(tx, rows, insertRowsSql);
     });
     return rows.length;
   });
@@ -479,7 +515,7 @@ export async function backfillLiveMessageSearchBatch(
       "searchText", "agentGoal", "agentTitle"
     )
     SELECT b.id, root."userId", roots.root_id, a.id, a.source::text, b.role::text,
-           b."createdAt", b.text, a.goal, a.title
+           b."createdAt", b.text, '', NULL
     FROM batch b
     JOIN "Agent" a ON a.id = b."agentId"
     JOIN roots ON roots.agent_id = a.id
@@ -487,5 +523,64 @@ export async function backfillLiveMessageSearchBatch(
     WHERE btrim(b.text) <> '' AND b.role::text <> 'SYSTEM' AND root."userId" IS NOT NULL
     ON CONFLICT ("messageId") DO NOTHING
   `);
+  await prisma.$executeRaw(Prisma.sql`
+    INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle")
+    SELECT DISTINCT ON (s."agentId") s."agentId", s."userId", a.goal, a.title
+    FROM "AgentTrajectorySearch" s
+    JOIN "Agent" a ON a.id = s."agentId"
+    WHERE ${afterId === null ? Prisma.sql`TRUE` : Prisma.sql`s."messageId" > ${afterId}`}
+      AND s."messageId" <= ${lastMessageId}
+    ON CONFLICT ("agentId") DO NOTHING
+  `);
   return { lastMessageId, scanned: batch.length, inserted };
+}
+
+export interface TrajectoryGoalBatch {
+  /** Highest AgentTrajectorySearch.messageId scanned; pass back as `afterId`. */
+  lastMessageId: string | null;
+  scanned: number;
+  cleared: number;
+}
+
+/**
+ * Move legacy per-row goal/title copies onto AgentTrajectoryAgent in one
+ * bounded, primary-key-ordered batch. Idempotent and resumable: an agent row
+ * that already exists is kept (live writers hold the newest value), and a
+ * row's copy is cleared only when its owner's agent row holds the same value.
+ */
+export async function normalizeTrajectoryGoalBatch(
+  afterId: string | null,
+  limit: number
+): Promise<TrajectoryGoalBatch> {
+  const after = afterId === null ? Prisma.sql`TRUE` : Prisma.sql`"messageId" > ${afterId}`;
+  const scannedIds = await prisma.$queryRaw<Array<{ messageId: string }>>(Prisma.sql`
+    SELECT "messageId" FROM "AgentTrajectorySearch" WHERE ${after}
+    ORDER BY "messageId" LIMIT ${limit}
+  `);
+  if (scannedIds.length === 0) return { lastMessageId: afterId, scanned: 0, cleared: 0 };
+  const lastMessageId = scannedIds[scannedIds.length - 1].messageId;
+  const cleared = await runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle")
+      SELECT DISTINCT ON ("agentId") "agentId", "userId", "agentGoal", "agentTitle"
+      FROM "AgentTrajectorySearch"
+      WHERE ${after} AND "messageId" <= ${lastMessageId}
+        AND ("agentGoal" <> '' OR "agentTitle" IS NOT NULL)
+      ORDER BY "agentId", "createdAt" DESC, "messageId" DESC
+      ON CONFLICT ("agentId") DO NOTHING
+    `);
+    return tx.$executeRaw(Prisma.sql`
+      UPDATE "AgentTrajectorySearch" s SET "agentGoal" = '', "agentTitle" = NULL
+      FROM "AgentTrajectoryAgent" g
+      WHERE ${afterId === null ? Prisma.sql`TRUE` : Prisma.sql`s."messageId" > ${afterId}`}
+        AND s."messageId" <= ${lastMessageId}
+        AND (s."agentGoal" <> '' OR s."agentTitle" IS NOT NULL)
+        AND g."agentId" = s."agentId" AND g."userId" = s."userId"
+        -- Only an identical copy is redundant; a divergent legacy copy stays,
+        -- so normalization never changes what search returns.
+        AND g."agentGoal" = s."agentGoal"
+        AND g."agentTitle" IS NOT DISTINCT FROM s."agentTitle"
+    `);
+  });
+  return { lastMessageId, scanned: scannedIds.length, cleared };
 }

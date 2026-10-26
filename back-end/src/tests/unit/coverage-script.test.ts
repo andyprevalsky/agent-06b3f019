@@ -500,6 +500,7 @@ function runSqlHooks(workflowMigration: string): {
     });
     mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
     mkdirSync(join(migrations, '20260929120000_agent_trajectory_search'), { recursive: true });
+    mkdirSync(join(migrations, '20261026210002_agent_trajectory_agent'), { recursive: true });
     mkdirSync(join(migrations, '20261026210001_tool_side_effect_operation_key_trgm'), {
       recursive: true,
     });
@@ -518,6 +519,10 @@ function runSqlHooks(workflowMigration: string): {
     writeFileSync(
       join(migrations, '20260929120000_agent_trajectory_search', 'migration.sql'),
       'SELECT trajectory_search;\n'
+    );
+    writeFileSync(
+      join(migrations, '20261026210002_agent_trajectory_agent', 'migration.sql'),
+      'SELECT trajectory_agent;\n'
     );
     writeFileSync(
       join(migrations, '20261026210001_tool_side_effect_operation_key_trgm', 'migration.sql'),
@@ -556,8 +561,8 @@ const appliedHooks = runSqlHooks(
 assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
 assert.match(
   appliedHooks.psqlInput,
-  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;[\s\S]*CREATE INDEX tool_side_effect_trgm;/,
-  'the advisory lock, the marked workflow block, the UTC cleanup, the trajectory search projection and the non-concurrent trigram index must reach psql in order'
+  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;[\s\S]*SELECT trajectory_agent;[\s\S]*CREATE INDEX tool_side_effect_trgm;/,
+  'the advisory lock, the marked workflow block, the UTC cleanup, the trajectory search projection, its per-agent supersession and the non-concurrent trigram index must reach psql in order'
 );
 assert.doesNotMatch(
   appliedHooks.psqlInput,
