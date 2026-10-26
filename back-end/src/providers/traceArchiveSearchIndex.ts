@@ -181,6 +181,24 @@ export class ArchivedTraceNotFoundError extends Error {
   }
 }
 
+function insertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
+  return Prisma.sql`
+      INSERT INTO "AgentTrajectorySearch" (
+        "messageId", "userId", "rootAgentId", "agentId", surface, role,
+        "createdAt", "searchText", "agentGoal", "agentTitle", "archivePath", "traceKind"
+      ) VALUES ${Prisma.join(
+        batch.map(
+          (row) => Prisma.sql`(
+        ${row.messageId}, ${row.userId}, ${row.rootAgentId}, ${row.agentId},
+        ${row.surface}, ${row.role}, ${row.createdAt}, ${row.searchText},
+        ${row.agentGoal}, ${row.agentTitle}, ${row.archivePath}, ${row.traceKind}
+      )`
+        )
+      )}
+      ON CONFLICT ("messageId") DO NOTHING
+      `;
+}
+
 function upsertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
   return Prisma.sql`
       INSERT INTO "AgentTrajectorySearch" (
@@ -212,17 +230,30 @@ function upsertRowsSql(batch: ArchivedTrajectoryRow[]): Prisma.Sql {
       `;
 }
 
+/**
+ * The rows a finalize replaces for one bundle. code_event rows come from
+ * code-session checkpoints, not this bundle; a finalize must not erase them.
+ * No index leads with rootAgentId: the owner equality makes it a bounded seek
+ * on AgentTrajectorySearch_user_root_time_idx instead of a whole-index walk.
+ */
+export function deleteArchivedBundleRowsSql(userId: string, rootAgentId: string): Prisma.Sql {
+  return Prisma.sql`
+    DELETE FROM "AgentTrajectorySearch"
+    WHERE "userId" = ${userId}
+      AND "rootAgentId" = ${rootAgentId}
+      AND "archivePath" IS NOT NULL
+      AND "traceKind" <> 'code_event'
+  `;
+}
+
 async function replaceArchivedRows(
+  userId: string,
   rootAgentId: string,
   rows: ArchivedTrajectoryRow[]
 ): Promise<void> {
   await runTransactionWithRetry(
     async (tx) => {
-      // code_event rows come from code-session checkpoints, not this bundle;
-      // a finalize must not erase them.
-      await tx.agentTrajectorySearch.deleteMany({
-        where: { rootAgentId, archivePath: { not: null }, traceKind: { not: 'code_event' } },
-      });
+      await tx.$executeRaw(deleteArchivedBundleRowsSql(userId, rootAgentId));
       for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
         await tx.$executeRaw(upsertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
       }
@@ -280,7 +311,7 @@ export async function indexArchivedTrace(
         .join(', ')}`
     );
   }
-  await replaceArchivedRows(rootAgentId, rows);
+  await replaceArchivedRows(fixture.user_id, rootAgentId, rows);
   return rows.length;
 }
 
@@ -294,13 +325,63 @@ export async function indexArchivedTraceFromR2(
   );
 }
 
+/**
+ * Index one llm/ artifact that arrived after finalization started. Only that
+ * artifact is read and its rows are inserted alongside the finalized ones, so
+ * N late files cost N reads rather than re-reading the whole run each time
+ * (quadratic in file count). Content already indexed keeps its original path
+ * and timestamp, exactly as the whole-bundle index orders it.
+ */
+export async function indexLateArchivedLlmArtifact(
+  rootAgentId: string,
+  objectPath: string
+): Promise<number> {
+  return withArchiveManifestLock(rootAgentId, async () => {
+    const bundle = await loadIndexableBundle(rootAgentId);
+    if (bundle === null) return 0;
+    const { fixture, finalized } = bundle;
+    const seen = new Set(
+      archivedMessageRows(fixture).map((row) =>
+        contentDigest(rootAgentId, row.agentId, row.role, row.searchText)
+      )
+    );
+    const rows = llmRows(
+      fixture,
+      objectPath,
+      await readJson(rootAgentId, objectPath),
+      seen,
+      !finalized
+    );
+    for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+      await prisma.$executeRaw(insertRowsSql(rows.slice(start, start + WRITE_BATCH_SIZE)));
+    }
+    return rows.length;
+  });
+}
+
 async function indexArchivedTraceFromR2Unlocked(
   rootAgentId: string,
   expectedUserId?: string
 ): Promise<number> {
+  const bundle = await loadIndexableBundle(rootAgentId, expectedUserId);
+  if (bundle === null) return 0;
+  const objects = await listArchivedObjectsStrict(rootAgentId);
+  return indexArchivedTrace(
+    rootAgentId,
+    bundle.fixture,
+    objects.map((object) => object.path),
+    !bundle.finalized
+  );
+}
+
+/** The verified fixture a bundle is indexed from, or null when it must not be indexed yet. */
+async function loadIndexableBundle(
+  rootAgentId: string,
+  expectedUserId?: string
+): Promise<{ fixture: ScopedDbFixture; finalized: boolean } | null> {
   const manifest = record(await readJson(rootAgentId, 'manifest.json.gz.enc'));
   const correlations = record(manifest?.correlations);
-  if (expectedUserId !== undefined && correlations?.user_id !== expectedUserId) return 0;
+  if (expectedUserId !== undefined && correlations?.user_id !== expectedUserId) return null;
   const archiveUserId = string(correlations?.user_id);
   if (archiveUserId === null) {
     throw new Error(`Trace archive has no owner for ${rootAgentId}`);
@@ -309,7 +390,7 @@ async function indexArchivedTraceFromR2Unlocked(
     where: { userId: archiveUserId },
     select: { userId: true },
   });
-  if (owner === null) return 0;
+  if (owner === null) return null;
   const finalized = manifest?.finalized === true;
   const fixture = (await readJson(
     rootAgentId,
@@ -329,16 +410,10 @@ async function indexArchivedTraceFromR2Unlocked(
       select: { status: true },
     });
     if (liveRoot !== null && ['STARTING_UP', 'ACTIVE', 'PAUSED'].includes(liveRoot.status)) {
-      return 0;
+      return null;
     }
   }
-  const objects = await listArchivedObjectsStrict(rootAgentId);
-  return indexArchivedTrace(
-    rootAgentId,
-    fixture,
-    objects.map((object) => object.path),
-    !finalized
-  );
+  return { fixture, finalized };
 }
 
 export interface LiveMessageBackfillBatch {

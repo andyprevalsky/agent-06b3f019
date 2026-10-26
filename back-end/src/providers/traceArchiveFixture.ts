@@ -35,6 +35,24 @@ export const FIXTURE_TABLE_ORDER = [
 ] as const;
 
 type FixtureTable = (typeof FIXTURE_TABLE_ORDER)[number];
+
+// The user's lifetime history grows with the account, not with one run (a
+// heavy user has ~190k MessageRecords and ~25k Cookies). The canonical base
+// image carries it; per-run fixtures capture only rows bounded by the run and
+// the user's small configuration, so their read cost and restore scope never
+// scale with history. Older fixtures list these tables in their own
+// `table_order`, and restore still honours that list.
+const USER_HISTORY_TABLES: ReadonlySet<FixtureTable> = new Set([
+  'Person',
+  'MessageRecord',
+  'Cookie',
+  'CookieBundle',
+  'BrowserPassword',
+  'AgentPhoneMessage',
+]);
+const RUN_FIXTURE_TABLE_ORDER = FIXTURE_TABLE_ORDER.filter(
+  (table) => !USER_HISTORY_TABLES.has(table)
+);
 type JsonRows = Record<string, unknown[]>;
 type FixtureDbClient = Prisma.TransactionClient;
 type FixtureAgent = Prisma.AgentGetPayload<{
@@ -174,7 +192,6 @@ async function collectFixtureWithClient(
     attentionRequests,
     browserSessions,
     claudeCodeSessions,
-    people,
     integrations,
     userEnvironmentRows,
     credentialPropagations,
@@ -202,7 +219,6 @@ async function collectFixtureWithClient(
     db.claudeCodeSession.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    db.person.findMany({ where: { userId: tree.userId } }),
     db.integration.findMany({ where: { userId: tree.userId } }),
     collectUserEnvironmentRows(db, tree.userId),
     db.agentRunCredentialPropagation.findMany({
@@ -224,7 +240,6 @@ async function collectFixtureWithClient(
   rows.AgentAttentionRequest = attentionRequests;
   rows.BrowserSession = browserSessions;
   rows.ClaudeCodeSession = claudeCodeSessions;
-  rows.Person = people;
   rows.Integration = integrations;
   Object.assign(rows, userEnvironmentRows);
   rows.AgentRunCredentialPropagation = credentialPropagations;
@@ -238,68 +253,43 @@ async function collectFixtureWithClient(
   const contextIds = rows.BrowserSession.map(
     (row) => (row as { contextId?: string }).contextId
   ).filter((id): id is string => typeof id === 'string');
-  const personIds = ids(rows.Person);
   const integrationIds = ids(rows.Integration);
 
-  const [tools, userAuthAssistanceRequests, browserContexts, messageRecords, emailCredentials] =
-    await Promise.all([
-      toolIds.length > 0 ? db.tool.findMany({ where: { id: { in: toolIds } } }) : [],
-      attentionIds.length > 0
-        ? db.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
-        : [],
-      contextIds.length > 0
-        ? db.browserContext.findMany({ where: { id: { in: contextIds } } })
-        : [],
-      personIds.length > 0
-        ? db.messageRecord.findMany({ where: { personId: { in: personIds } } })
-        : [],
-      integrationIds.length > 0
-        ? db.emailIntegrationCredential.findMany({
-            where: { integrationId: { in: integrationIds } },
-          })
-        : [],
-    ]);
+  const [tools, userAuthAssistanceRequests, browserContexts, emailCredentials] = await Promise.all([
+    toolIds.length > 0 ? db.tool.findMany({ where: { id: { in: toolIds } } }) : [],
+    attentionIds.length > 0
+      ? db.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
+      : [],
+    contextIds.length > 0 ? db.browserContext.findMany({ where: { id: { in: contextIds } } }) : [],
+    integrationIds.length > 0
+      ? db.emailIntegrationCredential.findMany({
+          where: { integrationId: { in: integrationIds } },
+        })
+      : [],
+  ]);
 
   rows.Tool = tools;
   rows.UserAuthAssistanceRequest = userAuthAssistanceRequests;
   rows.BrowserContext = browserContexts;
-  rows.MessageRecord = messageRecords;
   rows.EmailIntegrationCredential = emailCredentials;
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
 }
 
 async function collectUserEnvironmentRows(db: FixtureDbClient, userId: string): Promise<JsonRows> {
-  const [
-    cookies,
-    browserPasswords,
-    cookieBundles,
-    steelSessionAuths,
-    mintedAccounts,
-    passkeyCredentials,
-    agentIdentity,
-    agentPhoneMessages,
-    smsSession,
-  ] = await Promise.all([
-    db.cookie.findMany({ where: { userId } }),
-    db.browserPassword.findMany({ where: { userId } }),
-    db.cookieBundle.findMany({ where: { userId } }),
-    db.steelSessionAuth.findMany({ where: { userId } }),
-    db.mintedAccount.findMany({ where: { userId } }),
-    db.passkeyCredential.findMany({ where: { userId } }),
-    db.agentIdentity.findUnique({ where: { userId } }),
-    db.agentPhoneMessage.findMany({ where: { userId } }),
-    db.smsSession.findUnique({ where: { userId } }),
-  ]);
+  const [steelSessionAuths, mintedAccounts, passkeyCredentials, agentIdentity, smsSession] =
+    await Promise.all([
+      db.steelSessionAuth.findMany({ where: { userId } }),
+      db.mintedAccount.findMany({ where: { userId } }),
+      db.passkeyCredential.findMany({ where: { userId } }),
+      db.agentIdentity.findUnique({ where: { userId } }),
+      db.smsSession.findUnique({ where: { userId } }),
+    ]);
 
   return {
-    Cookie: cookies,
-    BrowserPassword: browserPasswords,
-    CookieBundle: cookieBundles,
     SteelSessionAuth: steelSessionAuths,
     MintedAccount: mintedAccounts,
     PasskeyCredential: passkeyCredentials,
     AgentIdentity: asArray(agentIdentity),
-    AgentPhoneMessage: agentPhoneMessages,
     SmsSession: asArray(smsSession),
   };
 }
@@ -320,10 +310,11 @@ function buildFixture(
     root_agent_id: rootAgentId,
     user_id: userId,
     agent_ids: agentIds,
-    table_order: FIXTURE_TABLE_ORDER,
+    table_order: RUN_FIXTURE_TABLE_ORDER,
     restore: {
       strategy: 'delete-scoped-rows-then-insert-in-table-order',
       scope: { root_agent_id: rootAgentId, user_id: userId, agent_ids: agentIds },
+      user_history: 'base-image',
     },
     rows,
   };
