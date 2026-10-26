@@ -17,13 +17,20 @@
  *   - agents: POST /api/agents accepts project_id, sub-agents inherit it,
  *     GET /api/agents returns project_id; deleting a project returns its
  *     agents to Home (null)
+ *   - Rose out of the box (PJ4): a Rose dev account's project list carries a
+ *     configured "Rose" project (repo, branch, startup script, six declared env
+ *     files, GitHub grant) — created or filled in once, idempotent, never
+ *     overwriting later edits; other accounts are untouched
  *
  * Usage: bash scripts/run-blackbox-tests.sh projects
  */
 import { randomBytes } from 'crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
 import { prisma } from '../../providers/database';
+import { ROSE_DEV_USER_IDS } from '../../utils/roseDevAccess';
 import {
   anonymousSession,
   apiKeyHeaders,
@@ -49,6 +56,7 @@ interface Project {
   lifecycle: { autoWake: boolean };
   envFileCount: number;
   githubConnected: boolean;
+  updatedAt: string;
 }
 
 interface EnvFile {
@@ -399,4 +407,138 @@ test('agents: project_id on create, inherited by sub-agents, listed, cleared on 
     where: { userId: s.userId },
     data: { deletedAt: new Date() },
   });
+});
+
+const ROSE_DEV_USER = ROSE_DEV_USER_IDS[0];
+const ROSE_REPO = 'https://github.com/Rose-Ai-Labs/rose';
+const ROSE_ENV_PATHS = [
+  'agents/.env',
+  'agents/.env.benchmark-temporal',
+  'back-end/.env',
+  'front-end/.env',
+  'mac-app/.env',
+  'research/.env',
+];
+const ROSE_STARTUP = readFileSync(
+  resolve(__dirname, '../../../../agents/benchmarks/fixtures/projects/rose-startup.sh'),
+  'utf8'
+);
+
+async function resetRoseDevProjects(): Promise<void> {
+  await prisma.project.deleteMany({ where: { userId: ROSE_DEV_USER } });
+  await prisma.githubRepoAccess.deleteMany({
+    where: { userId: ROSE_DEV_USER, repoUrl: ROSE_REPO },
+  });
+}
+
+async function devCall(path: string, init: { method?: string; body?: unknown } = {}) {
+  return call(path, { ...init, headers: apiKeyHeaders(ROSE_DEV_USER) });
+}
+
+async function devRose(): Promise<Project & { repoUrl: string | null }> {
+  const list = await devCall('/api/projects');
+  expectStatus(list, 200, 'dev list');
+  const roses = (list.data.projects as (Project & { repoUrl: string | null })[]).filter(
+    (p) => p.name === 'Rose'
+  );
+  assert(roses.length === 1, `exactly one Rose project, got ${roses.length}`);
+  return roses[0];
+}
+
+async function devEnvFiles(projectId: string): Promise<EnvFile[]> {
+  const res = await devCall(`/api/projects/${projectId}/env-files`);
+  expectStatus(res, 200, 'dev env files');
+  return res.data.envFiles as EnvFile[];
+}
+
+test('Rose out of the box: a name-only Rose project is configured on the next list (PJ4)', async () => {
+  await prisma.user.upsert({
+    where: { userId: ROSE_DEV_USER },
+    create: { userId: ROSE_DEV_USER, name: 'Rose dev (projects blackbox)' },
+    update: {},
+  });
+  await resetRoseDevProjects();
+  try {
+    // Andy's prod state on 2026-10-26: "Rose" created by name only.
+    const created = await devCall('/api/projects', { method: 'POST', body: { name: 'Rose' } });
+    expectStatus(created, 201, 'name-only Rose');
+    const rose = await devRose();
+    assert(rose.id === (created.data as unknown as Project).id, 'configures the existing row');
+    assert(rose.repoUrl === ROSE_REPO, `repo ${rose.repoUrl}`);
+    assert(rose.defaultBranch === 'main', `branch ${rose.defaultBranch}`);
+    assert(rose.startupScript === ROSE_STARTUP, 'startup script = PJ4 fixture');
+    assert(rose.startupTimeoutS === 120, `timeout ${rose.startupTimeoutS}`);
+    assert(rose.githubConnected === true, 'GitHub connected via a repo grant');
+    assert(rose.envFileCount === 6, `env files ${rose.envFileCount}`);
+    const files = await devEnvFiles(rose.id);
+    assert(
+      JSON.stringify(files.map((f) => f.path)) === JSON.stringify(ROSE_ENV_PATHS),
+      `env paths ${files.map((f) => f.path)}`
+    );
+    assert(
+      files.every((f) => f.source === 'declared' && !f.hasContent),
+      'declared, no values (values arrive only through codebase sync)'
+    );
+    const detail = await devCall(`/api/projects/${rose.id}`);
+    expectStatus(detail, 200, 'dev detail');
+    assert(detail.data.githubConnected === true, 'detail reports the grant');
+
+    // Idempotent: listing again changes nothing and duplicates nothing.
+    const again = await devRose();
+    assert(again.id === rose.id && again.updatedAt === rose.updatedAt, 'no rewrite on re-list');
+    assert(again.envFileCount === 6, 'no duplicate env files');
+    const grants = await prisma.githubRepoAccess.count({
+      where: { userId: ROSE_DEV_USER, repoUrl: ROSE_REPO },
+    });
+    assert(grants === 1, `one grant, got ${grants}`);
+
+    // Later edits stick: clearing the script or removing a file is not undone.
+    const cleared = await devCall(`/api/projects/${rose.id}`, {
+      method: 'PUT',
+      body: { startupScript: '' },
+    });
+    expectStatus(cleared, 200, 'clear startup script');
+    const removed = await devCall(`/api/projects/${rose.id}/env-files/${files[0].id}`, {
+      method: 'DELETE',
+    });
+    assert(removed.status === 204 || removed.status === 200, `delete env file ${removed.status}`);
+    const edited = await devRose();
+    assert(edited.startupScript === null, 'cleared script stays cleared');
+    assert(edited.envFileCount === 5, `removed file stays removed (${edited.envFileCount})`);
+  } finally {
+    await resetRoseDevProjects();
+  }
+});
+
+test('Rose out of the box: a dev account without a Rose project gets one; concurrent lists create one', async () => {
+  await prisma.user.upsert({
+    where: { userId: ROSE_DEV_USER },
+    create: { userId: ROSE_DEV_USER, name: 'Rose dev (projects blackbox)' },
+    update: {},
+  });
+  await resetRoseDevProjects();
+  try {
+    const lists = await Promise.all([devCall('/api/projects'), devCall('/api/projects')]);
+    for (const list of lists) expectStatus(list, 200, 'concurrent dev list');
+    const rows = await prisma.project.findMany({ where: { userId: ROSE_DEV_USER, name: 'Rose' } });
+    assert(rows.length === 1, `one Rose row, got ${rows.length}`);
+    const rose = await devRose();
+    assert(rose.repoUrl === ROSE_REPO && rose.startupScript === ROSE_STARTUP, 'configured');
+    assert(rose.githubConnected === true && rose.envFileCount === 6, 'connected, six files');
+  } finally {
+    await resetRoseDevProjects();
+  }
+});
+
+test('Rose out of the box: other accounts keep a name-only Rose project untouched', async () => {
+  const s = await anonymousSession();
+  const created = await createProject(s, { name: 'Rose' });
+  const list = await call('/api/projects', { auth: s.token });
+  expectStatus(list, 200, 'list');
+  const [rose] = list.data.projects as (Project & { repoUrl: string | null })[];
+  assert(rose.id === created.id && rose.repoUrl === null, 'no repo');
+  assert(rose.startupScript === null && rose.envFileCount === 0, 'no script, no files');
+  assert(rose.githubConnected === false, 'not connected');
+  const grants = await prisma.githubRepoAccess.count({ where: { userId: s.userId } });
+  assert(grants === 0, 'no grant');
 });
