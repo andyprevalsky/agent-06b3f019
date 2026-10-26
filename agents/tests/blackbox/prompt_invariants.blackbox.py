@@ -726,6 +726,9 @@ def _iter_production_py_files():
         rel = str(path.relative_to(AGENTS_ROOT))
         if any(s in rel for s in skip_path_substrings):
             continue
+        # Top-level agents/scripts/ holds offline maintenance tools (documented above).
+        if rel.startswith("scripts/"):
+            continue
         yield path
 
 
