@@ -146,6 +146,7 @@ export async function upsertPersonAndMessageRecords(
   let messagesProcessed = 0;
   let contactsProcessed = 0;
   let failedChunks = 0;
+  let firstChunkError: string | undefined;
 
   // Process contacts in chunks
   for (let i = 0; i < contacts.length; i += PERSON_CHUNK_SIZE) {
@@ -256,6 +257,7 @@ export async function upsertPersonAndMessageRecords(
     } catch (error) {
       if (error instanceof DisconnectedGoogleCredentialError) throw error;
       failedChunks++;
+      firstChunkError ??= error instanceof Error ? error.message : String(error);
       log.error('Error processing contact chunk', {
         jobId,
         error: error instanceof Error ? error.message : String(error),
@@ -266,7 +268,9 @@ export async function upsertPersonAndMessageRecords(
   // Durable callers (the messaging upload queue) retry the whole part; inserts
   // deduplicate, so a retry only fills what this run failed to store.
   if (options.throwOnChunkError === true && failedChunks > 0) {
-    throw new Error(`${failedChunks} contact chunk(s) failed to store (job ${jobId})`);
+    throw new Error(
+      `${failedChunks} contact chunk(s) failed to store (job ${jobId}): ${firstChunkError}`
+    );
   }
 
   log.info('Stored messages', {

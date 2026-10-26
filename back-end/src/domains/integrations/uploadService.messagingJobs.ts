@@ -126,7 +126,7 @@ async function markIntegrationFailed(integrationId: string, message: string) {
   await repo.updateIntegrationStatus(integrationId, IntegrationStatus.SYNC_FAILED, {
     lastSyncAt: new Date(),
     lastFailedSyncAt: new Date(),
-    failureReason: message,
+    failureReason: message.slice(0, 1000),
   });
 }
 
@@ -187,7 +187,12 @@ async function finalizeIntegration(integration: { id: string; config: unknown })
   const latest = await jobsRepo.findLatestMessagingUploadPart(integration.id);
   if (latest === null) return;
   const parts = await jobsRepo.findMessagingSyncParts(integration.id, latest);
-  if (parts.some((part) => part.failedAt !== null || part.processedAt === null)) return;
+  if (parts.some((part) => part.failedAt !== null)) {
+    // A later request of this sync set SYNCING again after a part failed.
+    await markIntegrationFailed(integration.id, 'a part of the latest messaging sync failed');
+    return;
+  }
+  if (parts.some((part) => part.processedAt === null)) return;
   const complete = parts.some((part) => part.syncComplete);
   const config = (integration.config as Record<string, unknown> | null) ?? {};
   await repo.updateIntegration(integration.id, {

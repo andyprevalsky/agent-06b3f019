@@ -218,14 +218,14 @@ export async function testMessagingUpload_nonFinalChunkKeepsCursor() {
 async function seedParts(
   userId: string,
   parts: Array<{ part: number; contacts: SyntheticContact[]; attempts?: number }>,
-  accessedAt: string
+  accessedAt: string,
+  uploadId = `imessage-upload-${userId}-seeded`
 ) {
   const integration = await prisma.integration.upsert({
     where: { userId_name_accountId: { userId, name: 'imessage', accountId: '' } },
     create: { userId, name: 'imessage', type: 'DATA_SOURCE', status: 'SYNCING', config: {} },
     update: { status: 'SYNCING' },
   });
-  const uploadId = `imessage-upload-${userId}-seeded`;
   await prisma.messagingUploadJob.createMany({
     data: parts.map((p) => ({
       userId,
@@ -272,6 +272,20 @@ export async function testMessagingUpload_exhaustedPartFailsSyncAndKeepsCursor()
     const integration = await imessageIntegration(userId);
     assert(integration?.status === 'SYNC_FAILED', `sync failed (got ${integration?.status})`);
     assert(cursorOf(integration) === undefined, 'cursor not advanced past a failed part');
+
+    // A later request of the same client sync sets SYNCING again; the failed
+    // part must still end the sync SYNC_FAILED rather than leave it SYNCING.
+    await seedParts(
+      userId,
+      [{ part: 0, contacts: syntheticContacts('5558', [1]) }],
+      '2026-02-01T00:00:00.000Z',
+      `imessage-upload-${userId}-later`
+    );
+    const later = await drainUntil(
+      () => imessageIntegration(userId),
+      (row) => row?.status !== 'SYNCING'
+    );
+    assert(later?.status === 'SYNC_FAILED', `later chunk keeps the sync failed (${later?.status})`);
   } finally {
     await cleanupUser(userId);
     await prisma.integration.deleteMany({ where: { userId } });
@@ -296,7 +310,10 @@ export async function testMessagingUpload_chunkStoreFailureLeavesPartRetryable()
     );
     assert(part.processedAt === null, 'a part with unstored messages is not processed');
     assert(part.failedAt === null && part.payload !== null, 'payload retained for the retry');
-    assert(/contact chunk/.test(part.lastError ?? ''), `chunk failure recorded: ${part.lastError}`);
+    assert(
+      /contact chunk.*: .+/.test(part.lastError ?? ''),
+      `chunk failure and its first cause recorded: ${part.lastError}`
+    );
   } finally {
     await cleanupUser(userId);
     await prisma.integration.deleteMany({ where: { userId } });
