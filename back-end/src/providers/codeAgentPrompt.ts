@@ -1,5 +1,4 @@
 import { isRoseRepoUrl } from './codePreview/preview';
-import { mobbinMcpToken } from './agentTools/mobbin';
 import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
 /** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
@@ -31,7 +30,7 @@ interface BuildCodeAgentPromptArgs {
   roseDesktop?: boolean;
   /** The checkout is the Rose repo itself (Rose-in-Rose, A1); detected from githubRepoUrl too. */
   roseRepo?: boolean;
-  /** The session has the Mobbin MCP server; defaults to whether the backend has its token. */
+  /** The session has the Mobbin MCP server (`mobbinAvailableFor`); off unless the caller says so. */
   mobbin?: boolean;
 }
 
@@ -102,7 +101,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
     '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
     '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
-    ...((args.mobbin ?? mobbinMcpToken() !== null)
+    ...(args.mobbin === true
       ? [
           '- Before you build a visual for the Agent Display, search the mobbin MCP tools for real app and website references and follow their layout and style.',
         ]

@@ -45,6 +45,20 @@ export function mobbinMcpToken(env: NodeJS.ProcessEnv = process.env): string | n
   return null;
 }
 
+/**
+ * Whether a session for `userId` gets the Mobbin server: the backend has the
+ * token AND the session can have agent tools at all (`withAgentTools` returns
+ * the workspace unchanged without a user). The code-agent prompt line and the
+ * installed server share this predicate, so the prompt never names a tool the
+ * session lacks.
+ */
+export function mobbinAvailableFor(
+  userId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return Boolean(userId) && mobbinMcpToken(env) !== null;
+}
+
 /** Claude Code `--mcp-config` entry; the header is an env placeholder, not the token. */
 export function mobbinMcpServerConfig(): MobbinMcpServerConfig {
   return {

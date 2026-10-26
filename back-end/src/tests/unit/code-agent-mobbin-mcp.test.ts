@@ -32,7 +32,11 @@ import {
   relocateAgentToolsWorkspace,
   withAgentTools,
 } from '../../providers/agentTools/workspace';
-import { MOBBIN_MCP_TOKEN_ENV, MOBBIN_MCP_URL } from '../../providers/agentTools/mobbin';
+import {
+  MOBBIN_MCP_TOKEN_ENV,
+  MOBBIN_MCP_URL,
+  mobbinAvailableFor,
+} from '../../providers/agentTools/mobbin';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
 import { localHomeFromWorkspace } from '../../providers/localDevices/homeFiles';
 import type { UserUiWorkspace } from '../../providers/userUi/workspace';
@@ -275,14 +279,46 @@ test('with MOBBIN_MCP_TOKEN: Codex gets the Mobbin server by env bearer, search 
   );
 });
 
-test('the code-agent prompt points at Mobbin only when the session has it', () => {
+test('the code-agent prompt points at Mobbin only when the caller says the session has it', () => {
   const line = /search the mobbin MCP tools/;
   assert.match(buildCodeAgentSystemPrompt({ mobbin: true }), line);
   assert.doesNotMatch(buildCodeAgentSystemPrompt({ mobbin: false }), line);
-  // Default: the backend's token, the same signal that installs the server.
+  // The prompt builder never reads the environment: an env var alone cannot change its bytes.
   process.env[MOBBIN_MCP_TOKEN_ENV] = SECRET;
-  assert.match(buildCodeAgentSystemPrompt({}), line);
-  assert.ok(!buildCodeAgentSystemPrompt({}).includes(SECRET), 'the prompt never holds the token');
-  delete process.env[MOBBIN_MCP_TOKEN_ENV];
   assert.doesNotMatch(buildCodeAgentSystemPrompt({}), line);
+  assert.ok(
+    !buildCodeAgentSystemPrompt({ mobbin: true }).includes(SECRET),
+    'the prompt never holds the token'
+  );
 });
+
+test('the prompt gate and the installed server agree: token AND a user, else neither', () => {
+  const home = join(fixtureDir, 'agree');
+  mkdirSync(home, { recursive: true });
+  const base = { agentId: 'mobbin-agree', taskId: 'mobbin-agree', provider: 'claude' as const };
+  for (const [token, userId, expected] of [
+    [SECRET, 'mobbin-test-user', true],
+    [SECRET, undefined, false], // no user: withAgentTools returns the workspace unchanged
+    [null, 'mobbin-test-user', false],
+    [null, undefined, false],
+  ] as const) {
+    if (token === null) delete process.env[MOBBIN_MCP_TOKEN_ENV];
+    else process.env[MOBBIN_MCP_TOKEN_ENV] = token;
+    assert.equal(
+      mobbinAvailableFor(userId),
+      expected,
+      `gate token=${token !== null} user=${userId}`
+    );
+    const workspace = withAgentTools(null, { ...base, userId, homeDir: home, roseDesktop: false });
+    const installed = workspace !== null && hasMobbinServer(workspace);
+    assert.equal(installed, expected, `server installed token=${token !== null} user=${userId}`);
+  }
+});
+
+function hasMobbinServer(workspace: UserUiWorkspace): boolean {
+  const file = workspace.files.find((f) => f.path === AGENT_TOOLS_MCP_CONFIG_PATH);
+  return (
+    file !== undefined &&
+    'mobbin' in (JSON.parse(file.content.toString('utf8')) as McpConfig).mcpServers
+  );
+}
