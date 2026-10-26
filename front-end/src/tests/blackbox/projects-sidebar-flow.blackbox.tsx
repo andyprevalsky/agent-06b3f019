@@ -5,7 +5,12 @@ import { http, HttpResponse } from 'msw';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
 import { renderWithProviders } from './test-wrapper';
 import { mockSession, makeAgent } from './app-sidebar.fixtures';
-import { makeProject, mockProjectsApi, openContextMenu } from './rose-sidebar.fixtures';
+import {
+  expectAgentMenuEntries,
+  makeProject,
+  mockProjectsApi,
+  openContextMenu,
+} from './rose-sidebar.fixtures';
 import { server } from './msw/server';
 const api = 'http://localhost:3001/api';
 beforeEach(() => {
@@ -118,4 +123,10 @@ it('keeps Rename / Settings / Delete on the existing project context menu', asyn
   expect(state.projects).toHaveLength(1);
   fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }));
   expect(screen.getByTestId('rose-project-row-p-rose')).toBeVisible();
+});
+it('mobile agent rows open the same trimmed menu (UI #26): Archive · Pin · Rename · Copy', async () => {
+  mockProjectsApi([makeProject()]);
+  renderList();
+  const row = await screen.findByTestId('rose-agent-row-rose-agent');
+  expectAgentMenuEntries(await openContextMenu(row, 'rose-agent-menu'));
 });
