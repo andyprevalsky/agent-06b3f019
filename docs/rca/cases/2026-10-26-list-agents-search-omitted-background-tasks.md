@@ -22,7 +22,7 @@ tags:
 sources:
   - agent b8a40ee9-bf0d-482c-b39e-c85dde479c9d (root), explore 90bcc9f4-e0a1-4c43-af5e-233efa88d052 (/root/check_existing_evidence)
   - fleet run 20261026-044408-21827 shard-01 r001-j0026 on ae2f7366c (/var/tmp/f8x/context/fleet/runs/20261026-044408-21827/browser-auth-assistance-declined/run.json, root messages 64-81)
-repro: back-end/src/tests/blackbox/agents-agent-address.cases.ts "GET /:id/tree — paths, path nodes and background tasks (running and finished) of listed agents"
+repro: back-end/src/tests/blackbox/agents-agent-address.cases.ts "GET /:id/tree — paths, path nodes and background tasks (running and finished) of listed agents" and "GET /:id/tree — search filters tasks before the per-owner cap and finds tasks of unloaded owners"
 status: fixed
 ---
 
@@ -67,14 +67,25 @@ error, but a different code path.
 
 ## Solution
 
-`searchMatches` now also matches background tasks. It searches the tasks of
-every agent row the search already loaded: the matches, their ancestors, and
-the caller path. If the prefix resolves (via the shared `resolveTreeAddress`) to
-a task, or to an agent, that owner is loaded too. Tasks use the same rule as
-agents: path equals the prefix or sits under it, and every query token appears in
-the goal. Results are merged shallowest-first with agents first and truncated to
-`limit`. Each `TreeMatch` now carries `type` ('agent' or the task type). The
-agents-side renderer prints a task match as `[task of …] browser completed`.
+`searchMatches` now also matches background tasks.
+`repoAgentTree.searchTreeTaskOwners` runs a busId-scoped, LIMITed query for
+agents in the tree that own a `backgroundTasks` entry whose path is the prefix
+or below it and whose goal contains every token. It uses the same scope and
+limit as the agent-goal query, so query-only search finds tasks of owners that
+the search would not otherwise load. `backgroundTaskNodes` applies the
+search predicate to each owner's tasks BEFORE its 10-per-owner and 100-per-
+response caps. Results are merged shallowest-first, agents first, and
+truncated to `limit`. Each `TreeMatch` carries `type`, and the agents-side
+renderer prints a task match as `[task of …] browser completed`.
+
+First version (6b8962046) defect, found by the golden-reference review:
+it filtered the already-capped `backgroundTaskNodes` output. An owner array
+lists running tasks first, then finished tasks oldest-first, so with more than
+10 tasks the newest finished one was cut before the filter ran.
+`path_prefix` then reported "No agents in this tree match" again. That
+version also searched only owners already loaded. The follow-up applies the
+filter before the cap and finds owners through the tree query. Its regression
+puts 12 tasks on one owner, and adds a task whose owner sits in another branch.
 
 Golden reference: codex `codex/codex-rs/core/src/agent/control.rs:380-437`.
 `list_agents` builds one registry list (`live_agents()`, :396) and applies
@@ -93,7 +104,7 @@ Also fixed a pre-existing stale stub in
 
 ## Human feedback
 
-None recorded.
+The parent's golden-reference reviewer rejected the first version: the filter ran after the cap, and query-only search had to match task text within the same busId-scoped query (filter first, then limit, as codex control.rs:380-437 and openclaw session-list-filters.ts do).
 
 ## Reusable lesson
 
