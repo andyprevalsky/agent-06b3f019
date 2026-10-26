@@ -15,17 +15,10 @@ CREATE INDEX IF NOT EXISTS "AgentTrajectoryAgent_userId_idx" ON "AgentTrajectory
 
 ALTER TABLE "AgentTrajectoryAgent" ENABLE ROW LEVEL SECURITY;
 
--- Backfill from each agent's newest trajectory row. The DISTINCT ON sort reads
--- only narrow key columns; goals are detoasted for one row per agent.
-INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle")
-SELECT s."agentId", s."userId", s."agentGoal", s."agentTitle"
-FROM (
-  SELECT DISTINCT ON ("agentId") "messageId"
-  FROM "AgentTrajectorySearch"
-  ORDER BY "agentId", "createdAt" DESC, "messageId" DESC
-) latest
-JOIN "AgentTrajectorySearch" s ON s."messageId" = latest."messageId"
-ON CONFLICT ("agentId") DO NOTHING;
+-- No backfill here: a whole-table INSERT ... SELECT hits the boot-time
+-- statement timeout (57014; see 20260929120000). Legacy rows keep their own
+-- copy, which search prefers, until `backfill-agent-trajectory-search.ts
+-- --agent-goals` moves them in bounded primary-key batches.
 
 CREATE OR REPLACE FUNCTION sync_agent_trajectory_search() RETURNS trigger AS $$
 DECLARE
