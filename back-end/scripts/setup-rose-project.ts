@@ -23,7 +23,7 @@ import {
   planRoseProjectSetup,
   roseStartupScript,
 } from '../src/domains/projects/roseProject';
-import { isRoseDevUser } from '../src/utils/roseDevAccess';
+import { isRoseRepoOwner } from '../src/utils/roseRepoOwners';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -89,8 +89,8 @@ async function main(): Promise<number> {
     console.error('usage: setup-rose-project.ts --user <userId> [--apply]');
     return 2;
   }
-  if (!isRoseDevUser(userId)) {
-    console.error(`${userId} is not a Rose dev account; nothing to set up`);
+  if (!isRoseRepoOwner(userId)) {
+    console.error(`${userId} is not a Rose repo owner; nothing to set up`);
     return 2;
   }
   const before = await readPlan(userId);

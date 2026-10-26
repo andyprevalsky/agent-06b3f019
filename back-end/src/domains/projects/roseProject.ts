@@ -1,8 +1,8 @@
 /**
- * Rose out of the box (rose-builds-rose PJ4): a Rose dev account's project
- * list always carries a configured "Rose" project.
+ * Rose out of the box (rose-builds-rose PJ4): a Rose repo owner's project
+ * list always carries a configured "Rose" project (owners: utils/roseRepoOwners).
  *
- *   GET /api/projects (dev account) ─► planRoseProjectSetup(rows, connected)
+ *   GET /api/projects (repo owner) ─► planRoseProjectSetup(rows, connected)
  *        │ nothing to do (steady state) ─► list as-is, zero extra queries
  *        └ plan ─► applyRoseProjectSetup ─► re-list
  *
@@ -12,20 +12,26 @@
  *   - pristine (name-only) "Rose"  → set repo + startup script, declare the six
  *                                     env files (paths only, no values)
  *   - Rose repo, no GitHub grant   → grant clone access (same table the public
- *                                     auto-grant and slack-auto-rca write)
+ *                                     auto-grant and slack-auto-rca write), only
+ *                                     when the backend's GitHub token reaches it
  * Env-file VALUES are never produced here: they arrive only through codebase
  * sync from the owner's checkout (`scripts/rose-sync push --project Rose`).
  *
- * 10k-agent behaviour: non-dev accounts return before any query; a dev account
- * pays one bounded write burst once, then nothing per list.
+ * 10k-agent behaviour: non-owner accounts return before any query; an owner
+ * pays one bounded write burst (and one GitHub API read) once, then nothing.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { normalizeGithubUrl } from '../../providers/github';
+import type { Prisma } from '@prisma/client';
+
 import { prisma } from '../../providers/database';
+import { fetchGithubRepoVisibility, normalizeGithubUrl } from '../../providers/github';
+import { createLogger } from '../../providers/logger';
 import { newSyncSalt, type ProjectWithCount } from '../../providers/projects/store';
-import { isRoseDevUser } from '../../utils/roseDevAccess';
+import { isRoseRepoOwner } from '../../utils/roseRepoOwners';
+
+const log = createLogger('Projects');
 
 export const ROSE_PROJECT_NAME = 'Rose';
 export const ROSE_PROJECT_REPO_URL = 'https://github.com/Rose-Ai-Labs/rose';
@@ -40,6 +46,19 @@ export const ROSE_PROJECT_ENV_FILES = [
   'research/.env',
 ] as const;
 export const ROSE_STARTUP_SCRIPT_PATH = 'agents/benchmarks/fixtures/projects/rose-startup.sh';
+
+export interface RoseSetupDeps {
+  /** Accounts that get the Rose project (default: the explicit repo-owner list). */
+  isOwner: (userId: string) => boolean;
+  /** One GitHub API read: can the backend's GitHub token reach the repo? */
+  repoReachable: () => Promise<boolean>;
+}
+
+export const DEFAULT_ROSE_SETUP: RoseSetupDeps = {
+  isOwner: isRoseRepoOwner,
+  repoReachable: async () =>
+    ['public', 'private'].includes(await fetchGithubRepoVisibility('Rose-Ai-Labs', 'rose')),
+};
 
 /** Repo root: back-end/{src,dist}/domains/projects → ../../../.. */
 const REPO_ROOT = resolve(__dirname, '../../../..');
@@ -83,9 +102,10 @@ export function findRoseProject<T extends { name: string; repoUrl: string | null
 export function planRoseProjectSetup(
   userId: string,
   rows: ProjectWithCount[],
-  connectedRepoUrls: ReadonlySet<string>
+  connectedRepoUrls: ReadonlySet<string>,
+  isOwner: RoseSetupDeps['isOwner'] = DEFAULT_ROSE_SETUP.isOwner
 ): RoseProjectPlan | null {
-  if (!isRoseDevUser(userId)) return null;
+  if (!isOwner(userId)) return null;
   const rose = findRoseProject(rows);
   if (!rose) return { createProject: true, fillProjectId: null, grantRepo: true };
   const fill = isPristine(rose);
@@ -95,8 +115,8 @@ export function planRoseProjectSetup(
   return { createProject: false, fillProjectId: fill ? rose.id : null, grantRepo };
 }
 
-async function declareEnvFiles(projectId: string): Promise<void> {
-  await prisma.projectEnvFile.createMany({
+async function declareEnvFiles(tx: Prisma.TransactionClient, projectId: string): Promise<void> {
+  await tx.projectEnvFile.createMany({
     data: ROSE_PROJECT_ENV_FILES.map((path) => ({
       projectId,
       path,
@@ -107,35 +127,57 @@ async function declareEnvFiles(projectId: string): Promise<void> {
   });
 }
 
-/** Idempotent and race-safe: create-if-missing, fill-if-still-pristine, skip duplicates. */
-export async function applyRoseProjectSetup(userId: string, plan: RoseProjectPlan): Promise<void> {
+/**
+ * Idempotent and race-safe: create-if-missing, fill-if-still-pristine, skip
+ * duplicates. Project settings and the declared env files commit together, so
+ * a partial failure leaves the project pristine and the next list retries it.
+ * The clone grant is written only when the backend's GitHub token can reach
+ * the repository.
+ */
+export async function applyRoseProjectSetup(
+  userId: string,
+  plan: RoseProjectPlan,
+  deps: RoseSetupDeps = DEFAULT_ROSE_SETUP
+): Promise<void> {
   const settings = {
     repoUrl: ROSE_PROJECT_REPO_URL,
     startupScript: roseStartupScript(),
   };
-  if (plan.createProject) {
-    const project = await prisma.project.upsert({
-      where: { userId_name: { userId, name: ROSE_PROJECT_NAME } },
-      create: {
-        userId,
-        name: ROSE_PROJECT_NAME,
-        defaultBranch: ROSE_PROJECT_DEFAULT_BRANCH,
-        syncSalt: newSyncSalt(),
-        ...settings,
-      },
-      update: {},
+  if (plan.createProject || plan.fillProjectId !== null) {
+    const fillProjectId = plan.fillProjectId;
+    await prisma.$transaction(async (tx) => {
+      if (plan.createProject) {
+        const project = await tx.project.upsert({
+          where: { userId_name: { userId, name: ROSE_PROJECT_NAME } },
+          create: {
+            userId,
+            name: ROSE_PROJECT_NAME,
+            defaultBranch: ROSE_PROJECT_DEFAULT_BRANCH,
+            syncSalt: newSyncSalt(),
+            ...settings,
+          },
+          update: {},
+        });
+        if (project.repoUrl === ROSE_PROJECT_REPO_URL) await declareEnvFiles(tx, project.id);
+      }
+      if (fillProjectId !== null) {
+        // Conditional: a concurrent edit after the list read wins over the defaults.
+        const filled = await tx.project.updateMany({
+          where: { id: fillProjectId, userId, repoUrl: null, startupScript: null },
+          data: settings,
+        });
+        if (filled.count === 1) await declareEnvFiles(tx, fillProjectId);
+      }
     });
-    if (project.repoUrl === ROSE_PROJECT_REPO_URL) await declareEnvFiles(project.id);
-  }
-  if (plan.fillProjectId !== null) {
-    // Conditional: a concurrent edit after the list read wins over the defaults.
-    const filled = await prisma.project.updateMany({
-      where: { id: plan.fillProjectId, userId, repoUrl: null, startupScript: null },
-      data: settings,
-    });
-    if (filled.count === 1) await declareEnvFiles(plan.fillProjectId);
   }
   if (plan.grantRepo) {
+    if (!(await deps.repoReachable())) {
+      log.warn('[Projects] Rose repo grant skipped: backend GitHub token cannot reach the repo', {
+        userId,
+        repoUrl: ROSE_PROJECT_REPO_URL,
+      });
+      return;
+    }
     await prisma.githubRepoAccess.createMany({
       data: [{ userId, repoUrl: ROSE_PROJECT_REPO_URL }],
       skipDuplicates: true,

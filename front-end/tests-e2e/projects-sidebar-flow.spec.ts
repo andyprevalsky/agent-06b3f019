@@ -107,7 +107,7 @@ for (const width of [1280, 390]) {
       width < 768
         ? page.getByTestId('project-settings-content')
         : page.getByTestId('rose-project-settings');
-    await expect(settings.getByRole('button', { name: 'Download setup helper' })).toBeVisible();
+    await expect(settings.getByRole('button', { name: 'Download setup helper' })).toHaveCount(0);
     await expect(
       settings.getByRole('spinbutton', { name: 'Startup timeout (seconds)' }),
     ).toHaveValue('120');
