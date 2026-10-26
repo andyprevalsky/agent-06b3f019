@@ -89,12 +89,30 @@ def _strip_headers(headers: Dict[str, str]) -> Dict[str, str]:
 class BrowserHttpCache:
     """Record/replay for one browser run."""
 
-    def __init__(self, goal: str, *, read_enabled: bool = True, write_enabled: bool = True):
+    def __init__(
+        self,
+        goal: str,
+        *,
+        read_enabled: bool = True,
+        write_enabled: bool = True,
+        agent_id: Optional[str] = None,
+    ):
         self.goal = goal
         self.goal_hash = normalize.goal_hash(goal)
         self.read_enabled = read_enabled
         self.write_enabled = write_enabled
+        self.agent_id = agent_id
+        # Resolved once per run: a non-DEMO child under a DEMO tree root must not
+        # write the shared namespace other users' replays read.
+        self._tree_write_allowed: Optional[bool] = None
         self._fulfilled_keys: set[str] = set()
+
+    async def _write_allowed(self) -> bool:
+        if self._tree_write_allowed is None:
+            self._tree_write_allowed = await cache_client.cache_write_allowed_for_agent(self.agent_id, self.goal)
+            if not self._tree_write_allowed:
+                logger.info("demo_cache.browser_http_write_skipped", agent_id=self.agent_id, reason="demo_tree_root")
+        return self._tree_write_allowed
 
     async def lookup(
         self,
@@ -145,13 +163,15 @@ class BrowserHttpCache:
         if key in self._fulfilled_keys:
             self._fulfilled_keys.discard(key)
             return False
+        if not await self._write_allowed():
+            return False
         value = {
             "status": status,
             "headers": _strip_headers(headers),
             "content_type": headers.get("content-type", ""),
             "body_b64": base64.b64encode(body).decode("ascii"),
         }
-        ok = await cache_client.cache_set(key, "browser_http", self.goal_hash, value)
+        ok = await cache_client.cache_set(key, "browser_http", self.goal_hash, value, goal=self.goal)
         if ok:
             logger.info("demo_cache.browser_http_stored", url=url, key=key, bytes=len(body))
         return ok

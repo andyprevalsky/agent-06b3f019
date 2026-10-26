@@ -316,6 +316,66 @@ def test_browser_use_write_skips_child_under_demo_tree_root(mem, monkeypatch):
     asyncio.run(body())
 
 
+def test_browser_http_write_skips_child_under_demo_tree_root(mem, monkeypatch):
+    """A non-DEMO browser child under a DEMO root never writes the shared HTTP namespace.
+
+    The child keys by its own goal, so only the agent's resolved tree root can tell
+    that its run replays a frozen DEMO recording other users read.
+    """
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+    roots = {"child-under-demo": _soft_complete_bench_goal(), "child-under-ordinary": "ordinary root goal"}
+    resolved: list[str] = []
+
+    async def resolve(agent_id):
+        resolved.append(agent_id)
+        return False, "child browser goal", True, f"root-of-{agent_id}", roots[agent_id], True
+
+    monkeypatch.setattr(browser_http.cache_client, "resolve_agent_fast_mode", resolve)
+
+    async def body():
+        for agent_id in ("child-under-demo", "child-under-ordinary"):
+            cache = browser_http.BrowserHttpCache(
+                "child browser goal", read_enabled=False, write_enabled=True, agent_id=agent_id
+            )
+            for page in ("a", "b"):
+                await cache.record(
+                    "GET", f"https://x.com/{agent_id}/{page}", "document", 200, {}, b"live"
+                )
+        # Only the ordinary-rooted child records; the tree root resolves once per run.
+        assert mem.set_calls == 2
+        assert len(mem.data) == 2
+        assert resolved.count("child-under-demo") == 1
+
+    asyncio.run(body())
+
+
+def test_network_cache_install_threads_agent_id(monkeypatch):
+    """The handler hands the browser agent id to the HTTP cache write gate."""
+    seen: dict[str, Any] = {}
+    real = browser_http.BrowserHttpCache
+
+    class Spy(real):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(browser_http, "BrowserHttpCache", Spy)
+
+    class Ctx:
+        def on(self, *_a: Any) -> None:
+            return None
+
+        async def route(self, *_a: Any) -> None:
+            return None
+
+    asyncio.run(
+        _install_fast_mode_network_cache(
+            Ctx(), "child browser goal", read_enabled=False, write_enabled=True, agent_id="agent-7"
+        )
+    )
+    assert seen.get("agent_id") == "agent-7"
+
+
 def test_browser_use_record_then_replay(mem):
     async def body():
         calls = {"n": 0}
