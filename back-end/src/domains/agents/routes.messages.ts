@@ -14,6 +14,7 @@ import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema
 import { postMessageSchema, generateSchemaRequestSchema } from './types';
 import * as controlService from './agentControlService';
 import * as messageService from './agentMessageService';
+import * as attachmentService from './agentAttachmentService';
 import * as queryService from './agentQueryService';
 import { resolveAgentReadAccess } from './routes.guards';
 
@@ -107,7 +108,7 @@ router.post(
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const result = await messageService.uploadAttachment(req.userId, req.params.id, req.file);
+      const result = await attachmentService.uploadAttachment(req.userId, req.params.id, req.file);
       res.status(201).json(result);
     } catch (error) {
       log.error('Upload attachment error', {
@@ -137,7 +138,7 @@ router.get(
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const result = await messageService.getAttachmentSignedUrl(req.userId, storagePath, {
+      const result = await attachmentService.getAttachmentSignedUrl(req.userId, storagePath, {
         agentId: req.params.id,
         isAdmin: isAdminUser(req.userId),
       });

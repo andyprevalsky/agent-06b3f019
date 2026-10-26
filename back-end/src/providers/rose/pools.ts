@@ -17,7 +17,8 @@
  * Planner stays rose-1-ultra (Opus 5.5).
  */
 
-export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use' | 'rose-local';
+export type PoolName =
+  'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use' | 'rose-local';
 
 export interface PoolSpec {
   name: PoolName;

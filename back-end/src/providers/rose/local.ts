@@ -12,7 +12,10 @@ function localConfig(): { base: string; model: string } {
   if (
     url.protocol !== 'http:' ||
     !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
-    url.username || url.password || url.search || url.hash
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
   ) {
     throw new Error('Rose Local requires an HTTP loopback endpoint');
   }

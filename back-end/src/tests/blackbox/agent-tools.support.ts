@@ -130,18 +130,47 @@ export const bundleItem = (entry: string, files: Record<string, string | Buffer>
  */
 export function cubeGlb(rgba: [number, number, number, number] = [1, 0, 0, 1], tag = ''): Buffer {
   const faces: [number[], number[], number[]][] = [
-    [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
-    [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
-    [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
-    [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
-    [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+    [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ],
+    [
+      [-1, 0, 0],
+      [0, 0, 1],
+      [0, 1, 0],
+    ],
+    [
+      [0, 1, 0],
+      [0, 0, 1],
+      [1, 0, 0],
+    ],
+    [
+      [0, -1, 0],
+      [1, 0, 0],
+      [0, 0, 1],
+    ],
+    [
+      [0, 0, 1],
+      [1, 0, 0],
+      [0, 1, 0],
+    ],
+    [
+      [0, 0, -1],
+      [0, 1, 0],
+      [1, 0, 0],
+    ],
   ];
   const positions: number[] = [];
   const normals: number[] = [];
   const indices: number[] = [];
   faces.forEach(([n, u, v], face) => {
-    for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+    for (const [a, b] of [
+      [-1, -1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ]) {
       for (let k = 0; k < 3; k += 1) positions.push(0.5 * (n[k] + a * u[k] + b * v[k]));
       normals.push(...n);
     }
@@ -169,7 +198,14 @@ export function cubeGlb(rgba: [number, number, number, number] = [1, 0, 0, 1], t
       { buffer: 0, byteOffset: 576, byteLength: 72, target: 34963 },
     ],
     accessors: [
-      { bufferView: 0, componentType: 5126, count: 24, type: 'VEC3', min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+      {
+        bufferView: 0,
+        componentType: 5126,
+        count: 24,
+        type: 'VEC3',
+        min: [-0.5, -0.5, -0.5],
+        max: [0.5, 0.5, 0.5],
+      },
       { bufferView: 1, componentType: 5126, count: 24, type: 'VEC3' },
       { bufferView: 2, componentType: 5123, count: 36, type: 'SCALAR' },
     ],

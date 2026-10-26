@@ -247,7 +247,8 @@ async function displayOwnerId(agentId: string): Promise<string | null> {
   if (hit !== undefined) return hit;
   const ownerId = await repo.findAgentOwnerId(agentId);
   if (ownerId === null) return null;
-  if (ownerCache.size >= OWNER_CACHE_MAX) ownerCache.delete(ownerCache.keys().next().value as string);
+  if (ownerCache.size >= OWNER_CACHE_MAX)
+    ownerCache.delete(ownerCache.keys().next().value as string);
   ownerCache.set(agentId, ownerId);
   return ownerId;
 }

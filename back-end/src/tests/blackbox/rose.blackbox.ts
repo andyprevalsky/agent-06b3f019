@@ -317,18 +317,31 @@ async function testRoseLocalOnlyCallsLoopback() {
     };
     const chunks: CompletionChunk[] = [];
     for await (const chunk of await createStreamingCompletion({
-      model: 'rose-labs/rose-local', messages: [{ role: 'user', content: 'hello' }],
-    })) chunks.push(chunk);
+      model: 'rose-labs/rose-local',
+      messages: [{ role: 'user', content: 'hello' }],
+    }))
+      chunks.push(chunk);
     assertEqual(seen.length, 1, 'one local request');
-    assert(chunks.some((c) => c.choices[0]?.delta.content === 'local ok'), 'local output');
-    assert(chunks.every((c) => c.pool_name === 'rose-local'), 'local provenance');
+    assert(
+      chunks.some((c) => c.choices[0]?.delta.content === 'local ok'),
+      'local output'
+    );
+    assert(
+      chunks.every((c) => c.pool_name === 'rose-local'),
+      'local provenance'
+    );
     process.env.ROSE_LOCAL_BASE_URL = 'https://openrouter.ai/api/v1';
     let rejected = false;
     try {
       for await (const chunk of await createStreamingCompletion({
-        model: 'rose-labs/rose-local', messages: [{ role: 'user', content: 'hello' }],
-      })) { assert(!chunk, 'unexpected streamed output'); }
-    } catch { rejected = true; }
+        model: 'rose-labs/rose-local',
+        messages: [{ role: 'user', content: 'hello' }],
+      })) {
+        assert(!chunk, 'unexpected streamed output');
+      }
+    } catch {
+      rejected = true;
+    }
     assert(rejected, 'remote URL rejected');
     assertEqual(seen.length, 1, 'no remote request');
   } finally {

@@ -455,7 +455,9 @@ export const resumeBrowserUseSession = replaceSession;
 export const rotateBrowserUseSession = replaceSession;
 
 export async function getBrowserUseSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {
-  const session = await request<resumeRecovery.BrowserUseSession>(`/browsers/${encodeURIComponent(sessionId)}`);
+  const session = await request<resumeRecovery.BrowserUseSession>(
+    `/browsers/${encodeURIComponent(sessionId)}`
+  );
   const expiresAt = new Date(session.timeoutAt).getTime();
   const createdAt = new Date(session.startedAt).getTime();
   return {
@@ -491,6 +493,7 @@ export async function pressBrowserUseKeys(sessionId: string, keys: string[]): Pr
 }
 
 type Download = BrowserFileInfo & { url?: string | null; lastModified: string };
+type DownloadPage = { files: Download[]; hasMore: boolean; nextCursor: string | null };
 
 export async function listBrowserUseSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const files: BrowserFileInfo[] = [];
@@ -498,11 +501,9 @@ export async function listBrowserUseSessionFiles(sessionId: string): Promise<Bro
   do {
     const params = new URLSearchParams({ limit: '100' });
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{
-      files: Download[];
-      hasMore: boolean;
-      nextCursor: string | null;
-    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
+    const page = await request<DownloadPage>(
+      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
+    );
     files.push(
       ...page.files.map(({ path, size, lastModified }) => ({
         path,
@@ -520,11 +521,9 @@ export async function readBrowserUseSessionFile(sessionId: string, path: string)
   let cursor: string | null = null;
   do {
     if (cursor) params.set('cursor', cursor);
-    const page = await request<{
-      files: Download[];
-      hasMore: boolean;
-      nextCursor: string | null;
-    }>(`/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`);
+    const page = await request<DownloadPage>(
+      `/browsers/${encodeURIComponent(sessionId)}/downloads?${params}`
+    );
     const found = page.files.find((file) => file.path === path);
     if (found) {
       if (!found.url) throw new Error(`Browser Use download URL unavailable: ${path}`);
