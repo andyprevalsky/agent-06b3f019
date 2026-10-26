@@ -50,6 +50,12 @@ export async function runBrowserResumeCustodyCases() {
       let profileReads = 0;
       let nativeDead = false;
       let nativeId = `native-${randomUUID()}`;
+      // 'incompatible' holds the first provider create open until the second
+      // resume reports, so the second always meets STARTED in-flight custody.
+      // A fixed response delay raced the second child's process startup: when
+      // startup outlasted it, the first resume had already released custody.
+      let releaseHeldCreate = () => {};
+      const heldCreate = new Promise<void>((resolve) => (releaseHeldCreate = resolve));
       const native = () =>
         provider === 'kernel'
           ? {
@@ -89,10 +95,8 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          setTimeout(
-            () => res.end(JSON.stringify(native())),
-            scenario === 'incompatible' ? 1000 : 100
-          );
+          if (scenario === 'incompatible') await heldCreate;
+          setTimeout(() => res.end(JSON.stringify(native())), 100);
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
           res.end(
@@ -239,7 +243,8 @@ export async function runBrowserResumeCustodyCases() {
             fixedDelays: Array.from({ length: 999 }, () => 10),
             shouldRetryResult: (created) => !created,
           });
-          const second = run();
+          // The first resume now holds STARTED custody inside its create.
+          const second = run().finally(releaseHeldCreate);
           results = await Promise.all([first, second]);
         } else {
           results = [await run()];
@@ -298,8 +303,10 @@ export async function runBrowserResumeCustodyCases() {
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
         } else if (scenario === 'incompatible' || scenario === 'manual-follow') {
-          assert(results[0]!.ok);
-          assert(!results[1]!.ok);
+          assert(results[0]!.ok, JSON.stringify({ provider, scenario, results }));
+          assert(!results[1]!.ok, JSON.stringify({ provider, scenario, results }));
+          if (scenario === 'incompatible')
+            assert.match(results[1]!.error ?? '', /incompatible with the in-flight operation/);
           assert.equal(creates, 1);
           assert.equal(hydrations, 1);
         } else if (scenario === 'stale-binding') {
@@ -333,6 +340,7 @@ export async function runBrowserResumeCustodyCases() {
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } finally {
+        releaseHeldCreate();
         for (const child of children) child.kill('SIGTERM');
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
