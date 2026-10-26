@@ -266,7 +266,9 @@ observability gap**. The parent thread contained it with approval on
 - `schema.prisma` declares the three restored trigram indexes
   (`@@index([col(ops: raw("gin_trgm_ops"))], map: …, type: Gin)`) and
   `extensions = [vector, pg_trgm]`, so neither `db push` nor `migrate diff` can
-  drop them.
+  drop them. The new structural test immediately caught a fifth one when this
+  branch synced main: S7's `MessageRecord_message_trgm_idx` (PR #1581) shipped
+  undeclared, so it is declared here too.
 - `20261026180002` drops only INVALID leftovers of those index names, since
   `IF NOT EXISTS` would otherwise skip a failed earlier build.
   `20261026180003..5` then rebuild them `CONCURRENTLY IF NOT EXISTS`.
