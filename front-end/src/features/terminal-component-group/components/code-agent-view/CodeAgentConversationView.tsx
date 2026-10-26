@@ -25,6 +25,7 @@ import { ProviderIcon } from '../claudeCodeChip.shared';
 import { FailureBox, PausedNote, SessionLine, Summary } from '../codeAgentChip.desktop';
 import { PinnedQuestionMount } from '../PinnedQuestion';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
+import { CodeResourcesIndicator } from '../CodeResourcesIndicator';
 import { useCodeAgentConversation, type CodeAgentConversation } from './useCodeAgentConversation';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
@@ -40,7 +41,7 @@ function useEscapeToClose(onClose: () => void) {
   }, [onClose]);
 }
 
-function Header({ c }: { c: CodeAgentConversation }) {
+function Header({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
   return (
     <header data-testid="code-agent-view-header" className="flex items-center gap-3 pb-3">
       <ProviderIcon codeProvider={c.provider} className="h-6 w-6 flex-none" />
@@ -61,6 +62,7 @@ function Header({ c }: { c: CodeAgentConversation }) {
           </p>
         )}
       </div>
+      <CodeResourcesIndicator taskId={taskId} running={c.stateText === 'Running'} />
       <span
         data-testid="code-agent-view-state"
         className={cn(
@@ -122,7 +124,7 @@ export function CodeAgentConversationView({
           aria-label={`${c.label}: ${c.title}`}
           className="relative z-20 mx-auto max-w-4xl pb-6 text-foreground dark:text-[#ecece8]"
         >
-          <Header c={c} />
+          <Header c={c} taskId={codeAgent.taskId} />
           {c.meta && c.chipState === 'failed' && (
             <FailureBox meta={c.meta} fallback={c.vm.failureMessage} flush />
           )}

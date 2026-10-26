@@ -25,6 +25,7 @@ import { after, before, test } from 'node:test';
 import { Sandbox } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { ENV_SIZE_SKILL_PATH, withAgentTools } from '../../providers/agentTools/workspace';
 import {
@@ -317,7 +318,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     assert.equal(requested.httpStatus, 202);
     assert.deepEqual(requested.body.to, { cpu: 2, memory_gb: 16 }, 'cpu unchanged, memory raised');
     const requestId = requested.body.request_id;
-    const alive = await keepAliveCodeTask(task.id, async () => undefined);
+    const alive = await keepAliveCodeTask(task.id, async () => undefined, NO_CODE_RESOURCES);
     assert.equal(
       alive.resize_requested?.request_id,
       requestId,
@@ -418,7 +419,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     assert.equal(retried.session.task_id, result.session.task_id);
     assert.equal(templates.length, 1, 'no duplicate sandbox on retry');
     assert.equal(
-      (await keepAliveCodeTask(retried.session.task_id, async () => undefined)).resize_requested,
+      (await keepAliveCodeTask(retried.session.task_id, async () => undefined, NO_CODE_RESOURCES)).resize_requested,
       undefined
     );
   } finally {

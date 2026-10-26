@@ -367,6 +367,23 @@ export async function broadcastBrowserSessionBinding(
 }
 
 /**
+ * Broadcast CODE_RESOURCES - the latest CPU / memory / disk sample of a code
+ * agent's sandbox (codeSessions/sandboxResources.ts), sent on the owning
+ * agent's channel once per keepalive of a running session.
+ */
+export async function broadcastCodeResources(
+  agentId: string,
+  taskId: string,
+  resources: import('../codeSessions/sandboxResources').CodeResourceSample
+): Promise<void> {
+  await broadcast({
+    topic: `agent:${agentId}`,
+    event: 'CODE_RESOURCES',
+    payload: { agentId, taskId, resources },
+  });
+}
+
+/**
  * Broadcast message INSERT event - notifies frontend of new message
  * This is the "true message" that shows in the chat (clears thinking bubble)
  *

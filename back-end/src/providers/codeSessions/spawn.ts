@@ -27,6 +27,7 @@ import {
 import { switchCodeSessionProvider } from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
+import { codeResourceDeps, type CodeResourceDeps, type CodeResourceSample } from './sandboxResources';
 
 const log = createLogger('CodeSessionSpawn');
 
@@ -251,13 +252,16 @@ export async function retireOwnedCodeSession(
 export async function keepAliveCodeTask(
   taskId: string,
   setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
-    Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY })
+    Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY }),
+  resources: CodeResourceDeps = codeResourceDeps
 ): Promise<{
   alive: boolean;
   code_session_id: string | null;
   awaiting_parent: AwaitingParentQuestion | null;
   /** A pending resize the attached activity applies (C16); present only when there is one. */
   resize_requested?: { request_id: string; from: SizeView; to: SizeView };
+  /** Latest CPU / memory / disk sample of the sandbox (item 29); present only when sampled. */
+  resources?: CodeResourceSample;
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
@@ -265,8 +269,17 @@ export async function keepAliveCodeTask(
   }
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
   // CLI runs and the Rose Mac app is connected.
+  // This keepalive is also the one resource sampler per running session (item 29):
+  // a Mac session has no sandbox to measure.
+  let sample: CodeResourceSample | null = null;
   if (!isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId)) {
     await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+    sample = await resources.sample(task.sandboxId);
+    if (sample !== null) {
+      await resources.publish(task.agentId, task.id, sample).catch((error: unknown) => {
+        log.warn('Resource sample broadcast failed', { taskId, error: String(error) });
+      });
+    }
   }
   if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
   const resize = await pendingResizeForTask(task.codeSessionId);
@@ -275,6 +288,7 @@ export async function keepAliveCodeTask(
     code_session_id: task.codeSessionId,
     awaiting_parent: (task.awaitingParent ?? null) as AwaitingParentQuestion | null,
     ...(resize !== null ? { resize_requested: resize } : {}),
+    ...(sample !== null ? { resources: sample } : {}),
   };
 }
 
