@@ -549,9 +549,12 @@ export async function withBrowserResumeLifecycle<T>(
       },
       beforeCreate: async (provider) => {
         await assertOwned();
-        if (createEntered)
+        // A definitely rejected create allocated nothing, so the provider may
+        // retry within this resume (e.g. Kernel re-resolving a deleted proxy).
+        if (createEntered && !createRejected)
           throw new Error('Browser resume native attempt requires reconciliation before retry');
         createEntered = true;
+        createRejected = false;
         request = { ...request, provider, phase: 'creating' };
         const changed = await prisma.toolSideEffect.updateMany({
           where: { operationKey, externalId: owner, status: 'STARTED' },

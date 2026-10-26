@@ -243,9 +243,11 @@ export async function closeSession(
   });
   if (pause && logical?.logicalOwnerKey) await checkpointLogicalBrowser(sessionId);
   const providerPause = pause && !logical?.logicalOwnerKey;
-  // A logical checkpoint is private state, not verified account evidence.
-  // Legacy harvesting must not publish it into a different browser account.
-  if (!logical?.logicalOwnerKey)
+  // A logical pause keeps its state private in the checkpoint. Retiring a
+  // logical browser ends that state, so its verified logins are published like
+  // any other browser's: the harvest takes only realms with sign-in evidence on
+  // this exact session.
+  if (!(pause && logical?.logicalOwnerKey))
     await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
       log.warn('Failed to persist signed-in browser state before close', {
         sessionId,
