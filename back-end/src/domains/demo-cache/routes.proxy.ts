@@ -79,14 +79,18 @@ function pathAfterProxyMount(req: Request, traceParam: string): string {
 function stripRecordOnlyPrefix(pathAndQuery: string): {
   pathAndQuery: string;
   readEnabled: boolean;
+  writeEnabled: boolean;
 } {
-  if (pathAndQuery === '/record-only') {
-    return { pathAndQuery: '/', readEnabled: false };
+  for (const [prefix, readEnabled, writeEnabled] of [
+    ['/record-only', false, true],
+    ['/replay-only', true, false],
+  ] as const) {
+    if (pathAndQuery === prefix) return { pathAndQuery: '/', readEnabled, writeEnabled };
+    if (pathAndQuery.startsWith(`${prefix}/`)) {
+      return { pathAndQuery: pathAndQuery.slice(prefix.length), readEnabled, writeEnabled };
+    }
   }
-  if (pathAndQuery.startsWith('/record-only/')) {
-    return { pathAndQuery: pathAndQuery.slice('/record-only'.length), readEnabled: false };
-  }
-  return { pathAndQuery, readEnabled: true };
+  return { pathAndQuery, readEnabled: true, writeEnabled: true };
 }
 
 async function fetchCodexUpstream(
@@ -129,6 +133,32 @@ anthropicProxyRouter.post(
       sessionId: trace.sessionId,
       seq: requestSeq(req.body),
       wrote: result.wrote,
+    });
+
+    res.status(result.status);
+    res.setHeader('content-type', result.contentType);
+    res.setHeader('x-fast-mode-cache', result.servedFromCache ? 'hit' : 'miss');
+    res.end(result.body);
+  })
+);
+
+anthropicProxyRouter.post(
+  '/:traceParam/replay-only/v1/messages',
+  asyncHandler(async (req: Request, res: Response) => {
+    const trace = parseAnthropicTraceParam(req.params.traceParam);
+    const result = await resolveAnthropic(
+      trace.traceHash,
+      req.body,
+      anthropicHeaders(req),
+      { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
+      true,
+      { sessionId: trace.sessionId, writeEnabled: false }
+    );
+
+    anthropicLog.info(`Anthropic proxy REPLAY-ONLY ${result.servedFromCache ? 'HIT' : 'MISS'}`, {
+      traceHash: trace.traceHash,
+      sessionId: trace.sessionId,
+      seq: requestSeq(req.body),
     });
 
     res.status(result.status);
@@ -182,7 +212,7 @@ codexProxyRouter.use(
       codexHeaders(req),
       { cacheGet, cacheSet, fetchUpstream: fetchCodexUpstream },
       resolvedPath.readEnabled,
-      { sessionId: trace.sessionId }
+      { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
     );
 
     const cacheable = isCacheableCodexRequest(req.method, pathAndQuery);

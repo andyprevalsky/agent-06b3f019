@@ -45,6 +45,8 @@ export interface CodexProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
+  /** False for a replay-only session: a live miss is served but never recorded. */
+  writeEnabled?: boolean;
 }
 
 export function codeAgentSlotKey(
@@ -410,7 +412,12 @@ export async function resolveCodex(
 
     const upstream = await deps.fetchUpstream(method, pathAndQuery, upstreamBody, headers);
     let wrote = false;
-    if (key !== null && upstream.status >= 200 && upstream.status < 300) {
+    if (
+      key !== null &&
+      traceContext.writeEnabled !== false &&
+      upstream.status >= 200 &&
+      upstream.status < 300
+    ) {
       const value: CachedCodexResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,

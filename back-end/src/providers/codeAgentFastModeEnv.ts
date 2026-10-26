@@ -111,12 +111,19 @@ export function codeAgentTraceHash(input: CodeAgentTraceInput): string {
   return sha256(JSON.stringify(stable)).slice(0, 16);
 }
 
-function proxyPath(goal: string, readEnabled: boolean, options?: CodeAgentTraceOptions): string {
+function proxyPath(
+  goal: string,
+  readEnabled: boolean,
+  writeEnabled: boolean,
+  options?: CodeAgentTraceOptions
+): string {
   const hash = codeAgentTraceHash(options?.trace ?? { goal });
   const sessionId = options?.sessionId?.trim();
   const traceSegment =
     sessionId !== undefined && sessionId !== '' ? `${hash}.${encodeURIComponent(sessionId)}` : hash;
-  return readEnabled ? traceSegment : `${traceSegment}/record-only`;
+  if (!readEnabled) return `${traceSegment}/record-only`;
+  // The trace hash carries no owner, so only recorder sessions may add slots.
+  return writeEnabled ? traceSegment : `${traceSegment}/replay-only`;
 }
 
 /**
@@ -134,7 +141,7 @@ export function buildFastModeAnthropicEnv(
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
-    ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
+    ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
   };
 }
 
@@ -161,6 +168,6 @@ export function buildFastModeCodexEnv(
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
-    CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
+    CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
   };
 }

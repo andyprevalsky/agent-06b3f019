@@ -54,6 +54,8 @@ export interface ProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
+  /** False for a replay-only session: a live miss is served but never recorded. */
+  writeEnabled?: boolean;
 }
 
 const traceOrdinalCounters = new Map<string, number>();
@@ -151,7 +153,7 @@ export async function resolveAnthropic(
 
     const upstream = await deps.fetchUpstream(upstreamBody, headers);
     let wrote = false;
-    if (upstream.status >= 200 && upstream.status < 300) {
+    if (traceContext.writeEnabled !== false && upstream.status >= 200 && upstream.status < 300) {
       const value: CachedAnthropicResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,
