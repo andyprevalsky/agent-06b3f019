@@ -436,7 +436,8 @@ def test_worker_cleanup_and_terminal_allocation_ownership(tmp_path):
             (case / f"worker-{worker}.stage.log").unlink()
         script = r"""set -uo pipefail
     source "$1"
-    CASE="$2"; MODE="$3"; WID=deadbeef000001
+    CASE="$2"; MODE="$3"; ROOT_DIR="$4"; WID=deadbeef000001
+    python3() { if [ "${3:-}" = shared-demo-cache-read-only ]; then return 10; fi; command python3 "$@"; }  # catalog policy: writable cache
     fleet_registry_volume_for_id() {
         [ "$1" = "$WID" ] || return 1
         [ "$MODE" != missing_volume_owner ] || return 1
@@ -492,7 +493,7 @@ def test_worker_cleanup_and_terminal_allocation_ownership(tmp_path):
         start = time.monotonic()
         with (case / "stdout.private.log").open("wb") as out, (case / "stderr.private.log").open("wb") as err:
             p = subprocess.Popen(
-                [shutil.which("bash") or "bash", str(driver), str(BASE / "subject.private.sh"), str(case), mode],
+                [shutil.which("bash") or "bash", str(driver), str(BASE / "subject.private.sh"), str(case), mode, str(ROOT)],
                 stdout=out,
                 stderr=err,
                 start_new_session=True,

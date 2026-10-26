@@ -19,8 +19,6 @@ import textwrap
 import threading
 import time as time_module
 from io import BytesIO
-from contextvars import ContextVar
-from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -43,23 +41,6 @@ from _test_utils import (
 )
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
-
-
-_legacy_browser_history_fixture = ContextVar("legacy_browser_history_fixture", default=False)
-
-
-def _both_browser_history_variants(test):
-    """Run archive-boundary fixtures with old replay and current GP identities."""
-    @wraps(test)
-    async def run():
-        for legacy in (True, False):
-            token = _legacy_browser_history_fixture.set(legacy)
-            try:
-                await test()
-                print(f"PASS {test.__name__} history={'legacy' if legacy else 'current'}")
-            finally:
-                _legacy_browser_history_fixture.reset(token)
-    return run
 
 
 def test_browser_use_captcha_wait_does_not_rotate_before_solver_window():
@@ -26371,7 +26352,7 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
     """TRY_CANCEL must not erase the browser task ownership key."""
     from domains.spawn_browser_agent_v3.handler import (
         SpawnBrowserAgentManagerV3,
-        _stable_browser_task_id,
+        _logical_browser_task_id,
     )
     from tools.base import MessageStatus
 
@@ -26406,7 +26387,6 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
 
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
@@ -26421,7 +26401,7 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
             events.append(event)
 
-    expected_task_id = _stable_browser_task_id(workflow_instance.agent_id, "tool-1")
+    expected_task_id = _logical_browser_task_id(workflow_instance.agent_id)
     assert handle.cancelled is True
     assert start_calls[0][1]["args"][4] == expected_task_id
     assert events[-1].status == MessageStatus.ERROR
@@ -26726,7 +26706,7 @@ async def test_manager_generation_handoff_during_write_approval_is_task_scoped()
 
 
 async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_task_id():
-    from domains.spawn_browser_agent_v3.handler import _stable_browser_task_id
+    from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
     from helpers.generation_handoff import GenerationHandoffRequested
 
     result_without_task_id = {
@@ -26734,7 +26714,6 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
     }
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.patched", return_value=False),
     ):
         workflow_instance, events, raised = await _run_manager_with_parked_activity(
             result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
@@ -26742,7 +26721,7 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
 
     assert isinstance(raised, GenerationHandoffRequested)
     assert events[-1].metadata["action_type"] == "task_complete"
-    assert events[-1].metadata["task_id"] == _stable_browser_task_id(workflow_instance.agent_id, "tool-1")
+    assert events[-1].metadata["task_id"] == _logical_browser_task_id(workflow_instance.agent_id)
 
 
 async def test_manager_failure_terminal_is_task_scoped():
@@ -28043,7 +28022,6 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert final_event.message == "Purchase completed."
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
-@_both_browser_history_variants
 async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_between_mint_retries=True)
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
@@ -28959,11 +28937,7 @@ async def _drive_browser_write_pause_archive_boundary(
     from workflows.agent_workflow import AgentWorkflow
 
     root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
-    legacy_history = _legacy_browser_history_fixture.get()
-    task_id = (
-        browser._stable_browser_task_id(root, tool)
-        if legacy_history else browser._logical_browser_task_id(root)
-    )
+    task_id = browser._logical_browser_task_id(root)
     rows, starts, paused_starts, mints = [], [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
@@ -29177,7 +29151,6 @@ async def _drive_browser_write_pause_archive_boundary(
 
     with (
         patch.object(browser.workflow, "in_workflow", return_value=True),
-        patch.object(browser.workflow, "patched", return_value=not legacy_history),
         patch("helpers.httpx_capture._mock_handler", persisted),
         patch("httpx.AsyncClient", side_effect=client),
         patch("config.load_config", return_value=config),
@@ -29449,7 +29422,6 @@ async def _drive_browser_write_pause_archive_boundary(
             assert not (asyncio.all_tasks() - previous_tasks), "owned approval/pause await survived manager exit"
 
 
-@_both_browser_history_variants
 async def test_manager_write_pause_seals_persisted_browser_for_archive():
     """PAUSE ends the manager's deferred write resume with a durable terminal."""
     await _drive_browser_write_pause_archive_boundary(pause=False)
@@ -29541,7 +29513,6 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
         assert events[-1] is terminals[0]
 
 
-@_both_browser_history_variants
 async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     """A real PAUSE must finish the pending payment browser before archival."""
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
@@ -29559,7 +29530,6 @@ async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     )
 
 
-@_both_browser_history_variants
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
@@ -29576,13 +29546,11 @@ async def test_manager_payment_pause_preserves_approval_and_interruptions():
         )
 
 
-@_both_browser_history_variants
 async def test_manager_explicit_pause_seals_auth_browser_for_archive():
     """An explicit PAUSE after auth's own pause must end that exact resume."""
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True)
 
 
-@_both_browser_history_variants
 async def test_manager_auth_pause_preserves_assistance_and_handoff():
     await _drive_browser_write_pause_archive_boundary(pause=False, auth=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, auth=True, concurrent_approval=True)
@@ -31572,14 +31540,14 @@ async def test_browser_agent_message_survives_a_failed_instruction_read():
 
 
 async def test_browser_manager_passes_inbox_address_as_trailing_activity_arg():
-    """spawn_agent's inbox address rides in the slot after the model; direct calls keep the old arity.
+    """spawn_agent's inbox address rides in the slot after the model.
 
-    A serialized (browser activity queue) start also appends its owned-cleanup
-    flag after that slot, so the inbox address keeps its recorded position.
+    Every start also appends its owned-cleanup flag after that slot, so the
+    inbox address keeps its recorded position (None for direct calls).
     """
     from domains.spawn_browser_agent_v3 import handler as h
 
-    async def started_args(tool_call, serialized=False):
+    async def started_args(tool_call):
         start = MagicMock(return_value=_SequencedActivityHandle({"status": "cancelled", "task_id": "task-1"}))
         workflow_instance = SimpleNamespace(
             user_id="user-1",
@@ -31593,7 +31561,6 @@ async def test_browser_manager_passes_inbox_address_as_trailing_activity_arg():
         with (
             patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", start),
             patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
-            patch("domains.spawn_browser_agent_v3.handler.browser_activity_queue_enabled", return_value=serialized),
         ):
             [
                 event
@@ -31604,13 +31571,10 @@ async def test_browser_manager_passes_inbox_address_as_trailing_activity_arg():
     base = {"goal": "Read calendar", "output_schema": {"fields": [{"name": "events", "type": "str"}]}}
     addressed = await started_args({**base, "inbox_address": "bg-tool-1"})
     direct = await started_args(base)
-    assert addressed[-1] == "bg-tool-1"
-    assert addressed[:-1] == direct
-    assert direct[-1] == "m"
-    serialized_addressed = await started_args({**base, "inbox_address": "bg-tool-1"}, serialized=True)
-    serialized_direct = await started_args(base, serialized=True)
-    assert serialized_addressed == [*addressed, True]
-    assert serialized_direct == [*direct, None, True]
+    assert addressed[-2:] == ["bg-tool-1", True]
+    assert direct[-2:] == [None, True]
+    assert addressed[:-2] == direct[:-2]
+    assert direct[-3] == "m"
 
 
 def test_browser_drain_resume_keeps_agent_inbox_cursor():

@@ -6,20 +6,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from temporalio import workflow
-
-BROWSER_ACTIVITY_QUEUE_PATCH = "persistent-browser-activity-queue-v1"
-
-
-def browser_activity_queue_enabled() -> bool:
-    return not workflow.in_workflow() or workflow.patched(BROWSER_ACTIVITY_QUEUE_PATCH)
-
 
 @asynccontextmanager
-async def browser_activity_turn(owner: Any, enabled: bool) -> AsyncIterator[None]:
-    if not enabled:
-        yield
-        return
+async def browser_activity_turn(owner: Any) -> AsyncIterator[None]:
     # Owned by this GP workflow, reconstructed in deterministic coroutine order
     # on replay. Never keep this lock on the process-global manager singleton.
     lock = getattr(owner, "_browser_activity_lock", None)
