@@ -13,8 +13,10 @@
  * PLACEMENT (one instance on screen per viewport, useIsMobile):
  *   'corner' (md+)  four bare icons (34px hit targets, tooltip on hover) in the
  *                   window's fixed top-right corner, unchanged when panels open — no bar, background, tile or
- *                   ring. They float above the full-height drawers (z 90), so
- *                   clicking the active icon is how a drawer closes (row 67).
+ *                   ring. They float above the full-height drawers
+ *                   (ROSE_LAYER.appIcons; coverIcons while an app that
+ *                   covers the query box is open), so clicking the active
+ *                   icon is how a drawer closes (row 67).
  *   'header' (< md) the same four icons inline at the right of the mobile
  *                   header, 40px tap targets; drawers open full screen over
  *                   them and close with their own X.
@@ -34,8 +36,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useRoseTheme } from '@/features/rose-theme';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { fetchIntegrationHealth, integrationsNeedingReconnect } from '@/lib/api/integrationHealth';
+import { ROSE_LAYER } from '@/lib/roseLayers';
 
-import { APP_ICON_EDGE, APP_ICON_GAP, APP_ICON_SIZE } from './roseAppsLayout';
+import { APP_ICON_EDGE, APP_ICON_GAP, APP_ICON_SIZE, coversComposer } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
 export const APP_ACTIVE_COLOR = '#9cddff';
@@ -71,7 +74,7 @@ function IconButton({
 }) {
   const hover = useHoverOpen(onHover);
   const openApp = useRoseApps()?.openApp;
-  const aboveQuerybox = openApp === 'integrations' || openApp === 'browser';
+  const aboveQuerybox = coversComposer(openApp);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -113,7 +116,7 @@ function IconButton({
         data-testid="rose-app-tooltip"
         side="bottom"
         sideOffset={4}
-        className={`${aboveQuerybox ? 'z-[102]' : 'z-[90]'} px-2 py-1 text-xs`}
+        className={`${aboveQuerybox ? ROSE_LAYER.coverIcons : ROSE_LAYER.appIcons} px-2 py-1 text-xs`}
       >
         {tooltip}
       </TooltipContent>
@@ -153,7 +156,7 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
         header
           ? 'relative flex min-w-0 items-center overflow-x-auto'
           : 'fixed hidden items-center md:flex'
-      } ${apps.openApp === 'integrations' || apps.openApp === 'browser' ? 'z-[102]' : 'z-[90]'}`}
+      } ${coversComposer(apps.openApp) ? ROSE_LAYER.coverIcons : ROSE_LAYER.appIcons}`}
       style={header ? undefined : { top: 11, right: APP_ICON_EDGE, gap: APP_ICON_GAP }}
     >
       <AppIconButtons

@@ -2,6 +2,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
+import { ROSE_LAYER } from '@/lib/roseLayers';
 import { browserComposerTarget } from './browserComposer';
 
 type Geometry = { left: number; top: number; width: number; height: number };
@@ -88,7 +89,7 @@ export function QueryInputLayer({
         <div
           ref={layer}
           data-testid="query-input-layer"
-          className="fixed z-[100] flow-root rose-mobile-query-area"
+          className={`fixed ${ROSE_LAYER.composer} flow-root rose-mobile-query-area`}
           style={{
             left: geometry?.left ?? 0,
             top: geometry?.top ?? 0,

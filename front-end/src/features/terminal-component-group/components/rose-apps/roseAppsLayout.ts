@@ -22,6 +22,17 @@ export const DRAWER_DEFAULT_WIDTH = 560;
 /** Width always left for the chat column beside a panel. */
 export const CHAT_MIN_WIDTH = 320;
 
+/**
+ * Apps whose panel covers the floating query box (ROSE_LAYER.coverPanel, with
+ * the icon row at coverIcons above it). Browser and Biz health are also full
+ * width: from the left bar to the window's right edge.
+ */
+const COMPOSER_COVERING_APPS: readonly string[] = ['browser', 'integrations', 'health'];
+
+export function coversComposer(app: string | null | undefined): boolean {
+  return app != null && COMPOSER_COVERING_APPS.includes(app);
+}
+
 export const DRAWER_EASE = 'cubic-bezier(.22,1,.36,1)';
 export const DRAWER_DURATION_MS = 520;
 

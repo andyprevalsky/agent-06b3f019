@@ -16,11 +16,12 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, within, waitFor } from '@testing-library/react';
+import { fireEvent, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { expandBar, makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
 import Terminal from '@/pages/Terminal';
 import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
 import {
@@ -381,5 +382,101 @@ describe('Popular Goals (#15, #24, #55)', () => {
     const input = screen.getByPlaceholderText('Enter any goal');
     await user.type(input, 'Import my repository');
     expect(input).toHaveValue('Import my repository');
+  });
+});
+
+// ─── UI review: one stacking order + composer continuity ────────────────────
+//
+// Rose Desktop layers that compete at the page root (lowest first):
+//   page content (the z-[4] main row) < composer (+ its attached agents-running
+//   pane) < panels that cover it (project settings, Biz health, Browser,
+//   Integrations) < popovers opened from any of them.
+// jsdom has no layout, so the assertions compare the z of the OUTERMOST
+// z-indexed ancestor of each element: an element inside a lower stacking
+// context can never paint above a higher root layer, whatever its own z.
+
+function rootLayerZ(element: Element): number {
+  let z = Number.NaN;
+  for (
+    let node: Element | null = element;
+    node !== null && node !== document.body;
+    node = node.parentElement
+  ) {
+    const match = /(?:^|\s)z-\[?(-?\d+)\]?(?=\s|$)/.exec(node.getAttribute('class') ?? '');
+    if (match) z = Number(match[1]);
+  }
+  return z;
+}
+
+describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14)', () => {
+  beforeEach(() => {
+    setViewport(1280, 800);
+    mockProjectsApi([makeProject()]);
+  });
+
+  it('project settings opened from the left bar stacks above the floating query box', async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    const panel = screen.getByTestId('rose-project-settings');
+    const composer = screen.getByTestId('query-input-layer');
+    expect(rootLayerZ(composer)).toBe(100);
+    expect(rootLayerZ(panel)).toBeGreaterThan(rootLayerZ(composer));
+  });
+
+  it('the Rose toolset popover stacks above the query box and its agents-running header', async () => {
+    await renderTerminal(true);
+    const composer = screen.getByTestId('query-input-layer');
+    fireEvent.mouseEnter(within(composer).getByTestId('pinned-toolset-chip'));
+    const heading = await screen.findByText('Built-in tools available to all Rose agents');
+    expect(composer.contains(heading)).toBe(false);
+    expect(rootLayerZ(heading)).toBeGreaterThan(rootLayerZ(composer));
+  });
+
+  it('starting an agent keeps the same query box mounted through creation and detail load', async () => {
+    const user = userEvent.setup({ delay: null });
+    let releaseDetail: () => void = () => undefined;
+    const detailHeld = new Promise<void>((resolve) => {
+      releaseDetail = resolve;
+    });
+    let detailRequested = false;
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, async ({ params }) => {
+        if (params.agentId === 'search' || params.agentId === 'code-agents') return undefined;
+        detailRequested = true;
+        await detailHeld;
+        return HttpResponse.json({
+          agent: {
+            agent_id: params.agentId,
+            goal: 'Plan my week',
+            model: 'rose-1-flash',
+            status: 'STARTING_UP',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            parent_agent_id: null,
+          },
+          messages: [],
+          pagination: { has_more: false, oldest_timestamp: null },
+        });
+      }),
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as { agent_id: string };
+        return HttpResponse.json({ agent_id: body.agent_id, status: 'STARTING_UP' });
+      }),
+    );
+    await renderTerminal(true);
+    const input = screen.getByPlaceholderText('Enter any goal');
+    const composer = screen.getByTestId('query-input-layer');
+    await user.type(input, 'Plan my week');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(detailRequested).toBe(true));
+    // While the created agent's detail loads, the box is the same node, still interactive.
+    expect(screen.queryByText(/Loading agent details/)).not.toBeInTheDocument();
+    expect(composer.isConnected).toBe(true);
+    expect(input.isConnected).toBe(true);
+    releaseDetail();
+    await waitFor(() => expect(screen.getByPlaceholderText('Type your message...')).toBe(input));
+    expect(composer.isConnected).toBe(true);
   });
 });
