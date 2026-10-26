@@ -189,6 +189,8 @@ export function buildFastModeAnthropicEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
+  if (process.env.BACKEND_API_KEY === undefined || process.env.BACKEND_API_KEY === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
@@ -216,6 +218,8 @@ export function buildFastModeCodexEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
+  if (process.env.BACKEND_API_KEY === undefined || process.env.BACKEND_API_KEY === '') return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,

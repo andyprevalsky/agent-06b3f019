@@ -304,3 +304,20 @@ if (failures.length > 0) {
   process.exit(1);
 }
 process.stdout.write(`\n✅ demo-cache flag/invariants: ${passed}/${passed} passed\n`);
+
+test('no BACKEND_API_KEY skips proxy routing instead of failing session creation', () => {
+  const saved = process.env.BACKEND_API_KEY;
+  process.env.BACKEND_API_KEY = '';
+  try {
+    assert.deepStrictEqual(
+      buildFastModeAnthropicEnv('g', true, 'https://api.example.com/anthropic-proxy'),
+      {}
+    );
+    assert.deepStrictEqual(
+      buildFastModeCodexEnv('g', true, 'https://api.example.com/codex-proxy'),
+      {}
+    );
+  } finally {
+    process.env.BACKEND_API_KEY = saved;
+  }
+});
