@@ -96,10 +96,42 @@ it('labels the Browser composer with its Rose pool, never the raw provider model
     </RoseAppsContext.Provider>,
   );
   const box = within(screen.getByTestId('browser-query-input'));
+  // Rows from before pool_name shipped: the owner-model rule.
   expect(box.getByTestId('browser-model-label')).toHaveTextContent('rose-flash');
   expect(box.queryByText('qwen-3.8-27b')).toBeNull();
   expect(box.queryByText('root-selected-model')).toBeNull();
   expect(box.queryByRole('combobox')).toBeNull();
+});
+
+it('labels the Browser composer with the pool its own rows report', () => {
+  renderWithProviders(
+    <RoseAppsContext.Provider
+      value={browser({
+        tabs: [
+          {
+            agentId: 'owner',
+            taskId: 'browser-task',
+            live: true,
+            actualModel: 'qwen-3.8-27b',
+            rosePool: 'rose-1-browser-use',
+          },
+        ],
+      })}
+    >
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        agentDetail={{ model: 'rose-labs/rose-1-ultra' } as QueryInputProps['agentDetail']}
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>,
+  );
+  const label = within(screen.getByTestId('browser-query-input')).getByTestId(
+    'browser-model-label',
+  );
+  expect(label).toHaveTextContent('rose-browser-use');
 });
 
 it('does not attach the agents-running header to the Browser composer', () => {

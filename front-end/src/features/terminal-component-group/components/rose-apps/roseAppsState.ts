@@ -34,6 +34,8 @@ export interface AgentBrowserTab {
   pageUrl?: string | null;
   /** Latest model reported by this browser task, never the owner model selection. */
   actualModel?: string | null;
+  /** Rose pool this browser task's steps reported (composer label); null on older rows. */
+  rosePool?: string | null;
   browserSessionMetadata?: BrowserSessionMetadata | null;
 }
 

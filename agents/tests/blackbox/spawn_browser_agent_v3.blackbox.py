@@ -7159,7 +7159,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
-                     current_model="fixture-actual-browser-model",
+                     current_model="fixture-actual-browser-model", browser_pool="rose-1-flash",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
     model_assignments = [node for node in ast.walk(tree)
@@ -7183,6 +7183,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     assert body["message"] == "Browser state captured."
     assert body["metadata"]["auxiliary"].get("current_url") == "https://example.com/login"
     assert body["metadata"]["auxiliary"].get("actual_model") == "fixture-actual-browser-model"
+    assert body["metadata"]["auxiliary"].get("pool_name") == "rose-1-flash", "label the composer with its own pool"
     for private_part in ("private-user", "private-password", "private-token", "private-fragment"):
         assert private_part not in json.dumps(body)
     row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}

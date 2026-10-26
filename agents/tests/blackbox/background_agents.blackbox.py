@@ -2320,6 +2320,17 @@ async def test_browser_composer_message_reaches_its_browser_not_the_root():
     assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
     assert state["user_instruction_messages"] == [{"role": "user", "content": "go to instacart instead"}], state
     assert state["user_instruction_message_ids"] == ["direct"]
+    # Race: a message lands after the browser's last step read, before its pause-close.
+    # The final post-close read finds it and the owner gets it in the browser result.
+    state["delivered_user_instruction_count"] = len(state["user_instruction_messages"])
+    late = {**direct, "id": "late", "timestamp": "2026-10-26T16:01:00Z", "text": "use the oat milk instead"}
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[start, direct, late])):
+        latest = await h._load_browser_resume_user_instructions("agent-1", state)
+    unread = h._unread_user_instructions(state, latest)
+    assert unread == ["use the oat milk instead"], unread
+    owner_text = h._with_unread_user_messages("Order placed.", unread)
+    assert owner_text.startswith("Order placed.") and "- use the oat milk instead" in owner_text, owner_text
+    assert h._with_unread_user_messages("Order placed.", []) == "Order placed."
     # The owner: hidden from its model, no DAG interrupt (no new root turn), no new requirement.
     assert is_excluded_from_model(direct)
     assert is_dag_interrupt_message(direct) is False

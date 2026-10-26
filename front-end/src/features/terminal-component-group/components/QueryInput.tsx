@@ -135,7 +135,9 @@ export default function QueryInput(props: QueryInputProps) {
               roseDark={roseDark}
               browser={browser}
               browserModelLabel={
-                browser ? browserComposerModel(props.agentDetail?.model) : undefined
+                browser
+                  ? browserComposerModel(apps, props.agentId, props.agentDetail?.model)
+                  : undefined
               }
             />
           </QueryInputShell>

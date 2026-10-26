@@ -1607,6 +1607,25 @@ def _append_browser_user_instructions(
     return messages
 
 
+def _unread_user_instructions(instruction_state: Dict[str, Any], latest_state: Dict[str, Any]) -> List[str]:
+    """User input the final read found that never reached this browser's model."""
+    delivered = int(instruction_state.get("delivered_user_instruction_count") or 0)
+    return [
+        message["content"]
+        for message in (latest_state.get("user_instruction_messages") or [])[delivered:]
+        if isinstance(message, dict) and isinstance(message.get("content"), str) and message["content"].strip()
+    ]
+
+
+def _with_unread_user_messages(message: str, unread: Any) -> str:
+    """Hand input the browser never acted on to its owner instead of dropping it."""
+    if not isinstance(unread, list) or not unread:
+        return message
+    lines = "\n".join(f"- {text}" for text in unread)
+    note = f"User messages sent to this browser after its last step (it did not act on them):\n{lines}"
+    return f"{message}\n\n{note}" if message else note
+
+
 def _browser_resume_continuity_state(
     *,
     action_history: Any,
@@ -7491,6 +7510,8 @@ async def _spawn_browser_agent_activity_v3_real(
             kwargs["auxiliary"] = {
                 **(kwargs.get("auxiliary") or {}),
                 "actual_model": current_model.strip(),
+                # The Rose pool this browser's steps run on (the FE label).
+                "pool_name": browser_pool,
             }
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
@@ -7572,11 +7593,16 @@ async def _spawn_browser_agent_activity_v3_real(
             },
         )
 
+    # Filled by the final post-close instruction read (collect_unread_user_instructions).
+    unread_user_instructions: List[str] = []
+
     def _visible_activity_result(
         result: Dict[str, Any],
         *,
         operational_sources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if unread_user_instructions:
+            result = {**result, "unread_user_messages": list(unread_user_instructions)}
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
         payment_response = result.get("payment_request")
@@ -9013,6 +9039,16 @@ async def _spawn_browser_agent_activity_v3_real(
             "schema_user_instruction_count": schema_user_instruction_count,
             "schema_attempted_user_instruction_count": len(user_instruction_messages),
         }
+
+        async def collect_unread_user_instructions() -> None:
+            # A Browser-composer message can land after the last step's read and
+            # before the pause-close; the owner gets it in this browser's result.
+            try:
+                latest = await _load_browser_resume_user_instructions(agent_id, instruction_state)
+            except Exception as read_error:
+                logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
+                return
+            unread_user_instructions[:] = _unread_user_instructions(instruction_state, latest)
 
         async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
             nonlocal instruction_state, response_schema, user_instruction_messages
@@ -11128,6 +11164,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+                        await collect_unread_user_instructions()
 
                         context_message = build_context_summary(
                             success=True,
@@ -12185,6 +12222,7 @@ Based on this feedback, I need to continue working on the task and address the i
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+        await collect_unread_user_instructions()
 
         context_message = build_context_summary(
             success=False,
@@ -13911,6 +13949,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     final_message = (
                         f"{final_message}\n\n{best_effort_response}" if final_message else best_effort_response
                     )
+            final_message = _with_unread_user_messages(final_message, result.get("unread_user_messages"))
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",

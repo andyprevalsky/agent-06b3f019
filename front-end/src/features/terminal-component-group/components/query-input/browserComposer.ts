@@ -40,7 +40,19 @@ export function browserRosePoolLabel(ownerModel: string | null | undefined): str
   return 'rose-flash';
 }
 
-/** The owner's selected (create-mode) model never labels the Browser; its agent model does. */
-export function browserComposerModel(ownerModel: string | null | undefined): string {
-  return browserRosePoolLabel(ownerModel) ?? 'Model unavailable';
+/** The task's reported Rose pool labels it; older rows fall back to the owner-model rule. */
+export function browserComposerModel(
+  apps: RoseAppsValue | null,
+  agentId: string | undefined,
+  ownerModel: string | null | undefined,
+): string {
+  const target = browserComposerTarget(apps, agentId);
+  const reported = apps?.tabs.find(
+    (tab) => tab.agentId === target?.dataset.agentId && tab.taskId === target?.dataset.taskId,
+  )?.rosePool;
+  return (
+    (reported ? browserRosePoolLabel(`rose-labs/${reported}`) : null) ??
+    browserRosePoolLabel(ownerModel) ??
+    'Model unavailable'
+  );
 }
