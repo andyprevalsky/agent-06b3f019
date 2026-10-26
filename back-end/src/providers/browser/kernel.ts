@@ -551,7 +551,9 @@ async function recreateKernelSession(
     oldSession.agentId,
     proxyLocation,
     {
-      omitProfile: oldSession.logicalOwnerKey !== null,
+      // Logical browsers keep their bound Kernel profile too: its saved state is
+      // what carries a live sign-in across rotate_ip, which (unlike pause) takes
+      // no checkpoint before replacing the provider session.
       ...kernelRecreateProxySelection(
         oldSession.kernelProxySource,
         oldSession.proxyTier,
