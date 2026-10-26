@@ -530,6 +530,10 @@ if $DB_FOUND; then
   LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30&connect_timeout=15"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  # Hold this database for the whole run: a concurrent runner's schema sync
+  # deadlocks the suite's live cases (40P01).
+  source "$SCRIPT_DIR/test-db-run-lock.sh"
+  acquire_test_db_run_lock "$LOCAL_PSQL_URL" "run-coverage.sh" || exit 1
   node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
   if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
     ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
