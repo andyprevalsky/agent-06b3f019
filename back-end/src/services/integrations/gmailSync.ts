@@ -498,9 +498,10 @@ async function syncGmailForUser(
   await prisma.integration.update({
     where: { id: integration.id },
     data: {
+      // Status stays SYNCING (the job's claim) until every credential is done;
+      // runGmailSyncJob sets CONNECTED once, so no instance re-claims mid-run.
       lastSyncAt: new Date(),
       lastSuccessfulSyncAt: new Date(),
-      status: IntegrationStatus.CONNECTED,
       config: {
         ...config,
         historyIds: updatedHistoryIds,
@@ -672,6 +673,10 @@ export async function runGmailSyncJob(): Promise<void> {
 
     if (allSucceeded) {
       successCount++;
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: { status: IntegrationStatus.CONNECTED },
+      });
     } else {
       failCount++;
       await prisma.integration.update({

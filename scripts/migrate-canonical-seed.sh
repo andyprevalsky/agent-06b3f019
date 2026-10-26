@@ -47,9 +47,16 @@ trap cleanup EXIT
 seed_cache() { (cd "$ROOT/back-end" && npx tsx scripts/seed-dump-cache.ts "$@"); }
 
 echo "▶ pg${PG_MAJOR}: ${OLD_TOKEN} → ${NEW_TOKEN}"
-if seed_cache head "$NEW_TOKEN" >/dev/null 2>&1; then
+# head exits 0 when present and 3 when absent; anything else is an error, and
+# continuing could overwrite an existing published fixture.
+head_rc=0
+seed_cache head "$NEW_TOKEN" >/dev/null 2>&1 || head_rc=$?
+if [ "$head_rc" -eq 0 ]; then
   echo "✅ ${NEW_TOKEN} already published"
   exit 0
+elif [ "$head_rc" -ne 3 ]; then
+  echo "❌ seed-dump-cache head ${NEW_TOKEN} failed (exit ${head_rc}); refusing to publish" >&2
+  exit 1
 fi
 seed_cache get "$OLD_TOKEN" "$WORK/old.dump"
 
@@ -62,9 +69,14 @@ for _ in $(seq 1 60); do
 done
 
 psql_c() { PGPASSWORD=postgres psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PORT" -U postgres "$@"; }
+# Exact per-table row counts (pg_stat n_live_tup is only an estimate).
 counts() {
-  psql_c -d "$1" -At -c "SELECT string_agg(relname || '=' || n_live_tup::text, ',' ORDER BY relname)
-    FROM (SELECT relname, n_live_tup FROM pg_stat_user_tables) t" 2>/dev/null
+  local query
+  query="$(psql_c -d "$1" -At -c "SELECT string_agg(format(
+      'SELECT %L || ''='' || count(*) FROM %I.%I', schemaname || '.' || tablename, schemaname, tablename),
+      ' UNION ALL ' ORDER BY schemaname, tablename)
+    FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")"
+  psql_c -d "$1" -At -c "$query" | sort
 }
 
 psql_c -d postgres -c 'CREATE DATABASE migrated' -c 'CREATE DATABASE roundtrip'
@@ -78,7 +90,6 @@ PGPASSWORD=postgres bash "$ROOT/scripts/validate-canonical-seed-dump.sh" migrate
 bash "$ROOT/scripts/save-seed-dump.sh" "$WORK/new.dump" 127.0.0.1 "$PORT" postgres migrated "$CONTAINER"
 bash "$ROOT/scripts/restore-seed-dump.sh" "$WORK/new.dump" 127.0.0.1 "$PORT" postgres roundtrip "$CONTAINER"
 PGPASSWORD=postgres bash "$ROOT/scripts/validate-canonical-seed-dump.sh" roundtrip 127.0.0.1 "$PORT" postgres
-psql_c -d migrated -c 'ANALYZE' && psql_c -d roundtrip -c 'ANALYZE'
 if [ "$(counts migrated)" != "$(counts roundtrip)" ]; then
   echo "❌ row counts differ after dump/restore round trip" >&2
   exit 1
