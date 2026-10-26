@@ -10,6 +10,19 @@ import {
 import { findMessages } from '../../domains/agents/repo';
 import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 
+type TestMetadata = {
+  [key: string]: unknown;
+  userPause?: { reason?: unknown; recordedAt?: unknown; browserCleanup?: unknown };
+};
+const report = (...parts: string[]): void => {
+  process.stdout.write(`${parts.join(' ')}\n`);
+};
+const reportError = (error: unknown): void => {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
+};
+
 async function main() {
   assert.equal(
     nonLocalDatabaseReason(process.env.DATABASE_URL ?? ''),
@@ -70,7 +83,7 @@ async function main() {
     assert.equal(rows[0].id, original.id);
     assert.equal(rows[0].timestamp.getTime(), original.timestamp.getTime());
     assert.ok(rows[0].text.startsWith(original.text));
-    assert.equal((rows[0].metadata as any).errorCode, 'ORIGINAL');
+    assert.equal((rows[0].metadata as unknown as TestMetadata).errorCode, 'ORIGINAL');
     const delivered = await findMessages(id, new Date('2026-01-02Z'));
     assert.equal(
       delivered.length,
@@ -109,10 +122,10 @@ async function main() {
       await Promise.all([first, second]);
       const final = await prisma.message.findMany({ where: { agentId: id } });
       const terminals = final.filter((row) =>
-        ['ERROR', 'FINISHED'].includes((row.metadata as any).toolStatus)
+        ['ERROR', 'FINISHED'].includes(String((row.metadata as unknown as TestMetadata).toolStatus))
       );
       assert.equal(terminals.length, 1, `one terminal in ordering pauseFirst=${pauseFirst}`);
-      assert.equal((terminals[0].metadata as any).userPause.reason, 'user');
+      assert.equal((terminals[0].metadata as unknown as TestMetadata).userPause?.reason, 'user');
       assert.ok(
         terminals[0].text.startsWith(pauseFirst ? 'original partial result' : 'completed result')
       );
@@ -171,8 +184,9 @@ async function main() {
       releaseAnnotation();
       annotatedAtCommit = (await annotation).message;
       assert.ok(
-        Date.parse((annotatedAtCommit.metadata as any).userPause.recordedAt) <
-          newer.timestamp.getTime()
+        Date.parse(
+          String((annotatedAtCommit.metadata as unknown as TestMetadata).userPause?.recordedAt)
+        ) < newer.timestamp.getTime()
       );
       const afterCommit = await findMessages(id, newer.timestamp);
       assert.deepEqual(
@@ -181,7 +195,7 @@ async function main() {
         'B3: a late committed annotation must replay after the ordinary cursor advances'
       );
       assert.equal(afterCommit[0].timestamp.getTime(), oldResult.timestamp.getTime());
-      assert.equal((afterCommit[0].metadata as any).errorCode, 'ORIGINAL');
+      assert.equal((afterCommit[0].metadata as unknown as TestMetadata).errorCode, 'ORIGINAL');
       assert.ok(afterCommit[0].text.startsWith(oldResult.text));
       // Without an acknowledgement, another poll must still replay it for a lost/restarted reader.
       assert.deepEqual(
@@ -205,13 +219,14 @@ async function main() {
         }
       );
       assert.match(consumer, /B3_CONSUMER_PASS/);
-      console.log(consumer.trim());
-      console.log(
+      report(consumer.trim());
+      report(
         'B3_PASS',
         JSON.stringify({
           annotationPid,
           ordinaryPid,
-          annotationClock: (annotatedAtCommit.metadata as any).userPause.recordedAt,
+          annotationClock: (annotatedAtCommit.metadata as unknown as TestMetadata).userPause
+            ?.recordedAt,
           ordinaryCursor: newer.timestamp.toISOString(),
           replayedResultId: oldResult.id,
           originalClock: oldResult.timestamp.toISOString(),
@@ -221,7 +236,7 @@ async function main() {
       releaseAnnotation();
       await annotation;
     }
-    console.log(
+    report(
       'browser user pause real PostgreSQL: PASS (10 concurrent annotations, SQL polling, both completion/pause lock orderings)'
     );
   } finally {
@@ -230,7 +245,7 @@ async function main() {
   }
 }
 main().catch(async (error) => {
-  console.error(error);
+  reportError(error);
   await prisma.$disconnect();
   process.exitCode = 1;
 });

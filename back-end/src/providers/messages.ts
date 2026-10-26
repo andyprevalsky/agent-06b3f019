@@ -182,7 +182,7 @@ export async function createMessageOnce(
       ? await persistOrdinaryMessage(params, idempotentId)
       : await persistToolLifecycleMessage(params, lifecycle);
   if (!result.created) {
-    if ('updated' in result && result.updated && params.skipBroadcast !== true)
+    if ('updated' in result && result.updated === true && params.skipBroadcast !== true)
       broadcastCreatedMessage(params, result.message);
     logUncreatedMessageWrite(params, result.message);
     return { message: result.message, created: false };
@@ -270,7 +270,7 @@ function broadcastWorkflowMessageGroup(
   result: PersistedWorkflowMessageGroup
 ): void {
   if (params.skipBroadcast === true) return;
-  if (result.main !== null && (result.main.created || result.main.updated)) {
+  if (result.main !== null && (result.main.created || result.main.updated === true)) {
     broadcastCreatedMessage(params, result.main.message);
   }
   for (const attachment of result.attachments) {

@@ -243,29 +243,18 @@ export async function findAncestors(agentId: string) {
 // Messages
 // ---------------------------------------------------------------------------
 
-/** Fetch messages for an agent ordered by timestamp ascending.
- * Ordinary rows follow `since`. Typed pause annotations replay independently
- * of that cursor: their transaction may commit after a newer ordinary row.
- * Consumers deduplicate annotations by stable message ID and recordedAt. */
+/** Typed user-pause annotations replay regardless of the `since` cursor (late commits). */
+const USER_PAUSE_ANNOTATION = {
+  role: 'TOOL' as const,
+  metadata: { path: ['userPause', 'reason'], equals: 'user' },
+};
+
+/** Messages after `since`, ascending, plus every user-pause annotation; consumers dedupe by ID. */
 export async function findMessages(agentId: string, since?: Date, browserToolCallId?: string) {
   return prisma.message.findMany({
     where: {
       agentId,
-      ...(since
-        ? {
-            AND: [
-              {
-                OR: [
-                  { timestamp: { gt: since } },
-                  {
-                    role: 'TOOL' as const,
-                    metadata: { path: ['userPause', 'reason'], equals: 'user' },
-                  },
-                ],
-              },
-            ],
-          }
-        : {}),
+      ...(since ? { AND: [{ OR: [{ timestamp: { gt: since } }, USER_PAUSE_ANNOTATION] }] } : {}),
       ...(browserToolCallId === undefined
         ? {}
         : {

@@ -1,20 +1,35 @@
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 
+type TestMetadata = {
+  [key: string]: unknown;
+  userPause?: { reason?: unknown; recordedAt?: unknown; browserCleanup?: unknown };
+};
+type TestRow = { id: string; [key: string]: unknown };
+type Broadcast = [unknown, { id: string; text: string; metadata: TestMetadata }];
+const report = (...parts: string[]): void => {
+  process.stdout.write(`${parts.join(' ')}\n`);
+};
+const reportError = (error: unknown): void => {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
+};
+
 async function main() {
-  let rows: any[] = [];
-  const broadcasts: any[] = [];
+  let rows: TestRow[] = [];
+  const broadcasts: Broadcast[] = [];
   const tx = {
     $queryRaw: async () => [],
     agent: { findUnique: async () => ({ temporalWorkflowId: 'generation' }) },
     message: {
       findMany: async () => rows,
-      update: async ({ where, data }: any) =>
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
         Object.assign(
-          rows.find((r) => r.id === where.id),
+          rows.find((r) => r.id === where.id)!,
           data
         ),
-      create: async ({ data }: any) => {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
         const row = { ...data, id: 'new', createdAt: new Date(), filePointer: null };
         rows.push(row);
         return row;
@@ -24,13 +39,13 @@ async function main() {
   await mock.module('../../providers/database', {
     namedExports: {
       prisma: tx,
-      runTransactionWithRetry: async (fn: any) => fn(tx),
+      runTransactionWithRetry: async (fn: (client: typeof tx) => unknown) => fn(tx),
     },
   });
   await mock.module('../../providers/chat/supabaseBroadcast', {
     namedExports: {
-      broadcastMessageInsert: async (...args: any[]) => {
-        broadcasts.push(args);
+      broadcastMessageInsert: async (...args: unknown[]) => {
+        broadcasts.push(args as unknown as Broadcast);
       },
     },
   });
@@ -85,11 +100,11 @@ async function main() {
     assert.equal(broadcasts[0][1].id, 'original');
     assert.ok(broadcasts[0][1].text.startsWith('original error'));
     assert.equal(broadcasts[0][1].metadata.error, true);
-    assert.equal(broadcasts[0][1].metadata.userPause.reason, 'user');
+    assert.equal(broadcasts[0][1].metadata.userPause?.reason, 'user');
   }
-  console.log('browser pause delivery: PASS (both persistence entrypoints, one same-ID broadcast)');
+  report('browser pause delivery: PASS (both persistence entrypoints, one same-ID broadcast)');
 }
 main().catch((error) => {
-  console.error(error);
+  reportError(error);
   process.exitCode = 1;
 });

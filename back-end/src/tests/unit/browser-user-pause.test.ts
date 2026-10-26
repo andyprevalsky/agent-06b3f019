@@ -2,6 +2,19 @@ import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import type { Message, Prisma } from '@prisma/client';
 
+type TestMetadata = {
+  [key: string]: unknown;
+  userPause?: { reason?: unknown; recordedAt?: unknown; browserCleanup?: unknown };
+};
+const report = (...parts: string[]): void => {
+  process.stdout.write(`${parts.join(' ')}\n`);
+};
+const reportError = (error: unknown): void => {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
+};
+
 async function main() {
   await mock.module('../../providers/database', {
     namedExports: {
@@ -42,13 +55,13 @@ async function main() {
       agent: { findUnique: async () => ({ temporalWorkflowId: generation }) },
       message: {
         findMany: async () => rows,
-        update: async ({ where, data }: any) => {
+        update: async ({ where, data }: { where: { id: string }; data: Partial<Message> }) => {
           events.push('update');
           const row = rows.find((r) => r.id === where.id)!;
           Object.assign(row, data);
           return row;
         },
-        create: async ({ data }: any) => {
+        create: async ({ data }: { data: Partial<Message> }) => {
           events.push('create');
           const row = { ...base(), ...data, id: 'created' };
           rows.push(row);
@@ -83,11 +96,11 @@ async function main() {
       result.message.text.startsWith(original.text),
       'original content must survive byte-for-byte'
     );
-    const metadata = result.message.metadata as any;
+    const metadata = result.message.metadata as unknown as TestMetadata;
     assert.equal(metadata.errorCode, 'ORIGINAL');
     assert.equal(metadata.error, true);
     assert.deepEqual(metadata.structured_response, { result: 'saved' });
-    assert.equal(metadata.userPause.reason, 'user');
+    assert.equal(metadata.userPause?.reason, 'user');
     assert.equal(metadata.toolStatus, status === 'IN_PROGRESS' ? 'FINISHED' : status);
     assert.deepEqual(f.events, ['lock', 'lock', 'update']);
     const once = structuredClone(result.message);
@@ -125,9 +138,9 @@ async function main() {
     },
     identity
   );
-  const both = priorCleanup.rows[0].metadata as any;
+  const both = priorCleanup.rows[0].metadata as unknown as TestMetadata;
   assert.deepEqual(both.browser_cleanup, { error: 'earlier close failed' });
-  assert.deepEqual(both.userPause.browserCleanup, { error: 'pause close failed' });
+  assert.deepEqual(both.userPause?.browserCleanup, { error: 'pause close failed' });
   const cleanup = fixture([base()]);
   await persistLockedToolLifecycleMessage(cleanup.tx, params, identity);
   const receipt = await persistLockedToolLifecycleMessage(
@@ -153,12 +166,16 @@ async function main() {
   const stale = fixture([base()], 'new-generation');
   const staleResult = await persistLockedToolLifecycleMessage(stale.tx, params, identity);
   assert.equal(staleResult.accepted, false);
-  assert.equal((stale.rows[0].metadata as any).userPause, undefined, 'stale pause never annotates');
-  console.log(
+  assert.equal(
+    (stale.rows[0].metadata as unknown as TestMetadata).userPause,
+    undefined,
+    'stale pause never annotates'
+  );
+  report(
     'browser user pause: PASS (preservation, original clocks, repeat, late write, empty, generation fence)'
   );
 }
 main().catch((error) => {
-  console.error(error);
+  reportError(error);
   process.exitCode = 1;
 });

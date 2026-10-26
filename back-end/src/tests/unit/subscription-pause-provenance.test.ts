@@ -3,6 +3,15 @@ import { mock } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
+const report = (...parts: string[]): void => {
+  process.stdout.write(`${parts.join(' ')}\n`);
+};
+const reportError = (error: unknown): void => {
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
+};
+
 async function main() {
   const cases: Array<{ source: string; signal: unknown[] }> = [];
   let source = '';
@@ -114,9 +123,9 @@ async function main() {
     }
   );
   assert.match(output, /B1_PASS: 4/);
-  console.log(output.trim());
+  report(output.trim());
 }
 main().catch((error) => {
-  console.error(error);
+  reportError(error);
   process.exitCode = 1;
 });
