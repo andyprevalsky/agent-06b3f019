@@ -13,7 +13,7 @@
  * a play button in a navigation list invited mis-clicks while scanning.
  *
  * Props-driven states:
- * - isSelected: boolean (highlight styling)
+ * - isSelected: boolean (highlight styling; ROW_FILL, readable in light and dark)
  * - isArchived: boolean (menu swaps Archive for Restore, hides Pin)
  * - hasAttentionRequest: boolean (forces the needs-help indicator)
  * - agent.status: drives the leading run indicator (see agentRunState.ts)
@@ -70,7 +70,7 @@ function RowActionButton({
         <button
           onClick={onClick}
           aria-label={label}
-          className="flex-shrink-0 rounded p-0.5 hover:bg-gray-200"
+          className="flex-shrink-0 rounded p-0.5 hover:bg-gray-200 dark:hover:bg-white/10"
         >
           {icon}
         </button>
@@ -82,7 +82,17 @@ function RowActionButton({
   );
 }
 
-const ACTION_ICON = 'h-3.5 w-3.5 text-gray-500';
+const ACTION_ICON = 'h-3.5 w-3.5 text-gray-500 dark:text-muted-foreground';
+
+/**
+ * Hover/selected fill. Light mode keeps the navi grey; dark mode (html.dark,
+ * Rose Desktop) uses the theme's `accent` hover token, because the fixed
+ * #e5e5e5 grey under the dark theme's near-white text was unreadable.
+ */
+const ROW_FILL = {
+  selected: 'bg-navi-white-dark dark:bg-accent',
+  hover: 'hover:bg-navi-white-dark dark:hover:bg-accent',
+} as const;
 
 /**
  * The row's trailing slot: run duration at rest, row actions on hover.
@@ -115,7 +125,10 @@ function RowTrailing({
             being hidden — otherwise a pinned row is indistinguishable at rest
             except by its sort position. */}
         {isPinned && (
-          <Pin className="h-3 w-3 flex-shrink-0 fill-current text-gray-500" aria-hidden="true" />
+          <Pin
+            className="h-3 w-3 flex-shrink-0 fill-current text-gray-500 dark:text-muted-foreground"
+            aria-hidden="true"
+          />
         )}
         {elapsed !== null && (
           <span
@@ -126,7 +139,7 @@ function RowTrailing({
           </span>
         )}
       </span>
-      <span className="absolute inset-y-0 right-0 z-10 flex items-center gap-0.5 rounded bg-navi-white-dark opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+      <span className="absolute inset-y-0 right-0 z-10 flex items-center gap-0.5 rounded bg-navi-white-dark dark:bg-accent opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
         {children}
       </span>
     </span>
@@ -154,7 +167,7 @@ const CompactRow = forwardRef<
       {...triggerProps}
       className={cn(
         'relative flex w-full cursor-pointer items-center justify-center rounded-lg p-2 transition-colors',
-        isSelected ? 'bg-navi-white-dark' : 'hover:bg-navi-white-dark',
+        isSelected ? ROW_FILL.selected : ROW_FILL.hover,
       )}
     >
       {/* A shared agent glyph, not the title's initial: a column of unrelated
@@ -219,10 +232,10 @@ const ExpandedRow = forwardRef<
         // No chrome at rest: a list of filled cards fights the content. Colour
         // appears on hover, and selection keeps a persistent fill so the current
         // agent is still identifiable once the pointer moves away.
-        isSelected ? 'bg-navi-white-dark' : 'hover:bg-navi-white-dark',
+        isSelected ? ROW_FILL.selected : ROW_FILL.hover,
       )}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-1.5">
         <AgentStatusIndicator status={runStatus} seed={agent.agent_id} />
         <h3 className="ml-0.5 min-w-0 flex-1 truncate text-sm font-medium" title={agent.goal}>
           {displayName}
