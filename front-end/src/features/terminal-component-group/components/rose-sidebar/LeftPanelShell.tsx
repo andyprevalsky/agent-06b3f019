@@ -4,12 +4,15 @@
  *   [CLOSED] not rendered
  *   [OPEN]   flush against the bar: full height, no gap, margin or floating card;
  *            left = 64px (collapsed bar) or 236px while the bar hover-expands,
- *            so the bar never covers it (left transitions with the bar width)
+ *            so the bar never covers it (left transitions with the bar width);
+ *            width = min(640px, room left of the top-right app icons), so on
+ *            narrow windows it never slides under the icon row
  *   [OPEN] --Escape | close button--> onClose
  *
- * LAYER: portaled to document.body at ROSE_LAYER.coverPanel, so it covers the
- * floating query box (portaled at ROSE_LAYER.composer). Rendered in place it
- * sat inside the main row's z-[4] stacking context, under the query box.
+ * LAYER: portaled to document.body at ROSE_LAYER.leftPanel: over the floating
+ * query box (ROSE_LAYER.composer), under app panels opened after it
+ * (ROSE_LAYER.coverPanel). Rendered in place it sat inside the main row's
+ * z-[4] stacking context, under the query box.
  *
  * Used by project settings (UI ledger rows 18/19/59).
  */
@@ -22,6 +25,14 @@ import { ROSE_LAYER } from '@/lib/roseLayers';
 import { cn } from '@/lib/utils';
 
 import { ROSE_BAR_EASE, ROSE_BAR_EXPANDED_WIDTH, ROSE_BAR_WIDTH } from './roseSidebarLayout';
+
+/** Gap kept between the panel's right edge and the top-right app icons. */
+const ICON_ROW_GAP = 16;
+
+/** At most 640px, ending left of the app icon row (--rose-app-icons-inset, published by RoseAppsProvider). */
+export function leftPanelWidth(left: number): string {
+  return `min(640px, calc(100vw - ${left}px - var(--rose-app-icons-inset, ${ROSE_BAR_WIDTH}px) - ${ICON_ROW_GAP}px))`;
+}
 
 export default function LeftPanelShell({
   label,
@@ -36,6 +47,7 @@ export default function LeftPanelShell({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const left = barExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -49,12 +61,12 @@ export default function LeftPanelShell({
       data-testid={testId}
       className={cn(
         'fixed bottom-0 top-0 hidden overflow-y-auto border-r border-gray-200/95 dark:border-white/[0.09] bg-white dark:bg-[#262624] px-[26px] py-[22px] text-[13px] text-[hsl(240_15%_8%)] dark:text-[#ecece8] shadow-[12px_0_40px_rgba(20,20,40,0.08)] md:block',
-        ROSE_LAYER.coverPanel,
+        ROSE_LAYER.leftPanel,
       )}
       style={{
-        left: barExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH,
-        width: `min(640px, calc(100vw - ${ROSE_BAR_WIDTH * 2}px))`,
-        transition: `left 280ms ${ROSE_BAR_EASE}`,
+        left,
+        width: leftPanelWidth(left),
+        transition: `left 280ms ${ROSE_BAR_EASE}, width 280ms ${ROSE_BAR_EASE}`,
       }}
     >
       <button

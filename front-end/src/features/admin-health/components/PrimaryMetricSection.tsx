@@ -18,6 +18,7 @@ import {
 import type { AdminHealthData } from '../types';
 import { MetricChange } from './MetricChange';
 import { seriesMetricChange } from './metricComparison';
+import { THEMED_TOOLTIP } from './chartTheme';
 
 function formatCurrency(cents: number | null): string {
   if (cents === null) return 'Unavailable';
@@ -87,6 +88,7 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
                 <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
                 <YAxis tickFormatter={moneyTick} tickLine={false} axisLine={false} fontSize={12} />
                 <Tooltip
+                  {...THEMED_TOOLTIP}
                   formatter={(value) =>
                     formatCurrency(value === null || value === undefined ? null : Number(value))
                   }

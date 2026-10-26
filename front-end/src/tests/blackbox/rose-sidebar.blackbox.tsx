@@ -98,6 +98,12 @@ describe('Rose left bar (flag on)', () => {
     localStorage.clear();
     mockSession();
     mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
+    // Admin bars (showAdminHealth) prewarm Biz health on mount.
+    server.use(
+      http.get(`${API_BASE}/admin-health`, () =>
+        HttpResponse.json({ error: 'admin health not mocked' }, { status: 503 }),
+      ),
+    );
   });
   afterEach(() => {
     localStorage.clear();
@@ -306,8 +312,8 @@ describe('Rose left bar (flag on)', () => {
     expect(panel.style.right).toBe('0px');
     expect(panel.style.width).toBe('');
     expect(screen.queryByTestId('app-drawer-resize-handle')).toBeNull();
-    // Over the floating query box (ROSE_LAYER.composer = z-[100]).
-    expect(panel.className).toContain('z-[101]');
+    // Over the floating query box (z-[100]) and an open project settings drawer (z-[101]).
+    expect(panel.className).toContain('z-[102]');
     expect(panel.parentElement).toBe(document.body);
     prewarm.mockRestore();
   });

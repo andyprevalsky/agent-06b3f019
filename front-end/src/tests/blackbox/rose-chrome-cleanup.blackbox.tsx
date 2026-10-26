@@ -76,6 +76,10 @@ beforeEach(() => {
     http.get(`${API_BASE}/credits/stats`, () =>
       HttpResponse.json({ totalTokens: 0, topModels: [] }),
     ),
+    // The flagged account is an admin: its left bar prewarms Biz health on mount.
+    http.get(`${API_BASE}/admin-health`, () =>
+      HttpResponse.json({ error: 'admin health not mocked' }, { status: 503 }),
+    ),
   );
 });
 
@@ -423,6 +427,40 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     const composer = screen.getByTestId('query-input-layer');
     expect(rootLayerZ(composer)).toBe(100);
     expect(rootLayerZ(panel)).toBeGreaterThan(rootLayerZ(composer));
+  });
+
+  it('an app opened while project settings is open covers the drawer, not the reverse', async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    const settings = screen.getByTestId('rose-project-settings');
+    // Read before Browser opens: the open Browser docks the composer in its own pane.
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    await user.click(screen.getByTestId('rose-app-browser'));
+    const browser = screen
+      .getAllByTestId('browser-app-drawer')
+      .find((drawer) => drawer.dataset.state === 'open');
+    expect(browser).toBeDefined();
+    if (browser === undefined) return;
+    expect(screen.getByTestId('rose-project-settings')).toBe(settings);
+    expect(rootLayerZ(settings)).toBeGreaterThan(composer);
+    expect(rootLayerZ(browser)).toBeGreaterThan(rootLayerZ(settings));
+    // The icon row stays clickable over the covering panel.
+    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(browser));
+  });
+
+  it('project settings ends left of the top-right app icon row on narrow windows', async () => {
+    const user = userEvent.setup({ delay: null });
+    setViewport(800, 800);
+    await renderTerminal(true);
+    expandBar();
+    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    const settings = screen.getByTestId('rose-project-settings');
+    // RoseAppsProvider publishes the icon row's width; the drawer subtracts it.
+    expect(document.documentElement.style.getPropertyValue('--rose-app-icons-inset')).toMatch(/px$/);
+    expect(settings.style.width).toContain('var(--rose-app-icons-inset');
+    expect(settings.style.width).toContain(`100vw - ${settings.style.left}`);
   });
 
   it('the Rose toolset popover stacks above the query box and its agents-running header', async () => {

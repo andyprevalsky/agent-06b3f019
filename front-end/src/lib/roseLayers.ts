@@ -12,8 +12,10 @@
  *   appIcons       top-right app icons, over an appPanel's corner
  *   composer       the floating query box (QueryInputLayer) and the
  *                  agents-running pane attached to its top
- *   coverPanel     panels that cover the composer: Browser, Integrations and
- *                  Biz health (right / full width), project settings (left)
+ *   leftPanel      project settings beside the left bar; covers the composer
+ *                  but stays open under an app the user opens afterwards
+ *   coverPanel     app panels that cover the composer: Browser, Integrations
+ *                  and Biz health (right / full width)
  *   coverIcons     top-right app icons, over a coverPanel's corner
  *   left bar       hover-expanded z-[110] (RoseSidebar), over a full panel
  *   popover        popovers opened from any layer above (ui/popover), e.g.
@@ -25,7 +27,8 @@ export const ROSE_LAYER = {
   appPanel: 'z-[66]',
   appIcons: 'z-[90]',
   composer: 'z-[100]',
-  coverPanel: 'z-[101]',
-  coverIcons: 'z-[102]',
+  leftPanel: 'z-[101]',
+  coverPanel: 'z-[102]',
+  coverIcons: 'z-[103]',
   popover: 'z-[220]',
 } as const;

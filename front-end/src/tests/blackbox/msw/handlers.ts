@@ -18,10 +18,6 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
-  // Admin left bars prewarm Biz health on mount; unavailable unless a test overrides.
-  http.get(`${API_BASE}/admin-health`, () =>
-    HttpResponse.json({ error: 'admin health not mocked' }, { status: 503 }),
-  ),
   // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),

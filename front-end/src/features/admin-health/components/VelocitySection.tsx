@@ -19,6 +19,7 @@ import {
 import type { AdminHealthData, AdminHealthTimeSlice, AdminHealthVelocityMetric } from '../types';
 import { MetricChange } from './MetricChange';
 import { seriesMetricChange } from './metricComparison';
+import { THEMED_TOOLTIP } from './chartTheme';
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value);
@@ -167,7 +168,7 @@ export default function VelocitySection({ data }: { data: AdminHealthData }) {
                 />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
                 <YAxis tickLine={false} axisLine={false} fontSize={12} />
-                <Tooltip />
+                <Tooltip {...THEMED_TOOLTIP} />
                 <Line
                   dataKey="githubCommits"
                   name="GitHub commits"
