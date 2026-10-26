@@ -2750,6 +2750,10 @@ class Sharded(unittest.TestCase):
         self.assertEqual(current, 2)
         self.assertGreater(planned, 0)
         self.assertEqual(planned % 3, 0)  # every copy of each task is admitted simultaneously
+        # A started Machine on an unreachable host comes back with "config": null (2026-10-26).
+        lost = dict(id='d', state='started', host_status='unreachable', config=None)
+        _, with_lost = CLI.shared_cpu_plan(ROOT, RUNNER, tasks, 3, baseline + [lost])
+        self.assertEqual(with_lost, 2 + 8)
 
     def test_sharded_run_admits_once_launches_k_runners_and_merges(self):
         with tempfile.TemporaryDirectory() as name:
