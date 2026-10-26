@@ -265,9 +265,12 @@ export function collectCodeAgentEvents(
   );
   const echoedTurnIds = new Set(personRecords.flatMap((r) => r.clientMessageId ?? []));
   const echoedTexts = new Set(personRecords.map((r) => r.text));
+  // A Rose → code-agent message renders once, from its clean a2a row (code_turn_id).
+  const delivered = deliveredAgentTurnIds(messages, taskId);
   for (const entry of records) {
     if (entry.at === null) continue;
     if (entry.type !== 'thinking' && entry.type !== 'message' && entry.type !== 'tool') continue;
+    if (isDeliveredAgentRecord(entry, delivered)) continue;
     const at = entry.at ?? entry.firstSeenAt ?? 0;
     const ts = entry.at ?? entry.firstSeenAt ?? 0;
     events.push({
@@ -277,6 +280,7 @@ export function collectCodeAgentEvents(
         text: entry.text || undefined,
         tool: entry.tool,
         role: entry.role,
+        sender: entry.role === 'user' ? entry.sender : undefined,
       },
       at,
       order: events.length,
@@ -307,6 +311,30 @@ export function collectCodeAgentEvents(
     }
   }
   return events.sort((a, b) => a.at - b.at || a.order - b.order).map(({ event }) => event);
+}
+
+/** CLI turn ids that the backend's a2a rows of this session were delivered as. */
+export function deliveredAgentTurnIds(messages: Message[], taskId: string): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    const metadata = message.metadata;
+    if (metadata?.task_id !== taskId || metadata.action_type !== 'agent_message') continue;
+    const id = str(metadata.code_turn_id);
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+/** The session's own (LLM-framed) copy of a message Rose delivered as an a2a row. */
+export function isDeliveredAgentRecord(entry: TranscriptEntry, delivered: Set<string>): boolean {
+  if (entry.type !== 'message' || entry.role !== 'user' || entry.sender !== 'agent') return false;
+  return agentRecordTurnId(entry, delivered) !== null;
+}
+
+/** The delivered turn id this record carries (client_message_id, else its `turn:<id>` key). */
+export function agentRecordTurnId(entry: TranscriptEntry, delivered: Set<string>): string | null {
+  const candidates = [entry.clientMessageId, entry.key.replace(/^turn:/, '')];
+  return candidates.find((id): id is string => !!id && delivered.has(id)) ?? null;
 }
 
 /** Session provider from its records (first record that names one). */

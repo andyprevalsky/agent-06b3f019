@@ -4,7 +4,9 @@
  * TRANSCRIPT:
  *   [EMPTY] → "Waiting for <agent>…"
  *   [EVENTS] → thinking (collapsed ⇄ expanded) · assistant messages · compact tool rows
- *              · "You → <agent>" rows (session echoes + local echoes not yet echoed back)
+ *              · "You → <agent>" rows (session echoes + local echoes not yet echoed back);
+ *                Rose's goal / messages from the session read "Rose → <agent>" (never "You") and a
+ *                message Rose delivered as an a2a row (code_turn_id) renders once, unframed
  *              · agent-to-agent rows ("Codex → Rose" / "Rose → Codex"; questions as "<agent> asks")
  *   new rows → scroll to bottom
  *
@@ -42,7 +44,9 @@ type Row =
 
 function buildRows(events: CodeAgentTranscriptEvent[], echoes: readonly LocalEcho[]): Row[] {
   const echoedBack = new Set(
-    events.filter((e) => e.role === 'user' && e.text).map((e) => e.text as string),
+    events
+      .filter((e) => e.role === 'user' && e.sender !== 'agent' && e.text)
+      .map((e) => e.text as string),
   );
   const rows: Row[] = events.map((event, index) => {
     const at = eventTimeMs(event.ts) ?? 0;
@@ -108,10 +112,14 @@ function ToolRow({ tool }: { tool: CodeAgentToolCall }) {
   );
 }
 
-function YouRow({ text, label }: { text: string; label: string }) {
+/** "You → Codex: …" for the person; "Rose → Codex: …" for Rose's goal / messages. */
+function YouRow({ text, label, from = 'You' }: { text: string; label: string; from?: string }) {
   return (
     <div className="text-foreground dark:text-[#ecece8]">
-      <span className={MUTED}>You → {label}:</span> {text}
+      <span className={MUTED}>
+        {from} → {label}:
+      </span>{' '}
+      {text}
     </div>
   );
 }
@@ -160,8 +168,10 @@ export function CodeAgentTranscript({
         if (event.type === 'agent_message' && event.a2a) {
           return <AgentToAgentRow key={key} a2a={event.a2a} compact />;
         }
-        if (event.role === 'user')
-          return <YouRow key={key} text={event.text ?? ''} label={label} />;
+        if (event.role === 'user') {
+          const from = event.sender === 'agent' ? 'Rose' : 'You';
+          return <YouRow key={key} text={event.text ?? ''} label={label} from={from} />;
+        }
         return (
           <div key={key} className="text-foreground dark:text-[#ecece8]">
             {event.text}

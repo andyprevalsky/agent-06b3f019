@@ -42,6 +42,8 @@ import {
 } from './codeAgentContract';
 import type { LocalEcho } from './codeAgentLocalState';
 import {
+  agentRecordTurnId,
+  deliveredAgentTurnIds,
   foldSessionTranscript,
   type TranscriptEntry,
   type TurnOutcome,
@@ -544,9 +546,27 @@ function roseMessage(input: CodeSessionInput, id: string, entry: TranscriptEntry
 export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   const records = foldSessionTranscript(input.messages, input.taskId);
   const builder = new SessionBuilder(input);
+  // A Rose → code-agent message is one row: its clean a2a row (code_turn_id) placed
+  // where the session's own framed copy of the turn sits; the framed copy never renders.
+  const delivered = deliveredAgentTurnIds(input.messages, input.taskId);
+  const canonicalByTurn = new Map<string, Message>();
+  for (const message of input.messages) {
+    const id = message.metadata?.code_turn_id;
+    if (typeof id === 'string' && delivered.has(id)) canonicalByTurn.set(id, message);
+  }
+  const placedTurns = new Set(
+    records.flatMap((entry) =>
+      entry.type === 'message' && entry.role === 'user' && entry.sender === 'agent'
+        ? (agentRecordTurnId(entry, delivered) ?? [])
+        : [],
+    ),
+  );
   for (const item of buildTimeline(input, records)) {
     if (item.kind === 'row') {
-      if ((item.message.metadata?.action_type as string) === 'agent_message') {
+      const turnId = item.message.metadata?.code_turn_id;
+      if (typeof turnId === 'string' && placedTurns.has(turnId)) {
+        // Placed at the session's own record of that turn (below).
+      } else if ((item.message.metadata?.action_type as string) === 'agent_message') {
         builder.coordination(item.message, item.at, null, false);
       } else {
         builder.out.push({ kind: 'message', key: item.message.message_id, message: item.message });
@@ -560,7 +580,11 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
         const key = entry.clientMessageId ? `turn:${entry.clientMessageId}` : entry.key;
         const id = `code:${input.taskId}:${key}`;
         const at = entry.at ?? item.at;
-        if (entry.sender === 'agent' && !builder.empty) {
+        const deliveredAs = entry.sender === 'agent' ? agentRecordTurnId(entry, delivered) : null;
+        const canonical = deliveredAs !== null ? canonicalByTurn.get(deliveredAs) : undefined;
+        if (canonical) {
+          builder.coordination(canonical, at, entry.turnId, true);
+        } else if (entry.sender === 'agent' && !builder.empty) {
           builder.coordination(roseMessage(input, id, entry), at, entry.turnId, true);
         } else {
           builder.person(personMessage(id, entry.text, at), at, entry.turnId, entry.turnStartedAt);
