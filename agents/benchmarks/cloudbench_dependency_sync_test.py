@@ -23915,7 +23915,7 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
     run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
     assert "stack process exited (rc=$stack_rc)" in run
-    assert "last 40 lines of stack log" in run
+    assert 'log_file_tail "$STACK_LOG" 40 stack' in run
 
 
 def test_imessage_relay_heartbeat_wait_aborts_when_remote_driver_is_dead() -> None:
@@ -27306,6 +27306,7 @@ def test_cloud_stack_failure_surfaces_each_service_log(tmp_path: Path) -> None:
         check=True,
     )
     out = result.stdout
+    assert f"last 40 lines of stack log ({stack_log})" in out
     assert "  | ❌ agents (PID 3594) exited with code 1" in out
     assert f"last 120 lines of worker log ({context}/logs/worker.log)" in out
     assert "  | RuntimeError: namespace validation failed" in out
