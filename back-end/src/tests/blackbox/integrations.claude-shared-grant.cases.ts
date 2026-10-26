@@ -175,3 +175,47 @@ export async function testClaudeCodeSandbox_concurrentSessionsShareOneAccessToke
     await cleanupIntegrations([rowId]);
   }
 }
+
+/** A malformed expiry is treated as expired; an omitted one (setup tokens) is not. */
+export async function testClaudeCodeSandbox_expiryParsingMatchesClaudeCode() {
+  const cases: Array<{ label: string; expiresAt: unknown; served: boolean }> = [
+    { label: 'omitted expiresAt', expiresAt: undefined, served: true },
+    { label: 'string expiresAt', expiresAt: 'soon', served: false },
+    { label: 'null expiresAt', expiresAt: null, served: true },
+    { label: 'zero expiresAt', expiresAt: 0, served: false },
+  ];
+  for (const testCase of cases) {
+    const userId = crypto.randomUUID();
+    const integration = await prisma.integration.create({
+      data: {
+        userId,
+        accountId: '',
+        name: 'claude_code',
+        type: 'TOOL_SETUP',
+        status: 'CONNECTED',
+        isActive: true,
+        poolingEnabled: false,
+        config: {
+          encryptedCredentials: encryptClaudeEnvelope(
+            JSON.stringify({
+              claudeAiOauth: {
+                accessToken: `${TOKEN_PREFIX}${crypto.randomUUID()}`,
+                refreshToken: 'shared-refresh',
+                ...(testCase.expiresAt === undefined ? {} : { expiresAt: testCase.expiresAt }),
+              },
+            })
+          ),
+        },
+      },
+    });
+    try {
+      const credential = await fetchClaudeCodeCredentialsWithMeta(userId);
+      assert(
+        (credential?.source === 'user') === testCase.served,
+        `${testCase.label}: expected served=${testCase.served}`
+      );
+    } finally {
+      await cleanupIntegrations([integration.id]);
+    }
+  }
+}

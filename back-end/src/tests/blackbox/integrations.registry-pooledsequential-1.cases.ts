@@ -40,6 +40,7 @@ import {
 import {
   testClaudeCodeSandbox_neverSpendsSharedRefreshGrant,
   testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
+  testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
 } from './integrations.claude-shared-grant.cases';
 
 export function pooledSequentialTestsPart1() {
@@ -72,6 +73,10 @@ export function pooledSequentialTestsPart1() {
     {
       name: 'claude-code sandbox -- concurrent sessions share one access token',
       fn: testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
+    },
+    {
+      name: 'claude-code sandbox -- expiry parsing matches Claude Code',
+      fn: testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
     },
     {
       name: 'rotation -- rate-limit window never shortens',

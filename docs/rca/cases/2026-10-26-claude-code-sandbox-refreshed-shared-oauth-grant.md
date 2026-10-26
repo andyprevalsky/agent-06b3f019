@@ -24,6 +24,7 @@ sources:
   - task User Scale Bug Bash lane S12 (parent thread thr_1981ff79aa724ae59870f1829121c7e1)
   - task S12 read-only evidence worker thread ph74xqb2qy847y823f4hq3tq6d8h15cg
   - memory:devbox-codex-oauth-revoked-use-prod-credential
+  - PR #1590
 repro: back-end/src/tests/blackbox/integrations.claude-shared-grant.cases.ts
 status: fixed
 ---
@@ -101,8 +102,9 @@ The fix is in `claudeCredentials.ts`:
 - Sandbox credentials are access-token-only: `credentialMode: 'oauth_token'`,
   `CLAUDE_CODE_OAUTH_TOKEN`, and no `credentials` envelope. The refresh token
   never leaves the server.
-- An access token with less than 5 minutes of life left is not served, and
-  selection falls through to the pool or the funded key.
+- An access token with less than 5 minutes of life left, or a malformed
+  `expiresAt`, is not served (an omitted `expiresAt` is served, as Claude Code
+  does). Selection then falls through to the pool or the funded key.
 - The EXPIRED auth_error "refreshable envelope" path and
   `forceOauthEnvelopeRefresh` were removed.
 - The owning device refreshes its token and re-uploads it. The server never
@@ -123,8 +125,10 @@ exactly that mode.
 10k-agent behaviour: N concurrent sandboxes of one user share one access token
 and perform zero refreshes, so there is no refresh race and no cross-revocation.
 Selection is one indexed Integration lookup per session, unchanged. Mid-session
-access-token expiry (8h TTL) now ends in a 401 inside that session instead of
-rotating the grant. Re-leasing a fresh token per turn is a follow-up.
+access-token expiry (8h TTL) ends in a 401 inside that one long-lived CLI
+process instead of rotating the grant. That was already true for healthy
+envelopes, which ran on the env token. Re-leasing and restarting the CLI with
+`--resume` before expiry is a follow-up (CodeRabbit finding on PR #1590).
 
 The Codex path has the same class: `CODEX_AUTH_JSON` carries `refresh_token`,
 and the Codex CLI refreshes a stale `last_refresh`. Codex refresh keeps the old

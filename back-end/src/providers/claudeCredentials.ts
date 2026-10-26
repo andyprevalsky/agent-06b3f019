@@ -4,6 +4,7 @@ import {
   markConnectionNeedsReconnectFromIntegrationFailure,
   syncConnectionAfterIntegrationAuthFailure,
 } from './integrationConnectionSync';
+import { claudeEnvelopeExpiredAt, parseClaudeEnvelope } from './claudeOauthEnvelope';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -303,26 +304,21 @@ function buildClaudeCodeCredentialResult(
   userId: string,
   poolTokenId?: string
 ): ClaudeCodeCredentialResult | null {
-  try {
-    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
-    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    if (!oauth) return null;
-    const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
-    // Real Anthropic OAuth access tokens are minted with this prefix; anything
-    // else is a placeholder (seed data, tests) that will 401 immediately.
-    if (!accessToken.startsWith('sk-ant-oat')) return null;
-    const expiresAt = oauth.expiresAt;
-    if (
-      typeof expiresAt === 'number' &&
-      Number.isFinite(expiresAt) &&
-      expiresAt <= Date.now() + SANDBOX_MIN_ACCESS_TOKEN_LIFETIME_MS
-    ) {
-      return null;
-    }
-    return { source, userId, poolTokenId, accessToken, credentialMode: 'oauth_token' };
-  } catch {
-    return null;
-  }
+  const envelope = parseClaudeEnvelope(credentialsJson);
+  // Real Anthropic OAuth access tokens are minted with this prefix; anything
+  // else is a placeholder (seed data, tests) that will 401 immediately.
+  if (!envelope?.accessToken.startsWith('sk-ant-oat')) return null;
+  // Like Claude Code, an envelope without `expiresAt` is not expired; a present
+  // but malformed expiry parses as already expired.
+  const mustOutliveAt = Date.now() + SANDBOX_MIN_ACCESS_TOKEN_LIFETIME_MS;
+  if (claudeEnvelopeExpiredAt(envelope, mustOutliveAt) !== null) return null;
+  return {
+    source,
+    userId,
+    poolTokenId,
+    accessToken: envelope.accessToken,
+    credentialMode: 'oauth_token',
+  };
 }
 
 // =============================================================================
