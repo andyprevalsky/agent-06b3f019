@@ -1451,11 +1451,12 @@ async function sync() {
         page,
         25,
         (m) => {
+          // Every synced person belongs to SEED_USER_ID, so it owns each message.
           const { id, ...rest } = m;
           return local.messageRecord.upsert({
             where: { id },
-            create: m as any,
-            update: rest as any,
+            create: { ...m, userId: SEED_USER_ID },
+            update: { ...rest, userId: SEED_USER_ID },
           });
         },
         (completed) => {

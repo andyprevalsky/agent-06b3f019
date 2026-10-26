@@ -120,6 +120,7 @@ async function seedRun(): Promise<SeededRun> {
   await prisma.messageRecord.create({
     data: {
       personId,
+      userId,
       channel: 'IMESSAGE',
       from: '+10000000000',
       to: '+10000000001',
