@@ -27281,7 +27281,8 @@ def test_cloud_stack_failure_surfaces_each_service_log(tmp_path: Path) -> None:
     helpers = _extract_fleet_function(driver, "log_file_tail() {") + _extract_fleet_function(
         driver, "log_stack_service_tails() {"
     )
-    death = driver[driver.index('log "FATAL: stack process exited'):driver.index("finish 1", driver.index('log "FATAL: stack process exited'))]
+    death_start = driver.index('log "FATAL: stack process exited')
+    death = driver[death_start : driver.index("finish 1", death_start)]
     timeout = driver[driver.index('log "FATAL: stack did not become healthy'):]
     assert "log_stack_service_tails" in death
     assert "log_stack_service_tails" in timeout[: timeout.index("finish 1")]

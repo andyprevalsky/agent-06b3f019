@@ -2490,7 +2490,9 @@ def test_trajectory_recall_restores_base_history_before_each_task():
 
     source = inspect.getsource(bench.main_async)
     run_block = source[source.index("async def _run_reported_task"):source.index("async def _report_ticker")]
-    prepare = run_block.index("await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)")
+    prepare = run_block.index(
+        "await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)"
+    )
     assert prepare < run_block.index("result = await run_single_task(")
     assert "batch_started_at = datetime.now(timezone.utc)" in source
 
