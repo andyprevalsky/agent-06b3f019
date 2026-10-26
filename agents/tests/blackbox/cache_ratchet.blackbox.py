@@ -347,6 +347,29 @@ def test_gpt_route_run_at_24_percent_passes_only_under_the_derived_floor():
     _assert_ratchet_fails(mixed)  # mixed routes take the strictest floor
 
 
+def test_direct_cerebras_flash_leg_is_a_classified_route():
+    """rose-1-flash serves sub-agents through the direct Cerebras hop, whose served
+    model is the bare pool ``cerebras_model`` (no transport suffix). Predeploy run
+    e9d82754 (spawn-sub-agents f7cbced0 48.6%, parallel-tool-calls a97a697d 49.9%)
+    failed the ratchet as 0.0% because those calls were ``unclassified``."""
+    from benchmarks.llm_usage import aggregate_prompt_cache_share, classify_model
+    from benchmarks.run_benchmark import cache_ratchet_failures
+
+    assert classify_model("qwen-3.8-27b") == ("cerebras", "qwen-3.8-27b")
+    usage = [
+        dict(_call(8384, 1620, 126), model="gpt-6.1-sol-foundry"),
+        dict(_call(2048, 0, 908), model="qwen-3.8-27b"),
+        dict(_call(1000, 0, 500), model="z-ai/glm-5.3-flash"),
+    ]
+    assert aggregate_prompt_cache_share(usage)["routes"] == ["other"]
+    for name in ("spawn-sub-agents", "parallel-tool-calls"):
+        result = _share_result(name, usage)
+        assert result.prompt_cache_share_pct == 78.4, result.prompt_cache_share_pct
+        assert cache_ratchet_failures([result]) == [], name
+        cold = _share_result(name, [dict(_call(0, 9000, 1000), model="qwen-3.8-27b")])
+        _assert_ratchet_fails(cold)
+
+
 def test_missing_route_telemetry_fails_closed():
     """No recorded route, or an unclassified one, cannot select a lenient floor."""
     good_share = _share_result("spawn-sub-agents", [_gpt_call(9000, 0, 1000)])
@@ -521,6 +544,7 @@ async def run_all_tests():
     result.record("cache_route_recorded", test_cache_route_is_recorded_from_the_served_model)
     result.record("gpt_floor_uniform_rule", test_gpt_route_floor_is_derived_by_one_rule_from_measured_history)
     result.record("gpt_run_24_derived_floor", test_gpt_route_run_at_24_percent_passes_only_under_the_derived_floor)
+    result.record("direct_cerebras_flash_route_classified", test_direct_cerebras_flash_leg_is_a_classified_route)
     result.record("missing_route_fails_closed", test_missing_route_telemetry_fails_closed)
     result.record(
         "claude_code_cache_ratchet_deploy_warn_only",

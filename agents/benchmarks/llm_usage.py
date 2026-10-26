@@ -20,6 +20,7 @@ PROVIDER_ORDER = (
     "gpt_api_key",
     "anthropic_api_key",
     "foundry",
+    "cerebras",
     "openrouter_model_1",
     "openrouter_model_2",
 )
@@ -43,6 +44,10 @@ def classify_model(model: str) -> tuple[str, str]:
     for suffix, provider in suffixes:
         if model.endswith(suffix):
             return provider, model[: -len(suffix)]
+    # The direct Cerebras hop serves the bare pool ``cerebras_model`` id with no
+    # transport suffix (providers/rose/cerebras.py posts pool_spec.cerebras_model).
+    if any(model and model == spec.cerebras_model for spec in POOL_REGISTRY.values()):
+        return "cerebras", model
     for slot in (0, 1):
         # Waterfalls are not all the same length -- rose-1-oss pins a single
         # open-weights layer -- so the slot must be bounds-checked per pool.
