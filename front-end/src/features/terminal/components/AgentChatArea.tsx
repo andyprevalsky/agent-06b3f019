@@ -128,18 +128,13 @@ function ChatColumn({
 
   const codeAgent = useOpenCodeAgent(a.selectedAgentId);
   if (codeAgent !== null) {
+    const blur = <BlurOverlay selectedAgentId={a.selectedAgentId} {...drip} />;
     return (
       <CodeAgentConversationView
         key={codeAgent.taskId}
         codeAgent={codeAgent}
         readOnlyMessage={readOnlyMessage}
-        backdrop={
-          <BlurOverlay
-            selectedAgentId={a.selectedAgentId}
-            dripStyles={drip.dripStyles}
-            blur={drip.blur}
-          />
-        }
+        backdrop={blur}
       />
     );
   }

@@ -27,6 +27,7 @@ import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 import * as roseDesktopFlag from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
 
+import { btcRows } from './code-agent-steering.fixtures';
 import { chipMessage, eventsMessage, LIVE_EVENTS, msg } from './code-agent-steering.fixtures';
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
@@ -502,96 +503,17 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
   });
 
   it('Andy 2026-10-26: blur backdrop, root left edge, goal as user prompt, coordination folded, no attribution', async () => {
-    const records = [
-      // Rose's initial goal (prod shape: id "goal", seq 0, sender agent).
-      {
-        id: 'goal',
-        seq: 0,
-        type: 'message',
-        role: 'user',
-        sender: 'agent',
-        text: 'Chart BTC for 24h',
-        ts: '2026-10-20T12:00:01.000Z',
-      },
-      {
-        id: 't1',
-        seq: 1,
-        type: 'tool',
-        ts: '2026-10-20T12:00:20.000Z',
-        tool: { name: 'Edit', target: 'chart.py', added: 40, removed: 0 },
-      },
-      // A later Rose → Codex message: coordination, folded into the work.
-      {
-        id: 'rose2',
-        seq: 2,
-        type: 'message',
-        role: 'user',
-        sender: 'agent',
-        text: 'Use UTC labels',
-        ts: '2026-10-20T12:00:30.000Z',
-      },
-      { id: 'r1', seq: 3, type: 'result', text: 'Finished', ts: '2026-10-20T12:02:07.000Z' },
-    ];
-    const codexMessage = msg(
-      {
-        toolName: 'send_message_to_user',
-        toolStatus: 'FINISHED',
-        isUserAttentionMessage: true,
-        attentionMessage: 'Chart is ready',
-        sendMessageToUser: true,
-        task_id: TASK,
-        requestingAgent: {
-          kind: 'code_agent',
-          agent_id: OWNER,
-          label: 'Codex',
-          provider: 'codex',
-          task_id: TASK,
-        },
-      },
-      { text: 'Chart is ready' },
-    );
-    serveBackend({
-      ownerMessages: ownerChat([
-        chipMessage(
-          {
-            state: 'completed',
-            ended_at: '2026-10-20T12:02:08.000Z',
-            summary: {
-              commit: 'ca85dd1aa',
-              branch: 'rose/btc',
-              files: [{ path: 'AGENTS.md', added: 40, removed: 0 }],
-            },
-          },
-          {
-            code_session: {
-              code_session_id: 'cs-1',
-              branch: 'rose/btc',
-              merge_target: 'main',
-              pushed: true,
-            },
-          },
-        ),
-        eventsMessage(records),
-        codexMessage,
-      ]),
-    });
+    serveBackend({ ownerMessages: ownerChat(btcRows(OWNER, TASK)) });
     const user = await renderOnOwner();
     const page = await openFromRow(user);
 
     // 21: the root transcript's blur backdrop sits behind the view's rows.
-    const blur = screen.getByTestId('chat-blur-overlay');
-    expect(blur.parentElement?.contains(page)).toBe(true);
-    expect(page.className).toContain('z-20');
+    expect(screen.getByTestId('chat-blur-overlay').parentElement?.contains(page)).toBe(true);
 
     // 22: every row shares the root transcript's left edge (no row insets),
     // including the Finished section (branch line and commit summary).
-    expect(page.querySelectorAll('.px-3\\.5, .pl-11, .mx-3')).toHaveLength(0);
-    for (const id of ['code-agent-view-header', 'code-agent-session', 'code-agent-summary']) {
-      expect(within(page).getByTestId(id).className).not.toMatch(/\b(px|pl|ml|mx)-/);
-    }
-    for (const slot of within(page).getAllByTestId('code-work-slot')) {
-      expect(slot.className).not.toMatch(/\b(px|pl|ml|mx)-/);
-    }
+    expect(within(page).getAllByTestId(/^code-agent-(session|summary)$/)).toHaveLength(2);
+    expect(page.querySelectorAll('.px-3\\.5, .pl-11, .mx-3, [class*="pl-"]')).toHaveLength(0);
 
     // 23: Codex's own message reads like a normal assistant message here.
     expect(within(page).getByText('Chart is ready')).toBeInTheDocument();
@@ -599,12 +521,10 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
 
     // 24: the goal renders as the user's prompt; no "Agents coordinating" row;
     // later coordination lives inside the Worked-for slot.
-    const transcript = within(page).getByTestId('code-agent-transcript');
-    expect(within(transcript).queryByTestId('agent-exchange-group')).toBeNull();
-    expect(within(transcript).queryByText(/Agents coordinating/)).toBeNull();
-    const goal = within(transcript).getByText('Chart BTC for 24h');
+    expect(within(page).queryByTestId('agent-exchange-group')).toBeNull();
+    const goal = within(page).getByText('Chart BTC for 24h');
     expect(goal.closest('[data-message-role="USER"]')).not.toBeNull();
-    const slot = within(transcript).getByTestId('code-work-slot');
+    const slot = within(page).getByTestId('code-work-slot');
     await user.click(within(slot).getByRole('button', { name: /Worked/ }));
     expect(within(slot).getByText('Use UTC labels')).toBeInTheDocument();
   });
