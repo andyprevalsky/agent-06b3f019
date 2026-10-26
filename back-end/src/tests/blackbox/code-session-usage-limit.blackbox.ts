@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import {
   checkpointCodeSession,
   restoreLatestCheckpoint,
@@ -398,9 +399,13 @@ test('a Mac session’s usage limit marks only the user’s own login; own_only 
   }
 
   let e2bCalls = 0;
-  const kept = await keepAliveCodeTask(macTask.id, async () => {
-    e2bCalls += 1;
-  });
+  const kept = await keepAliveCodeTask(
+    macTask.id,
+    async () => {
+      e2bCalls += 1;
+    },
+    NO_CODE_RESOURCES
+  );
   assert.equal(kept.alive, true);
   assert.equal(e2bCalls, 0, 'a Mac session has no E2B idle window to extend');
 });

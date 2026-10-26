@@ -53,6 +53,7 @@ import type { ClaudeCodeChipVM } from './claudeCodeChip.hooks';
 import { CodeAgentSteerInput, CodeAgentTranscript } from './codeAgentChip.steer';
 import { OpenAppButton } from './app-view/OpenAppButton';
 import { useCodeAgentView } from './code-agent-view/codeAgentViewState';
+import { CodeResourcesIndicator } from './CodeResourcesIndicator';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
@@ -291,6 +292,7 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
             provider={meta.provider}
           />
         )}
+        <CodeResourcesIndicator taskId={meta.task_id} running={running} />
         {elapsed && (
           <span data-testid="code-agent-elapsed" className={`text-xs tabular-nums ${MUTED}`}>
             {elapsed}
