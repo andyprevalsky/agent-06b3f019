@@ -59,6 +59,7 @@ console.log(JSON.stringify({client, prisma: dirname(backend.resolve('prisma/pack
                 "blackbox-auto-rca-env.sh",
                 "assert-prisma-client-current.mjs",
                 "normalize-local-user-phones.sh",
+                "blackbox-phone-env.sh",
             ):
                 source = ROOT / "back-end/scripts" / name
                 if source.exists():

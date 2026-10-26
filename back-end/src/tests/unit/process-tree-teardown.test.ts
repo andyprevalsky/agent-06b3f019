@@ -96,7 +96,7 @@ try {
 const runner = readFileSync(blackboxRunnerPath, 'utf8');
 assert.match(
   runner,
-  /npx tsx src\/bootstrap\.ts >"\$BACKEND_LOG" 2>&1 &\nBACKEND_PID=\$!/,
+  /npx tsx src\/bootstrap\.ts >"\$BACKEND_LOG" 2>&1 &\n[ \t]*BACKEND_PID=\$!/,
   'run-blackbox-tests.sh must record the PID of its isolated backend launcher'
 );
 assert.match(
