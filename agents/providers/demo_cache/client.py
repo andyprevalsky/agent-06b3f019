@@ -870,8 +870,8 @@ def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal
     return not demo_namespace or demo_recording_enabled()
 
 
-async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[str]) -> bool:
-    """Write-only tool gate: the goal and the agent's resolved tree root must both be writable."""
+async def cache_write_decision_for_agent(agent_id: Optional[str], goal: Optional[str]) -> Optional[bool]:
+    """Write-only tool gate: True/False once decided, None while the tree root is unresolved."""
     if not cache_write_allowed(normalize.goal_hash(goal or ""), goal=goal):
         return False
     if demo_recording_enabled() or not agent_id:
@@ -881,8 +881,13 @@ async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[
         # An unresolved tree root may be a frozen DEMO recording; losing one
         # write-through entry is safer than poisoning a replay namespace.
         logger.info("demo_cache.write_skipped_unresolved_agent", agent_id=agent_id)
-        return False
+        return None
     return not normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
+
+
+async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[str]) -> bool:
+    """Write-only tool gate: the goal and the agent's resolved tree root must both be writable."""
+    return await cache_write_decision_for_agent(agent_id, goal) is True
 
 
 async def cache_set(

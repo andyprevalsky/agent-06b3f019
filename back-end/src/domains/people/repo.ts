@@ -145,7 +145,7 @@ export async function findRecentMessages(
 ) {
   return prisma.messageRecord.findMany({
     where: {
-      person: { userId },
+      userId,
       ...(cutoffTime === undefined ? {} : { timestamp: { gte: cutoffTime } }),
     },
     orderBy: { timestamp: 'desc' },

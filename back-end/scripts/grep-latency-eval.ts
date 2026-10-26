@@ -297,6 +297,7 @@ async function seed(scale: number): Promise<SeedResult> {
   // class target, a multiline block, a mixed-case token, and a 30-row ledger.
   const messageRows: Array<{
     personId: string;
+    userId: string;
     channel: 'EMAIL';
     from: string;
     to: string;
@@ -319,6 +320,7 @@ async function seed(scale: number): Promise<SeedResult> {
       } else if (idx % 91 === 0) body = `MiXeDcAsE Beacon\n${body}`; // case-insensitive target
       messageRows.push({
         personId: person.id,
+        userId: EVAL_USER_ID,
         channel: 'EMAIL',
         from: `${idx}@${FIXTURE_DOMAIN}`,
         to: `me@${FIXTURE_DOMAIN}`,
@@ -333,6 +335,7 @@ async function seed(scale: number): Promise<SeedResult> {
   for (let i = 0; i < 30; i++) {
     messageRows.push({
       personId: ledgerPerson,
+      userId: EVAL_USER_ID,
       channel: 'EMAIL',
       from: `ledger@${FIXTURE_DOMAIN}`,
       to: `me@${FIXTURE_DOMAIN}`,
@@ -348,6 +351,7 @@ async function seed(scale: number): Promise<SeedResult> {
   ADVERSARIAL_MESSAGES.forEach((message, i) => {
     messageRows.push({
       personId: ledgerPerson,
+      userId: EVAL_USER_ID,
       channel: 'EMAIL',
       from: `adversarial@${FIXTURE_DOMAIN}`,
       to: `me@${FIXTURE_DOMAIN}`,
