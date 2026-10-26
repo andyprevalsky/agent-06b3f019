@@ -24,6 +24,7 @@ sources:
   - task Rose desktop UI review 2026-10-26 item 11 (Integrations screenshot; prod Render logs 15:00-16:30Z and read-only IntegrationSyncProgress rows for user 1f85ff25)
   - commit 75ce1addd (repro, branch fix/ui26-cookies)
   - commit 33f8e72c4 (fix, branch fix/ui26-cookies)
+  - commit 120aa86fe (repro probe scoped to the holder's blocked backend)
 repro: back-end/src/tests/blackbox/integration-accounts.pipelines.cases.ts — "cookie re-upload of a synced browser keeps reading synced (no 0-of-N bar)" (bash scripts/run-blackbox-tests.sh integration-accounts)
 status: fixed
 ---
@@ -102,7 +103,12 @@ goes down.
 Not changed (outside the reported defect): the Mac app still re-uploads
 unchanged cookie sets every 5 minutes, and the per-realm pre-phase still costs
 O(realms) serial queries. On a first import, the bar can therefore still sit
-at 0% during that pre-phase.
+at 0% during that pre-phase. Two overlapping refreshes (seen in prod at
+15:03-15:04Z) now resolve last-terminal-write-wins, because a refresh writes
+nothing before its terminal write that could retire the other run's id. A late
+failure can briefly show `sync_failed`, or a late success can hide an earlier
+failure, until the next 5-minute cycle. A row left `syncing` by a dead writer,
+or `failed`, shows the bar on its next upload.
 
 Golden reference: none of the reference harnesses (claude-code-src, codex,
 openclaw, hermes-agent) has an integration-sync progress bar. The nearest
