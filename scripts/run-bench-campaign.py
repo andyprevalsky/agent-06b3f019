@@ -480,6 +480,10 @@ def publish_campaign_group(
     return completed
 
 
+# Largest Fly shared-cpu guest size; the conservative count for a configless Machine.
+UNREACHABLE_HOST_SHARED_CPU_ALLOWANCE = 8
+
+
 def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, peak: int,
                                 baseline: list[dict[str, object]] | None, autoscale_max: int = 15, repetitions: int = 1) -> dict[str, object]:
     """Derive opt-in operator defaults; unknown native quotas never grant admission."""
@@ -566,6 +570,11 @@ def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, pe
         if machine.get("state") in ("stopped", "destroyed"):
             continue
         config = machine.get("config")
+        if config is None and machine.get("host_status") == "unreachable":
+            # Fly omits the config of a Machine on an unreachable host. Reserve the
+            # largest shared size so the governor never under-counts it.
+            baseline_shared += UNREACHABLE_HOST_SHARED_CPU_ALLOWANCE
+            continue
         if not isinstance(config, dict) or not isinstance(config.get("guest"), dict):
             raise ValueError("unknown native baseline configuration")
         guest = config["guest"]
