@@ -3,6 +3,7 @@ import type { Message } from '../hooks';
 import { isUserFacingWorkBoundary } from './trajectoryUserFacingBoundary';
 import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { eventTimeMs, parseAgentToAgentMessage } from '../hooks/codeAgentContract';
+import { localizeTimestamps } from '@/lib/localDateTime';
 
 export interface TrajectoryActivity {
   key: string;
@@ -49,7 +50,7 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
     key: message.message_id,
     message,
     kind: tool === 'thought' ? 'thinking' : 'work',
-    label: title,
+    label: localizeTimestamps(title),
   };
 }
 
