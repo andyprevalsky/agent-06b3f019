@@ -1,4 +1,10 @@
 import { testLanternCredentials } from './integrations.context';
+import {
+  testMessagingUpload_survivesProcessExitAfterAck,
+  testMessagingUpload_largeLegacyBodyIngestsInBoundedParts,
+  testMessagingUpload_nonFinalChunkKeepsCursor,
+  testContactUpsert_roundTripsScaleWithChunks,
+} from './integrations.messaging-ingestion.cases';
 import { testGoogleRevocationFailures_doNotStarveLaterPurge } from './integrations.email-credentials-2.cases';
 import { testStateTransition_fullLifecycle } from './integrations.lifecycle-boundaries-1.cases';
 import {
@@ -30,6 +36,22 @@ export function sequentialTestsPart1() {
     {
       name: 'claude-code billing-failure -- funded API key backed off globally',
       fn: testClaudeCodeBillingFailure_backsOffFundedApiKey,
+    },
+    {
+      name: 'messaging upload -- acknowledged upload survives process exit after the 200',
+      fn: testMessagingUpload_survivesProcessExitAfterAck,
+    },
+    {
+      name: 'messaging upload -- large legacy body ingests once in bounded parts',
+      fn: testMessagingUpload_largeLegacyBodyIngestsInBoundedParts,
+    },
+    {
+      name: 'messaging upload -- non-final chunk keeps the incremental cursor',
+      fn: testMessagingUpload_nonFinalChunkKeepsCursor,
+    },
+    {
+      name: 'contact upsert -- DB round trips scale with chunks, not contacts',
+      fn: testContactUpsert_roundTripsScaleWithChunks,
     },
   ];
 }

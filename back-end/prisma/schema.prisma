@@ -778,6 +778,35 @@ model MessageRecord {
   @@index([googleAccountEmail, createdAt])
 }
 
+/// Durable queue for messaging history uploads (iMessage, WhatsApp, Telegram).
+/// The upload route stores bounded parts here and acknowledges; a claimed
+/// drain parses them, so a deploy or crash after the 200 cannot lose a payload.
+/// `payload` is cleared once a part is processed or permanently fails.
+model MessagingUploadJob {
+  id            String    @id @default(uuid())
+  userId        String
+  integrationId String
+  platform      String
+  uploadId      String
+  part          Int
+  parts         Int
+  payload       Json?
+  accessedAt    String?
+  syncComplete  Boolean   @default(true)
+  contacts      Int
+  messages      Int
+  attempts      Int       @default(0)
+  claimedUntil  DateTime?
+  processedAt   DateTime?
+  failedAt      DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([uploadId, part])
+  @@index([processedAt, failedAt, claimedUntil, createdAt])
+  @@index([userId, createdAt])
+}
+
 model GoogleDataPurge {
   id              String    @id @default(uuid())
   userId          String

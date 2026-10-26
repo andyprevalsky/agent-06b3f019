@@ -204,76 +204,59 @@ export async function upsertPersonAndMessageRecords(
       if (p.linkedinUrl) personMap.set(p.linkedinUrl, p.id);
     });
 
-    // Process each contact's messages
+    // Insert every message of the chunk together, then refresh the chunk's
+    // person stats in one statement: O(chunks) round trips, not O(contacts).
+    const resolved: Array<{ personId: string; contact: ContactToUpsert }> = [];
     for (const contact of chunk) {
-      try {
-        const personId = personMap.get(contact.identifier);
-
-        if (!personId) {
-          log.warn('Person not found for contact, skipping messages', {
-            jobId,
-          });
-          continue;
-        }
-
-        if (!contact.messages?.length) {
-          log.warn('No messages for contact, skipping', {
-            jobId,
-          });
-          continue;
-        }
-
-        // Insert messages in batches
-        for (
-          let batchIndex = 0;
-          batchIndex < contact.messages.length;
-          batchIndex += MESSAGE_BATCH_SIZE
-        ) {
-          const batch = contact.messages.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE);
-
-          await createMessageBatch(
-            batch.map((msg) => ({
-              personId,
-              channel: msg.channel,
-              from: msg.from,
-              to: msg.to,
-              timestamp: msg.timestamp,
-              message: msg.message,
-              externalId: msg.externalId,
-              googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
-            })),
-            userId,
-            googleAccountEmail,
-            googleCredentialId
-          );
-        }
-
-        // Calculate communication frequency and update person stats
-        const frequency = calculateCommunicationFrequency(contact.messages);
-
-        await prisma.person.update({
-          where: { id: personId },
-          data: {
-            messagesExchanged: contact.messages.length,
-            communicationFrequency: frequency,
-          },
-        });
-
-        contactsProcessed++;
-        messagesProcessed += contact.messages.length;
-
-        log.info('Processed contact', {
-          jobId,
-          messagesInContact: contact.messages.length,
-          messagesProcessed,
-          totalMessages,
-        });
-      } catch (error) {
-        if (error instanceof DisconnectedGoogleCredentialError) throw error;
-        log.error('Error processing contact', {
-          jobId,
-        });
+      const personId = personMap.get(contact.identifier);
+      if (!personId) {
+        log.warn('Person not found for contact, skipping messages', { jobId });
+        continue;
       }
+      if (!contact.messages?.length) {
+        log.warn('No messages for contact, skipping', { jobId });
+        continue;
+      }
+      resolved.push({ personId, contact });
+    }
+    if (resolved.length === 0) continue;
+
+    try {
+      const rows = resolved.flatMap(({ personId, contact }) =>
+        contact.messages.map((msg) => ({
+          personId,
+          channel: msg.channel,
+          from: msg.from,
+          to: msg.to,
+          timestamp: msg.timestamp,
+          message: msg.message,
+          externalId: msg.externalId,
+          googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
+        }))
+      );
+      for (let batchIndex = 0; batchIndex < rows.length; batchIndex += MESSAGE_BATCH_SIZE) {
+        await createMessageBatch(
+          rows.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE),
+          userId,
+          googleAccountEmail,
+          googleCredentialId
+        );
+      }
+      await updatePersonMessageStats(resolved);
+      contactsProcessed += resolved.length;
+      messagesProcessed += rows.length;
+      log.info('Processed contact chunk', {
+        jobId,
+        contactsInChunk: resolved.length,
+        messagesProcessed,
+        totalMessages,
+      });
+    } catch (error) {
+      if (error instanceof DisconnectedGoogleCredentialError) throw error;
+      log.error('Error processing contact chunk', {
+        jobId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -283,6 +266,32 @@ export async function upsertPersonAndMessageRecords(
     contactsProcessed,
   });
   return { contacts: contactsProcessed, messages: messagesProcessed };
+}
+
+/**
+ * Refresh messagesExchanged (stored messages with the person, so a history
+ * split across uploads still counts in full) and the communication frequency
+ * of this batch, for a whole chunk in one UPDATE. Later contacts that resolve
+ * to the same person win, as the former per-contact updates did.
+ */
+async function updatePersonMessageStats(
+  resolved: Array<{ personId: string; contact: ContactToUpsert }>
+): Promise<void> {
+  const frequencies = new Map<string, string>();
+  for (const { personId, contact } of resolved) {
+    frequencies.set(personId, calculateCommunicationFrequency(contact.messages));
+  }
+  const ids = Array.from(frequencies.keys());
+  const values = ids.map((id) => frequencies.get(id) as string);
+  await prisma.$executeRaw`
+    UPDATE "Person" AS p
+    SET "messagesExchanged" = (
+          SELECT COUNT(*)::int FROM "MessageRecord" m WHERE m."personId" = p."id"
+        ),
+        "communicationFrequency" = v.frequency,
+        "updatedAt" = NOW()
+    FROM unnest(${ids}::text[], ${values}::text[]) AS v(id, frequency)
+    WHERE p."id" = v.id`;
 }
 
 /**

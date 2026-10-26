@@ -19,6 +19,7 @@ import {
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
+import { runMessagingUploadJobs } from './domains/integrations/uploadService.messagingJobs';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { runStuckAgentBugReports } from './domains/agents/stuckAgentBugReportService';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
@@ -289,6 +290,24 @@ function scheduleGoogleDataPurge(): void {
   cron.schedule('* * * * *', run);
 }
 
+/** Drain durable messaging upload parts, recovering any lost to a restart or crash. */
+function scheduleMessagingUploadJobs(): void {
+  if (process.env.DISABLE_MESSAGING_UPLOAD_JOBS === '1') {
+    createLogger('Cron').info('Messaging upload jobs disabled by DISABLE_MESSAGING_UPLOAD_JOBS');
+    return;
+  }
+  const cronLog = createLogger('Cron');
+  const run = () => {
+    runMessagingUploadJobs().catch((error: unknown) => {
+      cronLog.error('Messaging upload jobs failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+}
+
 function schedulePlaidSync(): void {
   if (process.env.DISABLE_PLAID_SYNC === '1') {
     createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
@@ -487,6 +506,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleSteelSessionReaper();
   scheduleGmailSync();
   scheduleGoogleDataPurge();
+  scheduleMessagingUploadJobs();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
