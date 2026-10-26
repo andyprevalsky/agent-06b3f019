@@ -203,6 +203,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
             clientSource={agents.clientSource}
             agents={agents.agents}
             isLoadingAgents={agents.isLoadingAgents}
+            hasLoadedAgents={agents.hasLoadedAgents}
             selectedAgentId={agents.selectedAgentId}
             onRefreshAgents={agents.loadAgents}
             dripStyles={drip.dripStyles}
