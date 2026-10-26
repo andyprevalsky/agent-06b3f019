@@ -104,6 +104,14 @@ expired leftovers from crashed holders, which the next acquire overwrites. Each
 held lease costs zero connections. Waiters back off exponentially, from 100 ms
 up to 1 s, within the same 120 s deadline.
 
+Review follow-ups (deploy takeover, 2026-10-26):
+- Acquire is idempotent for the same owner. A P1017 retry after a committed
+  insert re-takes its own lease instead of waiting 120 s behind itself.
+- Lease renewal and storage-write fencing were not added. The old lock had the
+  same fixed 120 s bound and the same check-then-write window, so this keeps
+  parity. Fencing R2 overwrites would need a lease generation carried into
+  every storage write; that is tracked as a follow-up.
+
 ## Human feedback
 
 None recorded.

@@ -188,7 +188,11 @@ export class ArchivedTraceNotFoundError extends Error {
  */
 function upsertTrajectoryAgentsSql(rows: ArchivedTrajectoryRow[]): Prisma.Sql | null {
   const agents = new Map<string, ArchivedTrajectoryRow>();
-  for (const row of rows) agents.set(row.agentId, row);
+  for (const row of rows) {
+    // An agent missing from a partial fixture has no metadata; writing it would
+    // blank the real goal/title the Message trigger already stored.
+    if (row.agentGoal !== '' || row.agentTitle !== null) agents.set(row.agentId, row);
+  }
   if (agents.size === 0) return null;
   return Prisma.sql`
     INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle", "updatedAt")

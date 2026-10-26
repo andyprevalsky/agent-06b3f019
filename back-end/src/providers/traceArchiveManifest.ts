@@ -338,6 +338,8 @@ async function acquireManifestLease(rootAgentId: string, ownerId: string): Promi
     ON CONFLICT ("rootAgentId") DO UPDATE
       SET "ownerId" = EXCLUDED."ownerId", "expiresAt" = EXCLUDED."expiresAt"
       WHERE "TraceArchiveManifestLease"."expiresAt" <= clock_timestamp()
+        -- A retried acquire (P1017 after commit) must not wait on its own lease.
+        OR "TraceArchiveManifestLease"."ownerId" = EXCLUDED."ownerId"
     RETURNING "ownerId"
   `;
   return rows[0]?.ownerId === ownerId;

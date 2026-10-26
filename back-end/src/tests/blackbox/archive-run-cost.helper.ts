@@ -309,6 +309,32 @@ export async function testTrajectoryGoalStoredOncePerAgent(seed: RunSeed): Promi
     assert.strictEqual(hit.agentGoal, goal, 'search must still return the agent goal');
     assert.strictEqual(hit.agentTitle, 'Goal probe');
   }
+  // A partial archive that lacks the Agent row carries no metadata; indexing
+  // it must not blank the goal/title already stored for that agent.
+  const partial = {
+    ...fixture,
+    rows: {
+      Agent: [],
+      Message: [
+        {
+          id: `goal-probe-${seed.rootAgentId}-partial`,
+          agentId: seed.rootAgentId,
+          role: 'ASSISTANT',
+          text: 'goal probe partial archive',
+          createdAt: new Date(now + 10).toISOString(),
+        },
+      ],
+    },
+  } as unknown as ScopedDbFixture;
+  await indexArchivedTrace(seed.rootAgentId, partial, []);
+  const kept = await prisma.$queryRaw<Array<{ agentGoal: string; agentTitle: string | null }>>`
+    SELECT "agentGoal", "agentTitle" FROM "AgentTrajectoryAgent" WHERE "agentId" = ${seed.rootAgentId}
+  `;
+  assert.deepStrictEqual(
+    kept,
+    [{ agentGoal: goal, agentTitle: 'Goal probe' }],
+    'a partial archive without agent metadata blanked the stored goal'
+  );
 }
 
 /**
