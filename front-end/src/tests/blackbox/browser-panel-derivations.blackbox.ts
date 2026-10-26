@@ -344,49 +344,33 @@ describe('computeActiveBrowserPanels', () => {
     // kill browser run 1 (call-1) and spawn run 2 (call-2) in the background on
     // the SAME task_id. Run 1's task_complete must not hide run 2's chip while
     // the agents-running pane shows that browser running.
-    const row = (id: string, second: number, metadata: Record<string, unknown>) => ({
-      message_id: id,
-      timestamp: `2026-10-26T15:59:${String(second).padStart(2, '0')}.000Z`,
-      text: '',
-      role: 'TOOL' as const,
-      metadata: { toolName: 'spawn_browser_agent', task_id: 'task-shared', ...metadata },
-    });
-    const msgs = [
-      row('run1-init', 7, {
-        toolCallId: 'call-1',
-        action_type: 'browser',
-        browser_url: 'https://live/run-1',
-        toolStatus: 'IN_PROGRESS',
-      }),
-      row('run1-done', 8, {
-        toolCallId: 'call-1',
-        action_type: 'task_complete',
-        toolStatus: 'FINISHED',
-      }),
-      row('run1-diagnostics', 9, {
-        toolCallId: 'browser-diagnostics:task-shared',
-        action_type: 'diagnostics',
-        toolStatus: 'FINISHED',
-      }),
-      row('run2-init', 27, {
-        toolCallId: 'call-2',
-        action_type: 'browser',
-        browser_url: 'https://live/run-2',
-        toolStatus: 'IN_PROGRESS',
-      }),
-    ] as Parameters<typeof computeActiveBrowserPanels>[0];
+    type Rows = Parameters<typeof computeActiveBrowserPanels>[0];
+    const row = (id: string, second: number, toolCallId: string, action_type: string) =>
+      ({
+        message_id: id,
+        timestamp: `2026-10-26T15:59:${String(second).padStart(2, '0')}.000Z`,
+        text: '',
+        role: 'TOOL' as const,
+        metadata: {
+          toolName: 'spawn_browser_agent',
+          task_id: 'task-shared',
+          toolCallId,
+          action_type,
+          toolStatus: action_type === 'browser' ? ('IN_PROGRESS' as const) : ('FINISHED' as const),
+          ...(action_type === 'browser' ? { browser_url: `https://live/${toolCallId}` } : {}),
+        },
+      }) as Rows[number];
+    const msgs: Rows = [
+      row('run1-init', 7, 'call-1', 'browser'),
+      row('run1-done', 8, 'call-1', 'task_complete'),
+      row('run1-diagnostics', 9, 'browser-diagnostics:task-shared', 'diagnostics'),
+      row('run2-init', 27, 'call-2', 'browser'),
+    ];
     expect(computeActiveBrowserPanels(msgs)).toEqual([
-      { taskId: 'task-shared', browserUrl: 'https://live/run-2' },
+      { taskId: 'task-shared', browserUrl: 'https://live/call-2' },
     ]);
     // Run 2's own terminal still closes the chip.
-    const ended = [
-      ...msgs,
-      row('run2-done', 40, {
-        toolCallId: 'call-2',
-        action_type: 'task_complete',
-        toolStatus: 'FINISHED',
-      }),
-    ] as Parameters<typeof computeActiveBrowserPanels>[0];
+    const ended: Rows = [...msgs, row('run2-done', 40, 'call-2', 'task_complete')];
     expect(computeActiveBrowserPanels(ended)).toEqual([]);
   });
 
