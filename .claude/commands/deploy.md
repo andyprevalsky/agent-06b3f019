@@ -621,7 +621,8 @@ their assertions or test counts:
 `bash scripts/tests/setup-db-concurrency.test.sh`,
 `bash scripts/tests/run-port-collision.test.sh`,
 `bash scripts/tests/run-cloud-benchmark-workers.test.sh`,
-`bash scripts/tests/blackbox-archive-env.test.sh`, and
+`bash scripts/tests/blackbox-archive-env.test.sh`,
+`bash scripts/tests/render-backend-build.test.sh`, and
 `python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
