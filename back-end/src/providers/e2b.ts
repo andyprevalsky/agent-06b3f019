@@ -3,6 +3,7 @@ import { createLogger } from './logger';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
+  fastModeProxySigningAvailable,
   resolveFastModeWriteEnabled,
 } from './codeAgentFastModeEnv';
 import type { FilePointer } from './storage';
@@ -18,7 +19,6 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
-import { isRoseDesktopUser } from '../utils/roseDesktop';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -45,7 +45,7 @@ import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
-import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
+import { prepareCodeSessionWorkspace, promptFlagsForUser } from './codeSessionWorkspace';
 import { applyPreviewUrlEnv, autostartRosePreview } from './codePreview/sandbox';
 import { isRoseRepoUrl } from './codePreview/preview';
 import {
@@ -194,7 +194,7 @@ async function createClaudeCodeSessionUnlocked(
     workDir,
     branch: codeSession?.branch,
     mergeTarget: codeSession?.mergeTarget,
-    roseDesktop: isRoseDesktopUser(userId),
+    ...promptFlagsForUser(userId),
     roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
   });
 
@@ -327,7 +327,7 @@ async function createClaudeCodeSessionUnlocked(
     );
   } else if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
     envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
-    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+    log.info('Fast Mode: routing sandbox Anthropic calls via the tee-proxy');
   } else if (sandboxTransport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
     log.info(`Routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
@@ -524,7 +524,7 @@ export async function createCodexCodeSession(
           workDir,
           branch: codeSession?.branch,
           mergeTarget: codeSession?.mergeTarget,
-          roseDesktop: isRoseDesktopUser(userId),
+          ...promptFlagsForUser(userId),
         });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
@@ -605,8 +605,8 @@ export async function createCodexCodeSession(
   });
   if (fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined) {
     envs.CODEX_FAST_MODE_PROXY_URL = fastModeEnv.CODEX_FAST_MODE_PROXY_URL;
-    log.info(`Fast Mode: routing sandbox Codex calls via ${envs.CODEX_FAST_MODE_PROXY_URL}`);
-  } else if (fastModeCacheEnabled === true) {
+    log.info('Fast Mode: routing sandbox Codex calls via the tee-proxy');
+  } else if (fastModeCacheEnabled === true && fastModeProxySigningAvailable()) {
     throw new Error(
       'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured. ' +
         'Set FAST_MODE_CODEX_PROXY_URL or FAST_MODE_ANTHROPIC_PROXY_URL ending in /anthropic-proxy.'

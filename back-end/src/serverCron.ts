@@ -19,6 +19,7 @@ import {
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
+import { runMessagingUploadJobs } from './domains/integrations/uploadService.messagingJobs';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { runStuckAgentBugReports } from './domains/agents/stuckAgentBugReportService';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
@@ -245,6 +246,9 @@ function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
   cronLog.info('Temporal workflow cleanup scheduled (every minute)');
 }
 
+/** Matches the Gmail crash-recovery window; one run should never take longer. */
+const CRON_RUN_STALE_MS = 60 * 60 * 1000;
+
 function scheduleGmailSync(): void {
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
     createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
@@ -252,13 +256,28 @@ function scheduleGmailSync(): void {
   }
   // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
   const cronLog = createLogger('Cron');
+  // Each integration is claimed atomically (claimGmailIntegrationForSync), so
+  // instances can share the work; this only stops one process stacking ticks.
+  // A run that hangs past the stale window no longer blocks later ticks.
+  let runningSince: number | null = null;
   const runSync = () => {
+    if (runningSince !== null && Date.now() - runningSince < CRON_RUN_STALE_MS) {
+      cronLog.info('Gmail sync already running; skipping overlapping tick');
+      return;
+    }
+    if (runningSince !== null)
+      cronLog.warn('Gmail sync previous run exceeded the stale window; starting anyway');
+    runningSince = Date.now();
     cronLog.info('Running Gmail sync job...');
-    runGmailSyncJob().catch((err) => {
-      cronLog.error('Gmail sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runGmailSyncJob()
+      .catch((err) => {
+        cronLog.error('Gmail sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        runningSince = null;
       });
-    });
   };
   runSync();
   cron.schedule('*/5 * * * *', runSync);
@@ -289,19 +308,54 @@ function scheduleGoogleDataPurge(): void {
   cron.schedule('* * * * *', run);
 }
 
+/** Drain durable messaging upload parts, recovering any lost to a restart or crash. */
+function scheduleMessagingUploadJobs(): void {
+  if (process.env.DISABLE_MESSAGING_UPLOAD_JOBS === '1') {
+    createLogger('Cron').info('Messaging upload jobs disabled by DISABLE_MESSAGING_UPLOAD_JOBS');
+    return;
+  }
+  const cronLog = createLogger('Cron');
+  const run = () => {
+    runMessagingUploadJobs().catch((error: unknown) => {
+      cronLog.error('Messaging upload jobs failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+}
+
 function schedulePlaidSync(): void {
   if (process.env.DISABLE_PLAID_SYNC === '1') {
     createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
     return;
   }
   const cronLog = createLogger('Cron');
+  // Each item sync holds a cross-instance lease (claimPlaidItemSync); this only
+  // stops one process stacking ticks.
+  // A run that hangs past the stale window no longer blocks later ticks.
+  let runningSince: number | null = null;
   const runPlaidSync = () => {
+    if (runningSince !== null && Date.now() - runningSince < CRON_RUN_STALE_MS) {
+      cronLog.info('Plaid transaction sync already running; skipping overlapping tick');
+      return;
+    }
+    if (runningSince !== null)
+      cronLog.warn(
+        'Plaid transaction sync previous run exceeded the stale window; starting anyway'
+      );
+    runningSince = Date.now();
     cronLog.info('Running Plaid transaction sync job...');
-    runPlaidTransactionSyncJob().catch((err) => {
-      cronLog.error('Plaid transaction sync job error', {
-        error: err instanceof Error ? err.message : String(err),
+    runPlaidTransactionSyncJob()
+      .catch((err) => {
+        cronLog.error('Plaid transaction sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        runningSince = null;
       });
-    });
   };
   cron.schedule('*/5 * * * *', runPlaidSync);
   cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
@@ -487,6 +541,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleSteelSessionReaper();
   scheduleGmailSync();
   scheduleGoogleDataPurge();
+  scheduleMessagingUploadJobs();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();

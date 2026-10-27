@@ -220,6 +220,28 @@ model Message {
 /// Search projection of live messages and finalized R2 trace bundles. Archive
 /// rows deliberately have no FK to Message: archived traces remain searchable
 /// after operational Agent/Message rows are purged.
+/// Per-root trace-archive manifest lease. A row lease (not a transaction-held
+/// advisory lock) so no pooled connection is pinned across R2 storage I/O.
+model TraceArchiveManifestLease {
+  rootAgentId String   @id
+  ownerId     String
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// One row per agent in trajectory search: its goal and title, stored once
+/// instead of on every AgentTrajectorySearch message row.
+model AgentTrajectoryAgent {
+  agentId    String   @id
+  userId     String
+  agentGoal  String   @default("")
+  agentTitle String?
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+}
+
 model AgentTrajectorySearch {
   messageId   String   @id
   userId      String
@@ -781,6 +803,35 @@ model MessageRecord {
   // planner walk other users' rows whenever one user owns a large share.
   @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
+}
+
+/// Durable queue for messaging history uploads (iMessage, WhatsApp, Telegram).
+/// The upload route stores bounded parts here and acknowledges; a claimed
+/// drain parses them, so a deploy or crash after the 200 cannot lose a payload.
+/// `payload` is cleared once a part is processed or permanently fails.
+model MessagingUploadJob {
+  id            String    @id @default(uuid())
+  userId        String
+  integrationId String
+  platform      String
+  uploadId      String
+  part          Int
+  parts         Int
+  payload       Json?
+  accessedAt    String?
+  syncComplete  Boolean   @default(true)
+  contacts      Int
+  messages      Int
+  attempts      Int       @default(0)
+  claimedUntil  DateTime?
+  processedAt   DateTime?
+  failedAt      DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([uploadId, part])
+  @@index([processedAt, failedAt, claimedUntil, createdAt])
+  @@index([userId, createdAt])
 }
 
 model GoogleDataPurge {
@@ -2265,4 +2316,18 @@ model IPhoneAcquireIntent {
 
   @@unique([deviceId, browserTaskId, requestKey])
   @@index([leaseId])
+}
+
+/// Cross-instance ephemeral state (providers/sharedState.ts): short-lived flow
+/// state, dedupe claims and leases that every backend instance must agree on.
+/// Rows expire; writers reap expired rows in small batches.
+model SharedEphemeralState {
+  namespace String
+  key       String
+  value     Json
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([namespace, key])
+  @@index([expiresAt])
 }

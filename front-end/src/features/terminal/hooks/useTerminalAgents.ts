@@ -242,6 +242,7 @@ function buildReturn(a: BuildArgs) {
     isChatMode: a.ctx.isChatMode,
     agents: overlaySelectedAgentTitle(a.agentList.agents, a.ctx.agent),
     isLoadingAgents: a.agentList.isLoadingAgents,
+    hasLoadedAgents: a.agentList.hasLoadedAgents,
     resumingAgentId: a.actions.resumingAgentId,
     isPausing: a.actions.isPausing,
     ancestors: a.ancestors,

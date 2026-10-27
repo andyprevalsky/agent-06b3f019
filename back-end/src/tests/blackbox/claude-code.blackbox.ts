@@ -402,15 +402,14 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
       return true;
     }
   }
-  // The token-only route deliberately excludes EXPIRED auth_error rows. Claude
-  // Code can still refresh Andy's full OAuth envelope in the real E2B path.
+  // The real E2B path receives only a live access token (never a refresh
+  // token), so the smoke can never rotate a grant another holder shares.
   const credential = await fetchClaudeCodeCredentialsWithMeta(DEV_USER_ID);
   return (
     credential?.source === 'user' &&
     credential.userId === DEV_USER_ID &&
-    credential.credentialMode === 'oauth_envelope' &&
-    typeof credential.credentials === 'string' &&
-    credential.credentials.length > 0
+    typeof credential.accessToken === 'string' &&
+    credential.accessToken.startsWith('sk-ant-')
   );
 }
 
@@ -695,7 +694,7 @@ function testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked() {
   );
 }
 
-async function testExpiredClaudeCredentialSelectsRefreshableAccount() {
+async function testExpiredClaudeCredentialIsNeverRefreshedInSandbox() {
   const userId = crypto.randomUUID();
   try {
     for (const [index, refreshToken] of ['', 'test-refresh'].entries()) {
@@ -716,14 +715,9 @@ async function testExpiredClaudeCredentialSelectsRefreshableAccount() {
         },
       });
     }
+    // Refreshing a stored grant revokes the user's own Claude Code that holds it.
     const credential = await fetchClaudeCodeCredentialsWithMeta(userId);
-    assert(credential?.source === 'user', 'must use this user’s own Claude credential');
-    assert(credential.credentialMode === 'oauth_envelope', 'must skip token-only expired row');
-    const parsed = JSON.parse(credential.credentials ?? '{}') as {
-      claudeAiOauth?: { refreshToken?: string; expiresAt?: number };
-    };
-    assert(parsed.claudeAiOauth?.refreshToken === 'test-refresh', 'refresh token must be retained');
-    assert(parsed.claudeAiOauth?.expiresAt === 0, 'sandbox copy must force refresh');
+    assert(credential?.source !== 'user', 'an EXPIRED own credential must not be served');
   } finally {
     await prisma.integration.deleteMany({ where: { userId, name: 'claude_code' } });
   }
@@ -1720,8 +1714,8 @@ async function runAll() {
       fn: async () => testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked(),
     },
     {
-      name: 'claude credentials -- expired account scan uses refreshable envelope',
-      fn: testExpiredClaudeCredentialSelectsRefreshableAccount,
+      name: 'claude credentials -- expired account is never refreshed in a sandbox',
+      fn: testExpiredClaudeCredentialIsNeverRefreshedInSandbox,
     },
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',

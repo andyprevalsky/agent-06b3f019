@@ -17,13 +17,14 @@ beforeEach(() => {
   localStorage.clear();
   mockSession();
 });
-function renderList() {
-  renderWithProviders(
+const listAgents = [
+  makeAgent({ agent_id: 'home-agent', goal: 'Home work', project_id: null }),
+  makeAgent({ agent_id: 'rose-agent', goal: 'Rose work', project_id: 'p-rose' }),
+];
+function mobileList({ agents = listAgents, isLoading = false } = {}) {
+  return (
     <RoseMobileAgentList
-      agents={[
-        makeAgent({ agent_id: 'home-agent', goal: 'Home work', project_id: null }),
-        makeAgent({ agent_id: 'rose-agent', goal: 'Rose work', project_id: 'p-rose' }),
-      ]}
+      agents={agents}
       selectedAgentId={null}
       onSelectAgent={vi.fn()}
       onClose={vi.fn()}
@@ -35,11 +36,14 @@ function renderList() {
       }}
       query=""
       contentMatchAgentIds={new Set()}
-      isLoading={false}
+      isLoading={isLoading}
       isSearching={false}
       searchError={null}
-    />,
+    />
   );
+}
+function renderList() {
+  return renderWithProviders(mobileList());
 }
 it('uses the original grouped rows and gear settings instead of a separate Projects dashboard', async () => {
   mockProjectsApi([makeProject({ id: 'website', name: 'Website' }), makeProject()]);
@@ -81,6 +85,29 @@ it('creates inline with Enter and cancels with Escape; keeps a failed name for r
   fireEvent.keyDown(input, { key: 'Enter' });
   expect(await screen.findByRole('alert')).toHaveTextContent('Could not create project');
   expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Keep this name');
+});
+it('keeps the list, inline project input and project menu mounted while agents refresh in the background', async () => {
+  mockProjectsApi([makeProject()]);
+  const view = renderWithProviders(mobileList({ agents: [], isLoading: true }));
+  expect(screen.getByLabelText('Loading agents')).toBeVisible();
+  view.rerender(mobileList());
+  fireEvent.click(await screen.findByRole('button', { name: '+ New project' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'New project name' }), {
+    target: { value: 'Website' },
+  });
+  // Defence in depth: even an isLoading refresh must not hide existing rows.
+  view.rerender(mobileList({ isLoading: true }));
+  expect(screen.queryByLabelText('Loading agents')).toBeNull();
+  expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Website');
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'New project name' }), { key: 'Escape' });
+  view.rerender(mobileList());
+  const menu = await openContextMenu(
+    screen.getByTestId('rose-project-row-p-rose'),
+    'rose-project-menu',
+  );
+  view.rerender(mobileList({ isLoading: true }));
+  expect(menu).toBeInTheDocument();
+  expect(within(menu).getByRole('menuitem', { name: 'Delete project' })).toBeVisible();
 });
 it('saves only changed repository fields from the existing gear settings', async () => {
   const state = mockProjectsApi([makeProject()]);

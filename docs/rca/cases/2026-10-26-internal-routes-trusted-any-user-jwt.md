@@ -10,8 +10,9 @@ first_bad_boundary: back-end/src/providers/auth.ts authenticate — admits the i
 symptoms:
   - POST /api/codex-code-session/create with a user JWT and harness_mode rose returns 200 with ws_url
   - user JWT reaches /api/send-sms, /api/vapi/call, /api/fast-cache/set, /api/archive/artifact
-  - GET /api/claude-code-session/:taskId returns another user's session goal and output
   - Internal callers only
+  - POST /anthropic-proxy/<goal hash>/v1/messages with no credentials reaches the tee-proxy
+  - Invalid Fast Mode proxy capability
 tags:
   - security
   - auth
@@ -21,6 +22,8 @@ tags:
 sources:
   - task S1 route identity (100-seat readiness audit 2026-10-24)
   - commit b3679ea7b (reproduced on origin/main)
+  - PR #1576
+  - task S8 remaining route auth gaps (reproduced on origin/main 7c173ec12)
 repro: back-end/src/tests/blackbox/route-identity.blackbox.ts
 status: fixed
 ---
@@ -101,9 +104,45 @@ owner check is one or two primary-key reads (`Agent.id`, `ClaudeCodeSession.id`)
 on user-JWT reads only. Internal worker traffic, which is all agent-driven
 traffic, does no extra queries. There is no shared state, lock or fan-in.
 
+### Follow-up: S8 remaining gaps (2026-10-26)
+
+Reproduced on origin/main `7c173ec12` with the extended `route-identity`
+blackbox and `internal-route-guard` structural test.
+
+- `/anthropic-proxy` and `/codex-proxy` are mounted with no middleware. The
+  trace segment is a 16-hex hash derived from the goal, so it is guessable for
+  any known (for example benchmark) goal. An unauthenticated request with that
+  hash reached the tee-proxy, which forwards upstream and reads or writes that
+  trace's DEMO cache entries; the observed response was Anthropic's own 401,
+  not ours. Production sets `FAST_MODE_ANTHROPIC_PROXY_URL`.
+  Fix: the proxy URL is the sandbox CLI's only credential, so the backend now
+  appends an HMAC capability (`<segment>,<32 hex>`, keyed by
+  `BACKEND_API_KEY` with its own context string) where it mints the URL
+  (`codeAgentFastModeEnv.ts`). Both routers verify it in constant time before any
+  trace route (403 `Invalid Fast Mode proxy capability`) and parse only the
+  verified segment. The URL is no longer logged.
+- `/api/world-models/*`, the WMH simulation shim, admitted any user JWT and
+  let it step any session id. It has no product callers, so it is now
+  internal-only.
+- Re-audited and already correct: `/api/blueprints/*` (identity bound to the
+  user unless internal; delete and feedback scoped by id and user) and the
+  browser-session `/task/*`, `/context/:userId`, `/init` and `prepare-auth`
+  routes (owner checks in the route or service).
+- `agents/benchmarks/codex_runner.py` posted to the unmounted
+  `/api/codex-session` with the run's (possibly user-JWT) headers, so the Codex
+  harness benchmark could never create a session. It now uses
+  `/api/codex-code-session` with internal API-key headers
+  (`_internal_api_headers`). Regression:
+  `test_codex_runner_creates_session_on_mounted_internal_route` in
+  `agents/tests/blackbox/benchmark.blackbox.py` asserts the path is mounted in
+  `server.ts` and that create carries the API key, not a JWT.
+
+Scale at 10k agents: one HMAC per proxy request (microseconds, no I/O, no
+shared state). Minting happens once per sandbox spawn.
+
 ## Human feedback
 
-None recorded.
+Andy (via parent, S8): do not spend effort on breach or exposure forensics; contain and fix only.
 
 ## Reusable lesson
 

@@ -7,8 +7,8 @@ import {
 import {
   testRotation_poolAuthErrorDisablesToken,
   testRotation_userAuthErrorDisablesToken,
-  testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
-  testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh,
+  testRotation_directAuthErrorFallsBackToPoolForClaudeCode,
+  testRotation_nearExpiryClaudeCodeTokenIsNotServed,
   testComputeTokenFastCacheAffinity_pinsProviderFamily,
   testComputeTokenProviderConstraint_overridesClaudeAffinity,
 } from './integrations.compute-rotation-2.cases';
@@ -37,6 +37,15 @@ import {
   testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
   testClaudeCodeBillingFailure_marksSharedAnthropicCooldown,
 } from './integrations.claude-lifecycle-1.cases';
+import {
+  testClaudeCodeSandbox_neverSpendsSharedRefreshGrant,
+  testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
+  testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
+} from './integrations.claude-shared-grant.cases';
+import {
+  testCodexSandbox_neverSpendsSharedRefreshGrant,
+  testCodexSandbox_concurrentSessionsShareOneAccessToken,
+} from './integrations.codex-shared-grant.cases';
 
 export function pooledSequentialTestsPart1() {
   return [
@@ -54,12 +63,32 @@ export function pooledSequentialTestsPart1() {
       fn: testRotation_userAuthErrorDisablesToken,
     },
     {
-      name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
-      fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
+      name: 'rotation -- direct auth_error falls back to pool for Claude Code',
+      fn: testRotation_directAuthErrorFallsBackToPoolForClaudeCode,
     },
     {
-      name: 'rotation -- near-expiry Claude Code envelope forces refresh',
-      fn: testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh,
+      name: 'rotation -- near-expiry Claude Code token is not served',
+      fn: testRotation_nearExpiryClaudeCodeTokenIsNotServed,
+    },
+    {
+      name: 'claude-code sandbox -- never spends a shared refresh grant',
+      fn: testClaudeCodeSandbox_neverSpendsSharedRefreshGrant,
+    },
+    {
+      name: 'claude-code sandbox -- concurrent sessions share one access token',
+      fn: testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
+    },
+    {
+      name: 'claude-code sandbox -- expiry parsing matches Claude Code',
+      fn: testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
+    },
+    {
+      name: 'codex sandbox -- never spends a shared refresh grant',
+      fn: testCodexSandbox_neverSpendsSharedRefreshGrant,
+    },
+    {
+      name: 'codex sandbox -- concurrent sessions share one access token',
+      fn: testCodexSandbox_concurrentSessionsShareOneAccessToken,
     },
     {
       name: 'rotation -- rate-limit window never shortens',

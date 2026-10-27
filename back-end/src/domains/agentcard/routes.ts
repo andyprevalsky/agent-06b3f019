@@ -79,7 +79,7 @@ router.get(
       res.status(400).json({ error: 'Invalid or expired connection link' });
       return;
     }
-    const { authUrl } = service.startConnect(userId);
+    const { authUrl } = await service.startConnect(userId);
     res.redirect(302, authUrl);
   })
 );

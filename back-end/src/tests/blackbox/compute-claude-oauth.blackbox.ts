@@ -60,7 +60,7 @@ async function runWatcherTick(options: {
   expectedState: string;
 }): Promise<{
   fetchCalls: number;
-  poll: ReturnType<typeof pollConnectSession>;
+  poll: Awaited<ReturnType<typeof pollConnectSession>>;
   browserClosed: number;
   browserReleased: number;
 }> {
@@ -130,7 +130,7 @@ async function runWatcherTick(options: {
     intervalHandler();
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
-    const poll = pollConnectSession(entry.userId, connectId);
+    const poll = await pollConnectSession(entry.userId, connectId);
     return { fetchCalls, poll, browserClosed, browserReleased };
   } finally {
     pending.delete(connectId);

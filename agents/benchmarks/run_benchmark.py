@@ -2496,6 +2496,13 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
     return None
 
 
+def _internal_api_headers(user_id: str) -> dict:
+    """API-key headers for internal-only backend routes (never a user JWT)."""
+    if not API_KEY:
+        raise RuntimeError("BACKEND_API_KEY env var is required for internal backend routes.")
+    return {"X-API-Key": API_KEY, "X-User-Id": user_id, "Content-Type": "application/json"}
+
+
 async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
     global _cached_headers, _cached_headers_user_id, _auth_mode
