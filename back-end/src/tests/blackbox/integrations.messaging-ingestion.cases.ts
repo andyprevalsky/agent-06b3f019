@@ -26,7 +26,10 @@ import {
   upsertPersonAndMessageRecords,
 } from './integrations.context';
 import { retryWithBackoff } from '../../providers/retry';
-import { runMessagingUploadJobs } from '../../domains/integrations/uploadService.messaging';
+import {
+  runMessagingUploadJobs,
+  processIMessageUpload,
+} from '../../domains/integrations/uploadService.messaging';
 import { PART_MAX_WEIGHT } from '../../domains/integrations/uploadService.messagingJobs';
 import { deleteIntegration } from '../../domains/integrations/repo.integration';
 
@@ -452,6 +455,47 @@ export async function testIntegrationDelete_removesQueuedUploadParts() {
     await deleteIntegration(integration!.id);
     const left = await prisma.messagingUploadJob.count({ where: { uploadId } });
     assert(left === 0, `queued parts deleted with their integration (${left} left)`);
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
+  }
+}
+
+/**
+ * A drain that finalizes while the final request is being accepted must not
+ * strand it: the integration is re-marked SYNCING only once the final parts
+ * exist, so a later drain still advances the cursor.
+ */
+export async function testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk() {
+  const { userId } = await createAnonSession();
+  const syncStart = '2026-05-01T00:00:00.000Z';
+  const delegate = prisma.messagingUploadJob as unknown as Record<string, unknown>;
+  const createMany = delegate.createMany as (...args: unknown[]) => Promise<unknown>;
+  try {
+    await processIMessageUpload(userId, syntheticContacts('5560', [3]) as never, syncStart, false);
+    await drainUntil(
+      () => imessageIntegration(userId),
+      (row) => row?.status === 'CONNECTED'
+    );
+    let interleaved = false;
+    delegate.createMany = async (...args: unknown[]) => {
+      // A concurrent drain runs at the instant the final parts are written.
+      interleaved = true;
+      await runMessagingUploadJobs();
+      return createMany.apply(prisma.messagingUploadJob, args);
+    };
+    try {
+      await processIMessageUpload(userId, syntheticContacts('5561', [2]) as never, syncStart);
+    } finally {
+      delegate.createMany = createMany;
+    }
+    assert(interleaved, 'the drain ran while the final parts were being written');
+    for (let i = 0; i < 3; i++) await runMessagingUploadJobs();
+    const done = await imessageIntegration(userId);
+    assert(
+      cursorOf(done) === syncStart && done?.status === 'CONNECTED',
+      `final chunk finalized after an interleaved drain (status ${done?.status}, cursor ${String(cursorOf(done))})`
+    );
   } finally {
     await cleanupUser(userId);
     await prisma.integration.deleteMany({ where: { userId } });
