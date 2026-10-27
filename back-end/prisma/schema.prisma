@@ -8,7 +8,8 @@ datasource db {
   url        = env("DATABASE_URL")
   directUrl  = env("DIRECT_URL")
   // Only extensions Prisma must create for `db push`; Supabase-managed ones stay unmanaged.
-  extensions = [vector]
+  // pg_trgm backs the GIN trigram search indexes declared below.
+  extensions = [vector, pg_trgm]
 }
 
 model Agent {
@@ -116,6 +117,10 @@ model Agent {
   @@index([busId])
   @@index([projectId])
   @@index([busId, taskPath])
+  // Trigram search indexes stay declared here: an index Prisma can model but
+  // the schema omits is dropped by `db push` and emitted by `migrate diff`.
+  @@index([title(ops: raw("gin_trgm_ops"))], map: "Agent_title_trgm_idx", type: Gin)
+  @@index([goal(ops: raw("gin_trgm_ops"))], map: "Agent_goal_trgm_idx", type: Gin)
 }
 
 model TemporalWorkflowCleanup {
@@ -215,6 +220,7 @@ model Message {
   @@index([agentId, timestamp])
   @@index([agentId, workflowGeneration, timestamp])
   @@index([createdAt])
+  @@index([text(ops: raw("gin_trgm_ops"))], map: "Message_text_trgm_idx", type: Gin)
 }
 
 /// Search projection of live messages and finalized R2 trace bundles. Archive
@@ -359,6 +365,7 @@ model ToolSideEffect {
   @@index([operationType])
   @@index([status])
   @@index([externalId])
+  @@index([operationKey(ops: raw("gin_trgm_ops"))], map: "ToolSideEffect_operationKey_trgm_idx", type: Gin)
 }
 
 /// One outbound phone call that the backend owns on Twilio. Each Vapi
@@ -803,6 +810,7 @@ model MessageRecord {
   // planner walk other users' rows whenever one user owns a large share.
   @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
+  @@index([message(ops: raw("gin_trgm_ops"))], map: "MessageRecord_message_trgm_idx", type: Gin)
 }
 
 /// Durable queue for messaging history uploads (iMessage, WhatsApp, Telegram).

@@ -235,6 +235,7 @@ require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRa
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
+require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py inherit-sync --head' "/deploy must record main-sync-only HEADs through the audited ledger path"
 require_text "$REVIEW_CYCLES" 'MAX_REVIEW_CYCLES = 3' "review cycle enforcement must hard-cap each deploy at three"
 require_text "$REVIEW_WAITER" 'actual_head != expected_head' "review waiter must reject stale or changed PR heads"
 if grep -Fq 'gh pr checks <PR_NUMBER> --watch' "$DEPLOY_COMMAND"; then
