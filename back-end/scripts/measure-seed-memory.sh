@@ -377,7 +377,7 @@ for i in $(seq 1 "$RUNS"); do
         export DIRECT_URL="$DATABASE_URL"
     fi
     SCHEMA_PUSH_LOG="$OUT_DIR/schema-push-$i.log"
-    if ! npx prisma db push --accept-data-loss --skip-generate >"$SCHEMA_PUSH_LOG" 2>&1; then
+    if ! PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --accept-data-loss --skip-generate >"$SCHEMA_PUSH_LOG" 2>&1; then
         echo "❌ run $i: schema push failed (diagnostic: $SCHEMA_PUSH_LOG)" | tee -a "$SUMMARY"
         tail -n 12 "$SCHEMA_PUSH_LOG" | tee -a "$SUMMARY"
         continue

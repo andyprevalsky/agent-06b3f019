@@ -21,8 +21,9 @@ import os from 'node:os';
 import {
   loadMigrationObjects,
   migrationObjectsFromSql,
-} from '../../../scripts/lib/migration-objects';
-import { compareCatalog, driftProblems } from '../../../scripts/verify-schema-objects';
+  normalizePolicyExpr,
+} from '../../providers/schemaDrift/migrationObjects';
+import { compareCatalog, driftProblems } from '../../providers/schemaDrift';
 
 const BACKEND_DIR = path.resolve(__dirname, '../../..');
 const schema = fs.readFileSync(path.join(BACKEND_DIR, 'prisma/schema.prisma'), 'utf8');
@@ -129,7 +130,7 @@ write(
   `CREATE EXTENSION IF NOT EXISTS pg_trgm;
    CREATE TABLE "User" ("userId" text);
    ALTER TABLE public."User" ENABLE ROW LEVEL SECURITY;
-   CREATE POLICY "Users can select own data" ON public."User" FOR SELECT USING (true);
+   CREATE POLICY "Users can select own data" ON public."User" FOR SELECT USING ((auth.uid())::text = "userId");
    CREATE INDEX CONCURRENTLY IF NOT EXISTS "Agent_title_trgm_idx" ON "Agent" USING GIN ("title" gin_trgm_ops);
    CREATE INDEX "Person_expr_idx" ON public."Person" USING gin ((lower(name)) gin_trgm_ops);
    CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN DROP INDEX "Agent_title_trgm_idx"; END $$ LANGUAGE plpgsql;
@@ -154,7 +155,7 @@ const report = compareCatalog(
     indexes: new Map([['Stale_idx', false]]),
     triggers: new Set(['Message.t']),
     functions: new Set(['f']),
-    policies: new Set(),
+    policies: new Map(),
     extensions: new Set(['pg_trgm']),
     rls: new Set(),
     exposed: ['Waitlist'],
@@ -168,5 +169,98 @@ assert.deepEqual(driftProblems(report), [
   'INVALID index: Stale_idx',
   'RLS disabled on anon/authenticated-readable table: Waitlist',
 ]);
+
+// A policy that keeps its name but is redefined (CodeRabbit on #1575: TO PUBLIC
+// USING (true)) is drift too; the deparsed live form of the same definition is not.
+const userPolicy = parsed.policyDefs.get('User.Users can select own data');
+assert.deepEqual(userPolicy, {
+  permissive: 'PERMISSIVE',
+  cmd: 'SELECT',
+  roles: ['public'],
+  using: '(auth.uid())::text="userId"',
+  withCheck: '',
+});
+const livePolicies = (using: string) =>
+  compareCatalog(
+    {
+      applied: new Set(['1_init', '2_drop']),
+      indexes: new Map([['Agent_title_trgm_idx', true]]),
+      triggers: new Set(['Message.t']),
+      functions: new Set(['f']),
+      policies: new Map([
+        [
+          'User.Users can select own data',
+          { permissive: 'PERMISSIVE', cmd: 'SELECT', roles: ['public'], using, withCheck: '' },
+        ],
+      ]),
+      extensions: new Set(['pg_trgm']),
+      rls: new Set(['User']),
+      exposed: [],
+    },
+    fixture
+  );
+assert.deepEqual(
+  driftProblems(livePolicies(normalizePolicyExpr('((auth.uid())::text = "userId")'))),
+  []
+);
+assert.deepEqual(driftProblems(livePolicies('true')), [
+  'changed policy: User.Users can select own data (1_init): expected PERMISSIVE FOR SELECT ' +
+    'TO public USING ((auth.uid())::text="userId"); live PERMISSIVE FOR SELECT TO public USING (true)',
+]);
+// A hand-written policy matches its deparsed live form: pg_policies adds ::text
+// casts to literals and parenthesizes AND/OR operands (CodeRabbit on #1608).
+const handWritten = migrationObjectsFromSql([
+  {
+    name: 'a',
+    sql: `CREATE POLICY "svc" ON public."T" FOR ALL TO authenticated USING (auth.role() = 'service_role' AND "userId" = (auth.uid())::text);`,
+  },
+]).policyDefs.get('T.svc');
+assert.ok(handWritten);
+const deparsedLive = normalizePolicyExpr(
+  `((auth.role() = 'service_role'::text) AND ("userId" = (auth.uid())::text))`
+);
+const handFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-objects-hand-'));
+fs.mkdirSync(path.join(handFixture, '1_init'));
+fs.writeFileSync(
+  path.join(handFixture, '1_init', 'migration.sql'),
+  `CREATE POLICY "svc" ON public."T" FOR ALL TO authenticated USING (auth.role() = 'service_role' AND "userId" = (auth.uid())::text);`
+);
+const handReport = (using: string) =>
+  driftProblems(
+    compareCatalog(
+      {
+        applied: new Set(['1_init']),
+        indexes: new Map(),
+        triggers: new Set(),
+        functions: new Set(),
+        policies: new Map([['T.svc', { ...handWritten, using }]]),
+        extensions: new Set(),
+        rls: new Set(),
+        exposed: [],
+      },
+      handFixture
+    )
+  );
+assert.deepEqual(handReport(deparsedLive), []);
+assert.equal(handReport('true').length, 1, 'a predicate rewritten to true must still alert');
+fs.rmSync(handFixture, { recursive: true, force: true });
+
+// ALTER POLICY rewrites only the clauses it names (CodeRabbit on #1608).
+const altered = migrationObjectsFromSql([
+  {
+    name: 'a',
+    sql: `CREATE POLICY "p" ON public."T" FOR SELECT TO authenticated USING (("userId" = (auth.uid())::text));
+          ALTER POLICY "p" ON public."T" USING (("ownerId" = (auth.uid())::text));`,
+  },
+]).policyDefs.get('T.p');
+assert.deepEqual(altered, {
+  permissive: 'PERMISSIVE',
+  cmd: 'SELECT',
+  roles: ['authenticated'],
+  using: '"ownerId"=(auth.uid())::text',
+  withCheck: '',
+});
 fs.rmSync(fixture, { recursive: true, force: true });
-console.log('Schema-object drift check reports dropped indexes, policies and RLS.');
+console.log(
+  'Schema-object drift check reports dropped indexes, policies (and redefinitions) and RLS.'
+);
