@@ -27,6 +27,7 @@ import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/ag
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
+import { runProductionSchemaDriftCheck } from './providers/schemaDrift/cron';
 
 function scheduleWorkerProcessRecovery(isProduction: boolean): void {
   if (!isProduction) return;
@@ -202,6 +203,45 @@ function scheduleStuckAgentBugReports(isProduction: boolean): void {
   run();
   cron.schedule('23 * * * *', run);
   cronLog.info('Stuck-agent bug reports scheduled (hourly)');
+}
+
+/**
+ * Hourly: read-only catalog check that applied migrations' RLS, policies (name
+ * and definition) and indexes still exist, and that no public table is
+ * anon/authenticated-readable with RLS off. A stray db push left prod RLS off
+ * for 18 days (2026-10-08) because nothing checked between deploys.
+ */
+function scheduleSchemaDriftCheck(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_SCHEMA_DRIFT_CHECK === '1') {
+    cronLog.info('Schema drift check disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_SCHEMA_DRIFT_CHECK',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runProductionSchemaDriftCheck()
+      .then((result) => {
+        // Logged every tick so a quiet hour still proves the check ran.
+        cronLog.info('Schema drift check summary', {
+          acquired: result.acquired,
+          ...(result.acquired ? { checked: result.checked, problems: result.problems.length } : {}),
+        });
+      })
+      .catch((error) => {
+        cronLog.error('Schema drift check failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  cron.schedule('41 * * * *', run);
+  cronLog.info('Schema drift check scheduled (hourly)');
 }
 
 function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
@@ -537,6 +577,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
   scheduleStuckAgentBugReports(isProduction);
+  scheduleSchemaDriftCheck(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleSteelSessionReaper();
   scheduleGmailSync();

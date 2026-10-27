@@ -11,7 +11,7 @@
     "build": "tsc && cp -r src/assets dist/assets",
     "start": "node dist/bootstrap.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy",
+    "prisma:migrate": "PRISMA_CLI_DATABASE_URL=\"${DIRECT_URL:?DIRECT_URL must name the migration target}\" prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:push:local": "bash scripts/prisma-local-push.sh",
     "prisma:studio": "prisma studio",

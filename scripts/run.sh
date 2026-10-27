@@ -1248,7 +1248,7 @@ echo "🐘 Syncing Prisma schema..."
 # give the shared phone to one row so push can keep the unique User.phone index.
 (cd back-end && bash scripts/normalize-local-user-phones.sh "$LOCAL_DB_URL" >/dev/null)
 (cd back-end && bash scripts/backfill-local-message-record-owner.sh "$LOCAL_DB_URL" >/dev/null)
-(cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
 (cd back-end && bash scripts/apply-local-message-record-trgm-index.sh "$LOCAL_DB_URL" >/dev/null)
 echo "🔎 Ensuring agent-network grep indexes..."
 (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
