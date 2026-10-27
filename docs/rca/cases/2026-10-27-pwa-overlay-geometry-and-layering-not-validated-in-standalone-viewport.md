@@ -25,6 +25,7 @@ sources:
   - commit 75b2a9c00
   - PR #854
   - commit b6ad551fc
+  - PR #1611
 repro: front-end/src/tests/blackbox/mobile-pwa-chrome.blackbox.tsx
 status: fixed
 ---
@@ -128,26 +129,32 @@ On branch fix/mobile-pwa-chrome:
   Back chevron while an agent is open (sub-agent → parent via
   `selectedAgentParentId`, root → home); the Rose icon hides below 360px while
   Back shows so the row still fits 320px.
-- `useModalPosition`: pure `computeModalPosition` clamps the panel inside an
-  8px viewport gutter, sets its width to `min(420, vw - 16)` and caps its height
-  below `--mobile-terminal-header-height`; `AgentSettingsDialog` is opaque below md.
+- `useModalPosition`: pure `computeModalPosition` keeps main's `start`/`end`
+  alignment (8b8506733 aligned the nub gear's panel `start` concurrently). It
+  clamps either edge inside an 8px viewport gutter, sets the width to
+  `min(420, vw - 16)`, caps the height below `--mobile-terminal-header-height`
+  and re-fits on window resize (rotation). `AgentSettingsDialog` is opaque
+  below md.
 - Attention `ModalWrapper`: below md the card is fixed, inset 8px, below the
   mobile header, scrolling within the remaining height.
 - `ui/sheet` close X: 40px target at `top: 0.5rem + safe-area-inset-top` for
   top/left/right sheets; `MobileAgentDrawer` pads top and bottom insets and
   leaves room for the X in the tab row.
-- `ui/context-menu` trigger: touch/pen long-press opens the menu from the
-  trigger's left edge at the touch height (mouse right-click unchanged); this
-  covers agent and project rows.
-- One modal layer: `ui/dialog` and `ui/sheet` overlay and content are all
-  `z-[210]`, so the last-opened surface (portals mount in open order) is on top
-  — a Sheet inside a Dialog (tests-e2e/overlay-layers) and Rename from the
-  drawer both work. `RoseAgentRowMenu` uses the shared menu layer `z-[220]`.
+- `ui/context-menu` trigger: a touch or pen long-press opens the menu from
+  the trigger's left edge at the touch height, and the click that follows the
+  lift is swallowed. Mouse right-click is unchanged. This covers agent and
+  project rows.
+- One modal tier: `ui/dialog` and `ui/sheet` both use scrim `z-[210]` and
+  content `z-[211]`. Portals mount in open order, so the last-opened surface is
+  on top: a Sheet inside a Dialog (tests-e2e/overlay-layers), and Rename from
+  the drawer. Each content stays strictly above its own scrim (the file-viewer
+  test). `RoseAgentRowMenu` uses the shared menu layer `z-[220]`, which
+  `lib/roseLayers.ts` documents.
 - `ui/toast` viewport: top padding includes the safe-area inset.
 - `SubAgentBreadcrumb`: below the mobile header on phones, `md:top-20` on desktop.
 
 Regression: `front-end/src/tests/blackbox/mobile-pwa-chrome.blackbox.tsx`
-(13 tests, Step 4b front-end coverage / blackbox runner). Sibling failures
+(15 tests, Step 4b front-end coverage / blackbox runner). Sibling failures
 prevented: every Dialog opened from any Sheet, every context menu on touch,
 every toast, every full-height Sheet close button. 10k-agent behavior: pure
 CSS/geometry plus one prop from already-loaded agent detail; no new

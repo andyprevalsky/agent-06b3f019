@@ -43,7 +43,7 @@ export interface RoseAgentMenuActions {
 }
 
 /** z-[220] is the shared menu/popover layer (ui/context-menu, ui/popover): above
- * the dialog/sheet modal layer (210), so the menu shows over the mobile drawer. */
+ * the dialog/sheet modal tier (210/211), so the menu shows over the mobile drawer. */
 const MENU_SURFACE =
   'z-[220] min-w-[236px] rounded-xl border border-gray-200/95 dark:border-white/[0.09] bg-white dark:bg-[#2f2f2c] p-[5px] text-sm text-[hsl(240_15%_8%)] dark:text-[#ecece8] shadow-[0_16px_40px_rgba(20,20,40,0.16)]';
 const ROW =

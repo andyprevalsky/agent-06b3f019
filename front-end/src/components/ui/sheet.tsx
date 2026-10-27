@@ -24,7 +24,7 @@ const SheetOverlay = React.forwardRef<
 ));
 SheetOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
-/** Sheets share the Dialog modal layer (z 210, see ui/dialog): the last opened is on top. */
+/** Sheets share the Dialog modal tier (scrim 210, content 211; see ui/dialog): the last opened is on top. */
 type SheetSide = 'top' | 'bottom' | 'left' | 'right';
 
 const sideClasses: Record<SheetSide, string> = {
@@ -49,7 +49,7 @@ const SheetContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed z-[210] gap-4 bg-background shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500',
+        'fixed z-[211] gap-4 bg-background shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500',
         sideClasses[side],
         className,
       )}

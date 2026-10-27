@@ -13,12 +13,12 @@
  *   - the agents drawer's close X sits below the status bar, clear of the tabs
  *   - the sub-agent breadcrumb starts below the mobile header
  *   - the drawer's Logout row stays above the home indicator
- *   - an agent row's long-press menu stacks above the drawer (menus 220 > sheet 210)
+ *   - an agent row's long-press menu stacks above the drawer (menus 220 > sheet 211)
  *     and opens from the row's left edge, not under the finger (a 345px menu
  *     anchored mid-row has room on neither side of a 430px screen); lifting the
  *     finger does not also open the agent
  *   - Rename chosen from that menu opens above the drawer (dialogs and sheets
- *     share one modal layer, so the later-opened one is on top)
+ *     share one modal tier, so the later-opened one is on top)
  *   - toasts drop below the status bar
  * jsdom has no layout engine: JS-computed geometry is asserted numerically,
  * CSS geometry from the declared classes.

@@ -32,7 +32,7 @@
  * the home-indicator inset at the bottom (Logout stays tappable); the Sheet's
  * close target sits below the status bar at the right of the tab row, which
  * leaves room for it (pr-12). Row menus use the shared menu layer (z 220),
- * above the Sheet (210); Rename opens later on the same modal layer, so on top.
+ * above the Sheet (211); Rename opens later on the same modal tier, so on top.
  *
  * ROSE HEADER (roseHeader, the Rose Desktop mobile header): the hamburger sits
  * on the header's LEFT with a 40px target and opens the drawer from the LEFT
