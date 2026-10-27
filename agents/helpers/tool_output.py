@@ -148,6 +148,25 @@ def retained_marker(text: str) -> str:
     return matches[-1][0] if matches and matches[-1].end() == len(text) else ""
 
 
+def _storage_object_missing(response: Any) -> bool:
+    """Whether a storage error response reports a missing object.
+
+    Supabase Storage answers a missing object with HTTP 400 and a structured
+    body ``{"statusCode": "404", "error": "not_found", "code": "NoSuchKey"}``,
+    not a bare 404.
+    """
+    status = getattr(response, "status_code", None)
+    if status == 404:
+        return True
+    if status != 400:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and (str(body.get("statusCode")) == "404" or body.get("code") == "NoSuchKey")
+
+
 async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
     from helpers.attachments import download_from_storage
 
@@ -155,7 +174,7 @@ async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
         raw = await download_from_storage(_storage_path(owner, output_id))
     except Exception as error:
         # A guessed or expired handle is an expected miss, not an outage.
-        if getattr(getattr(error, "response", None), "status_code", None) == 404:
+        if _storage_object_missing(getattr(error, "response", None)):
             raise FileNotFoundError("Retained output not found") from error
         raise
     if len(raw) > MAX_STORED_BYTES:

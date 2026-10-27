@@ -215,15 +215,24 @@ async def test_missing_retained_output_404_is_file_not_found():
     import httpx
     import tools.read_tool_output as reader
     request = httpx.Request("GET", "https://storage.test/object")
-    for status, expected in ((404, FileNotFoundError), (500, httpx.HTTPStatusError)):
-        async def download(path, status=status):
-            raise httpx.HTTPStatusError("storage", request=request, response=httpx.Response(status, request=request))
+    # Supabase Storage answers a missing object with HTTP 400 and a NoSuchKey body
+    # (observed 2026-10-27: {"statusCode":"404","error":"not_found","code":"NoSuchKey"}).
+    supabase_missing = {"statusCode": "404", "error": "not_found", "message": "Object not found", "code": "NoSuchKey"}
+    for status, body, expected in (
+        (404, None, FileNotFoundError),
+        (400, supabase_missing, FileNotFoundError),
+        (400, {"statusCode": "400", "error": "InvalidRequest"}, httpx.HTTPStatusError),
+        (500, None, httpx.HTTPStatusError),
+    ):
+        async def download(path, status=status, body=body):
+            response = httpx.Response(status, request=request, json=body) if body else httpx.Response(status, request=request)
+            raise httpx.HTTPStatusError("storage", request=request, response=response)
         with patch("helpers.attachments.download_from_storage", download):
             try:
                 await reader.read_tool_output_activity("u", "a", "", {"output_id": "c" * 32})
             except Exception as error:
-                assert type(error) is expected, (status, type(error))
-                assert (type(error).__name__ in reader.EXPECTED_READ_FAILURES) is (status == 404)
+                assert type(error) is expected, (status, body, type(error))
+                assert (type(error).__name__ in reader.EXPECTED_READ_FAILURES) is (expected is FileNotFoundError)
             else:
                 raise AssertionError("missing output was readable")
 
