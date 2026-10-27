@@ -10,11 +10,11 @@
  * packages + shared IPC types only).
  */
 
-import type { UploadResult } from '../../../shared/types/ipc';
+import type { MessagingUploadOptions, UploadResult } from '../../../shared/types/ipc';
 
 /**
  * Re-export the cross-cutting IPC result shape used by callers (handlers,
  * sibling domains) so they can depend on the batch-uploader barrel without
  * reaching into `shared/types/ipc`.
  */
-export type { UploadResult };
+export type { MessagingUploadOptions, UploadResult };

@@ -322,4 +322,29 @@ else
   echo "local MessageRecord owner backfill SQL: skipped (no local Postgres)"
 fi
 
+# Every stack/setup schema push must normalize User.phone first: a long-lived
+# local DB can hold two seeded copies of a later-merged account, and the unique
+# User.phone index then makes `prisma db push` fail the whole stack.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+python3 - "$REPO_ROOT/scripts/run.sh" "$REPO_ROOT/scripts/setup-db.sh" <<'PY'
+import sys
+from pathlib import Path
+
+missing = []
+for name in sys.argv[1:]:
+    lines = Path(name).read_text().splitlines()
+    pushes = [i for i, line in enumerate(lines)
+              if "npx prisma db push" in line and not line.lstrip().startswith("#")]
+    if not pushes:
+        missing.append(f"{name}: no schema push found")
+    for i in pushes:
+        window = lines[max(0, i - 10):i]
+        if not any("normalize-local-user-phones.sh" in line for line in window):
+            missing.append(f"{name}:{i + 1}: schema push without normalize-local-user-phones.sh")
+if missing:
+    print("\n".join(missing), file=sys.stderr)
+    sys.exit(1)
+PY
+echo "stack schema pushes normalize User.phone first: PASS"
+
 echo "local Prisma push safety tests: PASS"

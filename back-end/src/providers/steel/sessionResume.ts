@@ -388,7 +388,7 @@ async function recreateSessionWithinClaim(
           profile.profileId
         );
         createdSessionId = requestedSessionId;
-        registerInFlightSteelSession(requestedSessionId);
+        await registerInFlightSteelSession(requestedSessionId);
         const create = () =>
           dependencies.createSession({
             sessionId: requestedSessionId,
@@ -411,7 +411,7 @@ async function recreateSessionWithinClaim(
         createAcknowledged = true;
         // Capture the acknowledged allocation before any fallible bookkeeping.
         createdSessionId = session.id;
-        registerInFlightSteelSession(session.id);
+        await registerInFlightSteelSession(session.id);
         if (session.id !== requestedSessionId) {
           await (dependencies.prepareCandidateCleanup ?? prepareSteelCandidateCleanup)(
             taskId,
@@ -499,7 +499,7 @@ async function recreateSessionWithinClaim(
             error: error instanceof Error ? error.message : String(error),
           });
         });
-        unregisterInFlightSteelSession(session.id);
+        await unregisterInFlightSteelSession(session.id);
         await announceBrowserSessionBinding({ id: taskId });
 
         if (
@@ -556,7 +556,7 @@ async function recreateSessionWithinClaim(
             createdSessionId,
             'RELEASED'
           );
-          unregisterInFlightSteelSession(createdSessionId);
+          await unregisterInFlightSteelSession(createdSessionId);
           createdSessionId = null;
         }
         if (!createAcknowledged && createdSessionId !== null) {
@@ -568,7 +568,7 @@ async function recreateSessionWithinClaim(
             createdSessionId,
             'RELEASED'
           );
-          unregisterInFlightSteelSession(createdSessionId);
+          await unregisterInFlightSteelSession(createdSessionId);
           createdSessionId = null;
         }
         if (!committed && createdSessionId !== null) {
@@ -589,10 +589,10 @@ async function recreateSessionWithinClaim(
               uncommittedSessionId,
               'RELEASED'
             );
-            unregisterInFlightSteelSession(uncommittedSessionId);
+            await unregisterInFlightSteelSession(uncommittedSessionId);
             createdSessionId = null;
           } catch (releaseError) {
-            registerInFlightSteelSession(uncommittedSessionId);
+            await registerInFlightSteelSession(uncommittedSessionId);
             throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
           }
         }

@@ -20,6 +20,7 @@ import runpy
 import signal
 import ssl
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -3365,6 +3366,10 @@ class RunBenchShardedRouting(unittest.TestCase):
             (root/'agents/benchmarks').mkdir(parents=True)
             (root/'.claude/shared').mkdir(parents=True)
             subprocess.run(['cp', '-a', str(ROOT/'scripts'), str(root/'scripts')], check=True)
+            # Bytecode is ignored in the real repo; a stale copied .pyc that run-bench's
+            # Python recompiles must not become a tracked change in the fixture.
+            for cache in sorted((root/'scripts').rglob('__pycache__'), reverse=True):
+                shutil.rmtree(cache)
             # run-bench's timeout policy imports the catalog's caps, floors and history
             # readers from the agents benchmark package; no recorded history is copied.
             for member in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
@@ -3376,7 +3381,7 @@ class RunBenchShardedRouting(unittest.TestCase):
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
                 # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
-            (root/'.gitignore').write_text('.env\n.context/\n')
+            (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
             subprocess.run(git[:3] + ['init', '-q'], check=True)
             subprocess.run(git + ['add', '-A'], check=True)
             subprocess.run(git + ['commit', '-qm', 'fixture'], check=True)

@@ -105,10 +105,17 @@ async function retryRootArchiveFinalization(agentId: string, ignoreGrace: boolea
   }
 }
 
+/** Status written for an archived agent that had not reached a terminal status. */
+export const ARCHIVED_AGENT_STATUS_MESSAGE = 'Archived by user';
+const NON_TERMINAL_AGENT_STATUSES = ['STARTING_UP', 'ACTIVE', 'PAUSED'] as const;
+
 /**
  * Recursively soft-delete an agent and all its descendants.
  * Cleans up sessions, terminates Temporal workflows, deletes attention requests,
- * then sets `deletedAt`. Idempotent when the agent is already archived.
+ * then sets `deletedAt`. A still-running agent also becomes FAILED ("Archived by
+ * user") in the same transaction, so archived rows never stay ACTIVE/PAUSED;
+ * FAILED is irreversible for later worker status writes. Idempotent when the
+ * agent is already archived.
  */
 export async function deleteAgentRecursive(
   agentId: string,
@@ -153,6 +160,10 @@ async function deleteAgentRecursiveInternal(
         data: { deletedAt: new Date() },
       });
     }
+    await tx.agent.updateMany({
+      where: { id: agentId, status: { in: [...NON_TERMINAL_AGENT_STATUSES] } },
+      data: { status: 'FAILED', statusMessage: ARCHIVED_AGENT_STATUS_MESSAGE },
+    });
     const traceArchiveDeletionLease =
       agent.deletedAt === null && agent.parentAgentId === null && archiveEnabled()
         ? await enqueueTraceArchiveFinalization(tx, agentId)

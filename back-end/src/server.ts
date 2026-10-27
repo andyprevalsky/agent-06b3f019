@@ -164,15 +164,20 @@ const agentCardRawJson = express.json({
 app.post('/api/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
 app.post('/api/purchases/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
 
+// Plaid and Slack sign the exact received bytes. Capture the raw body only on
+// those webhook paths; the global parser below must not copy every body into a
+// second string (a large upload would otherwise hold twice its size in memory).
+const webhookRawJson = express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => {
+    (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+  },
+});
+app.post('/api/integrations/plaid/webhook', webhookRawJson);
+app.use('/api/webhooks/slack/auto-rca', webhookRawJson);
+
 // Middleware
-app.use(
-  express.json({
-    limit: '100mb',
-    verify: (req, _res, buf) => {
-      (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
-    },
-  })
-); // Increased to handle large encrypted payloads
+app.use(express.json({ limit: '100mb' })); // Large encrypted payloads and legacy messaging uploads
 
 // Published rose_user_ui files: public, credential-free, immutable. Mounted
 // before CORS because sandboxed iframes request them with Origin: null. In prod

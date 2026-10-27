@@ -144,6 +144,24 @@ gate. Run it as the exact standalone command shown, require exit 0 and its
 either is missing. Search output, quoted command text, and failed tool calls are
 not telemetry.
 
+Every `/deploy` publishes these timestamps to the repo, whatever its outcome.
+Whenever a `/deploy` stops, whether completed, blocked on an approval, the user or
+the review cap, or stopped by a failure it cannot fix, record
+`deploy outcome completed` or `deploy outcome blocked` and then run:
+
+```bash
+python3 scripts/factory_ledger.py publish
+```
+
+It appends this machine's unpublished `/deploy`, `/RCA` and `/update-prompts`
+stage records and factory events from `.context`, plus `/descend` ledger rows
+that `main` lacks, to `main` as one data-only commit under
+`agents/benchmarks/history/`. It never touches the working tree or the deploy
+branch, and it retries when `main` moves. Require exit 0 before the final
+response. Fly and Render do not deploy data-only commits under
+`agents/benchmarks/`. A `/deploy` that died before its outcome is published by
+the next `/deploy` on that machine.
+
 ## Step 0i: Isolated deploy-worktree preparation gate
 
 Before any test or mutation, verify that a `/descend`-created deploy worktree
@@ -610,7 +628,9 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
 `python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
+`python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
@@ -1720,6 +1740,14 @@ successes do not need a `startedAt` timestamp to prove freshness.
 REVIEW_STATE=$(python3 scripts/deploy_review_cycle.py status)
 REVIEW_HEAD=$(printf '%s' "$REVIEW_STATE" | python3 -c \
   'import json,sys; print(json.load(sys.stdin)["cycles"][-1]["head"])')
+REVIEW_KIND_OPEN=$(printf '%s' "$REVIEW_STATE" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["cycles"][-1]["kind"])')
+# Optional Graphide review (Step 9b): request it once, on the initial cycle only.
+GRAPHIDE_TS=""
+if [ "$REVIEW_KIND_OPEN" = initial ]; then
+  GRAPHIDE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  gh pr comment "$PR_NUMBER" --body '@graphide-review review' >/dev/null 2>&1 || GRAPHIDE_TS=""
+fi
 bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --timeout 600 --poll 5
 ```
 
@@ -1818,9 +1846,60 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
   -X DELETE >/dev/null 2>&1 || true
 ```
 
+### Step 9b: Read the optional Graphide review (skippable, never blocks)
+
+Graphide Review (GitHub App `graphide-review`) reviews a PR when someone
+mentions `@graphide-review` on it; Step 9 posted that request for the initial
+cycle's `REVIEW_HEAD`. Its result is a check run on that commit (PR comments are
+a per-repository Graphide setting that starts off). It is advisory, not a merge
+gate. After CodeRabbit/Claude reach a terminal result for the same HEAD, and
+**before** the Step 10 `finish`, read it with the time left in its 10-minute
+budget:
+
+```bash
+GRAPHIDE_JSON='{"status":"skipped","reason":"not requested (only the initial cycle requests Graphide)"}'
+if [ -n "$GRAPHIDE_TS" ]; then
+  GRAPHIDE_LEFT=$(python3 -c 'import sys
+from datetime import datetime as D, timezone as Z
+t = D.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=Z.utc)
+print(max(30, int(600 - (D.now(Z.utc) - t).total_seconds())))' "$GRAPHIDE_TS")
+  GRAPHIDE_JSON=$(bash scripts/read-graphide-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" \
+    --since "$GRAPHIDE_TS" --timeout "$GRAPHIDE_LEFT" --poll 15)
+fi
+printf '%s\n' "$GRAPHIDE_JSON"
+```
+
+The reader always exits 0 and prints one JSON object. `status: skipped` (no
+request, timeout, errored/cancelled check, unreadable API, HEAD moved) →
+record `Graphide Review | ⚠️ Skipped | <reason>` in `TEST_REPORT` and continue;
+never wait longer, re-request, or ask. `status: completed` → read its check-run
+summary/text/annotations and any bot reviews/comments, then classify each
+finding:
+
+- **Fix** only a finding that is BOTH high-confidence (you confirmed it against
+  the code, ideally with a reproducing test) AND critical to app function:
+  crash, data loss/corruption, security hole, or a broken core user flow.
+- **Note, do not fix** everything else (style, refactors, speculative or
+  low-confidence issues, non-critical edge cases): list it in `TEST_REPORT` and
+  the PR body. This narrower bar overrides Step 10's "fix ALL valid issues" for
+  Graphide-only findings.
+
+Record `Graphide Review | ✅ Read | <N> findings, <K> fixed, <N-K> noted`.
+
+**Ordering with the bounded review cycles:** Graphide is requested only on
+cycle 1 (`initial`), and its fixes join the cycle-1 stabilization batch. If
+cycle 1 is otherwise clean but a Graphide finding qualifies, close cycle 1 as
+`findings` and fix it; the fix is reviewed by cycle 2 (`incremental`), so it
+never needs a cycle beyond the existing three. Graphide is never requested on
+cycles 2 or 3, so it cannot create a HEAD after the last allowed cycle. The
+10-minute budget (counted from the request) bounds how long cycle 1's `finish`
+can wait for it; a Graphide result arriving later is ignored for this deploy.
+If Graphide posted inline comments, reply `[FIXED] <solution>` or
+`[NOTED] below the high-confidence critical bar` instead of `[IGNORED]`.
+
 ## Step 10: Handle review results
 
-Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments.
+Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments. Fold in the Step 9b Graphide classification for cycle 1 before choosing the cycle result.
 
 As soon as a reviewer reaches a terminal result (clean or findings), record the
 review lifecycle finish before proceeding or fixing anything, then close the
@@ -1846,6 +1925,9 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
   to every comment, and fix all findings together with any gate failures. **Do
   not push each fix.** Re-run the full Test Loop locally, commit the complete
   stabilization batch, then push once and request one incremental review.
+- **GRAPHIDE CRITICAL FINDING** (Step 9b, cycle 1 only) → treat as a valid
+  finding: close as `findings` and include the fix in the same batch. Graphide
+  skipped or only non-critical findings → no effect on the cycle result.
 - **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
 - **BOTH REVIEWERS USAGE-EXHAUSTED** → close the cycle `--result clean`, record the
   `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
@@ -1910,6 +1992,7 @@ REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
   'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
 [ "$REVIEW_COUNT" -lt 3 ] || {
   python3 scripts/record_factory_event.py deploy outcome blocked
+  python3 scripts/factory_ledger.py publish
   echo "review cycle cap reached; deploy is review-unstable" >&2
   exit 1
 }
@@ -1949,6 +2032,24 @@ a clean completed review. Enforce that invariant rather than trusting prose:
 ```bash
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
+
+**Main moved after a clean final review (sync-only HEAD).** When main must be
+merged after the last clean cycle (for example, the generated
+`docs/rca/INDEX.md` conflicts), merge `origin/main`, regenerate generated files
+(`python3 scripts/rca_archive.py reindex`), commit, re-run the gates the merged
+tree affects, then record the audited inheritance instead of hand-editing the
+ledger:
+
+```bash
+python3 scripts/deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main
+```
+
+It refuses unless the latest real review is clean, every new first-parent
+commit is a merge of history already on the base, the branch-only diff
+(generated files excluded) is byte-identical to the reviewed diff, and every
+file the sync changed was changed on the base or is generated. Its entry does
+not count toward the review-cycle cap. Any refusal means the change needs a
+real review cycle.
 
 ## Step 11: Archive plan (before the final review)
 
@@ -2641,7 +2742,13 @@ Record the completed lifecycle before the final response:
 
 ```bash
 python3 scripts/record_factory_event.py deploy outcome completed
+python3 scripts/factory_ledger.py publish
 ```
+
+`publish` appends this deploy's stage records, review, production and outcome
+events to `main`'s `agents/benchmarks/history/factory_events.jsonl` (see the
+publication rule before Step 0i). `/factory-review` then rebuilds /deploy and /RCA
+timing from the repo on any machine.
 
 After the new branch is created, the final message is only this scorecard in a
 `text` block, with no prose before or after it. Fill every value from recorded

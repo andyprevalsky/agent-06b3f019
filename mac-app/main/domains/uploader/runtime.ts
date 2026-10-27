@@ -25,7 +25,7 @@ import {
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import { postWhatsAppConnect } from './repo';
 import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
-import type { UploadResult } from './types';
+import type { MessagingUploadOptions, UploadResult } from './types';
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
 function emitProgress(
@@ -67,7 +67,8 @@ export class Uploader {
     integrationType: string,
     data: unknown,
     accessToken: string,
-    window: BrowserWindow | null
+    window: BrowserWindow | null,
+    options: MessagingUploadOptions = {}
   ): Promise<UploadResult> {
     // Final owning boundary for every BatchUploader payload. Orchestration and
     // IPC guards avoid reading local data unnecessarily, but this check makes a
@@ -83,7 +84,8 @@ export class Uploader {
         strategy,
         integrationType,
         data,
-        accessToken
+        accessToken,
+        options
       );
 
       emitProgress(window, integrationType, UPLOAD_PROGRESS_DONE_PERCENT);
