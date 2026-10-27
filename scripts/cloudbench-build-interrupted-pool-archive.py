@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 import re
 import runpy
+import stat
+import tempfile
 import tarfile
 
 
@@ -29,7 +31,68 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--capture-dir", type=Path, required=True)
+    parser.add_argument("--rebuild-existing", action="store_true",
+                        help="preserve a hash-selected old packet and publish a separately completed replacement")
+    parser.add_argument("--expected-manifest-sha256")
+    parser.add_argument("--expected-archive-sha256")
     args = parser.parse_args()
+    digests = (args.expected_manifest_sha256, args.expected_archive_sha256)
+    if args.rebuild_existing:
+        if not all(value and re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):
+            parser.error("--rebuild-existing requires both exact expected SHA-256 digests")
+        # Share the normal recoverer's lock; rebuild is a separate local CLI
+        # operation and must refuse while canonical recovery is active.
+        args.rebuild_helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-original-volume-capture.py")))
+        lock = args.rebuild_helper["RecoveryLock"](args.registry.resolve())
+        lock.acquire()
+        try:
+            build(args)
+        finally:
+            lock.release()
+    else:
+        if any(digests):
+            parser.error("expected packet digests require --rebuild-existing")
+        build(args)
+
+
+def packet_snapshot(path: Path, args, owner: str, run_id: str, manifest_sha=None, archive_sha=None):
+    """Read only the exact selected private packet; never follow aliases."""
+    manifest_sha = manifest_sha or args.expected_manifest_sha256
+    archive_sha = archive_sha or args.expected_archive_sha256
+    info = path.lstat()
+    assert stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o077 and info.st_uid == os.getuid()
+    assert path.resolve() == path
+    assert {entry.name for entry in path.iterdir()} == {"manifest.json", "originals.tar.gz"}
+    read = args.rebuild_helper["regular_bytes"]
+    manifest_bytes = read(path / "manifest.json", 1048576)
+    archive_bytes = read(path / "originals.tar.gz", 512 * 1024 * 1024)
+    assert hashlib.sha256(manifest_bytes).hexdigest() == manifest_sha
+    assert hashlib.sha256(archive_bytes).hexdigest() == archive_sha
+    manifest = json.loads(manifest_bytes)
+    assert manifest["schema"] == "cloudbench-forensic-retirement-v1"
+    assert manifest["owner"] == owner and manifest["run_id"] == run_id
+    assert type(manifest["proof_credit"]) is int and manifest["proof_credit"] == 0
+    assert manifest["archive_sha256"] == archive_sha
+    assert manifest["archive_bytes"] == len(archive_bytes)
+    return info.st_dev, info.st_ino, manifest_sha, archive_sha
+
+
+def publish_rebuilt_packet(destination: Path, canonical: Path, rejected: Path, helper: dict) -> None:
+    rename, sync = helper["rename_noreplace"], helper["fsync_directory"]
+    rename(canonical, rejected)
+    try:
+        sync(canonical.parent)
+        rename(destination, canonical)
+    except BaseException:
+        # Restore only into an absent name, never over a concurrent entry.
+        if not os.path.lexists(canonical):
+            rename(rejected, canonical)
+        sync(canonical.parent)
+        raise
+    sync(canonical.parent)
+
+
+def build(args) -> None:
     registry = args.registry.resolve()
     owner = registry.name
     assert re.fullmatch(r"[0-9a-f]{32}", owner)
@@ -58,8 +121,25 @@ def main() -> None:
     runtime = runpy.run_path(str(Path(__file__).with_name("cloudbench-status-server.py")))
     read = runtime["read_runtime_metadata"]
     forensic = runpy.run_path(str(Path(__file__).with_name("cloudbench-forensic-retirement.py")))
-    destination = run / "_forensic"
-    destination.mkdir(mode=0o700, exist_ok=False)
+    canonical = run / "_forensic"
+    if args.rebuild_existing:
+        assert fresh, "rebuild supports the fresh forensic contract only"
+        rejected = run / ("_forensic.rejected-" + args.expected_manifest_sha256)
+        if not os.path.lexists(canonical) and os.path.lexists(rejected):
+            # Resume a crash after preservation using only the hash-selected
+            # original packet; partial replacement directories stay retained.
+            packet_snapshot(rejected, args, owner, meta["run_id"])
+            args.rebuild_helper["rename_noreplace"](rejected, canonical)
+            args.rebuild_helper["fsync_directory"](run)
+        previous = packet_snapshot(canonical, args, owner, meta["run_id"])
+        assert not os.path.lexists(rejected), "selected rejected packet is already preserved"
+        destination = Path(tempfile.mkdtemp(prefix="_forensic.rebuild-", dir=run))
+        stage_info, run_info = destination.stat(), run.stat()
+        stage_identity = stage_info.st_dev, stage_info.st_ino
+        run_identity = run_info.st_dev, run_info.st_ino
+    else:
+        destination = canonical
+        destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
     rows = []
     normal_workers = []
@@ -255,9 +335,25 @@ def main() -> None:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if args.rebuild_existing:
+            # Recheck custody and owner latches after all replacement bytes
+            # are durable. Never discard or overwrite the rejected packet.
+            assert fields(registry / "meta") == meta
+            assert not (registry / "guest-cleanup-unconfirmed").exists()
+            assert (registry / "runtime-evidence-unconfirmed").is_file()
+            assert packet_snapshot(canonical, args, owner, meta["run_id"]) == previous
+            assert run.resolve() == run
+            run_info = run.lstat()
+            assert (run_info.st_dev, run_info.st_ino) == run_identity
+            manifest_sha = hashlib.sha256((json.dumps(manifest, sort_keys=True) + "\n").encode()).hexdigest()
+            stage = packet_snapshot(destination, args, owner, meta["run_id"],
+                                    manifest_sha, manifest["archive_sha256"])
+            assert stage[:2] == stage_identity
+            publish_rebuilt_packet(destination, canonical, rejected, args.rebuild_helper)
         print(json.dumps({"run_id": meta["run_id"], "tasks": len(rows),
                           "incomplete": sum(x["kind"] == "interrupted" for x in rows),
-                          "archive_bytes": archive_bytes, "proof_credit": 0}))
+                          "archive_bytes": archive_bytes, "proof_credit": 0,
+                          **({"preserved_rejected_packet": str(rejected)} if args.rebuild_existing else {})}))
     except BaseException:
         # Keep any partial archive for diagnosis; never publish a manifest that
         # could authorize release of the ownership latch.

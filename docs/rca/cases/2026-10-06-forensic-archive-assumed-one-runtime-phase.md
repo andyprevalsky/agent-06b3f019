@@ -147,11 +147,78 @@ registration test, archive validation (1,177 cases), and diff whitespace check.
 The owning suite remains registered in both the general test runner and the
 deploy structural registry; no new skip or exclusion was introduced.
 
-Private historical GREEN remains pending owner-local replay. No canonical
-recovery, new capture, provider mutation, paid benchmark or deployment is
-authorized in this lane. The historical native config stays
+Launch owner `ph7bpz2f14pct3j92t0e6nrvmx8h3nep` then replayed the exact
+private config/capture on committed 180fe6d260754dbae78336cde543e4d5b43df3e5
+with Fly API token unset. Builder and real full `verify(archive_only=True)`
+returned rc0: 196,422 bytes, nine files, one interrupted task, zero credit and
+`native_release_verified=false`. Archive SHA-256:
+cde579e3adf915a463f4c62626b8054b3c8e777de76fd8e658a6491fd5b5bba2;
+manifest SHA-256:
+f225a107973b611485207ee92ab324f3f0c1022d7f0c50e4aa275539d1f7e402.
+Capture inputs and the original rejected packet retained their before-run
+hashes. The owner reported two earlier scratch-environment refusals (missing
+historical Git objects, then uncommitted extracted source); only the committed
+source run is GREEN evidence. The new archive contains private config and stays
+local. This proves the archive contract, not native release or task outcome.
+
+No canonical recovery, new capture, provider mutation, paid benchmark or
+deployment is authorized in this lane. The historical native config stays
 private on the launch owner's box; its complete environment is never committed
 or sent as a shared fixture. The case stays mitigated pending native release.
+
+### Supported rebuild of an already rejected canonical packet
+
+The parent identified a second producer boundary: an existing rejected
+`_forensic` makes the default builder refuse at exclusive directory creation.
+Manually renaming or deleting that evidence is not an authorized recovery
+procedure. The unchanged real CLI regression
+`PreServiceArchiveTest.test_hash_bound_rebuild_preserves_previous_packet_and_real_verifier`
+failed on 180fe6d26 with rc2 / unrecognized rebuild arguments in 2.756 seconds.
+
+The supported CLI is the same builder with `--rebuild-existing`,
+`--expected-manifest-sha256 <rejected-manifest-digest>` and
+`--expected-archive-sha256 <rejected-archive-digest>`, plus the existing exact
+`--registry` and `--capture-dir` arguments. Both hashes are required. This is a
+separate offline operation before canonical recovery; it refuses its shared
+recovery lock while another exact-owner operation is active. It validates the
+old private two-file packet, owner/run/schema/zero-credit envelope and both
+hashes, builds a new packet in private sibling staging, and rechecks old custody,
+staged directory identity and expected payload hashes, parent identity and
+ownership latches before exclusive publication. The original directory is
+preserved at `_forensic.rejected-<manifest-digest>`. Default building still
+refuses an existing canonical packet. No evidence latch is cleared.
+
+Interrupted final publication restores the original only into an absent name;
+a concurrent entry is never overwritten. Process death after preservation can
+leave canonical absent with both old packet and stage retained. Repeating the
+same hash-selected CLI restores that preserved original under the existing
+lock and rebuilds, retaining partial staging for diagnosis. Native release and
+the full consumer remain independent gates.
+
+Independent review rejected initial runtime proposal 727fb4fc after actually
+substituting its completed staging directory and observing false builder
+success. Those runtime bytes were never applied. Revised approval
+`polar-k2-i10-rebuild-v1`, runtime patch
+bfa4117a759c3e2a7caac57308d70fe6c6520f9972e91aaed831a32803515498 and tests
+21d1be0d70b7f1fdded9655bb603b4f4db4e89d2c8c34fb89877697a9bb00339,
+was `GROUNDED` by the same independent I5 reviewer before application.
+The revised candidate refused the unchanged substitution reproduction. All six
+rebuild tests independently passed in 16.056 seconds; reviewer baseline RED was
+2.454 seconds. Added opened reference
+`openclaw/src/infra/backup-archive-publication.ts:75-120,185-230` binds private
+same-parent staging/source identity and exclusive durable publication.
+
+Author unchanged rebuild CLI repro passed in 3.046 seconds. Regressions include
+held lock, old packet and staging payload/directory substitution, parent alias,
+wrong digests, failed capture, existing preserve destination, unexpected files,
+final-rename failure with rollback and concurrent destination, and an actual
+killed test child followed by successful same-CLI resume. Final author gates:
+25/25 owning forensic tests (81.636 seconds), 14/14 prestack recovery
+(1.449 seconds), 6/6 prelaunch cancellation (3.040 seconds), all six new rebuild
+tests five consecutive unchanged runs, archive validation and diff check.
+The same registered suite runs both producer-format and rebuild regressions.
+Owner-local private historical rebuild proof remains a separate pending gate;
+no canonical packet or resource was changed by the author.
 
 ## Human feedback
 
