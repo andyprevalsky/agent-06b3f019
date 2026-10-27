@@ -50,6 +50,7 @@ import {
 } from './agent-tools.support';
 import { assertDisplayCsp, displayRendererCases } from './agent-tools-display.cases';
 import { displayRenderCases } from './agent-tools-render.cases';
+import { displayScriptAllCases } from './agent-tools-display-script.cases';
 
 const tests: BlackboxTest[] = [
   {
@@ -312,6 +313,7 @@ const tests: BlackboxTest[] = [
   },
   ...displayRendererCases(),
   ...displayRenderCases(),
+  ...displayScriptAllCases(),
 ];
 
 runSuite(tests).catch((err) => {

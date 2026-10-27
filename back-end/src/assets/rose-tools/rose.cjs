@@ -123,12 +123,12 @@ async function call(method, path, body) {
   }
 }
 
-// ── bundles: a folder, or an .html/.gltf/.obj plus the files it references ──
+// ── bundles: a folder, or an .html/.gltf/.obj/.js plus the files it references ──
 // The reference walk mirrors collectDisplayBundleFiles in
 // back-end/src/providers/agentTools/displayBundle.ts.
 
 const extOf = (path) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
-const BUNDLE_ROOT_EXT = new Set(['html', 'htm', 'gltf', 'obj']);
+const BUNDLE_ROOT_EXT = new Set(['html', 'htm', 'gltf', 'obj', 'js', 'mjs']);
 const SCANNABLE_EXT = new Set(['html', 'htm', 'css', 'js', 'mjs', 'gltf', 'obj', 'mtl']);
 const MODEL_EXT = new Set(['glb', 'gltf', 'obj', 'stl', 'usdz']);
 const ATTR_RE = /\b(?:src|href|poster|data)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
@@ -643,7 +643,7 @@ const ROSE_DESKTOP_MCP_TOOLS = [
   {
     name: 'display',
     description:
-      'Show the user images, videos, web pages, whole sites, 3D models or PDFs inline in Rose. Pages run any CSS and JS (CDN scripts and modules, WebGL/WebGPU, WebAssembly, fetch) in a sandboxed frame.',
+      'Show the user images, videos, web pages, whole sites, JavaScript, 3D models or PDFs inline in Rose. Pages and scripts run any CSS and JS (CDN scripts and modules, three.js, WebGL/WebGPU, WebAssembly, fetch) in a sandboxed frame.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -651,7 +651,7 @@ const ROSE_DESKTOP_MCP_TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description:
-            'Local files or folders: images, videos, an .html page (the files it references come along), a site folder (index.html), a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf.',
+            "Local files or folders: images, videos, an .html page (the files it references come along), a site folder (index.html), a .js/.mjs module run on a full-window page (import 'three' and 'three/addons/...' work; a default-exported function is called with a full-window element; its relative imports come along), a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf.",
         },
         urls: {
           type: 'array',
@@ -753,6 +753,7 @@ const STOCK_USAGE = `usage:
 const ROSE_DESKTOP_USAGE = `usage:
   rose display <file|folder|url>... [--html PAGE] [--caption TEXT]
       images, videos, .html pages (+ the files they reference), site folders,
+      .js/.mjs modules (run full-window; import 'three' works),
       3D models (.glb .gltf .obj .stl .usdz) and PDFs
   rose message <text> [--inline-view NAME] [--props JSON]
   rose env status [--json]
