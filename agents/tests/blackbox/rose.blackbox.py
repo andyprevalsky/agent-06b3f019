@@ -7312,11 +7312,13 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
     until the 590s deadline or its output limit. Reasoning is not a reply for a
     tool-call request, so the stalled leg uses the pool's next leg, and none of
     its metadata, reasoning text or items reaches the consumer. A leg that does
-    answer still delivers its reasoning first, in order.
+    answer still delivers its reasoning first, in order. Held reasoning text that
+    keeps arriving is not answer output either, so it cannot keep the idle
+    window open until the deadline (CodeRabbit #1604, b5d2c5af9).
     """
     calls: list[str] = []
 
-    def foundry_leg(opening_text: bool, answers: bool = False):
+    def foundry_leg(opening_text: bool, answers: bool = False, leaks_text: bool = False):
         async def source(**kwargs):
             calls.append("foundry")
             yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6.1-sol-foundry", "pool_name": "foundry"})
@@ -7335,6 +7337,8 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
                 index += 1
                 item = {"id": f"rs_{index}", "encrypted_content": "opaque", "summary": []}
                 yield StreamChunk(kind="codex_reasoning_item", data=item)
+                if leaks_text and index % 5 == 0:
+                    yield StreamChunk(kind="reasoning", data={"text": f" step {index}"})
                 await asyncio.sleep(0.01)
 
         return source
@@ -7354,14 +7358,19 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
         "ANTHROPIC_API_KEY": "",
     }
     outcomes = {}
-    for opening_text, answers in ((False, False), (True, False), (True, True)):
+    for opening_text, answers, leaks_text in (
+        (False, False, False),
+        (True, False, False),
+        (True, False, True),
+        (True, True, False),
+    ):
         calls.clear()
         chunks: list[StreamChunk] = []
         error = None
         started = time.monotonic()
         with (
             patch.dict(os.environ, env),
-            patch("providers.rose.client.foundry_complete", foundry_leg(opening_text, answers)),
+            patch("providers.rose.client.foundry_complete", foundry_leg(opening_text, answers, leaks_text)),
             patch("providers.rose.client.waterfall_complete", single_step_waterfall(next_leg)),
         ):
             try:
@@ -7378,10 +7387,10 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
                     chunks.append(chunk)
             except RoseDeadlineError as exc:
                 error = str(exc)
-        outcomes[(opening_text, answers)] = (list(calls), [c.kind for c in chunks], chunks, error)
+        outcomes[(opening_text, answers, leaks_text)] = (list(calls), [c.kind for c in chunks], chunks, error)
         assert time.monotonic() - started < 2.0, "the 5s deadline must not bound a stalled leg"
 
-    for stalled in ((False, False), (True, False)):
+    for stalled in ((False, False, False), (True, False, False), (True, False, True)):
         calls_seen, kinds, chunks, error = outcomes[stalled]
         assert error is None, (stalled, error)
         assert calls_seen == ["foundry", "waterfall"], (stalled, calls_seen)
@@ -7389,7 +7398,7 @@ async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
         assert chunks[0].data["actual_model"] == "openai/gpt-6-sol"
         assert chunks[1].data["name"] == "attempt_completion"
 
-    calls_seen, kinds, chunks, error = outcomes[(True, True)]
+    calls_seen, kinds, chunks, error = outcomes[(True, True, False)]
     assert error is None and calls_seen == ["foundry"], (error, calls_seen)
     assert kinds == ["metadata", "reasoning", "codex_reasoning_item", "tool_call", "usage", "done"], kinds
     assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"

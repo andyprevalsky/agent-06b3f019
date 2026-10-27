@@ -28,7 +28,7 @@ import ssl
 import time
 import uuid
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -1262,6 +1262,7 @@ class RoseClient:
             source: AsyncIterator[StreamChunk],
             *,
             ttft_override: Optional[float] = None,
+            is_opaque: Optional[Callable[[str], bool]] = None,
         ) -> AsyncIterator[StreamChunk]:
             """Wrap an upstream generator with deadline + TTFT + idle checks.
 
@@ -1284,6 +1285,8 @@ class RoseClient:
             window, so a stream of back-to-back empty reasoning items with no
             text or tool output is idle (seen on Foundry gpt-6.x under a
             required tool choice: 800+ items in 590s and no reply).
+            `is_opaque` lets a leg mark more kinds opaque the same way (the
+            Foundry leg's held reasoning text before any answer output).
             Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
@@ -1446,7 +1449,10 @@ class RoseClient:
                             elapsed_s=round(now - started, 3),
                             chunk_counts=dict(chunk_counts),
                         )
-                    if chunk.kind != "codex_reasoning_item":
+                    opaque = chunk.kind == "codex_reasoning_item" or (
+                        is_opaque is not None and is_opaque(chunk.kind)
+                    )
+                    if not opaque:
                         opaque_idle_since = None
                         last_progress_at = now
                     elif opaque_idle_since is None:
@@ -2068,7 +2074,12 @@ class RoseClient:
                                 skip_models=_skip_models,
                             )
                         ) as foundry_source:
-                            async for chunk in _guarded(foundry_source):
+                            async for chunk in _guarded(
+                                foundry_source,
+                                # Held reasoning is not answer output, so it
+                                # must not keep the idle window open either.
+                                is_opaque=lambda kind: not foundry_yielded_any and kind in foundry_hold_kinds,
+                            ):
                                 chunk = _with_timing_if_done(chunk)
                                 if not foundry_yielded_any and chunk.kind in foundry_hold_kinds:
                                     foundry_held.append(chunk)
