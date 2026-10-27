@@ -235,12 +235,13 @@ docker_available_for_cold_seed() {
 }
 
 # Check cwd first because many service command lines are just "node" or
-# "python3" and do not include the worktree path.
+# "python3" and do not include the worktree path. When the cwd is unreadable
+# (lsof missing or denied), the command path still decides; both checks stop at
+# nested worktrees.
 process_belongs_to_this_worktree() {
     local pid=$1
-    local cwd cmd
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    run_path_in_worktree "$cwd" "$PWD" && return 0
+    local cmd
+    process_cwd_in_this_worktree "$pid" && return 0
     cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
     run_cmd_mentions_worktree "$cmd" "$PWD"
 }
@@ -509,6 +510,54 @@ process_age_seconds() {
     }'
 }
 
+# Startup grace for an isolated stack that has not published services.json.
+# Fall back to the default on any non-integer override. An arithmetic error
+# would return "not owned" and let cleanup kill a just-started run before it
+# publishes services.json — fail toward preserving the stack. Bound before ANY
+# numeric use: a leading-zero value ("0000000008") is invalid octal to $(( )),
+# and a value near the integer ceiling overflows `grace + 59`. Cap at 5 digits
+# (~27h), far above any real bootstrap.
+benchmark_startup_grace_seconds() {
+    local grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
+    printf '%s\n' "$grace"
+}
+
+# An isolated run that has not published services.json is still starting when
+# its owner (local.py's local-stack-owner.json: the stack pid and its `ps
+# lstart` birth) is the same live process, or when the run directory is younger
+# than the startup grace (the owner record is written just after launch).
+isolated_run_still_starting() {  # <run-dir>
+    local run_dir="$1" owner pid birth grace grace_min
+    owner="$(OWNER="$run_dir/local-stack-owner.json" python3 - <<'PYEOF'
+import json, os, sys
+
+try:
+    with open(os.environ["OWNER"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+pid, birth = data.get("pid"), data.get("birth")
+if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and isinstance(birth, str) and birth.strip():
+    print(f"{pid} {birth.strip()}")
+PYEOF
+)" || owner=""
+    if [ -n "$owner" ]; then
+        pid="${owner%% *}"
+        birth="${owner#* }"
+        if [ "$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')" = "$birth" ]; then
+            return 0
+        fi
+    fi
+    grace="$(benchmark_startup_grace_seconds)"
+    grace_min=$(( (grace + 59) / 60 ))
+    [ -n "$(find "$run_dir" -maxdepth 0 -type d -mmin "-$grace_min" 2>/dev/null)" ]
+}
+
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
     # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
@@ -569,8 +618,13 @@ PYEOF
     if [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$run_id" != "." ] && [ "$run_id" != ".." ]; then
         run_dir="$PWD/.context/benchmarks/$run_id"
         if [ -d "$run_dir" ]; then
-            [ -f "$run_dir/services.json" ] || return 0
-            MANIFEST="$run_dir/services.json" python3 - <<'PYEOF' && return 0
+            if [ ! -f "$run_dir/services.json" ]; then
+                # Not published yet. Only an in-flight bootstrap is protected:
+                # a stack that died before publishing must not shield its
+                # leftover children for as long as the run directory exists.
+                isolated_run_still_starting "$run_dir" && return 0
+            else
+                MANIFEST="$run_dir/services.json" python3 - <<'PYEOF' && return 0
 import json, os, sys
 
 try:
@@ -581,6 +635,7 @@ except Exception:
 live = isinstance(data, dict) and str(data.get("status", "")).strip().lower() in {"starting", "running"}
 sys.exit(0 if live else 1)
 PYEOF
+            fi
         fi
     fi
 
@@ -589,19 +644,7 @@ PYEOF
     # Treat very young processes as owned rather than racing them to SIGTERM.
     local age grace
     age=$(process_age_seconds "$pid")
-    # Fall back to the default on any non-integer override. An arithmetic error
-    # here would return "not owned" and let cleanup kill a just-started run
-    # before it publishes services.json — fail toward preserving the stack.
-    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
-    # Bound before ANY numeric use. An all-digits string still breaks this
-    # function two ways: a leading-zero value ("0000000008") is invalid octal to
-    # the $(( )) below, and a value near the integer ceiling overflows
-    # `grace + 59`. Either one disables the young-process guard that stops
-    # cleanup from killing a benchmark which has not yet published
-    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
-    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
-        grace=90
-    fi
+    grace="$(benchmark_startup_grace_seconds)"
     [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
 
     # Young alone is not enough. An unqualified age check ALSO preserves a
@@ -711,10 +754,14 @@ if $IS_CLOUD; then
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                [ "$pid" = "$$" ] && continue
+                is_current_process_family "$pid" && continue
                 # `.cloud-env` marks the canonical checkout, but agent
                 # worktrees nest inside it (.claude/worktrees/<n>) and run
                 # their own stacks; a box-wide pattern kill murdered them.
-                if ! process_cwd_in_this_worktree "$pid"; then
+                # A cwd lsof cannot read falls back to the command path, so a
+                # stale worker is not left holding this stack's ports.
+                if ! process_belongs_to_this_worktree "$pid"; then
                     continue
                 fi
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then

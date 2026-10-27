@@ -20,6 +20,7 @@
 
 TEST_DB_RUN_LOCK_KEEPER_PID=""
 TEST_DB_RUN_LOCK_FILE=""
+TEST_DB_RUN_LOCK_KEY=""
 
 # Canonical lock key for a local Postgres URL: host:port/database, ignoring
 # credentials and query parameters so Prisma-tuned and psql URLs match.
@@ -31,25 +32,56 @@ test_db_run_lock_key() {  # <postgres-url>
   hostport="${rest%%/*}"
   database="${rest#*/}"
   [ "$database" != "$rest" ] && [ -n "$database" ] || return 1
-  host="${hostport%%:*}"
-  port="${hostport#*:}"
-  [ "$port" != "$hostport" ] && [ -n "$port" ] || port=5432
-  case "$host" in ""|127.0.0.1|::1|"[::1]") host=localhost ;; esac
+  case "$hostport" in
+    \[*\]*)
+      # Bracketed IPv6 ([::1]:5432): the address holds colons, so split at `]`.
+      host="${hostport%%]*}"
+      host="${host#[}"
+      port="${hostport#*]}"
+      port="${port#:}"
+      ;;
+    *)
+      host="${hostport%%:*}"
+      port="${hostport#*:}"
+      [ "$port" != "$hostport" ] || port=""
+      ;;
+  esac
+  [ -n "$port" ] || port=5432
+  case "$host" in ""|127.0.0.1|::1) host=localhost ;; esac
   printf '%s:%s/%s\n' "$host" "$port" "$database"
+}
+
+test_db_run_lock_file() {  # <lock-key>
+  local fs_key
+  fs_key="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '%s/%s.lock\n' "${ROSE_TEST_DB_LOCK_DIR:-${TMPDIR:-/tmp}/rose-test-db-locks}" "$fs_key"
+}
+
+# A coverage parent that already holds the lock hands its skip-sync blackbox
+# child ROSE_TEST_DB_LOCK_INHERITED_KEY/PID. The child runs under that lock only
+# when the key is its own database and the live holder named in the lock's
+# owner record is that pid; any other runner acquires the lock itself.
+test_db_run_lock_inherited() {  # <postgres-url>
+  local key holder="${ROSE_TEST_DB_LOCK_INHERITED_PID:-}" owner
+  [ -n "${ROSE_TEST_DB_LOCK_INHERITED_KEY:-}" ] && [[ "$holder" =~ ^[1-9][0-9]*$ ]] || return 1
+  key="$(test_db_run_lock_key "$1")" || return 1
+  [ "$key" = "$ROSE_TEST_DB_LOCK_INHERITED_KEY" ] || return 1
+  kill -0 "$holder" 2>/dev/null || return 1
+  owner="$(head -1 "$(test_db_run_lock_file "$key").owner" 2>/dev/null || true)"
+  case "$owner" in "pid=$holder "*) return 0 ;; esac
+  return 1
 }
 
 # acquire_test_db_run_lock <postgres-url> <runner-label>
 # Returns 0 holding the lock until this shell exits (or release is called).
 acquire_test_db_run_lock() {
-  local url="$1" label="${2:-backend test runner}" key fs_key lock_dir status_file keeper attempt status owner holder
+  local url="$1" label="${2:-backend test runner}" key status_file keeper attempt status owner holder
   key="$(test_db_run_lock_key "$url")" || {
     echo "❌ Cannot derive a test database lock key from the selected database URL." >&2
     return 1
   }
-  fs_key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
-  lock_dir="${ROSE_TEST_DB_LOCK_DIR:-${TMPDIR:-/tmp}/rose-test-db-locks}"
-  mkdir -p "$lock_dir" || return 1
-  TEST_DB_RUN_LOCK_FILE="$lock_dir/$fs_key.lock"
+  TEST_DB_RUN_LOCK_FILE="$(test_db_run_lock_file "$key")"
+  mkdir -p "$(dirname "$TEST_DB_RUN_LOCK_FILE")" || return 1
   status_file="$(mktemp "${TMPDIR:-/tmp}/rose-test-db-lock-status.XXXXXX")" || return 1
 
   python3 "$(dirname "${BASH_SOURCE[0]}")/coverage-process-lock.py" \
@@ -65,6 +97,7 @@ acquire_test_db_run_lock() {
 
   if [ "$status" = "acquired" ]; then
     TEST_DB_RUN_LOCK_KEEPER_PID="$keeper"
+    TEST_DB_RUN_LOCK_KEY="$key"
     # Holder description for a blocked peer. Written only after the kernel
     # lock is ours, so it always describes the live holder.
     printf 'pid=%s runner=%s workspace=%s cwd=%s started=%s\n' \
