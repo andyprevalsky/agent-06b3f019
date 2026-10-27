@@ -242,6 +242,21 @@ class Scorecard(unittest.TestCase):
         data["trend"] = data["trend"][:3]
         self.assertNotIn("SUCCESS RATE OVER TIME", self.valid(data))
 
+    def test_descent_iteration_count_controls_trend_threshold(self):
+        run = self.f.fleet()
+        for number in range(2, 5):
+            run_id = f"historical-{number}"
+            LEDGER["record"]("launch", run_id, ledger=self.f.ledger, goal="fleet-goal",
+                             slice=run_id, kind="fleet", run_dir=str(self.tmp / run_id),
+                             triggered_at=T0 + number * 10, scheduled_total=2)
+            LEDGER["record"]("end", run_id, ledger=self.f.ledger, goal="fleet-goal",
+                             ended_at=T0 + number * 10 + 5, state="COMPLETE",
+                             outcome={"task_status": {"PASSED": number % 3, "FAILED": 2 - number % 3}})
+        self.assertEqual(render(run, self.f, iterations=3)["trend"], [], "two launches may share one iteration")
+        card = render(run, self.f, iterations=4)
+        self.assertEqual(len(card["trend"]), 4)
+        self.assertIn("SUCCESS RATE OVER TIME", self.valid(card))
+
     def test_native_audit_presence_and_absence(self):
         admission = self.f.sharded(audit=False)
         no_audit = render(admission, self.f)["experiment"]

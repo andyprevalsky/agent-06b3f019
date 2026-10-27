@@ -112,8 +112,10 @@ Measurement contract
   reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
   replace the old standalone active-run/progress/cost blocks. A live experiment
   ends RUNNING; an unknown historical end reads END UNRECORDED, not capture time.
-- Once a goal has more than three launched experiments, show SUCCESS RATE OVER
-  TIME above the latest-three rows. Plot task PASS divided by scored tasks for
+- Once a descent goal has more than three completed iterations, pass its count
+  to `scripts/run-bench scorecard` with `--iterations N` and show SUCCESS RATE
+  OVER TIME above the latest-three rows. Outside descent, use more than three
+  launched experiments as the threshold. Plot task PASS divided by scored tasks for
   every experiment in goal order. Leave experiments with no scored tasks as
   gaps, and draw a still-running experiment's point hollow. The text fallback
   lists the same percentages and gaps.

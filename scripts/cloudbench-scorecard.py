@@ -849,7 +849,8 @@ def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: 
     return problems
 
 
-def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, agents=None, issues=None,
+def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, iterations: int | None = None,
+          agents=None, issues=None,
           now: float | None = None, deep: bool = True) -> dict:
     now = time.time() if now is None else now
     exp = load(run_dir, deep)
@@ -881,7 +882,7 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
         history.insert(0, _history_row(dict(exp, number=None)))
         history = history[:3]
     trend = []
-    if len(history_entries) > 3:
+    if (iterations if iterations is not None else len(history_entries)) > 3:
         for entry in history_entries:
             if mine and entry["id"] == mine["id"]:
                 item = exp
@@ -909,7 +910,8 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
                            + "\n  ".join(stale))
     exp_issues = _issues(exp) + overlay_issues
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
-            "since": since, "experiment": exp, "history": history, "trend": trend, "agents": agents,
+            "since": since, "experiment": exp, "history": history, "trend": trend,
+            "iterations": iterations, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
             "in_ledger": bool(mine)}
 
@@ -1486,6 +1488,7 @@ def main(argv=None) -> int:
     parser.add_argument("--issues", type=Path, help="JSON list of {text, owner, action, severity}")
     parser.add_argument("--ledger", type=Path, help="experiments ledger (default: git-common)")
     parser.add_argument("--goal", help="experiment goal for numbering and history")
+    parser.add_argument("--iterations", type=int, help="completed descent iterations; controls the >3 trend threshold")
     parser.add_argument("--now", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--shallow", action="store_true", help="skip reading verified export archives")
     parser.add_argument("--validate", type=Path, metavar="HTML", help="check a card against FORMAT v8")
@@ -1507,6 +1510,7 @@ def main(argv=None) -> int:
     issues = read_json(args.issues) if args.issues else None
     try:
         card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
+                     iterations=args.iterations,
                      agents=agents if isinstance(agents, list) else None,
                      issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
     except StaleOverlay as error:

@@ -28,8 +28,11 @@ for this goal. Show only the latest three actual experiments with concise timing
 queue/verdict, cost/cache/LLM and lifecycle subrows, replacing the old standalone
 active-run/progress/metrics and last-slice blocks. Preserve unknown classifications
 and original clocks; never invent zero measurements or failures.
-Once a goal has more than three experiments, show task success rate over time
-above those rows. Leave unscored experiments as gaps and draw running ones hollow.
+Once a descent goal has more than three completed iterations, show task success
+rate over time above those rows; pass the iteration count with `--iterations N`
+so multiple CLI launches in one batch do not advance the threshold. For other
+goals, use more than three experiments. Leave unscored experiments as gaps and
+draw running ones hollow.
 Color-code the card itself: green verified successes, red failures/blockers,
 blue active work and amber warnings/unmeasured coverage. On boxes.dev render
 actual CSS-colored text in a published HTML scorecard; diff highlighting and

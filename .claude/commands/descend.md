@@ -35,8 +35,9 @@ progress/final presentation. The iteration and stop policy below and in
 CLAUDE.md governs scheduling. Existing user
 steering overrides defaults: persist the requested names, goal, substrate,
 budgets, concurrency and acceptance rules rather than importing another run's
-special profile. Invocation authorizes running the requested slice and repairing
-infra; it does not approve a runtime/product fix or a different paid workload.
+special profile. Invocation authorizes running the requested slice and applying
+in-scope branch fixes under the grounding and final-review rules; it does not
+authorize a different paid workload.
 
 ## Current descent policy and batch schedule
 
@@ -46,6 +47,9 @@ user to invoke it. If `/goal` is unavailable, persist the same objective in
 `state.json` and continue. Read `/benchmark` before **every** benchmark launch,
 including dry runs, batches, reruns, outcome proofs and acceptance. Delegated
 launch owners read it before their first `scripts/run-bench` call.
+For each descent scorecard, pass the completed iteration count from `state.json`
+as `--iterations N`. The success-rate graph appears only after iteration 3;
+multiple CLI launches that form one logical batch do not advance that count.
 
 A **batch size** counts distinct benchmark task names in one CLI launch, not
 `-k` copies. At `-k 3`, 20 tasks schedule 60 copies. Start with 20 tasks, order
@@ -171,9 +175,10 @@ and Downstream Implications sections or their code-block presentation.
 
 ## Hard rules
 
-1. **No reward hacking.** Never change a benchmark definition, prompt, expected
+1. **No reward hacking.** Never change a task definition, task prompt, expected
    tools, pass criteria, load size, timeout, concurrency, price cap, or
-   production behavior merely to make it pass. Never weaken a repro assertion
+   production behavior merely to make it pass. A proven task-definition defect
+   follows TASK_DEFINITION_REVIEW and explicit final keep. Never weaken a repro assertion
    or hide a failed primary path behind a fallback. If a task contract appears wrong, route it to TASK_DEFINITION_REVIEW before any minimal correction.
 2. **No RCA without the hard proof pair.** Before a fixed candidate's
    outcome-proof benchmark rerun, the RCA
@@ -202,9 +207,10 @@ and Downstream Implications sections or their code-block presentation.
 5. **Infra is in scope.** RCA and fix every harness, fleet, credential plumbing,
    capacity, teardown, and control-plane failure. Never kill a benchmark fleet
    not launched by this session.
-6. **One final user review.** FINAL_CHANGE_REVIEW presents every applied change and its exact diff after the full slice is green. All human requests are delivered by the main
-   thread, never by a worker. Neither gate pauses unrelated benchmarks,
-   infra repairs or other clusters. Do not ask
+6. **One final user review.** FINAL_CHANGE_REVIEW presents every applied change
+   and its exact diff after the full slice is green. All human requests are
+   delivered by the main thread, never by a worker. Final review does not pause
+   unrelated benchmarks, infra repairs or other clusters. Do not ask
    Andy to prioritize independent work, choose between safe implementation
    paths, or approve ordinary infra fixes.
 7. **External blockers are not a third planned gate.** Keep every unaffected
@@ -235,10 +241,11 @@ and Downstream Implications sections or their code-block presentation.
     cluster — a singleton included — enters its own `/RCA` cycle. Give one
     worker ownership of each independent cluster, not one fixer per task.
     Require the unchanged owning-boundary repro red then green and cement it.
-    A HARNESS fix on protected surfaces needs the exact-snapshot strong grounding pass before applying it; an INFRA fix does not require that review. That
+    A HARNESS fix on protected surfaces needs the exact-snapshot strong
+    grounding pass before applying it; an INFRA fix does not require that review. That
     exact rerun supplies `/RCA`'s benchmark outcome proof for every member.
     No fixed task may be reported Confirmed before that proof. An ordinary
-    unchanged next slice may run while RCA/proof/approvals are pending;
+    unchanged next slice may run while RCA/proof/final review are pending;
     pending proof is not a global scheduling gate.
 12. **Use the benchmark scorecard.** Every progress/final response follows
     `.claude/shared/benchmark-report-format.txt`, with every section, measured
@@ -745,8 +752,8 @@ while the requested goal still has authorized work:
     once the full slice passes: complete FINAL_CHANGE_REVIEW, ablation rerun, publication and owned cleanup
 ```
 
-Do not stop for Andy to fix infra. Below 5%, unrelated infra RCAs, runtime
-approvals and deploys do not add a global next-slice gate. At >=5%, stop the
+Do not stop for Andy to fix infra. Below 5%, unrelated infra RCAs and final
+review preparation do not add a global next-slice gate. At >=5%, stop the
 active owned run and repair its critical failures before rerunning the original
 experiment. A verified local fix need not be deployed to production before its
 local-snapshot experiment. Keep previous failed runs, rates and clocks in history;
@@ -766,7 +773,7 @@ but are not silently counted as terminal infra failures.
 Triage every observed error, including INFRA, HARNESS, recovered errors from
 passing tasks and errors after grading. Start during the batch and update from
 final evidence. Ten errors with three causes should produce three RCA workers
-and three fixes; only runtime/product clusters require fix approval.
+and up to three fixes, subject to the eight-cluster iteration cap.
 
 ### TRIAGE_FAILURES — one card per failed task
 
@@ -923,7 +930,7 @@ ready. Never wait for an infra-clean run or every other RCA to finish.
 The queue holds clusters, not tasks. Sort it by:
 
 1. member-task count, largest first, so the fix that flips the most tasks is
-   decided first;
+   dispatched first;
 2. complexity class, easiest first, from the table below; then
 3. row ID.
 
@@ -942,10 +949,10 @@ merge. Between those events the order is stable, and a cluster whose
 outcome-proof rerun fails keeps its position.
 
 A cluster is **idle** when it is not applying, outcome-rerunning, or in RCA.
-Dispatch the top ready idle cluster to an available fix owner within the eight-slot iteration cap. A
-lower-ranked ready cluster is not held behind a higher-ranked cluster still
-collecting evidence or awaiting a different decision. Deliver each independent
-request with its own snapshot ID and full canonical approval packet.
+Dispatch the top ready idle cluster to an available fix owner within the
+eight-slot iteration cap. A lower-ranked ready cluster is not held behind a
+higher-ranked cluster still collecting evidence. Record each candidate's exact
+snapshot ID and diff for final review.
 
 Do not retract a dispatched fix when the queue changes. Dispatch newly ready
 independent clusters without waiting for another owner; use the current rank
@@ -1065,16 +1072,15 @@ Never put the latest subset denominator in the Overall slice field. Separate
 sampling goals preserve every slice's own task list and acceptance disposition;
 a new sample never rewrites the original run.
 
-### Cluster and approval status
+### Cluster and final-review status
 
 The full lifecycle ledger remains in `state.json`. Every row records ID, kind,
 issue class, exact member names/count, concrete first-bad boundary, RCA status,
-fix/test proof, approval snapshot/decision, real rerun and deploy status.
-Show changed or blocked clusters briefly in ISSUES / NEXT ACTION, including
-owner, boundary and proof/approval state. Use one active-worker line per agent,
-with its actual start/block timestamp and age. Pending runtime/deploy approval
-is not marked as blocking the next slice unless that exact action is a genuine
-resource/authorization dependency. Show the infra hold's original start/age.
+fix/test proof, grounding or task-definition verdict, real rerun and final
+review status. Show changed or blocked clusters briefly in ISSUES / NEXT
+ACTION, including owner, boundary and proof state. Use one active-worker line
+per agent, with its actual start/block timestamp and age. Show the infra hold's
+original start/age.
 
 For each terminal run record both task success and infra reliability. A below 5%
 infra result allows the next slice; it does not mean all tasks passed, all fixes
