@@ -307,7 +307,9 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     // viewer itself and the file could not be scrolled — the panel's z-[110]
     // override sat under the sheet scrim (z-[210]), which caught every wheel.
     const user = userEvent.setup();
-    downloadTextMock.mockResolvedValue(Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n'));
+    downloadTextMock.mockResolvedValue(
+      Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n'),
+    );
     const file = makeFile({ original_filename: 'notes.txt', mime_type: 'text/plain' });
     renderWithProviders(
       <CompletionSummaryCard
