@@ -129,7 +129,7 @@ async function startReplacementWorkflow(
       fastModeCacheEnabled: agent.fastModeCacheEnabled,
       memoryEnabled: agent.memoryEnabled,
       worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
-      startPhase: 'resume',
+      startPhase: agent.workflowStartPhase === 'browser' ? 'browser' : 'resume',
       ...(claim.resumeState.max_iterations !== null
         ? { maxIterations: claim.resumeState.max_iterations }
         : {}),

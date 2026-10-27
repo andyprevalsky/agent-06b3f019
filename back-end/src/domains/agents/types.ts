@@ -130,7 +130,7 @@ const createAgentBaseSchema = z.object({
   model: z.string().optional().default('rose-labs/rose-1-ultra'),
   reasoning_max_tokens: z.number().int().min(0).optional().default(256),
   source: z.enum(['WEB', 'MAC_APP', 'SMS']).optional().default('WEB'),
-  start_phase: z.enum(['plan', 'execute']).optional(), // Optional: bypass chat mode and start Temporal workflow directly
+  start_phase: z.enum(['plan', 'execute', 'browser']).optional(), // Optional: bypass chat mode and start Temporal workflow directly
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)

@@ -77,7 +77,7 @@ async function launchParams(
     ...(agent.parentAgentId !== null ? { parentAgentId: agent.parentAgentId } : {}),
     ...(agent.busId !== null ? { busId: agent.busId } : {}),
     depth: agent.depth,
-    startPhase: 'execute',
+    startPhase: agent.workflowStartPhase === 'browser' ? 'browser' : 'execute',
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
     memoryEnabled: agent.memoryEnabled,

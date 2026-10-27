@@ -237,6 +237,16 @@ AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
+def _browser_instruction_receipt(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Terminal evidence of the native browser's acknowledged input boundary."""
+    return {
+        "message_ids": list(state.get("user_instruction_message_ids") or []),
+        "read_confirmed": state.get("_user_instruction_poll_confirmed") is True,
+        "schema_current": int(state.get("schema_user_instruction_count") or 0)
+        >= len(state.get("user_instruction_messages") or []),
+    }
+
+
 def _logical_browser_task_id(agent_id: str) -> str:
     """One browser identity per GP; activity/tool IDs remain separate."""
     return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
@@ -11185,6 +11195,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 "session_id": session_id,
                                 "structured_response": structured_response,
                                 "browser_output_schema": response_schema,
+                                "browser_instruction_receipt": _browser_instruction_receipt(instruction_state),
                                 "output_files": output_files,
                             }
                         )
@@ -13873,6 +13884,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 "browser_cleanup",
                 "browser_error_type",
                 "browser_error_message",
+                "browser_instruction_receipt",
                 "world_model_simulated",
                 "world_model_session_id",
                 "world_model_name",

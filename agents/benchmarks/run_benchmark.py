@@ -3150,7 +3150,9 @@ async def create_agent(
     elif task.model:
         body["model"] = task.model
 
-    if task.start_phase:
+    if is_polar_bench_task(task):
+        body["start_phase"] = "browser"
+    elif task.start_phase:
         body["start_phase"] = task.start_phase
     # Planner memory is an explicit per-run A/B flag: default off for every benchmark.
     body["memory_enabled"] = task.memory == "on"

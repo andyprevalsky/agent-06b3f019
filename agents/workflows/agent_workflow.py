@@ -133,6 +133,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
+    from workflows.browser_execution import run_browser_execution
     from tools.set_plan import set_plan
     from tools.wait_for import wait_for
     from tools.web_fetch import web_fetch
@@ -940,6 +941,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.bus_id: Optional[str] = None  # Shared bus channel ID for tree updates
         self.tools_in_use: Set[str] = set()  # Currently executing tools (display strings)
         self.message_count: int = 0  # Total message count for this agent
+        self._browser_execution_mode = False
+        self._browser_execution_task_id: Optional[str] = None
+        self._browser_execution_contract: Optional[str] = None
+        self._browser_execution_requirement_keys: List[List[str]] = []
+        self._browser_execution_pending_input_ids: List[str] = []
         self.output_schema: Optional[Dict] = None  # Structured output schema (for prompts, verifier, tree, completion)
         self.start_time: Optional[datetime] = None  # Workflow start time for duration tracking
 
@@ -1296,6 +1302,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        self._browser_execution_mode = runtime.get("browser_execution_mode", self._browser_execution_mode) is True
+        self._browser_execution_task_id = runtime.get("browser_execution_task_id")
+        self._browser_execution_contract = runtime.get("browser_execution_contract")
+        self._browser_execution_requirement_keys = runtime.get("browser_execution_requirement_keys", [])
+        self._browser_execution_pending_input_ids = runtime.get("browser_execution_pending_input_ids", [])
         self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
@@ -1488,6 +1499,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
                 "pending_tool_resumes": list(self._pending_tool_resumes),
                 "background_agents": self._background_state_snapshot(),
+                "browser_execution_mode": self._browser_execution_mode,
+                "browser_execution_task_id": self._browser_execution_task_id,
+                "browser_execution_contract": self._browser_execution_contract,
+                "browser_execution_requirement_keys": self._browser_execution_requirement_keys,
+                "browser_execution_pending_input_ids": self._browser_execution_pending_input_ids,
             },
         }
 
@@ -2155,6 +2171,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.compute_token_demo_cache_affinity_key = (
             _demo_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
+        self._browser_execution_mode = start_phase == "browser"
         self._restore_deployment_state(resume_state)
         # continue_as_new / deployment resume may restore demo_cache_goal from
         # runtime_state. Recompute the DEMO cache gate from the restored goals
@@ -2498,7 +2515,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # plan|execute and no resume_state. continue_as_new / deploy resume
         # keep the live schema and plan — a later USER there is mid-run
         # feedback, not a new task.
-        is_fresh_start = resume_state is None and start_phase in ("plan", "execute")
+        is_fresh_start = resume_state is None and start_phase in ("plan", "execute", "browser")
         prior_run_superseded = False
         if is_fresh_start and not is_sub_agent:
             startup_execute_context = await workflow.execute_activity(
@@ -2610,7 +2627,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
         # already-finished DAG nodes from DB messages, then runs remaining nodes.
         resume_dag_from_context = start_phase == "execute_dag_resume"
-        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume", "resume")
+        skip_plan = start_phase in ("execute", "browser", "execute_continued", "execute_dag_resume", "resume")
         skip_dag = start_phase in ("execute_continued", "resume")
 
         if init_message_posted:
@@ -2735,6 +2752,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 retry_policy=CONTROL_PLANE_POLL_RETRY,
             )
             execute_context = filter_internal_subagent_messages(execute_context)
+
+        if self._browser_execution_mode:
+            result = await run_browser_execution(self, execute_context)
+            return await self._finish_execute_result(result)
 
         # Try DAG execution if a plan exists (skip after continue_as_new — DAG already ran)
         if skip_dag:
@@ -2931,6 +2952,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             **self._iteration_resume_kwargs(),
         )
 
+        return await self._finish_execute_result(execute_result)
+
+    async def _finish_execute_result(self, execute_result: Dict) -> Dict:
         await self._track_tokens_and_cost(execute_result)
 
         if execute_result["status"] == "completed":
@@ -2950,7 +2974,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 return execute_result
             self._require_current_response_schema_acceptance()
             await self._mark_complete(execute_result.get("context", []), execute_result.get("structured_response"))
-            return {"status": "completed", "goal": goal}
+            return {"status": "completed", "goal": self.goal}
 
         return await self._handle_incomplete(execute_result, "EXECUTE")
 
@@ -3185,13 +3209,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 or "No output schema has been accepted for the current user requirements"
             )
 
-    async def _response_schema_user_messages(self) -> List[str]:
+    async def _response_schema_user_messages(self, *, include_schema: bool = True) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
         goal = self._response_schema_task_base or (self.demo_cache_goal or self.goal or "").strip()
         if goal:
             messages.append(goal)
-        if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
+        if include_schema and isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
             messages.append(
                 "Current output schema (preserve fields unless later user feedback changes them):\n"
                 + _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":"))
@@ -3201,12 +3225,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # Reload durable USER rows so a later revision still includes feedback
         # accepted by an earlier workflow run.
         try:
-            persisted_messages = await workflow.execute_activity(
-                poll_new_messages,
-                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
-                retry_policy=CONTROL_PLANE_POLL_RETRY,
-            )
+            if not include_schema:
+                # Execution binding must admit durable rows through the same
+                # revision owner before it can accept a request/schema pair.
+                persisted_messages = await self._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+            else:
+                persisted_messages = await workflow.execute_activity(
+                    poll_new_messages,
+                    args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                    start_to_close_timeout=CONTROL_PLANE_POLL_TIMEOUT,
+                    retry_policy=CONTROL_PLANE_POLL_RETRY,
+                )
         except Exception as e:
             if any(
                 error_chain_has_type(e, kind)
@@ -3216,6 +3245,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "GenerationHandoffRequested",
                 )
             ):
+                raise
+            if not include_schema:
                 raise
             workflow.logger.warning(f"Failed to reload durable feedback for response_schema refresh: {e}")
             persisted_messages = []

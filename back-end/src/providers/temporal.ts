@@ -236,7 +236,7 @@ export interface StartAgentWorkflowParams {
   parentAgentId?: string; // Optional: parent agent ID for tree structure
   depth?: number; // Optional: nesting depth
   busId?: string; // Optional: shared bus channel ID for sub-agent tree updates
-  startPhase?: 'plan' | 'execute' | 'resume'; // 'resume' is internal deployment recovery
+  startPhase?: 'plan' | 'execute' | 'browser' | 'resume'; // 'resume' is internal deployment recovery
   maxIterations?: number; // Optional: step limit for execute phase (sub-agents use 25)
   priceLimitCents?: number; // Optional: price limit in cents (default 100)
   contextGates?: {

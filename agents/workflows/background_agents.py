@@ -106,6 +106,8 @@ WAKEABLE_TASK_TYPES = frozenset({"explore", "browser", "code"})
 # Finished explore/browser/code tasks that keep what a wake needs (args + previous result).
 MAX_WAKEABLE_FINISHED_TASKS = 10
 FINISHED_RECORD_KEYS = (
+    "browser_verified",
+    "browser_instruction_receipt",
     "tool_call_id",
     "agent_type",
     "address",
@@ -568,6 +570,9 @@ class BackgroundAgentsMixin:
             return
         metadata = event.metadata or {}
         data = event.data or {}
+        if metadata.get("toolName") == "spawn_browser_agent" and metadata.get("action_type") == "task_complete":
+            outcome["browser_verified"] = metadata.get("success") is True
+            outcome["browser_instruction_receipt"] = metadata.get("browser_instruction_receipt")
         outcome["status"] = event.status
         outcome["message"] = event.message or ""
         if isinstance(data.get("result"), str) and data["result"].strip():
@@ -619,6 +624,9 @@ class BackgroundAgentsMixin:
         if failed and paused and not kill_reason:
             status = PAUSED_TASK_STATUS
         record["status"] = status
+        if record.get("agent_type") == "browser":
+            record["browser_verified"] = outcome.get("browser_verified") is True
+            record["browser_instruction_receipt"] = outcome.get("browser_instruction_receipt")
         record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
         finished = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
