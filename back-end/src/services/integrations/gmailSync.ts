@@ -317,9 +317,7 @@ async function transformAndFilterEmails(
     where: {
       channel: MessageChannel.EMAIL,
       to: { in: batchContactEmails },
-      person: {
-        userId,
-      },
+      userId,
     },
     select: { to: true },
     distinct: ['to'],

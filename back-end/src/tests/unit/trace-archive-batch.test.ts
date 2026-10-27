@@ -11,6 +11,7 @@ import {
 } from '../../providers/traceArchive';
 import { prisma } from '../../providers/database';
 import {
+  archiveManifestLockWaiters,
   inspectFinalizedManifest,
   writeFinalizationMarker,
 } from '../../providers/traceArchiveManifest';
@@ -122,13 +123,16 @@ async function seed(rootAgentId: string) {
 }
 
 async function waitForAdvisoryWaiter(otherReady: () => boolean = () => false) {
-  await observeUntil(async () => {
-    if (otherReady()) return true;
-    const rows = await prisma.$queryRawUnsafe<{ waiting: number }[]>(
-      "SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory'"
-    );
-    return (rows[0]?.waiting ?? 0) >= 1;
-  });
+  await observeUntil(async () => otherReady() || archiveManifestLockWaiters() >= 1);
+}
+
+/** Native lease loss: expire exactly this root's held manifest lease row. */
+async function expireHeldManifestLease(rootAgentId: string): Promise<void> {
+  const expired = await prisma.$executeRaw`
+    UPDATE "TraceArchiveManifestLease" SET "expiresAt" = clock_timestamp() - interval '1 second'
+    WHERE "rootAgentId" = ${rootAgentId} AND "expiresAt" > clock_timestamp()
+  `;
+  assert.strictEqual(expired, 1, 'expire only the positively identified fixture root lease');
 }
 
 async function sameRootInterleaving(kind: 'batch' | 'single') {
@@ -380,17 +384,7 @@ async function startRetriesAfterLostLeasePreserveFinalization(
   onManifestWrite = async (key) => {
     if (key !== 'trace-archive/' + rootAgentId + '/' + target) return;
     onManifestWrite = undefined;
-    const rows = await prisma.$queryRaw<{ pid: number }[]>`
-        SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-        WHERE l.locktype = 'advisory' AND l.granted AND a.datname = current_database()
-        AND l.objsubid = 1
-        AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(${rootAgentId + ':trace-archive-manifest'}, 8104327)
-      `;
-    assert.strictEqual(rows.length, 1, 'terminate only this start fixture lock holder');
-    const result = await prisma.$queryRaw<{ terminated: boolean }[]>`
-        SELECT pg_terminate_backend(${rows[0].pid}::int) AS terminated
-      `;
-    assert.strictEqual(result[0]?.terminated, true);
+    await expireHeldManifestLease(rootAgentId);
     killed = true;
     await seed(rootAgentId);
     terminalObjects = new Map([...objects].filter(([name]) => name.includes('/manifest.')));
@@ -454,21 +448,7 @@ async function lostTransactionStopsWrites() {
   let writesAtLoss = -1;
   onEncryptedRead = async (key) => {
     if (key !== 'trace-archive/' + rootAgentId + '/manifest.json.gz.enc' || killed) return;
-    const rows = await prisma.$queryRaw<{ pid: number }[]>`
-      SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-      WHERE l.locktype = 'advisory' AND l.granted AND a.datname = current_database()
-      AND l.objsubid = 1
-      AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(${rootAgentId + ':trace-archive-manifest'}, 8104327)
-    `;
-    assert.strictEqual(
-      rows.length,
-      1,
-      'terminate only the positively identified fixture root lock holder'
-    );
-    const result = await prisma.$queryRaw<
-      { terminated: boolean }[]
-    >`SELECT pg_terminate_backend(${rows[0].pid}::int) AS terminated`;
-    assert.strictEqual(result[0]?.terminated, true);
+    await expireHeldManifestLease(rootAgentId);
     killed = true;
     writesAtLoss = fixturePuts;
   };

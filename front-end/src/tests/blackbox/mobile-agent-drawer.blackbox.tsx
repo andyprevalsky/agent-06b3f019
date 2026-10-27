@@ -45,6 +45,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof MobileAgent
   return {
     agents: [] as Agent[],
     isLoadingAgents: false,
+    hasLoadedAgents: true,
     selectedAgentId: null,
     onSelectAgent: vi.fn(),
     onCreateAgent: vi.fn(),
@@ -152,6 +153,27 @@ describe('MobileAgentDrawer', () => {
     renderWithProviders(<MobileAgentDrawer {...defaultProps({ agents: [] })} />);
     await u.click(screen.getByRole('button', { name: 'Open menu' }));
     expect(await screen.findByText('No agents yet')).toBeInTheDocument();
+  });
+
+  it('Rose list shows the spinner for the first load only, never for later polls', async () => {
+    const u = userEvent.setup();
+    server.use(http.get('*/api/projects', () => HttpResponse.json({ projects: [] })));
+    const view = renderWithProviders(
+      <MobileAgentDrawer
+        {...defaultProps({ roseHeader: true, isLoadingAgents: true, hasLoadedAgents: false })}
+      />,
+    );
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
+    expect(await screen.findByLabelText('Loading agents')).toBeInTheDocument();
+    view.rerender(<MobileAgentDrawer {...defaultProps({ roseHeader: true })} />);
+    await u.click(await screen.findByRole('button', { name: '+ New project' }));
+    await u.type(screen.getByRole('textbox', { name: 'New project name' }), 'Website');
+    // A background poll on an account with no agents: in flight again, first load settled.
+    view.rerender(
+      <MobileAgentDrawer {...defaultProps({ roseHeader: true, isLoadingAgents: true })} />,
+    );
+    expect(screen.queryByLabelText('Loading agents')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Website');
   });
 
   it('keeps the tab switcher below the iOS safe-area inset', async () => {

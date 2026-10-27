@@ -224,9 +224,7 @@ async function collectFixtureWithClient(
     db.agentRunCredentialPropagation.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    db.toolSideEffect.findMany({
-      where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
-    }),
+    db.$queryRaw<unknown[]>(toolSideEffectsForAgentsSql(agentIds)),
     db.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
   ]);
 
@@ -273,6 +271,19 @@ async function collectFixtureWithClient(
   rows.BrowserContext = browserContexts;
   rows.EmailIntegrationCredential = emailCredentials;
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
+}
+
+/**
+ * Side effects whose operation key names one of the run's agents. Keys embed
+ * the agent ID at varying positions, so this is a substring match; the
+ * ToolSideEffect_operationKey_trgm_idx trigram index lets it seek.
+ */
+export function toolSideEffectsForAgentsSql(agentIds: string[]): Prisma.Sql {
+  const matches = agentIds.map((id) => Prisma.sql`"operationKey" LIKE ${`%${id}%`}`);
+  return Prisma.sql`
+    SELECT * FROM "ToolSideEffect"
+    WHERE ${matches.length > 0 ? Prisma.join(matches, ' OR ') : Prisma.sql`FALSE`}
+  `;
 }
 
 async function collectUserEnvironmentRows(db: FixtureDbClient, userId: string): Promise<JsonRows> {
@@ -323,7 +334,9 @@ function buildFixture(
 export async function restoreFixture(fixture: ScopedDbFixture): Promise<void> {
   await deleteFixtureScope(fixture);
   for (const table of fixture.table_order) {
-    const tableRows = (fixture.rows[table] ?? []).map((row) => normalizeRow(table, row));
+    const tableRows = (fixture.rows[table] ?? []).map((row) =>
+      normalizeRow(table, row, fixture.user_id)
+    );
     if (tableRows.length === 0) continue;
     await delegate(table).createMany({
       data: tableRows,
@@ -404,8 +417,11 @@ function delegate(table: FixtureTable): ModelDelegate {
   return (prisma as unknown as Record<string, ModelDelegate>)[name];
 }
 
-function normalizeRow(table: FixtureTable, row: unknown): Record<string, unknown> {
+function normalizeRow(table: FixtureTable, row: unknown, userId: string): Record<string, unknown> {
   const normalized = { ...(row as Record<string, unknown>) };
+  // Fixtures archived before MessageRecord.userId existed omit it; every
+  // captured Person, and so every message, belongs to the fixture's user.
+  if (table === 'MessageRecord' && normalized.userId === undefined) normalized.userId = userId;
   for (const field of BIGINT_FIELDS[table] ?? []) {
     const value = normalized[field];
     if (typeof value === 'string' || typeof value === 'number') normalized[field] = BigInt(value);

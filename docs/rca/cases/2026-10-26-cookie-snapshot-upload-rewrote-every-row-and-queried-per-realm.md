@@ -20,6 +20,8 @@ tags:
   - write-amplification
   - postgres
 sources:
+  - PR #1579
+  - commit 1670e21437631f85c8fcc431862f4281f77e9b13
   - memory:scalability-audit-100-seats-20261024 (thread thr_1981ff79aa724ae59870f1829121c7e1, lane S5)
   - task S5 prod pg_stat_statements read-only snapshot 2026-10-26 (stats since 2025-11-21)
 repro: back-end/src/tests/blackbox/browser-credential-sync.blackbox.ts ("unchanged cookie re-upload rewrites no rows and issues O(1) statements per upload")
@@ -107,6 +109,14 @@ proportional to the cookies that actually changed. The previous cost was
 `2·realms + ceil(N/100) + 2P` statements, with all N rows rewritten. Everything
 stays keyed per user; no shared rows or locks are added. Clients already in
 the field get the fix without a Mac release.
+
+**Shipped (PR #1579, merge 1670e2143, Render live 2026-10-26 ~20:50Z).** Prod check, read-only, 20:52→21:02Z:
+
+- The old per-realm bundle upsert and the cleanup DELETE made 0 new calls.
+- The set-based bundle insert ran 6 times, one per upload.
+- Cookie row updates were +235 in 10 minutes, about 24/min. Before the fix the rate was about 3.4k/min.
+
+CodeRabbit found that the touched/live realm keys were not canonical (a mixed-case host). That was fixed with its own regression test before merge.
 
 ## Human feedback
 

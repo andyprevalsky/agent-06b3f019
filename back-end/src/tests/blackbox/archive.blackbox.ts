@@ -32,11 +32,7 @@ import {
   trackSeededRootAgent,
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
-import {
-  testFinalizeDeleteSeeksByRoot,
-  testFixtureExcludesUserLifetimeHistory,
-  testLateLlmArtifactIndexesOnlyItself,
-} from './archive-run-cost.helper';
+import { runCostCases } from './archive-run-cost.helper';
 
 config();
 
@@ -120,6 +116,7 @@ async function seedRun(): Promise<SeededRun> {
   await prisma.messageRecord.create({
     data: {
       personId,
+      userId,
       channel: 'IMESSAGE',
       from: '+10000000000',
       to: '+10000000001',
@@ -160,6 +157,7 @@ async function seedRun(): Promise<SeededRun> {
 }
 
 async function cleanup(seed: SeededRun): Promise<void> {
+  await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
   await prisma.message.deleteMany({ where: { id: { in: [seed.messageId, seed.staleMessageId] } } });
   await prisma.toolSideEffect.deleteMany({
     where: { operationKey: { contains: seed.rootAgentId } },
@@ -217,12 +215,7 @@ async function testFixtureScopeAndRestore(): Promise<void> {
 
 async function withSeededRun(fn: (seed: SeededRun) => Promise<void>): Promise<void> {
   const seed = await seedRun();
-  try {
-    await fn(seed);
-  } finally {
-    await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
-    await cleanup(seed);
-  }
+  await fn(seed).finally(() => cleanup(seed));
 }
 
 async function testStartFixtureSnapshotExcludesPostReadyWrites(): Promise<void> {
@@ -582,19 +575,10 @@ async function runAll(): Promise<void> {
       fn: runCurationPoolControls,
     },
     { name: 'fixture scope and restore replacement', fn: testFixtureScopeAndRestore },
-    {
-      name: "run fixture excludes the user's lifetime history",
-      fn: () => withSeededRun(testFixtureExcludesUserLifetimeHistory),
-    },
-    {
-      name: 'finalize search-index delete seeks by root',
-      fn: () => withSeededRun(testFinalizeDeleteSeeksByRoot),
-    },
-    {
-      name: 'late llm artifact indexes only itself',
-      fn: () =>
-        withSeededRun((seed) => testLateLlmArtifactIndexesOnlyItself(BASE_URL, API_KEY, seed)),
-    },
+    ...runCostCases(BASE_URL, API_KEY).map((runCase) => ({
+      name: runCase.name,
+      fn: () => withSeededRun(runCase.fn),
+    })),
     {
       name: 'start fixture snapshot excludes post-ready writes',
       fn: testStartFixtureSnapshotExcludesPostReadyWrites,

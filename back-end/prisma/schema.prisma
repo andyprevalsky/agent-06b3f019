@@ -220,6 +220,28 @@ model Message {
 /// Search projection of live messages and finalized R2 trace bundles. Archive
 /// rows deliberately have no FK to Message: archived traces remain searchable
 /// after operational Agent/Message rows are purged.
+/// Per-root trace-archive manifest lease. A row lease (not a transaction-held
+/// advisory lock) so no pooled connection is pinned across R2 storage I/O.
+model TraceArchiveManifestLease {
+  rootAgentId String   @id
+  ownerId     String
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// One row per agent in trajectory search: its goal and title, stored once
+/// instead of on every AgentTrajectorySearch message row.
+model AgentTrajectoryAgent {
+  agentId    String   @id
+  userId     String
+  agentGoal  String   @default("")
+  agentTitle String?
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+}
+
 model AgentTrajectorySearch {
   messageId   String   @id
   userId      String
@@ -768,13 +790,18 @@ model MessageRecord {
   externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
   createdAt          DateTime       @default(now())
-  person             Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  /// Owner, denormalized from Person so per-user reads use (userId, timestamp)
+  /// instead of joining every user's rows. The composite relation keeps it equal
+  /// to Person.userId (insert mismatch fails; owner changes cascade).
+  userId             String
+  person             Person         @relation(fields: [personId, userId], references: [id, userId], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
-  @@index([timestamp])
   @@index([personId, timestamp])
-  @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
+  // Every timestamp-ordered read is per user. A global timestamp index lets the
+  // planner walk other users' rows whenever one user owns a large share.
+  @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
 }
 
@@ -830,6 +857,7 @@ model Person {
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
+  @@unique([id, userId]) // Target of MessageRecord's (personId, userId) relation
   @@index([userId])
   @@index([firstName])
   @@index([lastName])
