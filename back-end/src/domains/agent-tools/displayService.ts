@@ -6,9 +6,9 @@
  *   items (url | file | content_base64 | bundle), caption, placement, options
  *     │ resolve bytes  (url: bounded SSRF-guarded fetch; file: tree pointer or
  *     │                 owner storage path, plus the tree files an .html/.gltf/
- *     │                 .obj references; base64: decode; bundle: decode files)
+ *     │                 .obj/.js references; base64: decode; bundle: decode files)
  *     │ classify       (magic bytes → image/* video/* pdf glb; declared + checked
- *     │                 → text/html, .gltf/.obj/.stl/.usdz)        ── all-or-nothing
+ *     │                 → text/html, .js/.mjs, .gltf/.obj/.stl/.usdz) ── all-or-nothing
  *     │ caps           (≤ 20 items, ≤ 20 MB per file, ≤ 100 MB per call;
  *     │                 bundles ≤ 500 files and ≤ 50 MB)
  *     ▼ kind
@@ -16,6 +16,8 @@
  *     page (.html)  ─► <owner>/display/<sha256>.html             → usercontent page URL
  *     bundle        ─► blobs + manifest (providers/agentTools/displayBundle.ts)
  *     model / pdf   ─► bundle of the file + a generated viewer   → usercontent bundle URL
+ *     script (.js)  ─► bundle of the script (+ the files it imports) + a generated
+ *                      page running it as a module (three.js import map), kind "bundle"
  *
  *   inline ─► ASSISTANT message per unique item,
  *             id = deterministicMessageId(agentId, "display:<sha256 | bundle hash>")
@@ -29,8 +31,10 @@ import { createHash } from '../../providers/crypto';
 import {
   DISPLAY_BUNDLE_MAX_FILES,
   DISPLAY_MODEL_EXTENSIONS,
+  DISPLAY_SCRIPT_EXTENSIONS,
   buildDisplayBundle,
   displayBlobKey,
+  displayRelativeRefs,
   storeDisplayBundle,
   type BuiltDisplayBundle,
   type DisplayBundleKind,
@@ -59,7 +63,7 @@ import type { PreparedItem, ResolvedItem } from './displayTypes';
 import { itemLabel, resolveAll } from './displayResolution';
 import { postInline } from './displayPosting';
 const TYPES_HELP =
-  'allowed: image/*, video/*, an .html page, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder; SVG excluded';
+  'allowed: image/*, video/*, an .html page, a .js/.mjs script, a 3D model (.glb .gltf .obj .stl .usdz), a .pdf, or a site folder; SVG excluded';
 const extOf = (path: string) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
 
 /** `<base href>` so a fetched page's relative links still load from its own site. */
@@ -74,10 +78,13 @@ function withBaseHref(html: Buffer, url: string): Buffer {
   return Buffer.from(text.slice(0, at) + tag + text.slice(at));
 }
 
-/** The model / PDF file name the viewer loads, with the extension of its real type. */
+/** The model / PDF / script file name the viewer loads, with the extension of its real type. */
 function viewerSourceName(filename: string, mimeType: string): string {
   const ext = DISPLAY_EXTENSIONS[mimeType] ?? 'bin';
   if (extOf(filename) === ext) return filename;
+  if (mimeType === 'text/javascript' && DISPLAY_SCRIPT_EXTENSIONS.has(extOf(filename))) {
+    return filename;
+  }
   return `${filename.replace(/\.[^.]*$/, '') || 'model'}.${ext}`;
 }
 
@@ -85,10 +92,11 @@ function bundleKindForEntry(entry: string, bytes: Buffer): DisplayBundleKind {
   const type = classifyDisplayMedia(bytes, { filename: entry });
   if (type === 'text/html') return 'bundle';
   if (type === 'application/pdf') return 'pdf';
+  if (type === 'text/javascript' && DISPLAY_SCRIPT_EXTENSIONS.has(extOf(entry))) return 'script';
   if (type !== null && type.startsWith('model/') && DISPLAY_MODEL_EXTENSIONS.has(extOf(entry)))
     return 'model';
   throw new DisplayFetchError(
-    `entry ${entry.slice(0, 200)} must be an .html page, a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf`
+    `entry ${entry.slice(0, 200)} must be an .html page, a .js/.mjs script, a 3D model (.glb .gltf .obj .stl .usdz) or a .pdf`
   );
 }
 
@@ -109,7 +117,8 @@ function prepareBundle(
   const built: BuiltDisplayBundle = buildDisplayBundle(source, files, kind);
   const sourceType =
     classifyDisplayMedia(files.get(source) as Buffer, { filename: source }) ?? 'text/html';
-  const displayKind: DisplayKind = kind;
+  // A script runs in its generated page: the UI frames it like any bundle.
+  const displayKind: DisplayKind = kind === 'script' ? 'bundle' : kind;
   return {
     index,
     sha256: built.hash,
@@ -136,7 +145,7 @@ function prepareBundle(
   };
 }
 
-function prepareSingle(
+export function prepareSingle(
   agent: repo.ToolAgent,
   entry: Extract<ResolvedItem, { type: 'single' }>
 ): PreparedItem {
@@ -145,6 +154,17 @@ function prepareSingle(
     contentType: entry.contentType,
   });
   if (mimeType === null) throw new DisplayFetchError(`is not a displayable file (${TYPES_HELP})`);
+  if (mimeType === 'text/javascript') {
+    const source = viewerSourceName(entry.filename, mimeType);
+    // A fetched script is shown alone: its relative imports would 404 inside the bundle.
+    const relative = entry.sourceUrl === undefined ? [] : displayRelativeRefs(source, entry.bytes);
+    if (relative.length > 0) {
+      throw new DisplayFetchError(
+        `imports relative modules (${relative.slice(0, 3).join(', ')}); a URL script is shown alone, so display it from a file path or a bundle that includes them`
+      );
+    }
+    return prepareBundle(agent, entry.index, source, new Map([[source, entry.bytes]]), 'script');
+  }
   const kind = displayKindForType(mimeType);
   if (kind === 'model' || kind === 'pdf') {
     const source = viewerSourceName(entry.filename, mimeType);

@@ -142,7 +142,7 @@ router.get(
       return;
     }
     try {
-      res.json(pollConnectSession(userId, req.params.connectId));
+      res.json(await pollConnectSession(userId, req.params.connectId));
     } catch (error) {
       mapError(error, res);
     }

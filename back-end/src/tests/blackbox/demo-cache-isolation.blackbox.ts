@@ -24,6 +24,7 @@ import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
+  signProxyTraceSegment,
 } from '../../providers/codeAgentFastModeEnv';
 import {
   demoCacheWriteCapability,
@@ -135,7 +136,10 @@ async function main(): Promise<void> {
       'https://api.example.com/codex-proxy',
       nonRecorderWrite
     ).CODEX_FAST_MODE_PROXY_URL;
-    assert(/\/codex-proxy\/[0-9a-f]{16}$/.test(codexUrl ?? ''), `codex non-recorder ${codexUrl}`);
+    assert(
+      /\/codex-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/.test(codexUrl ?? ''),
+      `codex non-recorder ${codexUrl}`
+    );
     const anthropicUrl = buildFastModeAnthropicEnv(
       'demo goal',
       true,
@@ -143,7 +147,7 @@ async function main(): Promise<void> {
       nonRecorderWrite
     ).ANTHROPIC_BASE_URL;
     assert(
-      /\/anthropic-proxy\/[0-9a-f]{16}$/.test(anthropicUrl ?? ''),
+      /\/anthropic-proxy\/[0-9a-f]{16},[0-9a-f]{32}$/.test(anthropicUrl ?? ''),
       `anthropic ${anthropicUrl}`
     );
     const recorderUrl = buildFastModeCodexEnv(
@@ -192,8 +196,8 @@ async function main(): Promise<void> {
           const mode = c.mode === 'SIGNED' ? `record.${capability}/` : c.mode;
           const url =
             kind === 'codex'
-              ? `${base}/codex-proxy/${trace}/${mode}backend-api/codex/responses`
-              : `${base}/anthropic-proxy/${trace}/${mode}v1/messages`;
+              ? `${base}/codex-proxy/${signProxyTraceSegment(trace)}/${mode}backend-api/codex/responses`
+              : `${base}/anthropic-proxy/${signProxyTraceSegment(trace)}/${mode}v1/messages`;
           const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },

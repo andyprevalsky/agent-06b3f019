@@ -184,6 +184,7 @@ function codexArgs(withRoseCli: boolean): string[] {
     join: (...parts: string[]) => parts.join('/'),
     existsSync: () => withRoseCli,
     codexFastModeProxy: null,
+    MOBBIN_MCP_TOKEN: '',
   }) as (options: { useFastModeProxy: boolean }) => string[];
   return build({ useFastModeProxy: false });
 }

@@ -14156,6 +14156,56 @@ async def test_codex_runner_harness_error_has_explicit_error_outcome():
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
 
+async def test_codex_runner_creates_session_on_mounted_internal_route():
+    """The runner must reach the backend's real, internal-only Codex route.
+
+    It posted to an unmounted /api/codex-session (always 404), and with a user
+    JWT, which the internal-only /api/codex-code-session/create refuses.
+    """
+    from types import SimpleNamespace
+    from aiohttp import web
+    import benchmarks.codex_runner as codex
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    server_ts = (Path(__file__).resolve().parents[3] / "back-end/src/server.ts").read_text()
+    assert f"app.use('{codex.CODEX_SESSION_PATH}'," in server_ts, codex.CODEX_SESSION_PATH
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        seen.append((request.path, dict(request.headers)))
+        if request.path == "/api/agents":
+            return web.json_response({"agent_id": "11111111-1111-4111-8111-111111111111"})
+        if request.path == "/api/codex-code-session/create":
+            return web.json_response({"error": "stop after create"}, status=500)
+        return web.json_response({"error": "not mounted"}, status=404)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        deps = SimpleNamespace(
+            benchmark_user_id=lambda: "test-user",
+            rose_api_url_for_harness=lambda url: url,
+            api_headers=AsyncMock(return_value={"Authorization": "Bearer user-jwt"}),
+            internal_api_headers=lambda user_id: {"X-API-Key": "internal-key", "X-User-Id": user_id},
+        )
+        result = await codex.run_codex_task(
+            f"http://127.0.0.1:{port}", get_task_by_name("claude-code-agent"), deps, "test goal"
+        )
+    finally:
+        await runner.cleanup()
+    creates = [h for path, h in seen if path == "/api/codex-code-session/create"]
+    assert creates, [path for path, _ in seen]
+    assert creates[0].get("X-API-Key") == "internal-key", creates[0]
+    assert "Authorization" not in creates[0], creates[0]
+    assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
 async def test_minted_benchmark_preserves_child_harness_outcomes():
     """A cancelled or broken child cannot become an ordinary aggregate failure."""
     from unittest.mock import AsyncMock
@@ -26133,6 +26183,9 @@ async def run_all_tests():
     await r.record_async("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
     await r.record_async(
         "codex_runner_harness_error_outcome", test_codex_runner_harness_error_has_explicit_error_outcome
+    )
+    await r.record_async(
+        "codex_runner_mounted_internal_route", test_codex_runner_creates_session_on_mounted_internal_route
     )
     await r.record_async(
         "minted_child_harness_outcomes",

@@ -6,6 +6,7 @@ import { retryWithBackoff } from '../../providers/retry';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { prisma } from '../../providers/database';
 
 type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
@@ -68,11 +69,10 @@ export async function runBrowserResumeCustodyCases() {
               startedAt: new Date().toISOString(),
               timeoutAt: new Date(Date.now() + 60000).toISOString(),
             };
-      // The fresh create in 'incompatible' stays open until the competing resume
-      // has answered, so the in-flight custody it must reject is still held no
-      // matter how long that second process takes to start.
-      let releaseHeldCreate = () => {};
-      const heldCreate = new Promise<void>((resolve) => (releaseHeldCreate = resolve));
+      let settleIncompatibleSecond = () => {};
+      const incompatibleSecondSettled = new Promise<void>((resolve) => {
+        settleIncompatibleSecond = resolve;
+      });
       const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) body += chunk;
@@ -94,7 +94,14 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          if (scenario === 'incompatible') await heldCreate;
+          if (scenario === 'incompatible') {
+            // Hold the first create until the competing resume has answered, so
+            // the second always meets in-progress custody however slowly its
+            // child process boots (a fixed 1s hold raced fork startup under load).
+            await Promise.race([incompatibleSecondSettled, delay(8000, undefined, { ref: false })]);
+            res.end(JSON.stringify(native()));
+            return;
+          }
           setTimeout(() => res.end(JSON.stringify(native())), 100);
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
@@ -242,7 +249,7 @@ export async function runBrowserResumeCustodyCases() {
             fixedDelays: Array.from({ length: 999 }, () => 10),
             shouldRetryResult: (created) => !created,
           });
-          const second = run().finally(releaseHeldCreate);
+          const second = run().finally(settleIncompatibleSecond);
           results = await Promise.all([first, second]);
         } else {
           results = [await run()];
@@ -336,7 +343,6 @@ export async function runBrowserResumeCustodyCases() {
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
       } finally {
-        releaseHeldCreate();
         for (const child of children) child.kill('SIGTERM');
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
