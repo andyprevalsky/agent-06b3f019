@@ -15,6 +15,12 @@ const log = createLogger('Tilion');
  * (net::ERR_TUNNEL_CONNECTION_FAILED) while direct sessions reached them.
  */
 export type TilionProxyType = 'residential' | 'mobile' | 'direct';
+
+/**
+ * New Tilion sessions start on datacenter egress (Tilion's own default and the
+ * cheaper exit); residential is reached through the normal rotation/recovery.
+ */
+export const TILION_DEFAULT_PROXY_TYPE: TilionProxyType = 'direct';
 export type GeoSpecificity = 'city' | 'state' | 'country';
 
 /** The browser activity budget (30 min) plus the 5 min margin the plan requires. */

@@ -283,7 +283,7 @@ async function main(): Promise<void> {
       'agent-1',
       { country: 'US', state: 'TX', city: 'DALLAS' },
       'https://shop.test/start',
-      { taskId: 'task-a' }
+      { taskId: 'task-a', proxyType: 'residential' }
     );
     const creates = server.callsTo('POST', /^\/v1\/session$/);
     assert.equal(creates.length, 1, 'a city-targeted agent must cost exactly one create');
@@ -326,7 +326,7 @@ async function main(): Promise<void> {
       'agent-1',
       { country: 'US', state: 'TX' },
       undefined,
-      { taskId: 'task-country' }
+      { taskId: 'task-country', proxyType: 'residential' }
     );
     assert.equal(server.callsTo('POST', /^\/v1\/session$/).length, createsBefore + 1);
     assert.deepEqual(server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body, {
@@ -346,6 +346,7 @@ async function main(): Promise<void> {
       {
         taskId: 'task-kept',
         keepValidationConnection: true,
+        proxyType: 'residential',
       }
     );
     assert.notEqual(kept.validationBrowser, null);
@@ -517,7 +518,7 @@ async function main(): Promise<void> {
     assert.match(rotated.proxySource, /^tilion_mobile_/);
     await assert.rejects(tilion.rotateTilionSession('task-a', 'isp'), /no isp exit/);
 
-    // ── direct (datacenter) exit: residential egress refuses payment hosts ──
+    // ── default exit is direct (datacenter); residential only when asked ────
     const lastCreate = () =>
       server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body as Record<string, unknown>;
     const direct = await tilion.createTilionSessionWithContext(
@@ -525,7 +526,7 @@ async function main(): Promise<void> {
       'agent-1',
       { country: 'US', state: 'TX', city: 'DALLAS' },
       'https://checkout.test/pay',
-      { taskId: 'task-direct', proxyType: 'direct' }
+      { taskId: 'task-direct' }
     );
     const directBody = lastCreate();
     assert.equal(directBody.residential, false);
@@ -549,7 +550,17 @@ async function main(): Promise<void> {
     assert.equal(lastCreate().residential, false);
     assert.equal(directResumed.proxySource, 'tilion_direct_country');
     assert.equal(rows.get('task-direct')?.proxyTier, 'direct');
-    await tilion.closeTilionSession(directResumed.sessionId, false);
+    // Rotating a datacenter session to residential replaces it (rotate-ip keeps the exit class).
+    const rotateIpCallsBefore = server.callsTo('POST', /\/rotate-ip$/).length;
+    const toResidential = await tilion.rotateTilionSession('task-direct', 'residential', {
+      carriedState: { cookies: [], origins: [] },
+    });
+    assert.equal(server.callsTo('POST', /\/rotate-ip$/).length, rotateIpCallsBefore);
+    assert.notEqual(toResidential.sessionId, directResumed.sessionId);
+    assert.equal(lastCreate().residential, true);
+    assert.equal(rows.get('task-direct')?.proxyTier, 'residential');
+    await tilion.releaseTilionRemoteSession(directResumed.sessionId);
+    await tilion.closeTilionSession(toResidential.sessionId, false);
 
     // ── B: a live Tilion session is never swapped for a blank browser ──────
     rotateReplies.push({

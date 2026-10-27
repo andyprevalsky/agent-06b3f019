@@ -58,6 +58,7 @@ import {
   landedLocation,
   regionForCountry,
   storedTilionProxyType,
+  TILION_DEFAULT_PROXY_TYPE,
   tilionProxyType,
   type TilionProxyType,
   tilionSessionLifetime,
@@ -318,7 +319,7 @@ export async function createTilionSessionWithContext(
     proxyType?: KernelProxyType | 'direct';
   }
 ): Promise<BrowserProviderSession & { geoTargeting: TilionGeoTargeting }> {
-  const proxyType = tilionProxyType(options?.proxyType ?? 'residential');
+  const proxyType = tilionProxyType(options?.proxyType ?? TILION_DEFAULT_PROXY_TYPE);
   const remote = await createRemote(location, proxyType);
   let row;
   try {
@@ -380,7 +381,10 @@ export async function createTilionRecoverySession(
   validationBrowser: Browser | null;
   geoTargeting: TilionGeoTargeting;
 }> {
-  const remote = await createRemote(location, tilionProxyType(options.proxyType ?? 'residential'));
+  const remote = await createRemote(
+    location,
+    tilionProxyType(options.proxyType ?? TILION_DEFAULT_PROXY_TYPE)
+  );
   return {
     sessionId: remote.sessionId,
     debugUrl: remote.debugUrl,
@@ -576,7 +580,9 @@ async function replaceSession(
       : baseLocation;
   const proxyType: TilionProxyType =
     options.rotateTo ??
-    (previousProvider === 'tilion' ? storedTilionProxyType(old.proxyTier) : 'residential');
+    (previousProvider === 'tilion'
+      ? storedTilionProxyType(old.proxyTier)
+      : TILION_DEFAULT_PROXY_TYPE);
 
   const remote = await createRemote(location, proxyType);
   let handedOff = false;
