@@ -46,6 +46,7 @@ class ActivityProbe:
         self.scenarios = ("auth" if auth else "write",)
         self.resume_state = resume_state
         self.calls = 0
+        self.queue_pointer_reads = 0
         self.real_execute = handler.execute_action
         self.real_disconnect = handler.disconnect_browser_after_passkey_capture
         self.real_record = handler.record_used_passkey_credentials
@@ -75,7 +76,20 @@ class ActivityProbe:
         return {"action": action, "usage": {}}
 
     def install(self, stack, current_handler):
+        from temporalio import activity
         from temporalio.testing import ActivityEnvironment
+        from helpers import activity_generation_drain
+
+        async def fixture_queue_pointer(**_kwargs):
+            # This ActivityEnvironment has no deployed worker generation. Its
+            # pointer belongs to this activity, not another local server.
+            assert activity.in_activity()
+            self.queue_pointer_reads += 1
+            return {"task_queue": activity.info().task_queue, "surface_hash": None}
+
+        stack.enter_context(patch.object(activity_generation_drain, "_cached_at", None))
+        stack.enter_context(patch.object(activity_generation_drain, "_cached_queue", None))
+        stack.enter_context(patch.object(activity_generation_drain, "read_agent_queue_pointer", fixture_queue_pointer))
 
         def run_activity(environment, function, *args, **kwargs):
             if function is current_handler.spawn_browser_agent_activity_v3:
@@ -190,6 +204,7 @@ async def drive(manifest):
         await module.test_private_browser_pause_urls_use_protected_continuity(second)
         final = await state()
         assert second.result["success"] is True, second.result
+        assert second.queue_pointer_reads > 0, "real generation-drain check must run"
         assert final["orderCount"] == 1, final
         return {"status": "passed", "before": before, "parked": parked,
                 "restored": restored, "final": final,
