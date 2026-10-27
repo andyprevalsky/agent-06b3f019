@@ -1,9 +1,9 @@
 /**
  * Shared context object and types for the Rose Desktop full-screen app view
  * (UI ledger rows 10/39). Split from the provider so the code-agent chip's
- * preview card and the view itself don't import the module that owns the state.
+ * Open app button and the view itself don't import the module that owns the state.
  *
- *   code_agent { task_id, title, provider } (+ preview_url shows the card) ──click──► openApp
+ *   code_agent { task_id, title, provider } (+ preview_url shows Open app) ──click──► openApp
  *                                                               │
  *   AgentChatArea ◄── useAppView().target (the open code session) ┘
  */

@@ -131,7 +131,7 @@ export async function retryOnTransientTransactionStart<T>(
 // respect. The hard invariant:
 //
 //   backendInstances * DEPLOY_OVERLAP * (connection_limit + DEMO_CACHE_POOL_LIMIT)
-//     + RESERVED <= POOLER_MAX_CLIENT_CONN
+//     + RESERVED + NONPROD <= POOLER_MAX_CLIENT_CONN
 //
 // Notes on each term:
 //   - Each backend instance holds TWO Prisma pools against the same pooler in
@@ -150,6 +150,11 @@ export async function retryOnTransientTransactionStart<T>(
 //     the window the historical EMAXCONN incidents fired in.
 //   - RESERVED covers the DIRECT_URL migration connection, ad-hoc scripts, and a
 //     local stack doing a prod-DB sync — none of which are Prisma-pool clients.
+//   - NONPROD is the slice left for dev and benchmark stacks, which reach the
+//     same pooler as the same user for the shared DEMO cache: a 50-guest DEMO
+//     fleet at 4 clients plus five stacks at 20 = 300. Production used to
+//     budget the whole cap for itself during a deploy overlap, so any such
+//     client could push it into EMAXCONN (2026-10-10/11).
 //
 // We DERIVE connection_limit from this invariant (boot-time arithmetic from
 // declared capacity — no runtime coordination, nothing to race) instead of
@@ -162,9 +167,11 @@ export async function retryOnTransientTransactionStart<T>(
 // a silent under-floor clamp would take prod down slowly instead.
 // computeProdConnectionLimit is exported so a structural test can assert the
 // invariant can never regress.
-const POOLER_MAX_CLIENT_CONN = intEnv('POOLER_MAX_CLIENT_CONN', 400);
+const POOLER_MAX_CLIENT_CONN = intEnv('POOLER_MAX_CLIENT_CONN', 1000);
 const BACKEND_INSTANCES = intEnv('BACKEND_INSTANCES', 1);
-const RESERVED_CLIENT_CONN = intEnv('POOLER_RESERVED_CLIENT_CONN', 40);
+const RESERVED_CLIENT_CONN = nonNegativeIntEnv('POOLER_RESERVED_CLIENT_CONN', 40);
+// 0 hands the whole slice back to production in an emergency.
+const NONPROD_CLIENT_BUDGET = nonNegativeIntEnv('POOLER_NONPROD_CLIENT_BUDGET', 300);
 const DEPLOY_OVERLAP = 2; // rolling deploy transiently doubles instance count
 const LOCAL_POOL_SIZE = 30; // direct Docker Postgres: each conn ~10MB, cap to avoid OOM
 
@@ -175,6 +182,13 @@ export const DEMO_CACHE_POOL_LIMIT = intEnvValue(demoCacheEnv('DEMO_CACHE_DB_POO
 
 function intEnv(name: string, fallback: number): number {
   return intEnvValue(process.env[name], fallback);
+}
+
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 function intEnvValue(raw: string | undefined, fallback: number): number {
@@ -203,12 +217,14 @@ export function computeProdConnectionLimit(opts?: {
   reserved?: number;
   deployOverlap?: number;
   demoCachePool?: number;
+  nonProdBudget?: number;
 }): number {
   const maxClientConn = opts?.maxClientConn ?? POOLER_MAX_CLIENT_CONN;
   const backendInstances = opts?.backendInstances ?? BACKEND_INSTANCES;
   const reserved = opts?.reserved ?? RESERVED_CLIENT_CONN;
   const deployOverlap = opts?.deployOverlap ?? DEPLOY_OVERLAP;
   const demoCachePool = opts?.demoCachePool ?? DEMO_CACHE_POOL_LIMIT;
+  const nonProdBudget = opts?.nonProdBudget ?? NONPROD_CLIENT_BUDGET;
 
   // Explicit opts bypass intEnv's guards; a zero/NaN instance count would turn
   // the division below into Infinity/NaN, which slips past the < floor check.
@@ -218,10 +234,11 @@ export function computeProdConnectionLimit(opts?: {
     reserved,
     deployOverlap,
     demoCachePool,
+    nonProdBudget,
   })) {
     if (
       !Number.isFinite(value) ||
-      (value <= 0 && name !== 'reserved' && name !== 'demoCachePool')
+      (value <= 0 && name !== 'reserved' && name !== 'demoCachePool' && name !== 'nonProdBudget')
     ) {
       throw new Error(`DB pool config: ${name} must be a finite positive number, got ${value}`);
     }
@@ -230,7 +247,7 @@ export function computeProdConnectionLimit(opts?: {
     }
   }
 
-  const budget = maxClientConn - reserved;
+  const budget = maxClientConn - reserved - nonProdBudget;
   const perInstance = Math.floor(budget / (backendInstances * deployOverlap));
   // The demo-cache pool shares this instance's slice of the budget in prod
   // (it falls back to DATABASE_URL there), so the main pool gets the remainder.
@@ -239,7 +256,7 @@ export function computeProdConnectionLimit(opts?: {
     throw new Error(
       `DB pool budget violation: ${backendInstances} backend instance(s) x ` +
         `${deployOverlap} deploy-overlap x (main pool + demo-cache ${demoCachePool}) + ` +
-        `reserved ${reserved} cannot fit under the Supavisor client cap ${maxClientConn} ` +
+        `reserved ${reserved} + non-production ${nonProdBudget} cannot fit under the Supavisor client cap ${maxClientConn} ` +
         `(derived main pool ${derived} < ${MIN_VIABLE_POOL}). Raise POOLER_MAX_CLIENT_CONN ` +
         `(bigger compute tier), lower BACKEND_INSTANCES/DEMO_CACHE_DB_POOL, or move the ` +
         `demo-cache to its own database.`

@@ -23,7 +23,6 @@ import { DeleteProjectDialog } from './DeleteProjectDialog';
 import RoseAgentGroups from './RoseAgentGroups';
 import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
 
-const NO_ACTIONS = {};
 const NO_ATTENTION: ReadonlySet<string> = new Set();
 interface MobileAgentListProps {
   agents: Agent[];
@@ -54,7 +53,7 @@ function useMobileRows(props: MobileAgentListProps) {
   });
   const code = useRoseCodeAgents(rows, props.selectedAgentId);
   const view = useCodeAgentView();
-  const actionsFor = useRoseAgentMenuActions(props.handlers, NO_ACTIONS);
+  const actionsFor = useRoseAgentMenuActions(props.handlers);
   return {
     rows,
     projects,

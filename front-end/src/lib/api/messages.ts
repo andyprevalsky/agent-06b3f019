@@ -3,17 +3,26 @@ import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 import type { FilePointer, Message } from './types';
 
 // Post a message to an agent
+/** Where a user message goes: the agent itself, or one of its running browser tasks. */
+export interface MessageTarget {
+  browserTaskId: string;
+}
+
 export async function postMessage(
   agentId: string,
   message: string,
   attachments?: FilePointer[],
+  target?: MessageTarget,
 ): Promise<Message> {
   const headers = getAuthHeaders();
 
-  const body: { message: string; attachments?: FilePointer[] } = { message };
+  const body: { message: string; attachments?: FilePointer[]; browser_task_id?: string } = {
+    message,
+  };
   if (attachments && attachments.length > 0) {
     body.attachments = attachments;
   }
+  if (target) body.browser_task_id = target.browserTaskId;
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/messages`, {
     method: 'POST',

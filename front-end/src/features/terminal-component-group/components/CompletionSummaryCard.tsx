@@ -17,7 +17,7 @@
  * - copiedField: string | null - Key of field currently showing "copied" feedback
  */
 
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Check, Copy } from 'lucide-react';
@@ -263,10 +263,15 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
 
   const { summary, outputs, toolUsage, totalToolCalls, durationSeconds, costDollars } = data;
 
+  // One pending "copied" reset at a time, cancelled when the card unmounts.
+  const copiedResetRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(copiedResetRef.current), []);
+
   const handleCopy = async (value: string, fieldKey: string) => {
     await copyToClipboard(value);
     setCopiedField(fieldKey);
-    setTimeout(() => setCopiedField(null), 2000);
+    clearTimeout(copiedResetRef.current);
+    copiedResetRef.current = setTimeout(() => setCopiedField(null), 2000);
   };
 
   const totalTools = totalToolCalls || toolUsage?.reduce((sum, t) => sum + t.count, 0) || 0;

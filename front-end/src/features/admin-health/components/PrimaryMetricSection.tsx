@@ -18,6 +18,7 @@ import {
 import type { AdminHealthData } from '../types';
 import { MetricChange } from './MetricChange';
 import { seriesMetricChange } from './metricComparison';
+import { THEMED_TOOLTIP } from './chartTheme';
 
 function formatCurrency(cents: number | null): string {
   if (cents === null) return 'Unavailable';
@@ -75,8 +76,8 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
               <AreaChart data={data.series} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="revenueGradient" x1="0" x2="0" y1="0" y2="1">
-                    <stop offset="0%" stopColor="#111827" stopOpacity={0.24} />
-                    <stop offset="100%" stopColor="#111827" stopOpacity={0.02} />
+                    <stop offset="0%" stopColor="currentColor" stopOpacity={0.24} />
+                    <stop offset="100%" stopColor="currentColor" stopOpacity={0.02} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid
@@ -87,6 +88,7 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
                 <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
                 <YAxis tickFormatter={moneyTick} tickLine={false} axisLine={false} fontSize={12} />
                 <Tooltip
+                  {...THEMED_TOOLTIP}
                   formatter={(value) =>
                     formatCurrency(value === null || value === undefined ? null : Number(value))
                   }
@@ -95,7 +97,7 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
                   type="monotone"
                   dataKey="revenueCents"
                   name="Revenue"
-                  stroke="#111827"
+                  stroke="currentColor"
                   strokeWidth={2}
                   fill="url(#revenueGradient)"
                 />

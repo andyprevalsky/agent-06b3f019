@@ -5,6 +5,10 @@
 import { createElement, type ReactNode } from 'react';
 import { AgentContext } from '@/features/agent-context';
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
+import {
+  CodeAgentViewContext,
+  type OpenCodeAgent,
+} from '@/features/terminal-component-group/components/code-agent-view/codeAgentViewState';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
@@ -295,6 +299,27 @@ export function renderChip(messages: Message[], roseDesktop = true) {
   );
 }
 
+/** The chip inside a code-agent view provider (Rose Desktop terminal); `open` spies Maximize. */
+export function renderChipWithView(
+  messages: Message[],
+  open: (agent: OpenCodeAgent) => void,
+  taskId = 'task-1',
+) {
+  const value = { openCodeAgent: null, open, close: () => {} };
+  return renderWithProviders(
+    createElement(
+      CodeAgentViewContext.Provider,
+      { value },
+      createElement(
+        WithAgent,
+        { messages },
+        createElement(ClaudeCodeChip, { taskId, toolCallId: `call-${taskId}` }),
+      ),
+    ),
+    { roseDesktop: true },
+  );
+}
+
 export interface RenderItemsOptions {
   roseDesktop?: boolean;
   currentAnimatingId?: string | null;
@@ -323,4 +348,91 @@ export function renderItems(messages: Message[], options: RenderItemsOptions = {
     ),
     { roseDesktop: options.roseDesktop ?? true },
   );
+}
+
+/** Andy's 2026-10-26 BTC session (prod shape): goal record, a later Rose message, Codex's message. */
+export function btcRows(ownerId: string, taskId: string): Message[] {
+  const records = [
+    // Rose's initial goal (prod shape: id "goal", seq 0, sender agent).
+    {
+      id: 'goal',
+      seq: 0,
+      type: 'message',
+      role: 'user',
+      sender: 'agent',
+      text: 'Chart BTC for 24h',
+      ts: '2026-10-20T12:00:01.000Z',
+    },
+    {
+      id: 't1',
+      seq: 1,
+      type: 'tool',
+      ts: '2026-10-20T12:00:20.000Z',
+      tool: { name: 'Edit', target: 'chart.py', added: 40, removed: 0 },
+    },
+    // A later Rose → Codex message: coordination, folded into the work.
+    {
+      id: 'rose2',
+      seq: 2,
+      type: 'message',
+      role: 'user',
+      sender: 'agent',
+      text: 'Use UTC labels',
+      ts: '2026-10-20T12:00:30.000Z',
+    },
+    { id: 'r1', seq: 3, type: 'result', text: 'Finished', ts: '2026-10-20T12:02:07.000Z' },
+  ];
+  const codexMessage = msg(
+    {
+      toolName: 'send_message_to_user',
+      toolStatus: 'FINISHED',
+      isUserAttentionMessage: true,
+      attentionMessage: 'Chart is ready',
+      sendMessageToUser: true,
+      task_id: taskId,
+      requestingAgent: {
+        kind: 'code_agent',
+        agent_id: ownerId,
+        label: 'Codex',
+        provider: 'codex',
+        task_id: taskId,
+      },
+    },
+    { text: 'Chart is ready' },
+  );
+  return [
+    chipMessage(
+      {
+        state: 'completed',
+        ended_at: '2026-10-20T12:02:08.000Z',
+        summary: {
+          commit: 'ca85dd1aa',
+          branch: 'rose/btc',
+          files: [{ path: 'AGENTS.md', added: 40, removed: 0 }],
+        },
+      },
+      {
+        code_session: {
+          code_session_id: 'cs-1',
+          branch: 'rose/btc',
+          merge_target: 'main',
+          pushed: true,
+        },
+      },
+    ),
+    eventsMessage(records),
+    codexMessage,
+    msg(
+      {
+        toolName: 'spawn_claude_code_agent',
+        toolCallId: `call-${taskId}`,
+        toolStatus: 'FINISHED',
+        task_id: taskId,
+        action_type: 'task_complete',
+        success: true,
+        code_provider: 'codex',
+      },
+      { text: 'Finished' },
+    ),
+  ];
 }

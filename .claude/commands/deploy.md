@@ -50,7 +50,8 @@ are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
 Before any request reaches the user, run that file's Golden-reference
-adversarial review. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
+adversarial review on the hunks the gate flagged for human approval only;
+never extend grounding to the rest of the diff. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
 gates: rerun the guard with its mandatory flag, record
 `<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
 in `TEST_REPORT`, list it in the PR body and continue. Only `NOT_GROUNDED` and
@@ -576,6 +577,7 @@ The concurrent runner executes exactly these independent suites, without changin
 their assertions or test counts:
 
 `bash scripts/tests/workspace-env.test.sh`,
+`python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
@@ -642,7 +644,8 @@ their assertions or test counts:
 `bash scripts/tests/setup-db-concurrency.test.sh`,
 `bash scripts/tests/run-port-collision.test.sh`,
 `bash scripts/tests/run-cloud-benchmark-workers.test.sh`,
-`bash scripts/tests/blackbox-archive-env.test.sh`, and
+`bash scripts/tests/blackbox-archive-env.test.sh`,
+`bash scripts/tests/render-backend-build.test.sh`, and
 `python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
@@ -1027,6 +1030,7 @@ if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
     (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
       DIRECT_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+      PRISMA_CLI_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
       npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
     (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
       DIRECT_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \

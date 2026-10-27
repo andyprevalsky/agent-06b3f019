@@ -102,6 +102,14 @@ export async function findAgent(agentId: string, userId?: string) {
   });
 }
 
+/** One browser task (BrowserSession.id) of this agent, by primary key — status only. */
+export async function findAgentBrowserTask(agentId: string, browserTaskId: string) {
+  return prisma.browserSession.findFirst({
+    where: { id: browserTaskId, agentId },
+    select: { status: true },
+  });
+}
+
 /** Fetch a single agent by ID (no ownership check, not deleted). */
 export async function findAgentById(agentId: string) {
   return prisma.agent.findFirst({

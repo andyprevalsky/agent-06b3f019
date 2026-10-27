@@ -400,7 +400,7 @@ else
     # --no-install: when dependency setup failed, npx would otherwise wait on a
     # hidden "Ok to proceed?" install prompt (output is discarded) forever.
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        npx --no-install prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
+        PRISMA_CLI_DATABASE_URL="$LOCAL_DB_URL" npx --no-install prisma db push --skip-generate --accept-data-loss >/dev/null 2>&1 ) \
         || log "WARN: prisma db push failed"
     ( cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
         LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh >/dev/null 2>&1 ) \

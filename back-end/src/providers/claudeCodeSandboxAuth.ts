@@ -301,14 +301,13 @@ export function shouldIgnoreAnthropicApiKeyCooldownForSandbox(params: {
 }
 
 /**
- * Whether a Claude Code sandbox with no user/pool login can run on a funded key
- * now. Same transport `createE2BSession` resolves (dedicated key, OpenRouter
- * gateway, else the shared key); the shared-org cooldown only blocks it when the
- * sandbox would send that shared key to api.anthropic.com. Credential
- * availability (C15) must answer from this, or a spawn falls over to Codex while
- * Claude Code could still run.
+ * Whether a Claude Code sandbox without an OAuth login can still authenticate:
+ * the same key choice and cooldown gate `createClaudeCodeSession` (e2b.ts)
+ * applies. OpenRouter or a dedicated key backs the CLI while the shared
+ * Anthropic org is on cooldown, so that cooldown alone does not make Claude
+ * Code unavailable.
  */
-export function canRunClaudeCodeOnFundedKey(params: {
+export function claudeCodeSandboxKeyUsable(params: {
   claudeCodeAnthropicApiKey: string | undefined;
   anthropicApiKey: string | undefined;
   anthropicBaseUrl: string | undefined;

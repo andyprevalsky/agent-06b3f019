@@ -1080,7 +1080,15 @@ async def _load_browser_resume_user_instructions(
         row_metadata = row.get("metadata") or {}
         if str(row.get("role") or "").upper() != "USER" or row_metadata.get("hidden"):
             continue
-        if is_agent_authored_user_metadata(row_metadata) or row_metadata.get("excludeFromModel"):
+        # A Browser-composer message names this task (browserTaskId) and is hidden
+        # from the owner's model (excludeFromModel); it is this browser's input.
+        addressed_here = (
+            resume_state.get("task_id") is not None
+            and row_metadata.get("browserTaskId") == resume_state.get("task_id")
+        )
+        if is_agent_authored_user_metadata(row_metadata) or (
+            row_metadata.get("excludeFromModel") and not addressed_here
+        ):
             # Agent notifications / agent messages on the owner are never user input.
             if row_metadata.get("agentMessage") is True and row_metadata.get("recipientTaskId"):
                 agent_message_rows.append(row)
@@ -1622,6 +1630,33 @@ def _append_browser_user_instructions(
     delivered = int(state.get("delivered_user_instruction_count") or 0)
     browser_turn_messages.extend(dict(message) for message in messages[delivered:])
     return messages
+
+
+def _unread_user_instructions(instruction_state: Dict[str, Any], latest_state: Dict[str, Any]) -> List[str]:
+    """User input the final read found that no browser-model decision acted on.
+
+    ``acted_user_instruction_count`` is captured immediately before each
+    browser-model request (after the step's observe succeeds). Later syncs (completion/max-steps
+    verifiers) advance ``delivered_user_instruction_count`` without a decision,
+    so they must not hide input from the owner.
+    """
+    acted = instruction_state.get("acted_user_instruction_count")
+    if acted is None:
+        acted = instruction_state.get("delivered_user_instruction_count")
+    return [
+        message["content"]
+        for message in (latest_state.get("user_instruction_messages") or [])[int(acted or 0):]
+        if isinstance(message, dict) and isinstance(message.get("content"), str) and message["content"].strip()
+    ]
+
+
+def _with_unread_user_messages(message: str, unread: Any) -> str:
+    """Hand input the browser never acted on to its owner instead of dropping it."""
+    if not isinstance(unread, list) or not unread:
+        return message
+    lines = "\n".join(f"- {text}" for text in unread)
+    note = f"User messages sent to this browser after its last step (it did not act on them):\n{lines}"
+    return f"{message}\n\n{note}" if message else note
 
 
 def _browser_resume_continuity_state(
@@ -5722,6 +5757,7 @@ async def _emit_browser_task_terminal_for_fe(
     message: str = "Browser session closed",
     preparation_cancellation: Optional[Dict[str, Any]] = None,
     cleanup_failure: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
 
@@ -5755,6 +5791,7 @@ async def _emit_browser_task_terminal_for_fe(
                 "excludeFromModel": True,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
+                **({"session_id": session_id} if session_id and not cleanup_failure else {}),
             },
         )
 
@@ -5785,6 +5822,7 @@ def _schedule_browser_cleanup(
     local_only_setup_tasks: tuple[Any, ...] = (),
     preparation_cancellation: Optional[Dict[str, Any]] = None,
     cleanup_failure: Optional[Dict[str, Any]] = None,
+    paused_session_id: Optional[str] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -5897,15 +5935,22 @@ def _schedule_browser_cleanup(
             # task_complete terminal so timeout/cancel cleanup cannot leave the
             # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
             if emit_task_terminal and not local_only:
+                # A pause ending paused the provider session (kept for continuation);
+                # only the local CDP/recorder resources are released here.
                 await _emit_browser_task_terminal_for_fe(
                     agent_id=agent_id,
                     task_id=task_id,
                     tool_call_id=tool_call_id,
                     browser_url=browser_url,
-                    title="Browser Session Closed",
-                    message="Browser session closed after teardown",
+                    title="Browser Paused" if paused_session_id else "Browser Session Closed",
+                    message=(
+                        "Browser session paused; the same session continues when resumed"
+                        if paused_session_id
+                        else "Browser session closed after teardown"
+                    ),
                     preparation_cancellation=preparation_cancellation,
                     cleanup_failure=cleanup_failure,
+                    session_id=paused_session_id,
                 )
             if dom_service:
                 try:
@@ -7857,6 +7902,8 @@ async def _spawn_browser_agent_activity_v3_real(
             kwargs["auxiliary"] = {
                 **(kwargs.get("auxiliary") or {}),
                 "actual_model": current_model.strip(),
+                # The Rose pool this browser's steps run on (the FE label).
+                "pool_name": browser_pool,
             }
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
@@ -7948,11 +7995,42 @@ async def _spawn_browser_agent_activity_v3_real(
             },
         )
 
+    # Filled by the final post-close instruction read (collect_unread_user_instructions).
+    unread_user_instructions: List[str] = []
+    # The read state exists before session setup, so a run that ends during setup
+    # still hands input sent to it to the owner; the step loop replaces it.
+    _resumed_input = write_lock_resume_state or {}
+    instruction_state: Dict[str, Any] = {
+        "tool_call_id": tool_call_id,
+        "task_id": task_id,
+        "user_instruction_messages": list(_resumed_input.get("user_instruction_messages") or []),
+        "user_instruction_message_ids": list(_resumed_input.get("user_instruction_message_ids") or []),
+        "delivered_user_instruction_count": int(_resumed_input.get("delivered_user_instruction_count") or 0),
+        "user_message_cursor": _resumed_input.get("user_message_cursor"),
+        "user_message_cursor_is_task_start": bool(_resumed_input.get("user_message_cursor_is_task_start")),
+    }
+
+    async def collect_unread_user_instructions() -> None:
+        # A Browser-composer message can land after the last step's read and
+        # before any pause-close (completion, max steps, user pause, failure);
+        # the owner gets it in this browser's result instead of losing it.
+        try:
+            state = instruction_state if instruction_state.get("task_id") else {**instruction_state, "task_id": task_id}
+            latest = await _load_browser_resume_user_instructions(agent_id, state)
+            # Same masking as every other value this activity reports.
+            unread_user_instructions[:] = [
+                _redact_activity_value(text) for text in _unread_user_instructions(state, latest)
+            ]
+        except Exception as read_error:
+            logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
+
     def _visible_activity_result(
         result: Dict[str, Any],
         *,
         operational_sources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if unread_user_instructions:
+            result = {**result, "unread_user_messages": list(unread_user_instructions)}
         # Archive references and routing IDs remain exact protocol values.
         auth_response = result.get("auth_assistance_request")
         payment_response = result.get("payment_request")
@@ -8327,6 +8405,8 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
     cleanup_failure: Optional[Dict[str, Any]] = None
+    # Set when a pause/cancel ending paused (kept) the provider session.
+    paused_session_id: Optional[str] = None
 
     async def _close_browser_with_cleanup_receipt(
         exact_session_id: str, pause: bool = False, current_url: str = ""
@@ -10259,6 +10339,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
+                # The browser-model decision below sees everything delivered so far;
+                # earlier exits this step (observe failure, realm reload, write-lock
+                # replay) never reach a decision, so they must not count as acted on.
+                instruction_state["acted_user_instruction_count"] = int(
+                    instruction_state.get("delivered_user_instruction_count") or 0
+                )
                 browser_stream = BrowserThinkingStream(
                     agent_id=agent_id,
                     task_id=task_id,
@@ -11709,6 +11795,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         _tilion_leave_session()
                         dom_service = None
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+                        await collect_unread_user_instructions()
 
                         context_message = build_context_summary(
                             success=True,
@@ -12776,6 +12863,7 @@ Based on this feedback, I need to continue working on the task and address the i
         _tilion_leave_session()
         dom_service = None
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+        await collect_unread_user_instructions()
 
         context_message = build_context_summary(
             success=False,
@@ -12885,6 +12973,9 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+            if cleanup_failure is None:
+                paused_session_id = session_id
+        await collect_unread_user_instructions()
 
         if task_id and browser_turn_messages:
             # A user pause: keep this run's exact conversation so a later
@@ -12908,7 +12999,7 @@ Based on this feedback, I need to continue working on the task and address the i
             with _suppress_browser_cleanup_errors():
                 await _save_browser_action_message(
                     agent_id=agent_id,
-                    title="Browser Session Cancelled",
+                    title="Browser Session Paused" if paused_session_id else "Browser Session Cancelled",
                     task_id=task_id,
                     message="Agent paused by user",
                     status=MessageStatus.FINISHED,
@@ -12917,7 +13008,13 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
                     output_schema=response_schema,
-                    extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
+                    extra_metadata=(
+                        {"browser_cleanup": cleanup_failure}
+                        if cleanup_failure
+                        else {"session_id": paused_session_id}
+                        if paused_session_id
+                        else None
+                    ),
                 )
 
         return {
@@ -12927,6 +13024,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "browser_url": redact_url_secrets(browser_url),
             "message": "Browser agent cancelled by user",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+            **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
         }
 
     except WorkflowGenerationSealed:
@@ -12963,6 +13061,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 pause=True,
                 current_url=current_url,
             )
+        await collect_unread_user_instructions()
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(
@@ -12974,6 +13073,8 @@ Based on this feedback, I need to continue working on the task and address the i
             error_context=error_context,
             goal=goal,
         )
+        # The failure row and result carry input the browser never acted on.
+        error_message = _with_unread_user_messages(error_message, list(unread_user_instructions))
 
         error_message = _redact_activity_value(error_message)
 
@@ -13164,6 +13265,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 # Pause-for-resume returns must keep the FE chip open for the next
                 # activity call (write / payment / auth assistance).
                 emit_task_terminal=not browser_task_paused_for_resume and not generation_sealed,
+                paused_session_id=paused_session_id,
                 local_only=generation_sealed,
                 local_only_recorders=locally_owned_recorders,
                 local_only_setup_tasks=(download_persister_task,),
@@ -13564,7 +13666,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
-                        message="User paused the browser agent",
+                        message=_with_unread_user_messages(
+                            "User paused the browser agent", (result or {}).get("unread_user_messages")
+                        ),
                         status=MessageStatus.ERROR,
                         metadata=_browser_task_terminal_metadata(result, activity_task_id),
                     )
@@ -14511,6 +14615,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     final_message = (
                         f"{final_message}\n\n{best_effort_response}" if final_message else best_effort_response
                     )
+            final_message = _with_unread_user_messages(final_message, result.get("unread_user_messages"))
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",

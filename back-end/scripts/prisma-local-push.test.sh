@@ -347,4 +347,60 @@ if missing:
 PY
 echo "stack schema pushes normalize User.phone first: PASS"
 
+# A bare Prisma CLI command from back-end/ reads back-end/.env, whose
+# DATABASE_URL/DIRECT_URL point at production. That is how the 2026-10-08 push
+# dropped prod indexes and RLS. The schema's directUrl therefore reads
+# PRISMA_CLI_DATABASE_URL, which no env file sets: the bare destructive
+# commands must refuse before contacting the .env target.
+test_bare_cli_refuses_env_file_target() (
+  local scratch prisma_bin out cmd
+  local -a args
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/prisma-bare-guard.XXXXXX")
+  trap 'rm -rf "$scratch"' EXIT
+  mkdir -p "$scratch/prisma"
+  cp "$(dirname "$SCRIPT")/../prisma/schema.prisma" "$scratch/prisma/schema.prisma"
+  printf 'DATABASE_URL="postgresql://u:p@prodlike.invalid:6543/postgres"\nDIRECT_URL="postgresql://u:p@prodlike.invalid:5432/postgres"\n' \
+    > "$scratch/.env"
+  prisma_bin=$(cd "$(dirname "$SCRIPT")/.." && node -e "process.stdout.write(require.resolve('prisma/build/index.js'))")
+  for cmd in "db push --skip-generate --accept-data-loss" "migrate dev --skip-generate" "migrate reset --force --skip-generate"; do
+    read -ra args <<<"$cmd"
+    if out=$(cd "$scratch" && env -u DATABASE_URL -u DIRECT_URL -u PRISMA_CLI_DATABASE_URL \
+      PRISMA_HIDE_UPDATE_MESSAGE=1 node "$prisma_bin" "${args[@]}" 2>&1); then
+      echo "bare prisma $cmd succeeded against the .env target" >&2
+      exit 1
+    fi
+    if grep -Fq 'prodlike.invalid:5432' <<<"$out" || ! grep -Fq 'PRISMA_CLI_DATABASE_URL' <<<"$out"; then
+      printf 'bare prisma %s did not refuse before using the .env target:\n%s\n' "$cmd" "$out" >&2
+      exit 1
+    fi
+  done
+  # An explicit local target is accepted by the same CLI.
+  (cd "$scratch" && env -u DATABASE_URL -u DIRECT_URL PRISMA_CLI_DATABASE_URL="$LOCAL_URL" \
+    PRISMA_HIDE_UPDATE_MESSAGE=1 node "$prisma_bin" validate >/dev/null 2>&1) || {
+    echo "prisma validate rejected an explicit PRISMA_CLI_DATABASE_URL" >&2
+    exit 1
+  }
+  # `npm run prisma:migrate:dev` goes through the validated local wrapper.
+  node -e '
+    const s = require(process.argv[1]).scripts["prisma:migrate:dev"];
+    if (s !== "bash scripts/prisma-local-push.sh --migrate-dev") {
+      console.error("prisma:migrate:dev must use the validated local wrapper: " + s);
+      process.exit(1);
+    }' "$(dirname "$SCRIPT")/../package.json"
+  if DATABASE_URL="$REMOTE_URL" DIRECT_URL="$REMOTE_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
+    bash "$SCRIPT" --migrate-dev >/dev/null 2>&1; then
+    echo "prisma:migrate:dev accepted a remote target" >&2
+    exit 1
+  fi
+  # Render runs `npm run prisma:migrate`: it must map DIRECT_URL explicitly.
+  node -e '
+    const s = require(process.argv[1]).scripts["prisma:migrate"];
+    if (!/PRISMA_CLI_DATABASE_URL="\$\{DIRECT_URL:\?[^}]*\}" prisma migrate deploy/.test(s)) {
+      console.error("prisma:migrate must set PRISMA_CLI_DATABASE_URL from DIRECT_URL: " + s);
+      process.exit(1);
+    }' "$(dirname "$SCRIPT")/../package.json"
+  echo "bare Prisma CLI refuses the env-file target: PASS"
+)
+test_bare_cli_refuses_env_file_target
+
 echo "local Prisma push safety tests: PASS"

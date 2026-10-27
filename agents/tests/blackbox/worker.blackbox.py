@@ -1285,7 +1285,11 @@ async def test_worker_health_bind_failure_stops_before_temporal_connect():
         blocker.bind(("::", 0))
         blocker.listen()
         port = blocker.getsockname()[1]
-        config = SimpleNamespace(environment="development", health_check_port=port)
+        config = SimpleNamespace(
+            environment="development",
+            health_check_port=port,
+            temporal=SimpleNamespace(namespace="blackbox", task_queue="navi-agent-tasks-blackbox"),
+        )
         connect = AsyncMock()
         with (
             patch.dict(os.environ, {"WORKER_INDEX": "0"}),
@@ -1340,7 +1344,10 @@ async def scenario(primary):
             pass
     profiler, logger = Mock(), Mock()
     with (
-        patch.dict(worker.os.environ, {"PROFILE_WORKER": "1", "TEMPORAL_WORKER_REQUIRE_ACTIVATION": "0"}),
+        patch.dict(
+            worker.os.environ,
+            {"PROFILE_WORKER": "1", "TEMPORAL_WORKER_REQUIRE_ACTIVATION": "0", "TEMPORAL_NAMESPACE": "blackbox"},
+        ),
         patch("cProfile.Profile", return_value=profiler),
         patch.object(worker, "logger", logger),
         patch.object(worker, "_start_sdk_runtime", return_value=(None, 0)),

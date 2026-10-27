@@ -195,10 +195,10 @@ export async function openAgentWithChip(): Promise<HTMLElement> {
   return await screen.findByTestId('code-agent-chip');
 }
 
-/** Chip → its live preview card → the full-screen app view. */
-export async function openAppView(title = 'Snake game'): Promise<HTMLElement> {
+/** Chip → its "Open app" button → the full-screen app view. */
+export async function openAppView(): Promise<HTMLElement> {
   const chip = await openAgentWithChip();
-  fireEvent.click(await within(chip).findByRole('button', { name: `Open ${title} preview` }));
+  fireEvent.click(await within(chip).findByRole('button', { name: 'Open app' }));
   return await screen.findByTestId('app-view-screen');
 }
 

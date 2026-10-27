@@ -9,7 +9,8 @@
  *
  * Scope: same-host workers only (local / cloud-agent benches). Production
  * Fly workers still need a funded E2B team — this path is gated on the E2B
- * billing error and disabled when FLY_APP_NAME is set.
+ * billing error and disabled on Render (RENDER=true) and when FLY_APP_NAME is
+ * set.
  *
  * Ownership (workDir + pid + port) is persisted to
  * `/tmp/claude-code-local/<taskId>/session.json` so close can still extract
@@ -295,8 +296,11 @@ export function isE2bTeamBillingBlockError(error: unknown): boolean {
 export function shouldAllowLocalClaudeCodeFallback(): boolean {
   if (process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK === '0') return false;
   if (process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK === '1') return true;
-  // Same-host benches (local / Cursor cloud). Fly multi-machine workers cannot
-  // reach a backend-local ws://127.0.0.1 listener.
+  // Same-host benches (local / Cursor cloud) only. Fly multi-machine workers
+  // cannot reach a backend-local ws://127.0.0.1 listener, and on Render the
+  // child process and its /tmp ownership file live on ONE backend instance, so
+  // a request served by another instance could not reach or close it.
+  if (process.env.RENDER === 'true') return false;
   return !process.env.FLY_APP_NAME;
 }
 

@@ -3,6 +3,7 @@
  * order, project grouping, collapsed dividers, hover-expand, run-state glyphs,
  * bottom rows (Feedback / Biz health / Archived / account), account glyph and
  * Settings drawer. Flag off keeps the stock sidebar (app-sidebar suites).
+ * The "View X old agents" row lives in rose-sidebar-old-agents.blackbox.tsx.
  * Projects, project settings and the agent right-click menu live in
  * rose-sidebar-projects.blackbox.tsx; code-agent rows in
  * rose-sidebar-code-agents.blackbox.tsx.
@@ -14,6 +15,7 @@ import type { User } from '@supabase/supabase-js';
 import { http, HttpResponse } from 'msw';
 
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
+import * as adminHealthPrewarm from '@/pages/adminHealthPrewarm';
 
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
@@ -73,6 +75,8 @@ const AGENTS = [
   }),
 ];
 
+const ADMIN_HEALTH_URL = 'http://localhost:3001/api/admin-health';
+
 function renderBar(overrides: Parameters<typeof defaultProps>[0] = {}, { dark = false } = {}) {
   const user = signedInUser();
   // Dark = the signed-in user's stored Rose theme choice (features/rose-theme).
@@ -97,6 +101,12 @@ describe('Rose left bar (flag on)', () => {
     localStorage.clear();
     mockSession();
     mockProjectsApi([makeProject(), makeProject({ id: 'p-habits', name: 'Habits' })]);
+    // Admin bars (showAdminHealth) prewarm Biz health on mount.
+    server.use(
+      http.get(ADMIN_HEALTH_URL, () =>
+        HttpResponse.json({ error: 'admin health not mocked' }, { status: 503 }),
+      ),
+    );
   });
   afterEach(() => {
     localStorage.clear();
@@ -128,7 +138,7 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.queryByLabelText('Resize sidebar')).toBeNull();
   });
 
-  it('orders Home, New Super Agent (black), Search, then Home agents and each project with its agents', async () => {
+  it('orders Home, New Super Agent (black), Search, then each project with its agents, then Home agents', async () => {
     renderBar();
     const bar = roseBar();
     const top = within(bar).getAllByRole('button').slice(0, 2);
@@ -150,15 +160,16 @@ describe('Rose left bar (flag on)', () => {
     expect(create).toHaveTextContent('New Super Agent');
     await screen.findByTestId('rose-project-row-p-rose');
     expect(rowOrder()).toEqual([
-      // Home: running first (sortAgents), an unknown project_id falls back to Home.
-      'agent:home-run',
-      'agent:orphan',
-      'agent:home-done',
+      // Projects on top (Rose first), then Home: running first (sortAgents),
+      // an unknown project_id falls back to Home.
       'project:p-rose',
       'agent:rose-run',
       'agent:rose-fail',
       'project:p-habits',
       'agent:habits-done',
+      'agent:home-run',
+      'agent:orphan',
+      'agent:home-done',
     ]);
     // Project agents sit indented while expanded; Home agents do not.
     expect(screen.getByTestId('rose-agent-row-rose-run').className).toContain('pl-[34px]');
@@ -278,6 +289,37 @@ describe('Rose left bar (flag on)', () => {
     expect(biz).toHaveAttribute('aria-pressed', 'true');
     await user.click(biz);
     expect(panel).toHaveAttribute('data-state', 'closed');
+  });
+
+  it('Biz health covers the query box full width like Browser; admin bars prewarm it on mount', async () => {
+    const user = userEvent.setup();
+    const prewarm = vi.spyOn(adminHealthPrewarm, 'prewarmAdminHealth');
+    const { unmount } = renderBar();
+    expect(prewarm).not.toHaveBeenCalled();
+    unmount();
+
+    clearCaptures();
+    renderBar({ showAdminHealth: true });
+    // Prewarmed before any click: the backend's cold day build starts with the bar.
+    expect(prewarm).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        capturedRequests.some(
+          (r) => r.method === 'GET' && r.url.endsWith('/api/admin-health?timeSlice=monthly'),
+        ),
+      ).toBe(true),
+    );
+    await user.click(within(roseBar()).getByRole('button', { name: 'Biz health' }));
+    const panel = screen.getByTestId('rose-app-panel');
+    expect(panel).toHaveAttribute('data-variant', 'full');
+    expect(panel.style.left).toBe('64px');
+    expect(panel.style.right).toBe('0px');
+    expect(panel.style.width).toBe('');
+    expect(screen.queryByTestId('app-drawer-resize-handle')).toBeNull();
+    // Over the floating query box (z-[100]) and an open project settings drawer (z-[101]).
+    expect(panel.className).toContain('z-[102]');
+    expect(panel.parentElement).toBe(document.body);
+    prewarm.mockRestore();
   });
 
   it('Feedback opens in the right drawer for every user', async () => {

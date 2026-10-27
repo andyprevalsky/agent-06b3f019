@@ -11,7 +11,9 @@
  *
  * In-activity explore/browser/code tasks have no Agent row; they become
  * synthetic TreeNodes (`task:<address>`, never navigable) so they render with
- * the same circle/progress/status language.
+ * the same circle/progress/status language. The selected agent's own
+ * explore/browser tasks also map to their trajectory id (`trajectories`), so
+ * the dock unfolds them from rows the client already holds.
  *
  * 10k-agent note: each build indexes `parentAgentId → children` in one pass
  * over the bus tree; counts, for_each totals and every rendered row then look
@@ -42,15 +44,24 @@ export interface PanelGroup {
 export interface PanelCounts {
   total: number;
   running: number;
+  /** User-paused (resumable) nodes: never running, but the dock must stay reachable. */
+  paused: number;
 }
 
 export interface AgentPanelModel {
   groups: PanelGroup[];
   getChildren: (parentId: string) => TreeNode[];
   counts: PanelCounts;
+  /**
+   * Synthetic explore/browser node id → the task id its already-loaded
+   * trajectory rows carry as `subAgentId` (selected agent's own tasks only).
+   */
+  trajectories: ReadonlyMap<string, string>;
 }
 
 const IN_ACTIVITY_TYPES = new Set(['explore', 'browser', 'code']);
+/** In-activity tasks whose trajectory the dock can unfold from the selected agent's rows. */
+const TRAJECTORY_TYPES = new Set(['explore', 'browser']);
 const FAILED_TASK = new Set(['failed', 'error', 'cancelled', 'canceled', 'timeout']);
 const DONE_TASK = new Set(['completed', 'complete', 'done', 'finished', 'success']);
 
@@ -64,6 +75,8 @@ export function isTaskNodeId(agentId: string): boolean {
 
 function taskStatus(status: string): TreeNode['status'] {
   const normalized = status.toLowerCase();
+  // A user pause ended the run: resumable, not running and not failed.
+  if (normalized === 'paused') return 'PAUSED';
   if (FAILED_TASK.has(normalized)) return 'FAILED';
   if (DONE_TASK.has(normalized)) return 'COMPLETED';
   return 'ACTIVE';
@@ -81,7 +94,9 @@ export function taskTreeNode(args: {
 }): TreeNode {
   const label = agentPathShortName(args.path) ?? singleLine(args.goal);
   return {
-    agentId: `${TASK_NODE_PREFIX}${args.address}`,
+    // A task's identity is its address (task path, else its id), as on the
+    // backend tree; Agent.backgroundTasks' `address` is the current run's inbox.
+    agentId: `${TASK_NODE_PREFIX}${args.path ?? args.address}`,
     parentAgentId: args.parentAgentId,
     goal: `${args.type} · ${label || args.address}`,
     status: args.status,
@@ -105,9 +120,15 @@ function fromTreeTask(task: TreeBackgroundTask, parentAgentId: string): TreeNode
   });
 }
 
+const SPAWN_NODE_STATUS: Record<BackgroundSpawn['state'], TreeNode['status']> = {
+  running: 'ACTIVE',
+  completed: 'COMPLETED',
+  failed: 'FAILED',
+  paused: 'PAUSED',
+};
+
 function fromSpawn(spawn: BackgroundSpawn, parentAgentId: string): TreeNode {
-  const status =
-    spawn.state === 'running' ? 'ACTIVE' : spawn.state === 'failed' ? 'FAILED' : 'COMPLETED';
+  const status = SPAWN_NODE_STATUS[spawn.state];
   return taskTreeNode({
     address: spawn.address ?? spawn.ownerToolCallId,
     parentAgentId,
@@ -146,16 +167,18 @@ function withSpawnGoal(node: TreeNode | undefined, id: string, parent: string, g
 function countAll(groups: PanelGroup[], getChildren: (id: string) => TreeNode[]): PanelCounts {
   let total = 0;
   let running = 0;
+  let paused = 0;
   const seen = new Set<string>();
   const walk = (node: TreeNode) => {
     if (seen.has(node.agentId)) return;
     seen.add(node.agentId);
     total += 1;
     if (isRunningNode(node)) running += 1;
+    else if (node.status === 'PAUSED') paused += 1;
     getChildren(node.agentId).forEach(walk);
   };
   groups.forEach((group) => group.roots.forEach(walk));
-  return { total, running };
+  return { total, running, paused };
 }
 
 function runningFirst(nodes: TreeNode[]): TreeNode[] {
@@ -193,13 +216,21 @@ export function buildAgentPanelModel({
 }: BuildArgs): AgentPanelModel {
   const childIndex = indexTreeChildren(nodes.values());
   const childCache = new Map<string, TreeNode[]>();
+  // The selected agent's own spawn rows list its tasks (with live activity);
+  // its persisted copy of the same task is not a second row.
+  const ownTaskIds = new Set(
+    spawns
+      .filter((spawn) => IN_ACTIVITY_TYPES.has(spawn.agentType))
+      .map((spawn) => fromSpawn(spawn, selectedAgentId).agentId),
+  );
   const getChildren = (parentId: string): TreeNode[] => {
     const cached = childCache.get(parentId);
     if (cached) return cached;
     const kids = childIndex.get(parentId) ?? [];
     const tasks = (nodes.get(parentId)?.backgroundTasks ?? [])
       .filter((task) => !nodes.has(task.address))
-      .map((task) => fromTreeTask(task, parentId));
+      .map((task) => fromTreeTask(task, parentId))
+      .filter((task) => parentId !== selectedAgentId || !ownTaskIds.has(task.agentId));
     const children = runningFirst([...kids, ...tasks]);
     childCache.set(parentId, children);
     return children;
@@ -220,11 +251,15 @@ export function buildAgentPanelModel({
   }
   const loose: TreeNode[] = getChildren(selectedAgentId).filter((n) => !claimed.has(n.agentId));
   const looseIds = new Set(loose.map((n) => n.agentId));
+  const trajectories = new Map<string, string>();
   for (const spawn of spawns) {
     if (spawn.agentType === 'for_each') continue;
     if (IN_ACTIVITY_TYPES.has(spawn.agentType)) {
       const task = fromSpawn(spawn, selectedAgentId);
       if (!looseIds.has(task.agentId)) loose.push(task);
+      if (spawn.taskId && TRAJECTORY_TYPES.has(spawn.agentType)) {
+        trajectories.set(task.agentId, spawn.taskId);
+      }
       continue;
     }
     for (const id of spawn.subAgentIds) {
@@ -235,5 +270,5 @@ export function buildAgentPanelModel({
   }
   if (loose.length > 0) groups.push({ key: 'children', header: null, roots: runningFirst(loose) });
   groups.sort((a, b) => Number(b.roots.some(isRunningNode)) - Number(a.roots.some(isRunningNode)));
-  return { groups, getChildren, counts: countAll(groups, getChildren) };
+  return { groups, getChildren, counts: countAll(groups, getChildren), trajectories };
 }

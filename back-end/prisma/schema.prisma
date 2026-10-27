@@ -6,7 +6,11 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  directUrl  = env("DIRECT_URL")
+  // Only the Prisma CLI reads directUrl (db push, migrate, validate). No env file
+  // sets PRISMA_CLI_DATABASE_URL, so a bare CLI command run from back-end/ cannot
+  // reach the production DIRECT_URL in back-end/.env (the 2026-10-08 stray push).
+  // Local pushes: `npm run prisma:push:local`. Render: `npm run prisma:migrate`.
+  directUrl  = env("PRISMA_CLI_DATABASE_URL")
   // Only extensions Prisma must create for `db push`; Supabase-managed ones stay unmanaged.
   // pg_trgm backs the GIN trigram search indexes declared below.
   extensions = [vector, pg_trgm]

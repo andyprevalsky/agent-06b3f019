@@ -134,7 +134,7 @@ test.describe('cloud-agent lifecycle', () => {
 
     // Rose Desktop folds a running agent's lifecycle rows into one live trajectory
     // row: it shows the latest lifecycle title with the cloud icon, no progress ring,
-    // and cannot be expanded until the work compresses.
+    // and stays collapsed until the user opens it.
     const group = page.getByTestId('trajectory-work-group');
     await expect(group).toHaveCount(1);
     await expect(group).toHaveAttribute('data-state', 'running');
@@ -143,7 +143,7 @@ test.describe('cloud-agent lifecycle', () => {
     );
     await expect(group.locator('svg.lucide-cloud')).toHaveCount(1);
     await expect(group.getByTestId('tool-batch-progress-ring')).toHaveCount(0);
-    await expect(group.getByRole('button')).toBeDisabled();
+    await expect(group.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
     for (const msg of lifecycleMessages) {
       await expect(page.getByText(msg.text, { exact: true })).toHaveCount(0);
     }
