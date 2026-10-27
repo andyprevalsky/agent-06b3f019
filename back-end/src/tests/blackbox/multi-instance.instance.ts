@@ -78,7 +78,15 @@ async function serveRoutedHub(port: number) {
         appVersion: null,
         lastSeenAt: new Date(),
       }),
-      findActiveSession: async () => null,
+      // The session row a backend restart or owner move restores from.
+      findActiveSession: async (taskId) =>
+        process.env.MI_HUB_DEVICE === undefined
+          ? null
+          : {
+              id: taskId,
+              agentId: taskId,
+              sandboxId: `mac-${process.env.MI_HUB_DEVICE}-${taskId}`,
+            },
       touchDevice: async () => undefined,
       relaySecret: () => 'mi-relay-secret',
       pingIntervalMs: 1_000,
@@ -228,6 +236,36 @@ async function main(): Promise<unknown> {
       await nextLine();
       await served.close();
       return { served: true };
+    }
+    case 'hub-start-local': {
+      // Starts a session on a Mac connected HERE, then (after the parent moves
+      // the Mac to another instance) stops it from here.
+      const [port, deviceId, taskId] = args;
+      const served = await serveRoutedHub(Number(port));
+      await barrier();
+      await sleep(1_500);
+      await served.hub.startSession({
+        deviceId,
+        userId: 'mi-hub-user',
+        command: {
+          type: 'start_session',
+          task_id: taskId,
+          agent_id: taskId,
+          provider: 'claude',
+          folder: null,
+          envs: {},
+          relay_path: `/api/local-code-relay/${taskId}/device`,
+          home_files: [],
+        },
+        deadlineMs: 15_000,
+      });
+      process.stdout.write('STARTED\n');
+      await nextLine();
+      await served.hub.stopSession(taskId, deviceId);
+      process.stdout.write('STOPPED\n');
+      await nextLine();
+      await served.close();
+      return { stopped: true };
     }
     case 'hub-start': {
       // Another instance: starts, probes and stops a session on a Mac whose

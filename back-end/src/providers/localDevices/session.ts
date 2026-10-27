@@ -267,7 +267,13 @@ export async function createLocalDeviceCodeSession(
       },
     });
   } catch (error) {
-    await hub.stopSession(taskId, target.deviceId);
+    // Best-effort: a failed stop must not replace the original error.
+    await hub.stopSession(taskId, target.deviceId).catch((stopError: unknown) =>
+      log.warn('Local session stop after a failed create failed', {
+        task_id: taskId,
+        error: stopError instanceof Error ? stopError.message : String(stopError),
+      })
+    );
     throw error;
   }
   return {
@@ -321,7 +327,15 @@ export async function closeLocalDeviceCodeSession(
   sandboxId: string,
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<{ outputFiles: [] }> {
-  await hub.stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null);
+  // Best-effort: the session row is marked CLOSED even when the Mac is unreachable.
+  await hub
+    .stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null)
+    .catch((error: unknown) =>
+      log.warn('Local session stop failed; marking it closed', {
+        task_id: taskId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
   await prisma.claudeCodeSession.updateMany({
     where: { id: taskId, status: 'ACTIVE' },
     data: { status: 'CLOSED', closedAt: new Date() },

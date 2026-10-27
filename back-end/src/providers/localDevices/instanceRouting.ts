@@ -24,6 +24,7 @@ import { createLogger } from '../logger';
 import {
   deleteEphemeral,
   getEphemeral,
+  insertEphemeralIfAbsent,
   putEphemeral,
   releaseLease,
   renewLease,
@@ -111,6 +112,22 @@ export async function claimDeviceOwner(
   const token = randomUUID();
   await putEphemeral(OWNER_NAMESPACE, deviceId, { token, ...row }, ttlMs);
   return token;
+}
+
+/**
+ * Re-claim after this instance's row was lost (expired during a DB outage):
+ * only when no live row exists, so a newer owner on another instance (the Mac
+ * reconnected there) is never overwritten. Null when another instance owns it.
+ */
+export async function reclaimDeviceOwner(
+  deviceId: string,
+  row: Omit<DeviceOwnerRow, 'token'>,
+  ttlMs: number
+): Promise<string | null> {
+  const token = randomUUID();
+  return (await insertEphemeralIfAbsent(OWNER_NAMESPACE, deviceId, { token, ...row }, ttlMs))
+    ? token
+    : null;
 }
 
 /** Rewrite this instance's owner row (e.g. the hello's sessions root) if it still owns it. */

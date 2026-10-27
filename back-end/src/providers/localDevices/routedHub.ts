@@ -25,6 +25,7 @@ import {
   LOCAL_DEVICE_INTERNAL_PATH,
   callOwner,
   claimDeviceOwner,
+  reclaimDeviceOwner,
   deviceOwner,
   forgetRelayDevice,
   internalAuthMatches,
@@ -129,11 +130,12 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
   }
 
   override async stopSession(taskId: string, deviceId: string | null): Promise<void> {
+    // A local relay session is authoritative only while this instance holds the
+    // device's control channel; after the Mac moved, the new owner serves it.
     const sessionDevice = this.sessions.get(taskId)?.deviceId ?? deviceId;
     const owner = sessionDevice === null ? null : await this.remoteOwner(sessionDevice);
-    if (owner === null || this.sessions.has(taskId)) {
-      this.stopSessionHere(taskId, deviceId);
-    } else {
+    this.stopSessionHere(taskId, deviceId);
+    if (owner !== null) {
       await callOwner(owner.instance, this.deps.relaySecret(), { op: 'stop', taskId, deviceId });
     }
     await forgetRelayDevice(taskId).catch((error: unknown) =>
@@ -154,7 +156,8 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
   // ── owner registry, driven by the control channel ───────────────────────
 
   protected override onControlOpened(deviceId: string, userId: string, _ws: WebSocket): void {
-    this.claimOwner(deviceId, userId);
+    // A new control connection is the device's newest location: it takes over.
+    this.claimOwner(deviceId, userId, 'connect');
   }
 
   /**
@@ -163,13 +166,23 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
    * through a database outage, or replaced) re-claims it while the socket is
    * still here, so the device never stays invisible to other instances.
    */
-  private claimOwner(deviceId: string, userId: string): void {
+  private claimOwner(deviceId: string, userId: string, mode: 'connect' | 'reclaim'): void {
     const ttl = this.ownerTtlMs;
     const sessionsRoot = this.devices.get(deviceId)?.sessionsRoot ?? null;
-    void claimDeviceOwner(deviceId, { instance: this.instance, userId, sessionsRoot }, ttl)
+    const claim = mode === 'connect' ? claimDeviceOwner : reclaimDeviceOwner;
+    void claim(deviceId, { instance: this.instance, userId, sessionsRoot }, ttl)
       .then((token) => {
         const previous = this.owned.get(deviceId);
         if (previous !== undefined) clearInterval(previous.timer);
+        if (token === null) {
+          // Another live instance holds the device (the Mac reconnected there):
+          // stop claiming it from this possibly half-open socket.
+          this.owned.delete(deviceId);
+          log.warn('Device owned by another instance; no longer claiming it', {
+            device_id: deviceId,
+          });
+          return;
+        }
         if (!this.devices.has(deviceId)) {
           this.owned.delete(deviceId);
           void releaseDeviceOwner(deviceId, token);
@@ -196,7 +209,7 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
         if (renewed || this.owned.get(deviceId)?.row.token !== token) return;
         if (!this.devices.has(deviceId)) return;
         log.warn('Device owner row lost while connected; re-claiming', { device_id: deviceId });
-        this.claimOwner(deviceId, userId);
+        this.claimOwner(deviceId, userId, 'reclaim');
       })
       .catch((error: unknown) =>
         log.warn('Device owner renew failed', { device_id: deviceId, error: errorText(error) })
@@ -246,8 +259,10 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
     if ('deviceId' in target) {
       deviceId = target.deviceId;
     } else {
-      if (this.sessions.has(target.taskId)) return false;
+      const local = this.sessions.get(target.taskId);
+      if (local !== undefined && this.devices.has(local.deviceId)) return false;
       deviceId =
+        local?.deviceId ??
         (await relayDevice(target.taskId)) ??
         parseLocalDeviceSandboxId((await this.deps.findActiveSession(target.taskId))?.sandboxId)
           ?.deviceId ??

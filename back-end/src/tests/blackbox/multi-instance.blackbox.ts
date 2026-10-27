@@ -21,6 +21,7 @@
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
  *  - a Mac on A serves a session that B starts, relays to and stops
+ *  - a session started on A follows its Mac to B for relay and stop
  *  - a connected Mac's owner row is re-claimed after it is lost
  *  - an E2B code session created on A runs project commands from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
@@ -418,6 +419,77 @@ async function main(): Promise<void> {
         await a.result;
       } finally {
         // A failed case kills its instances; their pending results are moot.
+        a.result.catch(() => undefined);
+        b.result.catch(() => undefined);
+        a.child.kill();
+        b.child.kill();
+      }
+    });
+
+    await test('a session started on A follows its Mac to B for relay and stop', async () => {
+      const deviceId = randomUUID();
+      const taskId = randomUUID();
+      const [portA, portB] = await freePorts(2);
+      const env = { MI_HUB_DEVICE: deviceId };
+      const a = startInstance('hub-start-local', [String(portA), deviceId, taskId], env);
+      const b = startInstance('hub-serve', [String(portB)], env);
+      try {
+        await Promise.all([a.ready, b.ready]);
+        const headers = { authorization: 'Bearer mi-device-token', 'x-rose-device-id': deviceId };
+        const controlA = await frames(`ws://127.0.0.1:${portA}/api/local-devices/control`, headers);
+        a.child.stdin.write('GO\n');
+        b.child.stdin.write('GO\n');
+        await controlA.next(
+          (f) => typeof f === 'object' && f.type === 'start_session',
+          'start on A'
+        );
+        controlA.ws.send(
+          JSON.stringify({ type: 'session_started', task_id: taskId, folder: '~/mi' })
+        );
+        const tunnelA = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}/device`,
+          headers
+        );
+        await waitFor(() => a.output().includes('STARTED\n'), "A's local start");
+        // The Mac's sockets drop and its control channel reconnects to B.
+        tunnelA.ws.close();
+        controlA.ws.close();
+        const controlB = await frames(`ws://127.0.0.1:${portB}/api/local-devices/control`, headers);
+        await waitForAsync(async () => {
+          const rows = await prisma.$queryRaw<Array<{ instance: string }>>`
+            SELECT value->>'instance' AS instance FROM "SharedEphemeralState"
+            WHERE namespace = 'local-device-owner' AND key = ${deviceId} AND "expiresAt" > now()`;
+          return rows[0]?.instance === `http://127.0.0.1:${portB}`;
+        }, 'B to own the device');
+        // The tunnel and a worker reconnect through A, which still holds a stale session.
+        const tunnel = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}/device`,
+          headers
+        );
+        const token = createHmac('sha256', 'mi-relay-secret')
+          .update(`local-code-relay:${taskId}`)
+          .digest('hex');
+        const worker = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}?token=${token}`
+        );
+        const open = await tunnel.next((f) => typeof f === 'object' && f.op === 'open', 'channel');
+        worker.ws.send('ping-via-a');
+        await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'data' && f.data === 'ping-via-a',
+          'the worker frame at the Mac'
+        );
+        tunnel.ws.send(JSON.stringify({ op: 'data', ch: open.ch, data: 'pong-via-b' }));
+        await worker.next((f) => f === 'pong-via-b', 'the Mac frame at the worker');
+        a.child.stdin.write('STOP\n');
+        await controlB.next(
+          (f) => typeof f === 'object' && f.type === 'stop_session' && f.task_id === taskId,
+          'stop_session on B'
+        );
+        for (const ws of [controlB.ws, tunnel.ws, worker.ws]) ws.close();
+        a.child.stdin.write('DONE\n');
+        b.child.stdin.write('DONE\n');
+        await Promise.all([a.result, b.result]);
+      } finally {
         a.result.catch(() => undefined);
         b.result.catch(() => undefined);
         a.child.kill();
