@@ -478,13 +478,20 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
         with backend.patched(clock=_virtual_clock(2000.0)):
             env = ActivityEnvironment()
             first = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
-            await _wait_until(lambda: session_home.runs(), "the CLI to start")
-            await asyncio.sleep(2.5)  # ~5000 virtual seconds with Bash in flight
-            assert not first.done(), f"an in-flight tool must keep the session attached: {first.result()}"
-            assert backend.closed == [], f"nothing may close a working session: {backend.closed}"
-            assert backend.keepalives >= 5, f"attached sessions keep their sandbox alive: {backend.keepalives}"
-            session_home.release("tool_done")
-            paused = await asyncio.wait_for(first, timeout=30)
+            try:
+                await _wait_until(lambda: session_home.runs(), "the CLI to start")
+                await _wait_until(lambda: backend.keepalives > 0, "the first attached-session keepalive")
+                await asyncio.sleep(2.5)  # ~5000 virtual seconds with Bash in flight
+                assert not first.done(), f"an in-flight tool must keep the session attached: {first.result()}"
+                assert backend.closed == [], f"nothing may close a working session: {backend.closed}"
+                assert backend.keepalives >= 5, f"attached sessions keep their sandbox alive: {backend.keepalives}"
+                session_home.release("tool_done")
+                paused = await asyncio.wait_for(first, timeout=30)
+            finally:
+                if not first.done():
+                    first.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await first
 
         assert paused["status"] == "paused" and paused["success"] is False, paused
         assert "not failed" in paused["message"], paused["message"]

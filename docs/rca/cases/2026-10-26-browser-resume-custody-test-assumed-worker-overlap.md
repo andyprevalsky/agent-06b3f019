@@ -220,3 +220,8 @@ Applied worker SHA256:
 The coordinator applied the exact reviewed bytes. Full combined-source backend
 coverage and deployment remain pending; the narrow native result does not
 certify those gates.
+
+
+## Corrected full owning-domain receipt on October 27
+
+The corrected browser-session owning domain passed in224,583ms on46bfbfb5 in the canonical228-domain backend batch, including the fresh-concurrent sibling and owner-timeout controls. Two other domains failed; global coverage/deploy acceptance remains pending.

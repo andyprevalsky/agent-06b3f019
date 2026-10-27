@@ -22,7 +22,7 @@ sources:
   - plan:.context/test-runs/agents-coverage-20261027-011609-649722/workflow/manifest.json
   - plan:.context/deploy-fresh-20261027/rca-workflow-woken/final-receipt.json
 repro: agents/tests/blackbox/workflow.blackbox.py::_run_all_workflow_tests (wf_woken_subagent_verifier_judges_new_task_schema)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -124,3 +124,8 @@ and required this case to remain pending full committed-source acceptance.
 ## Reusable lesson
 
 Give completion-verifier fixtures an explicit valid completion stimulus and assert that the intended tool path ran, so an iteration-limit fallback cannot masquerade as normal verification.
+
+
+## Full native owning-domain verification on October 27
+
+The committed correction at46bfbfb5 passed the full native workflow coverage domain in329.02 seconds during the canonical agents batch. That batch failed a separate code-sessions fixture; this receipt establishes the corrected workflow domain, not a green whole-deploy gate.

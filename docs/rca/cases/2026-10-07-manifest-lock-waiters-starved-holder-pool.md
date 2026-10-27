@@ -135,3 +135,8 @@ None recorded.
 ## Reusable lesson
 
 Never hold a pooled transaction across external I/O for mutual exclusion; use a lease row (owner + expiry, single-statement acquire, check and release) so neither holders nor waiters pin connections.
+
+
+## Corrected full owning-domain receipt on October 27
+
+The corrected archive owning domain passed in33,520ms on46bfbfb5 in the canonical228-domain backend batch. The historical reported PID ownership remains unknown. The batch failed two different domains, so global coverage/deploy acceptance remains pending.

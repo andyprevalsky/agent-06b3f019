@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 import AdmZip from 'adm-zip';
 import { prisma } from '../../providers/database';
 import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
@@ -103,6 +104,21 @@ async function gmailCredential(userId: string, address: string, token: string) {
   });
 }
 
+/** The native scheduler scans every tenant. Confine this test process's
+ * candidate query to its fixture owner; all eligibility predicates and real
+ * database reads/writes remain in force. Restore the seam after the job joins.
+ */
+async function runFixtureGmailSync(userId: string): Promise<void> {
+  const findMany = prisma.integration.findMany;
+  prisma.integration.findMany = ((args: Prisma.IntegrationFindManyArgs = {}) =>
+    findMany({ ...args, where: { AND: [args.where ?? {}, { userId }] } })) as typeof findMany;
+  try {
+    await runGmailSyncJob();
+  } finally {
+    prisma.integration.findMany = findMany;
+  }
+}
+
 async function gmailSyncReportsMessagesSaved(user: User): Promise<void> {
   const session = user();
   const address = `owner.${randomUUID().slice(0, 8)}@example.com`;
@@ -112,7 +128,7 @@ async function gmailSyncReportsMessagesSaved(user: User): Promise<void> {
   await gmailCredential(session.userId, address, box.token);
   const restore = gmail.install();
   try {
-    await runGmailSyncJob();
+    await runFixtureGmailSync(session.userId);
   } finally {
     restore();
   }
@@ -141,7 +157,7 @@ async function gmailFailureEndsFailed(): Promise<void> {
     await gmailCredential(session.userId, address, box.token);
     const restore = gmail.install();
     try {
-      await runGmailSyncJob();
+      await runFixtureGmailSync(session.userId);
     } finally {
       restore();
     }

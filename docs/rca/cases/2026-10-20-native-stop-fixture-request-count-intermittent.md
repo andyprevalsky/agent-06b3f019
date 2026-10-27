@@ -159,3 +159,10 @@ Evidence and exact candidate diff are retained under
 joined;1330 traced PIDs had zero survivors. No live Fly resource was touched.
 The correction is applied; this case remains open pending the parent-owned
 complete canonical structural gate on the combined source.
+
+
+## Full native owning-domain verification on October 27
+
+The committed correction at46bfbfb5 passed the full benchmark-live-results suite in the canonical67-suite command gate. Two separate suites failed; this receipt establishes the corrected native-stop owning suite, not a green whole-deploy gate. The exact original per-call timing gap remains documented above.
+
+The older October20/21 exact timing remains unresolved; its classification and open status are retained. The proven October27 clock-observer correction and current native owning-suite pass do not manufacture the older missing operation timings.
