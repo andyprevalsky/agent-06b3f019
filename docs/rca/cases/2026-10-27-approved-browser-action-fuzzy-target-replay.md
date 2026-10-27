@@ -202,3 +202,30 @@ pass is not relabeled as a full catalog benchmark pass.
 ## Reusable lesson
 
 Resolve the approved tool's permission result and let the ordinary actor continue instead of automatically replaying or substituting a saved UI target.
+
+
+### Review stabilization: preserve the actual accepted outcome
+
+The unchanged auth-decline smoke later failed on root
+`4800c82b-22ef-410d-9687-5f82827f2632`: two browser dispatches instead of one at
+369.2s. This was not queued replay: the browser received the correlated denial
+and continued naturally. Its native `attempt_completion` accepts no arguments,
+but the real completion summary still read obsolete `params.reasoning/text`.
+The accepted verifier explained that sign-in was declined; the parent received
+SUCCESS and blank structured fields without that explanation. The summary now
+uses the accepted `v_reasoning`, matching the existing simulated path. It adds
+no refusal policy, terminal guard, extra tool or synthetic recovery instruction.
+The root later also saw explicit denial through diagnostics yet retried, so this
+payload repair alone is not claimed to cure the catalog count failure.
+
+A separate actual status-only WMH producer stored `awaiting_write_approval`,
+which the rejection resolver omitted. The existing eligible status set now
+recognizes that enum. A permanent two-activity producer/rejection test verifies
+same-result continuation without execution. Four unchanged private owning tests
+passed one/failed three before and passed four after; elapsed time for this
+private pair was not recorded. All121 current agent domains,214 DEMO tests and
+172 unit tests subsequently passed under84% combined coverage. Fresh Golden
+N3392r4 grounds only the ten new mandatory hunks at29e2c47e3; current real-model
+outcome replay remains separate and pending. The prior October15 root-policy
+case remains unresolved; no policy correction or model-intelligence cause is
+inferred from this distinct, locally reproduced transport loss.

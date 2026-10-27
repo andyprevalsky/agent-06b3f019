@@ -259,3 +259,36 @@ purchase or live authentication action was performed during the RCA.
 ## Reusable lesson
 
 Persist private browser state through its existing checkpoint owner before suspending for an unbounded approval wait.
+
+
+### Review stabilization: terminal cleanup and exact native reconciliation
+
+Code review exposed an ordinary-terminal leak in the first strict passkey
+implementation. The shared close helper now requires complete passkey evidence
+only for write/payment approval. On ordinary completion, max-steps, cancellation
+or error, incomplete usage readback is explicitly logged and the same existing
+backend checkpoint/pause still executes. Approval capture failure continues to
+retain its source; successful auth assistance remains live. The unchanged four
+owning tests failed one/passed three before (25.48s), then passed four (22.23s).
+The new full-activity matrix covers84 fault/provider/path cases, including24
+strict approval-retention cases. No new close API or pipeline was introduced.
+
+Two backend review regressions are registered in the normal browser-session
+provider-lifecycle fixture. An opaque sandbox has effective `globalThis.origin`
+null even when `location.origin` is HTTPS; only the effective opaque-origin
+case is skipped. A readable frame's storage failure still retains the source.
+The real-CDP encrypted-checkpoint case failed1.302s before and passed1.541s
+with the guard. Exact released Steel candidates now settle their existing
+resume receipt under request/native identity, creating-phase ownership and
+unchanged-source fences. The actual shared-owner/Steel/isolated-DB regression
+failed4.675s before and passed1.207s afterward; it covers expired known-terminal
+recovery plus hydrating, unknown, foreign-owner and changed-source no-create
+controls. Missing state is never silently replaced with an empty baseline,
+and receipt age/null binding alone never authorizes a second native create.
+
+At source29e2c47e3, full backend coverage passed233 domains and325 unit files;
+normal TypeScript and all-TS/importer lint passed. The follow-up34c71e5f5 changes
+only test registration: explicit child-fixture URL dependencies let the existing
+structural ratchet see imported cases. Runtime hashes are unchanged. These
+checks supplement prior actual Rose-agent evidence; current post-stabilization
+real-model acceptance and production deployment remain pending.
