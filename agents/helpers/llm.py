@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 import re
+import sys
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -2254,9 +2255,13 @@ async def _render_llm_messages(
 
     async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
         suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""
+        # Retained previews need the originating agent's identity for scoped
+        # readback. Callers without it (DAG reasoning) have no read_tool_output
+        # tool, so they keep the complete redacted result.
+        retain = bool(user_id and agent_id)
         preview = await preview_tool_text(
             value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id,
-            limit=DEFAULT_INLINE_CHARS - len(suffix),
+            limit=DEFAULT_INLINE_CHARS - len(suffix) if retain else sys.maxsize,
         )
         if suffix and any(label not in preview for label in attachment_labels):
             preview += suffix

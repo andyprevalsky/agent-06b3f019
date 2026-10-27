@@ -1435,6 +1435,10 @@ def _normalize_action_params(
         return validate_browser_tool_args("phone", params)
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+    if normalized_action == "read_tool_output":
+        # Exactly read_tool_output's arguments; the generic mapping below drops
+        # output_id/offset/limit and renames query to instruction.
+        return {key: params[key] for key in ("output_id", "offset", "limit", "query") if params.get(key) is not None}
 
     if normalized_action == "read_logs":
         log_params: Dict[str, Any] = {}

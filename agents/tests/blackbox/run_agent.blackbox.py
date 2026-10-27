@@ -2627,6 +2627,34 @@ async def test_workflow_output_retention_uses_activity():
         assert "preview_tool_output_activity" in calls
 
 
+async def test_workflow_marker_verification_uses_activity():
+    """A short receipt carrying a retained marker is verified against storage;
+    that download must run in an activity, never in workflow code."""
+    import loop.run_agent as loop
+    from tools.read_tool_output import preview_tool_output_activity
+
+    marker = ('\n[Retained tool output: read_tool_output output_id="' + "a" * 32 + '" offset=600 '
+              "limit=20000; total_chars=900; Unicode characters; originating agent/session only; expires after 24h.]")
+    calls = []
+    async def execute_activity(fn, *, args, **kwargs):
+        calls.append(fn.__name__)
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}],
+                    "detected_tools_ordered": [("web_search", "tc", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity, fn
+        return await fn(*args)
+
+    async def failed_tool(*args):
+        raise RuntimeError("short failure " + "p" * 600 + marker)
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity), patch.object(loop, "preview_tool_text", side_effect=AssertionError("I/O entered workflow")):
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc", 1.0)],
+            execute_tool_override=failed_tool, is_inside_temporal_activity=False,
+        )
+    assert "preview_tool_output_activity" in calls, calls
+
+
 async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
     """A batch of grep results must not trip the explore compaction check.
 
@@ -3995,6 +4023,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
     await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
+    await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "poll_inbox_rows_reach_next_llm_call_once",

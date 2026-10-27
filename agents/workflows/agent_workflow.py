@@ -1576,7 +1576,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause", episode_cause)
+                # A user pause keeps the legacy zero-argument signal: a child on a
+                # draining older generation defines `pause(self)` and would fail its
+                # workflow task on every retry if given a cause.
+                if episode_cause == "user":
+                    await handle.signal("pause")
+                else:
+                    await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 

@@ -9,6 +9,10 @@ from tools.base import EventType, MessageStatus, ToolEvent
 from helpers.tool_output import ReadToolOutputTool, preview_tool_text, read_tool_output
 
 
+# Exception type names Temporal records for expected reader rejections.
+EXPECTED_READ_FAILURES = ("ValueError", "ValidationError", "FileNotFoundError")
+
+
 @activity.defn
 async def preview_tool_output_activity(user_id: str, agent_id: str, session_id: str, text: str, limit: int) -> str:
     """Keep attachment-store I/O out of deterministic workflow execution."""
@@ -34,7 +38,9 @@ async def read_tool_output_for_workflow(instance, tool_call: dict, tool_call_id:
         read_tool_output_activity,
         args=[instance.user_id, instance.agent_id, "", tool_call],
         start_to_close_timeout=timedelta(seconds=30),
-        retry_policy=RetryPolicy(maximum_attempts=2),
+        # Invalid, expired, out-of-scope or missing handles fail identically on
+        # retry; storage/network failures keep the retry.
+        retry_policy=RetryPolicy(maximum_attempts=2, non_retryable_error_types=list(EXPECTED_READ_FAILURES)),
     )
     text = format_read_tool_output(result)
     await instance._handle_tool_event(

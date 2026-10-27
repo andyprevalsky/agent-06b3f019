@@ -774,7 +774,7 @@ def discover_inputs(args, root, runner, token, run, fly=None):
 
     def preflight(facts):
         warm = warm_snapshot_preflight(fly, token, runner, decision['proof_raw'], None,
-                                       facts['protected_machines'], time.time() + 5400,
+                                       facts['protected_machines'], time.time() + run_deadline_seconds(args, runner),
                                        refresh=decision['refresh_command'])
         warm.pop('provider_calls')
         return warm
@@ -825,9 +825,10 @@ def discover_inputs(args, root, runner, token, run, fly=None):
     return report, paths
 
 
-def admission_remaining(deadline):
+def admission_remaining(deadline, limit=5400):
+    """Seconds left before an admission deadline at most ``limit`` (the original 5400 s, or a shard's bound e2e) away."""
     remaining = deadline - time.time()
-    if not 0 < remaining <= 5400:
+    if not 0 < remaining <= limit:
         raise ValueError("original admission clock expired")
     return remaining
 
@@ -1058,7 +1059,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     facts = facts_from(read(args.facts))
     tasks = json.loads(read(args.tasks))
     stamp = time.time() if started_at is None else started_at
-    if not 0 <= time.time()-stamp < 5400:
+    # A shard (and its retry) is bounded by its own e2e, as the runner's new-attempt clock is.
+    if not 0 <= time.time()-stamp < (5400 if shard is None else runner['shard_timeouts'](shard)[1]):
         raise ValueError('original campaign clock expired during admission')
     runner['campaign_argv'](tasks, stamp, shard)  # Exact bound task-name hash and all campaign arguments.
     auth = dict(schema='cloudbench-disposable-controller-authority-v1', allowed=True, single_host=True,
@@ -1141,6 +1143,11 @@ def selected_task_count(args, manifest):
 def simultaneous_copies(args, runner):
     """Global simultaneous benches: every copy of every selected task, across all shards."""
     return selected_task_count(args, json.loads(runner['read'](args.tasks))) * args.repetitions
+
+
+def run_deadline_seconds(args, runner):
+    """The longest TERM fence this invocation can bind: the original deadline or the bound e2e."""
+    return max(runner['RUN_DEADLINE'], bound_timeouts(args, runner)[1])
 
 
 def bound_timeouts(args, runner):
@@ -1468,7 +1475,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     ledger['record']('launch', directory.name, root=root, run_dir=str(directory), triggered_at=started_at, **fields)
     scorecard['print_instruction'](directory)
     try:  # nothing is allocated until coordinate() spawns the first runner
-        with runner['bounded'](min(110, admission_remaining(startup_deadline))):
+        with runner['bounded'](min(110, admission_remaining(startup_deadline, e2e_timeout))):
             cap = capacity_snapshot(capture['Fly'], token, args.org, directory, args.extra_destroying_count)
         cap.update(qualified_reuse_count=0, new_machine_demand=demand, qualified_ids=[], new_controller_slots=controllers,
                    requested_original_primary_slots=copies, worker_headroom=args.worker_headroom)
@@ -1513,7 +1520,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         runner_path = root / 'scripts/cloudbench-original600-runner.py'
 
         def spawn(shard):
-            admission_remaining(startup_deadline)
+            admission_remaining(startup_deadline, e2e_timeout)
             env_vars = dict(os.environ, GITHUB_TOKEN=github, CLOUDBENCH_GATE_NAME_SUFFIX='s%02d' % shard['index'])
             with open(Path(shard['out']).parent / 'runner.private.log', 'xb') as log:
                 return subprocess.Popen([sys.executable, str(runner_path), '--config', shard['config'], '--config-sha256',
@@ -1528,7 +1535,7 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
             attempt_dir.mkdir(mode=0o700)
             bound = shard_objects[index]
             slots = coordinator['capacity_demand'](len(bound['tasks']) * bound['runs'], 1)
-            with runner['bounded'](min(110, admission_remaining(startup_deadline))):
+            with runner['bounded'](min(110, admission_remaining(startup_deadline, e2e_timeout))):
                 fresh = capacity_snapshot(capture['Fly'], token, args.org, attempt_dir, args.extra_destroying_count,
                                           summary=True)
             fresh.update(qualified_reuse_count=0, new_machine_demand=slots, qualified_ids=[], new_controller_slots=1,
@@ -2623,7 +2630,8 @@ def main():
         warm = warm_snapshot_preflight(runpy.run_path(str(root/'scripts/cloudbench-original-volume-capture.py'))['Fly'],
                                        token_from_agents(runner['read'](args.agents_env)), runner,
                                        runner['read'](args.warm_deps), runner['read'](args.snapshot_inventory),
-                                       facts_from(runner['read'](args.facts))['protected_machines'], time.time() + 5400)
+                                       facts_from(runner['read'](args.facts))['protected_machines'],
+                                       time.time() + run_deadline_seconds(args, runner))
     if not args.run:
         check = dict(status='CHECKED_NOT_LAUNCHED', source_ref=args.source_ref, task_ref=bound_task_ref(args, runner),
                      uid=os.geteuid(), provider_calls=warm.pop('provider_calls'),

@@ -236,6 +236,30 @@ async function main() {
       releaseAnnotation();
       await annotation;
     }
+    // B4: replay covers the late-commit window, not every older annotation on every poll.
+    const pauseClock = Date.parse(
+      String((annotatedAtCommit.metadata as unknown as TestMetadata).userPause?.recordedAt)
+    );
+    assert.deepEqual(
+      (await findMessages(id, new Date(pauseClock + 30_000))).map((row) => row.id),
+      [oldResult.id],
+      'B4: an annotation still replays to a cursor beyond the 10s transaction timeout'
+    );
+    const later = await prisma.message.create({
+      data: {
+        agentId: id,
+        workflowGeneration: id,
+        role: 'ASSISTANT',
+        text: 'later ordinary result',
+        timestamp: new Date(pauseClock + 60 * 60_000 + 1_000),
+      },
+    });
+    assert.deepEqual(
+      (await findMessages(id, new Date(pauseClock + 60 * 60_000))).map((row) => row.id),
+      [later.id],
+      'B4: a consumed annotation an hour behind the cursor is not replayed on every poll'
+    );
+    report('B4_PASS: bounded pause replay keeps newer rows and drops stale annotations');
     report(
       'browser user pause real PostgreSQL: PASS (10 concurrent annotations, SQL polling, both completion/pause lock orderings)'
     );

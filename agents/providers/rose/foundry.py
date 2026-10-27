@@ -72,6 +72,9 @@ _SHARED_RPC_TIMEOUT_S = 2.0
 _SHARED_STALE_GRACE_S = _COOLDOWN_LADDER_S[0]
 # codex-rs/codex-api/src/sse/responses_error.rs:137-143 (used at :90-125).
 _TRY_AGAIN_RE = re.compile(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)")
+# The shared authority stores each deadline as a JavaScript Date (at most
+# 8.64e15 ms after the epoch) and rejects later advice with HTTP 400.
+_MAX_DEADLINE_EPOCH_MS = 8.64e15
 
 _REGION_SLOTS = range(1, 10)
 
@@ -236,6 +239,17 @@ def _route_plan(
     ]
 
 
+def _usable_hint(seconds: float) -> Optional[float]:
+    """Advice the shared authority can store; otherwise None, so the ladder applies.
+
+    Same acceptance as retryHintSeconds in back-end/src/providers/rose/foundry.ts
+    (codex RetryAfter::from_delay likewise drops a deadline it cannot represent).
+    """
+    if math.isfinite(seconds) and seconds > 0 and (time.time() + seconds) * 1000.0 <= _MAX_DEADLINE_EPOCH_MS:
+        return seconds
+    return None
+
+
 def _retry_hint_seconds(headers: httpx.Headers, message: str = "") -> Optional[float]:
     """Provider retry advice: Retry-After headers, else an in-stream "try again in N s".
 
@@ -246,17 +260,16 @@ def _retry_hint_seconds(headers: httpx.Headers, message: str = "") -> Optional[f
         value = headers.get(name)
         if value:
             try:
-                seconds = float(value) / scale
+                seconds = _usable_hint(float(value) / scale)
             except ValueError:
                 continue
-            if seconds > 0 and seconds == seconds and seconds != float("inf"):
+            if seconds is not None:
                 return seconds
     match = _TRY_AGAIN_RE.search(message or "")
     if match is None:
         return None
     value = float(match.group(1))
-    seconds = value / 1000.0 if match.group(2).lower() == "ms" else value
-    return seconds if seconds > 0 else None
+    return _usable_hint(value / 1000.0 if match.group(2).lower() == "ms" else value)
 
 
 def _remember_local_rate_limit(key: tuple[str, str], hint: Optional[float]) -> float:
@@ -361,6 +374,9 @@ async def _refresh_shared_cooldowns(keys: list[tuple[str, str]]) -> None:
             validated = {name: _validated_shared_state(value) for name, value in cooldowns.items()}
             for key in stale:
                 if _state_generation.get(key, 0) == generations[key] and _read_can_replace_mark(key):
+                    # The failed publication's local hold is over; this
+                    # authority snapshot now replaces it.
+                    _unconfirmed_marks.discard(key)
                     _apply_shared_state(key, validated.get(_shared_key(key), (0, 0.0)))
         except Exception as exc:
             logger.warning("rose.foundry.shared_cooldown_read_failed", error_type=type(exc).__name__)

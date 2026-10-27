@@ -710,8 +710,9 @@ def run(config_path,config_sha,out,*,github_token=None):
  root=Path(v['source_root']).resolve(strict=True);ref=v['source_ref'];need(re.fullmatch('[0-9a-f]{40}',ref or''),'UNBOUND final source')
  need(subprocess.check_output(['git','--no-replace-objects','-C',str(root),'rev-parse','HEAD'],text=True).strip()==ref,'source HEAD mismatch')
  validate_source_members(root,ref,v['source_files'])
- tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0 and time.time()<epoch+MAX_RUN_DEADLINE,'original new attempt clock expired')
+ tasks=json.loads(read(v['tasks_path']));epoch=v['started_at_epoch'];need(type(epoch)in(int,float)and epoch>0,'original new attempt clock expired')
  shard=v.get('shard');argv=campaign_argv(tasks,epoch,shard);deadline_s=RUN_DEADLINE if shard is None else shard_timeouts(shard)[1];shard_env(dict(v.get('remote_env',{})),shard,'original600-supervisor.'+'0'*24+'.json') # refuse before any output
+ need(time.time()<epoch+deadline_s,'original new attempt clock expired') # this run's own TERM fence, never the widest accepted bound
  authority_template=json.loads(read(v['authority_template']));need(authority_template['allowed']is True and authority_template['source_ref']==ref,'root authority must match final source')
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])

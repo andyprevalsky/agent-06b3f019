@@ -243,18 +243,31 @@ export async function findAncestors(agentId: string) {
 // Messages
 // ---------------------------------------------------------------------------
 
-/** Typed user-pause annotations replay regardless of the `since` cursor (late commits). */
-const USER_PAUSE_ANNOTATION = {
-  role: 'TOOL' as const,
-  metadata: { path: ['userPause', 'reason'], equals: 'user' },
-};
+/**
+ * Late-commit horizon for in-place user-pause annotations. Their writer sets
+ * `recordedAt` inside a transaction that times out after 10s, so a committed
+ * annotation is never older than this relative to any cursor it was hidden from.
+ */
+const USER_PAUSE_REPLAY_WINDOW_MS = 5 * 60_000;
 
-/** Messages after `since`, ascending, plus every user-pause annotation; consumers dedupe by ID. */
+/** User-pause annotations recorded inside the late-commit window before `since`. */
+function userPauseReplay(since: Date) {
+  const recordedAfter = new Date(since.getTime() - USER_PAUSE_REPLAY_WINDOW_MS).toISOString();
+  return {
+    role: 'TOOL' as const,
+    AND: [
+      { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+      { metadata: { path: ['userPause', 'recordedAt'], gt: recordedAfter } },
+    ],
+  };
+}
+
+/** Messages after `since`, ascending, plus recent user-pause annotations; consumers dedupe by ID. */
 export async function findMessages(agentId: string, since?: Date, browserToolCallId?: string) {
   return prisma.message.findMany({
     where: {
       agentId,
-      ...(since ? { AND: [{ OR: [{ timestamp: { gt: since } }, USER_PAUSE_ANNOTATION] }] } : {}),
+      ...(since ? { AND: [{ OR: [{ timestamp: { gt: since } }, userPauseReplay(since)] }] } : {}),
       ...(browserToolCallId === undefined
         ? {}
         : {

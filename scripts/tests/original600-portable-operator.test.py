@@ -1687,6 +1687,34 @@ class Portable(unittest.TestCase):
             self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
             self.assertEqual(terminal['release']['machine_id'],mid)
 
+    def test_new_attempt_refused_after_its_own_term_fence_before_any_output(self):
+        # PR #1599 review: the new-attempt clock accepted any attempt before epoch+MAX_RUN_DEADLINE
+        # (10020 s) although its TERM fence is epoch+RUN_DEADLINE (unsharded) or epoch plus the
+        # shard's bound e2e. Such an attempt allocated a controller only to TERM it at its first PROBE.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700)
+            tasks=json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text());tasks_path=private(base/'tasks.json',tasks)
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            names=[tasks[3],tasks[10],tasks[199]]
+            shard=dict(index=0,count=20,tasks=names,tasks_sha256=hashlib.sha256(('\n'.join(names)+'\n').encode()).hexdigest(),task_indexes=[3,10,199],runs=3,
+                       group_run_id='campaign-group-fixture',group_total=600,task_timeout=3300,e2e_timeout=6120)
+            limits=dict(CLOUDBENCH_APP_MACHINE_CEILING='100',CLOUDBENCH_SHARED_CPU_GOVERNOR='10')
+            for label,bound,fence in (('unsharded',None,RUNNER['RUN_DEADLINE']),('sharded',shard,6120)):
+                self.assertLess(fence,RUNNER['MAX_RUN_DEADLINE'])
+                for late in (False,True):
+                    with self.subTest(label=label,late=late):
+                        epoch=time.time()-fence+(-60 if late else 600)
+                        value=dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(base),source_ref='a'*40,source_files={},
+                                   tasks_path=str(tasks_path),started_at_epoch=epoch,authority_template=str(template),remote_env=dict(limits),remote_files=[])
+                        if bound is not None:value['shard']=dict(bound,group_started_at=epoch)
+                        config=private(base/('config-%s-%s.json'%(label,late)),value);out=base/('run-%s-%s'%(label,late))
+                        with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *unused:None,shard_placement_env=lambda *unused:(_ for _ in ()).throw(RuntimeError('admitted'))),\
+                             patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'):
+                            with self.assertRaisesRegex(ValueError if late else RuntimeError,'new attempt clock expired' if late else 'admitted'):
+                                RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                        # A late attempt refuses before any output, authority or gate exists.
+                        self.assertEqual(out.exists(),not late)
+
     def _stopped_controller_run(self,native,recover=True):
         # descend-full69 shard-00: the gate joined with GATE_EXPORT_PENDING after a devbox
         # suspension lost the export download, then the controller stopped (restart 'no').
@@ -2624,6 +2652,43 @@ class Sharded(unittest.TestCase):
             for key in set(legacy) - {'started_at_epoch', 'authority_template', 'remote_env', 'shard'}:
                 self.assertEqual(value[key], legacy[key], key)
 
+    def test_sharded_admission_and_retry_prepare_honour_the_bound_startup_window(self):
+        # PR #1599 review: an explicit --e2e-timeout 7000 at --task-timeout 1200 binds a 5800 s
+        # startup window, but the sharded capacity/spawn/retry guards and prepare() still refused
+        # every deadline beyond the fixed 5400 s original600 bound, so admission aborted at once.
+        self.assertEqual(RUNNER['startup_deadline_epoch'](0, 1200, 7000), 5800)
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory/'state').mkdir(mode=0o700)
+            args = self.args(directory, task_count=12, repetitions=3, tasks_per_controller=4, task_timeout=1200, e2e_timeout=7000)
+            plan = CLI.shard_selection(args, RUNNER)
+            guest_env = CLI.guest_temporal_env(ROOT, args.agents_env, args.backend_env)
+            def snapshot(*unused, **kwargs):
+                raise RuntimeError('capacity read admitted')
+            with patch.object(CLI, 'capacity_snapshot', snapshot), \
+                 patch.object(CLI, 'hub_interpreter', lambda args: sys.executable), \
+                 patch.object(CLI, 'missing_prompt_secrets', lambda *a: []), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaisesRegex(RuntimeError, 'capacity read admitted'):
+                CLI.sharded_run(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, 'ghs_fixture', plan, guest_env=guest_env)
+            # A retry is bounded by the shard's own e2e, as the runner's new-attempt clock is; the
+            # unsharded original600 admission keeps its fixed 5400 s bound.
+            tasks = json.loads(args.tasks.read_text())[0::20]
+            shard = dict(index=0, count=20, tasks=tasks, task_indexes=list(range(0, 200, 20)), runs=3, group_run_id='g', group_total=600,
+                         group_started_at=1.0, tasks_sha256=CLI.digest(('\n'.join(tasks)+'\n').encode()), e2e_timeout=7000)
+            env = dict(CLOUDBENCH_APP_MACHINE_CEILING='962', CLOUDBENCH_SHARED_CPU_GOVERNOR='2428')
+            for label, age, bound, refused in (('shard', 5500, shard, False), ('shard', 7001, shard, True), ('legacy', 5401, None, True)):
+                with self.subTest(label=label, age=age):
+                    target = directory/('%s-%d' % (label, age)); target.mkdir(mode=0o700)
+                    prepare = lambda: CLI.prepare(args if bound else self.args(directory), ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER, target,
+                                                  self.capacity(directory), started_at=time.time() - age, shard=bound,
+                                                  runtime_env=env if bound else None, scheduled_total=600)
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'original campaign clock expired during admission'):
+                            prepare()
+                    else:
+                        self.assertEqual(json.loads(prepare().read_bytes())['shard'], shard)
+
     def test_arbitrary_manifest_binds_its_hash_and_timeouts_into_every_shard_config(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -3201,6 +3266,20 @@ class InputDiscovery(unittest.TestCase):
             # The bound preflight accepts the discovered pair as explicit inputs.
             CLI.warm_snapshot_preflight(DiscoveryFly(fresh, []), 'FlyV1 fixture', RUNNER, paths['warm_deps'].read_bytes(),
                                         paths['snapshot_inventory'].read_bytes(), facts['protected_machines'], now + 5400)
+
+    def test_discovery_proves_snapshot_retention_through_the_bound_e2e_deadline(self):
+        # PR #1599 review: a bound e2e (default 10020 s at --task-timeout 7200) moves the TERM
+        # fence past 5400 s; a snapshot expiring inside that window must be refreshed, not reused.
+        now = time.time()
+        fixture = warm_fixture(now, created_age=5*86400 - 8000)  # expires 8000 s from now
+        for task_timeout, action in ((1200, 'reuse'), (7200, 'refresh')):
+            with self.subTest(task_timeout=task_timeout), self.common(fixture['warm_deps'], RUN_REF + ' ' + FIXTURE_SNAPSHOT + '\n') as fx:
+                fx.args.task_timeout = task_timeout
+                report, paths = CLI.discover_inputs(fx.args, ROOT, RUNNER, 'FlyV1 fixture', False,
+                                                    fly=DiscoveryFly(fixture, bench_inventory(fixture)))
+                self.assertEqual((report['action'], paths), (action, None))
+                if action == 'refresh':
+                    self.assertTrue(any('before the run deadline' in r for r in report['reasons']), report['reasons'])
 
     def test_discovery_run_refuses_when_the_producer_does_not_prove_this_ref(self):
         now = time.time()

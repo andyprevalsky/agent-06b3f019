@@ -742,11 +742,11 @@ async def summarize_tool_result(
         On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
         with a marker, and summarized=False.
     """
-    from helpers.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text, retained_marker
 
     retained = await preview_tool_text(tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "",
                                        agent_id=agent_id or "", session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS)
-    marker = retained[retained.rfind("\n[Retained tool output:"):] if "\n[Retained tool output:" in retained else ""
+    marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing {tool_name} result ({len(tool_result_text)} chars)")
 
@@ -861,11 +861,11 @@ async def summarize_and_filter_links(
     """
     import json
 
-    from helpers.tool_output import preview_tool_text
+    from helpers.tool_output import preview_tool_text, retained_marker
 
     retained = await preview_tool_text(markdown, user_id=claude_token_user_id or gpt_token_user_id or "",
                                        agent_id=agent_id or "", session_id=session_id, limit=max_markdown_length)
-    marker = retained[retained.rfind("\n[Retained tool output:"):] if "\n[Retained tool output:" in retained else ""
+    marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing web_fetch result ({len(markdown)} chars, {len(links)} links)")
 

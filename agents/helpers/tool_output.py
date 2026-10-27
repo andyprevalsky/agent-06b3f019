@@ -116,6 +116,17 @@ _RETAINED_MARKER = re.compile(
 )
 
 
+def contains_retained_marker(text: str) -> bool:
+    """Whether projecting this text would verify a marker against storage."""
+    return bool(_RETAINED_MARKER.search(text))
+
+
+def retained_marker(text: str) -> str:
+    """The complete native marker that ends ``text``, or ``""``."""
+    matches = list(_RETAINED_MARKER.finditer(text))
+    return matches[-1][0] if matches and matches[-1].end() == len(text) else ""
+
+
 async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
     from helpers.attachments import download_from_storage
 
@@ -170,6 +181,11 @@ async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_i
         return text
     if limit < 512:
         raise ValueError("Inline output limit must allow the retrieval marker")
+    if not user_id or not agent_id:
+        # No scoped readback exists without the originating identity; keep the
+        # bound and state the cut instead of failing the caller's tool result.
+        notice = f"\n[Tool output truncated: total_chars={len(text)}; no retained readback without agent identity.]"
+        return text[: limit - len(notice)] + notice
     output_id = await _persist(text, _owner(user_id, agent_id, session_id))
     return _preview(text, output_id, limit)
 

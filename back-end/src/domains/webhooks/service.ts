@@ -6,6 +6,7 @@ import { getTemporalClient } from '../../providers/temporal';
 import { resolvePendingGateByKey } from '../../providers/gateResolution';
 import { ensureRoseApiKeyForUser } from '../../providers/supabaseApiKeys';
 import * as repo from './repo';
+import { subscriptionPauseArgs } from './pauseSignalService';
 import { STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_LIVE } from './config';
 
 const log = createLogger('Webhooks');
@@ -254,7 +255,7 @@ async function pauseUserAgents(userId: string): Promise<void> {
       try {
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-        await handle.signal('pause', 'subscription');
+        await handle.signal('pause', ...(await subscriptionPauseArgs(client, handle, agent.id)));
         await repo.updateAgentStatus(agent.id, 'PAUSED');
         log.info('Paused agent (subscription lapsed)', {
           workflow_id: agent.temporalWorkflowId,

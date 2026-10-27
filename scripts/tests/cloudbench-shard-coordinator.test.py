@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Owning regression for sharded benchmark controllers: planning, global barrier, merge."""
 from pathlib import Path
-import ast, copy, json, os, runpy, signal, subprocess, sys, tempfile, unittest
+import ast, copy, json, math, os, runpy, signal, subprocess, sys, tempfile, time, unittest
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,7 +76,7 @@ class FullCohort(unittest.TestCase):
         source=Path(os.environ.get('SAME_CLI_CAMPAIGN_SOURCE',str(ROOT/'scripts/run-bench-campaign.py'))).read_text()
         tree=ast.parse(source)
         functions=[copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name))
-                   for name in ('abort_startup_cohort','release_ready_cohort')]
+                   for name in ('abort_startup_cohort','exclude_startup_holdouts','release_ready_cohort')]
         for fn in functions:
             fn.body=[ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in fn.body]
         for strict in (True,False):
@@ -86,7 +86,7 @@ class FullCohort(unittest.TestCase):
                 try:
                     (root/'ready/healthy.json').write_text(json.dumps(dict(cohort_id='c001',job_id='healthy',controller_pid=child.pid,ready_at='now')))
                     cohort=dict(status='waiting',cohort_id='c001',_jobs=[dict(job_id='failed',startup_failed_before_release=True),dict(job_id='healthy',_process=child)],_directory=root,ready_count=0,failed_count=0,expected_count=2)
-                    ns=dict(subprocess=subprocess,json=json,barrier_failure=False,first_failure=0,startup_expired=lambda:False,observe_external_abort=lambda:False,publish_external_barrier=lambda *a:None,external_barrier=object() if strict else None,external_barrier_release_id=lambda _:'receipt',utc_now=lambda:'now',write_json_atomic=lambda p,v:Path(p).write_text(json.dumps(v,default=str)),summary_path=root/'summary',state={'external_barrier':{}})
+                    ns=dict(subprocess=subprocess,json=json,math=math,time=time,holdout_margin_seconds=300.0,barrier_failure=False,first_failure=0,startup_expired=lambda:False,observe_external_abort=lambda:False,publish_external_barrier=lambda *a:None,external_barrier=object() if strict else None,external_barrier_release_id=lambda _:'receipt',utc_now=lambda:'now',write_json_atomic=lambda p,v:Path(p).write_text(json.dumps(v,default=str)),summary_path=root/'summary',state={'external_barrier':{}})
                     exec(compile(ast.fix_missing_locations(ast.Module(body=functions,type_ignores=[])),'production-partial-cohort','exec'),ns)
                     ns['release_ready_cohort'](cohort)
                     self.assertEqual((root/'release.json').exists(),not strict)
@@ -171,7 +171,7 @@ class ExplicitBudget(unittest.TestCase):
         source = Path(os.environ.get('SAME_CLI_CAMPAIGN_SOURCE', str(ROOT/'scripts/run-bench-campaign.py'))).read_text()
         tree = ast.parse(source)
         functions = [copy.deepcopy(next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name))
-                     for name in ('abort_startup_cohort','release_ready_cohort')]
+                     for name in ('abort_startup_cohort','exclude_startup_holdouts','release_ready_cohort')]
         for fn in functions:
             fn.body = [ast.Global(names=n.names) if isinstance(n,ast.Nonlocal) else n for n in fn.body]
         for phase in ('early','expired','expires_during_external_release'):
@@ -188,7 +188,7 @@ class ExplicitBudget(unittest.TestCase):
                         if phase=='expires_during_external_release': clock[0]=deadline+1
                         return 'receipt'
                     def write(path,value): Path(path).write_text(json.dumps(value))
-                    ns=dict(subprocess=subprocess,json=json,barrier_failure=False,first_failure=0,
+                    ns=dict(subprocess=subprocess,json=json,math=math,time=time,holdout_margin_seconds=300.0,barrier_failure=False,first_failure=0,
                             startup_expired=lambda:clock[0]>=deadline,observe_external_abort=lambda:False,
                             publish_external_barrier=lambda *a:None,external_barrier=object(),
                             external_barrier_release_id=external_release,utc_now=lambda:'now',

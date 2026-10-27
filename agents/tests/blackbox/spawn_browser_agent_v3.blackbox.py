@@ -14216,6 +14216,48 @@ async def test_browser_retained_handle_survives_native_redaction(objects):
 
 
 @_with_retained_output_fixture
+async def test_browser_native_read_tool_output_call_reaches_dispatcher(objects):
+    """A provider's read_tool_output call keeps output_id/offset/limit/query through normalization."""
+    import re
+    from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from providers.rose.browser_use import normalize_browser_use_response, normalize_browser_use_tool_calls
+
+    source = "x" * 30_000 + "NEEDLE_TAIL"
+    dom, history, _, _ = _private_secret_action_fixture(AsyncMock(return_value={"result": {"value": source}}))
+    result = await execute_action(dom, history, {"action": "evaluate", "params": {"code": "1"}}, user_id="user-a")
+    preview = _browser_tool_result_for_history("evaluate", result)["value"]
+    output_id = re.search(r'output_id="([a-f0-9]{32})"', preview).group(1)
+    cases = (
+        (
+            normalize_browser_use_tool_calls(
+                [{"id": "a", "function": {"name": "read_tool_output", "arguments": json.dumps(
+                    {"output_id": output_id, "offset": 29_990, "limit": 50}
+                )}}]
+            ),
+            "x" * 10 + "NEEDLE_TAIL",
+        ),
+        (
+            normalize_browser_use_tool_calls(
+                [{"id": "b", "name": "read_tool_output", "input": {"output_id": output_id, "query": "NEEDLE"}}]
+            ),
+            "NEEDLE_TAIL",
+        ),
+        (
+            normalize_browser_use_response(
+                {"action": [{"read_tool_output": {"output_id": output_id, "offset": 30_000, "limit": 6}}]}
+            ),
+            "NEEDLE",
+        ),
+    )
+    for action, expected in cases:
+        assert action["action"] == "read_tool_output" and action["index"] is None, action
+        page = await execute_action(dom, history, action, user_id="user-a")
+        assert page["success"] is True, page
+        assert page["output_id"] == output_id and page["content"] == expected, page
+
+
+@_with_retained_output_fixture
 async def test_browser_fallback_and_attachment_contract(objects):
     from domains.spawn_browser_agent_v3 import service_actions as actions
     from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_tool_result_for_history
@@ -34096,6 +34138,7 @@ async def run_all_tests():
         test_execute_action_select_dropdown_with_element,
     )
     await r.record_async("browser_retained_handle_survives_native_redaction", test_browser_retained_handle_survives_native_redaction)
+    await r.record_async("browser_native_read_tool_output_call_reaches_dispatcher", test_browser_native_read_tool_output_call_reaches_dispatcher)
     await r.record_async("browser_fallback_and_attachment_contract", test_browser_fallback_and_attachment_contract)
     await r.record_async("retained_browser_output_real_dispatch_and_history", test_retained_browser_output_real_dispatch_and_history)
     await r.record_async("retained_browser_output_redaction_expiry_failure", test_retained_browser_output_redaction_expiry_failure)

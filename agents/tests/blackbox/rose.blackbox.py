@@ -10602,6 +10602,111 @@ async def test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store():
         foundry._reset_foundry_cooldown_cache()
 
 
+async def test_foundry_unrepresentable_retry_hint_uses_ladder_and_fails_over():
+    """Advice the shared authority cannot store falls back to the ladder.
+
+    The authority keeps each deadline as a JavaScript Date and rejects advice
+    past its range with HTTP 400 (back-end foundryDeploymentCooldown.ts); the
+    backend client ignores such advice (foundry.ts retryHintSeconds), like
+    codex's RetryAfter::from_delay checked_add. A worker must not publish it.
+    """
+    import time
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    from providers.rose import foundry
+    from providers.rose.pools import foundry_model, get_pool
+
+    max_date_ms = 8.64e15
+    hint = foundry._retry_hint_seconds
+    assert hint(httpx.Headers({"retry-after": "1e18"}), "") is None
+    assert hint(httpx.Headers({"retry-after-ms": "1e30", "retry-after": "12"}), "") == 12.0
+    assert hint(httpx.Headers({"retry-after": "1e18"}), "try again in 9s") == 9.0
+    assert hint(httpx.Headers({}), "try again in " + "9" * 400 + " seconds") is None
+    assert hint(httpx.Headers({}), "try again in 999999999999999 seconds") is None
+    assert hint(httpx.Headers({"retry-after": "86400"}), "") == 86400.0, "storable advice stays uncapped"
+
+    model = foundry_model(get_pool("rose-1-ultra"))
+    deployments = [f"{model}-a", f"{model}-b"]
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://foundry.example.test",
+        "AZURE_FOUNDRY_API_KEY": "offline",
+        "AZURE_FOUNDRY_DEPLOYMENTS": ",".join(deployments),
+        "BACKEND_API_URL": "https://backend.example.test",
+        "BACKEND_API_KEY": "internal",
+    }
+    os_stub = types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))
+    with patch.object(foundry, "os", os_stub):
+        first = foundry._route_plan(foundry.foundry_regions(), (model,), "foundry-unrepresentable-route")[0][1]
+    key = ("https://foundry.example.test", first)
+    completed = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        "event: response.completed\n"
+        'data: {"type":"response.completed","response":'
+        '{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    )
+    hits: list[str] = []
+    marks: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "foundry.example.test":
+            deployment = json.loads(request.content)["model"]
+            hits.append(deployment)
+            if deployment == first:
+                return httpx.Response(429, headers={"retry-after": "1e18"}, content=b"{}")
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=completed.encode())
+        if request.url.path.endswith("/foundry-deployment/cooldown"):
+            return httpx.Response(200, json={"cooldowns": {}})
+        if request.url.path.endswith("/token/rate-limited"):
+            body = json.loads(request.content)
+            marks.append(body)
+            seconds = body.get("retryAfterSeconds", 30)
+            # The authority's own representable-deadline check (HTTP 400).
+            if time.time() * 1000 + seconds * 1000 > max_date_ms:
+                return httpx.Response(400, json={"error": "retryAfterSeconds must produce a representable deadline"})
+            until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+            return httpx.Response(200, json={"rateLimitedUntil": until, "strikes": 1, "remainingSeconds": seconds})
+        raise AssertionError(f"unexpected call {request.url}")
+
+    real = httpx.AsyncClient
+    module_httpx = types.SimpleNamespace(
+        AsyncClient=lambda **kw: real(**kw, transport=httpx.MockTransport(handler), trust_env=False),
+        Timeout=httpx.Timeout,
+        Headers=httpx.Headers,
+        TransportError=httpx.TransportError,
+    )
+    foundry._reset_foundry_cooldown_cache()
+    try:
+        with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", os_stub):
+            chunks = await _drain(
+                foundry.foundry_complete(
+                    pool_spec=get_pool("rose-1-ultra"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    response_format=None,
+                    tools=None,
+                    context_tools=None,
+                    tool_choice=None,
+                    temperature=None,
+                    effort=None,
+                    provider_fast_mode=True,
+                    request_id="foundry-unrepresentable",
+                    route_key="foundry-unrepresentable-route",
+                    agent_id=None,
+                    call_site="test",
+                    cache_namespace="foundry-unrepresentable",
+                    ttft_timeout_s=30,
+                    idle_timeout_s=30,
+                )
+            )
+        assert hits[0] == first and len(hits) == 2, hits
+        assert any(chunk.kind == "content" for chunk in chunks), "the next deployment must serve"
+        assert marks == [{"type": "foundry", "source": "pool", "region": "foundry.example.test", "deployment": first}]
+        assert key not in foundry._unconfirmed_marks, "the authority must acknowledge the mark"
+        assert 25 < foundry._cooldown_until[key] - time.monotonic() <= 30, "the fallback ladder sets the hold"
+    finally:
+        foundry._reset_foundry_cooldown_cache()
+
 
 async def _check_foundry_shared_state_case(case):
     import time
@@ -10826,6 +10931,41 @@ async def _check_foundry_shared_state_case(case):
                 with patch.object(f, "httpx", client(healthy)), patch.object(f, "datetime", FastClock):
                     await f._refresh_shared_cooldowns([key])
                 assert f._cooldown_until[key] - time.monotonic() > 29, "worker clock shortened authority duration"
+            if case == "failed_mark_then_remote_mark":
+                # This process's publication failed and its bounded local hold
+                # expired; another worker then marked the same deployment. The
+                # read that applies that authority state is a usable snapshot.
+                f._reset_foundry_cooldown_cache()
+                reads = []
+                authority = {"up": True}
+
+                async def remote_mark(req):
+                    if req.method == "POST":
+                        return httpx.Response(503)
+                    reads.append(1)
+                    if not authority["up"]:
+                        return httpx.Response(503)
+                    return httpx.Response(200, json={"cooldowns": {"r.example:deployment": state(300)}})
+
+                with patch.object(f, "httpx", client(remote_mark)):
+                    try:
+                        await f._report_rate_limit(region, key[1], None)
+                    except RoseServerError:
+                        pass
+                    else:
+                        raise AssertionError("a failed publication must surface")
+                    f._cooldown_until[key] = time.monotonic() - 1
+                    await f._refresh_shared_cooldowns([key])
+                    assert f._cooldown_until[key] - time.monotonic() > 290, "another worker's mark was not applied"
+                    assert key in f._shared_checked_at, "an applied authority snapshot was not cached"
+                    count = len(reads)
+                    await f._refresh_shared_cooldowns([key])
+                    assert len(reads) == count, "a fresh authority snapshot was read again"
+                    authority["up"] = False
+                    f._shared_checked_at[key] -= f._SHARED_RECHECK_S + 1
+                    await f._refresh_shared_cooldowns([key])  # within stale grace: no fail-closed
+                    assert len(reads) == count + 1
+                    assert f._cooldown_until[key] - time.monotonic() > 280, "a failed read dropped the cooldown"
         finally:
             f._reset_foundry_cooldown_cache()
 
@@ -10833,7 +10973,7 @@ async def _check_foundry_shared_state_case(case):
 async def test_foundry_shared_state_interleavings_and_validation():
     for case in (
         "overlap", "pending_mark", "pending_mark_failure", "stall_after_healthy_read",
-        "malformed", "reset", "new_mark", "mark_order", "clock",
+        "malformed", "reset", "new_mark", "mark_order", "clock", "failed_mark_then_remote_mark",
     ):
         await _check_foundry_shared_state_case(case)
 
@@ -11363,6 +11503,10 @@ async def run_all_tests():
     await r.record_async(
         "foundry_rate_limit_cooldown_hint_ladder_shared",
         test_foundry_rate_limit_cooldown_hint_ladder_and_shared_store,
+    )
+    await r.record_async(
+        "foundry_unrepresentable_retry_hint_uses_ladder",
+        test_foundry_unrepresentable_retry_hint_uses_ladder_and_fails_over,
     )
     await r.record_async("foundry_shared_state_interleavings", test_foundry_shared_state_interleavings_and_validation)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)

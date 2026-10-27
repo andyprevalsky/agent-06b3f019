@@ -70,7 +70,7 @@ from utils.llm_timeouts import (
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
 from utils.rose_desktop import is_rose_desktop_user
-from helpers.tool_output import preview_tool_text
+from helpers.tool_output import contains_retained_marker, preview_tool_text
 from utils.tool_schemas import create_agent_action_model, get_tool_models
 from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
@@ -395,7 +395,11 @@ async def run_agent(
     )
 
     async def preview_result(text: str) -> str:
-        if not is_inside_temporal_activity and len(text) > TOOL_RESULT_HARD_CAP_CHARS:
+        # Retention and marker verification both touch storage; neither may
+        # run in deterministic workflow code.
+        if not is_inside_temporal_activity and (
+            len(text) > TOOL_RESULT_HARD_CAP_CHARS or contains_retained_marker(text)
+        ):
             from tools.read_tool_output import preview_tool_output_activity
 
             return await execute_activity(

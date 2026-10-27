@@ -48,7 +48,18 @@ async function main(): Promise<void> {
           {
             OR: [
               { timestamp: { gt: floor } },
-              { role: 'TOOL', metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+              {
+                role: 'TOOL',
+                AND: [
+                  { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+                  {
+                    metadata: {
+                      path: ['userPause', 'recordedAt'],
+                      gt: '2026-10-14T23:55:00.000Z',
+                    },
+                  },
+                ],
+              },
             ],
           },
         ],
@@ -78,7 +89,18 @@ async function main(): Promise<void> {
           {
             OR: [
               { timestamp: { gt: floor } },
-              { role: 'TOOL', metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+              {
+                role: 'TOOL',
+                AND: [
+                  { metadata: { path: ['userPause', 'reason'], equals: 'user' } },
+                  {
+                    metadata: {
+                      path: ['userPause', 'recordedAt'],
+                      gt: '2026-10-14T23:55:00.000Z',
+                    },
+                  },
+                ],
+              },
             ],
           },
         ],

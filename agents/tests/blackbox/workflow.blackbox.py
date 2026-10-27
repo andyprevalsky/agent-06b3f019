@@ -3754,6 +3754,25 @@ async def test_workflow_signal_pause_cascades_to_children():
         # Both children should have received "pause" signal
         cascaded = [s for s in fake.signal_calls if s[1] == "pause"]
         assert {s[0] for s in cascaded} == {"wfc1", "wfc2"}
+        # A user pause cascades with no argument, exactly as before the cause
+        # parameter existed: a child still on a draining older generation defines
+        # `pause(self)` and would fail its workflow task on any argument.
+        assert all(s[2] is None for s in cascaded), cascaded
+    finally:
+        _restore_workflow(original)
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.pending_children = {"c1"}
+    wf.child_workflow_ids = {"c1": "wfc1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause("subscription")
+        # Only the cause-aware backend produces a non-user cause; children keep it.
+        assert [s for s in fake.signal_calls if s[1] == "pause"] == [("wfc1", "pause", "subscription")]
     finally:
         _restore_workflow(original)
 
