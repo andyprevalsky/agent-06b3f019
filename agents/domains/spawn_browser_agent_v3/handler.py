@@ -12406,28 +12406,6 @@ Based on this feedback, I need to continue working on the task and address the i
         if not return_cancelled_result:
             raise
 
-        if task_id:
-            with _suppress_browser_cleanup_errors():
-                await _save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Browser Session Paused" if paused_session_id else "Browser Session Cancelled",
-                    task_id=task_id,
-                    message="Agent paused by user",
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url or "",
-                    action_type="task_complete",
-                    tool_call_id=tool_call_id,
-                    is_completion_message=True,
-                    output_schema=response_schema,
-                    extra_metadata=(
-                        {"browser_cleanup": cleanup_failure}
-                        if cleanup_failure
-                        else {"session_id": paused_session_id}
-                        if paused_session_id
-                        else None
-                    ),
-                )
-
         return {
             "status": "cancelled",
             "task_id": task_id,
