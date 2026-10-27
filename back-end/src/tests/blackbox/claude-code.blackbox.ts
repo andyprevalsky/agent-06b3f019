@@ -1758,7 +1758,10 @@ async function runAll() {
     { name: 'POST /create -- github without user_id -> 400', fn: testCreate_githubWithoutUserId },
     { name: 'POST /create -- github access denied -> 403', fn: testCreate_githubAccessDenied },
     { name: 'POST /create -- invalid github URL -> 403', fn: testCreate_invalidGithubUrl },
-    { name: 'POST /create -- non-uuid code_session_id -> 400', fn: testCreate_nonUuidCodeSessionIdIs400 },
+    {
+      name: 'POST /create -- non-uuid code_session_id -> 400',
+      fn: testCreate_nonUuidCodeSessionIdIs400,
+    },
     {
       name: 'POST /create -- valid body hits E2B boundary -> 500 or 200',
       fn: testCreate_validBodyE2bBoundary,
