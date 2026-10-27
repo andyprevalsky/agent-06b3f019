@@ -57,6 +57,7 @@ interface AgentRowOverrides {
   deletedAt?: Date | null;
   createdAt?: Date;
   status?: 'ACTIVE' | 'PAUSED' | 'COMPLETED';
+  isBenchmark?: boolean;
   statusMessage?: string;
   parentAgentId?: string;
 }
@@ -444,6 +445,29 @@ test('archived-agent status backfill settles only archived non-terminal rows, id
     deletedAt: new Date(),
   });
   const liveId = await createAgentRow(session.user.id, `Archive backfill live ${RUN_ID}`);
+  const benchmarkId = await createAgentRow(session.user.id, `Archive backfill bench ${RUN_ID}`, {
+    deletedAt: new Date(),
+    isBenchmark: true,
+  });
+  const heldId = await createAgentRow(session.user.id, `Archive backfill held ${RUN_ID}`, {
+    deletedAt: new Date(),
+  });
+  await prisma.purchaseSpend.create({
+    data: {
+      userId: session.user.id,
+      agentId: heldId,
+      status: 'HELD',
+      fingerprint: `archive-backfill-${randomUUID()}`,
+      merchant: 'backfill fixture',
+      lineItemsJson: [],
+      totalCents: 100,
+    },
+  });
+  const skeletonId = await createAgentRow(
+    'benchmark-hub-ancestors',
+    `Archive backfill skeleton ${RUN_ID}`,
+    { deletedAt: new Date() }
+  );
 
   const dryRun = await backfillArchivedAgentStatus({ execute: false });
   assert(dryRun.pendingBefore >= 1 && dryRun.updated === 0, 'dry run must count but not write');
@@ -453,7 +477,7 @@ test('archived-agent status backfill settles only archived non-terminal rows, id
   assert(second.pendingBefore === 0 && second.updated === 0, 'a second run must find nothing');
 
   const rows = await prisma.agent.findMany({
-    where: { id: { in: [staleId, liveId] } },
+    where: { id: { in: [staleId, liveId, benchmarkId, heldId, skeletonId] } },
     select: { id: true, status: true, statusMessage: true },
   });
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -463,6 +487,14 @@ test('archived-agent status backfill settles only archived non-terminal rows, id
     'the archived ACTIVE row must become FAILED/"Archived by user"'
   );
   assert(byId.get(liveId)?.status === 'ACTIVE', 'a non-archived ACTIVE row must be untouched');
+  for (const [agentId, why] of [
+    [benchmarkId, 'an isBenchmark agent (benchmark cleanup has its own owner)'],
+    [heldId, 'an agent holding a HELD purchase spend (no money may move)'],
+    [skeletonId, 'a benchmark-hub ancestor skeleton (breadcrumb mirror)'],
+  ] as const) {
+    assert(byId.get(agentId)?.status === 'ACTIVE', `the backfill must skip ${why}`);
+  }
+  await prisma.purchaseSpend.deleteMany({ where: { agentId: heldId } });
 });
 
 // ========================= POST /:id/unarchive =============================
