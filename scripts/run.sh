@@ -238,6 +238,16 @@ docker_available_for_cold_seed() {
 # "python3" and do not include the worktree path. When the cwd is unreadable
 # (lsof missing or denied), the command path still decides; both checks stop at
 # nested worktrees.
+process_cwd_in_this_worktree() {
+    local pid=$1
+    local cwd physical_worktree
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
+    run_path_in_worktree "$cwd" "$PWD" || run_path_in_worktree "$cwd" "$physical_worktree"
+}
+
 process_belongs_to_this_worktree() {
     local pid=$1
     local cmd
@@ -457,16 +467,6 @@ is_current_process_family() {
         pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
     done
     return 1
-}
-
-process_cwd_in_this_worktree() {
-    local pid=$1
-    local cwd physical_worktree
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
-    # path used to start the process. Compare both spellings before reaping it.
-    physical_worktree=$(pwd -P)
-    run_path_in_worktree "$cwd" "$PWD" || run_path_in_worktree "$cwd" "$physical_worktree"
 }
 
 kill_stale_tree() {
