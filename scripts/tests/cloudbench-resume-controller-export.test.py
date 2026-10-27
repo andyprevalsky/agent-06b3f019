@@ -1160,14 +1160,20 @@ class ExportResume(unittest.TestCase):
             sizes.append(len(data))
             return real_write(fd, data)
 
-        before = set(Path(tempfile.gettempdir()).iterdir())
-        with mock.patch.object(M["os"], "write", side_effect=recording_write):
+        # A private temp root: a shared TMPDIR changes under concurrent processes.
+        scratch = self.root / "tmp"
+        scratch.mkdir(mode=0o700)
+        with (
+            mock.patch.object(tempfile, "tempdir", str(scratch)),
+            mock.patch.dict(os.environ, {"TMPDIR": str(scratch)}),
+            mock.patch.object(M["os"], "write", side_effect=recording_write),
+        ):
             rc, stdout, stderr = M["stream_get"](api, 60, self.mid, "/tmp/gate/x/originals.tar.gz", target)
         self.assertEqual((rc, stdout), (0, "streamed %d bytes" % len(payload)))
         self.assertEqual(M["file_sha"](target), M["sha"](payload))
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         self.assertEqual(sizes, [16 << 20, 16 << 20, 8 << 20])
-        self.assertEqual(set(Path(tempfile.gettempdir()).iterdir()), before)  # no local staging
+        self.assertEqual(list(scratch.iterdir()), [])  # no local staging
         with self.assertRaises(FileExistsError):
             M["stream_get"](api, 60, self.mid, "/tmp/gate/x/originals.tar.gz", target)
         slow = self.root / "slow-flyctl"
@@ -1187,7 +1193,12 @@ class ExportResume(unittest.TestCase):
         self.export = self.out / "export"
         self.export.mkdir(parents=True, mode=0o700)
         self.mid = "a" * 14
-        self.collector = ROOT / "scripts/cloudbench-controller-export.py"
+        # A normal checkout (umask 022) holds the collector at 0644; bind the
+        # fixture to that mode instead of whatever this checkout's umask produced.
+        self.collector = self.root / "source/scripts/cloudbench-controller-export.py"
+        self.collector.parent.mkdir(parents=True, mode=0o700)
+        self.collector.write_bytes((ROOT / "scripts/cloudbench-controller-export.py").read_bytes())
+        self.collector.chmod(0o644)
         self.caller = {"pid": 99, "birth": "fixture-gone", "host": "fixture"}
         self.record = {
             "machine_id": self.mid,
@@ -1369,6 +1380,42 @@ class ExportResume(unittest.TestCase):
         with self.assertRaises(ValueError):
             M["verify_stage"](self.value, stage)
 
+    def test_checkout_mode_collector_is_accepted_but_world_writable_or_linked_is_refused(self):
+        stage = self.root / "stage"
+        stage.mkdir(mode=0o700)
+        for name, raw in self.payloads.items():
+            (stage / name).write_bytes(raw)
+            (stage / name).chmod(0o600)
+        self.assertEqual(self.collector.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(M["read_source"](self.collector), self.collector.read_bytes())
+        for mode in (0o666, 0o664, 0o620):
+            self.collector.chmod(mode)
+            with self.assertRaisesRegex(ValueError, "regular current-owner collector source required"):
+                M["verify_stage"](self.value, stage)
+        self.collector.chmod(0o644)
+        alias = self.root / "alias.py"
+        alias.symlink_to(self.collector)
+        with self.assertRaisesRegex(ValueError, "physical collector source required"):
+            M["read_source"](alias)
+
+    def test_verify_executes_the_hashed_collector_bytes_not_the_path(self):
+        stage = self.root / "stage"
+        stage.mkdir(mode=0o700)
+        for name, raw in self.payloads.items():
+            (stage / name).write_bytes(raw)
+            (stage / name).chmod(0o600)
+        real_run_path = M["runpy"].run_path
+        collector = str(self.value["collector_path"])
+
+        def run_path(path, *args, **kwargs):
+            if str(path) == collector:
+                raise AssertionError("collector path re-read for execution")
+            return real_run_path(path, *args, **kwargs)
+
+        with mock.patch.object(M["runpy"], "run_path", side_effect=run_path):
+            hashes = M["verify_stage"](self.value, stage)
+        self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
+
     def test_all_remote_children_join_before_canonical_marker_and_no_replay(self):
         api = self.api()
 
@@ -1527,11 +1574,18 @@ class ExportResume(unittest.TestCase):
         remote = runpy.run_path(str(fixture))
         repo = self.root / "repo"
         repo.mkdir()
+        # Some interpreter builds (the uv-managed agents/venv CPython) omit the
+        # pidfd wrappers. The guarded signal never runs here, so patch it into
+        # existence; pidfd_open falls back to an owned /proc directory fd that
+        # the validator must still close exactly once.
+        pidfd_open = getattr(os, "pidfd_open", None) or (
+            lambda pid: os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+        )
         with mock.patch.object(
             signal,
             "pidfd_send_signal",
-            create=True,
             side_effect=AssertionError("no signal in read-only validator"),
+            create=True,
         ):
             self.assertEqual(
                 remote["readonly_hubs"](scope, self.collector.read_bytes(), repo, self.root),
@@ -1558,7 +1612,8 @@ class ExportResume(unittest.TestCase):
         owner.chmod(0o400)
         real_close = os.close
         with (
-            mock.patch.object(signal, "pidfd_send_signal", create=True, side_effect=AssertionError("no signal")),
+            mock.patch.object(signal, "pidfd_send_signal", side_effect=AssertionError("no signal"), create=True),
+            mock.patch.object(os, "pidfd_open", side_effect=pidfd_open, create=True),
             mock.patch.object(os, "close", wraps=real_close) as closed,
         ):
             with self.assertRaisesRegex(ValueError, "command changed"):
