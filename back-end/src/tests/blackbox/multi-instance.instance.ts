@@ -49,6 +49,81 @@ async function main(): Promise<unknown> {
         return { enteredAt, leftAt: Date.now() };
       });
     }
+    case 'sms-run': {
+      // A supervisor run on this instance: captures its inbound seq, then asks
+      // the commit gate whether it may still reply after a peer's /clear.
+      const store = await import('../../providers/smsSupervisor/sessionStore');
+      const gate = await import('../../providers/smsSupervisor/supervisorHandler');
+      const mySeq = await store.recordInboundSms(args[0], 'multi-instance inbound');
+      await barrier();
+      await sleep(Number(args[1]));
+      return { mySeq, ownsReply: await gate.inboundSeqStillCurrent(args[0], mySeq) };
+    }
+    case 'sms-clear': {
+      const repo = await import('../../domains/sms-webhook/repo');
+      await barrier();
+      await repo.clearSmsSession(args[0]);
+      return { cleared: true };
+    }
+    case 'auth-mint': {
+      // Asks for auth options on a realm with no saved login, which mints the
+      // agent identity when the stored one is outdated.
+      const { getAuthOptions } = await import('../../providers/authOptions');
+      await barrier();
+      const options = await getAuthOptions(args[0], 'https://multi-instance.example');
+      return { email: options.minted?.email ?? null };
+    }
+    case 'grant-remint': {
+      // A completion on this instance hits a revoked grant and asks for recovery.
+      const [userId, accountId, grantId] = args;
+      const { installGrantRecovery } = await import('../../domains/compute-grants/service');
+      const hook = installGrantRecovery({
+        minter: {
+          async mint() {
+            await sleep(1_500);
+            return { accessToken: `sk-ant-oat01-mi-${process.pid}` };
+          },
+        },
+      });
+      await barrier();
+      const outcome = await hook({
+        userId,
+        provider: 'claude',
+        accountId,
+        grantId,
+        status: 401,
+        body: '{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}',
+      });
+      return { status: outcome.status, accessToken: outcome.accessToken ?? null };
+    }
+    case 'steel-setup': {
+      // Instance A is still setting up a Steel session (no BrowserSession row yet).
+      const identity = await import('../../providers/steel/sessionIdentity');
+      await identity.registerInFlightSteelSession(args[0]);
+      await barrier();
+      await sleep(Number(args[1]));
+      await identity.unregisterInFlightSteelSession(args[0]);
+      return { registered: true };
+    }
+    case 'steel-reap': {
+      // Instance B's reaper sweeps the shared Steel account while A sets up.
+      const { reconcileOrphanedSteelSessions } = await import('../../providers/steel/sessionReaper');
+      await barrier();
+      await sleep(Number(args[1]));
+      const released: string[] = [];
+      await reconcileOrphanedSteelSessions({
+        identity: () => 'render:multi-instance',
+        isOwned: () => true,
+        listLiveSessions: async () => [
+          { id: args[0], createdAt: new Date(Date.now() - 11 * 60_000).toISOString() },
+        ],
+        heldSessionIds: async () => new Set(),
+        release: async (id) => {
+          released.push(id);
+        },
+      });
+      return { released };
+    }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');
       await barrier();

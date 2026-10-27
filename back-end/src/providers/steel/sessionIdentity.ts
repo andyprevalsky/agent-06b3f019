@@ -13,10 +13,12 @@
  *
  * Sessions still being set up (a recovery lane candidate, a token-minting
  * browser, a replacement that is not yet committed) have no BrowserSession row
- * yet, so they register here while this process holds them.
+ * yet, so they register here (in shared state every instance reads) while
+ * their holder sets them up.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { deleteEphemeral, liveEphemeralKeys, putEphemeral } from '../sharedState';
 
 const MARKER_LENGTH = 8;
 
@@ -55,24 +57,40 @@ export function isOwnedSteelSessionId(
   return sessionId.toLowerCase().startsWith(marker);
 }
 
-// Sessions this process is still setting up or using without a BrowserSession row.
-// Once the row commits it holds the session, so an entry only has to outlive
-// setup; entries older than this are dropped so the map cannot grow with every
-// committed session and the reaper never skips a session on a stale entry.
+// Sessions still being set up or used without a BrowserSession row. Once the
+// row commits it holds the session, so an entry only has to outlive setup;
+// entries older than this expire so the reaper never skips a session on a stale
+// entry. Every backend instance shares one Steel marker, so the set lives in
+// Postgres: a reaper on instance B must see a session instance A is setting up.
+// The local map answers this process's own checks without a query.
 const IN_FLIGHT_TTL_MS = 20 * 60 * 1000;
+const IN_FLIGHT_NAMESPACE = 'steel-in-flight';
 const inFlight = new Map<string, number>();
 
-export function registerInFlightSteelSession(sessionId: string): void {
+export async function registerInFlightSteelSession(sessionId: string): Promise<void> {
   inFlight.set(sessionId, Date.now());
+  await putEphemeral(IN_FLIGHT_NAMESPACE, sessionId, {}, IN_FLIGHT_TTL_MS);
 }
 
-export function unregisterInFlightSteelSession(sessionId: string): void {
+export async function unregisterInFlightSteelSession(sessionId: string): Promise<void> {
   inFlight.delete(sessionId);
+  await deleteEphemeral(IN_FLIGHT_NAMESPACE, sessionId);
 }
 
-export function inFlightSteelSessionIds(now: number = Date.now()): ReadonlySet<string> {
+/** This process's in-flight sessions; no query. */
+export function localInFlightSteelSessionIds(now: number = Date.now()): ReadonlySet<string> {
   for (const [sessionId, registeredAt] of inFlight) {
     if (now - registeredAt > IN_FLIGHT_TTL_MS) inFlight.delete(sessionId);
   }
   return new Set(inFlight.keys());
+}
+
+/** Which of `candidates` any backend instance still holds in flight. */
+export async function inFlightSteelSessionIds(candidates: string[]): Promise<ReadonlySet<string>> {
+  const local = localInFlightSteelSessionIds();
+  const shared = await liveEphemeralKeys(
+    IN_FLIGHT_NAMESPACE,
+    candidates.filter((id) => !local.has(id))
+  );
+  return new Set([...candidates.filter((id) => local.has(id)), ...shared]);
 }

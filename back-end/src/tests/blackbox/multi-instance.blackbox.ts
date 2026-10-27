@@ -9,6 +9,10 @@
  *
  *  - an AgentCard PKCE connect started on A completes on B
  *  - the per-user SMS commit lock serializes commits across instances
+ *  - an SMS /clear on B supersedes a supervisor run in flight on A
+ *  - two instances minting one agent identity agree on one inbox
+ *  - a revoked compute grant seen on two instances is re-minted once
+ *  - B's Steel reaper skips a session A is still setting up
  *  - a WhatsApp redelivery that lands on the other instance is a duplicate
  *  - two instances' Gmail sync ticks claim one integration once
  *  - a Plaid item sync runs on one instance at a time
@@ -30,6 +34,7 @@ import { prisma } from '../../providers/database';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
+import { createPrismaGrantStore, upsertAccountConnection } from '../../domains/compute-grants/repo';
 
 config();
 
@@ -130,6 +135,101 @@ async function main(): Promise<void> {
         second.enteredAt >= first.leftAt,
         `commits overlapped: second entered ${first.leftAt - second.enteredAt}ms before first left`
       );
+    });
+
+    await test("an SMS /clear on instance B supersedes A's in-flight supervisor run", async () => {
+      const smsUser = randomUUID();
+      await prisma.user.create({ data: { userId: smsUser, name: 'Multi-instance SMS user' } });
+      try {
+        const [run, clear] = await concurrently([
+          ['sms-run', [smsUser, '1500']],
+          ['sms-clear', [smsUser]],
+        ]);
+        assert(clear.cleared === true, `clear failed: ${JSON.stringify(clear)}`);
+        assert(typeof run.mySeq === 'number', `run failed: ${JSON.stringify(run)}`);
+        assert(run.ownsReply === false, "A's run must not reply after B cleared the session");
+      } finally {
+        await prisma.smsSession.deleteMany({ where: { userId: smsUser } });
+        await prisma.user.deleteMany({ where: { userId: smsUser } });
+      }
+    });
+
+    await test('two instances minting one agent identity agree on one inbox', async () => {
+      const mintUser = randomUUID();
+      await prisma.user.create({ data: { userId: mintUser, name: 'Multi-instance mint user' } });
+      try {
+        // An identity on a retired domain is replaced on the next auth request.
+        await prisma.agentIdentity.create({
+          data: { userId: mintUser, email: 'agent@retired-domain.example' },
+        });
+        const results = await concurrently(
+          [
+            ['auth-mint', [mintUser]],
+            ['auth-mint', [mintUser]],
+          ],
+          {
+            PRIMITIVE_API_KEY: 'multi-instance-primitive',
+            PRIMITIVE_DOMAIN: 'mail.multi-instance.test',
+            AGENTPHONE_API_KEY: '',
+          }
+        );
+        const stored = await prisma.agentIdentity.findUnique({ where: { userId: mintUser } });
+        assert(
+          results.every((r) => typeof r.email === 'string' && r.email === stored?.email),
+          `both instances must be told the stored identity ${stored?.email}: ${JSON.stringify(results)}`
+        );
+      } finally {
+        await prisma.mintedAccount.deleteMany({ where: { userId: mintUser } });
+        await prisma.agentIdentity.deleteMany({ where: { userId: mintUser } });
+        await prisma.user.deleteMany({ where: { userId: mintUser } });
+      }
+    });
+
+    await test('a revoked compute grant seen on two instances is re-minted once', async () => {
+      const grantUser = `mi-grant-${randomUUID()}`;
+      const accountId = 'acct-mi';
+      try {
+        await upsertAccountConnection({
+          userId: grantUser,
+          provider: 'claude',
+          accountId,
+          accountEmail: 'mi@example.com',
+          session: `session-${grantUser}`,
+        });
+        const original = await createPrismaGrantStore('cloud').saveGrant({
+          userId: grantUser,
+          provider: 'claude',
+          accountId,
+          accessToken: 'sk-ant-oat01-mi-original',
+        });
+        const results = await concurrently([
+          ['grant-remint', [grantUser, accountId, original.grantId]],
+          ['grant-remint', [grantUser, accountId, original.grantId]],
+        ]);
+        const minted = await prisma.computeGrant.count({
+          where: { userId: grantUser, id: { not: original.grantId } },
+        });
+        assert(minted === 1, `the account must be re-minted once, minted ${minted}x`);
+        assert(
+          results.every((r) => r.accessToken !== null && r.accessToken === results[0].accessToken),
+          `both instances must retry on the one replacement: ${JSON.stringify(results)}`
+        );
+      } finally {
+        await prisma.computeGrant.deleteMany({ where: { userId: grantUser } });
+        await prisma.computeAccountConnection.deleteMany({ where: { userId: grantUser } });
+      }
+    });
+
+    await test("B's Steel reaper does not release a session A is still setting up", async () => {
+      const sessionId = randomUUID();
+      const [setup, reap] = await concurrently([
+        ['steel-setup', [sessionId, '3000']],
+        ['steel-reap', [sessionId, '1000']],
+      ]);
+      assert(setup.registered === true, `setup failed: ${JSON.stringify(setup)}`);
+      const released = reap.released as string[] | undefined;
+      assert(Array.isArray(released), `reaper failed: ${JSON.stringify(reap)}`);
+      assert(released.length === 0, `B released A's in-flight session: ${released.join(',')}`);
     });
 
     await test('a WhatsApp redelivery that lands on the other instance is a duplicate', async () => {

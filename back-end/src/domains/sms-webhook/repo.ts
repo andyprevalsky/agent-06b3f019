@@ -31,11 +31,15 @@ export async function updateAttentionRequest(id: string, userResponse: string) {
   });
 }
 
-/** Upsert SMS session to clear message history */
+/**
+ * Upsert SMS session to clear message history. Advancing `lastInboundSeq`
+ * supersedes every supervisor run in flight on ANY instance: their commit gate
+ * (inboundSeqStillCurrent) refuses to write or reply once the seq has moved.
+ */
 export async function clearSmsSession(userId: string) {
   return prisma.smsSession.upsert({
     where: { userId },
-    update: { messages: JSON.stringify([]) },
+    update: { messages: JSON.stringify([]), lastInboundSeq: { increment: 1 } },
     create: { userId, messages: JSON.stringify([]) },
   });
 }

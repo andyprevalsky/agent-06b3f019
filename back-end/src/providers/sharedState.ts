@@ -64,6 +64,23 @@ export async function getEphemeral<T>(namespace: string, key: string): Promise<T
   return rows[0]?.value;
 }
 
+/** Which of `keys` hold a live value. Bounded by the caller's candidate list. */
+export async function liveEphemeralKeys(namespace: string, keys: string[]): Promise<Set<string>> {
+  if (keys.length === 0) return new Set();
+  const rows = await prisma.$queryRaw<Array<{ key: string }>>`
+    SELECT key FROM "SharedEphemeralState"
+    WHERE namespace = ${namespace} AND key = ANY(${keys}::text[]) AND "expiresAt" > now()
+  `;
+  return new Set(rows.map((row) => row.key));
+}
+
+/** Delete a value whether or not it is still live. */
+export async function deleteEphemeral(namespace: string, key: string): Promise<void> {
+  await prisma.$executeRaw`
+    DELETE FROM "SharedEphemeralState" WHERE namespace = ${namespace} AND key = ${key}
+  `;
+}
+
 /** Atomically read and delete a live value: exactly one caller across all instances gets it. */
 export async function takeEphemeral<T>(namespace: string, key: string): Promise<T | undefined> {
   const rows = await prisma.$queryRaw<Array<{ value: T }>>`

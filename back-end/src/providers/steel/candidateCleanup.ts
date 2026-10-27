@@ -63,7 +63,7 @@ export interface SteelCandidateCleanupDependencies {
   isOwned: (sessionId: string, identity: string) => boolean;
   listPending: (identity: string) => Promise<SteelCandidateCleanupIntent[]>;
   held: (sessionId: string) => Promise<boolean>;
-  inFlight: () => ReadonlySet<string>;
+  inFlight: (candidates: string[]) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
   release: (sessionId: string) => Promise<void>;
   inspect: (sessionId: string) => Promise<{ id: string; status: string }>;
   claim: typeof withSteelLifecycleClaim;
@@ -120,7 +120,7 @@ export async function reconcileSteelCandidateCleanup(
   for (const intent of await deps.listPending(identity)) {
     if (intent.ownershipIdentity !== identity || !deps.isOwned(intent.sessionId, identity))
       continue;
-    if (deps.inFlight().has(intent.sessionId) || (await deps.held(intent.sessionId))) continue;
+    if ((await deps.inFlight([intent.sessionId])).has(intent.sessionId) || (await deps.held(intent.sessionId))) continue;
     try {
       await deps.claim(intent.taskId, async (assertTaskOwned, runTaskNative) => {
         const cleanup = async (
@@ -129,7 +129,7 @@ export async function reconcileSteelCandidateCleanup(
         ): Promise<void> => {
           await assertTaskOwned();
           await assertProfileOwned?.();
-          if (deps.inFlight().has(intent.sessionId) || (await deps.held(intent.sessionId))) return;
+          if ((await deps.inFlight([intent.sessionId])).has(intent.sessionId) || (await deps.held(intent.sessionId))) return;
           await assertTaskOwned();
           await assertProfileOwned?.();
           const release = () => deps.release(intent.sessionId);
