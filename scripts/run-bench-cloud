@@ -2072,7 +2072,6 @@ verify_app_environment() {
     listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || {
         read_status=$?
         echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
-        echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
         return 1
     }
     if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '

@@ -15918,7 +15918,6 @@ verify_fleet_environment() {
 }
 if ! verify_fleet_environment; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
-    echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
 fi
 

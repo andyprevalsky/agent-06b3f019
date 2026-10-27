@@ -8205,6 +8205,13 @@ print(json.dumps([{'Name': n} for n in (names if mode == 'success' else names[:-
             assert proc.returncode != 0 and "verified (read-only)" not in stdout
         if mode == "hang":
             assert "read exit=124" in stderr and elapsed < 3.5
+        if mode == "missing":
+            assert "missing secrets: GITHUB_TOKEN" in stderr
+            assert "--refresh-secrets" in stderr
+        else:
+            assert "--setup" not in stderr and "--refresh-secrets" not in stderr, (
+                "a failed read must not recommend mutating unverified app configuration"
+            )
         if mode in {"invalid-timeout", "zero-timeout", "double-zero-timeout"}:
             assert not pid_file.exists(), "invalid deadline dispatched a native read"
         elif pid_file.exists():
@@ -8215,6 +8222,29 @@ print(json.dumps([{'Name': n} for n in (names if mode == 'success' else names[:-
         if not finished:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate(timeout=2)
+
+
+@pytest.mark.parametrize("kind", ["timeout", "malformed", "missing", "success"])
+def test_fleet_environment_error_preserves_verifier_remediation(tmp_path: Path, kind: str) -> None:
+    """Only a confirmed missing-name verdict authorizes the leaf's repair hint."""
+    source = fleet_source_text()
+    start = source.index("if ! verify_fleet_environment; then")
+    end = source.index("\nfi", start) + len("\nfi")
+    diagnostic = {
+        "timeout": "Could not read app secrets (read exit=124).",
+        "malformed": "Unreadable app secrets listing.",
+        "missing": "Benchmark app environment is missing secrets: GITHUB_TOKEN\nRefresh explicitly: bash scripts/run-bench-cloud --refresh-secrets",
+        "success": "Shared benchmark app environment verified (read-only).",
+    }[kind]
+    script = "verify_fleet_environment() { printf '%s\\n' \"$VERDICT\" >&2; return \"$VERDICT_CODE\"; };\n" + source[start:end]
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                            env={**os.environ, "VERDICT": diagnostic, "VERDICT_CODE": "0" if kind == "success" else "1"}, timeout=3)
+    assert result.returncode == (0 if kind == "success" else 1)
+    assert diagnostic in result.stderr
+    assert "--setup" not in result.stderr
+    assert result.stderr.count("--refresh-secrets") == (1 if kind == "missing" else 0)
+    if kind != "success":
+        assert "no benchmark machine was started" in result.stderr
 
 
 def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> None:

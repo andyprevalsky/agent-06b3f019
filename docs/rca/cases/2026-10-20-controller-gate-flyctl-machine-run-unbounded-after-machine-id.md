@@ -200,3 +200,54 @@ not repaired-task outcome proof. The summary digest is
 `191441eff599b057be2a5630f207f4178d1b63e8713e585ab15dd70224c06132`.
 The four recorded processes were gone by22:52 according to the launch owner.
 The supported cleanup was performed by that owner, not this RCA worker.
+
+## Iteration-5 follow-up — timed-out read incorrectly advised configuration writes
+
+The I16 bound worked in live campaign `campaign-20261027-225938-1983302`,
+source `d6ad54228cec845c3dc5708e08bcced54be65e61`. Copy `r002-j0020`,
+`polar-bu-005` run2, finished `INFRA_ERROR`/true/exit1 at
+`2026-10-27T23:00:56.462199+00:00`, after60.52s total controller time.
+Its exact log records native `read exit=124` and no Machine started. The other
+29 copy logs record successful verification (one includes a second canary
+verification). This proves a bounded failure in one read; it does not prove
+provider overload, authentication failure or a particular network cause.
+There are no individual read timestamps or response bytes. The copy failed
+before its own source-provenance receipt; campaign source is launcher-bound.
+
+The separately reproduced error-contract defect is operational advice:
+`verify_app_environment` printed `--setup` on any native read failure, and the
+fleet wrapper unconditionally recommended `--refresh-secrets` for every
+verifier failure. A timeout does not establish missing configuration, and
+those maintenance operations change shared state. The repair removes
+both blanket hints. The original failure/classification text, native exit,
+20-second default/override, authentication, required names and parser remain.
+A successful parsed response missing `GITHUB_TOKEN` still prints the existing
+explicit refresh advice exactly once. No retry, provider call or cache
+extension is introduced.
+
+The same actual-CLI and extracted production fleet-block tests fail5cases
+before the repair and pass all13afterward, including missing-name/success
+controls, native timeout/error and cancellation. Codex
+`14ff9c3a43ebf9bf543cf5f7c45cff2bfea2e512`,
+`codex-rs/login/src/auth/storage.rs:191-211` treats NotFound as absent while
+propagating other read errors, and `gateway_auth_storage.rs:64-68` preserves a
+load error separately from an absent credential. These provide the closest
+same-domain distinction. OpenClaw's capability-read updater sometimes suggests
+upgrading on generic errors; that contrary pattern was examined and is not
+used as authority for overwriting potentially valid secrets.
+
+Bounded retries and coalescing were considered but not inferred as repairs.
+The October19 operator case has an existing110-second admission budget around
+3attempts; this read has a20-second bound and no captured evidence a retry
+would succeed. The existing campaign env proof requires a live strict-cohort
+barrier plus inventory authority. Extending that proof to an ordinary fallback
+without a bound identity would change its trust scope. The underlying provider
+observation gap therefore remains open. No task outcome was repaired or
+reclassified by this diagnostic change.
+
+Independent review by ph74rex3pescaywbxyjn3njr158h3pp9 returned GROUNDED
+for exact patch SHA25666d8bfd07ce846e865e2a8fe24074b7c9ddcff60aebea0be91a9b4092429f28b.
+Applied gates passed:15 owning verifier/helper cases in4.88s; original600
+status parser13 cases in0.595s; campaign environment10 cases in4.249s; full
+cloudbench-env shell gate; both Bash syntax checks and RCA archive validation. No production
+change, deployment, paid run or live-campaign mutation was performed.
