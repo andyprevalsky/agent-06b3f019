@@ -9,10 +9,10 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: scripts/lib/cloudbench-env.sh cloudbench_detach_reexec preserved inherited descriptors above stderr across setsid and exec
 symptoms:
   - top capability controller remained blocked in tee after terminal failure
-  - orphan slice tee remained blocked after run-bench-fleet exited
   - agent_link_server retained fd 63 as a writer to the slice tee input pipe
   - "exact-owner recovery guard is held; retry after it exits"
   - "flyctl agent inherited fd10 on cloudbench-fleet-recovery-locks after recovery exited"
+  - "fleet-infra-canary-preflight.transaction.lock inherited by hung flyctl secrets list"
 tags:
   - cloudbench
   - fleet
@@ -26,6 +26,8 @@ sources:
   - fleet run Polar k2 I9 owner 49927b5b138945249cb5e040f87159c8 on 2026-10-27
   - commit 05125f70e9297ad8d2b9fadddfb5cd3e1fb0d4ab
   - agent ph71mj3hyjmygq66wy30ncnj158h3gq0 I9-RECOVERY-FD-2
+  - commit 56ad8146f3decdca1d3ff427eda9327cac4f52c0
+  - agent ph74rex3pescaywbxyjn3njr158h3pp9 I17-CANARY-FD-1
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py test_detach_reexec_closes_inherited_launcher_pipe
 status: fixed
 ---
@@ -237,3 +239,103 @@ reviewed `GROUNDED` at SHA256
 same non-author reviewer. No production runtime bytes changed after the
 pre-application runtime verdict. Local proof artifacts are retained under
 `.context/polar-k2-i9/`; the permanent regression and this case are committed.
+
+## Recurrence: 2026-10-27 canary preflight donated its transaction to native Fly
+
+Polar It4 I17 is the same custody class at a distinct source-owned boundary.
+I9 excluded the Bash recovery guard at native Fly execution; that does not
+constrain the preflight helper's explicit `pass_fds` of a different transaction
+FD into the entire canary tree. Parent-reported original source is
+`56ad8146f3decdca1d3ff427eda9327cac4f52c0`: campaign742460 (birth7923571)
+had 30 jobs awaiting preflight before allocation. Canary fleet1448491 launched
+`run-bench-cloud --verify-secrets`1456644, whose native `flyctl secrets list`
+1456787 remained hung for over13 minutes with the preflight transaction lock
+inherited. Original process receipts belong to launchowner
+`ph7bpz2f14pct3j92t0e6nrvmx8h3nep`; original cleanup is exclusively that
+owner/coordinator's operation, not an effect inferred from a source patch.
+
+First bad owned boundary: `_run_owned_canary` in
+`scripts/cloudbench-infra-canary-preflight.py` explicitly passed the lock
+handle via `Popen(pass_fds=...)` to Bash. Bash's later native execs inherited
+that inheritable descriptor, so foreign blocking calls and detached daemons
+could keep a transaction they do not own. `run-bench-cloud` verification's
+missing timeout is separately owned by I16; timeout repair does not exclude
+this descriptor from later foreign processes.
+
+Simply removing `pass_fds` is wrong: the existing canary suite requires a
+canary to retain transaction custody if the outer preflight helper is killed.
+The repair confines deliberate inheritance to a small source-owned Python
+supervisor. That supervisor marks its handle noninheritable, launches the
+original canary with `close_fds=True`, forwards TERM through the same monitor
+and waits for its actual child before closing custody. The outer helper uses
+the same original monitor for that supervisor. Parent stamp/failure publication
+still happens while the original parent holds its descriptor. There is no
+explicit unlock, lock unlink, replacement inode, process-group kill or timeout
+change. One additional Python process exists per active canary, not per job.
+
+Permanent causal repro:
+`python3 scripts/tests/canary-preflight-fd.test.py`. It runs the real helper,
+real flock, Bash native exec and a fixture process that forks a detached daemon.
+On the exact buggy source, four outcomes (success, exit17, outer helper SIGKILL,
+cancellation) fail native descriptor exclusion in0.651s. It separately requires
+lock exclusivity throughout live native execution even after outer helper
+death, delayed native cancellation cleanup and join, correct exit/stamp behavior,
+and reacquisition after native exit while the unrelated daemon remains alive.
+The fixture only releases or signals exact processes it created. It uses Linux
+procfs for FD receipts with an explicit platform guard; the existing portable
+shell canary crash/follower test remains unchanged. The regression is invoked
+by the already registered `scripts/tests/fleet-infra-canary.test.sh` suite.
+
+Opened references: OpenClaw `scripts/pr-lib/process-group-runner.mjs:36-48`
+retains creator custody in a supervisor; lines333-345 explicitly specify
+child stdio and lines530-565 wait for drain before retiring custody. Codex
+`codex-rs/utils/pty/src/pty.rs:541-567` and
+`codex-rs/utils/pty/src/spawn_helper_main.rs:77` exclude unrelated child
+FDs; `codex-rs/rmcp-client/tests/stdio_descriptor_boundary.rs:29-66` tests both
+native child and descendant exclusion. Hermes
+`hermes_cli/update_cmd_posix_pause.py:531-532` uses `close_fds=True` for detached
+restart. Contrary intentional custody in `hermes_cli/update_lock.py:1194-1219`
+passes locks to mutator children to survive parent death; our source-owned
+supervisor retains that duty while foreign Fly does not receive it.
+
+Archive searches: `transaction lock inherited` and
+`detached helper inherited descriptor`. This is a recurrence of this case's
+foreign-exec capability leak, not a recurrence of the historical recoveryguard
+path itself. Preserve both proofs and scopes.
+
+Limits: the offline proof establishes descriptor ownership and supervision,
+not successful original campaign outcome or live provider behavior. A native
+canary that ignores TERM still retains custody until it exits, as before; I16
+owns its bounded provider-call cancellation. Killing the custody supervisor
+itself is not the same as killing its outer parent and no blanket crash
+immunity is claimed. Source-owned canary cleanup still owns its resources.
+No paid run, provider mutation, deploy, task edit, original PID signal or
+Freedom change was performed by this owner.
+
+Human direction: preserve parent lifetime and child PID supervision, obtain
+independent opened-reference exact-snapshot GROUNDED review before runtime
+application, coordinate without overlap with I16, push a small row-tagged fix.
+
+Independent opened-reference review by
+`ph74rex3pescaywbxyjn3njr158h3pp9` returned `GROUNDED` for
+`I17-CANARY-FD-1`, exact runtime/test patch SHA256
+`9bc0b8229a6376e98951bf86adc5bfc98377e5fa628a089548ce0825604acfe9`,
+before application. The reviewer independently ran the exact new regression
+in an automatically cleaned temporary fixture (four outcomes green, ~1.027s).
+The unchanged post-application command then passed all four outcomes in0.948s
+on this owner's checkout. No runtime bytes changed after that review.
+
+Original I17 receipts subsequently arrived and were opened: at22:46:58Z
+native Fly1456787 had elapsed13:41 and its FD table included the exact
+transaction path. At22:48:23Z preflight1448488 (birth8035758) held FLOCK WRITE
+on inode2157345 with29 waiters; canary1448491 (8035761), verify1456644
+(8036734) and nativeFly1456787 (8036755) all held that path. Launchowner's
+terminal receipt records the independent authorized campaignTERM at22:48:31.701Z
+and final cancellation22:52:05.629925Z, zero remaining transaction flocks,
+30 failed-epoch own-removed seals and no Machine created since22:14Z. Those
+are original owner cleanup receipts, not effects credited to this source fix.
+The canary shell suite passed after application, including its unchanged
+helper-crash/follower control and new FD regression (1.000s in-suite).
+The owning cleanup-ticket campaign suite also passed20 tests in46.010s,
+including cancelled parent canary join and failure-before-worker-fork controls.
+Archive validation, Python/Bash syntax and whitespace checks passed.
