@@ -50,7 +50,8 @@ are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
 Before any request reaches the user, run that file's Golden-reference
-adversarial review. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
+adversarial review on the hunks the gate flagged for human approval only;
+never extend grounding to the rest of the diff. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
 gates: rerun the guard with its mandatory flag, record
 `<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
 in `TEST_REPORT`, list it in the PR body and continue. Only `NOT_GROUNDED` and

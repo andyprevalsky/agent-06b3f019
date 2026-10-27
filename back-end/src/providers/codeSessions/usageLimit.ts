@@ -25,6 +25,7 @@
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
+import { claudeCodeSandboxKeyUsable } from '../claudeCodeSandboxAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
 import {
   isGptApiKeyOnCooldown,
@@ -123,6 +124,18 @@ async function hasLeasableIntegration(
   return pooled > 0;
 }
 
+/** The funded key a Claude Code sandbox would use when no login is leased. */
+async function claudeCodeFundedKeyUsable(): Promise<boolean> {
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  return claudeCodeSandboxKeyUsable({
+    claudeCodeAnthropicApiKey: process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+    anthropicApiKey,
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
+    sharedKeyOnCooldown: anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false,
+  });
+}
+
 /**
  * Whether a spawn could lease a Claude / Codex credential right now.
  * `ownOnly` (a Mac run) counts only the user's own logins: a local session
@@ -136,7 +149,7 @@ export async function codeCredentialAvailability(
   const ownOnly = options.ownOnly === true;
   const claude =
     (await hasLeasableIntegration(userId, 'claude_code', now, ownOnly)) ||
-    (!ownOnly && Boolean(process.env.ANTHROPIC_API_KEY) && !(await isAnthropicApiKeyOnCooldown()));
+    (!ownOnly && (await claudeCodeFundedKeyUsable()));
   const codex =
     (await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly)) ||
     (!ownOnly && Boolean(process.env.GPT_API_KEY) && !(await isGptApiKeyOnCooldown()));

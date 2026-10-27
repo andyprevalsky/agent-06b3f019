@@ -17,6 +17,8 @@ export interface UseWebSocketArgs {
   isCompletedRef: MutableRefObject<boolean>;
   shouldClose: boolean;
   onStateChange: (state: ChipState) => void;
+  /** false → status only: lifecycle transitions, no output buffered or written. */
+  bufferOutput?: boolean;
 }
 
 export interface UseSavedOutputArgs {

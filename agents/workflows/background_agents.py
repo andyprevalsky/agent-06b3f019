@@ -497,7 +497,11 @@ class BackgroundAgentsMixin:
     def _launch_background_task(self, task_id: str) -> None:
         if task_id in self._background_handles:
             return
-        self._background_handles[task_id] = asyncio.create_task(self._run_background_task(task_id))
+        # A user pause from this launch on ends the run as "paused" (workflow state,
+        # never result text). Read now: a pause handled before the task's first
+        # step still belongs to this run.
+        pause_sequence = getattr(self, "_pause_signal_sequence", 0)
+        self._background_handles[task_id] = asyncio.create_task(self._run_background_task(task_id, pause_sequence))
 
     def _preassigned_child_agent_id(self, tool_call_id: str) -> Optional[str]:
         """Child agent id minted at background start (general_purpose only)."""
@@ -507,7 +511,7 @@ class BackgroundAgentsMixin:
         children = [child for child in record.get("child_agent_ids") or [] if isinstance(child, str) and child]
         return children[0] if children else None
 
-    async def _run_background_task(self, task_id: str) -> None:
+    async def _run_background_task(self, task_id: str, pause_sequence: int) -> None:
         record = self._background_tasks.get(task_id)
         if record is None:
             return
@@ -517,8 +521,6 @@ class BackgroundAgentsMixin:
         if isinstance(resume, dict):
             self._background_resume_hints[task_id] = resume
         result: Any = None
-        # A user pause during this run ends it as "paused" (workflow state, never result text).
-        pause_sequence = getattr(self, "_pause_signal_sequence", 0)
         try:
             result = await self._execute_tool("spawn_agent", args, task_id)
         except Exception as exc:  # the record must still finish (one failed notification)
@@ -580,6 +582,11 @@ class BackgroundAgentsMixin:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if structured is not None:
             outcome["structured_response"] = structured
+        # The provider session a browser ending names (paused, never torn down,
+        # until the root finishes); every ending reports it for continuation.
+        session_id = metadata.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            outcome["session_id"] = session_id
 
     # ----------------------------------------------------------- completion
 
@@ -652,6 +659,7 @@ class BackgroundAgentsMixin:
                 summary=summary,
                 structured_response=structured_response,
                 file_pointers=outcome.get("file_pointers"),
+                session_id=outcome.get("session_id"),
             )
             try:
                 await self._post_message(
@@ -664,6 +672,7 @@ class BackgroundAgentsMixin:
                         background_task_id=task_id,
                         idempotency_key=key,
                         run=run,
+                        session_id=outcome.get("session_id"),
                     ),
                 )
             except Exception as exc:

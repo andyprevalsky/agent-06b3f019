@@ -1,9 +1,23 @@
+/**
+ * STATE MACHINE: DisplayMediaListItem (one display call's media at its first row)
+ *   always            → DisplayMediaGroup inline in the chat (caption, gallery / lazy frame)
+ *   the open panel shows this same entry → the inline copy unmounts (one live frame),
+ *                       a muted "Showing in Agent Display" line stands in
+ *   onOpen (the active app conversation routes displays to the Agent Display panel)
+ *                     → plus an "Open agent display" text button: opens this output
+ *                       full size in the panel (the panel keeps its own single frame)
+ *   shouldType        → completes the typing chain like other bubbles
+ *
+ * Reads only what DisplayMediaGroup already reads (signed URLs once per file set);
+ * the button reads nothing.
+ */
 import { useEffect } from 'react';
 import type { Message } from '../../hooks';
 import type { DisplayMediaItem } from '../../hooks/codeAgentContract';
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
+import { displayEntryId, shownDisplayEntry } from './agentDisplayEntries';
+import { useRoseApps } from './roseAppsState';
 
-/** One display call's media at its first row; completes the typing chain like other bubbles. */
 export function DisplayMediaListItem({
   message,
   items,
@@ -22,6 +36,11 @@ export function DisplayMediaListItem({
   useEffect(() => {
     if (shouldType) onTypingComplete();
   }, [shouldType, onTypingComplete]);
+  const apps = useRoseApps();
+  const inPanel =
+    onOpen !== undefined &&
+    apps?.openApp === 'display' &&
+    shownDisplayEntry(apps)?.id === displayEntryId(message);
   return (
     <div
       data-message-id={message.message_id}
@@ -29,16 +48,21 @@ export function DisplayMediaListItem({
       data-message-kind="display-media"
       className="min-w-0 max-w-full"
     >
-      {onOpen ? (
+      {inPanel ? (
+        <p data-testid="display-shown-in-panel" className="text-sm text-muted-foreground">
+          Showing in Agent Display
+        </p>
+      ) : (
+        <DisplayMediaGroup items={items} agentId={agentId} />
+      )}
+      {onOpen && !inPanel && (
         <button
           type="button"
           onClick={onOpen}
-          className="text-sm text-muted-foreground underline underline-offset-2"
+          className="mt-1 text-sm text-muted-foreground underline underline-offset-2"
         >
-          Open agent display{items[0]?.caption ? ` · ${items[0].caption}` : ''}
+          Open agent display
         </button>
-      ) : (
-        <DisplayMediaGroup items={items} agentId={agentId} />
       )}
     </div>
   );

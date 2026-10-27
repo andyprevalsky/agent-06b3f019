@@ -266,11 +266,18 @@ function deriveInitialChipState(
 }
 
 /** Composed view-model — wires sub-hooks and exposes chip UI state. */
+/** savedOutput: read the saved terminal output once ended; terminalOutput: keep socket output. */
+interface ChipOptions {
+  savedOutput?: boolean;
+  terminalOutput?: boolean;
+}
+
 export function useClaudeCodeChip(
   taskId: string,
   wsUrl: string | undefined,
   forceShow: boolean,
   initialCodeProvider: CodeProvider = 'claude',
+  { savedOutput = true, terminalOutput = true }: ChipOptions = {},
 ): ClaudeCodeChipVM {
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
@@ -314,11 +321,13 @@ export function useClaudeCodeChip(
     isCompletedRef,
     shouldClose: isComplete || chipState === 'completed' || chipState === 'failed',
     onStateChange: handleStateChange,
+    bufferOutput: terminalOutput,
   });
   useSavedOutputFetch({
     taskId,
     codeProvider: derived.codeProvider,
-    shouldFetch: isComplete && taskId !== 'pending' && derived.simulatedOutput === undefined,
+    shouldFetch:
+      savedOutput && isComplete && taskId !== 'pending' && derived.simulatedOutput === undefined,
     terminalRef,
     outputBufferRef,
     onOutputLoaded: setTerminalTranscript,

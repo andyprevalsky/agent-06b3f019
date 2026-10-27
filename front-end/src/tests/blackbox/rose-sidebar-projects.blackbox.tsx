@@ -24,6 +24,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { server } from './msw/server';
 import {
   expandBar,
+  expectAgentMenuEntries,
   makeProject,
   mockProjectsApi,
   openContextMenu,
@@ -93,6 +94,19 @@ describe('Rose projects in the left bar', () => {
     expect(
       within(screen.getByTestId('rose-group-home')).getByTestId('rose-agent-row-a-home'),
     ).toBeInTheDocument();
+  });
+
+  it('Projects sit at the top: project rows and + New project come before Home agents', async () => {
+    api = mockProjectsApi([makeProject({ id: 'p-site', name: 'Website' }), makeProject()]);
+    renderBar();
+    const rose = await screen.findByTestId('rose-project-row-p-rose');
+    const home = screen.getByTestId('rose-agent-row-a-home');
+    const precedesHome = (node: Element) =>
+      (node.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(precedesHome(rose)).toBe(true);
+    expect(precedesHome(screen.getByTestId('rose-project-row-p-site'))).toBe(true);
+    expect(precedesHome(screen.getByTestId('rose-agent-row-a-rose'))).toBe(true);
+    expect(precedesHome(screen.getByRole('button', { name: '+ New project' }))).toBe(true);
   });
 
   it('+ New project creates inline: Enter creates, Escape cancels', async () => {
@@ -256,6 +270,12 @@ describe('Rose projects in the left bar', () => {
     );
     expect(lifecycle).toHaveTextContent('Startup script');
     expect(lifecycle).toHaveTextContent('set');
+    // No checkout-import/setup-helper block (Andy, 2026-10-26: "wtf is this part?").
+    expect(within(panel).queryByRole('region', { name: 'Development environment' })).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Download setup helper' })).toBeNull();
+    expect(panel).not.toHaveTextContent(
+      /Import your working checkout|Not imported yet|Checkout imported/,
+    );
 
     // Working in the panel collapses the bar (pointer left it); hover back to reach ⚙.
     expandBar();
@@ -535,34 +555,16 @@ describe('Rose agent right-click menu', () => {
     mockProjectsApi([makeProject()]);
   });
 
-  it('lists the boxes.dev-style items in order; destructive items red', async () => {
+  it('lists exactly Archive · Pin · Rename · Copy (UI #26); removed items absent; Archive red', async () => {
     renderBar();
     const menu = await openContextMenu(
       await screen.findByTestId('rose-agent-row-a-home'),
       'rose-agent-menu',
     );
-    const items = within(menu)
-      .getAllByRole('menuitem')
-      .map((i) => i.textContent);
-    expect(items).toEqual([
-      'New agent in this branchsame E2B session',
-      'Archive agent',
-      'Mark unread',
-      'Mute notifications',
-      'Pin agent',
-      'Rename agent',
-      'Share agent',
-      'Delete agent',
-      'Schedule a prompt…',
-      'Copy',
-    ]);
+    expectAgentMenuEntries(menu);
     expect(within(menu).getByRole('menuitem', { name: 'Archive agent' }).className).toContain(
       'text-[#e5484d]',
     );
-    expect(within(menu).getByRole('menuitem', { name: 'Delete agent' }).className).toContain(
-      'text-[#e5484d]',
-    );
-    expect(within(menu).getAllByRole('separator').length).toBeGreaterThanOrEqual(4);
     expect(menu.className).toContain('dark:bg-[#2f2f2c]');
   });
 
@@ -594,38 +596,6 @@ describe('Rose agent right-click menu', () => {
     );
     await user.click(within(menu).getByRole('menuitem', { name: 'Rename agent' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
-  });
-
-  it('unbuilt items show a clear not-yet toast; provided handlers are called instead', async () => {
-    const user = userEvent.setup();
-    renderBar();
-    const row = await screen.findByTestId('rose-agent-row-a-home');
-    for (const [item, toast] of [
-      ['New agent in this branch', 'New agent in this branch is not available yet'],
-      ['Mark unread', 'Mark unread is not available yet'],
-      ['Mute notifications', 'Mute notifications is not available yet'],
-      ['Share agent', 'Share agent is not available yet'],
-      ['Delete agent', 'Delete agent is not available yet'],
-      ['Schedule a prompt…', 'Schedule a prompt is not available yet'],
-    ] as const) {
-      const menu = await openContextMenu(row, 'rose-agent-menu');
-      await user.click(within(menu).getByRole('menuitem', { name: new RegExp(`^${item}`) }));
-      expect(await screen.findByText(toast)).toBeInTheDocument();
-    }
-  });
-
-  it('a provided roseActions handler replaces the toast', async () => {
-    const user = userEvent.setup();
-    const onNewAgentInBranch = vi.fn();
-    renderBar({ roseActions: { onNewAgentInBranch } });
-    const menu = await openContextMenu(
-      await screen.findByTestId('rose-agent-row-a-home'),
-      'rose-agent-menu',
-    );
-    await user.click(within(menu).getByRole('menuitem', { name: /^New agent in this branch/ }));
-    expect(onNewAgentInBranch).toHaveBeenCalledWith(
-      expect.objectContaining({ agent_id: 'a-home' }),
-    );
   });
 
   it('Copy › Copy agent ID writes the id to the clipboard', async () => {

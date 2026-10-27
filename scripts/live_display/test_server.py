@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -95,6 +96,47 @@ class LiveDisplayTest(unittest.TestCase):
                 with self.assertRaises(HTTPError) as error:
                     self.get("/fixture-capability/frame")
                 self.assertEqual(error.exception.code, 409)
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join()
+
+    def test_next_frame_request_never_sees_finished_generation_as_busy(self):
+        # Under host load the handler thread can be descheduled after writing a
+        # frame. The viewer's next request must not find that finished
+        # generation still holding the lock (429).
+        class SlowReleaseLock:
+            def __init__(self):
+                self.inner = threading.Lock()
+
+            def acquire(self, blocking=True):
+                return self.inner.acquire(blocking)
+
+            def release(self):
+                time.sleep(0.3)
+                self.inner.release()
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                payload = json.dumps({"base64_image": base64.b64encode(b"\xff\xd8\xfffixture").decode()}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.server.upstream = f"http://127.0.0.1:{upstream.server_port}"
+            self.server.predict_lock = SlowReleaseLock()
+            for _ in range(2):
+                with self.get("/fixture-capability/frame") as response:
+                    self.assertEqual(response.status, 200)
         finally:
             upstream.shutdown()
             upstream.server_close()

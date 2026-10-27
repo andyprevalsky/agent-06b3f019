@@ -26,7 +26,8 @@
  *   each entry may carry lastFivePassed from run history for the green check)
  * - selectedTags: string[] (tag filter; OR semantics across selected tags)
  * - searchQuery: string (text filter composed with selectedTags)
- * - isOpen: boolean (popover open state)
+ * - isOpen: boolean (popover open state; keeps ui/popover's ROSE_LAYER.popover
+ *   z so it covers the floating query box it opens from)
  * - isLoading: boolean (while resolving attachment URLs into File objects)
  *
  * UI: icon-only trigger (document icon) styled to match the other query-box icon buttons.
@@ -219,7 +220,7 @@ export default function TestPromptsSelector({
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <TestPromptTrigger nub={variant === 'nub'} setIsOpen={setIsOpen} />
       <PopoverContent
-        className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4 z-50"
+        className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}

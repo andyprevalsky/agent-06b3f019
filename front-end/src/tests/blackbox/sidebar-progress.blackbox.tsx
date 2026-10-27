@@ -36,12 +36,6 @@ function row(overrides = {}, expanded = true, attention = false) {
         onCopyLink() {},
         onTogglePin() {},
         onArchive() {},
-        onNewAgentInBranch() {},
-        onMarkUnread() {},
-        onMute() {},
-        onShare() {},
-        onDelete() {},
-        onSchedulePrompt() {},
         onCopyId() {},
       }}
       onMenuOpenChange={() => {}}
