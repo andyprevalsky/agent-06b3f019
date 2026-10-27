@@ -200,11 +200,15 @@ export async function testManifestLockHoldsNoConnectionDuringStorageIo(
   seed: RunSeed
 ): Promise<void> {
   const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
+  // Only transactions holding the manifest lease table count: other domains share this
+  // database under parallel coverage, and their idle transactions are not this lock's.
   const heldInTransaction = async (since: Date) =>
     prisma.$queryRaw<Array<{ pid: number; xactStart: Date }>>`
-      SELECT pid, xact_start AS "xactStart" FROM pg_stat_activity
-      WHERE datname = current_database() AND pid <> pg_backend_pid()
-        AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
+      SELECT DISTINCT a.pid, a.xact_start AS "xactStart" FROM pg_stat_activity a
+      JOIN pg_locks l ON l.pid = a.pid
+      WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()
+        AND a.state LIKE 'idle in transaction%' AND a.xact_start <= ${since}
+        AND l.relation = '"TraceArchiveManifestLease"'::regclass
     `;
   await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
     const operationStart = new Date();
