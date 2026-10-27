@@ -1,6 +1,10 @@
-/** A single active output frame, mounted only while Agent Display is open. */
+/**
+ * A single active output frame, mounted only while Agent Display is open; it fills
+ * the panel's content height (DisplayMediaGroup fill), never a fixed 480px box.
+ */
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
 import { AppDrawerShell } from './AppDrawerShell';
+import { shownDisplayEntry } from './agentDisplayEntries';
 import { useRoseApps } from './roseAppsState';
 
 export function AgentDisplayDrawer() {
@@ -8,11 +12,7 @@ export function AgentDisplayDrawer() {
   if (!apps) return null;
   const open = apps.openApp === 'display';
   const entries = apps.displayEntries.filter((entry) => entry.agentId === apps.selectedAgentId);
-  const chosen =
-    entries.find(
-      (entry) =>
-        entry.id === apps.displaySelection?.id && entry.agentId === apps.displaySelection.agentId,
-    ) ?? entries.at(-1);
+  const chosen = shownDisplayEntry(apps);
   return (
     <AppDrawerShell open={open} label="Agent Display" testId="agent-display-drawer" variant="full">
       <div
@@ -22,7 +22,10 @@ export function AgentDisplayDrawer() {
         Agent Display
       </div>
       {open && (
-        <div className="min-h-0 flex-1 overflow-y-auto p-4" data-testid="agent-display-content">
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"
+          data-testid="agent-display-content"
+        >
           {!chosen ? (
             <p className="text-sm text-muted-foreground">
               {apps.selectedAgentId
@@ -56,6 +59,7 @@ export function AgentDisplayDrawer() {
                 key={`${chosen.agentId}:${chosen.id}`}
                 items={chosen.items}
                 agentId={chosen.agentId}
+                fill
               />
             </>
           )}

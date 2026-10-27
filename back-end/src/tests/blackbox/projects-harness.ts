@@ -5,6 +5,26 @@ import { config } from 'dotenv';
 
 config();
 
+/**
+ * These suites write and delete rows directly; back-end/.env points at PROD.
+ * Refuse any DATABASE_URL that is not a local Postgres before a query runs.
+ */
+export function assertLocalDatabaseUrl(raw: string | undefined): void {
+  let host = '';
+  try {
+    host = new URL(raw ?? '').hostname;
+  } catch {
+    host = '';
+  }
+  if (!['localhost', '127.0.0.1', '::1', '[::1]'].includes(host)) {
+    throw new Error(
+      `Refusing to run projects black-box tests against a non-local DATABASE_URL (host ${host || 'unset'}); use scripts/run-blackbox-tests.sh`
+    );
+  }
+}
+
+assertLocalDatabaseUrl(process.env.DATABASE_URL);
+
 export const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 export const API_KEY = process.env.BACKEND_API_KEY || '';
 

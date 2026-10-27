@@ -20,6 +20,7 @@ import {
   type CreateAgentPayload,
   type FilePointer,
   type BlueprintFeedback,
+  type MessageTarget,
 } from '@/lib/api';
 
 // ── Agent list ────────────────────────────────────────────────────────────
@@ -42,8 +43,13 @@ export async function createAgent(payload: CreateAgentPayload) {
 
 // ── Messaging ─────────────────────────────────────────────────────────────
 
-export async function postMessage(agentId: string, message: string, attachments?: FilePointer[]) {
-  return postMessageAPI(agentId, message, attachments);
+export async function postMessage(
+  agentId: string,
+  message: string,
+  attachments?: FilePointer[],
+  target?: MessageTarget,
+) {
+  return postMessageAPI(agentId, message, attachments, target);
 }
 
 export async function uploadAttachment(file: File, onProgress?: (progress: number) => void) {

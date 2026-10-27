@@ -55,6 +55,31 @@ test('disables local fallback on Fly by default', () => {
   }
 });
 
+test('disables local fallback on Render: the child process would live on one instance', () => {
+  const prev = {
+    render: process.env.RENDER,
+    fly: process.env.FLY_APP_NAME,
+    flag: process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK,
+  };
+  try {
+    delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    delete process.env.FLY_APP_NAME;
+    process.env.RENDER = 'true';
+    assert.equal(shouldAllowLocalClaudeCodeFallback(), false);
+    delete process.env.RENDER;
+    assert.equal(shouldAllowLocalClaudeCodeFallback(), true);
+  } finally {
+    for (const [key, value] of [
+      ['RENDER', prev.render],
+      ['FLY_APP_NAME', prev.fly],
+      ['CLAUDE_CODE_ALLOW_LOCAL_FALLBACK', prev.flag],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('createLocalClaudeCodeSessionIfBillingBlocked returns null when not a billing block', async () => {
   const result = await createLocalClaudeCodeSessionIfBillingBlocked(new Error('rate limited'), {
     taskId: 't-no-op',

@@ -11,17 +11,35 @@
  *    SubAgentTree hierarchy, navigates on agent rows, sits flush on the input,
  *    and shows output schemas (per agent, and a results table per for_each).
  */
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
-import { BackgroundAgentsBanner } from '@/features/terminal-component-group/components/background-agents/BackgroundAgentsBanner';
+import { FINISHED_FLASH_MS } from '@/features/terminal-component-group/components/background-agents/BackgroundAgentsBanner';
+import {
+  buildAgentPanelModel,
+  isTaskNodeId,
+} from '@/features/terminal-component-group/components/background-agents/agentsPanelGroups';
 import { deriveBackgroundSpawns } from '@/features/terminal-component-group/hooks/backgroundSpawns';
+import { getStatusText, type TreeNode } from '@/hooks/useAgentTree';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
 import { makeAgentTreeNode } from './terminal-component-chips.fixtures';
+import {
+  dockElement,
+  done,
+  explore,
+  forEach,
+  gp,
+  live,
+  pausedBrowser,
+  renderDock,
+  rootWithBrowserTask,
+  row,
+  started,
+} from './background-agents.fixtures';
 
 const tree = vi.hoisted(() => ({ nodes: new Map<string, unknown>() }));
 vi.mock('@/hooks/useAgentTree', async () => {
@@ -36,88 +54,6 @@ beforeAll(() => {
 beforeEach(() => {
   tree.nodes = new Map();
 });
-
-const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
-let seq = 0;
-function row(
-  metadata: Record<string, unknown>,
-  text = '',
-  role: Message['role'] = 'TOOL',
-): Message {
-  seq += 1;
-  return {
-    message_id: `m-${seq}`,
-    timestamp: new Date(T0 + seq * 1000).toISOString(),
-    role,
-    text,
-    metadata,
-  };
-}
-
-function started(callId: string, type: string, path: string, goal: string): Message {
-  return row(
-    {
-      toolCallId: callId,
-      toolName: 'spawn_agent',
-      toolStatus: 'FINISHED',
-      hidden: true,
-      runInBackground: true,
-      backgroundAddress: path,
-      backgroundPath: path,
-      backgroundGoal: goal,
-      backgroundAgentType: type,
-    },
-    'Started',
-  );
-}
-
-function live(callId: string, extra: Record<string, unknown>): Message {
-  return row({
-    toolCallId: callId,
-    toolName: 'spawn_general_purpose_agent',
-    toolStatus: 'IN_PROGRESS',
-    excludeFromModel: true,
-    busId: 'root-1',
-    ...extra,
-  });
-}
-
-function done(callId: string, path: string, status: string, body: string): Message {
-  return row(
-    {
-      agentNotification: true,
-      toolName: 'agent_notification',
-      fromAgentAddress: path,
-      status,
-      backgroundTaskId: callId,
-    },
-    `Message Type: ${status === 'failed' ? 'FAILED' : 'FINAL_ANSWER'}\nTask name: x\nSender: ${path}\nPayload:\n${body}`,
-    'USER',
-  );
-}
-
-const gp = () => [
-  started('call_gp', 'general_purpose', '/root/budget_planner', 'Draft a rough budget'),
-  live('call_gp', { subAgentIds: ['child-1'], spawnGroupId: 'call_gp' }),
-];
-const forEach = () => [
-  started('call_fe', 'for_each', '/root/venue_capacities', 'Look up each venue'),
-  live('call_fe:0', { subAgentIds: ['fe-a'] }),
-  live('call_fe:1', { subAgentIds: ['fe-b'] }),
-  live('call_fe:2', { subAgentIds: ['fe-c'] }),
-];
-const explore = () => [
-  started('call_ex', 'explore', '/root/hotel_price', 'Find the average hotel price'),
-  row({
-    toolCallId: 'call_ex',
-    toolName: 'spawn_agent',
-    toolStatus: 'IN_PROGRESS',
-    excludeFromModel: true,
-    agentType: 'explore',
-    taskId: 't-ex',
-    title: 'Exploring',
-  }),
-];
 
 function renderList(messages: Message[], onNavigateToAgent = vi.fn()) {
   return render(
@@ -291,11 +227,116 @@ class ScanCountingMap<K, V> extends Map<K, V> {
   }
 }
 
-function renderDock(messages: Message[], onNavigate = vi.fn()) {
-  return render(
-    <BackgroundAgentsBanner selectedAgentId="root-1" messages={messages} onNavigate={onNavigate} />,
+describe('paused background browser (root pause)', () => {
+  it('derives the spawn as paused, not completed', () => {
+    expect(deriveBackgroundSpawns(pausedBrowser()).get('call_br')).toMatchObject({
+      state: 'paused',
+      rawStatus: 'paused',
+      agentType: 'browser',
+      // The session id is for continuation, not the user-facing summary.
+      resultSummary: 'User paused the browser agent',
+    });
+  });
+
+  /** The collapsed dock names the paused task (never "Running") and opens to its row. */
+  function expectPausedDockReachable() {
+    const dock = screen.getByTestId('background-agents-banner');
+    expect(dock).toHaveAttribute('data-running', '0');
+    const toggle = within(dock).getByRole('button', { name: /1 agent paused/ });
+    expect(dock).not.toHaveTextContent(/Running|All agents finished/);
+    fireEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel')).toHaveTextContent(
+      'browser · order_breakfast_dd',
+    );
+  }
+
+  it('lists the paused task as PAUSED (never running); the collapsed dock still reaches it', () => {
+    tree.nodes.set('root-1', rootWithBrowserTask('paused'));
+    const spawns = [...deriveBackgroundSpawns(pausedBrowser()).values()];
+    const model = buildAgentPanelModel({
+      nodes: tree.nodes as Map<string, TreeNode>,
+      selectedAgentId: 'root-1',
+      spawns,
+    });
+    const tasks = model.groups
+      .flatMap((group) => group.roots)
+      .filter((n) => isTaskNodeId(n.agentId));
+    expect(tasks.map((n) => [n.status, getStatusText(n)])).toEqual([['PAUSED', 'paused']]);
+    expect(model.counts).toEqual({ total: 1, running: 0, paused: 1 });
+    renderDock(pausedBrowser());
+    expectPausedDockReachable();
+  });
+
+  it('keeps the collapsed dock after the finished flash when the running task pauses', () => {
+    vi.useFakeTimers();
+    try {
+      tree.nodes.set('root-1', rootWithBrowserTask('running'));
+      const view = renderDock(pausedBrowser().slice(0, 2));
+      expect(screen.getByTestId('background-agents-banner')).toHaveTextContent('Running 1 agent');
+      tree.nodes.set('root-1', rootWithBrowserTask('paused'));
+      view.rerender(dockElement(pausedBrowser()));
+      act(() => {
+        vi.advanceTimersByTime(FINISHED_FLASH_MS + 1);
+      });
+      expectPausedDockReachable();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Prod shape: Agent.backgroundTasks keys the task by its run inbox (the tool
+  // call id) while the spawn rows address it by its task path. One task is one row.
+  it.each([
+    ['running', 2, 'ACTIVE'],
+    ['paused', 6, 'PAUSED'],
+    ['completed', 2, 'COMPLETED'],
+  ] as const)(
+    'lists one row for a %s task known to both the tree and its spawn rows',
+    (status, rowCount, nodeStatus) => {
+      const rows = pausedBrowser().slice(0, rowCount);
+      if (status === 'completed') {
+        rows.push(
+          row({
+            toolCallId: 'call_br',
+            toolName: 'spawn_browser_agent',
+            toolStatus: 'FINISHED',
+            excludeFromModel: true,
+            title: 'Browser automation complete',
+            action_type: 'task_complete',
+            task_id: 't-br',
+          }),
+          done('call_br', '/root/order_breakfast_dd', 'completed', 'Ordered.'),
+        );
+      }
+      tree.nodes.set(
+        'root-1',
+        makeAgentTreeNode({
+          agentId: 'root-1',
+          backgroundTasks: [
+            {
+              address: 'call_br',
+              path: '/root/order_breakfast_dd',
+              type: 'browser',
+              goal: 'Place a breakfast order',
+              status,
+            },
+          ],
+        }),
+      );
+      const model = buildAgentPanelModel({
+        nodes: tree.nodes as Map<string, TreeNode>,
+        selectedAgentId: 'root-1',
+        spawns: [...deriveBackgroundSpawns(rows).values()],
+      });
+      const tasks = model.groups
+        .flatMap((group) => group.roots)
+        .filter((n) => isTaskNodeId(n.agentId));
+      expect(tasks.map((n) => n.status)).toEqual([nodeStatus]);
+      // The selected agent's own rows supply the live activity of a running task.
+      if (status === 'running') expect(tasks[0].toolsInUse).toEqual(['Clicking <a "Continue">']);
+    },
   );
-}
+});
 
 describe('running-agents dock', () => {
   it('is hidden when nothing is running', () => {
@@ -329,7 +370,48 @@ describe('running-agents dock', () => {
     await userEvent.click(within(panel).getByText('explore · hotel_price'));
     expect(onNavigate).not.toHaveBeenCalled();
     fireEvent.keyDown(panel, { key: 'Escape' });
-    expect(screen.queryByTestId('background-agents-panel')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Running 2 agents/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByTestId('background-agents-panel-slot')).toHaveAttribute(
+      'data-state',
+      'closed',
+    );
+  });
+
+  it('opens and closes by animating the same mounted slot (no mount at full height, no remount)', async () => {
+    tree.nodes.set('child-1', makeAgentTreeNode({ agentId: 'child-1', parentAgentId: 'root-1' }));
+    renderDock([...gp(), ...explore()]);
+    const toggle = screen.getByRole('button', { name: /Running 2 agents/ });
+    // Closed: the slot is already mounted at 0fr, inert and hidden, so the
+    // first open has a starting frame to animate from.
+    const slot = screen.getByTestId('background-agents-panel-slot');
+    expect(slot).toHaveAttribute('data-state', 'closed');
+    expect(slot).toHaveClass('grid', 'grid-rows-[0fr]', 'transition-[grid-template-rows]');
+    expect(slot).toHaveClass('motion-reduce:transition-none');
+    expect(slot).toHaveAttribute('inert');
+    expect(slot).toHaveAttribute('aria-hidden', 'true');
+
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel-slot')).toBe(slot);
+    expect(slot).toHaveAttribute('data-state', 'open');
+    expect(slot).toHaveClass('grid-rows-[1fr]', 'transition-[grid-template-rows]');
+    expect(slot).not.toHaveClass('grid-rows-[0fr]');
+    expect(slot).not.toHaveAttribute('inert');
+    const content = screen.getByTestId('background-agents-panel');
+    expect(slot.contains(content)).toBe(true);
+
+    // Closing keeps the content mounted so the collapse animates the same nodes.
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel-slot')).toBe(slot);
+    expect(slot).toHaveClass('grid-rows-[0fr]');
+    expect(slot).toHaveAttribute('inert');
+    expect(screen.getByTestId('background-agents-panel')).toBe(content);
+
+    await userEvent.click(toggle);
+    expect(screen.getByTestId('background-agents-panel')).toBe(content);
+    expect(slot).toHaveClass('grid-rows-[1fr]');
   });
 
   it('groups for_each children under one cluster header', async () => {
@@ -406,6 +488,80 @@ describe('running-agents dock', () => {
     expect(within(table).getAllByRole('row')).toHaveLength(2);
     expect(table).toHaveTextContent('Fair Market');
     expect(table).toHaveTextContent('string · required');
+  });
+
+  it('expands an explore or browser task row into its trajectory from loaded rows, without fetching', async () => {
+    const browserRows = [
+      started('call_br', 'browser', '/root/order_breakfast', 'Order breakfast'),
+      row({
+        toolCallId: 'call_br',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        excludeFromModel: true,
+        task_id: 't-br',
+        action_type: 'browser',
+        browser_url: 'https://live.example/br',
+        title: 'Browser Agent In Progress',
+      }),
+      row(
+        {
+          toolCallId: 'br-step-1',
+          toolName: 'spawn_browser_agent',
+          toolStatus: 'FINISHED',
+          task_id: 't-br',
+          subAgentId: 't-br',
+          action_type: 'goto',
+          title: 'Navigated → https://www.instacart.com/',
+        },
+        'Navigated → https://www.instacart.com/',
+      ),
+    ];
+    const exploreStep = row(
+      {
+        toolCallId: 'ex-step-1',
+        toolName: 'web_search',
+        toolStatus: 'FINISHED',
+        subAgentId: 't-ex',
+        title: 'Searched the web for hotel prices',
+      },
+      'Searched the web for hotel prices',
+    );
+    const messages = [...explore(), exploreStep, ...browserRows];
+    const onNavigate = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    renderDock(messages, onNavigate);
+    await userEvent.click(screen.getByRole('button', { name: /Running 2 agents/ }));
+    const panel = screen.getByTestId('background-agents-panel');
+    expect(within(panel).queryByTestId('agent-panel-trajectory')).toBeNull();
+    const fetchesBeforeExpand = fetchSpy.mock.calls.length;
+
+    await userEvent.click(within(panel).getByText('explore · hotel_price'));
+    const exploreTrajectory = within(panel).getByTestId('agent-panel-trajectory');
+    expect(exploreTrajectory).toHaveAttribute('data-task-id', 't-ex');
+    expect(
+      exploreTrajectory.querySelector(`[data-message-id="${exploreStep.message_id}"]`),
+    ).not.toBeNull();
+
+    await userEvent.click(within(panel).getByText('browser · order_breakfast'));
+    const trajectories = within(panel).getAllByTestId('agent-panel-trajectory');
+    const browserTrajectory = trajectories.find((el) => el.dataset.taskId === 't-br');
+    expect(browserTrajectory).toBeDefined();
+    expect(
+      browserTrajectory!.querySelector(`[data-message-id="${browserRows[2].message_id}"]`),
+    ).not.toBeNull();
+
+    // Built from rows the client already holds: no request and no navigation.
+    expect(fetchSpy.mock.calls.length).toBe(fetchesBeforeExpand);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    // Clicking the row again folds its trajectory away.
+    await userEvent.click(within(panel).getByText('explore · hotel_price'));
+    expect(
+      within(panel)
+        .getAllByTestId('agent-panel-trajectory')
+        .map((el) => el.dataset.taskId),
+    ).toEqual(['t-br']);
+    fetchSpy.mockRestore();
   });
 
   it('builds and renders a wide tree with a linear number of node scans', () => {

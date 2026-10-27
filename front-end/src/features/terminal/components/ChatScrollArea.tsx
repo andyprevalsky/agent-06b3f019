@@ -120,7 +120,8 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
   );
 }
 
-function BlurOverlay({
+/** The root transcript's backdrop blur (also behind the code-agent view, AgentChatArea). */
+export function BlurOverlay({
   selectedAgentId,
   dripStyles,
   blur,
@@ -136,6 +137,7 @@ function BlurOverlay({
 
   return (
     <div
+      data-testid="chat-blur-overlay"
       className="absolute inset-0 pointer-events-none ease-in-out"
       style={{
         backdropFilter: filterVal,

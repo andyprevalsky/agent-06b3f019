@@ -1,3 +1,4 @@
+import { createLogger } from '../../providers/logger';
 import { fetchAmplitudeFunnel, unavailableAmplitudeFunnel } from './amplitude';
 import {
   ADMIN_PHONE_DIGITS,
@@ -24,6 +25,32 @@ import type { AdminHealthPeriod, AdminHealthResponse, AdminHealthTimeSlice } fro
 import { fetchVelocityByPeriod } from './velocity';
 
 const responseCache = new Map<string, { expiresAt: number; value: Promise<AdminHealthResponse> }>();
+const log = createLogger('AdminHealth');
+
+/**
+ * Logs how long one build input took (also on rejection), so the cold-build
+ * critical path behind fetchInputs' Promise.all is visible in production logs.
+ * The promise's result and errors pass through unchanged.
+ */
+function timedInput<T>(
+  input: string,
+  timeSlice: AdminHealthTimeSlice,
+  work: Promise<T>
+): Promise<T> {
+  const startedAt = Date.now();
+  const record = (status: 'ok' | 'error') =>
+    log.info('input.done', { input, timeSlice, status, duration_ms: Date.now() - startedAt });
+  return work.then(
+    (value) => {
+      record('ok');
+      return value;
+    },
+    (error: unknown) => {
+      record('error');
+      throw error;
+    }
+  );
+}
 
 export class AdminHealthForbiddenError extends Error {
   constructor() {
@@ -97,10 +124,15 @@ async function fetchInputs(
     BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
     BLACKBOX_TEST_CAPTURE_OUTBOUND
   );
-  const blackboxOfflineAmplitude = () =>
-    unavailableAmplitudeFunnel(
-      `Amplitude live fetch is disabled for the ${timeSlice} blackbox shape case.`
-    );
+  const amplitudeFunnel = (period: AdminHealthPeriod) =>
+    fetchLiveAmplitude
+      ? fetchAmplitudeFunnel(new Date(period.start), new Date(period.end))
+      : Promise.resolve(
+          unavailableAmplitudeFunnel(
+            `Amplitude live fetch is disabled for the ${timeSlice} blackbox shape case.`
+          )
+        );
+  const timed = <T>(input: string, work: Promise<T>) => timedInput(input, timeSlice, work);
   const [
     tasks,
     productTasks,
@@ -117,24 +149,26 @@ async function fetchInputs(
     connectedConnectors,
     gmvRecords,
   ] = await Promise.all([
-    repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
-    findProductRootTasksBetween(historyStart, historyEnd),
-    costRepo.findRootAgentRunsBetween(historyStart, historyEnd),
-    costRepo.findRootAgentRunUsageBetween(historyStart, historyEnd),
-    repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
-    repo.findWaitlistSignupsBetween(historyStart, historyEnd),
-    repo.findVerifiedUsersCreatedBefore(historyEnd, Array.from(ADMIN_USER_IDS)),
-    fetchStripeRevenueByPeriod(periods),
-    fetchStripeSubscribersByPeriod(periods, retrievalTime),
-    fetchVelocityByPeriod(periods),
-    fetchLiveAmplitude
-      ? fetchAmplitudeFunnel(new Date(current.start), new Date(current.end))
-      : Promise.resolve(blackboxOfflineAmplitude()),
-    fetchLiveAmplitude
-      ? fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end))
-      : Promise.resolve(blackboxOfflineAmplitude()),
-    repo.findConnectedConnectors(),
-    repo.findClearedGmvBetween(historyStart, historyEnd),
+    timed('rootTasks', repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd)),
+    timed('productRootTasks', findProductRootTasksBetween(historyStart, historyEnd)),
+    timed('rootAgentRuns', costRepo.findRootAgentRunsBetween(historyStart, historyEnd)),
+    timed('rootAgentRunUsage', costRepo.findRootAgentRunUsageBetween(historyStart, historyEnd)),
+    timed(
+      'firstRootTasks',
+      repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd)
+    ),
+    timed('waitlistSignups', repo.findWaitlistSignupsBetween(historyStart, historyEnd)),
+    timed(
+      'verifiedUsers',
+      repo.findVerifiedUsersCreatedBefore(historyEnd, Array.from(ADMIN_USER_IDS))
+    ),
+    timed('stripeRevenue', fetchStripeRevenueByPeriod(periods)),
+    timed('stripeSubscribers', fetchStripeSubscribersByPeriod(periods, retrievalTime)),
+    timed('velocity', fetchVelocityByPeriod(periods)),
+    timed('amplitudeCurrent', amplitudeFunnel(current)),
+    timed('amplitudePrevious', amplitudeFunnel(previous)),
+    timed('connectedConnectors', repo.findConnectedConnectors()),
+    timed('clearedGmv', repo.findClearedGmvBetween(historyStart, historyEnd)),
   ]);
   return {
     tasks,

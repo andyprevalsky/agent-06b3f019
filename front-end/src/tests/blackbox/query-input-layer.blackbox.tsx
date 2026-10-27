@@ -43,6 +43,8 @@ it('keeps the portaled composer aligned when a parent gate moves its unchanged-s
       toJSON() {},
     };
   });
+  // The layer is pinned by its bottom edge: bottom = viewport clientHeight - anchor bottom.
+  vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
   const { unmount } = render(
     <div data-testid="gate-container">
       <QueryInputLayer enabled>
@@ -52,13 +54,16 @@ it('keeps the portaled composer aligned when a parent gate moves its unchanged-s
   );
   const layer = screen.getByTestId('query-input-layer');
   expect(layer.parentElement).toBe(document.body);
-  expect(layer).toHaveStyle({ left: '40px', top: '100px', width: '400px' });
+  // Anchor bottom = 100 + 80 = 180 -> 800 - 180.
+  expect(layer).toHaveStyle({ left: '40px', bottom: '620px', width: '400px' });
+  expect(layer.style.top).toBe('');
   expect(observed).toContain(screen.getByTestId('gate-container'));
   const input = screen.getByRole('textbox', { name: 'Message' });
   input.focus();
   top = 200;
   act(() => notify());
-  expect(layer).toHaveStyle({ top: '200px' });
+  // The gate moved the anchor down 100px: its bottom is now 280 -> 800 - 280.
+  expect(layer).toHaveStyle({ bottom: '520px' });
   expect(document.activeElement).toBe(input);
   unmount();
   expect(disconnect).toHaveBeenCalledOnce();
@@ -77,6 +82,7 @@ it.each(['other-owner', 'other-task', 'root'])(
       browserComposerSlot: slot,
       selectedAgentId: 'owner',
       browserTabAgentId: scenario === 'root' ? null : 'owner',
+      browserTabTaskId: scenario === 'root' ? null : 'task',
       tabs: [{ agentId: 'owner', taskId: 'task', live: true }],
     } as unknown as RoseAppsValue;
     try {
@@ -114,6 +120,7 @@ it('fences an old owner slot during A to B selection, then restores the normal c
       browserComposerSlot: target,
       selectedAgentId: selected,
       browserTabAgentId: selected,
+      browserTabTaskId: selected,
       tabs: [{ agentId: selected, taskId: selected, live: true }],
     }) as unknown as RoseAppsValue;
   const tree = (state: RoseAppsValue) => (

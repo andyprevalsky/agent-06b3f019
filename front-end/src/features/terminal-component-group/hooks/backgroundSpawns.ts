@@ -13,7 +13,9 @@
  *
  * STATE per spawn (derived, never stored):
  * [RUNNING] -- completion row OR terminal `<owner>` spawn row --> [COMPLETED | FAILED]
- * [COMPLETED | FAILED] -- row with a higher backgroundRun --> [RUNNING]
+ * [ANY] -- completion row with status "paused" --> [PAUSED]
+ *          (a user pause ended a browser/code run; resumable, never failed)
+ * [COMPLETED | FAILED | PAUSED] -- row with a higher backgroundRun --> [RUNNING]
  *
  * The trajectory renders these rows with main's spawn UI unchanged; the
  * query-box dock reads this derivation (spawned agent ids, for_each groups,
@@ -23,7 +25,7 @@ import { isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../api';
 import { codexPayload, completionStatus } from './codexMessage';
 
-export type BackgroundRunState = 'running' | 'completed' | 'failed';
+export type BackgroundRunState = 'running' | 'completed' | 'failed' | 'paused';
 
 export interface BackgroundSpawn {
   ownerToolCallId: string;
@@ -33,6 +35,11 @@ export interface BackgroundSpawn {
   address: string | null;
   /** Codex-style tree path (`/root/outreach/draft_a`) when the backend sends one. */
   path: string | null;
+  /**
+   * In-activity explore/browser task id (`taskId` / `task_id` on the owner's
+   * rows); its trajectory rows carry it as `subAgentId`. Latest run wins.
+   */
+  taskId: string | null;
   goal: string;
   /** Output schema passed to spawn_agent when a row carries it (raw; normalized by the chip). */
   outputSchema: unknown;
@@ -93,7 +100,7 @@ export function agentPathShortName(path: string | null | undefined): string | nu
 export function notificationSummary(body: string): string | null {
   const sections = body
     .split(/\n{2,}/)
-    .filter((section) => !/^(Structured Response|File):\s/.test(section.trim()));
+    .filter((section) => !/^(Structured Response|File|Session ID):\s/.test(section.trim()));
   const text = sections.join('\n\n').trim();
   return text || null;
 }
@@ -158,8 +165,11 @@ function isTerminalSpawnRow(message: Message, ownerToolCallId: string): boolean 
   return metadata.toolStatus === 'FINISHED' || metadata.toolStatus === 'ERROR';
 }
 
+/** The workflow's own outcome; "paused" is resumable, so it is neither failed nor completed. */
 function notificationState(status: string | null): BackgroundRunState {
-  return status && FAILED_STATUSES.has(status.toLowerCase()) ? 'failed' : 'completed';
+  const normalized = status?.toLowerCase() ?? '';
+  if (normalized === 'paused') return 'paused';
+  return FAILED_STATUSES.has(normalized) ? 'failed' : 'completed';
 }
 
 function emptySpawn(owner: string, startedAt: string): BackgroundSpawn {
@@ -168,6 +178,7 @@ function emptySpawn(owner: string, startedAt: string): BackgroundSpawn {
     agentType: 'agent',
     address: null,
     path: null,
+    taskId: null,
     goal: '',
     outputSchema: null,
     state: 'running',
@@ -215,6 +226,9 @@ function absorbMetadata(spawn: BackgroundSpawn, message: Message): void {
     spawn.goal ||
     (str(metadata.backgroundGoal) ?? str(metadata.fullGoal) ?? str(metadata.goal) ?? '');
   spawn.busId = spawn.busId ?? str(metadata.busId);
+  // The first foreground explore row reuses the owner id as its taskId.
+  const taskId = str(metadata.task_id) ?? str(metadata.taskId);
+  if (taskId && taskId !== spawn.ownerToolCallId) spawn.taskId = taskId;
   spawn.outputSchema =
     spawn.outputSchema ??
     metadata.backgroundOutputSchema ??

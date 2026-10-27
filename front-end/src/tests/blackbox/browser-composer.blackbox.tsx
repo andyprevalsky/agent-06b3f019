@@ -1,11 +1,16 @@
 /** Browser composition stays on the existing owner channel without exposing root controls. */
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import QueryInput, {
+  type QueryInputProps,
+} from '@/features/terminal-component-group/components/QueryInput';
 import {
   RoseAppsContext,
   type RoseAppsValue,
 } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
+import { postMessage } from '@/lib/api/messages';
+import type { Message } from '@/lib/api';
+import { UserBubble } from '@/features/terminal-component-group/components/message-bubble/UserBubble';
 import { renderWithProviders } from './test-wrapper';
 
 vi.mock('@/lib/api/messages', async (original) => ({
@@ -25,6 +30,7 @@ function browser(value: Partial<RoseAppsValue> = {}) {
     openApp: 'browser',
     browserMode: 'remote',
     browserTabAgentId: 'owner',
+    browserTabTaskId: 'browser-task',
     selectedAgentId: 'owner',
     browserComposerSlot: slot,
     tabs: [{ agentId: 'owner', taskId: 'browser-task', live: true }],
@@ -68,23 +74,21 @@ it('shows only text, files, Send and an honest read-only model label in the owne
   expect(onPause).not.toHaveBeenCalled();
 });
 
-it('pins the reported Browser task model instead of the owner model', () => {
+it('labels the Browser composer with its Rose pool, never the raw provider model', () => {
+  // Prod agent 447576b9 (rose-1-flash root): the browser reported the Cerebras
+  // leg "qwen-3.8-27b"; the composer must name the Rose pool it runs on.
   renderWithProviders(
     <RoseAppsContext.Provider
       value={browser({
         tabs: [
-          {
-            agentId: 'owner',
-            taskId: 'browser-task',
-            live: true,
-            actualModel: 'browser-actual-model',
-          },
+          { agentId: 'owner', taskId: 'browser-task', live: true, actualModel: 'qwen-3.8-27b' },
         ],
       })}
     >
       <QueryInput
         liftAboveApps
         agentId="owner"
+        agentDetail={{ model: 'rose-labs/rose-1-flash' } as QueryInputProps['agentDetail']}
         value=""
         onChange={vi.fn()}
         onSubmit={vi.fn()}
@@ -93,9 +97,123 @@ it('pins the reported Browser task model instead of the owner model', () => {
     </RoseAppsContext.Provider>,
   );
   const box = within(screen.getByTestId('browser-query-input'));
-  expect(box.getByText('browser-actual-model')).toBeVisible();
+  // Rows from before pool_name shipped: the owner-model rule.
+  expect(box.getByTestId('browser-model-label')).toHaveTextContent('rose-flash');
+  expect(box.queryByText('qwen-3.8-27b')).toBeNull();
   expect(box.queryByText('root-selected-model')).toBeNull();
   expect(box.queryByRole('combobox')).toBeNull();
+});
+
+it('labels the Browser composer with the pool its own rows report', () => {
+  renderWithProviders(
+    <RoseAppsContext.Provider
+      value={browser({
+        tabs: [
+          {
+            agentId: 'owner',
+            taskId: 'browser-task',
+            live: true,
+            actualModel: 'qwen-3.8-27b',
+            rosePool: 'rose-1-browser-use',
+          },
+        ],
+      })}
+    >
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        agentDetail={{ model: 'rose-labs/rose-1-ultra' } as QueryInputProps['agentDetail']}
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>,
+  );
+  const label = within(screen.getByTestId('browser-query-input')).getByTestId(
+    'browser-model-label',
+  );
+  expect(label).toHaveTextContent('rose-browser-use');
+});
+
+it('does not attach the agents-running header to the Browser composer', () => {
+  const banner = <div data-testid="background-agents-banner">Running 1 agent</div>;
+  const tree = (open: boolean) => (
+    <RoseAppsContext.Provider value={browser(open ? {} : { openApp: null })}>
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        topAttachment={banner}
+        value=""
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>
+  );
+  const view = renderWithProviders(tree(true));
+  const box = within(screen.getByTestId('browser-query-input'));
+  expect(box.queryByTestId('background-agents-banner')).toBeNull();
+  expect(box.queryByText('Running 1 agent')).toBeNull();
+  // The owner's own composer keeps the header.
+  view.rerender(tree(false));
+  expect(screen.getByTestId('background-agents-banner')).toBeInTheDocument();
+});
+
+it('sends from the Browser composer straight to its browser task', async () => {
+  const onSubmit = vi.fn();
+  const tree = (open: boolean) => (
+    <RoseAppsContext.Provider value={browser(open ? {} : { openApp: null })}>
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        value="go to instacart instead"
+        onChange={vi.fn()}
+        onSubmit={onSubmit}
+      />
+    </RoseAppsContext.Provider>
+  );
+  const view = renderWithProviders(tree(true));
+  fireEvent.click(
+    within(screen.getByTestId('browser-query-input')).getByRole('button', { name: 'Send' }),
+  );
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(undefined, { browserTaskId: 'browser-task' });
+  // The owner's own composer keeps addressing the agent itself.
+  onSubmit.mockClear();
+  view.rerender(tree(false));
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(undefined);
+
+  const fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response(JSON.stringify({ message_id: 'm1' }), { status: 201 }));
+  await postMessage('owner', 'go to instacart instead', undefined, {
+    browserTaskId: 'browser-task',
+  });
+  const [url, init] = fetchSpy.mock.calls[0];
+  expect(String(url)).toMatch(/\/agents\/owner\/messages$/);
+  expect(JSON.parse(String(init?.body))).toEqual({
+    message: 'go to instacart instead',
+    browser_task_id: 'browser-task',
+  });
+  fetchSpy.mockRestore();
+});
+
+it('labels a Browser-composer message in the owner chat as sent to the Browser', () => {
+  const row = (metadata: Record<string, unknown>) =>
+    ({
+      message_id: `m-${Object.keys(metadata).length}`,
+      timestamp: '2026-10-26T15:59:40Z',
+      role: 'USER',
+      text: 'go to instacart instead',
+      metadata,
+    }) as Message;
+  const view = renderWithProviders(
+    <UserBubble message={row({ browserTaskId: 'browser-task', excludeFromModel: true })} />,
+  );
+  expect(screen.getByText('You → Browser:', { exact: false })).toBeVisible();
+  // An attention reply tagged for the browser is still the owner's own message.
+  view.rerender(<UserBubble message={row({ browserTaskId: 'browser-task' })} />);
+  expect(screen.queryByText('You → Browser:', { exact: false })).toBeNull();
+  expect(screen.getByText('go to instacart instead')).toBeVisible();
 });
 
 it('keeps the root composer controls when the Browser drawer is closed', () => {
@@ -131,6 +249,7 @@ it('retains draft files when moving between the owner composer and Browser, and 
   expect(box.getByText('notes.txt')).toBeVisible();
   expect(box.getByRole('textbox')).toHaveValue('draft');
   fireEvent.click(box.getByRole('button', { name: 'Send' }));
+  // Files only reach models through the owner agent, so they go untargeted.
   expect(onSubmit).toHaveBeenCalledExactlyOnceWith([
     { id: 'file-pointer', original_filename: 'notes.txt' },
   ]);
@@ -157,4 +276,33 @@ it('keeps the native code composer usable on its original direct channel in Brow
   expect(box.queryByPlaceholderText('Message Rose about this browser')).toBeNull();
   fireEvent.keyDown(box.getByRole('textbox'), { key: 'Enter' });
   expect(nativeSubmit).toHaveBeenCalledOnce();
+});
+
+it('rejects the stale sibling task slot while both browser tabs remain registered', () => {
+  renderWithProviders(
+    <RoseAppsContext.Provider
+      value={browser({
+        browserTabTaskId: 'other-browser-task',
+        tabs: [
+          { agentId: 'owner', taskId: 'browser-task', live: true },
+          {
+            agentId: 'owner',
+            taskId: 'other-browser-task',
+            live: true,
+            actualModel: 'other-model',
+          },
+        ],
+      })}
+    >
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        value="draft"
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>,
+  );
+  expect(screen.queryByTestId('browser-query-input')).toBeNull();
+  expect(slot?.childElementCount).toBe(0);
 });

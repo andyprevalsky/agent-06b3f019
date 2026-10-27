@@ -8,6 +8,10 @@
  *                     (e.g. the Integrations sync-progress poll)
  *   [OPEN] --Escape | its trigger again (icon / left-bar row)--> [CLOSING]
  *
+ * Geometry/layer: Biz health is full width (variant 'full', like Browser);
+ * the others are the resizable right panel. Integrations and Biz health cover
+ * the floating query box (coversComposer → ROSE_LAYER.coverPanel).
+ *
  * Header = icon + title; no close X (the triggers toggle, UI ledger row 67).
  * Bodies reuse existing pages (loaded lazily through the pages layer; features
  * never import other features):
@@ -27,7 +31,7 @@ import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import SidebarCreditIndicator from '../SidebarCreditIndicator';
 import { AppDrawerShell } from './AppDrawerShell';
 import { FeedbackAppPanel } from './FeedbackAppPanel';
-import { DRAWER_DURATION_MS } from './roseAppsLayout';
+import { DRAWER_DURATION_MS, coversComposer } from './roseAppsLayout';
 import { useRoseApps, type RoseApp } from './roseAppsState';
 
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
@@ -89,7 +93,7 @@ function PanelBody({ app }: { app: PanelApp }): ReactNode {
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
-  if (app === 'health') return <AdminHealthPage />;
+  if (app === 'health') return <AdminHealthPage embedded />;
   return <SettingsBody onLogout={apps?.onLogout} />;
 }
 
@@ -112,7 +116,8 @@ export function RoseAppPanelDrawer() {
       open={open}
       label={`${meta?.title ?? 'App'} panel`}
       testId="rose-app-panel"
-      aboveQuerybox={shown === 'integrations'}
+      variant={shown === 'health' ? 'full' : 'panel'}
+      aboveQuerybox={coversComposer(shown)}
     >
       {shown !== null && meta !== null && (
         <>

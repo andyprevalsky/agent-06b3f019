@@ -1,3 +1,4 @@
+import { localizeTimestamps } from '@/lib/localDateTime';
 import { ToolIcon } from './ToolIcon';
 
 interface StatusLineProps {
@@ -25,10 +26,14 @@ export function StatusLine({ statusText, toolsInUse, isHovered }: StatusLineProp
     return (
       <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
         <ToolIcon toolName={toolsInUse[0]} />
-        <span>{toolsInUse[0]}</span>
+        <span>{localizeTimestamps(toolsInUse[0])}</span>
       </span>
     );
   }
 
-  return <span className="text-xs text-gray-500 dark:text-gray-400">{statusText}</span>;
+  return (
+    <span className="text-xs text-gray-500 dark:text-gray-400">
+      {localizeTimestamps(statusText)}
+    </span>
+  );
 }

@@ -14,6 +14,7 @@ import type {
   FilePointer,
   CreateAgentPayload,
   InspectionContext,
+  MessageTarget,
 } from '@/lib/api';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
@@ -87,7 +88,7 @@ export interface TerminalAgentActions {
   handleCreateAgent: (data: CreateAgentPayload) => Promise<void>;
   handleResumeAgent: (agentId: string) => Promise<void>;
   handlePauseAgent: () => Promise<void>;
-  handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  handleSendMessage: (attachments?: FilePointer[], target?: MessageTarget) => Promise<void>;
   handleLogout: () => Promise<void>;
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
@@ -155,7 +156,7 @@ export interface AgentSlice {
   isPausing: boolean;
   ancestors: AncestorNode[];
   handleSelectAgent: (id: string | null) => void;
-  handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  handleSendMessage: (attachments?: FilePointer[], target?: MessageTarget) => Promise<void>;
   handlePauseAgent: () => Promise<void>;
   handleSubmitFeedback: (f: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (id: string) => Promise<void>;
@@ -185,6 +186,7 @@ export type {
   AncestorNode,
   FilePointer,
   CreateAgentPayload,
+  MessageTarget,
 } from '@/lib/api';
 
 export type { Model } from '@/hooks/useAppData';

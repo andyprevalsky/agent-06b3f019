@@ -3,7 +3,7 @@
  * and render file contents (HTML srcDoc, spreadsheet tables, text, etc.).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
@@ -48,6 +48,12 @@ vi.mock('@/features/terminal-component-group/api', async () => {
     downloadAttachmentAsText: (...args: unknown[]) => downloadTextMock(...args),
   };
 });
+
+/** Tailwind z of an element (z-[N] or z-N); NaN when it has none. */
+function layerZ(element: Element | null): number {
+  const match = /(?:^|\s)z-\[?(-?\d+)\]?(?=\s|$)/.exec(element?.getAttribute('class') ?? '');
+  return match ? Number(match[1]) : Number.NaN;
+}
 
 function makeFile(
   overrides: Partial<FilePointer> & Pick<FilePointer, 'original_filename' | 'mime_type'>,
@@ -296,6 +302,41 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(downloadTextMock).toHaveBeenCalled();
   });
 
+  it('the file viewer panel sits above its own dark scrim and its body is the scroll container', async () => {
+    // Regression (Andy, 2026-10-27): opening a file cast a dark overlay over the
+    // viewer itself and the file could not be scrolled — the panel's z-[110]
+    // override sat under the sheet scrim (z-[210]), which caught every wheel.
+    const user = userEvent.setup();
+    downloadTextMock.mockResolvedValue(
+      Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n'),
+    );
+    const file = makeFile({ original_filename: 'notes.txt', mime_type: 'text/plain' });
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{ summary: 'Done', outputs: [{ key: 'doc', label: 'Notes', value: file }] }}
+      />,
+      { roseDesktop: true },
+    );
+    await user.click(await screen.findByTestId('file-pointer-chip'));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    const text = await within(drawer).findByTestId('document-preview-text');
+    // The scrim is the sibling Radix renders in the same portal.
+    const scrim = drawer.previousElementSibling;
+    expect(scrim).toHaveClass('fixed', 'inset-0');
+    expect(scrim?.className).toMatch(/bg-black\//);
+    expect(layerZ(drawer)).toBeGreaterThan(layerZ(scrim));
+    // Height-bounded panel, its body scrolls (min-h-0 flex child, overflow auto).
+    expect(drawer).toHaveClass('flex', 'flex-col', 'h-full', 'overflow-hidden');
+    const body = text.parentElement;
+    expect(body).toHaveClass('min-h-0', 'flex-1', 'overflow-auto');
+    expect(drawer.contains(body)).toBe(true);
+    // A wheel on scrollable content is not cancelled by the modal scroll lock
+    // (jsdom has no layout, so give the body its overflowing geometry).
+    Object.defineProperty(body!, 'scrollHeight', { configurable: true, value: 4000 });
+    Object.defineProperty(body!, 'clientHeight', { configurable: true, value: 600 });
+    expect(fireEvent.wheel(body!, { deltaY: 120 })).toBe(true);
+  });
+
   it('runs generated HTML+JS for Rose Desktop accounts with every network load still blocked', async () => {
     // Regression (2026-10-20 recording): a code agent's single-file game opened in
     // the drawer but default-src 'none' blocked its inline script, so it never ran.
@@ -313,7 +354,7 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     await user.click(await screen.findByTestId('file-pointer-chip'));
     const drawer = await screen.findByTestId('document-preview-drawer');
     // Above the top-right account rail (z-[100]) so Download is never covered.
-    expect(drawer.className).toContain('z-[110]');
+    expect(layerZ(drawer)).toBeGreaterThan(100);
     const policy = csp(
       (await within(drawer).findByTestId('document-preview-html')).getAttribute('srcdoc') ?? '',
     );

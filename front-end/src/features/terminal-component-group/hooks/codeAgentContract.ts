@@ -8,7 +8,7 @@
  *
  *   agent:<rootId> realtime INSERT/UPDATE (existing message path)
  *     ├─ metadata.code_agent            → CodeAgentMeta    (chip lifecycle, target, summary,
- *     │    preview_url → live preview card that opens the full-screen app view);
+ *     │    preview_url → "Open app" button that opens the full-screen app view);
  *     │    state 'paused' = idle/user pause or waiting on the parent: resumable, never failed
  *     ├─ metadata.code_session          → CodeSessionFacts (branch → merge_target, pushed/pr/merged)
  *     ├─ metadata.failure_kind 'usage_limit' + retryable + usage_limit{provider, resets_at}
@@ -154,6 +154,8 @@ export interface CodeAgentTranscriptEvent {
   tool?: CodeAgentToolCall;
   /** 'user' = a steering message echoed back by the session (default 'assistant'). */
   role?: 'assistant' | 'user';
+  /** Who sent a 'user' message: the person, or Rose (the goal / an agent message). */
+  sender?: 'user' | 'agent';
   a2a?: AgentToAgentMessage;
 }
 
