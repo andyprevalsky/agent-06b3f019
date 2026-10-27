@@ -175,7 +175,10 @@ const CompactRow = forwardRef<
           carries the per-row state. */}
       <Bot
         data-sidebar-agent-icon
-        className={cn('h-5 w-5', isSelected ? 'text-gray-800' : 'text-gray-500')}
+        className={cn(
+          'h-5 w-5',
+          isSelected ? 'text-gray-800 dark:text-foreground' : 'text-gray-500',
+        )}
       />
       {runStatus.state !== 'active' && (
         <span className="absolute -top-0.5 right-0.5">
