@@ -2806,7 +2806,10 @@ PY_IMAGE_REF
 }
 
 image_build_input_provenance() {
-    python3 - "$IMAGE_BUILD_CONTEXT" "${IMAGE_BUILD_BUILDER:-native}" <<'PY_INPUTS'
+    local node_fp python_fp
+    node_fp="$(cloudbench_node_dependency_fingerprint "$IMAGE_BUILD_CONTEXT")" || return 1
+    python_fp="$(cloudbench_manifest_fingerprint "$IMAGE_BUILD_CONTEXT" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    python3 - "$IMAGE_BUILD_CONTEXT" "${IMAGE_BUILD_BUILDER:-native}" "$node_fp" "$python_fp" <<'PY_INPUTS'
 import hashlib
 import json
 import os
@@ -2828,6 +2831,8 @@ def git_value(*arguments):
 
 dirty = git_value("status", "--porcelain=v1", "--untracked-files=normal")
 print(json.dumps({
+    "node_dependency_fingerprint": sys.argv[3],
+    "python_dependency_fingerprint": sys.argv[4],
     "build_context": str(context),
     "source_sha": git_value("rev-parse", "HEAD") or "",
     "source_dirty": None if dirty is None else bool(dirty),
@@ -2879,6 +2884,17 @@ if [ "$MODE" = build-image ]; then
         # be attributed to an image whose build context was already submitted.
         image_build_provenance="$(image_build_input_provenance)" || exit $?
         build_warm_image || exit $?
+        # An image receipt must not attribute changed dependency inputs to a
+        # publication submitted before those edits.
+        image_build_final_provenance="$(image_build_input_provenance)" || exit 1
+        python3 - "$image_build_provenance" "$image_build_final_provenance" <<'PY_DEP_INPUTS'
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+for key in ('node_dependency_fingerprint', 'python_dependency_fingerprint'):
+    if before[key] != after[key]:
+        raise SystemExit('Dependency inputs changed during image build; publication is not admitted')
+PY_DEP_INPUTS
+        [ "$?" = 0 ] || exit 1
         image_build_finished="$(date +%s)"
         python3 - "$OUT_DIR/cloudbench-image-build.json" "$IMAGE_REF" \
             "$IMAGE_BUILD_NO_CACHE" "$image_build_provenance" \

@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.cloudbench_image_cli_test import _image_dependency_inputs
+
 ROOT = Path(__file__).resolve().parents[2]
 IMAGES = ("Dockerfile.cloudbench-warm", "Dockerfile.cloudbench")
 
@@ -344,6 +346,7 @@ def test_cloudbench_image_build_stages_an_exact_git_seed_and_removes_it(tmp_path
     context = tmp_path / "checkout"
     libraries = context / "scripts/lib"
     libraries.mkdir(parents=True)
+    _image_dependency_inputs(context)
     registry = context / "agents/providers/rose/pools.py"
     registry.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
@@ -494,6 +497,7 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
     context = tmp_path / "checkout"
     libraries = context / "scripts/lib"
     libraries.mkdir(parents=True)
+    _image_dependency_inputs(context)
     registry = context / "agents/providers/rose/pools.py"
     registry.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)

@@ -22,6 +22,17 @@ BASH = shutil.which("bash")
 PUBLISHER_LIB = ROOT / "scripts/lib/cloudbench-image-publisher.sh"
 
 
+def _image_dependency_inputs(context):
+    # The real receipt producer now fingerprints actual selected manifests.
+    for relative in ('package.json', 'back-end/package.json', 'front-end/package.json'):
+        path = context / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+    (context / 'back-end/package-lock.json').write_text('fixture-lock\n')
+    (context / 'agents').mkdir(exist_ok=True)
+    (context / 'agents/requirements.txt').write_text('fixture-requirements\n')
+
+
 @contextmanager
 def _manifest_registry(response):
     requests = []
@@ -809,6 +820,7 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
     registry = root / "agents/providers/rose/pools.py"
     registry.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
+    _image_dependency_inputs(root)
     (root / "Dockerfile.cloudbench-warm").write_text("FROM fixture-source\n")
     (root / "fly.cloudbench-warm.toml").write_text('app = "fixture-source"\n')
     binaries = tmp_path / "bin"
@@ -850,6 +862,7 @@ def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, buil
     helper = source[start:end]
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture-selected-checkout"\n')
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture-selected-checkout\n")
     observed = tmp_path / "arguments.json"
@@ -896,12 +909,14 @@ def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, buil
 
 
 @pytest.mark.parametrize("builder", [None, "depot"])
-def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_path, builder):
+@pytest.mark.parametrize("change_dependencies", [False, True])
+def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_path, builder, change_dependencies):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
     start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     files = {
         "Dockerfile.cloudbench-warm": "FROM fixture-selected-checkout\n",
         "fly.cloudbench-warm.toml": 'app = "fixture-selected-checkout"\n',
@@ -922,6 +937,8 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
         "from pathlib import Path\n"
         "context=Path(sys.argv[1])\n"
         "(context/'Dockerfile.cloudbench-warm').write_text('changed after provider launch\\n')\n"
+        + ("(context/'back-end/package.json').write_text('{\"dependencies\":{\"fixture\":\"2.0\"}}')\n" if change_dependencies else "")
+        +
         "subprocess.run(['git','-C',str(context),'-c','user.name=Fixture','-c',"
         "'user.email=fixture@example.invalid','commit','-qm','provider started'],check=True,capture_output=True)\n"
     )
@@ -929,6 +946,7 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
     output.mkdir()
     harness = tmp_path / "build.sh"
     harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
         "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
         f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
@@ -947,8 +965,15 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
         text=True,
         timeout=30,
     )
+    if change_dependencies:
+        assert result.returncode != 0
+        assert "Dependency inputs changed during image build" in result.stderr
+        assert not (output / "cloudbench-image-build.json").exists()
+        return
     assert result.returncode == 0, result.stderr
     receipt = json.loads((output / "cloudbench-image-build.json").read_text())
+    assert len(receipt["node_dependency_fingerprint"]) == 64
+    assert len(receipt["python_dependency_fingerprint"]) == 64
     assert receipt["source_sha"] == before
     assert receipt["source_dirty"] is True
     assert receipt["build_context"] == str(context)
@@ -992,6 +1017,7 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
     output = tmp_path / "receipt"
@@ -1017,6 +1043,7 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
     publisher.chmod(0o700)
     harness = tmp_path / "build.sh"
     harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
         "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
         f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
@@ -1154,6 +1181,7 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
     output = tmp_path / "receipt"
@@ -1187,7 +1215,8 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
     with _manifest_registry(response) as (origin, _requests):
         harness = tmp_path / "build.sh"
         harness.write_text(
-            "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
+            f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
+        "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
             f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
             f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
             f"OUT_DIR={shlex.quote(str(output))}\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"

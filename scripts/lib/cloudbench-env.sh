@@ -2718,3 +2718,37 @@ for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
 }
+
+# A volume snapshot proof cannot establish the baked /app inputs used by fresh
+# storage. Consume only an explicitly pinned, verified image-build receipt.
+cloudbench_verify_image_dependency_receipt() {  # <receipt> <sha256> <source-id> <node> <python>
+    python3 -c '
+import hashlib, json, re, sys
+from pathlib import Path
+try:
+    path, expected, source, node, python = sys.argv[1:]
+    if not re.fullmatch("[0-9a-f]{64}", expected):
+        raise ValueError("missing pinned image-build receipt SHA256")
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("image-build receipt checksum differs")
+    proof = json.loads(raw)
+    rows = [row for row in json.load(sys.stdin) if row.get("id") == source]
+    if len(rows) != 1:
+        raise ValueError("image source missing or ambiguous")
+    row = rows[0]
+    digest = (row.get("image_ref") or {}).get("digest") or row["config"]["image"].rpartition("@")[2]
+    if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
+        raise ValueError("source image has no immutable digest")
+    if proof.get("schema") != "cloudbench-image-build-v1" or proof.get("publication_verified") is not True:
+        raise ValueError("image publication is unverified")
+    image = proof.get("published_image_ref", "")
+    if image.rpartition("@")[2] != digest or proof.get("image_ref") != image or proof.get("published_digest") != digest:
+        raise ValueError("image receipt does not cover actual source image")
+    if proof.get("node_dependency_fingerprint") != node or proof.get("python_dependency_fingerprint") != python:
+        raise ValueError("baked image dependency identity differs from requested ref")
+except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+    print("Fresh-storage image dependency admission refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+' "$@"
+}
