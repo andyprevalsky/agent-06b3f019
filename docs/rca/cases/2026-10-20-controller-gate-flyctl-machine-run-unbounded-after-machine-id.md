@@ -176,3 +176,27 @@ The case remains open for original native API
 causality and unchanged cohort outcome evidence. The original
 campaign's cleanup and next unchanged cohort remain parent/launch-owner work.
 No provider mutation, paid run or deployment was performed by this RCA worker.
+
+### Original I16 receipts received after the source repair
+
+Launch-owner immutable receipts confirm campaign
+`campaign-20261027-221425-742460`, canary fleet
+`20261027-223307-1448491`, under `r002-j0019`/`polar-bu-004`.
+At `2026-10-27T22:46:58.106Z`, native PID1456787 had elapsed13:41,
+parent1456644, stateSl, wait channel`futex_wait_queue`, 12threads and
+59,988KiBRSS. The captured argv is exactly
+`flyctl secrets list -a navi-whisper-lux-bench --json`. The last saved canary
+log reached the read-only app-environment verifier with no subsequent native
+response. No response payload exists to diagnose the remote wait itself.
+The original native observation digest is
+`738e88c056dc3cffaedbeb3b7d2d4adc79f8a83e096c8c315b04922f0d47ffc9`.
+
+The parent-authorized TERM targeted campaign PID742460 with birth7923571 at
+`2026-10-27T22:48:31.701Z`. The terminal summary reports cancelled at
+`2026-10-27T22:52:05.629925+00:00`, with30 cancelled members retaining their
+producer `INFRA_ERROR`/true/143 classification, no new allocations, no lock
+flocks remaining and ownership removed. This is cancellation/cleanup evidence,
+not repaired-task outcome proof. The summary digest is
+`191441eff599b057be2a5630f207f4178d1b63e8713e585ab15dd70224c06132`.
+The four recorded processes were gone by22:52 according to the launch owner.
+The supported cleanup was performed by that owner, not this RCA worker.
