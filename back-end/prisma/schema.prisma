@@ -220,6 +220,28 @@ model Message {
 /// Search projection of live messages and finalized R2 trace bundles. Archive
 /// rows deliberately have no FK to Message: archived traces remain searchable
 /// after operational Agent/Message rows are purged.
+/// Per-root trace-archive manifest lease. A row lease (not a transaction-held
+/// advisory lock) so no pooled connection is pinned across R2 storage I/O.
+model TraceArchiveManifestLease {
+  rootAgentId String   @id
+  ownerId     String
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// One row per agent in trajectory search: its goal and title, stored once
+/// instead of on every AgentTrajectorySearch message row.
+model AgentTrajectoryAgent {
+  agentId    String   @id
+  userId     String
+  agentGoal  String   @default("")
+  agentTitle String?
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+}
+
 model AgentTrajectorySearch {
   messageId   String   @id
   userId      String

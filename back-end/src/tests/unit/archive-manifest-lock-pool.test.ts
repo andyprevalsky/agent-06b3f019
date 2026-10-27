@@ -1,7 +1,6 @@
 #!/usr/bin/env tsx
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
 import { createTestHarness, observeUntil } from './trace-archive-test-utils'; // pragma: allowlist secret
 
 const baseUrl = process.env.DATABASE_URL ?? '';
@@ -12,20 +11,10 @@ const separator = baseUrl.includes('?') ? '&' : '?';
 process.env.DATABASE_URL = `${baseUrl}${separator}connection_limit=2&pool_timeout=4`;
 
 const { test, finish } = createTestHarness('archive manifest lock pool tests');
-const observer = new PrismaClient({
-  datasources: { db: { url: `${baseUrl}${separator}connection_limit=1` } },
-});
-
-async function advisoryWaiters(): Promise<number> {
-  const rows = await observer.$queryRawUnsafe<{ waiting: number }[]>(
-    "SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory'"
-  );
-  return rows[0]?.waiting ?? 0;
-}
-
 async function main(): Promise<void> {
   const { prisma } = await import('../../providers/database');
-  const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
+  const { archiveManifestLockWaiters, withArchiveManifestLock } =
+    await import('../../providers/traceArchiveManifest');
 
   await test('a same-root waiter cannot starve the lock holder of pool connections', async () => {
     const rootAgentId = `manifest-lock-pool-${randomUUID()}`;
@@ -53,7 +42,7 @@ async function main(): Promise<void> {
       return 'waiter';
     });
     void waiter.catch(() => {});
-    await observeUntil(async () => (await advisoryWaiters()) >= 1);
+    await observeUntil(async () => archiveManifestLockWaiters() >= 1);
     release();
     const [holderResult, waiterResult] = await Promise.allSettled([holder, waiter]);
     assert.strictEqual(
@@ -67,7 +56,6 @@ async function main(): Promise<void> {
     assert.deepStrictEqual(order, ['holder', 'waiter'], 'the lock still serializes one root');
   });
 
-  await observer.$disconnect();
   await prisma.$disconnect();
   finish();
 }

@@ -6,6 +6,7 @@ import {
   ArchivedTraceNotFoundError,
   backfillLiveMessageSearchBatch,
   indexArchivedTraceFromR2,
+  normalizeTrajectoryGoalBatch,
 } from '../src/providers/traceArchiveSearchIndex';
 import { prisma } from '../src/providers/database';
 
@@ -57,10 +58,54 @@ async function backfillLiveMessages(args: string[]): Promise<void> {
   );
 }
 
+/**
+ * Move legacy per-row goal/title copies onto AgentTrajectoryAgent in
+ * primary-key-ordered batches (no statement scans the whole table).
+ * Idempotent and resumable with `--after <last cursor>`.
+ */
+async function normalizeAgentGoals(args: string[]): Promise<void> {
+  const usage =
+    'Usage: backfill-agent-trajectory-search.ts --agent-goals [--batch-size 1..5000] [--after <message id>]';
+  const sizeArg = args.indexOf('--batch-size');
+  const afterArg = args.indexOf('--after');
+  const batchSize = sizeArg >= 0 ? Number(args[sizeArg + 1]) : 1000;
+  const known = new Set(['--batch-size', '--after']);
+  const operands = new Set([sizeArg + 1, afterArg + 1].filter((index) => index > 0));
+  if (
+    !Number.isInteger(batchSize) ||
+    batchSize < 1 ||
+    batchSize > 5_000 ||
+    (afterArg >= 0 && (!args[afterArg + 1] || args[afterArg + 1].startsWith('-'))) ||
+    args.some((arg, index) => !operands.has(index) && !known.has(arg))
+  ) {
+    throw new Error(usage);
+  }
+  let afterId: string | null = afterArg >= 0 ? args[afterArg + 1] : null;
+  let scanned = 0;
+  let cleared = 0;
+  for (let batches = 1; ; batches += 1) {
+    const batch = await normalizeTrajectoryGoalBatch(afterId, batchSize);
+    if (batch.scanned === 0) break;
+    afterId = batch.lastMessageId;
+    scanned += batch.scanned;
+    cleared += batch.cleared;
+    if (batches % 50 === 0) {
+      process.stderr.write(`Scanned ${scanned} rows (${cleared} cleared); cursor ${afterId}\n`);
+    }
+  }
+  process.stdout.write(
+    `${JSON.stringify({ mode: 'agent-goals', scanned, cleared, cursor: afterId })}\n`
+  );
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args[0] === '--live-messages') {
     await backfillLiveMessages(args.slice(1));
+    return;
+  }
+  if (args[0] === '--agent-goals') {
+    await normalizeAgentGoals(args.slice(1));
     return;
   }
   const usage =
