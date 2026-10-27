@@ -190,6 +190,7 @@ CODEX_AUTH_ADMISSION_TOKEN=""
 CODEX_AUTH_HELPER="${CLOUDBENCH_CODEX_AUTH_HELPER:-$CONTROL_DIR/cloudbench-codex-auth.py}"
 HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
+STACK_LAUNCH_ATTEMPTED=0
 STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
 GUEST_DIAGNOSTICS_PID=""
@@ -271,6 +272,18 @@ publish_cleanup_ack() {
             log "FATAL: stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
         fi
+    fi
+    if [ "${STACK_LAUNCH_ATTEMPTED:-1}" = 0 ] && [ -z "${STACK_PID:-}" ] \
+        && [ -z "${ACTIVE_COMMAND_PID:-}" ]; then
+        # This driver can exit during dependency setup, before run.sh creates
+        # services.json. Preserve that truthful terminal phase before the ACK.
+        local seal="$DATA_DIR/cloudbench-prestack-${CLOUDBENCH_RUN_TOKEN}.sealed"
+        local seal_temporary="${seal}.tmp.$$"
+        for artifact in services.json run.json stack.log logs/backend.log logs/worker.log; do
+            [ ! -e "$CONTEXT_DIR/$artifact" ] && [ ! -L "$CONTEXT_DIR/$artifact" ] || return 1
+        done
+        printf '%s\n' "$CLOUDBENCH_RUN_TOKEN" > "$seal_temporary" \
+            && mv -f "$seal_temporary" "$seal" || return 1
     fi
     printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
         && mv -f "$temporary" "$CLEANUP_ACK_FILE"
@@ -1311,6 +1324,7 @@ fi
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 rm -f "$STACK_CLEANUP_STATUS_FILE"
+STACK_LAUNCH_ATTEMPTED=1
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
 STACK_PID=$!
 if ! STACK_NATIVE_IDENTITY="$(python3 "$CONTROL_DIR/process-identity.py" "$STACK_PID")" \

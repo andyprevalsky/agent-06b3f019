@@ -4928,9 +4928,12 @@ assert expected["version"] == 1 and expected["run_token"] == run_token and expec
 files = expected["files"]
 # A guest stopped before launching anything seals only its exact bench.log.
 prelaunch = expected.get("prelaunch") is True
-if prelaunch:
-    required = {"bench.log"}
-    assert set(expected) == {"version", "run_token", "machine_id", "files", "prelaunch"}
+prestack = expected.get("prestack") is True
+no_stack = prelaunch or prestack
+if no_stack:
+    phase = "prelaunch" if prelaunch else "prestack"
+    required = {"bench.log"} if prelaunch else {"bench.log", f"cloudbench-prestack-{run_token}.sealed"}
+    assert set(expected) == {"version", "run_token", "machine_id", "files", phase}
     assert isinstance(files, dict) and set(files) == required
 else:
     required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
@@ -4966,7 +4969,9 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
-if prelaunch:
+if no_stack:
+    if prestack:
+        assert (pending / f"cloudbench-prestack-{run_token}.sealed").read_bytes() == (run_token + "\n").encode()
     with (pending / "bench.log").open("rb") as log:
         stamp = ("RUNSTAMP-" + run_token + "\n").encode()
         assert log.read(len(stamp)) == stamp, "pre-launch log belongs to another run"
@@ -4983,7 +4988,7 @@ with (pending / "manifest.json").open("x") as output:
     os.fsync(output.fileno())
 # Persist child directory entries before acknowledging the published capture.
 # File fsync alone does not make their names durable across controller failure.
-for directory in ((pending,) if prelaunch else (pending / "logs", pending)):
+for directory in ((pending,) if no_stack else (pending / "logs", pending)):
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -4995,7 +5000,7 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
-if prelaunch:
+if no_stack:
     # No run result can exist to bind the latch to; the sealed pre-launch
     # bundle is the complete runtime evidence, so release the latch here.
     intent.unlink()

@@ -2611,7 +2611,8 @@ path = sys.argv[1]
 if not os.path.isfile(path) or os.path.islink(path):
     raise SystemExit(1)
 with open(path, 'rb') as manifest:
-    raise SystemExit(0 if json.loads(manifest.read(1048577)).get('prelaunch') is True else 1)
+    value = json.loads(manifest.read(1048577))
+    raise SystemExit(0 if value.get('prelaunch') is True or value.get('prestack') is True else 1)
 PY
 }
 
@@ -2647,11 +2648,17 @@ assert re.fullmatch(r'[0-9a-f]+', owner['machine_id'])
 assert re.fullmatch(r'[A-Za-z0-9._-]+', owner['run_token'])
 assert all(owner[k] == manifest[k] for k in ('run_token', 'machine_id'))
 prelaunch = manifest.get('prelaunch') is True
-if prelaunch:
-    # The guest stopped before launching any driver or stack: its exact
-    # bench.log is the complete runtime evidence.
-    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', 'prelaunch'}
-    assert set(manifest['files']) == {'bench.log'}
+prestack = manifest.get('prestack') is True
+no_stack = prelaunch or prestack
+if no_stack:
+    # Prelaunch means no driver; prestack means the driver cleaned up before
+    # attempting run.sh. Neither phase has a benchmark result.
+    phase = 'prelaunch' if prelaunch else 'prestack'
+    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', phase}
+    expected = {'bench.log'} if prelaunch else {'bench.log', 'cloudbench-prestack-' + owner['run_token'] + '.sealed'}
+    assert set(manifest['files']) == expected
+    if prestack:
+        assert read(root / ('cloudbench-prestack-' + owner['run_token'] + '.sealed')) == (owner['run_token'] + '\n').encode()
     stamp = ('RUNSTAMP-' + owner['run_token'] + '\n').encode()
     with open(root / 'bench.log', 'rb') as log:
         assert log.read(len(stamp)) == stamp
@@ -2687,7 +2694,7 @@ for name, row in manifest['files'].items():
         assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
         assert digest.hexdigest() == row['sha256']
         os.fsync(f.fileno())
-for directory in ((root, root.parent, out) if prelaunch else (root / 'logs', root, root.parent, out)):
+for directory in ((root, root.parent, out) if no_stack else (root / 'logs', root, root.parent, out)):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)

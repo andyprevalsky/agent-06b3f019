@@ -305,5 +305,114 @@ class CancelledAcceptedStartEligibility(unittest.TestCase):
         self.assertNotEqual(self.eligible(), 0)
 
 
+
+class DriverPrestackCancel(unittest.TestCase):
+    """I5: real driver cleanup after dep_sync, before run.sh exists."""
+
+    def test_driver_cleanup_seals_prestack_evidence_for_both_collectors(self):
+        import runpy
+        with tempfile.TemporaryDirectory(prefix="cloudbench-driver-prestack-") as temporary:
+            base = Path(temporary).resolve()
+            data = base / "data"
+            context = data / "repo/.context/cloudbench"
+            context.mkdir(parents=True)
+            token = TOKEN
+            (data / "bench.log").write_text(
+                f"RUNSTAMP-{token}\n[cloudbench] STEP dep_sync\n"
+                "[cloudbench] guest shutdown requested; draining benchmark root before stack teardown\n"
+            )
+            (data / f"cloudbench-shutdown-{token}.request").touch()
+            driver = SCRIPTS / "cloudbench-run.sh"
+            script = "\n".join(shell_function(driver, name) for name in
+                               ("publish_cleanup_ack", "cleanup_stack"))
+            variables = {
+                "DATA_DIR": data, "CONTEXT_DIR": context,
+                "CLOUDBENCH_RUN_TOKEN": token,
+                "CLEANUP_ACK_FILE": data / f"cloudbench-driver-clean-{token}.ack",
+                "PRESTACK_SEAL_FILE": data / f"cloudbench-prestack-{token}.sealed",
+                "INTERRUPT_CLEANUP_STATUS_FILE": data / "interrupt.status",
+                "RUNNER_INTERRUPT_CLEANUP_STATUS_FILE": context / "interrupt.status",
+                "STACK_CLEANUP_STATUS_FILE": context / "stack.status",
+                "STACK_PID": "", "STACK_LAUNCH_ATTEMPTED": "0", "STACK_NATIVE_IDENTITY": "", "ACTIVE_COMMAND_PID": "",
+                "ACTIVE_COMMAND_SIGNALLED": "0", "CODEX_AUTH_ADMISSION_TOKEN": "",
+                "HEARTBEAT_SLEEP_PID": "", "TAIL_PID": "", "GUEST_DIAGNOSTICS_PID": "",
+            }
+            import shlex
+            prefix = "\n".join(f"{key}={shlex.quote(str(value))}" for key, value in variables.items())
+            result = subprocess.run(["bash", "-c", "set -uo pipefail\n" + prefix +
+                                     "\nlog() { :; }\n" + script +
+                                     "\ntrap cleanup_stack EXIT\nexit 143\n"],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 143, result.stderr)
+            self.assertEqual((data / f"cloudbench-driver-clean-{token}.ack").read_text(), token + "\n")
+            # The actual boot supervisor publishes exited only after the driver returns.
+            (data / "cloudbench-driver.state").write_text("exited\n")
+            server = runpy.run_path(str(SCRIPTS / "cloudbench-status-server.py"))
+            manifest = server["runtime_evidence_manifest"](data, token, MACHINE)
+            self.assertIs(manifest.get("prestack"), True)
+            self.assertEqual(set(manifest["files"]), {"bench.log", f"cloudbench-prestack-{token}.sealed"})
+            # A live driver, a foreign receipt, or any stack artifact invalidates this phase.
+            seal = data / f"cloudbench-prestack-{token}.sealed"
+            original = seal.read_bytes()
+            for name, value in (("cloudbench-driver.pid", b"999\n"),
+                                (f"cloudbench-prestack-{token}.sealed", b"foreign\n"),
+                                ("repo/.context/cloudbench/services.json", b"{}")):
+                target = data / name
+                target.write_bytes(value)
+                with self.assertRaises((OSError, ValueError, KeyError)):
+                    server["runtime_evidence_manifest"](data, token, MACHINE)
+                if target == seal:
+                    target.write_bytes(original)
+                else:
+                    target.unlink()
+            # Cancellation in the launch-to-PID assignment window must never
+            # become a no-stack receipt, nor may an active command do so.
+            for guard in ("STACK_LAUNCH_ATTEMPTED=1", "ACTIVE_COMMAND_PID=999999"):
+                seal.unlink()
+                guarded = subprocess.run(["bash", "-c", "set -uo pipefail\n" + prefix +
+                                          "\n" + guard + "\nlog() { :; }\n" + script +
+                                          "\ntrap cleanup_stack EXIT\nexit 143\n"],
+                                         capture_output=True, text=True, timeout=10)
+                self.assertEqual(guarded.returncode, 143, guarded.stderr)
+                self.assertFalse(seal.exists(), guard)
+                seal.write_bytes(original)
+            port = free_port()
+            secret = secrets.token_hex(32)
+            env = dict(os.environ, CLOUDBENCH_BARRIER_TOKEN=secret, FLY_MACHINE_ID=MACHINE)
+            process = subprocess.Popen([sys.executable, str(SCRIPTS / "cloudbench-status-server.py"),
+                                        "--port", str(port), "--directory", str(data), "--run-token", token],
+                                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(100):
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=.1):
+                            break
+                    except OSError:
+                        time.sleep(.02)
+                for kind in ("recovery", "controller"):
+                    out = base / kind
+                    (out / "remote-logs").mkdir(parents=True)
+                    owner = json.dumps({"version": 1, "run_token": token, "machine_id": MACHINE})
+                    for name in ("runtime-evidence.pending", "runtime-evidence.owner.json"):
+                        (out / name).write_text(owner)
+                    if kind == "recovery":
+                        command = [sys.executable, str(SCRIPTS / "cloudbench-collect-runtime-evidence.py"),
+                                   str(out / "remote-logs"), str(port), token, MACHINE, "10"]
+                    else:
+                        collect = shell_function(SCRIPTS / "run-bench-cloud", "cloudbench_collect_runtime_evidence")
+                        command = ["bash", "-c", collect + '\ncloudbench_collect_runtime_evidence "$@"',
+                                   "collect", str(out / "remote-logs"), str(port), token, MACHINE, "10"]
+                    captured = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(captured.returncode, 0, captured.stderr)
+                    validate = shell_function(SCRIPTS / "run-bench-fleet", "cloudbench_validate_primary_runtime_evidence")
+                    checked = subprocess.run(["bash", "-c", validate + '\ncloudbench_validate_primary_runtime_evidence "$@"',
+                                              "validate", str(out), MACHINE, token],
+                                             capture_output=True, text=True, timeout=10)
+                    self.assertEqual(checked.returncode, 0, checked.stderr)
+                    self.assertFalse((out / "runtime-evidence.pending").exists())
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
