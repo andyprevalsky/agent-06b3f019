@@ -196,12 +196,50 @@ export async function prepareSessionCredentials(
   };
 }
 
+/** A blank initial page has no authentication realm or origin storage. */
+async function prepareInitialSessionCredentials(
+  sessionId: string,
+  userId: string,
+  targetUrl: string,
+  options: { browser?: Browser }
+) {
+  if (targetUrl !== 'about:blank') {
+    return prepareSessionCredentials(sessionId, userId, targetUrl, options);
+  }
+  // Navigation prepares the real target realm through the existing JIT path.
+  // Do not query, reserve or inject a site's credentials into an opaque page.
+  return {
+    ...buildSessionCredentialPayload('', {
+      realm: '',
+      steel_session: null,
+      cookie_bundles: [],
+      passwords: [],
+      passkeys: [],
+      email_otp: { available: false, connected_emails: [], match_for_site_account: null },
+      readable_identifiers: [],
+      minted: null,
+    }, [], []),
+    auth_credential_ref: null,
+    cookies_injected: false,
+    cookies_count: 0,
+    auth_source: 'none' as const,
+    browser_state_injection: {
+      cookies: { injected: false, cookieCount: 0, authSource: 'none' as const, credentialRef: null },
+      fingerprint: { injected: false },
+      indexedDB: { injected: false, originCount: 0 },
+      localStorage: { injected: false, originCount: 0 },
+      permissions: { injected: false, grantCount: 0 },
+      cacheStorage: { injected: false, originCount: 0 },
+    },
+  };
+}
+
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
   const logical = await ensureLogicalBrowser(userId, agentId);
   if (id !== undefined && id !== logical.id)
     return initLegacySession(userId, agentId, startUrl, id, {
-      prepare: prepareSessionCredentials,
+      prepare: prepareInitialSessionCredentials,
       metadata: buildBrowserSessionMetadata,
     });
   await repo.updateLogicalSessionUrls(
@@ -215,7 +253,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     // follows the winner through the resume path instead of failing.
     try {
       return await initLegacySession(userId, agentId, startUrl, logical.id, {
-        prepare: prepareSessionCredentials,
+        prepare: prepareInitialSessionCredentials,
         metadata: buildBrowserSessionMetadata,
       });
     } catch (error) {

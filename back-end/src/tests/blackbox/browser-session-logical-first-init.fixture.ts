@@ -33,6 +33,8 @@ globalThis.fetch = (async (input, init) => {
 const START_URL = 'https://shop.example.test/account';
 const created: Array<{ taskId: string | undefined; sessionId: string }> = [];
 const resumed: string[] = [];
+const closed: string[] = [];
+const authRequests: string[] = [];
 const injected: Array<{ sessionId: string; url: string }> = [];
 const savedSessionInjection = {
   cookies: {
@@ -52,15 +54,18 @@ async function main() {
   const userId = `logical-first-init-${randomUUID()}`;
   const agentId = randomUUID();
   const resumedAgentId = randomUUID();
+  const neutralAgentId = randomUUID();
   await prisma.user.create({ data: { userId, isAnonymous: false } });
   await prisma.agent.createMany({
-    data: [agentId, resumedAgentId].map((id) => ({ id, userId, goal: 'logical first init' })),
+    data: [agentId, resumedAgentId, neutralAgentId].map((id) => ({ id, userId, goal: 'logical first init' })),
   });
   await mock.module('../../providers/authOptions', {
     namedExports: {
       ...authOptions,
-      getAuthOptions: async () => ({
-        realm: 'shop.example.test',
+      getAuthOptions: async (_user: string, realm: string) => {
+        authRequests.push(realm);
+        return ({
+        realm,
         steel_session: null,
         cookie_bundles: [],
         passwords: [],
@@ -68,7 +73,8 @@ async function main() {
         email_otp: { available: false, connected_emails: [], match_for_site_account: null },
         readable_identifiers: [],
         minted: null,
-      }),
+      });
+      },
     },
   });
   await mock.module('../../providers/browser', {
@@ -110,6 +116,10 @@ async function main() {
       resumeSession: async (taskId: string) => {
         resumed.push(taskId);
         throw new Error('fixture: resume reached the provider');
+      },
+      closeSession: async (sessionId: string) => {
+        closed.push(sessionId);
+        await prisma.browserSession.updateMany({ where: { sessionId }, data: { status: 'CLOSED' } });
       },
       getFingerprintInjectionData: async () => null,
       injectUserData: async (sessionId: string, _user: string, url: string) => {
@@ -194,12 +204,52 @@ async function main() {
     const prepared = await prepareSessionCredentials(privateSession, userId, START_URL);
     assert.deepEqual(injected, [], 'private checkpoint state must not take shared-store injection');
     assert.equal(prepared.cookies_injected, false);
+    // 3. Exact about:blank is a neutral initial page, not an auth realm.
+    // Materialize the real logical row once without reading/injecting credentials.
+    const authBefore = authRequests.length;
+    const injectionsBefore = injected.length;
+    const closesBefore = closed.length;
+    const blank = await initSession(userId, neutralAgentId, 'about:blank');
+    assert.equal(blank.auth_realm, '');
+    assert.equal(blank.auth_options.realm, '');
+    assert.deepEqual(blank.auth_options.cookie_bundles, []);
+    assert.deepEqual(blank.auth_options.passwords, []);
+    assert.deepEqual(blank.auth_options.passkeys, []);
+    assert.deepEqual(blank.passwords, []);
+    assert.deepEqual(blank.passkeys, []);
+    assert.equal(blank.cookies_injected, false);
+    assert.equal(blank.auth_source, 'none');
+    assert.equal(blank.browser_session_metadata.cookies_count, 0);
+    assert.equal(blank.browser_session_metadata.local_storage_origin_count, 0);
+    assert.equal(authRequests.length, authBefore, 'blank initialization queried an auth realm');
+    assert.equal(injected.length, injectionsBefore, 'blank initialization injected origin data');
+    assert.equal(closed.length, closesBefore, 'blank initialization retired its logical browser');
+    const neutralId = logicalBrowserTaskId(neutralAgentId);
+    const neutral = await prisma.browserSession.findUniqueOrThrow({ where: { id: neutralId } });
+    assert.equal(neutral.status, 'ACTIVE');
+    assert.equal(neutral.sessionId, blank.session_id);
+    assert.equal(await prisma.browserSession.count({ where: { agentId: neutralAgentId } }), 1);
+    assert.equal(created.length, 2);
+
+    // Credential preparation remains realm-only. Once navigation selects HTTPS,
+    // the existing JIT path injects the real target without allocating again.
+    for (const target of ['about:blank', 'data:text/plain,hello', 'file:///tmp/example', 'javascript:alert(1)']) {
+      await assert.rejects(prepareSessionCredentials(blank.session_id, userId, target), /authentication realm/);
+    }
+    const navigated = await prepareSessionCredentials(blank.session_id, userId, START_URL);
+    assert.equal(navigated.auth_realm, 'example.test');
+    assert.equal(navigated.cookies_injected, true);
+    assert.equal(authRequests.length, authBefore + 1);
+    assert.deepEqual(injected.slice(injectionsBefore), [{ sessionId: blank.session_id, url: START_URL }]);
+    assert.equal(created.length, 2, 'JIT credential preparation allocated another browser');
+    assert.equal(closed.length, closesBefore);
+
     console.log(
       'PASS logical first init: provider profile + saved credentials + full metadata; checkpointed logical resume unchanged'
     );
   } finally {
     await prisma.browserContext.deleteMany({ where: { userId } });
-    await prisma.agent.deleteMany({ where: { id: { in: [agentId, resumedAgentId] } } });
+    await prisma.agent.deleteMany({ where: { id: { in: [agentId, resumedAgentId, neutralAgentId] } } });
     await prisma.user.delete({ where: { userId } });
     await prisma.$disconnect();
     globalThis.fetch = originalFetch;
