@@ -8,6 +8,7 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: generic verify counted every historical allocated Machine as a primary or legacy worker and required service files for every task
 symptoms:
+  - KeyError original-native-config.json in verify_pre_service_archive after archive builder rc0
   - AssertionError at len(by_machine) == len(rows) + len(unstarted_workers) + len(started_workers)
   - complete original pre-service capture lacks mandatory service files
   - original backend log grew after the exact stopped-provider cleanup receipt
@@ -19,6 +20,7 @@ sources:
   - PR #1299 follow-up
   - fleet run 20261007-001156-61479
   - commit 61148634e2dcad07bc951227e91ecf9e69eb47ce
+  - fleet run 20261027-191440-2597567 owner 49927b5b138945249cb5e040f87159c8
 repro: scripts/tests/cloudbench-forensic-quiesced.test.py
 status: mitigated
 ---
@@ -93,6 +95,63 @@ native inventory. Exact native recovery and deployment qualification remain
 required before claiming the original resources released or deployed. Status
 remains mitigated while that native obligation is outstanding; no new benchmark
 execution was performed.
+
+### October 27, 2026 recurrence: producer omitted the pre-service proof envelope
+
+Archive searches used `KeyError original-native-config.json` and
+`original volume archive recovery wrappers`. This is a recurrence of this
+case's producer/consumer contract: the phase-aware consumer was cemented with
+hand-built complete archives, while the generic original-volume builder never
+carried the native collector's config/provenance sidecars. Capture succeeded,
+but the first bad boundary was capture artifacts to generic archive members.
+
+The unchanged historical 2,704-byte packet (SHA-256
+071a10dba7b84f579836e89ae3d02179435f20c7c362bdd554abfbbc1f77a996)
+was replayed locally through real `verify(archive_only=True)`: it raised
+`KeyError: 'original-native-config.json'`. The new registered
+`PreServiceArchiveTest.test_native_capture_builder_roundtrip_uses_real_verifier`
+ran against parent 05125f70e and failed at the same boundary in 3.152 seconds.
+The fixture runs the actual CLI builder and full verifier, with the existing
+fixture-only reviewed-source policy; historical replay uses the real policy.
+
+The reviewed adapter preserves the original config, raw nested capture and
+native provenance bytes. It consumes the collector's own typed receipt rather
+than inventing legacy `capture_complete` or `restored_original_config` fields.
+The collector's config digest is canonical JSON; its saved private JSON has a
+trailing newline. Legacy receipt validation and source policy stay mandatory.
+The regression checks exact archived wrapper bytes, zero credit and no native
+release; adversarial checks rehash the outer packet before testing inner
+identity, config, capture, absence and native-stop authenticity.
+
+Opened artifact-custody references: OpenClaw
+`src/commands/backup-verify-manifest.ts:100-206` retains typed source/payload/config
+inventories, `src/infra/backup-create-stream.ts:11-31` seals actual traversed bytes,
+and Hermes `scripts/ci/archive_inputs.py:106-145` verifies archived size/digest.
+These support preserving and validating complete original evidence; they grant
+no Fly authority. No live-agent hot path, per-agent lock or polling is added.
+
+Independent reviewer `ph7cqance5nyhhhfe7rtfkwd9s8h3wf5` returned `GROUNDED`
+for approval `polar-k2-i10-native-capture-v1` on base 05125f70e, runtime patch
+SHA-256 d89aeee8d0a10711596729f0115e211078d7d1fa1c2fce142f42782e8467fcc0
+and test patch a640b3c2775a1107373e5b7c48ae44c0aa5b08b0540502fa061275466753d908.
+Review opened every cited reference plus Codex source-ledger content identity
+and searched Claude/Kimi for contrary practice. The reviewer independently
+reproduced RED in 2.406 seconds, roundtrip GREEN in 2.707 seconds and all 19
+owning tests in 56.507 seconds. Only then were the exact reviewed runtime bytes
+applied. The unchanged author roundtrip passed in 3.574 seconds.
+
+Author gates on the exact reviewed bytes: owning forensic suite 19/19
+(66.438 seconds), prestack recovery 14/14 (1.376 seconds), prelaunch cancellation
+6/6 (3.098 seconds), all four new tests five consecutive runs unchanged, gate
+registration test, archive validation (1,177 cases), and diff whitespace check.
+The owning suite remains registered in both the general test runner and the
+deploy structural registry; no new skip or exclusion was introduced.
+
+Private historical GREEN remains pending owner-local replay. No canonical
+recovery, new capture, provider mutation, paid benchmark or deployment is
+authorized in this lane. The historical native config stays
+private on the launch owner's box; its complete environment is never committed
+or sent as a shared fixture. The case stays mitigated pending native release.
 
 ## Human feedback
 

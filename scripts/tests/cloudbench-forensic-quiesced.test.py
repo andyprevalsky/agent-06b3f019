@@ -1,6 +1,9 @@
 """A canceled composite run may retire only from exact quiesced receipts."""
 
 import hashlib
+import copy
+import shutil
+import subprocess
 import io
 import os
 import sys
@@ -334,6 +337,165 @@ class PreServiceArchiveTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         return retirement.verify(f.registry, f.run, manifest_path, archive, f.machines, f.volumes,
                                  archive_only=True)
+
+    def native_builder_fixture(self):
+        # Start with the existing full consumer fixture, including real worker
+        # capture and source recipe. Replace only its hand-built outer packet.
+        self.generic()
+        f = self.fixture
+        shutil.rmtree(f.run / "_forensic")
+        f.captures.mkdir(exist_ok=True)
+        machine = bootstrap_test.MACHINE
+        raw = self.originals["original-volume-capture.tar.gz"]
+        config = self.originals["original-native-config.json"] + b"\n"
+        legacy = json.loads(self.originals["original-capture-manifest.json"])
+        proof = dict(
+            schema="cloudbench-original-volume-capture-v1", version=1,
+            kind="original-volume-inert-capture", direct_original_volume=True,
+            proof_credit=0, native_release_verified=False,
+            fleet_owner_token=bootstrap_test.OWNER, run_id=bootstrap_test.RUN,
+            app=bootstrap_test.APP, bench=bootstrap_test.BENCH, ordinal=0,
+            allocation_kind="clone", guest_run_token=bootstrap_test.TOKEN,
+            machine_id=machine, source_machine_id=machine,
+            volume_id=bootstrap_test.VOLUME, source_volume_id=bootstrap_test.VOLUME,
+            archive_name=machine + ".tar.gz", archive_bytes=len(raw),
+            archive_sha256=hashlib.sha256(raw).hexdigest(),
+            files=legacy["files"], missing=legacy["missing"],
+            native_original_config_sha256=hashlib.sha256(json.dumps(
+                json.loads(config), sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            native_final_state="stopped", native_final_volume_state="created",
+            inert_command=["sleep", "infinity"], guest_inert_sleepers=1,
+            provider_mutations=["config-inert", "start", "stop", "config-restore"],
+        )
+        for suffix, data in (("tar.gz", raw), ("original-config.private.json", config),
+                             ("provenance.json", json.dumps(proof).encode())):
+            (f.captures / (machine + "." + suffix)).write_bytes(data)
+        (f.run / "execution-task-matrix.json").write_text("{}")
+        return proof
+
+    def build_native(self):
+        f = self.fixture
+        return subprocess.run([
+            sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+            "--registry", str(f.registry), "--capture-dir", str(f.captures),
+        ], capture_output=True, text=True)
+
+    def verify_built_native(self):
+        f = self.fixture
+        packet = f.run / "_forensic"
+        return retirement.verify(f.registry, f.run, packet / "manifest.json",
+                                 packet / "originals.tar.gz", f.machines, f.volumes,
+                                 archive_only=True)
+
+    def test_native_capture_builder_roundtrip_uses_real_verifier(self):
+        proof = self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.verify_built_native()
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertFalse(result["native_release_verified"])
+        packet = self.fixture.run / "_forensic"
+        row = json.loads((packet / "manifest.json").read_bytes())["tasks"][0]
+        self.assertEqual(row["missing"], proof["missing"])
+        with tarfile.open(packet / "originals.tar.gz") as archive:
+            for name, suffix in (("original-capture-provenance.json", "provenance.json"),
+                                 ("original-native-config.json", "original-config.private.json"),
+                                 ("original-volume-capture.tar.gz", "tar.gz")):
+                self.assertEqual(archive.extractfile(bootstrap_test.BENCH + "/" + name).read(),
+                                 (self.fixture.captures / (bootstrap_test.MACHINE + "." + suffix)).read_bytes())
+
+    def test_native_builder_refuses_missing_symlinked_or_mismatched_sidecars(self):
+        proof = self.native_builder_fixture()
+        f = self.fixture
+        config = f.captures / (bootstrap_test.MACHINE + ".original-config.private.json")
+        provenance = f.captures / (bootstrap_test.MACHINE + ".provenance.json")
+        original_config = config.read_bytes()
+        for fault in ("missing-config", "symlink-config", "foreign-owner", "wrong-hash", "wrong-files"):
+            with self.subTest(fault=fault):
+                changed = copy.deepcopy(proof)
+                if fault == "missing-config":
+                    config.unlink()
+                elif fault == "symlink-config":
+                    config.unlink()
+                    target = f.captures / "config-target"
+                    target.write_bytes(original_config)
+                    config.symlink_to(target)
+                elif fault == "foreign-owner":
+                    changed["fleet_owner_token"] = "f" * 32
+                elif fault == "wrong-hash":
+                    changed["archive_sha256"] = "0" * 64
+                else:
+                    changed["files"]["bench.log"]["sha256"] = "0" * 64
+                provenance.write_text(json.dumps(changed))
+                result = self.build_native()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((f.run / "_forensic/manifest.json").exists())
+                shutil.rmtree(f.run / "_forensic")
+                config.unlink(missing_ok=True)
+                config.write_bytes(original_config)
+
+    def test_native_consumer_rejects_tampering_even_with_rehashed_outer_packet(self):
+        self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        manifest = json.loads((packet / "manifest.json").read_bytes())
+        with tarfile.open(packet / "originals.tar.gz") as archive:
+            original = {member.name: archive.extractfile(member).read() for member in archive}
+        prefix = bootstrap_test.BENCH + "/"
+        for field, value in (
+            ("fleet_owner_token", "f" * 32), ("run_id", "foreign"),
+            ("app", "foreign"), ("bench", "foreign"), ("ordinal", 1),
+            ("machine_id", "c" * 14), ("source_machine_id", "c" * 14),
+            ("source_volume_id", "vol_foreign"), ("volume_id", "vol_foreign"),
+            ("guest_run_token", "foreign"), ("proof_credit", 1),
+            ("native_release_verified", True), ("native_final_state", "started"),
+            ("native_final_volume_state", "destroyed"), ("provider_mutations", ["config-inert", "start"]),
+            ("native_original_config_sha256", "0" * 64), ("archive_sha256", "0" * 64),
+            ("missing", []), ("files", {}), ("changed-config", None),
+            ("changed-raw", None), ("mixed-wrappers", None),
+        ):
+            with self.subTest(field=field):
+                payloads = dict(original)
+                proof = json.loads(payloads[prefix + "original-capture-provenance.json"])
+                if field == "changed-config":
+                    config = json.loads(payloads[prefix + "original-native-config.json"])
+                    config["env"]["CLOUDBENCH_RUN_TOKEN"] = "foreign"
+                    payloads[prefix + "original-native-config.json"] = json.dumps(config).encode()
+                    proof["native_original_config_sha256"] = hashlib.sha256(json.dumps(
+                        config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                elif field == "changed-raw":
+                    payloads[prefix + "original-volume-capture.tar.gz"] += b"changed"
+                elif field == "mixed-wrappers":
+                    payloads[prefix + "original-capture-receipt.json"] = b"{}"
+                else:
+                    proof[field] = value
+                payloads[prefix + "original-capture-provenance.json"] = json.dumps(proof).encode()
+                changed = copy.deepcopy(manifest)
+                for member, data in payloads.items():
+                    if member.startswith(prefix):
+                        changed["tasks"][0]["files"][member[len(prefix):]] = dict(
+                            bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                changed["uncompressed_bytes"] = sum(map(len, payloads.values()))
+                with tarfile.open(packet / "originals.tar.gz", "w:gz") as archive:
+                    for name, data in payloads.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                raw = (packet / "originals.tar.gz").read_bytes()
+                changed.update(archive_bytes=len(raw), archive_sha256=hashlib.sha256(raw).hexdigest())
+                (packet / "manifest.json").write_text(json.dumps(changed))
+                with self.assertRaises((AssertionError, KeyError, ValueError)):
+                    self.verify_built_native()
+
+    def test_native_consumer_keeps_reviewed_source_policy_mandatory(self):
+        self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.reviewed_sources.clear()
+        with self.assertRaises(AssertionError):
+            self.verify_built_native()
 
     def test_generic_archive_retains_honest_failed_worker_and_full_ledger(self):
         result = self.generic()

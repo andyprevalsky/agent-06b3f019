@@ -57,6 +57,7 @@ def main() -> None:
                 original_fresh[original["machine_id"]] = original
     runtime = runpy.run_path(str(Path(__file__).with_name("cloudbench-status-server.py")))
     read = runtime["read_runtime_metadata"]
+    forensic = runpy.run_path(str(Path(__file__).with_name("cloudbench-forensic-retirement.py")))
     destination = run / "_forensic"
     destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
@@ -172,10 +173,30 @@ def main() -> None:
                                 }, sort_keys=True).encode())
                         else:
                             entry["services_status"] = None
+                            # Preserve the actual collector sidecars and nested
+                            # capture bytes. Never synthesize legacy receipts.
+                            wrappers = {
+                                "original-native-config.json": read(args.capture_dir / f"{machine}.original-config.private.json", 1048576),
+                                "original-capture-provenance.json": read(args.capture_dir / f"{machine}.provenance.json", 1048576),
+                                "original-volume-capture.tar.gz": read(capture, 64 * 1024 * 1024),
+                            }
+                            proof = json.loads(wrappers["original-capture-provenance.json"])
+                            assert proof["files"] == entry["files"]
+                            entry["missing"] = proof["missing"]
+                            originals = dict(wrappers)
+                            with tarfile.open(fileobj=io.BytesIO(wrappers["original-volume-capture.tar.gz"]), mode="r:gz") as source:
+                                for member in source:
+                                    assert member.isfile() and member.name not in originals
+                                    assert 0 <= member.size <= 64 * 1024 * 1024
+                                    stream = source.extractfile(member)
+                                    assert stream is not None
+                                    originals[member.name] = stream.read(member.size + 1)
+                            forensic["verify_original_volume_provenance"](meta, entry, originals)
+                            for relative, data in wrappers.items():
+                                add(relative, data)
                             for relative in (services_name, "repo/.context/cloudbench/stack.log",
                                              "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"):
-                                if relative not in seen:
-                                    entry["missing"].append(relative)
+                                assert relative not in seen and relative in entry["missing"]
                         ack = f"cloudbench-driver-clean-{run_token}.ack"
                         if ack not in seen:
                             entry["missing"].append(ack)
