@@ -278,12 +278,6 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
-    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-      method: 'POST',
-      headers: apiKeyHeaders(),
-      body: JSON.stringify({ output }),
-    });
-    assertStatus(outputRes.status, 200, outputRes.data);
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
@@ -304,6 +298,14 @@ async function testSmoke_codexCompletesE2bTask() {
         `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
       );
     }
+    // Persist only a run that is not the fundless skip: an exhausted run can end with
+    // no output at all, which the route rightly rejects before the skip is decided.
+    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output }),
+    });
+    assertStatus(outputRes.status, 200, outputRes.data);
     assert(
       succeeded,
       `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
