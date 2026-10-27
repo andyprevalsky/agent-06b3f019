@@ -45,8 +45,9 @@ interface Cli {
   evaluateBudgets(result: unknown): Verdict;
   traceMainThreadTasks(
     trace: Buffer,
-    minMs: number
-  ): { phase: string; duration: number; cpu: number }[];
+    minMs: number,
+    samples?: { pid: number; t: number; state: string }[]
+  ): { phase: string; duration: number; cpu: number; pageWait: number | null }[];
   auditEntryFiles(
     entry: string,
     files: AuditFile[]
@@ -140,58 +141,181 @@ test('host noise makes missed fps inconclusive but keeps every other violation',
   assert.equal(quietPass.warnings.filter((w) => w.rule === 'fps-inconclusive').length, 0);
 });
 
-test('long-task: CPU-heavy tasks fail; wall-only tasks fail unless a second window is clean', () => {
+test('long-task: page CPU or page-made blocking calls fail; host stalls fail unless a second window is clean', () => {
   const withTasks = (normal: Record<string, unknown>) =>
     cli.evaluateBudgets({ ...SMOOTH, normal: { ...SMOOTH.normal, ...normal } });
-  // A 134 ms wall-clock task that used 2 ms of CPU and did not recur: the host stalled the renderer.
+  // A 134 ms task with 2 ms of CPU and no blocking call (the thread was descheduled or stopped)
+  // that did not recur: the host stalled the renderer.
   const stalled = withTasks({
-    longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }],
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 2, pageWait: 0 }],
     longTaskRecheck: [],
   });
   assert.equal(stalled.pass, true, JSON.stringify(stalled.violations));
   assert.ok(stalled.warnings.some((w) => w.rule === 'long-task-stall'));
-  // A blocking wait the page repeats (GPU readback, sync XHR, a busy-wait on a loaded host) recurs.
+  // One blocking call the page made (GPU readback, sync XHR) is the page's work even when it does
+  // not recur and uses no CPU.
+  const blocked = withTasks({
+    longTasks: [{ phase: 'steady', duration: 1152, cpu: 0.8, pageWait: 1149 }],
+    longTaskRecheck: [],
+  });
+  assert.deepEqual(rules(blocked), ['long-task']);
+  assert.ok(!blocked.warnings.some((w) => w.rule === 'long-task-stall'));
+  // A host-stalled task that recurs (a busy-wait on a loaded host) fails.
   const recurring = withTasks({
-    longTasks: [{ phase: 'steady', duration: 84, cpu: 30 }],
-    longTaskRecheck: [{ phase: 'steady', duration: 82, cpu: 28 }],
+    longTasks: [{ phase: 'steady', duration: 84, cpu: 30, pageWait: 0 }],
+    longTaskRecheck: [{ phase: 'steady', duration: 82, cpu: 28, pageWait: 0 }],
   });
   assert.deepEqual(rules(recurring), ['long-task']);
-  // Not re-measured, or no CPU time recorded: judged on wall time.
-  assert.deepEqual(rules(withTasks({ longTasks: [{ phase: 'steady', duration: 134, cpu: 2 }] })), [
-    'long-task',
-  ]);
-  assert.deepEqual(rules(withTasks({ longTasks: [{ phase: 'steady', duration: 134 }] })), [
-    'long-task',
-  ]);
+  // Not re-measured, or no CPU time / thread samples: judged on wall time.
+  for (const t of [
+    { duration: 134, cpu: 2, pageWait: 0 },
+    { duration: 134, cpu: 2, pageWait: null },
+    { duration: 134 },
+  ]) {
+    const recheck = 'pageWait' in t && t.pageWait === 0 ? {} : { longTaskRecheck: [] };
+    assert.deepEqual(
+      rules(withTasks({ longTasks: [{ phase: 'steady', ...t }], ...recheck })),
+      ['long-task'],
+      JSON.stringify(t)
+    );
+  }
   // The same wall time spent computing is the page's own work, whatever the second window shows.
   const busy = withTasks({
-    longTasks: [{ phase: 'steady', duration: 134, cpu: 131 }],
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 131, pageWait: 0 }],
     longTaskRecheck: [],
   });
   assert.deepEqual(rules(busy), ['long-task']);
 
-  // Steady tasks come from a Chromium trace: renderer main-thread RunTask events with tdur.
+  // Steady tasks come from a Chromium trace (renderer main-thread RunTask with tdur); pageWait is
+  // the sampled time the thread slept (state S) while page script (FunctionCall) was running.
   const trace = Buffer.from(
     JSON.stringify({
       traceEvents: [
         { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
         { ph: 'M', name: 'thread_name', pid: 1, tid: 2, args: { name: 'Compositor' } },
-        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 3000, tdur: 2900 },
-        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 134000, tdur: 1800 },
-        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 81000, tdur: 80500 },
-        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 2, dur: 90000, tdur: 90000 },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 0,
+          dur: 3000,
+          tdur: 2900,
+        },
+        // Stopped by the host (T) inside page script: not the page's wait.
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 10000,
+          dur: 134000,
+          tdur: 1800,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 10500, dur: 133000 },
+        // Sleeping (S) in a page call for 100 ms, then descheduled (R) outside script.
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 200000,
+          dur: 150000,
+          tdur: 900,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 200000, dur: 100000 },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 400000,
+          dur: 81000,
+          tdur: 80500,
+        },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 2,
+          ts: 0,
+          dur: 90000,
+          tdur: 90000,
+        },
       ],
     })
   );
-  assert.deepEqual(cli.traceMainThreadTasks(trace, 50), [
-    { phase: 'steady', duration: 134, cpu: 1.8 },
-    { phase: 'steady', duration: 81, cpu: 80.5 },
+  const samples = [
+    ...Array.from({ length: 69 }, (_, i) => ({ pid: 1, t: 10000 + i * 2000, state: 'T' })),
+    ...Array.from({ length: 76 }, (_, i) => ({
+      pid: 1,
+      t: 200000 + i * 2000,
+      state: i < 50 ? 'S' : 'R',
+    })),
+  ];
+  assert.deepEqual(cli.traceMainThreadTasks(trace, 50, samples), [
+    { phase: 'steady', duration: 134, cpu: 1.8, pageWait: 0 },
+    { phase: 'steady', duration: 150, cpu: 0.9, pageWait: 100 },
+    { phase: 'steady', duration: 81, cpu: 80.5, pageWait: null },
   ]);
+  // A promise continuation (await, then a blocking call) runs in the microtask checkpoint, not in
+  // a FunctionCall: still page script. A 120 ms sampler gap after an S sample is host time.
+  const asyncTrace = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 0,
+          dur: 120000,
+          tdur: 600,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 100, dur: 300 },
+        {
+          ph: 'X',
+          name: 'BlinkScheduler_PerformMicrotaskCheckpoint',
+          pid: 1,
+          tid: 1,
+          ts: 500,
+          dur: 119000,
+        },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 200000,
+          dur: 130000,
+          tdur: 500,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 200000, dur: 130000 },
+      ],
+    })
+  );
+  const asyncSamples = [
+    ...Array.from({ length: 61 }, (_, i) => ({ pid: 1, t: i * 2000, state: 'S' })),
+    { pid: 1, t: 200000, state: 'S' },
+    { pid: 1, t: 202000, state: 'S' },
+    { pid: 1, t: 322000, state: 'R' },
+    { pid: 1, t: 330000, state: 'R' },
+  ];
+  assert.deepEqual(
+    cli.traceMainThreadTasks(asyncTrace, 50, asyncSamples).map((t) => t.pageWait),
+    [118, 2]
+  );
+  assert.deepEqual(
+    cli.traceMainThreadTasks(trace, 50).map((t) => t.pageWait),
+    [null, null, null],
+    'no thread samples (not Linux): no page-wait evidence'
+  );
   const noCpu = Buffer.from(
     JSON.stringify({
       traceEvents: [
         { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
-        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, dur: 90000 },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, ts: 0, dur: 90000 },
       ],
     })
   );
