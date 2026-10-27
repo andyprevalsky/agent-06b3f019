@@ -198,8 +198,6 @@ export interface CreateAgentPayload {
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
-  // Rose Desktop "New agent in this branch": work in that agent's code session (same branch).
-  share_code_session_with?: string;
 }
 
 // Sub-agent Tree Types

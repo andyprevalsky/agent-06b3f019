@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import {
   checkpointCodeSession,
   restoreLatestCheckpoint,
@@ -58,6 +59,8 @@ const saved = {
   backend: process.env.CODE_SESSION_STORAGE_BACKEND,
   dir: process.env.CODE_SESSION_STORAGE_LOCAL_DIR,
   anthropic: process.env.ANTHROPIC_API_KEY,
+  claudeCodeKey: process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+  openrouter: process.env.OPENROUTER_API_KEY,
   gpt: process.env.GPT_API_KEY,
   decryptionKey: process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY,
 };
@@ -108,8 +111,11 @@ async function otherLeasable(name: string): Promise<number> {
 before(async () => {
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(fixtureDir, 'storage');
-  // Shared funded keys would make every availability answer true.
+  // Shared funded keys (and the gateways a Claude Code sandbox would use)
+  // would make every availability answer true.
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.CLAUDE_CODE_ANTHROPIC_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   delete process.env.GPT_API_KEY;
   await prisma.user.create({ data: { userId, name: 'Usage Limit' } });
   await prisma.agent.create({ data: { id: agentId, userId, goal: 'Ship the parser' } });
@@ -120,6 +126,8 @@ after(async () => {
     ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
     ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
     ['ANTHROPIC_API_KEY', saved.anthropic],
+    ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeKey],
+    ['OPENROUTER_API_KEY', saved.openrouter],
     ['GPT_API_KEY', saved.gpt],
     ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
   ] as const) {
@@ -398,9 +406,13 @@ test('a Mac session’s usage limit marks only the user’s own login; own_only 
   }
 
   let e2bCalls = 0;
-  const kept = await keepAliveCodeTask(macTask.id, async () => {
-    e2bCalls += 1;
-  });
+  const kept = await keepAliveCodeTask(
+    macTask.id,
+    async () => {
+      e2bCalls += 1;
+    },
+    NO_CODE_RESOURCES
+  );
   assert.equal(kept.alive, true);
   assert.equal(e2bCalls, 0, 'a Mac session has no E2B idle window to extend');
 });

@@ -3247,7 +3247,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         for message in requirements:
             if (message.get("role") or "").upper() != "USER":
                 continue
-            if (message.get("metadata") or {}).get("hidden"):
+            if (message.get("metadata") or {}).get("hidden") or (message.get("metadata") or {}).get(
+                "excludeFromModel"
+            ):
+                # Hidden from this agent's model (e.g. a message addressed to one browser task).
                 continue
             # A task update from an ancestor agent changes requirements like a user correction.
             if is_agent_authored_user_metadata(message.get("metadata")) and not _is_requirement_agent_row(message):

@@ -137,21 +137,6 @@ export async function getBenchmarkSharedAgent(
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
-/** `share_code_session_with` named an agent that does not exist (or another user's): 404. */
-export const CODE_SESSION_SHARE_TARGET_NOT_FOUND = 'CODE_SESSION_SHARE_TARGET_NOT_FOUND';
-
-/** A rejected POST /api/agents, with the backend's HTTP status and error `code`. */
-export class CreateAgentError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code: string | undefined,
-  ) {
-    super(message);
-    this.name = 'CreateAgentError';
-  }
-}
-
 // Create a new agent
 export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   const headers = getAuthHeaders();
@@ -164,12 +149,8 @@ export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   });
 
   if (!response.ok) {
-    const error = (await response.json()) as { error?: string; code?: string };
-    throw new CreateAgentError(
-      error.error || 'Failed to create agent',
-      response.status,
-      typeof error.code === 'string' ? error.code : undefined,
-    );
+    const error = (await response.json()) as { error?: string };
+    throw new Error(error.error || 'Failed to create agent');
   }
 
   return await response.json();

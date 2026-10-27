@@ -27,6 +27,7 @@ import {
 import { DISCONNECTED_BACKFILL_POLL_MS } from '@/features/agent-context/config';
 import * as RealtimeMod from '@/lib/realtime';
 import { getBrowserSessionBinding } from '@/lib/browserSessionBindings';
+import { clearCodeResources, getCodeResources } from '@/lib/codeResources';
 
 type AgentHandlers = Parameters<typeof RealtimeMod.subscribeToAgent>[1];
 type CapturedAgentHandlers = Omit<AgentHandlers, 'onAgentModeStarted'> & {
@@ -184,6 +185,31 @@ describe('useRealtimeSubscription', () => {
       asOf: 2,
     });
     unmount();
+  });
+
+  it('publishes CODE_RESOURCES samples to the code-resources store while the scope is active', async () => {
+    clearCodeResources();
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    const { unmount } = renderHook(() => useRealtimeSubscription(makeDeps()));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+
+    const resources = {
+      sampled_at: '2026-10-26T18:02:15.000Z',
+      cpu: { used_pct: 36, cores: 8 },
+      memory: { used_bytes: 11, total_bytes: 16 },
+      disk: null,
+    };
+    act(() => capturedHandlers.onCodeResources?.({ taskId: 'task-res', resources }));
+    expect(getCodeResources('task-res')).toEqual(resources);
+
+    unmount();
+    const late = { ...resources, sampled_at: '2026-10-26T18:04:15.000Z' };
+    act(() => capturedHandlers.onCodeResources?.({ taskId: 'task-res', resources: late }));
+    expect(getCodeResources('task-res')).toEqual(resources);
   });
 
   it('restores chat mode when the root completion_summary finishes', async () => {

@@ -28,6 +28,66 @@ const turn = (event: string, id = 'native-1', second = 0) => ({
   ...(event === 'ended' ? { turn_ended_at: at(second), turn_outcome: 'completed' } : {}),
 });
 
+describe('a delivered Rose message is matched within its own session', () => {
+  it("another session's a2a row with the same code_turn_id never replaces this session's", () => {
+    const row = (taskId: string, text: string) =>
+      msg(
+        {
+          action_type: 'agent_message',
+          task_id: taskId,
+          subAgentId: taskId,
+          code_turn_id: 'a2a-shared',
+          a2a: {
+            kind: 'message',
+            message_id: 'm-1',
+            direction: 'received',
+            text,
+            from: { id: 'root', kind: 'agent', label: 'Rose' },
+            to: { id: taskId, kind: 'code', label: 'Codex' },
+          },
+        },
+        { text },
+      );
+    const entries = buildCodeSession({
+      messages: [
+        eventsMessage([
+          {
+            id: 'goal',
+            seq: 0,
+            type: 'message',
+            role: 'user',
+            sender: 'agent',
+            text: 'Go',
+            ts: at(1),
+          },
+          {
+            id: 'turn:a2a-shared',
+            seq: 1,
+            type: 'message',
+            role: 'user',
+            sender: 'agent',
+            client_message_id: 'a2a-shared',
+            text: '[Message from Rose …]\n\nFor task one',
+            ts: at(3),
+          },
+        ]),
+        row('task-1', 'For task one'),
+        // Same sender + message_id to another session → the same code_turn_id.
+        row('task-2', 'For task two'),
+      ],
+      taskId: 'task-1',
+      ownerAgentId: 'root',
+      provider: 'codex',
+      sessionState: 'running',
+      sessionEndedAt: null,
+      echoes: [],
+    });
+    const texts = JSON.stringify(entries);
+    expect(texts).toContain('For task one');
+    expect(texts).not.toContain('For task two');
+  });
+});
+
 describe('native code-session work slots', () => {
   it.each(['claude', 'codex'] as const)(
     'folds %s streaming/replay and keeps final answer outside the work slot',

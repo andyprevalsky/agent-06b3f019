@@ -2376,6 +2376,143 @@ def test_payment_setup_resume_stays_exclusive_beside_event_ticket():
     ]
 
 
+def test_trajectory_recall_tasks_run_exclusive_beside_their_producers():
+    """A producer that finishes mid-recall must not become the newest prior run.
+
+    PR #1570 smoke: claude-code-agent finished its Collatz run before
+    grep-agent-trajectories-code-tool-status searched history, which then
+    answered SUCCESS from that fresh run instead of the base image's FAILED one.
+    """
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    names = [
+        "claude-code-agent",
+        "grep-agent-trajectories-code-tool-status",
+        "chat-mode",
+        "grep-agent-trajectories-cross-surface",
+    ]
+    phases = bench._parallel_task_phases([by_name[name] for name in names])
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["grep-agent-trajectories-code-tool-status", "grep-agent-trajectories-cross-surface"]),
+        ("parallel", ["claude-code-agent", "chat-mode"]),
+    ]
+    recall = sorted(task.name for task in by_name.values() if bench._reads_base_trajectory_history(task))
+    assert recall == sorted(name for name in by_name if name.startswith("grep-agent-trajectories-")), recall
+
+
+def test_trajectory_recall_starts_from_base_history_on_isolated_stack(tmp_path):
+    """Each recall task sees only base-image trajectories, never rows this batch wrote.
+
+    Uses a real Postgres whose session TimeZone is not UTC: createdAt is a UTC
+    TIMESTAMP(3), so a naive timestamptz comparison would shift the boundary.
+    """
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import urlparse
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    db_name = f"victoria_bench_traj_{uuid.uuid4().hex[:10]}"
+    db_url = admin.rsplit("/", 1)[0] + "/" + db_name
+    port = urlparse(admin).port or 5432
+
+    def psql(url: str, sql: str) -> str:
+        result = subprocess.run(["psql", url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                                capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    recall = by_name["grep-agent-trajectories-code-tool-status"]
+    producer = by_name["claude-code-agent"]
+    batch_started_at = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def utc(moment: datetime) -> str:
+        return moment.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    rows = {
+        "base-failed-tool": utc(datetime(2026, 7, 1, 12, tzinfo=timezone.utc)),
+        "before-batch": utc(batch_started_at - timedelta(milliseconds=1)),
+        "batch-success-tool": utc(batch_started_at + timedelta(seconds=5)),
+    }
+
+    psql(admin, f'CREATE DATABASE "{db_name}"')
+    try:
+        psql(admin, f"ALTER DATABASE \"{db_name}\" SET timezone TO 'America/Los_Angeles'")
+        psql(db_url, (
+            'CREATE TABLE "AgentTrajectorySearch" ("messageId" text primary key, "createdAt" TIMESTAMP(3) NOT NULL)'
+        ))
+        values = ", ".join(f"('{message}', '{created}')" for message, created in rows.items())
+        psql(db_url, f'INSERT INTO "AgentTrajectorySearch" VALUES {values}')
+
+        def remaining() -> list[str]:
+            return psql(db_url, 'SELECT "messageId" FROM "AgentTrajectorySearch" ORDER BY 1').splitlines()
+
+        context = tmp_path / "context"
+        context.mkdir()
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": str(context)}):
+            # No active isolated stack: never fall back to a workspace or prod DB.
+            bench._prepare_base_trajectory_history(recall, "http://localhost:3001", batch_started_at)
+            assert len(remaining()) == 3
+
+            def manifest(**database) -> None:
+                (context / "services.json").write_text(json.dumps({
+                    "status": "running",
+                    "ports": {"backend": 3001, "health": 3003},
+                    "database": {"name": db_name, "port": port, **database},
+                }))
+
+            # Only run.sh's per-run database is isolated: a workspace or shared
+            # victoria DB on the same server, or an unowned container, is not.
+            for not_isolated in (
+                {"use_system_postgres": True, "name": "victoria"},
+                {"use_system_postgres": True, "name": "victoria_stack_gate_gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": False, "container": "victoria-db-gate-gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": True, "container": ""},
+            ):
+                manifest(**not_isolated)
+                assert bench._isolated_stack_database_url() is None, not_isolated
+            manifest(use_system_postgres=False, owned_by_run_sh=True, container="victoria-db-run-1")
+            assert bench._isolated_stack_database_url() is not None
+            manifest(use_system_postgres=True)
+            bench._prepare_base_trajectory_history(producer, "http://localhost:3001", batch_started_at)
+            bench._prepare_base_trajectory_history(recall, "https://navi-j9a9.onrender.com", batch_started_at)
+            assert len(remaining()) == 3
+
+            bench._prepare_base_trajectory_history(recall, "http://localhost:3001", batch_started_at)
+            assert remaining() == ["base-failed-tool", "before-batch"]
+
+            (context / "services.json").write_text(json.dumps({
+                "status": "stopped",
+                "ports": {"backend": 3001, "health": 3003},
+                "database": {"name": "victoria", "port": port},
+            }))
+            assert bench._restore_base_trajectory_history(batch_started_at) is None
+    finally:
+        psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_trajectory_recall_restores_base_history_before_each_task():
+    """The batch coordinator restores history inside every admitted task, before it runs."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+
+    source = inspect.getsource(bench.main_async)
+    run_block = source[source.index("async def _run_reported_task"):source.index("async def _report_ticker")]
+    prepare = run_block.index(
+        "await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)"
+    )
+    # Before admission, so a cancelled waiter is still provably never admitted.
+    assert prepare < run_block.index("_admitted_tasks[token] = task") < run_block.index("await run_single_task(")
+    assert "batch_started_at = datetime.now(timezone.utc)" in source
+
+
 def test_biometrics_fixture_stays_exclusive_beside_shared_auth_task():
     """A saved-auth benchmark must not observe WebDecoy's temporary DB clearing."""
     from benchmarks import run_benchmark as bench
@@ -27767,6 +27904,18 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "trajectory_recall_tasks_run_exclusive_beside_their_producers",
+        test_trajectory_recall_tasks_run_exclusive_beside_their_producers,
+    )
+    r.record(
+        "trajectory_recall_starts_from_base_history_on_isolated_stack",
+        _with_tmp_path(test_trajectory_recall_starts_from_base_history_on_isolated_stack),
+    )
+    r.record(
+        "trajectory_recall_restores_base_history_before_each_task",
+        test_trajectory_recall_restores_base_history_before_each_task,
     )
     r.record("browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part)
     await r.record_async(

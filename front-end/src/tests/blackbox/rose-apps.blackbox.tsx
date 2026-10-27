@@ -202,8 +202,8 @@ describe('top-right app icons', () => {
     expect(row.style.right).toBe('16px');
     expect(row.style.left).toBe('');
     expect(row.style.transform).toBe('');
-    expect(row.className).toContain('z-[102]');
-    expect(drawer.className).toContain('z-[101]');
+    expect(row.className).toContain('z-[103]');
+    expect(drawer.className).toContain('z-[102]');
     expect(screen.getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
 
     // Clicking the active icon is how the drawer closes.
@@ -236,14 +236,14 @@ describe('top-right app icons', () => {
     await user.click(screen.getByTestId('rose-app-integrations'));
     expect(screen.queryByTestId('rose-phone')).toBeNull();
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
-    expect(screen.getByTestId('rose-app-panel').className).toContain('z-[101]');
+    expect(screen.getByTestId('rose-app-panel').className).toContain('z-[102]');
     const icons = screen.getByTestId('rose-app-icons');
-    expect(icons.className).toContain('z-[102]');
+    expect(icons.className).toContain('z-[103]');
     expect(icons.style.right).toBe('16px');
     expect(icons.style.top).toBe('11px');
     await user.click(screen.getByTestId('rose-app-browser'));
-    expect(icons.className).toContain('z-[102]');
-    expect(screen.getByTestId('browser-app-drawer').className).toContain('z-[101]');
+    expect(icons.className).toContain('z-[103]');
+    expect(screen.getByTestId('browser-app-drawer').className).toContain('z-[102]');
   });
 
   it('Dark mode is a toggle (moon → sun, label swaps) that drives RoseThemeProvider and opens no panel', async () => {

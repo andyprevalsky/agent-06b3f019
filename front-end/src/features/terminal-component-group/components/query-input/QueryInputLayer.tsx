@@ -1,10 +1,20 @@
-/** Keep the composer at its layout position while escaping the app panel stacking context. */
+/**
+ * Keep the composer at its layout position while escaping the app panel stacking context.
+ *
+ * The fixed layer is pinned by its BOTTOM edge to the anchor's bottom (the
+ * composer sits at the bottom of a bottom-aligned column), so content that
+ * grows inside it (the agents-running pane opening) extends upward in the same
+ * frame. Pinned by top, it grew downward past its slot for the ~2 frames the
+ * ResizeObserver -> anchor height -> anchor position round trip took, then
+ * jumped up (and the reverse on close).
+ */
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
+import { ROSE_LAYER } from '@/lib/roseLayers';
 import { browserComposerTarget } from './browserComposer';
 
-type Geometry = { left: number; top: number; width: number; height: number };
+type Geometry = { left: number; bottom: number; width: number; height: number };
 
 export function QueryInputLayer({
   enabled,
@@ -29,7 +39,12 @@ export function QueryInputLayer({
       const bounds = anchor.current.getBoundingClientRect();
       const height = layer.current.getBoundingClientRect().height;
       setGeometry((previous) => {
-        const next = { left: bounds.left, top: bounds.top, width: bounds.width, height };
+        const next = {
+          left: bounds.left,
+          bottom: document.documentElement.clientHeight - bounds.bottom,
+          width: bounds.width,
+          height,
+        };
         return previous &&
           Object.keys(next).every(
             (key) => previous[key as keyof Geometry] === next[key as keyof Geometry],
@@ -88,10 +103,10 @@ export function QueryInputLayer({
         <div
           ref={layer}
           data-testid="query-input-layer"
-          className="fixed z-[100] flow-root rose-mobile-query-area"
+          className={`fixed ${ROSE_LAYER.composer} flow-root rose-mobile-query-area`}
           style={{
             left: geometry?.left ?? 0,
-            top: geometry?.top ?? 0,
+            bottom: geometry?.bottom ?? 0,
             width: geometry?.width || '100%',
           }}
         >

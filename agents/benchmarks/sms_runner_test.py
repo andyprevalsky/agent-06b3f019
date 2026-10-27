@@ -1931,6 +1931,8 @@ def test_actual_admitted_sms_wrapper_retires_only_verified_exact_roots(monkeypat
     monkeypatch.setattr(outcome_publication,'wait_for_publication',AsyncMock())
     ns={'asyncio':asyncio,'BenchmarkTask':bench.BenchmarkTask,'TaskResult':bench.TaskResult,
         'base_url':'http://localhost:39999','run_single_task':delegate,
+        '_reads_base_trajectory_history':bench._reads_base_trajectory_history,
+        '_prepare_base_trajectory_history':bench._prepare_base_trajectory_history,'batch_started_at':None,
         'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None),
         '_admitted_tasks':admitted,'_entered_task_futures':set(),'_task_root_custody':bench._task_root_custody,'_admitted_agent_ids':agents,'_evaluated_task_results':evaluated,
         '_outcome_signatures':signatures,'_live_task_agent_ids':live,

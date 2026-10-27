@@ -500,4 +500,26 @@ run_signal_case "single-TERM"
 run_signal_case "second-TERM" TERM
 run_signal_case "TERM-INT-HUP-burst" TERM INT HUP TERM
 
+# Regression (2026-10-26): the same-queue stale-worker sweep scoped by a bare
+# "$root"/* prefix, so a canonical-checkout stack claimed workers whose cwd was
+# a nested agent worktree (.claude/worktrees/<name>).
+(
+    scope_root="$(mktemp -d)"
+    nested="$scope_root/.claude/worktrees/gate-x"
+    mkdir -p "$nested/agents" "$scope_root/agents"
+    printf 'gitdir: /nonexistent\n' > "$nested/.git"
+    (cd "$nested/agents" && exec sleep 1000) &
+    nested_pid=$!
+    (cd "$scope_root/agents" && exec sleep 1000) &
+    own_pid=$!
+    trap 'kill "$nested_pid" "$own_pid" 2>/dev/null || true; rm -rf "$scope_root"' EXIT
+    sleep 0.2
+    run_process_cwd_in_tree "$own_pid" "$scope_root" || { echo "FAIL: own-tree worker not recognized" >&2; exit 1; }
+    if run_process_cwd_in_tree "$nested_pid" "$scope_root"; then
+        echo "FAIL: nested worktree worker claimed by the enclosing checkout" >&2
+        exit 1
+    fi
+)
+echo "PASS: run_process_cwd_in_tree never claims a nested worktree"
+
 echo "All run process cleanup tests passed."

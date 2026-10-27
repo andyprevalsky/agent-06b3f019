@@ -235,16 +235,25 @@ docker_available_for_cold_seed() {
 }
 
 # Check cwd first because many service command lines are just "node" or
-# "python3" and do not include the worktree path.
+# "python3" and do not include the worktree path. When the cwd is unreadable
+# (lsof missing or denied), the command path still decides; both checks stop at
+# nested worktrees.
+process_cwd_in_this_worktree() {
+    local pid=$1
+    local cwd physical_worktree
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
+    # path used to start the process. Compare both spellings before reaping it.
+    physical_worktree=$(pwd -P)
+    run_path_in_worktree "$cwd" "$PWD" || run_path_in_worktree "$cwd" "$physical_worktree"
+}
+
 process_belongs_to_this_worktree() {
     local pid=$1
-    local cwd cmd
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    if [ "$cwd" = "$PWD" ] || [[ "$cwd" == "$PWD"/* ]]; then
-        return 0
-    fi
+    local cmd
+    process_cwd_in_this_worktree "$pid" && return 0
     cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-    echo "$cmd" | grep -Fq "$PWD"
+    run_cmd_mentions_worktree "$cmd" "$PWD"
 }
 
 # Check if a port requires moving this workspace to a different range.
@@ -470,19 +479,6 @@ is_current_process_family() {
     return 1
 }
 
-process_cwd_in_this_worktree() {
-    local pid=$1
-    local cwd physical_worktree
-    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
-    # macOS reports /var as /private/var in lsof, while $PWD keeps the logical
-    # path used to start the process. Compare both spellings before reaping it.
-    physical_worktree=$(pwd -P)
-    case "$cwd" in
-        "$PWD"|"$PWD"/*|"$physical_worktree"|"$physical_worktree"/*) return 0 ;;
-    esac
-    return 1
-}
-
 kill_stale_tree() {
     local pid=$1
     # Recheck EVERY pid, not just the entry point. A stale matching parent must
@@ -522,6 +518,54 @@ process_age_seconds() {
         else if (NF == 2) { print $1 * 60 + $2 }
         else              { print 0 }
     }'
+}
+
+# Startup grace for an isolated stack that has not published services.json.
+# Fall back to the default on any non-integer override. An arithmetic error
+# would return "not owned" and let cleanup kill a just-started run before it
+# publishes services.json — fail toward preserving the stack. Bound before ANY
+# numeric use: a leading-zero value ("0000000008") is invalid octal to $(( )),
+# and a value near the integer ceiling overflows `grace + 59`. Cap at 5 digits
+# (~27h), far above any real bootstrap.
+benchmark_startup_grace_seconds() {
+    local grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
+    printf '%s\n' "$grace"
+}
+
+# An isolated run that has not published services.json is still starting when
+# its owner (local.py's local-stack-owner.json: the stack pid and its `ps
+# lstart` birth) is the same live process, or when the run directory is younger
+# than the startup grace (the owner record is written just after launch).
+isolated_run_still_starting() {  # <run-dir>
+    local run_dir="$1" owner pid birth grace grace_min
+    owner="$(OWNER="$run_dir/local-stack-owner.json" python3 - <<'PYEOF'
+import json, os, sys
+
+try:
+    with open(os.environ["OWNER"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+pid, birth = data.get("pid"), data.get("birth")
+if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and isinstance(birth, str) and birth.strip():
+    print(f"{pid} {birth.strip()}")
+PYEOF
+)" || owner=""
+    if [ -n "$owner" ]; then
+        pid="${owner%% *}"
+        birth="${owner#* }"
+        if [ "$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')" = "$birth" ]; then
+            return 0
+        fi
+    fi
+    grace="$(benchmark_startup_grace_seconds)"
+    grace_min=$(( (grace + 59) / 60 ))
+    [ -n "$(find "$run_dir" -maxdepth 0 -type d -mmin "-$grace_min" 2>/dev/null)" ]
 }
 
 pid_belongs_to_active_isolated_benchmark() {
@@ -573,24 +617,44 @@ PYEOF
         hops=$((hops + 1))
     done
 
+    # Run identity: local.py launches every isolated stack with
+    # BENCHMARK_RUN_ID, which all its services, tunnels and reparented
+    # (ppid 1) children inherit. Manifest PIDs and ancestry miss a detached
+    # child, so a non-isolated sweep killed a bootstrapping isolated stack
+    # (2026-10-12). Protect any process whose run is still starting/running,
+    # or has not published services.json yet.
+    local run_id run_dir
+    run_id="$(run_process_env_value "$pid" BENCHMARK_RUN_ID)"
+    if [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$run_id" != "." ] && [ "$run_id" != ".." ]; then
+        run_dir="$PWD/.context/benchmarks/$run_id"
+        if [ -d "$run_dir" ]; then
+            if [ ! -f "$run_dir/services.json" ]; then
+                # Not published yet. Only an in-flight bootstrap is protected:
+                # a stack that died before publishing must not shield its
+                # leftover children for as long as the run directory exists.
+                isolated_run_still_starting "$run_dir" && return 0
+            else
+                MANIFEST="$run_dir/services.json" python3 - <<'PYEOF' && return 0
+import json, os, sys
+
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+live = isinstance(data, dict) and str(data.get("status", "")).strip().lower() in {"starting", "running"}
+sys.exit(0 if live else 1)
+PYEOF
+            fi
+        fi
+    fi
+
     # Publication race: the isolated runner execs run.sh BEFORE it writes
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
     local age grace
     age=$(process_age_seconds "$pid")
-    # Fall back to the default on any non-integer override. An arithmetic error
-    # here would return "not owned" and let cleanup kill a just-started run
-    # before it publishes services.json — fail toward preserving the stack.
-    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
-    # Bound before ANY numeric use. An all-digits string still breaks this
-    # function two ways: a leading-zero value ("0000000008") is invalid octal to
-    # the $(( )) below, and a value near the integer ceiling overflows
-    # `grace + 59`. Either one disables the young-process guard that stops
-    # cleanup from killing a benchmark which has not yet published
-    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
-    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
-        grace=90
-    fi
+    grace="$(benchmark_startup_grace_seconds)"
     [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
 
     # Young alone is not enough. An unqualified age check ALSO preserves a
@@ -622,7 +686,7 @@ kill_stale_same_worktree_benchmark_stack() {
 
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-        if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+        if run_cmd_mentions_worktree "$cmd" "$PWD" || process_cwd_in_this_worktree "$pid"; then
             if pid_belongs_to_active_isolated_benchmark "$pid"; then
                 echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
                 continue
@@ -700,6 +764,16 @@ if $IS_CLOUD; then
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                [ "$pid" = "$$" ] && continue
+                is_current_process_family "$pid" && continue
+                # `.cloud-env` marks the canonical checkout, but agent
+                # worktrees nest inside it (.claude/worktrees/<n>) and run
+                # their own stacks; a box-wide pattern kill murdered them.
+                # A cwd lsof cannot read falls back to the command path, so a
+                # stale worker is not left holding this stack's ports.
+                if ! process_belongs_to_this_worktree "$pid"; then
+                    continue
+                fi
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
                     continue

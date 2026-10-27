@@ -74,6 +74,7 @@ function applyWsMessage(
   isCompletedRef: MutableRefObject<boolean>,
   onStateChange: (state: ChipState) => void,
 ): void {
+  // A status-only socket passes null refs: every output write below is skipped.
   switch (msg.type) {
     case 'buffer': {
       const formatted = formatTerminalOutputForDisplay(msg.data, 'buffer');
@@ -120,15 +121,33 @@ function applyWsMessage(
   }
 }
 
+/** Refs that keep no output: a status-only socket's writes land here and vanish. */
+class DiscardingOutput {
+  readonly terminal: MutableRefObject<XTermTerminal | null> = { current: null };
+  readonly buffer: MutableRefObject<string> = {
+    get current() {
+      return '';
+    },
+    set current(_value: string) {
+      // Discarded: nothing displays a status-only session's output.
+    },
+  };
+}
+
 export function useClaudeCodeWebSocket({
   wsUrl,
-  terminalRef,
-  outputBufferRef,
+  terminalRef: displayRef,
+  outputBufferRef: bufferRef,
   isCompletedRef,
   shouldClose,
   onStateChange,
+  bufferOutput = true,
 }: TerminalTypes.UseWebSocketArgs): void {
   const wsRef = useRef<WebSocket | null>(null);
+  // Status only (bufferOutput false): output goes to a sink that keeps nothing.
+  const [sink] = useState(() => new DiscardingOutput());
+  const terminalRef = bufferOutput ? displayRef : sink.terminal;
+  const outputBufferRef = bufferOutput ? bufferRef : sink.buffer;
 
   const connect = useCallback(
     (attempt: number) => {

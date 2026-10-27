@@ -30,6 +30,7 @@ import { after, before, test } from 'node:test';
 import { Sandbox } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import { checkpointKey } from '../../providers/codeSessions/artifactStore';
 import { shareCodeSession } from '../../providers/codeSessions/branch';
 import {
@@ -553,13 +554,17 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
     data: { agentId: rootAgentId, sandboxId: 'sb-keepalive', goal: 'g', codeSessionId: session.id },
   });
   const extended: Array<[string, number]> = [];
-  const alive = await keepAliveCodeTask(task.id, async (sandboxId, timeoutMs) => {
-    extended.push([sandboxId, timeoutMs]);
-  });
+  const alive = await keepAliveCodeTask(
+    task.id,
+    async (sandboxId, timeoutMs) => {
+      extended.push([sandboxId, timeoutMs]);
+    },
+    NO_CODE_RESOURCES
+  );
   assert.deepEqual(alive, { alive: true, code_session_id: session.id, awaiting_parent: null });
   // A question to the (blocked) spawning agent rides on the next keepalive.
   await markAwaitingParent(task.id, { message_id: 'q-1', question: 'Which database?' });
-  const asked = await keepAliveCodeTask(task.id, async () => undefined);
+  const asked = await keepAliveCodeTask(task.id, async () => undefined, NO_CODE_RESOURCES);
   assert.equal(asked.awaiting_parent?.question, 'Which database?');
   assert.equal(asked.awaiting_parent?.message_id, 'q-1');
   assert.deepEqual(extended, [['sb-keepalive', 30 * 60 * 1000]]);

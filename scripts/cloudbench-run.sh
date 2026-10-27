@@ -1357,6 +1357,22 @@ STATUS="none"
 # startup even if run.sh rejects a dump that looked restorable at preflight. A
 # successful warm restore still exits this loop as soon as health is ready.
 STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
+# Isolated run.sh writes each service to $CONTEXT_DIR/logs. The driver log is
+# the one file the controller always pulls back, even when sealed runtime
+# evidence is unavailable, so a stack that dies before health must leave each
+# service's exit cause here (a worker rc=1 at 873s was otherwise unexplained).
+log_file_tail() {
+    [ -f "$1" ] || return 0
+    log "───── last $2 lines of $3 log ($1) ─────"
+    tail -"$2" "$1" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+}
+log_stack_service_tails() {
+    log_file_tail "$STACK_LOG" 40 stack
+    log_file_tail "$CONTEXT_DIR/logs/worker.log" 120 worker
+    log_file_tail "$CONTEXT_DIR/logs/backend.log" 60 backend
+    log_file_tail "$CONTEXT_DIR/logs/frontend.log" 80 frontend
+    log_file_tail "$REPO_DIR/front-end/frontend-logs.log" 80 frontend
+}
 if [ ! -s "$STACK_SEED_DUMP" ]; then
     log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
 fi
@@ -1369,14 +1385,7 @@ for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
         # so a sporadic bring-up death is diagnosable from the pulled-back logs.
         wait "$STACK_PID" 2>/dev/null; stack_rc=$?
         log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
-        log "───── last 40 lines of stack log ($STACK_LOG) ─────"
-        tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
-        for _frontend_log in "$CONTEXT_DIR/logs/frontend.log" "$REPO_DIR/front-end/frontend-logs.log"; do
-            if [ -f "$_frontend_log" ]; then
-                log "───── last 80 lines of frontend log ($_frontend_log) ─────"
-                tail -80 "$_frontend_log" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
-            fi
-        done
+        log_stack_service_tails
         if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
             log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
         fi
@@ -1407,8 +1416,7 @@ done
 
 if ! $STACK_READY; then
     log "FATAL: stack did not become healthy within the timeout"
-    log "─── tail of stack log ───"
-    tail -80 "$STACK_LOG" || true
+    log_stack_service_tails
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"

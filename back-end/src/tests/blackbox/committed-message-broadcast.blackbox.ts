@@ -19,6 +19,10 @@ if (LIVE) {
   process.env.SUPABASE_URL = 'https://broadcast.blackbox.invalid';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'blackbox-service-key';
 }
+// Lane/shard byte capacity is independent of the 8 KB live INSERT cap (covered by
+// realtime-payload-cap); lift it so large rows still reach those budgets
+// (LIVE mode: the 158 KB WAF row still exercises the encoded transport).
+process.env.SUPABASE_BROADCAST_LIVE_INSERT_MAX_BYTES = String(1024 * 1024);
 process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '0';
 process.env.SUPABASE_BROADCAST_TIMEOUT_MS = '2000';
 process.env.SUPABASE_BROADCAST_BATCH_SIZE = '1';

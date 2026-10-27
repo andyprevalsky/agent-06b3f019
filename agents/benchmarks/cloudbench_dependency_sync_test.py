@@ -23927,7 +23927,7 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
     run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
     assert "stack process exited (rc=$stack_rc)" in run
-    assert "last 40 lines of stack log" in run
+    assert 'log_file_tail "$STACK_LOG" 40 stack' in run
 
 
 def test_imessage_relay_heartbeat_wait_aborts_when_remote_driver_is_dead() -> None:
@@ -27282,12 +27282,50 @@ def test_cloud_agentcard_payment_tasks_provide_onboarding_callback_env() -> None
     assert "scripts/setup-benchmark-payment.ts --user-id" in driver
 
 
-def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:
-    driver = DRIVER_SCRIPT.read_text()
+def test_cloud_stack_failure_surfaces_each_service_log(tmp_path: Path) -> None:
+    """A stack that dies before health leaves every service's exit cause in the driver log.
 
-    assert "$CONTEXT_DIR/logs/frontend.log" in driver
-    assert "front-end/frontend-logs.log" in driver
-    assert "last 80 lines of frontend log" in driver
+    original600 r001-j0031: the guest worker exited rc=1 after 873s, but only the
+    stack and frontend tails reached cloudbench-driver.log, and sealed runtime
+    evidence was unavailable, so the worker's traceback never left the guest.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    helpers = _extract_fleet_function(driver, "log_file_tail() {") + _extract_fleet_function(
+        driver, "log_stack_service_tails() {"
+    )
+    death_start = driver.index('log "FATAL: stack process exited')
+    death = driver[death_start : driver.index("finish 1", death_start)]
+    timeout = driver[driver.index('log "FATAL: stack did not become healthy'):]
+    assert "log_stack_service_tails" in death
+    assert "log_stack_service_tails" in timeout[: timeout.index("finish 1")]
+
+    context = tmp_path / "context"
+    (context / "logs").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / "front-end").mkdir(parents=True)
+    stack_log = tmp_path / "stack.log"
+    stack_log.write_text("❌ agents (PID 3594) exited with code 1\n")
+    worker_lines = [f"worker line {n}" for n in range(200)] + ["RuntimeError: namespace validation failed"]
+    (context / "logs" / "worker.log").write_text("\n".join(worker_lines) + "\n")
+    (context / "logs" / "backend.log").write_text("backend listening on :3001\n")
+    (repo / "front-end" / "frontend-logs.log").write_text("vite build ok\n")
+    script = 'log() { printf "%s\\n" "$*"; }\n' + helpers + "\nlog_stack_service_tails\n"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "STACK_LOG": str(stack_log), "CONTEXT_DIR": str(context), "REPO_DIR": str(repo)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    out = result.stdout
+    assert f"last 40 lines of stack log ({stack_log})" in out
+    assert "  | ❌ agents (PID 3594) exited with code 1" in out
+    assert f"last 120 lines of worker log ({context}/logs/worker.log)" in out
+    assert "  | RuntimeError: namespace validation failed" in out
+    assert "  | worker line 81" in out and "  | worker line 80" not in out
+    assert "  | backend listening on :3001" in out
+    assert "  | vite build ok" in out
+    assert f"({context}/logs/frontend.log)" not in out
 
 
 def test_production_only_cloud_route_rejects_mixed_target_batches() -> None:

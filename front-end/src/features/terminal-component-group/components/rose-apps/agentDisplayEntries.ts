@@ -21,6 +21,20 @@ export function displayEntryId(message: Message): string {
     : message.message_id;
 }
 
+/** The entry the Agent Display panel shows: the selection, else the agent's latest. */
+export function shownDisplayEntry(apps: {
+  displayEntries: AgentDisplayEntry[];
+  displaySelection: { agentId: string; id: string } | null;
+  selectedAgentId: string | null;
+}): AgentDisplayEntry | undefined {
+  const entries = apps.displayEntries.filter((entry) => entry.agentId === apps.selectedAgentId);
+  const selection = apps.displaySelection;
+  return (
+    entries.find((entry) => entry.id === selection?.id && entry.agentId === selection.agentId) ??
+    entries.at(-1)
+  );
+}
+
 export function agentDisplayEntries(agentId: string, messages: Message[]): AgentDisplayEntry[] {
   const rows = dedupeCodeDisplays(messages);
   const groups = groupDisplayMedia(rows).groupsByLeadId;

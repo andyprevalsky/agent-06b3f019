@@ -146,6 +146,29 @@ describe('CompletionSummaryCard', () => {
     expect(writeText).toHaveBeenCalledWith('Alice');
   });
 
+  it('cancels the copied-state reset when the card unmounts', async () => {
+    // A reset left pending fired after the test environment was torn down
+    // ("window is not defined", an unhandled error that failed coverage).
+    const user = userEvent.setup();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      const view = renderWithProviders(
+        <CompletionSummaryCard
+          data={{ summary: 'Done', outputs: [{ key: 'name', label: 'Name', value: 'Alice' }] }}
+        />,
+      );
+      await user.click(screen.getByTitle('Copy to clipboard'));
+      const resetIndex = setTimeoutSpy.mock.calls.findIndex(([, ms]) => ms === 2000);
+      expect(resetIndex).toBeGreaterThanOrEqual(0);
+      view.unmount();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(setTimeoutSpy.mock.results[resetIndex].value);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
   it('renders FilePointer outputs as download chips (no copy button)', () => {
     const filePointer: FilePointer = {
       id: 'file-1',

@@ -276,8 +276,14 @@ require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
 require_text "$DESCEND" 'golden reference' \
   "descend must require the shared golden-reference evidence"
-require_text "$RCA" 'The golden-reference check (Step 6b in `docs/root-cause-analysis.md`)' \
-  "RCA completion must record the golden-reference check"
+require_text "$RCA" 'When the fix changes an approval-gated surface, the golden-reference check' \
+  "RCA completion must record the golden-reference check for approval-gated fixes"
+require_text "$RCA_GUIDE" 'Run this step only when the fix changes an approval-gated surface' \
+  "RCA golden-reference grounding is scoped to approval-gated fixes, not all code"
+require_text "$FORMAT" 'Scope: only the hunks inside the mandatory user-approval section' \
+  "golden-reference review covers only the hunks in the mandatory approval scope"
+require_text "$ROOT_DIR/CLAUDE.md" 'It reviews only the hunks inside the mandatory user-approval scope' \
+  "CLAUDE.md rule 26a scopes grounding to the mandatory approval hunks"
 require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
   "RCA methodology must check the reference harnesses before choosing a fix"
 require_text "$FORMAT" "## Golden-reference adversarial review" \

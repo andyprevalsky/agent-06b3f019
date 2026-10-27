@@ -32,6 +32,12 @@
  *
  * Trigger: variant 'icon' (stock) = muted gear; variant 'nub' (Rose Desktop
  * query-box tab) = bare white gear with the instant "Agent settings" tooltip.
+ *
+ * Anchor (above the trigger, opening away from its side of the screen):
+ *   'icon' sits at the right end of the stock TopBar -> right edges align,
+ *          the panel extends leftward
+ *   'nub'  sits on the tab at the query box's left edge -> left edges align,
+ *          the panel extends rightward (clamped inside the viewport)
  */
 
 import { useRef, useState, type RefObject } from 'react';
@@ -52,7 +58,11 @@ import DeleteSection from './agent-settings-dialog/DeleteSection';
 import ReportBugSection from './agent-settings-dialog/ReportBugSection';
 import { useDeleteFlow } from './agent-settings-dialog/useDeleteFlow';
 import { usePriceLimitEdit } from './agent-settings-dialog/usePriceLimitEdit';
-import { useModalPosition } from './agent-settings-dialog/useModalPosition';
+import {
+  PANEL_MAX_WIDTH_VW,
+  PANEL_WIDTH_PX,
+  useModalPosition,
+} from './agent-settings-dialog/useModalPosition';
 import { useReportBug } from './agent-settings-dialog/useReportBug';
 import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 
@@ -91,7 +101,7 @@ export default function AgentSettingsDialog({
 }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const modalPosition = useModalPosition(open, triggerRef);
+  const modalPosition = useModalPosition(open, triggerRef, variant === 'nub' ? 'start' : 'end');
   const { user: authUser } = useAuth();
   const showReportBug = isAdminOperator(authUser);
 
@@ -118,13 +128,13 @@ export default function AgentSettingsDialog({
         className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden"
         style={{
           position: 'fixed',
-          bottom: `${modalPosition.bottom}px`,
-          right: `${modalPosition.right}px`,
+          bottom: modalPosition.bottom,
+          left: modalPosition.left,
+          right: modalPosition.right,
           top: 'auto',
-          left: 'auto',
           transform: 'none',
-          width: '420px',
-          maxWidth: '90vw',
+          width: PANEL_WIDTH_PX,
+          maxWidth: `${PANEL_MAX_WIDTH_VW}vw`,
           maxHeight: '85vh',
           backgroundColor: 'transparent',
           backdropFilter: 'blur(12px)',

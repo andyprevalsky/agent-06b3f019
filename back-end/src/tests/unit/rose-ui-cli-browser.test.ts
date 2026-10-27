@@ -8,6 +8,7 @@
  *                          ──► rose-ui perf ──► metrics JSON (fps, long tasks, CLS, bytes, props bridge)
  *                          ──► rose-ui record ──► frame strip PNG (+ MP4 when ffmpeg is installed)
  *   fixtures/user-ui/janky ──► rose-ui check ──► exit 1 on the load-independent rules
+ *   fixtures/user-ui/blocking ──► rose-ui check ──► exit 1 on long-task (one blocking GPU readback)
  *   seed + rose-ui skill examples ──► rose-ui check --examples ──► exit 0, every example passes
  *
  * Fixtures are copied to a temp folder so captures never land in the repo; the CLI
@@ -223,6 +224,36 @@ test('check fails the deliberately janky fixture on load-independent rules', asy
     assert.ok(rules.has(rule), `janky fixture violates ${rule} (got ${[...rules].join(', ')})`);
   }
 });
+
+// Page waits are told from host stalls by sampling thread state from /proc (Linux), and the
+// fixture's readback is only slow on the software GPU (SwiftShader) Linux hosts use.
+const linuxOnly =
+  process.platform === 'linux' ? false : 'page-wait attribution samples /proc (Linux only)';
+
+test(
+  'check fails a one-off blocking GPU readback on long-task (a page wait, not a host stall)',
+  { skip: linuxOnly },
+  async () => {
+    const blocking = folder('blocking', join(fixtures, 'blocking'));
+    const run = await rose(blocking, ['check', '--json']);
+    const report = json<{
+      entries: {
+        normal: {
+          longTasks: { phase: string; duration: number; cpu?: number; pageWait?: number }[];
+        };
+        verdict: { violations: { rule: string }[]; warnings: { rule: string }[] };
+      }[];
+    }>(run, 'check blocking');
+    const entry = report.entries[0];
+    const evidence = JSON.stringify(entry.normal.longTasks);
+    assert.ok(
+      entry.verdict.violations.some((v) => v.rule === 'long-task'),
+      `blocking readback fails long-task: ${evidence}`
+    );
+    assert.ok(!entry.verdict.warnings.some((w) => w.rule === 'long-task-stall'), evidence);
+    assert.equal(run.code, 1, 'check exits 1 on violations');
+  }
+);
 
 test('check --examples passes every shipped example', async () => {
   // The starting bundle with the rose-ui skill's examples copied in, as the

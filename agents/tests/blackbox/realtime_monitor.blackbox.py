@@ -313,6 +313,27 @@ def test_no_hanging_tool_calls_ignores_subagent_internal_tools():
     assert invariant.failure_reason is None
 
 
+def test_no_hanging_tool_calls_closes_on_bounded_finished_notice():
+    """A FINISHED row over the backend's 8 KB live cap arrives as INSERT_DEFERRED."""
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_broadcast("INSERT", {"payload": {"record": _tool_record("agent-1", "IN_PROGRESS")}})
+    notice = {
+        "agentId": "agent-1",
+        "id": "msg-FINISHED",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "role": "TOOL",
+        "reason": "This message is too large to stream live; loading it from the server.",
+        "preview": "Search results...",
+        "metadata": {"toolCallId": "tc-1", "toolName": "web_search", "toolStatus": "FINISHED"},
+    }
+    invariant.handle_broadcast("INSERT_DEFERRED", {"payload": {"record": notice}})
+    invariant.handle_broadcast("INSERT", {"payload": {"record": _assistant_record("agent-1")}})
+
+    assert invariant.failure_reason is None, invariant.failure_reason
+
+
 def test_no_hanging_tool_calls_ignores_declaring_assistant():
     from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
 
@@ -470,6 +491,10 @@ async def run_all_tests():
     r.record(
         "no_hanging_tool_calls_ignores_subagent_internal_tools",
         test_no_hanging_tool_calls_ignores_subagent_internal_tools,
+    )
+    r.record(
+        "no_hanging_tool_calls_closes_on_bounded_finished_notice",
+        test_no_hanging_tool_calls_closes_on_bounded_finished_notice,
     )
     r.record(
         "no_hanging_tool_calls_ignores_declaring_assistant",
