@@ -16318,10 +16318,10 @@ warm_deps_preflight() {
     recorded_state="$(warm_deps_recorded_state 2>/dev/null || true)"
     if [ -n "$recorded_state" ]; then
         read -r s_node s_py s_epoch _rest <<< "$recorded_state" || true
-        # Hydration already bound this exact completed snapshot and epoch to
-        # the donor, volume and manifests. Reuse that captured inventory: an
-        # uncertain later provider read is not evidence that proof went stale.
-        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+        # Selection already checked this exact completed snapshot in the
+        # donor volume inventory. Reuse those bytes for its epoch even when
+        # the dependency receipt was local; a later partial list is not age.
+        if [ -n "${SNAPSHOTS_JSON:-}" ]; then
             snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")" || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1

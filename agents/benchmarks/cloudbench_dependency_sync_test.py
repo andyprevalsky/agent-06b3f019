@@ -19132,6 +19132,31 @@ def test_warm_deps_preflight_preserves_captured_exact_proof_when_later_read_fail
     assert (tmp_path / "common/snapshot-read-count").read_text().strip() == "1"
 
 
+@pytest.mark.parametrize("subsequent_read", ["failed", "empty", "malformed"])
+def test_legacy_receipt_reuses_selected_snapshot_inventory_without_second_read(
+    tmp_path: Path, subsequent_read: str
+) -> None:
+    """Selection already observed this exact snapshot; local proof needs no second list."""
+    node, python = "1" * 64, "2" * 64
+    inventory = [{"id": "warm-machine", "config": {"mounts": [{"volume": "vol_warm"}]}}]
+    result, calls = _preflight_harness(
+        tmp_path,
+        state_line=f"{node} {python} 1000 snap-current",
+        dirty=False,
+        autorefresh="1",
+        snap_epoch=2000,
+        warm_inventory=inventory,
+        node_fp=node,
+        python_fp=python,
+        subsequent_snapshot_read=subsequent_read,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "restored proven donor dependency snapshot" not in result.stdout
+    assert "SNAP_AFTER=snap-current" in result.stdout
+    assert "refresh-deps" not in calls.read_text()
+    assert (tmp_path / "common/snapshot-read-count").read_text().strip() == "1"
+
+
 def test_warm_deps_preflight_requires_live_verification_after_a_new_refresh(tmp_path: Path) -> None:
     """The old captured list cannot authorize the snapshot made by maintenance."""
     result, calls = _preflight_harness(
