@@ -37,6 +37,9 @@ export async function deleteIntegration(integrationId: string) {
       });
       revocations.push({ id: job.id, token });
     }
+    // Queued history parts hold message payloads; they must not outlive or be
+    // processed after their integration.
+    await tx.messagingUploadJob.deleteMany({ where: { integrationId } });
     const integration = await tx.integration.delete({ where: { id: integrationId } });
     return { integration, revocations };
   });

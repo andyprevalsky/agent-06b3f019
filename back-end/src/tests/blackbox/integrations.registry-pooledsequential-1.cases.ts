@@ -42,6 +42,10 @@ import {
   testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
   testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
 } from './integrations.claude-shared-grant.cases';
+import {
+  testCodexSandbox_neverSpendsSharedRefreshGrant,
+  testCodexSandbox_concurrentSessionsShareOneAccessToken,
+} from './integrations.codex-shared-grant.cases';
 
 export function pooledSequentialTestsPart1() {
   return [
@@ -77,6 +81,14 @@ export function pooledSequentialTestsPart1() {
     {
       name: 'claude-code sandbox -- expiry parsing matches Claude Code',
       fn: testClaudeCodeSandbox_expiryParsingMatchesClaudeCode,
+    },
+    {
+      name: 'codex sandbox -- never spends a shared refresh grant',
+      fn: testCodexSandbox_neverSpendsSharedRefreshGrant,
+    },
+    {
+      name: 'codex sandbox -- concurrent sessions share one access token',
+      fn: testCodexSandbox_concurrentSessionsShareOneAccessToken,
     },
     {
       name: 'rotation -- rate-limit window never shortens',
