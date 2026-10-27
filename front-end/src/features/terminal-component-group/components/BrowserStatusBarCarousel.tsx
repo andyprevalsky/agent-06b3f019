@@ -66,30 +66,32 @@ function BrowserStatusBarCarouselImpl({ browsers }: { browsers: BrowserSession[]
       {browsers.length > 1 && (
         <div
           aria-label="Active browsers"
-          className="mb-2 flex min-w-0 items-center gap-1.5 overflow-x-auto py-1 sm:pl-36 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="mb-2 flex min-w-0 items-center gap-1.5 sm:pl-36"
         >
           <span className="shrink-0 pr-1 text-[10px] text-muted-foreground">
             {browsers.length} browsers
           </span>
-          {browsers.map((browser) => (
-            <button
-              type="button"
-              key={browser.taskId}
-              aria-label={`Show browser: ${labels.get(browser.taskId)}`}
-              aria-pressed={browser.taskId === activeTaskId}
-              onClick={() => setSelectedTaskId(browser.taskId)}
-              title={labels.get(browser.taskId)}
-              className={cn(
-                'flex min-w-0 max-w-[200px] shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors',
-                browser.taskId === activeTaskId
-                  ? 'border-border bg-muted text-foreground'
-                  : 'border-transparent text-muted-foreground hover:bg-muted/50',
-              )}
-            >
-              <Bot aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">{labels.get(browser.taskId)}</span>
-            </button>
-          ))}
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {browsers.map((browser) => (
+              <button
+                type="button"
+                key={browser.taskId}
+                aria-label={`Show browser: ${labels.get(browser.taskId)}`}
+                aria-pressed={browser.taskId === activeTaskId}
+                onClick={() => setSelectedTaskId(browser.taskId)}
+                title={labels.get(browser.taskId)}
+                className={cn(
+                  'flex min-w-0 max-w-[200px] shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors',
+                  browser.taskId === activeTaskId
+                    ? 'border-border bg-muted text-foreground'
+                    : 'border-transparent text-muted-foreground hover:bg-muted/50',
+                )}
+              >
+                <Bot aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{labels.get(browser.taskId)}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {browsers.map((browser) => (

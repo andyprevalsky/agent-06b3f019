@@ -1,5 +1,6 @@
 /** Browser selector behavior, preserving mounted task owners across selection. */
 import { describe, it, expect, vi } from 'vitest';
+import type { Message } from '@/lib/api';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
@@ -31,7 +32,7 @@ export function BrowserStatusBarCarousel({
 }: {
   browsers: { taskId: string; browserUrl: string }[];
 }) {
-  const messages = browsers.flatMap((browser) => [
+  const messages = browsers.flatMap<Message>((browser) => [
     {
       message_id: `spawn-${browser.taskId}`,
       timestamp: '2026-10-27T00:00:00Z',
