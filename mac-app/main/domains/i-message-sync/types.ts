@@ -1,7 +1,19 @@
-import type { IMessageData, UploadResult, AuthSession } from '../../../shared/types/ipc';
+import type {
+  IMessageData,
+  MessagingUploadOptions,
+  UploadResult,
+  AuthSession,
+} from '../../../shared/types/ipc';
 import type { NormalizedMessage, SyncEvent } from '../../services/messaging/types';
 
-export type { IMessageData, UploadResult, AuthSession, NormalizedMessage, SyncEvent };
+export type {
+  IMessageData,
+  MessagingUploadOptions,
+  UploadResult,
+  AuthSession,
+  NormalizedMessage,
+  SyncEvent,
+};
 
 /**
  * Integration record returned by IntegrationCache.getIntegration().
