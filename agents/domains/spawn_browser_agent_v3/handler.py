@@ -1608,11 +1608,19 @@ def _append_browser_user_instructions(
 
 
 def _unread_user_instructions(instruction_state: Dict[str, Any], latest_state: Dict[str, Any]) -> List[str]:
-    """User input the final read found that never reached this browser's model."""
-    delivered = int(instruction_state.get("delivered_user_instruction_count") or 0)
+    """User input the final read found that no browser-model decision acted on.
+
+    ``acted_user_instruction_count`` is captured at each step-start sync, the
+    point a browser-model decision follows. Later syncs (completion/max-steps
+    verifiers) advance ``delivered_user_instruction_count`` without a decision,
+    so they must not hide input from the owner.
+    """
+    acted = instruction_state.get("acted_user_instruction_count")
+    if acted is None:
+        acted = instruction_state.get("delivered_user_instruction_count")
     return [
         message["content"]
-        for message in (latest_state.get("user_instruction_messages") or [])[delivered:]
+        for message in (latest_state.get("user_instruction_messages") or [])[int(acted or 0):]
         if isinstance(message, dict) and isinstance(message.get("content"), str) and message["content"].strip()
     ]
 
@@ -7606,15 +7614,31 @@ async def _spawn_browser_agent_activity_v3_real(
 
     # Filled by the final post-close instruction read (collect_unread_user_instructions).
     unread_user_instructions: List[str] = []
+    # The read state exists before session setup, so a run that ends during setup
+    # still hands input sent to it to the owner; the step loop replaces it.
+    _resumed_input = write_lock_resume_state or {}
+    instruction_state: Dict[str, Any] = {
+        "tool_call_id": tool_call_id,
+        "task_id": task_id,
+        "user_instruction_messages": list(_resumed_input.get("user_instruction_messages") or []),
+        "user_instruction_message_ids": list(_resumed_input.get("user_instruction_message_ids") or []),
+        "delivered_user_instruction_count": int(_resumed_input.get("delivered_user_instruction_count") or 0),
+        "user_message_cursor": _resumed_input.get("user_message_cursor"),
+        "user_message_cursor_is_task_start": bool(_resumed_input.get("user_message_cursor_is_task_start")),
+    }
 
     async def collect_unread_user_instructions() -> None:
         # A Browser-composer message can land after the last step's read and
         # before any pause-close (completion, max steps, user pause, failure);
         # the owner gets it in this browser's result instead of losing it.
         try:
-            latest = await _load_browser_resume_user_instructions(agent_id, instruction_state)
-            unread_user_instructions[:] = _unread_user_instructions(instruction_state, latest)
-        except Exception as read_error:  # includes an ending before the first instruction read
+            state = instruction_state if instruction_state.get("task_id") else {**instruction_state, "task_id": task_id}
+            latest = await _load_browser_resume_user_instructions(agent_id, state)
+            # Same masking as every other value this activity reports.
+            unread_user_instructions[:] = [
+                _redact_activity_value(text) for text in _unread_user_instructions(state, latest)
+            ]
+        except Exception as read_error:
             logger.warning("[BrowserAgent] Final user-input read failed", task_id=task_id, error=str(read_error))
 
     def _visible_activity_result(
@@ -9534,6 +9558,10 @@ async def _spawn_browser_agent_activity_v3_real(
 
             if not await sync_user_instructions():
                 await sync_user_instructions(require_confirmed_read=True)
+            # This step's browser-model decision sees everything delivered so far.
+            instruction_state["acted_user_instruction_count"] = int(
+                instruction_state.get("delivered_user_instruction_count") or 0
+            )
             agent_message_rows = instruction_state.pop("_agent_message_rows", None) or []
             if agent_inbox is not None:
                 # Same read as the user instructions: rows addressed to this task only, once each.

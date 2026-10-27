@@ -2331,6 +2331,10 @@ async def test_browser_composer_message_reaches_its_browser_not_the_root():
     owner_text = h._with_unread_user_messages("Order placed.", unread)
     assert owner_text.startswith("Order placed.") and "- use the oat milk instead" in owner_text, owner_text
     assert h._with_unread_user_messages("Order placed.", []) == "Order placed."
+    # A verifier-time sync (completion / max steps) delivers input with no browser-model
+    # decision after it: only the step-start count says what the browser acted on.
+    verifier_synced = {**latest, "delivered_user_instruction_count": 2, "acted_user_instruction_count": 1}
+    assert h._unread_user_instructions(verifier_synced, latest) == ["use the oat milk instead"]
     # The owner: hidden from its model, no DAG interrupt (no new root turn), no new requirement.
     assert is_excluded_from_model(direct)
     assert is_dag_interrupt_message(direct) is False

@@ -6,10 +6,13 @@ import { deliverUserMessageToWorkflow, signalUserResponse } from '../../provider
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import {
+  broadcastCreatedMessage,
   createMessage,
   createMessageOnce,
+  createUserMessageInTransaction,
   createWorkflowMessageGroup,
 } from '../../providers/messages';
+import { prisma } from '../../providers/database';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import {
   generateResponseSchema,
@@ -206,14 +209,15 @@ async function validatePostTarget(
  * it). A paused/ended session (run over, or pause-closed after its last step)
  * would never read it, so the message is delivered to the owner as before.
  * Files only reach models through the owner, so a target with files is a 400.
- * One primary-key read per message.
+ * The ACTIVE check and the insert share one row lock (see
+ * createBrowserTargetedMessage), so a pause-close cannot slip between them.
  */
 async function resolveBrowserTarget(
   agentId: string,
   body: PostMessageBody,
   role: string,
   isInternal: boolean
-): Promise<{ metadata: Record<string, unknown> } | { error: string; status: number } | null> {
+): Promise<{ browserTaskId: string } | { error: string; status: number } | null> {
   const browserTaskId = body.browser_task_id;
   if (browserTaskId === undefined) return null;
   if (isInternal || role !== 'USER') {
@@ -224,10 +228,37 @@ async function resolveBrowserTarget(
   }
   const task = await repo.findAgentBrowserTask(agentId, browserTaskId);
   if (task === null) return { error: 'Browser task not found', status: 404 };
-  if (task.status !== 'ACTIVE') return null;
-  return {
-    metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
-  };
+  return { browserTaskId };
+}
+
+/**
+ * Store a Browser-composer message only while its session is ACTIVE, under a
+ * FOR SHARE lock on that BrowserSession row. The browser's pause-close UPDATE
+ * waits for this insert (so its post-close read sees the row), or commits
+ * first (so the message falls back to the owner, returning null). One row
+ * lock and one insert per message; broadcast after commit.
+ */
+async function createBrowserTargetedMessage(
+  agentId: string,
+  body: PostMessageBody,
+  browserTaskId: string
+) {
+  const message = await prisma.$transaction(async (tx) => {
+    const [session] = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT status FROM "BrowserSession"
+      WHERE id = ${browserTaskId} AND "agentId" = ${agentId}
+      FOR SHARE`;
+    if (session?.status !== 'ACTIVE') return null;
+    return createUserMessageInTransaction(tx, {
+      agentId,
+      text: body.message,
+      metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
+    });
+  });
+  if (message !== null) {
+    broadcastCreatedMessage({ agentId, text: message.text, role: 'USER' }, message);
+  }
+  return message;
 }
 
 /**
@@ -285,17 +316,22 @@ export async function postMessage(
 
   const browserTarget = await resolveBrowserTarget(agentId, body, role, isInternal);
   if (browserTarget !== null && 'error' in browserTarget) return browserTarget;
-  const metadata = browserTarget === null ? body.metadata : browserTarget.metadata;
+  const targeted =
+    browserTarget === null
+      ? null
+      : await createBrowserTargetedMessage(agentId, body, browserTarget.browserTaskId);
 
   const messageParams = {
     agentId,
     text: body.message,
     role,
-    metadata,
+    metadata: body.metadata,
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
   };
   let message;
-  if (isInternal) {
+  if (targeted !== null) {
+    message = targeted;
+  } else if (isInternal) {
     // An internal write with no X-Agent-Workflow-Generation header is
     // UNATTRIBUTED, not "generation 1". Defaulting it to the agent id
     // fabricated a real-but-wrong generation, because generation 1's Temporal
@@ -340,11 +376,7 @@ export async function postMessage(
   // echoing them back as receive_user_response would read as user feedback.
   // A Browser-composer message belongs to that browser task: the browser reads
   // it at its next step, so the owner's loop is never signalled for it.
-  if (
-    role === 'USER' &&
-    browserTarget === null &&
-    !(isInternal && isAgentAuthoredRow(body.metadata))
-  ) {
+  if (role === 'USER' && targeted === null && !(isInternal && isAgentAuthoredRow(body.metadata))) {
     await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
   }
 
