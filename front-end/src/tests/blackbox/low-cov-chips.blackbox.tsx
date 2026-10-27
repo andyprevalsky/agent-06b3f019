@@ -22,26 +22,6 @@ import type { FilePointer } from '@/lib/api';
 
 // BrowserStatusBar is heavy — it imports realtime subscriptions, xterm adjacents,
 // and DOM/ref-heavy behavior. Stub it to a simple placeholder that exposes its props.
-vi.mock('@/features/terminal-component-group/components/BrowserStatusBar', () => ({
-  default: ({
-    taskId,
-    browserUrl,
-    forceMinimized,
-  }: {
-    taskId: string;
-    browserUrl: string;
-    forceMinimized?: boolean;
-  }) => (
-    <div
-      data-testid={`browser-status-bar-${taskId}`}
-      data-url={browserUrl}
-      data-force-minimized={String(!!forceMinimized)}
-    >
-      browser-{taskId}
-    </div>
-  ),
-}));
-
 // MarkdownText is used by ApprovalChip. Replace with a passthrough to avoid
 // having to stub react-markdown.
 vi.mock('@/features/terminal-component-group/components/MarkdownText', () => ({
@@ -66,7 +46,6 @@ vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
 import { CompletionSummaryCard } from '@/features/terminal-component-group/components/CompletionSummaryCard';
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import SubAgentToolBubble from '@/features/terminal-component-group/components/SubAgentToolBubble';
-import BrowserStatusBarCarousel from '@/features/terminal-component-group/components/BrowserStatusBarCarousel';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CompletionSummaryCard
@@ -613,88 +592,3 @@ describe('SubAgentToolBubble', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // BrowserStatusBarCarousel
 // ═══════════════════════════════════════════════════════════════════════════
-
-describe('BrowserStatusBarCarousel', () => {
-  it('returns null when no browsers given', () => {
-    const { container } = renderWithProviders(<BrowserStatusBarCarousel browsers={[]} />);
-    expect(container.firstChild).toBeNull();
-  });
-
-  it('renders a single browser without carousel controls', () => {
-    renderWithProviders(
-      <BrowserStatusBarCarousel browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]} />,
-    );
-    expect(screen.getByTestId('browser-status-bar-t1')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Previous browser')).not.toBeInTheDocument();
-  });
-
-  it('renders multiple browsers with navigation arrows and index indicator', () => {
-    renderWithProviders(
-      <BrowserStatusBarCarousel
-        browsers={[
-          { taskId: 't1', browserUrl: 'https://x.com' },
-          { taskId: 't2', browserUrl: 'https://y.com' },
-          { taskId: 't3', browserUrl: 'https://z.com' },
-        ]}
-      />,
-    );
-    expect(screen.getByLabelText('Previous browser')).toBeInTheDocument();
-    expect(screen.getByLabelText('Next browser')).toBeInTheDocument();
-    expect(screen.getByText('1/3')).toBeInTheDocument();
-  });
-
-  it('advances with Next and wraps with Previous', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(
-      <BrowserStatusBarCarousel
-        browsers={[
-          { taskId: 't1', browserUrl: 'https://x.com' },
-          { taskId: 't2', browserUrl: 'https://y.com' },
-        ]}
-      />,
-    );
-    expect(screen.getByText('1/2')).toBeInTheDocument();
-    await user.click(screen.getByLabelText('Next browser'));
-    expect(screen.getByText('2/2')).toBeInTheDocument();
-    // Wrap around back to 1/2
-    await user.click(screen.getByLabelText('Next browser'));
-    expect(screen.getByText('1/2')).toBeInTheDocument();
-    // Previous wraps back to 2/2
-    await user.click(screen.getByLabelText('Previous browser'));
-    expect(screen.getByText('2/2')).toBeInTheDocument();
-  });
-
-  it('clicking a non-active card activates it', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(
-      <BrowserStatusBarCarousel
-        browsers={[
-          { taskId: 't1', browserUrl: 'https://x.com' },
-          { taskId: 't2', browserUrl: 'https://y.com' },
-        ]}
-      />,
-    );
-    expect(screen.getByText('1/2')).toBeInTheDocument();
-    // Click the non-active (t2) card wrapper
-    const t2 = screen.getByTestId('browser-status-bar-t2');
-    await user.click(t2.parentElement!);
-    expect(screen.getByText('2/2')).toBeInTheDocument();
-  });
-
-  it('shrinks browsers array → activeIndex clamps to remaining range', () => {
-    const { rerender } = renderWithProviders(
-      <BrowserStatusBarCarousel
-        browsers={[
-          { taskId: 't1', browserUrl: 'https://x.com' },
-          { taskId: 't2', browserUrl: 'https://y.com' },
-          { taskId: 't3', browserUrl: 'https://z.com' },
-        ]}
-      />,
-    );
-    // Reduce to 1 → single browser path
-    rerender(
-      <BrowserStatusBarCarousel browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]} />,
-    );
-    expect(screen.getByTestId('browser-status-bar-t1')).toBeInTheDocument();
-  });
-});

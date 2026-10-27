@@ -81,7 +81,7 @@ export async function resolveLocalTarget(
     if (devices.length > 1) return unavailable('device_selection_required');
     device = devices[0];
   }
-  if (!hub.isDeviceConnected(device.id)) {
+  if (!(await hub.deviceOnline(device.id))) {
     return {
       available: false,
       reason: LOCAL_TARGET_DEVICE_DISCONNECTED,
@@ -228,7 +228,7 @@ export async function createLocalDeviceCodeSession(
     agentId: params.agentId,
     taskId,
     provider: params.provider,
-    homeDir: hub.deviceSessionHome(target.deviceId, taskId),
+    homeDir: await hub.sessionHome(target.deviceId, taskId),
   });
   let folder: string;
   try {
@@ -267,7 +267,13 @@ export async function createLocalDeviceCodeSession(
       },
     });
   } catch (error) {
-    hub.stopSession(taskId, target.deviceId);
+    // Best-effort: a failed stop must not replace the original error.
+    await hub.stopSession(taskId, target.deviceId).catch((stopError: unknown) =>
+      log.warn('Local session stop after a failed create failed', {
+        task_id: taskId,
+        error: stopError instanceof Error ? stopError.message : String(stopError),
+      })
+    );
     throw error;
   }
   return {
@@ -321,7 +327,15 @@ export async function closeLocalDeviceCodeSession(
   sandboxId: string,
   hub: LocalDeviceHub = localDeviceHub()
 ): Promise<{ outputFiles: [] }> {
-  hub.stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null);
+  // Best-effort: the session row is marked CLOSED even when the Mac is unreachable.
+  await hub
+    .stopSession(taskId, parseLocalDeviceSandboxId(sandboxId)?.deviceId ?? null)
+    .catch((error: unknown) =>
+      log.warn('Local session stop failed; marking it closed', {
+        task_id: taskId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
   await prisma.claudeCodeSession.updateMany({
     where: { id: taskId, status: 'ACTIVE' },
     data: { status: 'CLOSED', closedAt: new Date() },
@@ -329,13 +343,13 @@ export async function closeLocalDeviceCodeSession(
   return { outputFiles: [] };
 }
 
-export function localDeviceSessionHealth(
+export async function localDeviceSessionHealth(
   sandboxId: string,
   hub: LocalDeviceHub = localDeviceHub()
-): { alive: boolean; sandbox_id: string; error?: string } {
+): Promise<{ alive: boolean; sandbox_id: string; error?: string }> {
   const owner = parseLocalDeviceSandboxId(sandboxId);
   if (owner === null) return { alive: false, sandbox_id: sandboxId, error: 'not a local session' };
-  const alive = hub.isDeviceConnected(owner.deviceId) && hub.isSessionTunnelConnected(owner.taskId);
+  const alive = await hub.sessionLive(owner.deviceId, owner.taskId);
   return alive
     ? { alive, sandbox_id: sandboxId }
     : { alive, sandbox_id: sandboxId, error: 'The Rose Mac app is not connected' };
