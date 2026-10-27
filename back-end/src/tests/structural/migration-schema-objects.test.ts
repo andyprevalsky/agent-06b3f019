@@ -207,6 +207,21 @@ assert.deepEqual(driftProblems(livePolicies('true')), [
   'changed policy: User.Users can select own data (1_init): expected PERMISSIVE FOR SELECT ' +
     'TO public USING ((auth.uid())::text="userId"); live PERMISSIVE FOR SELECT TO public USING (true)',
 ]);
+// ALTER POLICY rewrites only the clauses it names (CodeRabbit on #1608).
+const altered = migrationObjectsFromSql([
+  {
+    name: 'a',
+    sql: `CREATE POLICY "p" ON public."T" FOR SELECT TO authenticated USING (("userId" = (auth.uid())::text));
+          ALTER POLICY "p" ON public."T" USING (("ownerId" = (auth.uid())::text));`,
+  },
+]).policyDefs.get('T.p');
+assert.deepEqual(altered, {
+  permissive: 'PERMISSIVE',
+  cmd: 'SELECT',
+  roles: ['authenticated'],
+  using: '"ownerId"=(auth.uid())::text',
+  withCheck: '',
+});
 fs.rmSync(fixture, { recursive: true, force: true });
 console.log(
   'Schema-object drift check reports dropped indexes, policies (and redefinitions) and RLS.'

@@ -28,6 +28,7 @@ import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFina
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
 import { runProductionSchemaDriftCheck } from './providers/schemaDrift/cron';
+import { alertError } from './providers/errorAlert';
 
 function scheduleWorkerProcessRecovery(isProduction: boolean): void {
   if (!isProduction) return;
@@ -232,8 +233,12 @@ function scheduleSchemaDriftCheck(isProduction: boolean): void {
         });
       })
       .catch((error) => {
-        cronLog.error('Schema drift check failed', {
-          error: error instanceof Error ? error.message : String(error),
+        const message = error instanceof Error ? error.message : String(error);
+        cronLog.error('Schema drift check failed', { error: message });
+        // A check that cannot run is as silent as no check; say so in #errors.
+        alertError({
+          source: 'schema_drift',
+          message: `Schema drift check failed to run: ${message}`,
         });
       })
       .finally(() => {

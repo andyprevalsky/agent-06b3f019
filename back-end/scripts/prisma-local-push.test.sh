@@ -340,7 +340,7 @@ test_bare_cli_refuses_env_file_target() (
   for cmd in "db push --skip-generate --accept-data-loss" "migrate dev --skip-generate" "migrate reset --force --skip-generate"; do
     read -ra args <<<"$cmd"
     if out=$(cd "$scratch" && env -u DATABASE_URL -u DIRECT_URL -u PRISMA_CLI_DATABASE_URL \
-      PRISMA_HIDE_UPDATE_MESSAGE=1 timeout 120 node "$prisma_bin" "${args[@]}" 2>&1); then
+      PRISMA_HIDE_UPDATE_MESSAGE=1 node "$prisma_bin" "${args[@]}" 2>&1); then
       echo "bare prisma $cmd succeeded against the .env target" >&2
       exit 1
     fi
@@ -355,6 +355,18 @@ test_bare_cli_refuses_env_file_target() (
     echo "prisma validate rejected an explicit PRISMA_CLI_DATABASE_URL" >&2
     exit 1
   }
+  # `npm run prisma:migrate:dev` goes through the validated local wrapper.
+  node -e '
+    const s = require(process.argv[1]).scripts["prisma:migrate:dev"];
+    if (s !== "bash scripts/prisma-local-push.sh --migrate-dev") {
+      console.error("prisma:migrate:dev must use the validated local wrapper: " + s);
+      process.exit(1);
+    }' "$(dirname "$SCRIPT")/../package.json"
+  if DATABASE_URL="$REMOTE_URL" DIRECT_URL="$REMOTE_URL" PRISMA_LOCAL_PUSH_DRY_RUN=1 \
+    bash "$SCRIPT" --migrate-dev >/dev/null 2>&1; then
+    echo "prisma:migrate:dev accepted a remote target" >&2
+    exit 1
+  fi
   # Render runs `npm run prisma:migrate`: it must map DIRECT_URL explicitly.
   node -e '
     const s = require(process.argv[1]).scripts["prisma:migrate"];

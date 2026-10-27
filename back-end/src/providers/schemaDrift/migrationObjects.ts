@@ -353,6 +353,30 @@ function applyStatement(objects: MigrationObjects, stmt: string, migration: stri
     return;
   }
 
+  // ALTER POLICY ... [TO roles] [USING (...)] [WITH CHECK (...)] changes only
+  // the clauses it names; the rest of the replayed definition stays.
+  m = new RegExp(String.raw`^ALTER\s+POLICY\s+${QIDENT}\s+ON\s+${QUALIFIED}\s+(.*)$`, 'i').exec(
+    stmt
+  );
+  if (m) {
+    const key = `${ident(m[5], m[6])}.${ident(m[1], m[2])}`;
+    const def = objects.policyDefs.get(key);
+    if (def) {
+      const tail = m[7] ?? '';
+      const altered = parsePolicyTail(tail);
+      objects.policyDefs.set(key, {
+        ...def,
+        ...(/\bTO\s/i.test(tail.split(/\b(?:USING|WITH\s+CHECK)\b/i)[0] ?? '')
+          ? { roles: altered.roles }
+          : {}),
+        ...(/\bUSING\b/i.test(tail) ? { using: altered.using } : {}),
+        ...(/\bWITH\s+CHECK\b/i.test(tail) ? { withCheck: altered.withCheck } : {}),
+      });
+      objects.policies.set(key, migration);
+    }
+    return;
+  }
+
   m = new RegExp(String.raw`^CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?${QIDENT}`, 'i').exec(
     stmt
   );

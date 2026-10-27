@@ -125,6 +125,8 @@ test('production cron registers the hourly schema drift check', () => {
   const register = cronSource.slice(cronSource.indexOf('export function registerCronJobs'));
   assert.match(register, /scheduleSchemaDriftCheck\(isProduction\);/);
   assert.match(cronSource, /runProductionSchemaDriftCheck\(\)/);
+  // A check that throws must still reach #errors, not only stderr.
+  assert.match(cronSource, /Schema drift check failed[\s\S]{0,400}alertError\(\{/);
   assert.match(
     cronSource,
     /cron\.schedule\('\d+ \* \* \* \*', run\);\n {2}cronLog\.info\('Schema drift/
