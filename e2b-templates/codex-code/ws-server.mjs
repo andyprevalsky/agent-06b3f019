@@ -1485,7 +1485,8 @@ class CodexAppServer {
   async start(input, settings, clientId, outputSchema = null) {
     const settingsVersion = this.settingsVersion;
     // A turn can fail in the same chunk as its turn/start response.
-    this.pendingTurnStart = { input, clientId, outputSchema };
+    const turnStart = { input, clientId, outputSchema };
+    this.pendingTurnStart = turnStart;
     const response = await this.request("turn/start", {
       threadId: this.threadId,
       input,
@@ -1495,7 +1496,8 @@ class CodexAppServer {
       ...(clientId ? { clientUserMessageId: clientId } : {}),
       ...(outputSchema ? { outputSchema } : {}),
     });
-    this.turnStarts.set(response.turn.id, this.pendingTurnStart);
+    this.turnStarts.set(response.turn.id, turnStart);
+    if (this.pendingTurnStart === turnStart) this.pendingTurnStart = null;
     this.activeTurnId = this.endedTurnIds.has(response.turn.id)
       ? null
       : response.turn.id;
@@ -1733,7 +1735,10 @@ async function runCodexAppServer() {
       } catch {
         // Best-effort: a stale auth.json only matters if the API-key login fails.
       }
-      if (!(await loginWithApiKey())) return null;
+      if (!(await loginWithApiKey())) {
+        appendEvent({ type: "error", message: "Codex API-key login failed" });
+        return null;
+      }
       usingApiKey = true;
       oauthFallbackReason = null;
       const next = spawnCodexAppServer();
@@ -1769,7 +1774,11 @@ async function runCodexAppServer() {
   }
   let result = await closed;
   if (fallback) {
-    const retried = await fallback;
+    // A failed fallback must still end the run with final/exit, never crash it.
+    const retried = await fallback.catch((error) => {
+      appendEvent({ type: "error", message: error.message });
+      return null;
+    });
     if (retried) result = await retried;
   }
   turnsClosed = true;

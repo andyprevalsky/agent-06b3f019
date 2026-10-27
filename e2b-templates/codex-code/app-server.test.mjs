@@ -749,10 +749,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
   let ws;
+  const messages = [];
   try {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
         ws = new WebSocket(`ws://127.0.0.1:${port}?cursor=0`);
+        // Replayed events can arrive with the upgrade; listen before awaiting open.
+        ws.on("message", (d) => messages.push(JSON.parse(d)));
         await new Promise((resolve, reject) => {
           ws.once("open", resolve);
           ws.once("error", reject);
@@ -762,8 +765,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     }
-    const messages = [];
-    ws.on("message", (d) => messages.push(JSON.parse(d)));
     const events = () =>
       messages.flatMap((m) =>
         m.type === "code_agent_event"
