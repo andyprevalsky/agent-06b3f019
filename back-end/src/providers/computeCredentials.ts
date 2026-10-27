@@ -116,8 +116,8 @@ function parseGptEnvelope(credentialsJson: string) {
     // grants intentionally omit the refresh lineage, while legacy synced
     // auth.json envelopes still include it. Requiring refresh_token here made a
     // healthy access-only grant invisible even though this path never uses it.
-    // The Codex CLI sandbox reader remains strict in gptCredentials.ts because
-    // that surface receives and persists the complete auth.json envelope.
+    // The Codex CLI sandbox reader in gptCredentials.ts likewise serves the
+    // access token only and strips any refresh token before it leaves the server.
     if (accessToken.length === 0) return null;
     const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
     return { accessToken, accountId };
