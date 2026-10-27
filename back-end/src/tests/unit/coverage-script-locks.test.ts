@@ -400,6 +400,64 @@ try {
   );
   assert.equal(inherited('', holderPid), 1, 'no inherited key means acquire');
 
+  // CodeRabbit #1592 cycle 2: the default lock directory followed each runner's
+  // TMPDIR, so runners with /var/tmp and /tmp locked different files for the
+  // same database and both ran. The default must not depend on TMPDIR.
+  const sharedDb = `postgresql://localhost:5432/victoria_tmpdir-${process.pid}-${Date.now()}`;
+  const tmpA = mkdtempSync(join(tmpdir(), 'lock-tmpdir-a-'));
+  const tmpB = mkdtempSync(join(tmpdir(), 'lock-tmpdir-b-'));
+  const defaultLockEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete defaultLockEnv.ROSE_TEST_DB_LOCK_DIR;
+  const sharedReady = join(tmpA, 'holder-ready');
+  const sharedHolder = spawn(
+    'bash',
+    [
+      '-c',
+      'source "$1"; acquire_test_db_run_lock "$2" "tmpdir holder" || exit 9; touch "$3"; sleep 30',
+      'holder',
+      testDbLockLibPath,
+      sharedDb,
+      sharedReady,
+    ],
+    { env: { ...defaultLockEnv, TMPDIR: tmpA }, stdio: 'ignore' }
+  );
+  try {
+    waitForPath(sharedReady, true);
+    const contender = spawnSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; acquire_test_db_run_lock "$2" "tmpdir contender"',
+        'c',
+        testDbLockLibPath,
+        sharedDb,
+      ],
+      { env: { ...defaultLockEnv, TMPDIR: tmpB }, encoding: 'utf8', timeout: 15_000 }
+    );
+    assert.equal(
+      contender.status,
+      1,
+      `a runner with a different TMPDIR must contend for the same database lock: ${contender.stderr}`
+    );
+  } finally {
+    sharedHolder.kill('SIGKILL');
+    const sharedLock = execFileSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; test_db_run_lock_file "$(test_db_run_lock_key "$2")"',
+        'f',
+        testDbLockLibPath,
+        sharedDb,
+      ],
+      { env: defaultLockEnv, encoding: 'utf8' }
+    ).trim();
+    rmSync(sharedLock, { force: true });
+    rmSync(`${sharedLock}.owner`, { force: true });
+    rmSync(tmpA, { recursive: true, force: true });
+    rmSync(tmpB, { recursive: true, force: true });
+  }
+
   // A SIGKILLed holder never strands the lock: the kernel lock dies with its keeper.
   testDbLockHolder.kill('SIGKILL');
   let recovered = tryAcquire('postgresql://localhost:5432/victoria_gate-x');
