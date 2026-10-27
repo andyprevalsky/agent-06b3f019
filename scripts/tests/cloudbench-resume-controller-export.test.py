@@ -1692,6 +1692,18 @@ class ExportResume(unittest.TestCase):
 class WriterScanPermission(unittest.TestCase):
     """A transiently unreadable /proc entry is re-observed; a persistently unreadable live one fails closed."""
 
+    def test_exited_thread_during_maps_scan_is_not_a_writer(self):
+        collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
+        process_paths = collector["process_paths"]
+        with tempfile.TemporaryDirectory() as name:
+            process = Path(name) / "8888"
+            task = process / "task" / "8888"
+            (task / "fd").mkdir(parents=True)
+            (task / "cwd").symlink_to(Path(name) / "repo")
+            (task / "maps").write_text("")
+            with mock.patch.object(Path, "read_text", side_effect=ProcessLookupError(3, "No such process")):
+                self.assertEqual(process_paths(process), [])
+
     def scan(self, denials, *, alive=True):
         collector = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-export.py"))
         writers = collector["writers"]

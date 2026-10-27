@@ -128,14 +128,15 @@ def process_paths(process):
     paths = []
     for task in (process / "task").iterdir():
         try:
-            paths.append(os.readlink(task / "cwd"))
+            task_paths = [os.readlink(task / "cwd")]
             for fd in (task / "fd").iterdir():
-                try: paths.append(os.readlink(fd))
-                except FileNotFoundError: continue
+                try: task_paths.append(os.readlink(fd))
+                except (FileNotFoundError, ProcessLookupError): continue
             for line in (task / "maps").read_text().splitlines():
                 fields = line.split(None, 5)
-                if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
-        except FileNotFoundError:
+                if len(fields) == 6 and "w" in fields[1]: task_paths.append(fields[5])
+            paths.extend(task_paths)
+        except (FileNotFoundError, ProcessLookupError):
             continue
     return paths
 
@@ -145,7 +146,7 @@ def observed_paths(process):
     for attempt in range(WRITER_OBSERVATION_ATTEMPTS):
         try:
             return process_paths(process)
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
         except PermissionError:
             if not process.exists():
