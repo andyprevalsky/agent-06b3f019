@@ -34,6 +34,11 @@ fi
 bash "$(dirname "${BASH_SOURCE[0]}")/normalize-local-user-phones.sh" "$DIRECT_URL" >/dev/null
 bash "$(dirname "${BASH_SOURCE[0]}")/backfill-local-message-record-owner.sh" "$DIRECT_URL" >/dev/null
 
-npx prisma db push "$@"
+if [ "${1:-}" = "--migrate-dev" ]; then
+  shift
+  PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma migrate dev "$@"
+else
+  PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push "$@"
+fi
 # Push cannot model the gin_trgm_ops index; restore it from its migration.
 bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-message-record-trgm-index.sh" "$DIRECT_URL" >/dev/null
