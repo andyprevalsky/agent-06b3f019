@@ -109,3 +109,28 @@ role before creating the resource. Release it only after the provider has
 persisted that state. For provider capacity, admit on the provider's own
 typed refusal and wait for a slot. A DB mirror of provider concurrency can
 drift and then wedge every user.
+
+
+## Standalone SDK contract follow-up — October 27
+
+The combined planner deploy at `62cf2b1d2cddd627736beb7dbad0ce3094af5d2a`
+failed TypeScript with TS2614: `ServiceBusyError` was not exported by `e2b`.
+The existing non-capacity-rejection control also failed: an expected
+`AuthenticationError` became `TypeError: Right-hand side of instanceof is not
+an object` at `isSandboxCapacityError`.
+
+The supported standalone install selected the committed backend lock's E2B
+2.33.0. That SDK has neither the class nor its HTTP 503 specialization, while
+the source above requires both. The manifest's `^2.11.1` range still permitted
+that SDK. A newer hoisted root installation could hide the incompatibility;
+it did not make a fresh standalone install reproducible.
+
+The backend minimum and committed lock now select E2B 2.53.1, including its
+required dependency closure. This is the locally verified compatible version,
+not a claim about the first release that introduced the class. No capacity
+policy, retry deadline, sandbox creation path or test assertion changed.
+A clean standalone npm ci and Prisma generation succeeded. The same existing
+capacity unit file changed from four passes and one failure to five passes;
+the installed package exports both native capacity-error classes. Combined
+deploy verification follows separately. Private receipts are under
+`.context/deploy-fresh-20261027/batch8-e2b-candidate/`.

@@ -266,3 +266,29 @@ One authorized read-only canonical get_card completed in one HTTP 200 attempt. E
 The existing ledger owner automatically acknowledged the overdue failed observation before the outer assertion. This is intentional one-run failure acknowledgement, NOT repayment. Shared-ledger SHA256 remained 00fe6102dafbd4350bc7105f404144d64bbbe83a2e622364a7c258f6c76145f9 before and after investigation. The 1300 sandbox cents remain an unverified return exposure; no real-dollar loss is asserted. No checker or policy fix is justified. A later ordinary TestLoop PASS cannot establish financial recovery or erase this failed gate.
 
 Private evidence: `.context/auth-deploy/repair-next-primary/treasury-rails-2a798-rca/` contains hash-bound final-checkpoint.json, the redacted failure window, nine-control offline proof (28f398946d5af2ca80c7fa0f38d9598a06a222aa7b7b2ccdd9ad8423712f3452), one-read intent and safe projection (f2b098f8e8549cc24c984643ef3a6ecb229023e650f5a36ea84fb192563f9310). No raw journal, payment credentials or full card response was copied into this archive. Two exact-source searches and this case's Solution/Human feedback were read before choosing recurrence rather than a duplicate case.
+
+
+## October 27 overdue sandbox observation — acknowledgement is not repayment
+
+Combined coverage on `62cf2b1d2cddd627736beb7dbad0ce3094af5d2a` failed
+before a new treasury mint. The local pending journal identifies
+`card_8f528f7a78972d4c9fc1d499`, transfer `owt_67c15bc4e75ae8d1c53f4155`,
+and 1300 sandbox cents, minted October 26 at 19:57:28.600 UTC. The October 27
+20:35 check found no matching provider transfer and reported it overdue at
+24.6 hours. Its current state is UNKNOWN; missing rows prove neither
+consumption, recovery nor financial loss.
+
+The unchanged journal owner automatically appended its normal overdue
+acknowledgement at 20:35:11.489 UTC before the failed assertion. No agent
+edited the journal, set a skip flag, or changed the deadline. The existing
+contract deliberately reports an overdue entry once, so a subsequent ordinary
+TestLoop independently required by the SDK repair follows that contract.
+It does not establish a refund, financial cleanup or a repaired provider.
+Retain the failed gate and the 1300 sandbox-cent unverified-return exposure.
+
+The earlier aggregate backend run passed treasury, but its original
+card-specific mint/CLOSED/settlement payload was not recovered. The journal
+provides recorded identity, not a newly observed close. No provider mutation
+or read was performed during this reconciliation. Private evidence is under
+`.context/deploy-fresh-20261027/batch8-treasury/`; the failed native artifact is
+`.context/test-runs/backend-coverage-failed-20261027-203940-1417183/`.
