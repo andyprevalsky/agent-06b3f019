@@ -1,4 +1,7 @@
-/** A single active output frame, mounted only while Agent Display is open. */
+/**
+ * A single active output frame, mounted only while Agent Display is open; it fills
+ * the panel's content height (DisplayMediaGroup fill), never a fixed 480px box.
+ */
 import { DisplayMediaGroup } from '../inline-media/DisplayMediaGroup';
 import { AppDrawerShell } from './AppDrawerShell';
 import { shownDisplayEntry } from './agentDisplayEntries';
@@ -19,7 +22,10 @@ export function AgentDisplayDrawer() {
         Agent Display
       </div>
       {open && (
-        <div className="min-h-0 flex-1 overflow-y-auto p-4" data-testid="agent-display-content">
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"
+          data-testid="agent-display-content"
+        >
           {!chosen ? (
             <p className="text-sm text-muted-foreground">
               {apps.selectedAgentId
@@ -53,6 +59,7 @@ export function AgentDisplayDrawer() {
                 key={`${chosen.agentId}:${chosen.id}`}
                 items={chosen.items}
                 agentId={chosen.agentId}
+                fill
               />
             </>
           )}
