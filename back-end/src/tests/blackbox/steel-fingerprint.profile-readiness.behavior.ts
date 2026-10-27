@@ -196,7 +196,7 @@ export async function testSteelWriterProfileHandoff(
     prisma.browserProviderProfile.upsert = upsertProfile;
     prisma.browserContext.update = updateContext;
     steel.sessions.retrieve = nativeRetrieve;
-    for (const id of allocated.keys()) unregisterInFlightSteelSession(id);
+    for (const id of allocated.keys()) await unregisterInFlightSteelSession(id);
     restoreClaims();
   }
 }
