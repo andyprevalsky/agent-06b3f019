@@ -63,9 +63,11 @@ round. Record iteration number, task names, size, `-k`, concurrency, infra
 numerator/denominator, and rotation cursor in state. Never change a task's
 timeout to fit a batch. The CLI's provider capacity bounds **simultaneous
 copies**: cap `--concurrency` to the verified provider limit and let excess
-copies queue within the same launch. If the CLI refuses that shape, preserve
-the task count and use the smallest supported number of concurrent CLI launches
-while retaining one logical batch and its fixed denominator.
+copies queue within the same launch **only after the wide-run operator proves
+bounded admission and release in its owning offline gate**. If the CLI refuses
+that shape, repair bounded scheduling before advancing the size ramp. A split
+across CLI launches does not satisfy the requested batch size; record any
+earlier split as an exception rather than silently redefining the batch.
 
 After each run, triage every error and dispatch one fix sub-agent per independent
 INFRA or HARNESS cluster, largest member-task count first. Admit at most 8
