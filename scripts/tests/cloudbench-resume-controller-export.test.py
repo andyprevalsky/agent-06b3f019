@@ -699,7 +699,8 @@ class ExportResume(unittest.TestCase):
             remote["bounded_export"]({"export": lambda _a: (_ for _ in ()).throw(ValueError("controller originals changed during export"))}, args, attempts=3, sync=lambda: None, sleep=lambda _s: None)
 
     def runner_fixture(self, owner_pid=123, owner_birth="runner-owner", gate_pid=987654321, with_pending=True,
-                       log=None, owner_live=True, task_ref=None, caller_task_ref=None):
+                       log=None, owner_live=True, task_ref=None, caller_task_ref=None, shard_extra=None,
+                       caller_deadline_seconds=None):
         """One sharded original600 run directory whose own runner is the bound cleanup owner.
 
         ``task_ref`` binds the shard's own pushed task source; ``caller_task_ref`` overrides
@@ -738,6 +739,8 @@ class ExportResume(unittest.TestCase):
                      group_started_at=epoch)
         if task_ref is not None:
             shard["task_ref"] = task_ref
+        shard.update(shard_extra or {})
+        caller["deadline"] = epoch + (caller_deadline_seconds or 5400)
         caller["task_ref"] = runner["shard_task_ref"](shard) if caller_task_ref is None else caller_task_ref
         write(self.out / "caller.json", caller)
         sources = {name: M["sha"]((ROOT / "scripts" / name).read_bytes())
@@ -928,6 +931,36 @@ class ExportResume(unittest.TestCase):
             (self.out / "gate.private.log").write_text("GATE_EXPORT_VERIFIED machine=" + self.mid + "\n")
             with self.assertRaisesRegex(ValueError, "already verified"):
                 M["check"](*args, cleanup_window=window, dead_owner=True)
+
+    def test_dead_owner_accepts_the_shards_bound_e2e_deadline_only(self):
+        # 2026-10-20 Polar batch 1 (0a2470cc6): --timeout 7200 binds e2e_timeout 9300, so the
+        # runner recorded caller deadline = epoch + 9300; recovery required epoch + 5400 and
+        # refused the dead-owner cleanup route for every shard of the run. The current
+        # runner binds the widened 10020 default (task + startup, copy tail and release).
+        bound = dict(task_timeout=7200, e2e_timeout=10020)
+        for seconds, accepted in ((10020, True), (5400, False), (10021, False)):
+            with self.subTest(caller_deadline=seconds):
+                self.setUp()
+                f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
+                                        log="GATE_START fixture\n", owner_live=False, shard_extra=bound,
+                                        caller_deadline_seconds=seconds)
+                args = (f.config, f.digest, self.out, "f" * 40)
+                with self.runner_patches(f):
+                    if accepted:
+                        value = M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
+                        self.assertEqual(value["binding"]["capture_kind"], "dead-runner-owner")
+                        self.assertEqual(value["state"]["deadline"], f.epoch + 10020)
+                        M["unchanged"](value)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
+                            M["check"](*args, cleanup_window=self.dead_window(f), dead_owner=True)
+        # The unbound default keeps the historical epoch + 5400 and refuses a bound-looking clock.
+        self.setUp()
+        f = self.runner_fixture(owner_pid=self.dead_pid(), owner_birth="proc-start:fixture:1", with_pending=False,
+                                log="GATE_START fixture\n", owner_live=False, caller_deadline_seconds=9300)
+        with self.runner_patches(f):
+            with self.assertRaisesRegex(ValueError, "normal authority/caller differs"):
+                M["check"](f.config, f.digest, self.out, "f" * 40, cleanup_window=self.dead_window(f), dead_owner=True)
 
     def test_live_or_reused_runner_birth_never_borrows_a_live_owner(self):
         me = os.getpid()
