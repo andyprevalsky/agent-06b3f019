@@ -20,6 +20,7 @@
  *  - a Plaid item sync runs on one instance at a time
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
+ *  - a Mac on A serves a session that B starts, relays to and stops
  *  - a held lease is renewed past its TTL, so no instance takes it over
  *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
  *
@@ -28,11 +29,13 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
+import { createHmac, randomUUID } from 'node:crypto';
+import WebSocket from 'ws';
 import { join } from 'node:path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
@@ -61,6 +64,7 @@ function assert(cond: unknown, msg: string): void {
 
 interface Instance {
   child: ChildProcessWithoutNullStreams;
+  output: () => string;
   ready: Promise<void>;
   result: Promise<Record<string, unknown>>;
 }
@@ -93,7 +97,67 @@ function startInstance(op: string, args: string[], env: Record<string, string> =
       resolve(JSON.parse(line.slice('RESULT '.length)) as Record<string, unknown>);
     });
   });
-  return { child, ready, result };
+  return { child, output: () => out, ready, result };
+}
+
+async function freePorts(count: number): Promise<number[]> {
+  const servers = await Promise.all(
+    Array.from({ length: count }, async () => {
+      const server = createNetServer();
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+      return server;
+    })
+  );
+  const ports = servers.map((server) => (server.address() as AddressInfo).port);
+  await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+  return ports;
+}
+
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
+  const polls = Math.ceil(timeoutMs / 50);
+  const met = await retryWithBackoff(async () => cond(), {
+    maxRetries: polls,
+    fixedDelays: Array<number>(polls).fill(50),
+    shouldRetryResult: (ok) => !ok,
+    component: 'MultiInstanceWait',
+  });
+  if (!met) throw new Error(`timed out waiting for ${what}`);
+}
+
+/** A WebSocket that records text frames, with a promise for the next matching one. */
+async function frames(url: string, headers: Record<string, string> = {}) {
+  const ws = new WebSocket(url, { headers });
+  const seen: string[] = [];
+  ws.on('message', (raw) => seen.push(raw.toString()));
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+  const next = async (
+    match: (frame: Record<string, unknown> | string) => boolean,
+    what: string
+  ) => {
+    let found: string | undefined;
+    await waitFor(() => {
+      found = seen.find((text) => {
+        let parsed: Record<string, unknown> | string = text;
+        try {
+          parsed = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          // plain text frame
+        }
+        return match(parsed);
+      });
+      return found !== undefined;
+    }, what);
+    seen.splice(seen.indexOf(found as string), 1);
+    try {
+      return JSON.parse(found as string) as Record<string, unknown>;
+    } catch {
+      return { text: found };
+    }
+  };
+  return { ws, next };
 }
 
 /** Run one operation per instance with their critical sections released together. */
@@ -390,6 +454,82 @@ async function main(): Promise<void> {
       assert(foreign.state === 'unknown', "another user must not read the session's snapshot");
       assert(host.released === true, "B's cancel must release the browser A owns");
     });
+    await test('a Mac on instance A serves a session started, relayed and stopped from B', async () => {
+      const deviceId = randomUUID();
+      const taskId = randomUUID();
+      const [portA, portB] = await freePorts(2);
+      const a = startInstance('hub-serve', [String(portA)]);
+      const b = startInstance('hub-start', [String(portB), deviceId, taskId]);
+      try {
+        await Promise.all([a.ready, b.ready]);
+        const deviceHeaders = {
+          authorization: 'Bearer mi-device-token',
+          'x-rose-device-id': deviceId,
+        };
+        // The Mac's control channel lands on A; its tunnel and the worker land on B.
+        const control = await frames(
+          `ws://127.0.0.1:${portA}/api/local-devices/control`,
+          deviceHeaders
+        );
+        control.ws.send(
+          JSON.stringify({ type: 'hello', sessions: [], sessions_root: '/Users/mi/rs' })
+        );
+        a.child.stdin.write('GO\n');
+        b.child.stdin.write('GO\n');
+        await control.next(
+          (f) => typeof f === 'object' && f.type === 'start_session',
+          'start_session on A'
+        );
+        control.ws.send(
+          JSON.stringify({ type: 'session_started', task_id: taskId, folder: '~/mi' })
+        );
+        const tunnel = await frames(
+          `ws://127.0.0.1:${portB}/api/local-code-relay/${taskId}/device`,
+          deviceHeaders
+        );
+        await waitFor(() => b.output().includes('STARTED\n'), "B's start to resolve");
+        const token = createHmac('sha256', 'mi-relay-secret')
+          .update(`local-code-relay:${taskId}`)
+          .digest('hex');
+        const worker = await frames(
+          `ws://127.0.0.1:${portB}/api/local-code-relay/${taskId}?token=${token}`
+        );
+        const open = await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'open',
+          'channel open'
+        );
+        worker.ws.send('ping-from-worker');
+        await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'data' && f.data === 'ping-from-worker',
+          'worker frame at the Mac'
+        );
+        tunnel.ws.send(JSON.stringify({ op: 'data', ch: open.ch, data: 'pong-from-mac' }));
+        await worker.next((f) => f === 'pong-from-mac', 'Mac frame at the worker');
+        b.child.stdin.write('CHECK\n');
+        await control.next(
+          (f) => typeof f === 'object' && f.type === 'stop_session' && f.task_id === taskId,
+          'stop_session on A'
+        );
+        const result = await b.result;
+        assert(result.online === true, `B must see the Mac online: ${JSON.stringify(result)}`);
+        assert(
+          result.home === `/Users/mi/rs/${taskId}`,
+          `B must see the session HOME: ${result.home}`
+        );
+        assert(result.folder === '~/mi', `B must get the started folder: ${result.folder}`);
+        assert(result.live === true, 'B must see the session live');
+        for (const ws of [control.ws, tunnel.ws, worker.ws]) ws.close();
+        a.child.stdin.write('DONE\n');
+        await a.result;
+      } finally {
+        // A failed case kills its instances; their pending results are moot.
+        a.result.catch(() => undefined);
+        b.result.catch(() => undefined);
+        a.child.kill();
+        b.child.kill();
+      }
+    });
+
     await test('a held lease is renewed past its TTL, so no instance takes it over', async () => {
       const key = `mi-${randomUUID()}`;
       const [holder, peer] = await concurrently([
