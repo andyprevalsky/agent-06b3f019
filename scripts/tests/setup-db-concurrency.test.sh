@@ -129,6 +129,8 @@ cat > "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
+cp "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+  "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh"
 cat > "$TMP/fake-repo/scripts/benchmark-seed-cache" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "/tmp/fake-seed.dump"
@@ -137,6 +139,7 @@ touch "$TMP/fake-repo/back-end/prisma-schema-placeholder"
 mkdir -p "$TMP/fake-repo/back-end/prisma"
 touch "$TMP/fake-repo/back-end/prisma/schema.prisma"
 chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+  "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh" \
   "$TMP/fake-repo/scripts/benchmark-seed-cache"
 
 # A failed Mac container must never redirect a destructive setup to shared PG.
@@ -622,7 +625,8 @@ chmod +x "$SYS/bin"/*
 make_system_repo() { # make_system_repo <dir>
   mkdir -p "$1/back-end/scripts" "$1/back-end/prisma"
   cp -R "$TMP/fake-repo/scripts" "$1/scripts"
-  cp "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" "$1/back-end/scripts/"
+  cp "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
+    "$TMP/fake-repo/back-end/scripts/normalize-local-user-phones.sh" "$1/back-end/scripts/"
   touch "$1/back-end/prisma/schema.prisma"
   cat > "$1/scripts/benchmark-seed-cache" <<STUB
 #!/usr/bin/env bash
