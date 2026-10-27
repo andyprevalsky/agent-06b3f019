@@ -8,8 +8,8 @@ const expected = {
     hash: '084d1f78c6f4e40b1f0bbf43738a190299a5684b33f1d934d1e6d48d30aedfb0',
   },
   sequentialTests: {
-    count: 12,
-    hash: 'ecca48607c6cceb9b92b1ec0b49d5f89d5b8399b7f536fc91fb571945ac82059',
+    count: 15,
+    hash: '9a54f0196e090a01a014a894f2f4d21c6ee027872385276113c927ea3d9770f7',
   },
   pooledSequentialTests: {
     count: 29,

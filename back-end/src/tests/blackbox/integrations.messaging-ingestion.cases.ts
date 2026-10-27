@@ -28,6 +28,7 @@ import {
 import { retryWithBackoff } from '../../providers/retry';
 import { runMessagingUploadJobs } from '../../domains/integrations/uploadService.messaging';
 import { PART_MAX_WEIGHT } from '../../domains/integrations/uploadService.messagingJobs';
+import { deleteIntegration } from '../../domains/integrations/repo.integration';
 
 interface SyntheticContact {
   contact_id: string;
@@ -371,5 +372,88 @@ export async function testContactUpsert_roundTripsScaleWithChunks() {
   } finally {
     restores.forEach((restore) => restore());
     await cleanupUser(userId);
+  }
+}
+
+function recentContact(identifier: string, daysAgo: number[], withIds: boolean) {
+  return {
+    identifier,
+    identifierType: 'phone' as const,
+    firstName: 'Split',
+    messages: daysAgo.map((d) => ({
+      channel: MessageChannel.IMESSAGE,
+      from: 'me',
+      to: 'them',
+      timestamp: new Date(Date.now() - d * 24 * 60 * 60 * 1000),
+      message: `day ${d}`,
+      externalId: withIds ? `${identifier}-${d}` : undefined,
+    })),
+  };
+}
+
+/** A contact split across upload parts gets its frequency from its whole stored history. */
+export async function testMessagingUpload_splitContactFrequencyUsesFullHistory() {
+  const { userId } = await createAnonSession();
+  const phone = `+1555${Date.now().toString().slice(-7)}`;
+  try {
+    // Four distinct days in the last five is 'daily'; either half alone is not.
+    await upsertPersonAndMessageRecords(userId, [recentContact(phone, [0, 1], true)], 'split#0');
+    await upsertPersonAndMessageRecords(userId, [recentContact(phone, [2, 3], true)], 'split#1');
+    const person = await prisma.person.findFirst({ where: { userId, phoneNumber: phone } });
+    assert(
+      person?.messagesExchanged === 4,
+      `all four messages counted (${person?.messagesExchanged})`
+    );
+    assert(
+      person?.communicationFrequency === 'daily',
+      `frequency from the full history, not the last part (${person?.communicationFrequency})`
+    );
+  } finally {
+    await cleanupUser(userId);
+  }
+}
+
+/** A retried durable part stores its ID-less messages once, not once per attempt. */
+export async function testMessagingUpload_idlessMessageRetryStoresOnce() {
+  const { userId } = await createAnonSession();
+  const phone = `+1556${Date.now().toString().slice(-7)}`;
+  const contacts = [recentContact(phone, [0, 1, 2], false)];
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await upsertPersonAndMessageRecords(
+        userId,
+        contacts,
+        'idless-upload#0',
+        undefined,
+        undefined,
+        {
+          throwOnChunkError: true,
+        }
+      );
+    }
+    const stored = await storedMessages(userId);
+    assert(stored === 3, `retry deduplicates ID-less messages (stored ${stored}/3)`);
+  } finally {
+    await cleanupUser(userId);
+  }
+}
+
+/** Deleting an integration removes its queued history parts and their payloads. */
+export async function testIntegrationDelete_removesQueuedUploadParts() {
+  const { userId } = await createAnonSession();
+  try {
+    const { uploadId } = await seedParts(
+      userId,
+      [{ part: 0, contacts: syntheticContacts('5559', [2]) }],
+      '2026-04-01T00:00:00.000Z'
+    );
+    const integration = await imessageIntegration(userId);
+    assert(integration !== null, 'integration seeded');
+    await deleteIntegration(integration!.id);
+    const left = await prisma.messagingUploadJob.count({ where: { uploadId } });
+    assert(left === 0, `queued parts deleted with their integration (${left} left)`);
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
   }
 }

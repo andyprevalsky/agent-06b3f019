@@ -93,8 +93,9 @@ export async function findMessagingUploadJob(id: string) {
   return prisma.messagingUploadJob.findUnique({ where: { id } });
 }
 
+// updateMany: a part deleted with its integration mid-processing is a no-op.
 export async function markMessagingUploadJobProcessed(id: string): Promise<void> {
-  await prisma.messagingUploadJob.update({
+  await prisma.messagingUploadJob.updateMany({
     where: { id },
     data: { processedAt: new Date(), claimedUntil: null, payload: Prisma.DbNull },
   });
@@ -105,14 +106,14 @@ export async function markMessagingUploadJobRetry(
   error: string,
   retryAt: Date
 ): Promise<void> {
-  await prisma.messagingUploadJob.update({
+  await prisma.messagingUploadJob.updateMany({
     where: { id },
     data: { claimedUntil: retryAt, lastError: error.slice(0, 1000) },
   });
 }
 
 export async function markMessagingUploadJobFailed(id: string, error: string): Promise<void> {
-  await prisma.messagingUploadJob.update({
+  await prisma.messagingUploadJob.updateMany({
     where: { id },
     data: {
       failedAt: new Date(),

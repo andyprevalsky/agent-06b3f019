@@ -6,6 +6,9 @@ import {
   testMessagingUpload_exhaustedPartFailsSyncAndKeepsCursor,
   testMessagingUpload_chunkStoreFailureLeavesPartRetryable,
   testContactUpsert_roundTripsScaleWithChunks,
+  testMessagingUpload_splitContactFrequencyUsesFullHistory,
+  testMessagingUpload_idlessMessageRetryStoresOnce,
+  testIntegrationDelete_removesQueuedUploadParts,
 } from './integrations.messaging-ingestion.cases';
 import { testGoogleRevocationFailures_doNotStarveLaterPurge } from './integrations.email-credentials-2.cases';
 import { testStateTransition_fullLifecycle } from './integrations.lifecycle-boundaries-1.cases';
@@ -62,6 +65,18 @@ export function sequentialTestsPart1() {
     {
       name: 'contact upsert -- DB round trips scale with chunks, not contacts',
       fn: testContactUpsert_roundTripsScaleWithChunks,
+    },
+    {
+      name: 'messaging upload -- split contact frequency uses its full stored history',
+      fn: testMessagingUpload_splitContactFrequencyUsesFullHistory,
+    },
+    {
+      name: 'messaging upload -- retried part stores ID-less messages once',
+      fn: testMessagingUpload_idlessMessageRetryStoresOnce,
+    },
+    {
+      name: 'integration delete -- removes queued messaging upload parts',
+      fn: testIntegrationDelete_removesQueuedUploadParts,
     },
   ];
 }

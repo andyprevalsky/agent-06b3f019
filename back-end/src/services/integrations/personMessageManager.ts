@@ -209,8 +209,8 @@ export async function upsertPersonAndMessageRecords(
 
     // Insert every message of the chunk together, then refresh the chunk's
     // person stats in one statement: O(chunks) round trips, not O(contacts).
-    const resolved: Array<{ personId: string; contact: ContactToUpsert }> = [];
-    for (const contact of chunk) {
+    const resolved: Array<{ personId: string; contact: ContactToUpsert; index: number }> = [];
+    for (const [offset, contact] of chunk.entries()) {
       const personId = personMap.get(contact.identifier);
       if (!personId) {
         log.warn('Person not found for contact, skipping messages', { jobId });
@@ -220,13 +220,13 @@ export async function upsertPersonAndMessageRecords(
         log.warn('No messages for contact, skipping', { jobId });
         continue;
       }
-      resolved.push({ personId, contact });
+      resolved.push({ personId, contact, index: i + offset });
     }
     if (resolved.length === 0) continue;
 
     try {
-      const rows = resolved.flatMap(({ personId, contact }) =>
-        contact.messages.map((msg) => ({
+      const rows = resolved.flatMap(({ personId, contact, index }) =>
+        contact.messages.map((msg, position) => ({
           personId,
           userId,
           channel: msg.channel,
@@ -234,7 +234,11 @@ export async function upsertPersonAndMessageRecords(
           to: msg.to,
           timestamp: msg.timestamp,
           message: msg.message,
-          externalId: msg.externalId,
+          // NULL never deduplicates, so a retried durable part would store an
+          // ID-less message twice. Its job id and payload position are stable.
+          externalId:
+            msg.externalId ??
+            (options.throwOnChunkError === true ? `${jobId}:${index}:${position}` : undefined),
           googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
         }))
       );
@@ -246,7 +250,7 @@ export async function upsertPersonAndMessageRecords(
           googleCredentialId
         );
       }
-      await updatePersonMessageStats(resolved);
+      await updatePersonMessageStats(resolved.map((r) => r.personId));
       contactsProcessed += resolved.length;
       messagesProcessed += rows.length;
       log.info('Processed contact chunk', {
@@ -286,20 +290,30 @@ export async function upsertPersonAndMessageRecords(
 }
 
 /**
- * Refresh messagesExchanged (stored messages with the person, so a history
- * split across uploads still counts in full) and the communication frequency
- * of this batch, for a whole chunk in one UPDATE. Later contacts that resolve
- * to the same person win, as the former per-contact updates did.
+ * Refresh messagesExchanged and communicationFrequency from the stored
+ * messages, so a history split across upload parts counts in full. Frequency
+ * reads only distinct message days inside its 360-day window (at most ~361
+ * rows per person via the personId+timestamp index), and the stats are written
+ * for the whole chunk in one UPDATE.
  */
-async function updatePersonMessageStats(
-  resolved: Array<{ personId: string; contact: ContactToUpsert }>
-): Promise<void> {
-  const frequencies = new Map<string, string>();
-  for (const { personId, contact } of resolved) {
-    frequencies.set(personId, calculateCommunicationFrequency(contact.messages));
+async function updatePersonMessageStats(personIds: string[]): Promise<void> {
+  const ids = Array.from(new Set(personIds));
+  const days = await prisma.$queryRaw<Array<{ personId: string; day: Date }>>`
+    SELECT DISTINCT m."personId", date_trunc('day', m."timestamp") AS day
+    FROM "MessageRecord" m
+    WHERE m."personId" = ANY(${ids}::text[])
+      AND m."timestamp" >= NOW() - INTERVAL '361 days'`;
+  const daysByPerson = new Map<string, Array<{ timestamp: Date }>>();
+  for (const { personId, day } of days) {
+    const list = daysByPerson.get(personId) ?? [];
+    list.push({ timestamp: day });
+    daysByPerson.set(personId, list);
   }
-  const ids = Array.from(frequencies.keys());
-  const values = ids.map((id) => frequencies.get(id) as string);
+  // Every id here has stored messages; none in the window reads as 'rarely'.
+  const values = ids.map((id) => {
+    const recent = daysByPerson.get(id) ?? [];
+    return recent.length === 0 ? 'rarely' : calculateCommunicationFrequency(recent);
+  });
   await prisma.$executeRaw`
     UPDATE "Person" AS p
     SET "messagesExchanged" = (
