@@ -47,7 +47,9 @@ window). Under 2-core pinned contention, the largest tasks were 25 ms wall but
 The probe's `longtask` PerformanceObserver reports wall-clock duration.
 `evaluateBudgets` failed any steady task over 50 ms. Wall time includes intervals
 in which the host stops a running renderer task: preemption, major page faults or
-a blocked synchronous IPC. Those stalls are not the page's work.
+a stopped process. Those stalls are not the page's work. A blocking call the page
+makes itself (sync XHR, GPU readback) also shows low CPU, but it is the page's
+work; the PR #1592 review found that the first two fixes excused it.
 
 Reproduction: a scratch injector (not checked in) sent SIGSTOP for 130 ms to the test's own renderer
 processes after their main thread entered state R, simulating a host stall of a
