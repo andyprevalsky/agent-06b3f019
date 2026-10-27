@@ -96,7 +96,12 @@ and its protections were untouched.
 
 The evidence publisher recovered/rendered the last root response_schema call.
 Its HTTPS rendering was published and independently read back with HTTP200
-(45156 bytes); read-only shared-agent FE verification returned HTTP404. No recording-verified
+(45156 bytes); initial read-only shared-agent FE verification returned HTTP404. I12 then
+published the exact captured run through the supported publisher, restoring
+HTTP200 with15 messages. The real browser validator still rejects it: three
+task-complete rows and zero recording events/pointers. Initialization failed
+in the gather before recorder creation; no recording is reconstructed or
+fabricated from that absence. No recording-verified
 FE link is claimed. Evidence, exact all20 hashes, candidate/repro scripts and
 logs are retained under `.context/polar-r1b/`.
 
@@ -104,7 +109,7 @@ The exact proposed patch SHA256 is
 `86e5c336f7b2673acbedcb29e044c45144a5e8e6b8f01b7c12045745c9c849da`.
 Independent reviewer `ph713pr5yxbgrhp4j9d1tdvvqh8h2c2y` marked each runtime
 hunk GROUNDED, but the full approval remains NOT_GROUNDED because the required
-FE/recording validation fails. The patch has not been applied. I12 is
+recording validation fails (shared-agent API recovery is now complete). The patch has not been applied. I12 is
 investigating publication using the existing artifacts; no paid rerun was
 launched to obtain approval evidence.
 

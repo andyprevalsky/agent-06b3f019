@@ -11,9 +11,12 @@ context controls and50 credential controls pass. No task/evaluator change or
 benchmark outcome claim is made.
 
 Independent review by `ph713pr5yxbgrhp4j9d1tdvvqh8h2c2y` found all runtime
-hunks GROUNDED. Full approval remains NOT_GROUNDED because the canonical FE
-lookup returns404 and no browser recording was attached to this zero-step
-failure. The last root response_schema dump was recovered and published through
+hunks GROUNDED. Full approval remains NOT_GROUNDED because no browser recording was attached to this zero-step
+failure. The initial canonical API lookup returned404; I12 recovered HTTP200
+with15 messages by publishing the exact captured run through the normal
+publisher. Its validator confirms three terminal rows and zero recording
+events or pointers. Recorder creation lies after the failing initialization
+gather; no recording is fabricated. The last root response_schema dump was recovered and published through
 the supported renderer; its seven-day HTTPS link was independently read back
 by both author and reviewer. SHA256:
 `accb93b0bceea82981283ce6006129d3d6c9ba3dd364927a6e04db92c3869153`.
