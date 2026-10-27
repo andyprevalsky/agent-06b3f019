@@ -41,10 +41,14 @@ authorize a different paid workload.
 
 ## Current descent policy and batch schedule
 
-Start `/goal` yourself when the slice is resolved: all original benchmark tasks
-must pass every requested copy in one full-slice acceptance run. Never ask the
-user to invoke it. If `/goal` is unavailable, persist the same objective in
-`state.json` and continue. Read `/benchmark` before **every** benchmark launch,
+Start `/goal` yourself when the slice is resolved, using the user's exact
+acceptance rule. The default is every original task passing every requested
+copy in one full-slice acceptance run; an explicit rolling-history goal uses
+each task's requested number of most recent scored runs, which may come from
+different batches. Never ask the user to invoke `/goal`. If it is unavailable
+or an older unfinished goal cannot be replaced, persist the current objective
+and the superseded one in `state.json` and continue. Read `/benchmark` before
+**every** benchmark launch,
 including dry runs, batches, reruns, outcome proofs and acceptance. Delegated
 launch owners read it before their first `scripts/run-bench` call.
 For each descent scorecard, pass the completed iteration count from `state.json`
@@ -128,7 +132,12 @@ deployment. Run `/deploy` only if a change directly affects production
 infrastructure that benchmarks exercise and branch-source runs cannot test;
 record the failed alternatives and why the roughly 3-hour deployment is needed.
 
-Continue until every original task passes every `-k` copy in one full-slice run.
+Continue until the user's exact acceptance condition holds for every original
+task. For this Polar `-k 2` descent, each task's two most recent terminal,
+scored benchmark copies on the final branch source must both be PASS; batches
+may establish that condition at different times. A newer FAIL removes green
+status until two later passes replace it. Do not count unscored, missing,
+diagnostic, or older-source copies as green evidence.
 Then present **one** `FINAL_CHANGE_REVIEW`: exact diffs for every change, ranked
 by an independent reviewer with the smelliest first. Andy chooses keep or
 ablate for each; revert chosen ablations and rerun their tasks and the full
@@ -158,7 +167,7 @@ this command are superseded by this policy.
    once, batch blocking findings and reuse verified unchanged dependencies. A
    second review needs changed bytes, a failed check or a named unresolved risk.
    Do not add bookkeeping acknowledgements, unrelated gates or a full `/deploy`
-   before the next useful experiment. Final review follows full-slice acceptance; unavoidable production approvals block only their scoped action.
+   before the next useful experiment. Final review follows the requested acceptance condition; unavoidable production approvals block only their scoped action.
 5. **Sleep when the critical owners are working and no useful independent work
    remains.** Operational monitors and workers continue. Wake for actionable
    events or every **15 minutes**; inspect evidence, send the full scorecard,
@@ -636,7 +645,7 @@ unrelated work into that commit. After closing the terminal main lane, commit
 the remaining rows before the final response. `DONE` and `BLOCKED` are invalid
 while this ledger has uncommitted rows for the current run.
 
-After each full-slice acceptance attempt and at the terminal boundary, analyze
+After each acceptance attempt and at the terminal boundary, analyze
 the recent window against the preceding window. Negative change is faster;
 positive change is a regression to investigate:
 
@@ -776,7 +785,7 @@ while the requested goal still has authorized work:
         remove a wait, narrow/reassign a stall or add useful parallel work
         if the same blocker persists without new evidence, change the approach
         return to sleep if the critical owners still need time
-    once the full slice passes: complete FINAL_CHANGE_REVIEW, ablation rerun, publication and owned cleanup
+    once the requested acceptance condition holds: complete FINAL_CHANGE_REVIEW, ablation proof, publication and owned cleanup
 ```
 
 Do not stop for Andy to fix infra. Below 5%, unrelated infra RCAs and final
@@ -1006,7 +1015,9 @@ for Andy's explicit keep in FINAL_CHANGE_REVIEW.
 After the required local repro and grounding review, apply each fix as its own
 row-tagged branch commit and run the unchanged affected tasks on the cloud fleet.
 Run `/sync` and read `/benchmark` before every subset or full-slice rerun. The
-final acceptance covers the entire original slice at the requested `-k`.
+final acceptance follows the user's recorded goal across the entire original
+task set; a rolling-history goal does not require one simultaneous full-slice
+launch.
 Use supported branch-source transport; verify the executed source snapshot.
 
 ### What the outcome proof runs
@@ -1090,7 +1101,9 @@ run combined. In ISSUES / NEXT ACTION keep these compact lines when a subset
 is executing:
 
 - `Overall slice: <passed_original>/<total_original> passed` — original names,
-  fixed denominator and each task's latest trustworthy result.
+  fixed denominator and each task's current acceptance status. For a rolling
+  two-pass goal, count a task only when its two most recent source-valid scored
+  copies are both PASS; one latest PASS alone is insufficient.
 - `Latest run: <passed_run>/<total_run> passed` — exact executed subset and its
   actual start, terminal time or elapsed duration. Bench run times come from
   producer artifacts, not observation timestamps.
@@ -1116,19 +1129,21 @@ visible even when their failure is accepted for a separate infrastructure goal.
 
 ### Final change review
 
-After the full-slice acceptance passes, an independent reviewer ranks all
+After the requested acceptance condition holds, an independent reviewer ranks all
 row-tagged commits by smell and risk. The main thread presents each exact diff
 inline with its causal and outcome evidence. Andy chooses keep or ablate for
 each. A task-definition correction requires explicit keep under CLAUDE.md rules
-25 and 26a. Revert every ablated change, rerun its affected tasks and the full
-slice, and repeat repair if green is lost. Do not ask after individual fixes.
+25 and 26a. Revert every ablated change, rerun its affected tasks, and recheck
+the requested acceptance condition for every original task on the final source;
+repeat repair if green is lost. Do not ask after individual fixes.
 
 ## Done
 
-Completion requires every original task passing every requested copy in one
-full-slice acceptance run; all error clusters causally repaired and outcome
+Completion requires every original task meeting the user's recorded acceptance
+condition on the final source; all error clusters causally repaired and outcome
 proved or explicitly dispositioned; cemented regressions; FINAL_CHANGE_REVIEW
-completed with every chosen ablation applied and the full slice rerun green;
+completed with every chosen ablation applied and the requested condition
+reverified across the original task set;
 and controller exit, final publication and exact resource release verified.
 Keep genuine task failures and infra reliability separate in the final
 scorecard. Do not add a new acceptance gate or paid workload beyond the
