@@ -32879,6 +32879,30 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_pat
     assert drained["created"] == 50 and drained["all_reaped"]
 
 
+def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget_rerun_at_same_path(tmp_path: Path) -> None:
+    """A rerun at a recreated work path must not inherit the earlier run's admission ledger.
+
+    The reserve ledger lives under /tmp, outside the test directory. A recreated parent lock at
+    the same path changes the recorded identity, which used to fail every owner of the next run.
+    """
+    driver = ROOT / "agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+    env = {**os.environ, "RESERVE_FIXTURE_OWNER_COUNT": "3", "RESERVE_FIXTURE_CAPACITY_MB": "3000"}
+    work = tmp_path / "cohort"
+    for attempt in range(3):
+        shutil.rmtree(work, ignore_errors=True)
+        result = subprocess.run(
+            [sys.executable, str(driver), str(FLEET_SCRIPT), str(work)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=FIXTURE_HOST_GUARD_SECONDS + 2 * FIXTURE_DRAIN_SECONDS,
+        )
+        assert result.returncode == 0, (attempt, result.stdout + result.stderr)
+        receipt = json.loads((work / "receipt.safe.json").read_text())
+        assert receipt["admitted"] == 3 and receipt["failed"] == 0, (attempt, receipt)
+
+
 @pytest.mark.parametrize("interleaving", ["timezone", "reused-pid"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identity(
     tmp_path: Path,
