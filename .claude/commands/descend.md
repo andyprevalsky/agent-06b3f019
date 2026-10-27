@@ -59,10 +59,13 @@ the same batch. When effective timeouts tie, use a declared step budget (fewest
 steps first) and then task name for a stable order; a step budget is only a
 scheduling tie-breaker and does not change any timeout or task contract.
 If a batch finishes with infra errors on fewer than 5% of its originally
-scheduled copies, increase the next batch size by 10 tasks up to
-70; otherwise keep the size. Rotate to the next task set every 5 iterations;
-repeat the same task set until then. An iteration is one batch run and its fix
-round. Record iteration number, task names, size, `-k`, concurrency, infra
+scheduled copies, increase the next batch size by 10 tasks up to 70; otherwise
+keep the size. Within a five-iteration rotation window, retain
+the current tasks and append the next shortest unvisited tasks when size grows;
+the retained tasks repeat while the growing edge adds new coverage. After the
+fifth iteration, switch to the next unvisited cohort at the current batch size;
+do not silently carry old tasks into the new cohort. An iteration is one batch
+run and its fix round. Record iteration number, task names, size, `-k`, concurrency, infra
 numerator/denominator, and rotation cursor in state. Never change a task's
 timeout to fit a batch. The CLI's provider capacity bounds **simultaneous
 copies**: cap `--concurrency` to the verified provider limit and let excess
