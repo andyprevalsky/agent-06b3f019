@@ -98,9 +98,11 @@ transient-poll max_iterations contract. Native contexts joined their owned
 Temporal servers; observed owned process IDs were absent afterward. No live
 provider, remote database or production task was called.
 
-This case remains open pending parent-owned application and full canonical
-workflow/agents coverage on the committed corrected source. The focused
-native group does not replace that acceptance, any other deploy gate. No fresh Mac or production acceptance is claimed.
+The parent applied the narrow correction. Later full canonical workflow and
+agents coverage passed on af4cde0458152c76e2ea9fea8d177ba5e9e01344; the
+woken case also passed in batch5, whose failures concern separate cutover and
+CPU cases. These receipts close this fixture boundary, not other deploy gates
+or Mac/production acceptance.
 
 Golden test-producer analogs were read in
 `openclaw/packages/agent-core/src/agent-loop.test-support.ts:110-115`,

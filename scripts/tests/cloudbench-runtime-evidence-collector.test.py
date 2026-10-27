@@ -291,6 +291,16 @@ def guest_inventory_includes_optional_wmh_log():
             raise AssertionError("a linked WMH log was admitted as runtime evidence")
 
 
+def _rca_capture(name, value):
+    try:
+        directory = os.environ.get("CPU_RCA_DIR")
+        if directory:
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+            Path(directory, name).write_text(json.dumps(value()))
+    except Exception:
+        pass  # Diagnostics must not change the fixture outcome or cleanup.
+
+
 def guest_diagnostics_sampler_and_inventory():
     """The bounded sampler writes CPU, pool and pg_stat_activity samples that the
     guest inventory seals as optional runtime evidence."""
@@ -360,6 +370,12 @@ def guest_diagnostics_sampler_and_inventory():
         burner = subprocess.Popen(
             [sys.executable, "-c", "import sys\nwhile True: pass", "--password=secret-arg"],
         )
+        prior_cpu_rca_pid = os.environ.get("CPU_RCA_BURNER_PID")
+        prior_cpu_rca_dir = os.environ.get("CPU_RCA_DIR")
+        if prior_cpu_rca_dir:
+            os.environ["CPU_RCA_DIR"] = str(Path(prior_cpu_rca_dir, f"burner-{burner.pid}"))
+            os.environ["CPU_RCA_BURNER_PID"] = str(burner.pid)
+            _rca_capture("burner-start.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
         try:
             attributed = Path(directory) / "attributed.jsonl"
             result = subprocess.run(
@@ -369,8 +385,21 @@ def guest_diagnostics_sampler_and_inventory():
                 capture_output=True, text=True, timeout=30, check=False,
             )
         finally:
-            burner.kill()
-            burner.wait()
+            _rca_capture("burner-final.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
+            _rca_capture("attributed.json", lambda: [json.loads(line) for line in attributed.read_text().splitlines()])
+            try:
+                burner.kill()
+                burner.wait()
+            finally:
+                _rca_capture("burner-joined.json", lambda: {"pid": burner.pid, "returncode": burner.returncode, "monotonic": time.monotonic()})
+                if prior_cpu_rca_pid is None:
+                    os.environ.pop("CPU_RCA_BURNER_PID", None)
+                else:
+                    os.environ["CPU_RCA_BURNER_PID"] = prior_cpu_rca_pid
+                if prior_cpu_rca_dir is None:
+                    os.environ.pop("CPU_RCA_DIR", None)
+                else:
+                    os.environ["CPU_RCA_DIR"] = prior_cpu_rca_dir
         assert result.returncode == 0, result.stderr
         samples = [json.loads(line) for line in attributed.read_text().splitlines()]
         assert len(samples) == 2, samples

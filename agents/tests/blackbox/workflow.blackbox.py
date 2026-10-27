@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import traceback
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -315,6 +316,9 @@ CUTOVER_USAGE: Dict[str, List[Dict[str, Any]]] = {}
 CUTOVER_APPROVAL_REQUESTS: Dict[str, List[str]] = {}
 CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded calls
 CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
+CUTOVER_COMPLETION_REQUESTED: Dict[str, bool] = {}
+CUTOVER_RESPONSE_SCHEMAS: Dict[str, Dict[str, Any]] = {}
+CUTOVER_GENERATED_SCHEMAS: Dict[str, Dict[str, Any]] = {}
 
 
 # agent_id -> number of poll_new_messages calls that succeed before every later
@@ -451,6 +455,8 @@ async def mock_release_compute_token_lineage_activity(lineage_key: str) -> bool:
 
 @activity.defn(name="fetch_agent_config")
 async def mock_fetch_agent_config(agent_id: str) -> Dict:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        return {"context_gates": {}, "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id), "write_lock_enabled": True}
     return {"context_gates": {}, "response_schema": None, "write_lock_enabled": True}
 
 
@@ -687,6 +693,10 @@ async def mock_call_llm_activity(
         CUTOVER_LLM_QUEUES.setdefault(activity_agent_id, []).append(activity.info().task_queue)
         script = CUTOVER_LLM_SCRIPTS[activity_agent_id]
         tool_calls = script.pop(0) if script else [{"tool": "attempt_completion"}]
+        if activity_agent_id in CUTOVER_RESPONSE_SCHEMAS and any(
+            call.get("tool") == "attempt_completion" for call in tool_calls
+        ):
+            CUTOVER_COMPLETION_REQUESTED[activity_agent_id] = True
         return {
             "response": "",
             "tool_calls": tool_calls,
@@ -754,9 +764,15 @@ async def mock_check_progress(
         CUTOVER_VERIFIER_CONTEXTS[agent_id].append(list(context))
     if agent_id in VERIFIER_SCHEMA_CAPTURE:
         VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
+    # These scripted cutover scenarios require the new generation to make
+    # its own completion request after the delegated tool resumes.
+    completion_requested = (
+        agent_id not in CUTOVER_RESPONSE_SCHEMAS
+        or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
+    )
     return {
-        "score": 1.0,
-        "reasoning": "Complete",
+        "score": 1.0 if completion_requested else 0.0,
+        "reasoning": "Complete" if completion_requested else "Awaiting the scripted completion request",
         "structured_response": None,
         # C6: usage must always be returned so callers (post-DAG verifier,
         # main-loop verifier) can route the cost through _on_tokens.
@@ -849,6 +865,12 @@ async def mock_set_response_schema_activity(
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
+        schema = CUTOVER_RESPONSE_SCHEMAS[agent_id]
+        if kwargs.get("persist", args[0] if args else True):
+            CUTOVER_GENERATED_SCHEMAS[agent_id] = schema
+        return {"schema": schema, "usage": {}}
     if agent_id in SCHEMA_GENERATION_CAPTURE:
         SCHEMA_GENERATION_CAPTURE[agent_id].append(list(user_messages))
         return {"schema": WOKEN_SCHEMA, "usage": {}}
@@ -862,6 +884,8 @@ async def mock_resolve_agent_address_activity(agent_id: str, address: str, user_
 
 @activity.defn(name="persist_response_schema_activity")
 async def mock_persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    if agent_id in CUTOVER_RESPONSE_SCHEMAS:
+        CUTOVER_GENERATED_SCHEMAS[agent_id] = schema
     return None
 
 
@@ -1860,6 +1884,7 @@ def _opt_in_cutover_agent(
     CUTOVER_POINTER[workflow_id] = CUTOVER_OLD_QUEUE
     CUTOVER_POINTER_FETCHES[workflow_id] = []
     CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_COMPLETION_REQUESTED[agent_id] = False
     CUTOVER_LLM_QUEUES[agent_id] = []
     CUTOVER_VERIFIER_CONTEXTS[agent_id] = []
     CUTOVER_SMS[agent_id] = []
@@ -1882,8 +1907,13 @@ def _opt_in_cutover_agent(
             }
         ]
     ]
+    CUTOVER_RESPONSE_SCHEMAS[agent_id] = CUTOVER_LLM_SCRIPTS[agent_id][0][0]["output_schema"]
+    SCHEMA_GENERATION_CAPTURE[agent_id] = []
+    VERIFIER_SCHEMA_CAPTURE[agent_id] = []
 
 
+# The root's schema generator returns the same declared output contract as
+# its sole delegated task. Other workflow fixtures retain their no-schema path.
 async def _start_cutover_workflow(client, agent_id: str, workflow_id: str):
     return await client.start_workflow(
         AgentWorkflow.run,
@@ -1915,6 +1945,11 @@ def _assert_browser_resumed_on_new_generation(agent_id: str) -> tuple:
     assert list(inspect.signature(mock_spawn_browser_agent_activity_v3).parameters) == list(
         inspect.signature(spawn_browser_agent_activity_v3).parameters
     ), "mock_spawn_browser_agent_activity_v3 must mirror the real activity signature"
+    assert SCHEMA_GENERATION_CAPTURE[agent_id] == [["Order the item on shop.example.com"]]
+    assert CUTOVER_GENERATED_SCHEMAS[agent_id] == CUTOVER_RESPONSE_SCHEMAS[agent_id]
+    assert VERIFIER_SCHEMA_CAPTURE[agent_id] and all(
+        schema == CUTOVER_RESPONSE_SCHEMAS[agent_id] for schema in VERIFIER_SCHEMA_CAPTURE[agent_id]
+    ), "the continued verifier must retain the generated native schema"
     calls = CUTOVER_BROWSER[agent_id]["calls"]
     assert len(calls) == 2, f"expected one interrupted + one resumed browser activity, got {len(calls)}"
     first, second = calls
@@ -1969,6 +2004,19 @@ def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> N
         and "SHOP-4242" in (row.get("text") or "")
         for row in verifier_contexts[-1]
     ), "the continued generation's context must contain the resumed browser result"
+
+
+def _clear_cutover_test_state(agent_id: str, workflow_id: str) -> None:
+    for capture in (
+        CUTOVER_MESSAGES, CUTOVER_LLM_SCRIPTS, CUTOVER_LLM_QUEUES,
+        CUTOVER_VERIFIER_CONTEXTS, CUTOVER_SMS, CUTOVER_USAGE,
+        CUTOVER_APPROVAL_REQUESTS, CUTOVER_BROWSER, CUTOVER_CODE,
+        CUTOVER_RESPONSE_SCHEMAS, CUTOVER_GENERATED_SCHEMAS, CUTOVER_COMPLETION_REQUESTED,
+        SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE,
+    ):
+        capture.pop(agent_id, None)
+    CUTOVER_POINTER.pop(workflow_id, None)
+    CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
 
 
 async def _run_parked_tool_cutover_tests() -> List[tuple]:
@@ -2038,6 +2086,8 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_parked_write_approval_rewaits_same_request_on_new_generation"
             agent_id = "agent-cutover-approval"
@@ -2114,6 +2164,8 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_drained_code_agent_reattaches_same_sandbox_on_new_generation"
             agent_id = "agent-cutover-code"
@@ -2133,6 +2185,8 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
             name = "wf_cutover_background_browser_resumes_in_background_and_notifies_once"
             agent_id = "agent-cutover-background"
@@ -2197,6 +2251,8 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
+            finally:
+                _clear_cutover_test_state(agent_id, workflow_id)
 
     return results
 
@@ -2216,6 +2272,11 @@ def _assert_code_mock_mirrors_activity() -> None:
 def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:
     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
+    assert SCHEMA_GENERATION_CAPTURE[agent_id] == [["Order the item on shop.example.com"]]
+    assert CUTOVER_GENERATED_SCHEMAS[agent_id] == CUTOVER_RESPONSE_SCHEMAS[agent_id]
+    assert VERIFIER_SCHEMA_CAPTURE[agent_id] and all(
+        schema == CUTOVER_RESPONSE_SCHEMAS[agent_id] for schema in VERIFIER_SCHEMA_CAPTURE[agent_id]
+    ), "the continued verifier must retain the generated native schema"
     calls = CUTOVER_CODE[agent_id]["calls"]
     assert len(calls) == 2, f"expected one drained + one reattached code-agent activity, got {calls}"
     first, second = calls
@@ -13117,8 +13178,10 @@ async def run_all_tests():
             print(f"  \u2705 {test_name}")
         else:
             r.failed += 1
-            r.errors.append(f"{test_name}: {err}")
-            print(f"  \u274c {test_name}: {err}")
+            detail = f"{type(err).__name__}: {err}"
+            r.errors.append(f"{test_name}: {detail}")
+            print(f"  \u274c {test_name}: {detail}")
+            traceback.print_exception(type(err), err, err.__traceback__)
 
     teardown_mock()
     return r.all_passed

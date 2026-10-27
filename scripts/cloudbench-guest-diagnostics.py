@@ -14,6 +14,7 @@ the runtime evidence bundle as ``guest-diagnostics.jsonl``.
 usage: cloudbench-guest-diagnostics.py <output> <database-url> <pool-limit>
                                        <interval-seconds> <max-samples>
 """
+import atexit
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,24 @@ import time
 MAX_LINE_BYTES = 4096
 TOP_PROCESSES = 8
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+
+# Opt-in local failure diagnostics; normal runtime evidence stays unchanged.
+_RCA_ROWS = []
+_RCA_DROPPED = 0
+
+
+def _rca_save():
+    try:
+        if _RCA_ROWS:
+            Path(os.environ["CPU_RCA_DIR"], f"sampler-{os.getpid()}.json").write_text(
+                json.dumps({"samples": _RCA_ROWS, "dropped": _RCA_DROPPED})
+            )
+    except Exception:
+        pass  # Diagnostic output never changes collector status.
+
+
+if os.environ.get("CPU_RCA_DIR"):
+    atexit.register(_rca_save)
 
 PG_SUMMARY_SQL = """
 SELECT json_build_object(
@@ -98,6 +117,21 @@ def top_processes(previous: dict, current: dict, elapsed_s: float) -> list[dict]
         delta = used - (before[1] if before and before[0] == comm else 0)
         if delta > 0 and elapsed_s > 0:
             rows.append({"pid": pid, "comm": comm, "cpu_pct": round(100.0 * delta / CLOCK_TICKS / elapsed_s, 1)})
+    try:
+        if os.environ.get("CPU_RCA_DIR") and os.environ.get("CPU_RCA_BURNER_PID"):
+            global _RCA_DROPPED
+            if len(_RCA_ROWS) < 128:
+                target = int(os.environ["CPU_RCA_BURNER_PID"])
+                _RCA_ROWS.append({
+                    "pid": target, "sampler_pid": os.getpid(), "at": time.time(),
+                    "elapsed_s": elapsed_s, "clock_ticks": CLOCK_TICKS,
+                    "before": previous.get(target), "after": current.get(target),
+                    "ranked": [row for row in rows if row["pid"] == target],
+                })
+            else:
+                _RCA_DROPPED += 1
+    except Exception:
+        pass  # Malformed diagnostic settings cannot affect a CPU sample.
     rows.sort(key=lambda row: row["cpu_pct"], reverse=True)
     return rows[:TOP_PROCESSES]
 

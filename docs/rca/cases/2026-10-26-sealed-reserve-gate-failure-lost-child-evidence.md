@@ -83,3 +83,38 @@ assertions and deadlines. Evidence is retained in
 .context/rca-6731984c/integrated-command-structural-rerun.log. This clears that
 execution of the deployment gate and does not identify or repair the earlier
 nonzero child outcome. The archive status remains open.
+
+## 2026-10-27 batch5 recurrence — OPEN
+
+Source 807dedd8ff0495d9f89699d1f1ed50be2d8e46a0. The original owning
+sealed=True subtest raised subprocess.TimeoutExpired at the unchanged120s
+boundary, scripts/tests/run-deploy-structural-gates.test.py:837. TemporaryDirectory
+cleanup then reported errno39, sealed not empty. These are one primary owning
+failure and cleanup fallout. The earlier archived incident was a normally
+returned nonzero child; shared cause is not established.
+
+The original /tmp/stress200-owning-yvxzmd09 was rescued before any new native
+execution. Only nested/cleanup-disk-reserve.lock and .status survived inside
+sealed/. The lock recorded PID3528326, now absent; status contained120.
+Source order shows the driver had passed the200 completion handshakes and
+started the nested preflight. It does not prove200 successful admissions, and
+status120 is not an identified internal timeout contract. It may be fallout;
+no causal inference is justified without the lost child stdout/stderr, receipt,
+per-owner logs or pre-kill process observations.
+
+No surviving process with the exact original fixture path was found. The
+original temporary directory is unchanged; its metadata and file bytes were
+copied to the worker's own evidence directory. No original process was signalled.
+
+One unchanged owning-method observation under pinned3.11.9 passed in73.937s.
+Unsealed:95admitted/105rejected, child exit1 expected. Sealed:200admitted,
+child exit0, nested0, all assertions true. Both created/reaped200children;
+no recorded child PID remained. This is a diagnostic observation, not a
+causal red/green repair. A second run qualifies the opt-in capture, not a fix.
+
+The RCA remains unresolved. No runtime or acceptance patch is proposed.
+A scratch-only gated capture is prepared for the coordinator's next planned
+canonical occurrence, retaining temporary state and child output with a passive
+110s driver traceback before the original120s boundary. Original assertions,
+200concurrency, capacity72705MiB, native deadlines and zero-provider contract
+remain unchanged. Root owns archive integration, full gates and any later fix.
