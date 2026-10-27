@@ -55,8 +55,11 @@ A **batch size** counts distinct benchmark task names in one CLI launch, not
 `-k` copies. At `-k 3`, 20 tasks schedule 60 copies. Start with 20 tasks, order
 unvisited tasks by shortest effective timeout first (catalog timeout, then
 recorded runtime, then CLI default), and keep tasks with similar timeouts in
-the same batch. If a batch finishes with infra errors on fewer than 5% of its
-originally scheduled copies, increase the next batch size by 10 tasks up to
+the same batch. When effective timeouts tie, use a declared step budget (fewest
+steps first) and then task name for a stable order; a step budget is only a
+scheduling tie-breaker and does not change any timeout or task contract.
+If a batch finishes with infra errors on fewer than 5% of its originally
+scheduled copies, increase the next batch size by 10 tasks up to
 70; otherwise keep the size. Rotate to the next task set every 5 iterations;
 repeat the same task set until then. An iteration is one batch run and its fix
 round. Record iteration number, task names, size, `-k`, concurrency, infra
