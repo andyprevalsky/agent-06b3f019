@@ -174,6 +174,39 @@ def test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag():
         assert result["params"]["auth_cookies_are_preserved"] is expected, (raw, result)
 
 
+def test_practice_content_and_access_control_share_a_scoped_policy():
+    """Task content stays actionable without allowing manual access-gate solving."""
+    scope = (
+        "Exception to the CAPTCHA recovery and no-manual-solving rules: a public static-text or plain-arithmetic "
+        "practice exercise explicitly requested by the user is ordinary page content only when it does not guard "
+        "access to another page or service. Complete that content with normal browser actions. This exception "
+        "never covers behavioral, token, or slider challenges; apply the normal recovery rules to those."
+    )
+    task = "Read the displayed text in the public practice exercise and enter it in the field."
+    requested_actions = [
+        "read_browser_state", "screenshot", "input_text", "press_key",
+        "recover_from_challenge", "request_user_assistance_for_authentication",
+    ]
+    for recovery_disabled in ("0", "1"):
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": recovery_disabled}):
+            messages = build_browser_use_messages(
+                task=task, browser_state={}, action_history=[],
+                available_actions=requested_actions, turn_messages=[],
+            )
+            assert messages[1] == {"role": "user", "content": task}
+            assert scope in messages[0]["content"]
+            assert "Do not drag sliders" in messages[0]["content"] or "do not drag sliders" in messages[0]["content"]
+            tools = {tool["name"]: tool for tool in build_browser_use_tools(requested_actions)}
+            assert {"input_text", "press_key", "screenshot"} <= tools.keys()
+            for name in ("screenshot", "request_user_assistance_for_authentication"):
+                assert scope in tools[name]["description"], name
+            if recovery_disabled == "0":
+                assert scope in tools["recover_from_challenge"]["description"]
+                assert "otherwise try to solve the widget yourself" in tools["recover_from_challenge"]["description"]
+            else:
+                assert "recover_from_challenge" not in tools
+
+
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
     assert "Relatively expensive recovery to forcefully open" in description
@@ -2502,6 +2535,7 @@ async def run_all_tests():
     await r.record_async("advertised coordinate-only action remains admissible", test_advertised_coordinate_only_action_is_admitted)
     await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
+    r.record("practice_content_and_access_control_scoped_policy", test_practice_content_and_access_control_share_a_scoped_policy)
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
 
     r.record("tool_descriptions_filters_and_params", test_generate_tool_descriptions_filters_and_includes_params)
@@ -2902,18 +2936,21 @@ def test_phone_off_matches_prephone_bytes():
     Re-pinned at 042d82196 for exactly one deliberate, mode-independent change:
     a05e1beb7 (Q3b, approved) added the shared browser_auth_contract line "Sign in or
     sign up only with identities listed in Auth Options. ..." to both modes. The tools
-    hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
+    hashes were unchanged at Q3b; no Phone text entered the phone-off prompt.
+    R2c snapshot c957b155 adds the independently grounded static-text/arithmetic
+    practice exception to both modes; these hashes include exactly that shared
+    policy change. Re-pin only for
     reviewed text that also reaches phone-on mode, and record the commit here.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('ad32df749a6a2d7bd52cdd71beba6847813e3f65de4b9e121f0af2d159f10ec5', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('9bd995b7f5e4d24462806f7e2f34db7a1330fcd80b3c9b6fbef79dfe6a69ef84', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('9d49d6a481be321d041064dc39ac616c4367feabe89ecdfe19efb3548f939f12', '92784c43c43e9c0b1f6f0be2d8b5c1647e617cccacee4d8913d9561b0484fb7e', '04caac05356ce17a680db0d238d52875ad29309ad83375cf50e7658d8b05ee81'), '1': ('0bbd32c80e5e2c59d3acf8b35f099c8c750ceffcf48eebaef311c003b08fb4d4', '9aed41d41f5f7e945d7b8f5b5d66d08c88ab657035285bce815e300c48254c8c', '5550ec62404695dfd0dd35f3093767b6d254910c901b551d569f74d13572eab0')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from reviewed c28f801be+a05e1beb7+R2c"
 
 
 async def test_phone_off_actual_rose_request():

@@ -12,6 +12,14 @@ AUTH_ASSISTANCE_HANDOFF_RULE = (
 )
 
 
+CHALLENGE_RECOVERY_SCOPE = (
+    "Exception to the CAPTCHA recovery and no-manual-solving rules: a public static-text or plain-arithmetic "
+    "practice exercise explicitly requested by the user is ordinary page content only when it does not guard "
+    "access to another page or service. Complete that content with normal browser actions. This exception "
+    "never covers behavioral, token, or slider challenges; apply the normal recovery rules to those."
+)
+
+
 def build_authentication_contract(*, recover_enabled: bool) -> str:
     """Render the unchanged actor Authentication policy for every consumer."""
     if recover_enabled:
@@ -57,5 +65,6 @@ def build_authentication_contract(*, recover_enabled: bool) -> str:
 - If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
 - {EXHAUSTED_AUTH_OPTIONS_HANDOFF_RULE}
 - {AUTH_ASSISTANCE_HANDOFF_RULE}
+{CHALLENGE_RECOVERY_SCOPE}
 {challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""

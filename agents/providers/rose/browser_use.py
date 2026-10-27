@@ -30,7 +30,7 @@ from tools.prompts import attempt_completion_prompt
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from utils.browser_auth_contract import build_authentication_contract
+from utils.browser_auth_contract import CHALLENGE_RECOVERY_SCOPE, build_authentication_contract
 
 logger = structlog.get_logger()
 
@@ -224,12 +224,14 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "complete it without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
-            "those instead of trying to solve them yourself."
+            "those instead of trying to solve them yourself. "
+            f"{CHALLENGE_RECOVERY_SCOPE}"
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
+            f"{CHALLENGE_RECOVERY_SCOPE} "
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
             "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
             "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
@@ -476,6 +478,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
             "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
             "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
+            f"{CHALLENGE_RECOVERY_SCOPE} "
             "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
             "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
             "Use a screenshot only if you need to confirm the challenge type. Do not drag sliders, click "
@@ -736,7 +739,8 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
-                "of trying to solve them yourself."
+                "of trying to solve them yourself. "
+                f"{CHALLENGE_RECOVERY_SCOPE}"
             )
         input_schema = _collapse_nullable_schema(generated_tool["input_schema"])
         if action_name == "request_user_assistance_for_authentication":
