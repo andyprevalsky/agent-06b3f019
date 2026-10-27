@@ -211,6 +211,68 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages")
         self.valid(data)
 
+    def test_campaign_monitor_receipts(self):
+        captured = json.loads((GOLDEN / "campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / captured["summary"]["campaign_id"]
+        summary = dict(captured["summary"], total_jobs=2, task_count=2, runs=1, jobs=[])
+        fleets = []
+        for item in captured["jobs"]:
+            entry = dict(item["job"])
+            fleet = root / ".context/fleet/runs" / item["card"]["run_id"]
+            fleets.append(fleet)
+            entry["log"] = str(directory / Path(entry["log"]).name)
+            write(Path(entry["log"]), f"    {root}/scripts/run-bench monitor {fleet}\n"
+                  f"    {root}/scripts/run-bench monitor {root}/.context/fleet/runs/nested-canary\n")
+            write(fleet / "_batch/report-card.json", item["card"])
+            lifecycle = dict(item["lifecycle"], workspace_root=str(root))
+            write(fleet / "_batch/lifecycle.json", lifecycle)
+            write(fleet / "teardown-ownership/meta", item["meta"].replace("/home/boxes/rose", str(root)))
+            write(fleet / "teardown-ownership/provider-teardown-verified.epoch", item["released_epoch"])
+            summary["jobs"].append(entry)
+        write(directory / "summary.json", summary)
+        before = (directory / "summary.json").read_bytes()
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["source_ref"], captured["provenance"]["source"])
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["INFRA"]), (1, 1, 0))
+        self.assertEqual(exp["reasons"][0][1], CARD["reason_key"](captured["jobs"][0]["card"]["per_task"][0]["failure_reason"]))
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 2, "of": 2})
+        self.assertEqual(exp["released"], {"yes": 2, "of": 2})
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        self.assertEqual((directory / "summary.json").read_bytes(), before)
+        relocated = write(self.tmp / "custom-campaign-root/summary.json", summary).parent
+        self.assertEqual(CARD["load"](relocated)["lifecycle_verified"], {"yes": 2, "of": 2})
+        mixed = json.loads((fleets[1] / "_batch/report-card.json").read_text())
+        mixed["execution_provenance"]["base_sha"] = "a" * 40
+        write(fleets[1] / "_batch/report-card.json", mixed)
+        self.assertIsNone(CARD["load"](directory)["source_ref"], "mixed sources must remain explicit")
+        write(fleets[1] / "_batch/report-card.json", captured["jobs"][1]["card"])
+        for invalid in ("nan", "inf", "-1", "unrecorded"):
+            write(fleets[0] / "teardown-ownership/provider-teardown-verified.epoch", invalid)
+            self.assertEqual(CARD["load"](directory)["released"], {"yes": 1, "of": 2})
+        write(fleets[0] / "teardown-ownership/provider-teardown-verified.epoch", captured["jobs"][0]["released_epoch"])
+        # Retry-mode summaries carry the same handle explicitly; no log needed.
+        for entry, fleet in zip(summary["jobs"], fleets):
+            entry["fleet_dir"] = str(fleet)
+            entry["run_id"] = fleet.name
+            Path(entry["log"]).unlink()
+        write(directory / "summary.json", summary)
+        self.assertEqual(CARD["load"](directory)["lifecycle_verified"], {"yes": 2, "of": 2})
+        # A different run's seal and a missing seal cannot certify this job.
+        lifecycle["run_id"] = "different-run"
+        write(fleets[1] / "_batch/lifecycle.json", lifecycle)
+        (fleets[0] / "teardown-ownership/provider-teardown-verified.epoch").unlink()
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 2})
+        self.assertEqual(exp["released"], {"yes": 0, "of": 2})
+        # Binding a log to a different task must not borrow its reason or source.
+        wrong = dict(captured["jobs"][0]["card"])
+        wrong["per_task"] = [task("unrelated", "failed", reason="unrelated failure")]
+        write(fleets[0] / "_batch/report-card.json", wrong)
+        exp = CARD["load"](directory)
+        self.assertIsNone(exp["source_ref"], "partial source coverage is not campaign provenance")
+        self.assertIn(["AGENT FAIL", "reason UNRECORDED", 1], exp["reasons"])
+
     def test_sharded_golden_audit_and_history(self):
         data = render(self.f.sharded(), self.f)
         self.golden("sharded", CARD["render_text"](data))

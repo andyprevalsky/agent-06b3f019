@@ -21,6 +21,7 @@ import html
 import json
 import math
 import re
+import shlex
 import sys
 import tarfile
 import time
@@ -515,6 +516,61 @@ def load_fleet(run_dir: Path) -> dict:
     return finish_experiment(exp)
 
 
+def campaign_fleet(attempt: dict) -> Path | None:
+    """Read the physical handle emitted by the controller, including non-retry campaigns.
+
+    Those summaries record verdicts but not fleet_dir. The monitor command in
+    their job log is the producer's handle; PID/name guessing is not a binding.
+    """
+    if isinstance(attempt.get("fleet_dir"), str):
+        return Path(attempt["fleet_dir"])
+    log = attempt.get("log")
+    if not isinstance(log, str):
+        return None
+    try:
+        with Path(log).open(errors="replace") as stream:
+            for line in stream:
+                if "/scripts/run-bench monitor " not in line:
+                    continue
+                try:
+                    fields = shlex.split(line.strip())
+                except ValueError:
+                    continue
+                if len(fields) != 3 or fields[1] != "monitor":
+                    continue
+                command = Path(fields[0])
+                if not command.is_absolute() or command.name != "run-bench" or command.parent.name != "scripts":
+                    continue
+                root = command.parent.parent
+                fleet = Path(fields[2])
+                if fleet.parent == root / ".context/fleet/runs":
+                    # Match run-bench-campaign.terminal_task: the first handle is
+                    # this controller; later ones may belong to its infra canary.
+                    return fleet
+    except OSError:
+        return None
+    return None
+
+
+def campaign_release(fleet: Path, card: dict) -> bool:
+    """Use the run-bound producer seal, without claiming a new native audit."""
+    lifecycle = read_json(fleet / "_batch/lifecycle.json") or {}
+    try:
+        meta = dict(line.split("=", 1) for line in (fleet / "teardown-ownership/meta").read_text().splitlines())
+    except (OSError, ValueError):
+        return False
+    released_at = read_epoch(fleet / "teardown-ownership/provider-teardown-verified.epoch")
+    return bool(lifecycle.get("status") == "verified"
+                and lifecycle.get("run_id") == card.get("run_id") == meta.get("run_id") == fleet.name
+                and lifecycle.get("fleet_owner_token") == meta.get("fleet_owner_token")
+                and lifecycle.get("fleet_owner_token")
+                and lifecycle.get("workspace_root") == meta.get("workspace_root") == str(fleet.parents[3])
+                and lifecycle.get("hub_publication_failed") is False
+                and meta.get("status") == "provider-teardown-verified"
+                and all(task.get("lifecycle_stage") == "released" for task in card.get("per_task") or [])
+                and released_at is not None and math.isfinite(released_at) and released_at > 0)
+
+
 def load_campaign(run_dir: Path) -> dict:
     summary = read_json(run_dir / "summary.json") or {}
     exp = empty_experiment("campaign", run_dir)
@@ -524,14 +580,44 @@ def load_campaign(run_dir: Path) -> dict:
     exp["tasks"] = summary.get("task_count")
     exp["triggered_at"] = epoch_of(summary.get("e2e_started_at_epoch")) or epoch_of(summary.get("started_at"))
     cards = {}
+    jobs = []
+    releases = {}
     for job in summary.get("jobs") or []:
-        for attempt in [job, *(job.get("attempts") or [])]:
-            fleet = attempt.get("fleet_dir") if isinstance(attempt, dict) else None
-            if isinstance(fleet, str):
-                card = read_json(Path(fleet) / "_batch/report-card.json")
-                if isinstance(card, dict) and card.get("run_id"):
-                    cards[card["run_id"]] = card
-    exp["rows"], exp["rows_source"] = compact_rows(summary, cards), "summary.json"
+        if not isinstance(job, dict):
+            continue
+        job = dict(job)
+        jobs.append(job)
+        for attempt in [job, *reversed(job.get("attempts") or [])]:
+            fleet = campaign_fleet(attempt) if isinstance(attempt, dict) else None
+            if fleet is None:
+                continue
+            card = read_json(fleet / "_batch/report-card.json")
+            if not isinstance(card, dict) or card.get("run_id") != fleet.name:
+                continue
+            tasks = card.get("per_task") or []
+            if len(tasks) != 1 or not isinstance(tasks[0], dict) or tasks[0].get("name") != job.get("task"):
+                continue
+            if attempt.get("run_id") not in (None, card["run_id"]):
+                continue
+            cards[card["run_id"]] = card
+            releases[card["run_id"]] = campaign_release(fleet, card)
+            if attempt is job and job.get("run_id") is None:
+                job["run_id"] = card["run_id"]
+    exp["rows"] = compact_rows(dict(summary, jobs=jobs), cards)
+    exp["rows_source"] = "summary.json + fleet receipts" if cards else "summary.json"
+    refs = set()
+    complete_sources = True
+    for job, row in zip(jobs, exp["rows"]):
+        card = card_for(job, cards)
+        ref = ((card or {}).get("execution_provenance") or {}).get("base_sha")
+        if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):
+            complete_sources = False
+        else:
+            refs.add(ref)
+        if card and releases.get(card["run_id"]):
+            row["released"] = row["lifecycle"] = True
+    if complete_sources and len(refs) == 1:
+        exp["source_ref"] = refs.pop()
     status = summary.get("status")
     if summary.get("finished_at"):
         exp["ended_at"], exp["end_evidence"] = epoch_of(summary["finished_at"]), "summary.json finished_at"
