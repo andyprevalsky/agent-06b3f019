@@ -119,3 +119,17 @@ and verified in a fresh browser. The exact terminal agent, merchant and
 merchant tunnel were retired; the deployment semantic stack remains owned
 until its mandatory gate finishes. Runtime source binding and strict ledger:
 `.context/rca-3392/final-rose-positive-validation.json`.
+
+### Post-sync namespace qualification
+
+The same real Rose acceptance was repeated after integrating upstream worker
+and namespace isolation, using `rose-labs-bench.tch2n`. Agent
+`505428f6-4e43-41b0-a0dc-8f8473c5e6b9` completed in **245.1 seconds**.
+It again produced one valid order and one approval, retained all four storage
+proofs across same-logical-browser/native recreation, and chose
+`read_browser_state` after the original permission result. The recording and
+65 messages were [published and verified in a fresh browser](https://www.roselabs.ai/?agent-id=505428f6-4e43-41b0-a0dc-8f8473c5e6b9#benchmark-share=8533a9bd-e91d-432f-806f-5245eed89b08.1795727033.72ab38ef627b24aa71ab1653f00d1dea6a63d042070f23aa91478a6a91d5a833).
+The raw observer's same-host historical rows are preserved; the audit selects
+the exact current agent owner and verifies one parked/restored logical browser.
+No model result or browser action was mocked. Private current-source binding:
+`.context/rca-3392/postsync-rose-positive-validation.json`.
