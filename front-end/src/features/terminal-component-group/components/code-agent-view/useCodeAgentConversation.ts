@@ -86,8 +86,10 @@ export function useCodeAgentConversation(open: OpenCodeAgent): CodeAgentConversa
   const wsUrl = useMemo(() => sessionWsUrl(messages, taskId), [messages, taskId]);
   const provider: CodeAgentProvider = meta?.provider ?? open.provider ?? 'claude';
   // A snapshot drives the view: no terminal WebSocket (nothing displays its bytes).
+  // Without one the socket carries lifecycle only and keeps no terminal output.
   const vm = useClaudeCodeChip(taskId, meta ? undefined : wsUrl, false, provider, {
     savedOutput: false,
+    terminalOutput: false,
   });
   const chipState = meta
     ? desktopChipState(meta, vm.chipState)
