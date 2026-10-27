@@ -96,8 +96,8 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          if (incompatible) {
-            // Keep the first operation in flight until the contender has answered.
+          if (incompatible || scenario === 'fresh-concurrent') {
+            // Keep creation pending until the contender has observed active custody.
             await createHeld;
             res.end(JSON.stringify(native()));
           } else {
@@ -174,7 +174,7 @@ export async function runBrowserResumeCustodyCases() {
         },
       });
       const key = `steel-browser-task-lifecycle:${session.id}`;
-      const run = (fresh = false) =>
+      const run = (fresh = false, observeCustody = false) =>
         new Promise<Outcome>((resolve, reject) => {
           const child = fork(
             new URL('./browser-session-resume-custody.worker.ts', import.meta.url),
@@ -194,6 +194,10 @@ export async function runBrowserResumeCustodyCases() {
                       }))`,
                     ]
                   : []),
+                // Keep this overlap control independent of a fast contender fork.
+                ...(observeCustody
+                  ? ['--import', 'data:text/javascript,await new Promise(r => setTimeout(r, 1500))']
+                  : []),
               ],
               stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
               env: {
@@ -203,6 +207,7 @@ export async function runBrowserResumeCustodyCases() {
                 CONDUCTOR_WORKSPACE_NAME: owner,
                 CUSTODY_PROVIDER: provider,
                 CUSTODY_FRESH: fresh ? '1' : '0',
+                CUSTODY_OBSERVE_ACTIVE: observeCustody ? '1' : '0',
                 CUSTODY_LOGICAL_PAUSE: scenario === 'logical-pause' ? '1' : '0',
                 CUSTODY_STALE: scenario === 'stale-binding' ? '1' : '0',
                 KERNEL_PROXY_ENABLED: 'false',
@@ -222,7 +227,11 @@ export async function runBrowserResumeCustodyCases() {
           }, 10000);
           child.stdout!.on('data', (x) => (logs += x));
           child.stderr!.on('data', (x) => (logs += x));
-          child.once('message', (message) => {
+          child.on('message', (message) => {
+            if ((message as { custodyObserved?: string } | null)?.custodyObserved === key) {
+              releaseCreate();
+              return;
+            }
             received = true;
             clearTimeout(timer);
             resolve(message as Outcome);
@@ -252,9 +261,19 @@ export async function runBrowserResumeCustodyCases() {
         if (scenario === 'concurrent' || scenario === 'logical-empty')
           results = await Promise.all([run(), run()]);
         else if (scenario === 'logical-pause') results = [await run()];
-        else if (scenario === 'fresh-concurrent')
-          results = await Promise.all([run(true), run(true)]);
-        else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
+        else if (scenario === 'fresh-concurrent') {
+          const first = run(true);
+          const contender = (async () => {
+            await retryWithBackoff(async () => creates > 0, {
+              maxRetries: 1000,
+              initialBackoffMs: 10,
+              fixedDelays: Array.from({ length: 999 }, () => 10),
+              shouldRetryResult: (created) => !created,
+            });
+            return run(true, true);
+          })();
+          results = await Promise.all([first, contender]);
+        } else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
         else if (incompatible) {
           let firstSettled = false;
           const first = run(true).finally(() => {

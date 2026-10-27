@@ -126,3 +126,36 @@ The exact unchanged parameter passed in 5.83 seconds; its retained log is
 `.context/stuck-report/native-stop-recheck.log`. The unchanged owning suite subsequently passed: 1100 passed, four skipped,
 1242 deselected in 556.75 seconds (`.context/stuck-report/native-stop-owning-suite.log`). No runtime implementation, assertion, deadline, retry policy
 or remote resource was changed. This recurrence remains unresolved, not fixed.
+
+## October 27 causal observer reproduction and correction
+
+Fresh deploy qualification on8b1c38ff reproduced two exact stop requests and
+5.342553556 seconds of outer Python elapsed time, failing the assertion that
+required three requests or at least six elapsed seconds. Native ownership
+retention and false verification were preserved. This was not a violation of
+the independent fourteen-second wall ceiling. Original per-call timings remain
+unrecorded; no original scheduling-delay cause is inferred.
+
+A controlled finite1.1-second local fake stop reproduced the same assertion
+with each stop under its unchanged two-second call bound. The native phase's
+Bash SECONDS clock reached six while outer continuous elapsed was5.64 seconds.
+The fixture had compared different clocks. It now records the native phase's
+own SECONDS delta around the call and uses that clock solely for deadline
+exhaustion. The six-second phase, two-second call, fourteen-second wall and
+thirty-second subprocess limits, three-attempt cap, exact identities and all
+retention/no-destroy/verification assertions are unchanged. Runtime code is
+unchanged.
+
+Same-command controlled red became green with the corrected observer. Five
+consecutive candidate runs passed with two stops, native_seconds6 and outer
+elapsed5.618–5.643 seconds; all nine native scenarios plus counts-only-sent
+passed. Adversarial wrong-ID and real20.622-second overrun controls still fail.
+A premature two-request return plus six seconds of unrelated shell startup
+passed the old observer but fails the corrected one with native_seconds4.
+This distinguishes phase exhaustion from unrelated elapsed time.
+
+Evidence and exact candidate diff are retained under
+.context/deploy-fresh-20261027/rca-native-stop. All launched test commands were
+joined;1330 traced PIDs had zero survivors. No live Fly resource was touched.
+The correction is applied; this case remains open pending the parent-owned
+complete canonical structural gate on the combined source.

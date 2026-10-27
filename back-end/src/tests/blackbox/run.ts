@@ -13,6 +13,7 @@
  */
 import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import { resolve, dirname, join } from 'path';
 
 function readEnv(...names: string[]): string | undefined {
@@ -240,10 +241,17 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
     const args = paymentDomain
       ? [resolve(cwd, 'scripts/with-agentcard-lock.py'), process.execPath, '--import', 'tsx', file]
       : ['--import', 'tsx', file];
+    // Stamp every connection at pool creation, including transactions that
+    // predate a probe, so database assertions can attribute their subject.
+    const databaseOwner = `blackbox-${randomUUID()}`;
+    const databaseUrl = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
+    databaseUrl?.searchParams.set('application_name', databaseOwner);
     const child = spawn(command, args, {
       cwd,
       env: {
         ...process.env,
+        ...(databaseUrl ? { DATABASE_URL: databaseUrl.href } : {}),
+        BLACKBOX_TEST_DATABASE_OWNER: databaseOwner,
         FORCE_COLOR: '0',
         NO_COLOR: '1',
         BLACKBOX_TEST_RUN_ID: runId,

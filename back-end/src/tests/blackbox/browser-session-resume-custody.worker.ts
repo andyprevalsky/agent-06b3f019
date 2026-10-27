@@ -10,6 +10,25 @@ const indexPath = path.resolve(__dirname, '../../providers/browser/index.ts');
 const recoveryPath = path.resolve(__dirname, '../../providers/browser/resumeRecovery.ts');
 const local = createRequire(providerPath);
 const { prisma } = local('../database');
+if (process.env.CUSTODY_OBSERVE_ACTIVE === '1') {
+  const findUnique = prisma.toolSideEffect.findUnique.bind(prisma.toolSideEffect);
+  let observed = false;
+  prisma.toolSideEffect.findUnique = async (query: unknown) => {
+    const row = await findUnique(query);
+    if (
+      !observed &&
+      row?.operationKey === `steel-browser-task-lifecycle:${process.argv[2]}` &&
+      row.operationType === 'browser_task_resume' &&
+      row.status === 'STARTED' &&
+      row.request?.phase === 'creating'
+    ) {
+      observed = true;
+      process.send?.({ custodyObserved: row.operationKey, pid: process.pid });
+    }
+    return row;
+  };
+}
+
 const original = Module._load;
 const api = process.env.BROWSER_USE_API_BASE_URL;
 const browser = {

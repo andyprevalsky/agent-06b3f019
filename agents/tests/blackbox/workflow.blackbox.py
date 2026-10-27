@@ -1778,6 +1778,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 ]
                 SCHEMA_GENERATION_CAPTURE[woken_id] = []
                 VERIFIER_SCHEMA_CAPTURE[woken_id] = []
+                CUTOVER_LLM_SCRIPTS[woken_id] = [[{"tool": "attempt_completion", "result": "All done"}]]
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
@@ -1803,6 +1804,14 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     await asyncio.sleep(0.5)
                 judged = VERIFIER_SCHEMA_CAPTURE[woken_id]
                 assert judged, "woken sub-agent never reached its verifier"
+                assert any(
+                    row.get("role") == "ASSISTANT"
+                    and any(
+                        call.get("tool") == "attempt_completion"
+                        for call in (row.get("metadata") or {}).get("tool_calls", [])
+                    )
+                    for row in CUTOVER_MESSAGES[woken_id]
+                ), "woken sub-agent reached fallback verification without dispatching its completion tool"
                 assert judged[0] == WOKEN_SCHEMA, (
                     f"woken sub-agent verifier judged without the new task's schema: {judged[0]!r}"
                 )
@@ -1814,7 +1823,13 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
             finally:
-                for capture in (CUTOVER_MESSAGES, SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE):
+                for capture in (
+                    CUTOVER_MESSAGES,
+                    SCHEMA_GENERATION_CAPTURE,
+                    VERIFIER_SCHEMA_CAPTURE,
+                    CUTOVER_LLM_SCRIPTS,
+                    CUTOVER_LLM_QUEUES,
+                ):
                     capture.pop(WOKEN_SUBAGENT_ID, None)
 
     return results

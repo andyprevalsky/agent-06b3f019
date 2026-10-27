@@ -176,3 +176,47 @@ and rows before observer cleanup. No supervisor cleanup was needed after green.
 Exact commands, source hashes and pre-cleanup receipts are retained under
 .context/deploy-fresh-20261027/independent-review/ir1-native. This repair changes
 only the test fixture; full combined coverage remains the deploy owner's gate.
+
+
+## October 27 fresh-concurrent follow-up
+
+The combined backend gate at source 8b1c38ff failed `creates === 1` with two
+creates. Retained V8 coverage identifies Browser Use/fresh-concurrent (scenario
+loop 15, Kernel branch 0). The historical worker timings were not captured.
+The separate earlier incompatible-owner failure-path repair did not establish
+this sibling fixture's intended overlap.
+
+The unchanged fixture released create after 100 ms. Starting two child processes
+does not prove both have joined active custody. A fresh request entering after
+the first operation finishes correctly starts a new lifecycle. A controlled
+native 2-second delay of only the second concurrently forked fresh worker
+reproduced the same two-create assertion: the first completed at 01:38:40.589Z,
+the second entered at 01:38:42.931Z and returned a distinct session. These are
+controlled timings, not a recovered historical schedule.
+
+The reviewed correction holds the first fresh create until the designated
+contender's real Prisma query returns this exact operation's STARTED/creating
+custody row. A fixture-only worker observer sends IPC and returns the actual
+query result unchanged; no extra query or production change is introduced.
+The fixture observes owner and contender immediately with Promise.all. A
+permanent 1500 ms contender-start delay protects the slow-start boundary;
+existing 10-second deadlines and all 49 assertion ASTs remain unchanged.
+Fresh-sequential remains the negative sibling: both providers require two
+creates, two hydrations and distinct sessions.
+
+The native permanent control failed before and passed after with identical
+argv, 34 ordinary scenarios plus both expected owner-timeout cleanup controls.
+The controlled 2-second pair also failed before and passed after. All exact
+UUID rows were independently absent, every native child exited, and no observer
+kill or unhandled rejection was needed. Evidence and limits are retained under
+`.context/deploy-fresh-20261027/rca-custody-create-count/`.
+
+Applied patch SHA256:
+`ab8bdd845c9132648e4d8ba9946f669f3e227f47872387fd6a1d75a69fe77250`.
+Applied fixture SHA256:
+`591a02d23b313d40239218eaf53473cfa11c18e5609ec32f21ba80a727bd5d0d`.
+Applied worker SHA256:
+`0953725628d0025ac9504d7cb669ddc41bcbe73a107f5b5c8d14f8ab82a39134`.
+The coordinator applied the exact reviewed bytes. Full combined-source backend
+coverage and deployment remain pending; the narrow native result does not
+certify those gates.
