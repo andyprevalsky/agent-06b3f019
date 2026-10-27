@@ -17,6 +17,7 @@ import os
 import ssl
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -7302,6 +7303,98 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
+    """A Foundry leg that stalls before any answer output uses the next leg.
+
+    2026-10-27 browser-auth-assistance-declined: with the compute token leased
+    elsewhere, root execute_loop calls used Foundry gpt-6.1-sol, which streamed
+    hundreds of small reasoning items and some summary text, but no tool call,
+    until the 590s deadline or its output limit. Reasoning is not a reply for a
+    tool-call request, so the stalled leg uses the pool's next leg, and none of
+    its metadata, reasoning text or items reaches the consumer. A leg that does
+    answer still delivers its reasoning first, in order.
+    """
+    calls: list[str] = []
+
+    def foundry_leg(opening_text: bool, answers: bool = False):
+        async def source(**kwargs):
+            calls.append("foundry")
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6.1-sol-foundry", "pool_name": "foundry"})
+            if opening_text:
+                yield StreamChunk(kind="reasoning", data={"text": "Considering the declined sign-in"})
+            if answers:
+                yield StreamChunk(kind="codex_reasoning_item", data={"id": "rs_1", "encrypted_content": "x"})
+                yield StreamChunk(
+                    kind="tool_call", data={"id": "call_f", "name": "attempt_completion", "arguments": "{}"}
+                )
+                yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1})
+                yield StreamChunk(kind="done", data={})
+                return
+            index = 0
+            while True:
+                index += 1
+                item = {"id": f"rs_{index}", "encrypted_content": "opaque", "summary": []}
+                yield StreamChunk(kind="codex_reasoning_item", data=item)
+                await asyncio.sleep(0.01)
+
+        return source
+
+    async def next_leg(**kwargs):
+        calls.append("waterfall")
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-6-sol", "pool_name": "rose-1-ultra"})
+        yield StreamChunk(kind="tool_call", data={"id": "call_1", "name": "attempt_completion", "arguments": "{}"})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "stop"})
+        yield StreamChunk(kind="done", data={})
+
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    outcomes = {}
+    for opening_text, answers in ((False, False), (True, False), (True, True)):
+        calls.clear()
+        chunks: list[StreamChunk] = []
+        error = None
+        started = time.monotonic()
+        with (
+            patch.dict(os.environ, env),
+            patch("providers.rose.client.foundry_complete", foundry_leg(opening_text, answers)),
+            patch("providers.rose.client.waterfall_complete", single_step_waterfall(next_leg)),
+        ):
+            try:
+                async for chunk in RoseClient(openrouter_key="ork-x").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "Tell me my member number"}],
+                    tools=[{"name": "attempt_completion", "description": "Finish", "input_schema": {"type": "object"}}],
+                    _exclude_anthropic_family=True,
+                    call_site="test-foundry-opaque-reasoning-stall",
+                    deadline_s=5.0,
+                    ttft_timeout_s=1.0,
+                    idle_timeout_s=0.2,
+                ):
+                    chunks.append(chunk)
+            except RoseDeadlineError as exc:
+                error = str(exc)
+        outcomes[(opening_text, answers)] = (list(calls), [c.kind for c in chunks], chunks, error)
+        assert time.monotonic() - started < 2.0, "the 5s deadline must not bound a stalled leg"
+
+    for stalled in ((False, False), (True, False)):
+        calls_seen, kinds, chunks, error = outcomes[stalled]
+        assert error is None, (stalled, error)
+        assert calls_seen == ["foundry", "waterfall"], (stalled, calls_seen)
+        assert kinds == ["metadata", "tool_call", "usage", "done"], (stalled, kinds)
+        assert chunks[0].data["actual_model"] == "openai/gpt-6-sol"
+        assert chunks[1].data["name"] == "attempt_completion"
+
+    calls_seen, kinds, chunks, error = outcomes[(True, True)]
+    assert error is None and calls_seen == ["foundry"], (error, calls_seen)
+    assert kinds == ["metadata", "reasoning", "codex_reasoning_item", "tool_call", "usage", "done"], kinds
+    assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"
+
+
 async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
     """The browser-use dump must record what the Foundry route actually sent (descend R13).
 
@@ -9243,6 +9336,40 @@ async def test_client_buffered_progress_keeps_silence_and_outer_bounds():
         seconds=600, expected_error="rose.complete deadline exceeded after 590.0s", expected_time=590.0
     )
     await assert_progress_case(mode="reasoning")
+
+
+async def test_client_opaque_reasoning_items_do_not_refresh_idle_window():
+    """Encrypted reasoning items alone are not progress (2026-10-27 recurrence).
+
+    Foundry gpt-6.1-sol streamed 805 back-to-back empty reasoning items over
+    590s with no text or tool call (browser-auth-assistance-declined). Each
+    `codex_reasoning_item` restarted the 120s idle window, so only the whole-call
+    deadline ended it. Real summary text and tool output remain progress.
+    """
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    idle = "rose.complete idle for 120.0s (deadline 590.0s)"
+    # After visible reasoning text, the idle window runs from that text.
+    await assert_progress_case(
+        protocol="responses", mode="opaque_reasoning", seconds=600, expected_error=idle, expected_time=122.55
+    )
+    # As the first output, an item ends TTFT and opens the idle window.
+    await assert_progress_case(
+        protocol="responses", mode="opaque_reasoning", prelude=0, seconds=600, expected_error=idle, expected_time=121.0
+    )
+    # Consumer backpressure after an item is still not provider silence.
+    await assert_progress_case(
+        protocol="responses",
+        mode="opaque_reasoning",
+        prelude=0,
+        seconds=600,
+        consumer_pause=100,
+        pause_at=2,
+        expected_error=idle,
+        expected_time=221.0,
+    )
+    # Items that carry growing summary text keep a long stream alive.
+    await assert_progress_case(protocol="responses", mode="summarized_reasoning", seconds=150)
 
 
 async def test_client_parser_only_progress_preserves_ttft_without_idle_timeout():
@@ -11536,6 +11663,14 @@ async def run_all_tests():
     await r.record_async(
         "client_buffered_progress_keeps_silence_and_outer_bounds",
         test_client_buffered_progress_keeps_silence_and_outer_bounds,
+    )
+    await r.record_async(
+        "client_opaque_reasoning_items_do_not_refresh_idle_window",
+        test_client_opaque_reasoning_items_do_not_refresh_idle_window,
+    )
+    await r.record_async(
+        "client_foundry_opaque_reasoning_stall_uses_next_leg",
+        test_client_foundry_opaque_reasoning_stall_uses_next_leg,
     )
     await r.record_async(
         "client_buffered_progress_resets_for_new_waterfall_attempt",
