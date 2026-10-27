@@ -216,6 +216,9 @@ export const postMessageSchema = z.object({
   metadata: z.record(z.any()).optional(), // JSON metadata about the tool call (toolCallId, toolName, status, etc)
   attachments: z.array(filePointerSchema).optional(), // File attachments (array, creates separate messages)
   file_pointer: filePointerSchema.optional(), // Single file pointer for this message (OAI-style)
+  // User Browser composer: deliver this USER message straight to the agent's
+  // running browser task (BrowserSession.id), not to the agent's own loop.
+  browser_task_id: z.string().min(1).max(200).optional(),
   // Internal callers only: piggyback one task-inbox read (explore progress posts);
   // the response carries `pending_inbox` rows addressed to `task_id` after `since`.
   inbox: z

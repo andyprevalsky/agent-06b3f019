@@ -217,13 +217,148 @@ async function testLiveViewBinding(accessToken: string, userId: string): Promise
   }
 }
 
+/**
+ * Browser composer: a user message addressed to one ACTIVE browser task goes to
+ * that browser only. The owner probe is a finished run that still records a
+ * workflow id: any owner delivery (workflow signal or chat handler) first
+ * clears that id and reopens the agent, so it is observable without Temporal.
+ * Its model is rose-local, so a reopened chat turn makes no remote LLM call.
+ * A paused/ended browser session would never read the message, so it falls
+ * back to normal owner delivery.
+ */
+async function testBrowserTargetedMessage(accessToken: string, userId: string): Promise<void> {
+  const agent = await prisma.agent.create({
+    data: {
+      userId,
+      goal: 'Browser composer target',
+      status: 'COMPLETED',
+      model: 'rose-labs/rose-local',
+      temporalWorkflowId: `composer-probe-${randomUUID()}`,
+    },
+  });
+  const context = await prisma.browserContext.upsert({
+    where: { userId },
+    create: { userId, contextId: `composer-profile-${randomUUID()}` },
+    update: {},
+  });
+  const session = (agentId: string, status: 'ACTIVE' | 'PAUSED') =>
+    prisma.browserSession.create({
+      data: { contextId: context.id, agentId, sessionId: `composer-${randomUUID()}`, status },
+    });
+  const live = await session(agent.id, 'ACTIVE');
+  const pausedRun = await session(agent.id, 'PAUSED');
+  const foreign = await session(randomUUID(), 'ACTIVE');
+  const racing = await session(agent.id, 'ACTIVE');
+  const post = (browserTaskId: string, extra: Record<string, unknown> = {}) =>
+    request(`${BASE_URL}/api/agents/${agent.id}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({
+        message: 'go to instacart instead',
+        browser_task_id: browserTaskId,
+        ...extra,
+      }),
+    });
+  const stored = async (sent: JsonResponse) =>
+    prisma.message.findUniqueOrThrow({
+      where: { id: (sent.data as { message_id: string }).message_id },
+      select: { role: true, text: true, metadata: true },
+    });
+  const owner = () =>
+    prisma.agent.findUniqueOrThrow({
+      where: { id: agent.id },
+      select: { status: true, statusMessage: true, temporalWorkflowId: true },
+    });
+  try {
+    const before = await owner();
+    const sent = await post(live.id);
+    expectStatus(sent, 201);
+    const row = await stored(sent);
+    const metadata = row.metadata as Record<string, unknown>;
+    if (
+      row.role !== 'USER' ||
+      row.text !== 'go to instacart instead' ||
+      metadata.browserTaskId !== live.id ||
+      metadata.excludeFromModel !== true
+    ) {
+      throw new Error(`Browser-targeted message was not tagged: ${JSON.stringify(row)}`);
+    }
+    // Neither signalled nor chat-handled: the owner row is untouched.
+    if (JSON.stringify(await owner()) !== JSON.stringify(before)) {
+      throw new Error(
+        `Browser-targeted message reached the owner: ${JSON.stringify(await owner())}`
+      );
+    }
+    expectStatus(await post(randomUUID()), 404);
+    expectStatus(await post(foreign.id), 404);
+    const file = {
+      id: randomUUID(),
+      storage_path: 'composer/notes.txt',
+      original_filename: 'notes.txt',
+      mime_type: 'text/plain',
+      size_bytes: 5,
+      created_at: new Date().toISOString(),
+    };
+    expectStatus(await post(live.id, { attachments: [file] }), 400);
+    expectStatus(await post(live.id, { file_pointer: file }), 400);
+    if ((await prisma.message.count({ where: { agentId: agent.id } })) !== 1) {
+      throw new Error('Rejected browser targets stored messages');
+    }
+    // Run ended / pause-closed browser: delivered to the owner as before, never lost.
+    const fallback = await post(pausedRun.id);
+    expectStatus(fallback, 201);
+    const fallbackMetadata = ((await stored(fallback)).metadata ?? {}) as Record<string, unknown>;
+    if ('browserTaskId' in fallbackMetadata || 'excludeFromModel' in fallbackMetadata) {
+      throw new Error(`Paused-browser message was hidden: ${JSON.stringify(fallbackMetadata)}`);
+    }
+    const after = await owner();
+    if (after.temporalWorkflowId !== null) {
+      throw new Error(`Paused-browser message did not reach the owner: ${JSON.stringify(after)}`);
+    }
+    // Race: the browser's pause-close commits while the message is in flight. The
+    // ACTIVE check and the insert share the session row lock, so the message
+    // waits for the close and then falls back to the owner instead of hiding.
+    let releaseClose = () => {};
+    const closeHeld = new Promise<void>((resolve) => (releaseClose = resolve));
+    const closing = prisma.$transaction(
+      async (tx) => {
+        await tx.browserSession.update({ where: { id: racing.id }, data: { status: 'PAUSED' } });
+        await closeHeld;
+      },
+      { timeout: 15_000 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const racedPost = post(racing.id);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    releaseClose();
+    await closing;
+    const raced = await racedPost;
+    expectStatus(raced, 201);
+    const racedMetadata = ((await stored(raced)).metadata ?? {}) as Record<string, unknown>;
+    if ('browserTaskId' in racedMetadata || 'excludeFromModel' in racedMetadata) {
+      throw new Error(
+        `Message raced past the pause-close was hidden: ${JSON.stringify(racedMetadata)}`
+      );
+    }
+  } finally {
+    await prisma.browserSession.deleteMany({
+      where: { id: { in: [live.id, pausedRun.id, foreign.id, racing.id] } },
+    });
+    // The reopened chat turn may still be writing its (local-model) failure row.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await prisma.message.deleteMany({ where: { agentId: agent.id } });
+    await prisma.agent.delete({ where: { id: agent.id } }).catch(() => undefined);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { accessToken, userId } = await anonymousSession();
   await testCrossUserResume(accessToken);
   await testOwnershipHandshake(accessToken, userId);
   await testLiveViewBinding(accessToken, userId);
+  await testBrowserTargetedMessage(accessToken, userId);
   await prisma.$disconnect();
-  console.log('PASS browser-session-control (3 cases)');
+  console.log('PASS browser-session-control (4 cases)');
 }
 
 runAll().catch(async (error) => {

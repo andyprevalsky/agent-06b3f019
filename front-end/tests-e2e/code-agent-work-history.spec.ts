@@ -195,10 +195,20 @@ for (const provider of ['claude', 'codex'] as const) {
     const history = slot.getByTestId('code-work-activities');
     await expect(slot).toHaveCount(1);
     await expect(slot).toHaveAttribute('data-state', 'running');
-    await expect(history.locator('[data-message-id]')).toHaveCount(1);
+    // A running turn is the compact Working fold: its steps (thoughts included)
+    // appear only once the fold is expanded.
+    await expect(slot.getByRole('button', { expanded: false })).toContainText('Working');
+    await expect(history.locator('[data-message-id]')).toHaveCount(0);
     await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible();
     await slot.getByRole('button', { expanded: false }).click();
-    await expect(history.locator('[data-message-id]')).toHaveCount(30);
+    // 30 deduped steps, 20 a page (the trajectory work groups' pager); opening a
+    // running fold lands on its latest page.
+    const pager = slot.getByRole('navigation', { name: 'Work history pages' });
+    await expect(pager.getByRole('status')).toHaveText('2 / 2');
+    await expect(history.locator('[data-message-id]')).toHaveCount(10);
+    await pager.getByRole('button', { name: 'Previous activities' }).click();
+    await expect(pager.getByRole('status')).toHaveText('1 / 2');
+    await expect(history.locator('[data-message-id]')).toHaveCount(20);
     completed = true;
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(slot).toHaveCount(1);
@@ -207,9 +217,13 @@ for (const provider of ['claude', 'codex'] as const) {
     await expect(slot.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
     await expect(view.getByText(FINAL, { exact: true })).toBeVisible();
     await expect(slot.getByText(FINAL, { exact: true })).toHaveCount(0);
-    await slot.getByRole('button').click();
-    await expect(history.locator('[data-message-id]')).toHaveCount(30);
-    await slot.getByRole('button').click();
+    await slot.getByRole('button', { expanded: false }).click();
+    await expect(pager.getByRole('status')).toHaveText('1 / 2');
+    await expect(history.locator('[data-message-id]')).toHaveCount(20);
+    await pager.getByRole('button', { name: 'Next activities' }).click();
+    await expect(pager.getByRole('status')).toHaveText('2 / 2');
+    await expect(history.locator('[data-message-id]')).toHaveCount(10);
+    await slot.getByRole('button', { expanded: true }).click();
     await expect(history).toBeHidden();
     expect(hasUncaughtErrors(rec)).toEqual([]);
   });

@@ -23,7 +23,7 @@
  * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
  *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
  *   overlay the content (no right bar, no content inset). Flag off: no icons.
- * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
+ * APP VIEW (AppViewProvider): a code-agent chip's "Open app" button opens the
  *   code session's preview full screen in place of the chat column (Rose
  *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
  * CODE AGENT VIEW (CodeAgentViewProvider, flag on only): a left-bar code-agent
@@ -336,7 +336,6 @@ function SidebarSection({
       onCreateAgent={agents.handleCreateNewAgent}
       roseActions={{
         onCreateAgentInProject: agents.handleCreateNewAgentInProject,
-        onNewAgentInBranch: agents.handleCreateNewAgentInBranch,
       }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}

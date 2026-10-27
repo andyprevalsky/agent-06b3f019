@@ -29,11 +29,18 @@
  * Delete-flow state is owned by useDeleteFlow; price-limit editing state is
  * owned by usePriceLimitEdit; report-bug state is owned by useReportBug;
  * anchor position is owned by useModalPosition (clamped inside the viewport,
- * height capped below the mobile header). Phones (< md) get an opaque panel; the
- * desktop panel stays transparent glass.
+ * height capped below the mobile header, re-fit on rotation). Phones (< md)
+ * get an opaque panel; the desktop panel stays transparent glass.
  *
  * Trigger: variant 'icon' (stock) = muted gear; variant 'nub' (Rose Desktop
  * query-box tab) = bare white gear with the instant "Agent settings" tooltip.
+ *
+ * Anchor (above the trigger, opening away from its side of the screen):
+ *   'icon' sits at the right end of the stock TopBar -> right edges align,
+ *          the panel extends leftward
+ *   'nub'  sits on the tab at the query box's left edge -> left edges align,
+ *          the panel extends rightward
+ *   either way the panel stays inside an 8px viewport gutter
  */
 
 import { useRef, useState, type RefObject } from 'react';
@@ -93,7 +100,7 @@ export default function AgentSettingsDialog({
 }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const modalPosition = useModalPosition(open, triggerRef);
+  const modalPosition = useModalPosition(open, triggerRef, variant === 'nub' ? 'start' : 'end');
   const { user: authUser } = useAuth();
   const showReportBug = isAdminOperator(authUser);
 
@@ -120,12 +127,12 @@ export default function AgentSettingsDialog({
         className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden bg-[#EEEFF2] dark:bg-[#262624] md:bg-transparent md:dark:bg-transparent"
         style={{
           position: 'fixed',
-          bottom: `${modalPosition.bottom}px`,
-          right: `${modalPosition.right}px`,
+          bottom: modalPosition.bottom,
+          left: modalPosition.left,
+          right: modalPosition.right,
           top: 'auto',
-          left: 'auto',
           transform: 'none',
-          width: `${modalPosition.width}px`,
+          width: modalPosition.width,
           maxHeight: modalPosition.maxHeight,
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',

@@ -12,9 +12,14 @@ export interface AgentSettingsDialogProps {
   variant?: 'icon' | 'nub';
 }
 
+/** Which trigger edge the panel aligns to: 'start' = left (opens rightward). */
+export type ModalAlign = 'start' | 'end';
+
+/** Fixed-position offsets in px; the unused horizontal side is 'auto'. */
 export interface ModalPosition {
   bottom: number;
-  right: number;
+  left: number | 'auto';
+  right: number | 'auto';
   /** Panel width (px), capped so the panel fits the viewport with an edge gap. */
   width: number;
   /** CSS max-height: the room above the trigger, below the mobile header. */

@@ -1,4 +1,5 @@
 export { AdminHealth } from './components';
+export { prewarmAdminHealth } from './api';
 export type {
   AdminHealthData,
   AdminHealthSeriesPoint,

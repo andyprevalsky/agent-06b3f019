@@ -2865,7 +2865,9 @@ def _real_user_requirement_keys(context: List[Dict]) -> set:
         if (message.get("role") or "").upper() != "USER" or (message.get("metadata") or {}).get("hidden"):
             continue
         metadata = message.get("metadata") or {}
-        if is_agent_authored_user_metadata(metadata):
+        # Rows hidden from this agent's model (e.g. a Browser-composer message
+        # addressed to one browser task) are not this agent's requirements.
+        if is_agent_authored_user_metadata(metadata) or is_excluded_from_model(message):
             continue
         request_id = metadata.get("attentionRequestId")
         if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:

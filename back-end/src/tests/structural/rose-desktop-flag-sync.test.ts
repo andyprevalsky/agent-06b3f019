@@ -25,6 +25,7 @@ import {
   isRoseDesktopUser,
 } from '../../utils/roseDesktop';
 import { ROSE_DEV_USER_IDS, isRoseDevUser } from '../../utils/roseDevAccess';
+import { ROSE_REPO_OWNER_USER_IDS, isRoseRepoOwner } from '../../utils/roseRepoOwners';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../../..');
@@ -87,6 +88,19 @@ assert.deepEqual(
   sorted(backend),
   `ROSE_DEV_USER_IDS must equal ROSE_DESKTOP_USER_IDS.\n  dev:     ${JSON.stringify(ROSE_DEV_USER_IDS)}\n  desktop: ${JSON.stringify(backend)}`
 );
+
+// The private Rose repo grant (domains/projects/roseProject) has its own
+// explicit owner list: adding a desktop pilot or dev account never grants
+// repository access, so that list must not be derived from either one.
+const ownersFile = path.join(repoRoot, 'back-end/src/utils/roseRepoOwners.ts');
+assert.doesNotMatch(
+  fs.readFileSync(ownersFile, 'utf8'),
+  /roseDesktop|roseDevAccess|ROSE_DESKTOP_USER_IDS|ROSE_DEV_USER_IDS/,
+  'ROSE_REPO_OWNER_USER_IDS must be an explicit list, not the desktop/dev list'
+);
+assert.notStrictEqual(ROSE_REPO_OWNER_USER_IDS, ROSE_DESKTOP_USER_IDS);
+assert.deepEqual([...ROSE_REPO_OWNER_USER_IDS], ['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
+assert.equal(isRoseRepoOwner('00000000-0000-0000-0000-000000000000'), false);
 
 const probes: Array<string | null | undefined> = [
   ...backend,

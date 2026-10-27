@@ -148,6 +148,16 @@ function inlineWidth(el: HTMLElement): number {
   return el.style.maxWidth ? Math.min(width, toPx(el.style.maxWidth)) : width;
 }
 
+/** The panel's horizontal extent from whichever fixed-position side is anchored. */
+function panelX(el: HTMLElement): { left: number; right: number } {
+  const width = inlineWidth(el);
+  const left =
+    el.style.left && el.style.left !== 'auto'
+      ? Number.parseFloat(el.style.left)
+      : window.innerWidth - Number.parseFloat(el.style.right) - width;
+  return { left, right: left + width };
+}
+
 beforeEach(() => {
   localStorage.clear();
   signIn();
@@ -337,10 +347,9 @@ describe('Agent Settings on a 430px phone', () => {
     const dialog = await screen.findByRole('dialog');
 
     await waitFor(() => expect(dialog.style.right).not.toBe('16px'));
-    const right = Number.parseFloat(dialog.style.right);
-    const width = inlineWidth(dialog);
-    expect(right).toBeGreaterThanOrEqual(EDGE);
-    expect(PHONE.width - right - width).toBeGreaterThanOrEqual(EDGE);
+    const x = panelX(dialog);
+    expect(x.left).toBeGreaterThanOrEqual(EDGE);
+    expect(PHONE.width - x.right).toBeGreaterThanOrEqual(EDGE);
 
     expect(dialog.style.maxHeight).toContain('var(--mobile-terminal-header-height)');
     expect(dialog.style.backgroundColor).not.toBe('transparent');
@@ -385,8 +394,9 @@ describe('Agent Settings on a 430px phone', () => {
       window.dispatchEvent(new Event('resize'));
     });
     await waitFor(() => expect(dialog.style.width).toBe('420px'));
-    const right = Number.parseFloat(dialog.style.right);
-    expect(PHONE.height - right - inlineWidth(dialog)).toBeGreaterThanOrEqual(EDGE);
+    const x = panelX(dialog);
+    expect(x.left).toBeGreaterThanOrEqual(EDGE);
+    expect(PHONE.height - x.right).toBeGreaterThanOrEqual(EDGE);
     expect(dialog.style.bottom).toBe(`${PHONE.width - 330 + EDGE}px`);
   });
 });

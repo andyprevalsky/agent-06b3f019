@@ -2065,6 +2065,9 @@ def apply_manifest_environment(manifest: dict) -> None:
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
         os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
+        from temporal_connection import apply_stack_temporal_namespace
+
+        apply_stack_temporal_namespace(REPO_ROOT)
         prefix = "navi-agent-tasks-"
         if str(task_queue).startswith(prefix):
             os.environ["CONDUCTOR_WORKSPACE_NAME"] = str(task_queue)[len(prefix) :]

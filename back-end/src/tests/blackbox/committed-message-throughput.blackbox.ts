@@ -6,6 +6,9 @@ import assert from 'node:assert/strict';
 // generally completed in 47–133 ms. Keep production caps and deadlines.
 process.env.SUPABASE_URL = 'https://broadcast.blackbox.invalid';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'blackbox-service-key';
+// Lane/shard byte capacity is independent of the 8 KB live INSERT cap (covered by
+// realtime-payload-cap); lift it so large rows still reach those budgets.
+process.env.SUPABASE_BROADCAST_LIVE_INSERT_MAX_BYTES = String(1024 * 1024);
 process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '10';
 process.env.SUPABASE_BROADCAST_TIMEOUT_MS = '2000';
 process.env.SUPABASE_BROADCAST_BATCH_SIZE = '100';

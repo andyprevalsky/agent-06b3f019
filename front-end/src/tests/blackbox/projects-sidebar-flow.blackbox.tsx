@@ -5,7 +5,12 @@ import { http, HttpResponse } from 'msw';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
 import { renderWithProviders } from './test-wrapper';
 import { mockSession, makeAgent } from './app-sidebar.fixtures';
-import { makeProject, mockProjectsApi, openContextMenu } from './rose-sidebar.fixtures';
+import {
+  expectAgentMenuEntries,
+  makeProject,
+  mockProjectsApi,
+  openContextMenu,
+} from './rose-sidebar.fixtures';
 import { server } from './msw/server';
 const api = 'http://localhost:3001/api';
 beforeEach(() => {
@@ -53,7 +58,7 @@ it('uses the original grouped rows and gear settings instead of a separate Proje
   expect(within(screen.getByTestId('rose-group-p-rose')).getByText('Rose work')).toBeVisible();
   expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeVisible();
   fireEvent.click(within(project).getByRole('button', { name: 'Rose project settings' }));
-  expect(screen.getByRole('button', { name: 'Download setup helper' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Download setup helper' })).toBeNull();
   expect(screen.getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');
   expect(screen.getByRole('spinbutton', { name: 'Startup timeout (seconds)' })).toHaveValue(120);
   fireEvent.click(screen.getByRole('button', { name: 'Back to agents' }));
@@ -145,4 +150,10 @@ it('keeps Rename / Settings / Delete on the existing project context menu', asyn
   expect(state.projects).toHaveLength(1);
   fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }));
   expect(screen.getByTestId('rose-project-row-p-rose')).toBeVisible();
+});
+it('mobile agent rows open the same trimmed menu (UI #26): Archive · Pin · Rename · Copy', async () => {
+  mockProjectsApi([makeProject()]);
+  renderList();
+  const row = await screen.findByTestId('rose-agent-row-rose-agent');
+  expectAgentMenuEntries(await openContextMenu(row, 'rose-agent-menu'));
 });

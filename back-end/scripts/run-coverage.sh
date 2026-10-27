@@ -532,7 +532,19 @@ if $DB_FOUND; then
     echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
     exit 1
   fi
-  LOCAL_PSQL_URL="${LOCAL_PSQL_URL:-postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria}"
+  if [[ -z "${LOCAL_PSQL_URL:-}" ]]; then
+    # Workspace Docker container: never its shared `victoria`, which the local
+    # stack (Step 5 run.sh, semantic tests) serves from. The destructive
+    # blackbox cases get this workspace's own database inside the container,
+    # the same name the standalone runner and the E2B smoke use.
+    if ! COVERAGE_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    ENSURE_SYSTEM_DB_NAME="$COVERAGE_DB_NAME"
+    LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$COVERAGE_DB_NAME"
+    echo "Coverage database: $COVERAGE_DB_NAME (workspace container, not the stack's victoria)"
+  fi
   # Docker Desktop can briefly stop accepting new TCP connections while the
   # parallel coverage lanes saturate the shared host. Prisma's five-second
   # default connect timeout made every first query fail even when Postgres
@@ -541,6 +553,10 @@ if $DB_FOUND; then
   LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30&connect_timeout=15"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  # Hold this database for the whole run: a concurrent runner's schema sync
+  # deadlocks the suite's live cases (40P01).
+  source "$SCRIPT_DIR/test-db-run-lock.sh"
+  acquire_test_db_run_lock "$LOCAL_PSQL_URL" "run-coverage.sh" || exit 1
   node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
   if [[ -n "${ENSURE_SYSTEM_DB_NAME:-}" ]] &&
     ! ensure_workspace_system_db "$LOCAL_DB_PORT" "$ENSURE_SYSTEM_DB_NAME"; then
@@ -750,6 +766,7 @@ launch_coverage_process_group env \
   BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
   BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
   BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
+  ROSE_TEST_DB_LOCK_INHERITED_KEY="$TEST_DB_RUN_LOCK_KEY" ROSE_TEST_DB_LOCK_INHERITED_PID="$$" \
   BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
   BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
   BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \

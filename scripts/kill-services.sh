@@ -16,6 +16,8 @@
 # want that to abort the teardown mid-list.
 
 WORKTREE_DIR="$(pwd -P)"
+# run_path_in_worktree / run_cmd_mentions_worktree: nested-worktree-aware scope.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/run-process-cleanup.sh"
 DRY=0
 [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
@@ -172,9 +174,7 @@ cmd_of() {
 }
 
 cwd_matches() {
-    local cwd
-    cwd=$(cwd_of "$1")
-    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]]
+    run_path_in_worktree "$(cwd_of "$1")" "$WORKTREE_DIR"
 }
 
 is_self_or_parent() {
@@ -352,7 +352,7 @@ service_like_process() {
     local pid=$1
     local cwd cmd
     cwd=$(cwd_of "$pid")
-    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]] || return 1
+    run_path_in_worktree "$cwd" "$WORKTREE_DIR" || return 1
 
     cmd=$(cmd_of "$pid")
     case "$cwd" in
@@ -374,7 +374,7 @@ service_like_process() {
             ;;
     esac
 
-    echo "$cmd" | grep -Fq "$WORKTREE_DIR"
+    run_cmd_mentions_worktree "$cmd" "$WORKTREE_DIR"
 }
 
 manifest_pids() {
@@ -515,7 +515,7 @@ for pattern in \
         root_start=$(process_start_time "$pid") || root_start=""
         [[ -n "$root_start" ]] || continue
         is_protected_process "$pid" && continue
-        cwd_matches "$pid" || echo "$(cmd_of "$pid")" | grep -Fq "$WORKTREE_DIR" || continue
+        cwd_matches "$pid" || run_cmd_mentions_worktree "$(cmd_of "$pid")" "$WORKTREE_DIR" || continue
         record_pid "$ROOTS_FILE" "$pid" "$root_start" || true
     done
 done

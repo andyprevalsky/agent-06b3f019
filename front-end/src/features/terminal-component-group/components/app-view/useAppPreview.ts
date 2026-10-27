@@ -1,5 +1,5 @@
 /**
- * Preview reads for the open app view / an on-screen preview card.
+ * Preview reads for the open app view.
  *
  * useCodePreviewStatus (open view only; one GET per open, no polling):
  *   [LOADING] --GET /claude-code-session/:taskId/preview--> [READY(view)]
@@ -14,11 +14,8 @@
  *   [MINTING] --403 USER_SESSION_REQUIRED | ROSE_DEV_ONLY--> [HIDDEN] (nothing)
  *   [MINTING] --404 / other failure--> [ERROR]
  *   task / enabled change → a new code (codes are single-use, 60 s)
- *
- * useOnScreen: one IntersectionObserver per card; the card's frame only lives
- * while it is on screen.
  */
-import { useEffect, useState, type RefObject } from 'react';
+import { useEffect, useState } from 'react';
 
 import {
   CodePreviewApiError,
@@ -100,19 +97,4 @@ export function usePreviewFrameSrc(taskId: string, enabled: boolean): PreviewFra
     };
   }, [taskId, enabled]);
   return state;
-}
-
-export function useOnScreen(ref: RefObject<Element>): boolean {
-  const [onScreen, setOnScreen] = useState(false);
-  useEffect(() => {
-    const element = ref.current;
-    if (element === null || typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver((entries) => {
-      const entry = entries[entries.length - 1];
-      if (entry) setOnScreen(entry.isIntersecting);
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [ref]);
-  return onScreen;
 }

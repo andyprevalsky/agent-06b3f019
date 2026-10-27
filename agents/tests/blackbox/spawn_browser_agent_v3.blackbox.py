@@ -7159,7 +7159,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
-                     current_model="fixture-actual-browser-model",
+                     current_model="fixture-actual-browser-model", browser_pool="rose-1-flash",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
     model_assignments = [node for node in ast.walk(tree)
@@ -7183,6 +7183,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     assert body["message"] == "Browser state captured."
     assert body["metadata"]["auxiliary"].get("current_url") == "https://example.com/login"
     assert body["metadata"]["auxiliary"].get("actual_model") == "fixture-actual-browser-model"
+    assert body["metadata"]["auxiliary"].get("pool_name") == "rose-1-flash", "label the composer with its own pool"
     for private_part in ("private-user", "private-password", "private-token", "private-fragment"):
         assert private_part not in json.dumps(body)
     row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}
@@ -25225,6 +25226,64 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
     ), completions[0]["message"]
 
 
+@_in_browser_activity_context
+async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner():
+    """A Browser-composer message sent before the first step still reaches the owner.
+
+    The run fails during session setup, before the step loop builds its input state;
+    the post-close read must still find the message addressed to the allocated task.
+    """
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": None,
+        "passwords": [],
+    }
+    direct = {
+        "id": "direct",
+        "timestamp": "2026-10-26T15:59:40Z",
+        "role": "USER",
+        "text": "go to instacart instead",
+        "metadata": {"browserTaskId": "task-1", "excludeFromModel": True},
+    }
+    poll = AsyncMock(return_value=[await native_browser_start_source("2026-10-26T15:59:09+00:00"), direct])
+    save_mock = AsyncMock()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", poll),
+    ):
+        with pytest.raises(RuntimeError, match="No CDP URL provided"):
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+    assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
+    failed = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
+    assert len(failed) == 1, _completion_messages(save_mock)
+    assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
+
+
 async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
@@ -34742,6 +34801,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_failure_completion_message_leads_with_goal",
         test_spawn_browser_activity_failure_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_setup_failure_hands_unread_input_to_owner",
+        test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner,
     )
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",

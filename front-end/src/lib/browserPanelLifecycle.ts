@@ -87,6 +87,24 @@ function compareBrowserMessageOrder(a: Message, b: Message): number {
 }
 
 /**
+ * A relaunched browser can reuse an ended run's task_id (prod agent 447576b9:
+ * the root killed run 1 and spawned run 2 on the same task). An init after a
+ * terminal starts a new run; only the latest run decides the chip.
+ */
+function currentBrowserRun(taskMessages: Message[]): Message[] {
+  let start = 0;
+  let ended = false;
+  taskMessages.forEach((message, index) => {
+    if (isBrowserTaskTerminalMessage(message)) ended = true;
+    else if (ended && isBrowserInitMessage(message)) {
+      start = index;
+      ended = false;
+    }
+  });
+  return taskMessages.slice(start);
+}
+
+/**
  * Browser status chip lifecycle:
  *
  * spawn_browser_agent init/browser/system/session_started
@@ -103,6 +121,8 @@ function compareBrowserMessageOrder(a: Message, b: Message): number {
  *          worker's generic tool-error path, which only knows the toolCallId
  *   -> auth_assistance FINISHED remains non-terminal and resumes this task
  *   -> [HIDDEN_STATUS_CHIP]
+ *   -> a later init on the same task_id (relaunch, new tool call)
+ *   -> [VISIBLE_STATUS_CHIP] for that run (earlier runs' terminals ignored)
  */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
   const panels: BrowserPanelData[] = [];
@@ -128,9 +148,9 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
   });
 
   browserTaskIds.forEach((taskId) => {
-    const taskMessages = messages
-      .filter((m) => m.metadata?.task_id === taskId)
-      .sort(compareBrowserMessageOrder);
+    const taskMessages = currentBrowserRun(
+      messages.filter((m) => m.metadata?.task_id === taskId).sort(compareBrowserMessageOrder),
+    );
     const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
     const latestBrowserMessage = [...taskMessages]

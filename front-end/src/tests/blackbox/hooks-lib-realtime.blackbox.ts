@@ -164,8 +164,13 @@ describe('lib/realtime', () => {
     eventMap['INSERT_DEFERRED']?.({ payload: { record } });
     eventMap['INSERT_DEFERRED']?.({ payload: { record: { ...record, id: '' } } });
     eventMap['INSERT_DEFERRED']?.({ payload: { record: { ...record, reason: undefined } } });
-    expect(onInsertDeferred).toHaveBeenCalledTimes(1);
-    expect(onInsertDeferred).toHaveBeenCalledWith(record);
+    // An oversized notice carries a string preview; anything else is malformed.
+    const bounded = { ...record, id: 'bounded-row', preview: 'Code-agent SDK event JSON:' };
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: bounded } });
+    eventMap['INSERT_DEFERRED']?.({ payload: { record: { ...bounded, preview: 42 } } });
+    expect(onInsertDeferred).toHaveBeenCalledTimes(2);
+    expect(onInsertDeferred).toHaveBeenNthCalledWith(1, record);
+    expect(onInsertDeferred).toHaveBeenNthCalledWith(2, bounded);
   });
 
   it('subscribeToAgent: decodes an INSERT_ENCODED frame into the normal INSERT callback', async () => {
