@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { Case } from './iphone-control.cases';
+import { ineligiblePhoneFixtureNumber } from './phone-fixture-users';
 import {
   freshSetup,
   proveSettings,
@@ -91,7 +92,8 @@ export const setupRaceCases: Case[] = [
         if (change === 'phone')
           await prisma.user.update({
             where: { userId: f.userId },
-            data: { phone: '+19729777433' },
+            // Run-unique: a hardcoded number collides with an interrupted run's leftover user.
+            data: { phone: ineligiblePhoneFixtureNumber() },
           });
         if (change === 'epoch')
           await prisma.iPhoneDevice.update({
