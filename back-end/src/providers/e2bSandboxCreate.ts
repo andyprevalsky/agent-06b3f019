@@ -1,4 +1,5 @@
-import { RateLimitError, Sandbox, ServiceBusyError } from 'e2b';
+import { RateLimitError, Sandbox } from 'e2b';
+import { alertError } from './errorAlert';
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
@@ -123,55 +124,39 @@ export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
 export const SANDBOX_CREATE_REQUEST_TIMEOUT_MS = 120_000;
 
 /**
- * How long a code-agent sandbox create waits for E2B capacity. E2B caps
- * concurrently running sandboxes per team (Hobby 20, Pro 100, add-ons
- * 600/1,100) and answers a create over the cap with HTTP 429
- * (`RateLimitError`) or a busy 503 (`ServiceBusyError`). Neither creates a
- * sandbox, so waiting for a slot is safe; failing the code agent on the first
- * refusal was not. The default stays inside the agent's 60s create request
- * (spawn_claude_code_agent/repo.py), so the caller never gives up and retries
- * while the backend is still waiting. Synchronous user paths (user tools,
- * inspections) opt out and fail fast.
+ * E2B refused a create because the team's concurrent-sandbox plan limit is in
+ * use (HTTP 429, `RateLimitError`). Creates fail immediately on it, without
+ * waiting or queueing, so the shortage stays visible and the plan gets scaled.
  */
-export function e2bCapacityWaitMs(): number {
-  const parsed = Number.parseInt(process.env.E2B_CAPACITY_WAIT_MS ?? '30000', 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 30_000;
-}
-const E2B_CAPACITY_POLL_INITIAL_MS = 2_000;
-const E2B_CAPACITY_POLL_MAX_MS = 10_000;
-
-export function isSandboxCapacityError(error: unknown): boolean {
-  return error instanceof RateLimitError || error instanceof ServiceBusyError;
+export class E2BSandboxCapacityError extends Error {
+  readonly code = 'E2B_CAPACITY_EXHAUSTED';
+  readonly statusCode = 503;
+  constructor(readonly providerDetail: string) {
+    super(
+      'E2B concurrent-sandbox limit reached: every sandbox allowed by the current E2B plan ' +
+        'is in use, so no new sandbox can start. Scale the E2B plan to run more code agents.'
+    );
+    this.name = 'E2BSandboxCapacityError';
+  }
 }
 
 export async function createSandboxWithRetry(
   templateId: string,
   options: Parameters<typeof Sandbox.create>[1],
-  label: string,
-  capacity: { waitMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+  label: string
 ): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
-  const sleep =
-    capacity.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const deadline = Date.now() + (capacity.waitMs ?? 0);
-  for (let refusal = 1; ; refusal += 1) {
-    try {
-      return await createSandboxAttempts(templateId, options, label);
-    } catch (error) {
-      const remainingMs = deadline - Date.now();
-      if (!isSandboxCapacityError(error) || remainingMs <= 0) throw error;
-      const delayMs = Math.min(
-        E2B_CAPACITY_POLL_MAX_MS,
-        E2B_CAPACITY_POLL_INITIAL_MS * 2 ** (refusal - 1),
-        remainingMs
-      );
-      log.warn(`E2B:${label} at sandbox capacity; waiting for a slot`, {
-        refusal,
-        delayMs,
-        remainingMs,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await sleep(delayMs);
-    }
+  try {
+    return await createSandboxAttempts(templateId, options, label);
+  } catch (error) {
+    if (!(error instanceof RateLimitError)) throw error;
+    const capacity = new E2BSandboxCapacityError(error.message);
+    log.error(`E2B:${label} ${capacity.message}`, { providerDetail: error.message });
+    alertError({
+      source: 'e2b_capacity',
+      message: capacity.message,
+      context: { label, providerDetail: error.message.slice(0, 300) },
+    });
+    throw capacity;
   }
 }
 

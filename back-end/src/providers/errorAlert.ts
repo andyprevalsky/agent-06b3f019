@@ -27,7 +27,8 @@ export type FailureSource =
   | 'agent_workflow'
   | 'backend_crash'
   | 'agent_watchdog'
-  | 'schema_drift';
+  | 'schema_drift'
+  | 'e2b_capacity';
 
 const SOURCE_LABEL: Record<FailureSource, string> = {
   chat: '🔴 Chat loop failed',
@@ -37,6 +38,7 @@ const SOURCE_LABEL: Record<FailureSource, string> = {
   backend_crash: '🔴 Backend crashing',
   agent_watchdog: '🔴 Agent stuck / silently died',
   schema_drift: '🔴 Production schema drift (RLS / indexes / policies)',
+  e2b_capacity: '🔴 E2B concurrent-sandbox limit reached — scale the E2B plan',
 };
 
 const OUTBOUND_TIMEOUT_MS = 4000;
