@@ -59,7 +59,7 @@ A **batch size** counts individual scheduled benchmark runs in one CLI launch,
 independent of `-k`. Divide the size by `-k` to get the number of distinct task
 names; for example, size 20 at `-k 2` means 10 distinct tasks run twice each,
 for exactly 20 runs. Select the requested run count first, then select exactly
-that many task names; never multiply the requested batch size by `-k` again.
+that quotient of task names; never multiply the requested batch size by `-k` again.
 If the requested size is not divisible by `-k`, ask for a concrete size rather
 than silently rounding or changing `-k`. For the current Polar descent, use
 `-k 2`, start at 20 runs (10 distinct tasks), increase by 10 runs after an
