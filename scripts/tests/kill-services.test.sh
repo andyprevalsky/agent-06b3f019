@@ -742,13 +742,22 @@ nested_stack_pid=$!
 nested_worker_pid=$!
 (cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
 own_stack_pid=$!
-PIDS+=("$nested_stack_pid" "$nested_worker_pid" "$own_stack_pid")
+# A `..` token that textually starts with this worktree but resolves outside
+# it (CodeRabbit, PR #1592): the argv pattern `$WORKTREE/agents.*worker.py`
+# matches it, so only the lexically normalized path predicate keeps it alive.
+ESCAPE="$TMP_ROOT/escape"
+mkdir -p "$ESCAPE/agents"
+printf 'import time\ntime.sleep(1000)\n' > "$ESCAPE/agents/worker.py"
+(cd "$ESCAPE/agents" && exec python3 "$WORKTREE/agents/../../escape/agents/worker.py") > /dev/null 2>&1 &
+escape_worker_pid=$!
+PIDS+=("$nested_stack_pid" "$nested_worker_pid" "$own_stack_pid" "$escape_worker_pid")
 sleep 0.5
 
 (cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/nested-sweep.log" 2>&1) || true
 
 assert_alive "$nested_stack_pid" "run.sh in a nested Git worktree"
 assert_alive "$nested_worker_pid" "worker.py in a nested Git worktree"
+assert_alive "$escape_worker_pid" "worker.py named through a \$WORKTREE/.. escape"
 assert_dead "$own_stack_pid" "this worktree's own run.sh"
 
 # The path predicate itself: the root and its plain subdirectories are owned;
@@ -756,10 +765,18 @@ assert_dead "$own_stack_pid" "this worktree's own run.sh"
 # share a prefix are not.
 (
     source "$WORKTREE/scripts/kill-services.sh"
-    for owned in "$WORKTREE" "$WORKTREE/agents" "$WORKTREE/.claude/worktrees" "$WORKTREE/agents/worker.py"; do
+    for owned in "$WORKTREE" "$WORKTREE/agents" "$WORKTREE/.claude/worktrees" "$WORKTREE/agents/worker.py" \
+        "$WORKTREE/agents/../back-end" "$WORKTREE//agents/./worker.py" "$WORKTREE/agents/.." "$WORKTREE/"; do
         run_path_in_worktree "$owned" "$WORKTREE" || { echo "FAIL: $owned should be in $WORKTREE" >&2; exit 1; }
     done
-    for foreign in "$NESTED" "$NESTED/agents" "$NESTED/agents/worker.py" "${WORKTREE}-sibling/agents" "$TMP_ROOT/foreign"; do
+    run_path_in_worktree "$WORKTREE/agents" "$WORKTREE/./" \
+        || { echo "FAIL: a non-normalized root must still own its subdirectories" >&2; exit 1; }
+    # `..` segments are resolved lexically before the prefix and nested-.git
+    # checks: escapes to a sibling, the parent, or into a nested worktree miss.
+    for foreign in "$NESTED" "$NESTED/agents" "$NESTED/agents/worker.py" "${WORKTREE}-sibling/agents" "$TMP_ROOT/foreign" \
+        "$WORKTREE/.." "$WORKTREE/../foreign" "$WORKTREE/agents/../../escape/agents/worker.py" \
+        "$WORKTREE/./../worktree-sibling" "$WORKTREE/agents/../.claude/worktrees/gate-nested/agents" \
+        "$WORKTREE/agents"$'\n'"$TMP_ROOT/foreign"; do
         if run_path_in_worktree "$foreign" "$WORKTREE"; then
             echo "FAIL: $foreign must not be in $WORKTREE" >&2
             exit 1
@@ -771,7 +788,11 @@ assert_dead "$own_stack_pid" "this worktree's own run.sh"
         echo "FAIL: nested worktree argv path treated as own" >&2
         exit 1
     fi
+    if run_cmd_mentions_worktree "python3 $WORKTREE/agents/../../escape/agents/worker.py --x=$WORKTREE/../foreign" "$WORKTREE"; then
+        echo "FAIL: a \$WORKTREE/.. argv escape treated as own" >&2
+        exit 1
+    fi
 )
-echo "PASS: the sweep never crosses into a nested Git worktree"
+echo "PASS: the sweep never crosses into a nested Git worktree or out through .."
 
 echo "All kill-services tests passed."
