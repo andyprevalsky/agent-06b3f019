@@ -1146,6 +1146,19 @@ async def test_summarize_page_metadata_validates_dates_and_sanitizes_values():
     assert "Ignore previous instructions" not in block and "evil" not in block
 
 
+async def test_summarize_page_metadata_accepts_slash_dates_with_time():
+    """CodeRabbit 4383894332: a slash date with a time part is a valid publication date.
+
+    ``_PAGE_DATE_RE`` admits ``2024/03/01 12:00:00`` but ``datetime.fromisoformat``
+    rejects the slashes, so the date was dropped. Invalid times stay rejected.
+    """
+    for declared in ("2024/03/01 12:00:00", "2024/3/1T09:30Z"):
+        block = _metadata_block(await _summarizer_prompt({"citation_publication_date": declared}))
+        assert block == f"citation_publication_date: {declared}", block
+    rejected = await _summarizer_prompt({"citation_publication_date": "2024/03/01 25:00"})
+    assert rejected == await _summarizer_prompt()
+
+
 async def test_summarize_prompt_unchanged_without_allowlisted_metadata():
     """A page with no allowlisted facts keeps the pre-metadata prompt bytes."""
     baseline = await _summarizer_prompt()
@@ -1220,6 +1233,10 @@ async def run_all_tests():
     await r.record_async(
         "summarize_page_metadata_validates_dates_and_sanitizes_values",
         test_summarize_page_metadata_validates_dates_and_sanitizes_values,
+    )
+    await r.record_async(
+        "summarize_page_metadata_accepts_slash_dates_with_time",
+        test_summarize_page_metadata_accepts_slash_dates_with_time,
     )
     await r.record_async(
         "summarize_prompt_unchanged_without_allowlisted_metadata",

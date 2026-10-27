@@ -873,7 +873,9 @@ def _is_page_metadata_date(value: str) -> bool:
         return False
     try:
         if match.group("time"):
-            datetime.fromisoformat(value)
+            # Hyphenate and zero-pad slash dates (2024/3/1 12:00) so ISO parsing accepts them.
+            month, day = int(match.group("month")), int(match.group("day"))
+            datetime.fromisoformat(f"{match.group('year')}-{month:02d}-{day:02d}{match.group('time')}")
         else:
             datetime(int(match.group("year")), int(match.group("month") or 1), int(match.group("day") or 1))
     except ValueError:
