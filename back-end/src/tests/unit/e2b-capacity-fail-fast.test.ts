@@ -33,10 +33,9 @@ function stubCreate(error: Error): { calls: number } {
   return state;
 }
 
-async function waitForAlerts(count: number): Promise<void> {
-  for (let i = 0; i < 100 && alerts.length < count; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+/** Alerts are fire-and-forget; give the local webhook POST time to land. */
+function settleAlerts(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 300));
 }
 
 before(async () => {
@@ -79,7 +78,7 @@ test('an E2B 429 fails fast with the typed capacity error and fires the alert', 
     return true;
   });
   assert.equal(state.calls, 1, 'no retry and no wait after a capacity refusal');
-  await waitForAlerts(1);
+  await settleAlerts();
   assert.equal(alerts.length, 1);
   assert.match(alerts[0], /E2B concurrent-sandbox limit reached/);
 });
@@ -89,8 +88,7 @@ test('repeat refusals share one throttled alert signature', async () => {
   for (let i = 0; i < 3; i += 1) {
     await assert.rejects(createSandboxWithRetry('tpl', {}, 'Claude Code'), E2BSandboxCapacityError);
   }
-  await waitForAlerts(1);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await settleAlerts();
   assert.equal(alerts.length, 1);
 });
 
@@ -105,6 +103,6 @@ test('other create rejections are unchanged and do not alert as capacity', async
   const state = stubCreate(new AuthenticationError('bad key'));
   await assert.rejects(createSandboxWithRetry('tpl', {}, 'Claude Code'), AuthenticationError);
   assert.equal(state.calls, 1);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await settleAlerts();
   assert.equal(alerts.length, 0);
 });
