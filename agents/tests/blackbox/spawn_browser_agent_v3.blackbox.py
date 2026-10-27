@@ -29304,6 +29304,15 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
         first["request_id"] = "request-fixture"
     if has_id:
         first["task_id"] = "task-fixture"
+    if kind == "write-rejected":
+        turns = []
+        h._append_browser_turn_messages(
+            turns,
+            unified_action={"action": "click", "params": {"index": 4}},
+            result={"status": "needs_write_approval", "success": False},
+            tool_call_id="blocked-click",
+        )
+        first.update(browser_turn_messages=turns, pending_tool_call_id="blocked-click")
     if kind == "activity-error":
         first = RuntimeError("fixture activity failure")
     if kind == "missing-result":
@@ -29324,6 +29333,18 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
 
     def start(*_args, **kwargs):
         ids.append(kwargs["args"][4])
+        if kind == "write-rejected" and len(ids) == 2:
+            assert not _browser_manager_terminal_events(events), "rejection prematurely ended the browser task"
+            state = kwargs["args"][12]
+            assert state["approval_type"] == "rejected"
+            assert state["pending_action"] is None
+            assert state["task_id"] == ("task-fixture" if has_id else None)
+            assert ids[-1] == ("task-fixture" if has_id else ids[0])
+            h._finalize_rejected_browser_approval(state)
+            denied = [m for m in state["browser_turn_messages"] if m.get("role") == "tool"]
+            assert len(denied) == 1 and denied[0]["tool_call_id"] == "blocked-click"
+            assert json.loads(denied[0]["content"])["status"] == "rejected"
+            assert state["write_lock_approvals"] == {}
         return _TerminalBoundaryHandle(
             first if len(ids) == 1 else {"status": "completed", "task_id": ids[-1], "success": True, "message": "done"}
         )
@@ -29335,6 +29356,8 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
             return {"attention_request_id": "fixture-approval"}
         if kind == "approval-error":
             raise RuntimeError("fixture approval failure")
+        if kind == "write-rejected":
+            context.append({"role": "USER", "text": "fixture feedback", "timestamp": "2026-10-01T00:00:01Z"})
         raise UserRejectedError(
             "fixture rejected",
             rejection_message="fixture feedback" if kind == "write-rejected" else "",
@@ -29404,7 +29427,7 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
     assert completed[0].status == (
         MessageStatus.FINISHED if kind in ("write-pending", "auth-pending", "write-rejected") else MessageStatus.ERROR
     )
-    assert len(ids) == (2 if kind in ("write-pending", "auth-pending") else 1)
+    assert len(ids) == (2 if kind in ("write-pending", "auth-pending", "write-rejected") else 1)
     if kind == "write-rejected":
         tool_results = [
             message
@@ -29413,7 +29436,9 @@ async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
         ]
         assert len(tool_results) == 1
         assert tool_results[0]["tool_call_id"] == "fixture-tool"
-        assert "fixture feedback" in tool_results[0]["content"], "FE closure erased the user's rejection feedback"
+        assert "done" in tool_results[0]["content"], "parent tool must resolve with the resumed activity result"
+        assert "fixture feedback" not in tool_results[0]["content"], "rejection feedback is not a fabricated completion"
+        assert sum(m.get("role") == "USER" and m.get("text") == "fixture feedback" for m in context) == 1
     return {
         "case": kind,
         "result_has_id": has_id,

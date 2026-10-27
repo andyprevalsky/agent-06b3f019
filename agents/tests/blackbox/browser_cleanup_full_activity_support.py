@@ -2,6 +2,7 @@
 import ast
 import asyncio
 import copy
+import json
 from pathlib import Path
 import socket
 from unittest.mock import AsyncMock, patch
@@ -25,7 +26,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
         if terminal_writer_status is not None:
             cases = [("cancellation", 200, False), ("original_error", 200, False)] if terminal_writer_stage == "terminal" else [("original_error", 200, False)]
         for scenario, http_status, fail_background in cases:
-            fixture = 'test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance' if scenario.startswith('declined') else 'test_spawn_browser_activity_failure_completion_message_leads_with_goal' if scenario == 'original_error' else 'test_spawn_browser_activity_verified_completion_message_leads_with_goal'
+            fixture = '_exercise_browser_resume_user_input' if scenario.startswith('declined') else 'test_spawn_browser_activity_failure_completion_message_leads_with_goal' if scenario == 'original_error' else 'test_spawn_browser_activity_verified_completion_message_leads_with_goal'
             node = copy.deepcopy(next((n for n in source.body if isinstance(n, ast.AsyncFunctionDef) and n.name == fixture)))
             selected_titles = {
                 "terminal": {"Browser Session Cancelled", "Task Failed"},
@@ -66,11 +67,22 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                             n.args[1] = ast.Call(func=ast.Name(id='AsyncMock', ctx=ast.Load()), args=[], keywords=[ast.keyword(arg='side_effect', value=ast.Call(func=ast.Attribute(value=ast.Name(id='asyncio', ctx=ast.Load()), attr='CancelledError', ctx=ast.Load()), args=[], keywords=[]))])
                     return n
             node = Adapter().visit(node)
+            if scenario.startswith('declined'):
+                # Reuse the actual activity adapter, not the multi-case assertion
+                # wrapper. Its old early-return contract no longer exists.
+                activity_index = next(i for i, n in enumerate(node.body) if isinstance(n, ast.With)
+                                      and any(isinstance(child, ast.Await) and isinstance(child.value, ast.Call)
+                                              and isinstance(child.value.func, ast.Name)
+                                              and child.value.func.id == 'spawn_browser_agent_activity_v3'
+                                              for child in ast.walk(n)))
+                node.body = node.body[:activity_index + 1]
+                node.body.extend(ast.parse('boundary_actor_turns.extend(actor_call.captured_turns)').body)
             if scenario.startswith('cancellation') or scenario == 'maxstep' or scenario.endswith('request_cancelled') or scenario.startswith('declined_lookup') or sealed_only or terminal_writer_status is not None:
                 node.body = [n for n in node.body if not isinstance(n, ast.Assert)]
             if scenario != 'original_error':
                 node.body.append(ast.Return(value=ast.Name(id='result', ctx=ast.Load())))
-            namespace = dict(owning_namespace, boundary_close=close, boundary_save=saves, boundary_lookup=boundary_lookup, boundary_propagation_failure=AsyncMock(side_effect=RuntimeError("ordinary owned propagation failure")))
+            actor_turns = []
+            namespace = dict(owning_namespace, boundary_close=close, boundary_save=saves, boundary_lookup=boundary_lookup, boundary_actor_turns=actor_turns, boundary_propagation_failure=AsyncMock(side_effect=RuntimeError("ordinary owned propagation failure")))
             exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'existing-full-activity-fixture', 'exec'), namespace)
             clear_captures()
             setup_mock({'/api/browser-session/close': {'status': http_status, 'json': {'error': 'lifecycle claim held'}}})
@@ -134,12 +146,30 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             original_finalize = handler._finalize_browser_recording_for_fe_resilient
             failed_finalize = AsyncMock(side_effect=OSError("owned fixture recording finalize failure"))
             error = None
+            error_message = None
             outcome = None
             with patch.object(realtime_messages, '_queue_realtime_message', observed_queue), patch.object(handler, '_finalize_browser_recording_for_fe_resilient', failed_finalize if fail_background else original_finalize), patch.object(handler, 'save_browser_action_message', saves), patch.object(handler, '_schedule_browser_cleanup', tracked), patch.object(handler, 'MAX_ITERATIONS', 0 if scenario == 'maxstep' else handler.MAX_ITERATIONS):
                 try:
-                    outcome = await namespace[fixture]()
+                    if scenario.startswith('declined'):
+                        turns = []
+                        handler._append_browser_turn_messages(
+                            turns,
+                            unified_action={"action": "request_user_assistance_for_authentication", "params": {}},
+                            result={"success": True, "request_id": "auth-request"},
+                            tool_call_id="denied-auth-call",
+                        )
+                        outcome = await namespace[fixture](
+                            approval_type=handler.AUTH_ASSISTANCE_DECLINED,
+                            actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+                            resume_overrides={"session_id": "session-1", "browser_turn_messages": turns,
+                                              "rejected_action": {"tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
+                                                                  "request_id": "auth-request", "url": "https://example.com/login"}},
+                        )
+                    else:
+                        outcome = await namespace[fixture]()
                 except BaseException as e:
                     error = type(e).__name__
+                    error_message = str(e)
                 if owned_tasks:
                     await asyncio.gather(*owned_tasks)
             messages = [c.kwargs for c in saves.await_args_list]
@@ -158,7 +188,6 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                 r['terminalWriterStage'] = terminal_writer_stage
                 selected = []
                 for captured in get_captured_requests():
-                    import json
                     body = captured.get('requestBody') or {}
                     if isinstance(body, str):
                         body = json.loads(body)
@@ -213,16 +242,23 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             if fail_background:
                 assert failed_finalize.await_count == 1, r
             expected_status = 'cancelled' if scenario.startswith('cancellation') else 'max_iterations' if scenario == 'maxstep' else 'completed'
-            if scenario != 'original_error':
+            if scenario == 'declined_lookup_error':
+                assert error == 'RuntimeError' and error_message == 'owned fixture ordinary lookup failure', r
+                assert outcome is None and not actor_turns, r
+                assert close.await_args.args[1] == 'session-1', r
+                assert any('owned fixture ordinary lookup failure' in (message.get('extra_metadata') or {}).get('browser_error_message', '') for message in terminal), r
+            elif scenario != 'original_error':
                 assert error is None and outcome['status'] == expected_status, r
                 if scenario.startswith('declined'):
-                    assert outcome['user_declined_auth'] is True and outcome['success'] is False, r
+                    assert outcome['success'] is True and not outcome.get('user_declined_auth'), r
+                    assert len(actor_turns) == 1, r
+                    denied = [message for message in actor_turns[0] if message.get('role') == 'tool' and message.get('tool_call_id') == 'denied-auth-call']
+                    assert len(denied) == 1 and json.loads(denied[0]['content'])['status'] == 'rejected', r
+                    assert json.loads(denied[0]['content'])['success'] is False, r
+                    assert not [message for message in actor_turns[0] if message.get('role') == 'user'], r
                 elif scenario == 'completion':
                     assert outcome['success'] is True, r
                 business = {key: outcome.get(key) for key in ('status', 'success', 'message', 'user_declined_auth', 'task_id', 'session_id', 'structured_response', 'best_effort_response')}
-                if scenario == 'declined_lookup_error':
-                    assert outcome['session_id'] == 'session-1', r
-                    assert close.await_args.args[1] == 'session-1', r
                 if scenario in business_results:
                     assert business == business_results[scenario], (business, business_results[scenario])
                 else:
