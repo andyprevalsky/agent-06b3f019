@@ -252,6 +252,10 @@ GATES = (
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
     ),
     Gate(
+        "read-graphide-review",
+        ("python3", "scripts/tests/read-graphide-review.test.py"),
+    ),
+    Gate(
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
     ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
