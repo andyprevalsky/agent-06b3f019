@@ -18415,10 +18415,26 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     # can still say `started` after the config mutation has committed `stopped`,
     # so it is not an ordering proof. Wait for run-bench-cloud to publish the exact
     # post-config start acceptance before spending the finite proxy attach budget.
+    # A child whose boot update failed (for example consecutive Fly host 408s)
+    # never gets that release, and the barrier waits for this autoscaler to exit
+    # before cloning its one replacement. Exit fail-closed, with no capacity
+    # committed, as soon as the child has finished.
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
-        while [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; do sleep 0.2; done
+        while [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; do
+            if [ -e "$out/benchmark-child.finished" ]; then
+                printf '%s\n' "child finished before the boot-config barrier released; no worker capacity was committed" > "$out/autoscaler.failed"
+                echo "  ℹ️ [$bench] mandatory autoscaler: child finished before boot-config release; exiting without workers" >&2
+                return 1
+            fi
+            sleep 0.2
+        done
         primary_start_deadline=$((SECONDS + ${CLOUDBENCH_READY_TIMEOUT:-600}))
         while [ ! -f "$out/post-config-start.accepted" ]; do
+            if [ -e "$out/benchmark-child.finished" ]; then
+                printf '%s\n' "child finished before its post-config start was accepted; no worker capacity was committed" > "$out/autoscaler.failed"
+                echo "  ℹ️ [$bench] mandatory autoscaler: child finished before start acceptance; exiting without workers" >&2
+                return 1
+            fi
             if [ "$SECONDS" -ge "$primary_start_deadline" ]; then
                 printf '%s\n' "primary post-config start was not accepted before autoscaler attachment" > "$out/autoscaler.failed"
                 echo "  ❌ [$bench] mandatory autoscaler: primary post-config start was not accepted" >&2

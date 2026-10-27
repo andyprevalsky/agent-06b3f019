@@ -2146,6 +2146,53 @@ FAKEFLY
     [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "host replacement ran past the boot-config deadline"
 ) || fail "fleet host-unresponsive replacement checks failed"
 
+# The mandatory autoscaler of a boot-launch child waits for the fleet's
+# boot-config release. When that child fails its boot update (for example three
+# Fly host 408s), the release never comes for it, while the barrier waits for
+# that same autoscaler to exit before cloning a replacement. The autoscaler's
+# real pre-release wait must notice the finished child and exit without
+# committing capacity (descend I4: polar-bu-007 r002-j0017, 2026-10-27).
+(
+  autoscaler_wait_source="$(awk '
+    /# Boot-launch intentionally configures the entire fleet while every primary/ { capture = 1 }
+    /# The keyed inventory already carries Fly/ { exit }
+    capture { print }
+  ' "$ROOT_DIR/scripts/run-bench-fleet")"
+  [ -n "$autoscaler_wait_source" ] || fail "missing the autoscaler boot-release wait"
+  eval "autoscaler_boot_release_wait() { $autoscaler_wait_source
+    return 0; }"
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/autoscaler-release-barrier"
+  out="$TMP_ROOT/autoscaler-release/polar-bu-007"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready" "$out"
+  bench=polar-bu-007; cid=d8d99353a46378; CLOUDBENCH_BOOT_LAUNCH=1
+  ( sleep 0.5; printf '125\n' > "$out/benchmark-child.finished" ) &
+  started=$SECONDS
+  wait_rc=0
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" \
+    2>"$TMP_ROOT/autoscaler-release.err" || wait_rc=$?
+  wait
+  [ "$wait_rc" -ne 124 ] ||
+    fail "autoscaler kept waiting for a boot-config release after its child finished (fleet replacement deadlock)"
+  [ "$wait_rc" -ne 0 ] && [ $((SECONDS - started)) -lt 10 ] &&
+    grep -q 'child finished before the boot-config barrier released' "$out/autoscaler.failed" &&
+    [ ! -e "$out/autoscaler.completed-after-child" ] ||
+    fail "autoscaler did not exit fail-closed without capacity after an early child finish (rc=$wait_rc)"
+  # A released barrier with an accepted start still proceeds to attachment.
+  rm -f "$out/benchmark-child.finished" "$out/autoscaler.failed"
+  : > "$BOOT_CONFIG_BARRIER/release"
+  printf '%s\n' "$cid" > "$out/post-config-start.accepted"
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" ||
+    fail "a released, accepted primary did not reach autoscaler attachment"
+  # A child that finishes after release but before start acceptance also exits promptly.
+  rm -f "$out/post-config-start.accepted"
+  printf '125\n' > "$out/benchmark-child.finished"
+  wait_rc=0
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" \
+    2>/dev/null || wait_rc=$?
+  [ "$wait_rc" -ne 124 ] && [ "$wait_rc" -ne 0 ] ||
+    fail "autoscaler waited for start acceptance after its child finished (rc=$wait_rc)"
+) || fail "autoscaler boot-release wait checks failed"
+
 # A shared mutation lease is joined exactly when _with_timeout wrote its
 # join-native receipt for the latest attempt, whatever its exit status: a
 # signal-killed child (137) or an interruption after the child exists (143)
