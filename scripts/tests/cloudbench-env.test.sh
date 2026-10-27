@@ -2193,6 +2193,53 @@ FAKEFLY
     fail "autoscaler waited for start acceptance after its child finished (rc=$wait_rc)"
 ) || fail "autoscaler boot-release wait checks failed"
 
+# The relaunched slot's new autoscaler cannot report ready before the fleet
+# writes the boot-config release, and that release follows this replacement.
+# Before release the replacement defers the readiness check to the normal
+# start barrier instead of waiting on a slot that cannot become ready
+# (descend I4 review finding).
+(
+  for fleet_fn in fleet_replace_host_unresponsive_child wait_for_mandatory_autoscaler_startup; do
+    fleet_fn_source="$(awk -v name="$fleet_fn" '
+      $0 ~ "^" name "\\(\\) *\\{" { capture = 1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$ROOT_DIR/scripts/run-bench-fleet")"
+    [ -n "$fleet_fn_source" ] || fail "missing fleet function $fleet_fn"
+    eval "$fleet_fn_source"
+  done
+  fleet_job_running() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+  primary_vm_size_for_bench() { echo performance-2x; }
+  primary_vm_memory_for_bench() { echo 4096; }
+  primary_clone_storage_mode() { echo fresh; }
+  WARM_ID=warm00000000; SNAP_ID=snap0; CLOUDBENCH_BOOT_LAUNCH=1; AUTOSCALER_STARTUP_WAIT_SECONDS=3
+  clone_machine_target() { printf 'm200fresh0000c\n'; }
+  launch_fleet_bench_child() {
+    # Like the real relaunch: a fresh child plus a live mandatory autoscaler
+    # that waits for the boot-config release before it can publish readiness.
+    sleep 30 & CHILD_PIDS[$3]=$!
+    sleep 30 & AUTOSCALER_PIDS[$3]=$!
+    CHILD_MACHINE[$3]=m200fresh0000c
+  }
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/replace-live-barrier"
+  fleet_out="$TMP_ROOT/replace-live/polar-bu-007"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready" "$fleet_out"
+  CHILD_OUT=("$fleet_out"); CHILD_BENCH=(polar-bu-007); CHILD_MACHINE=(d8d99353a46378)
+  CHILD_BENCH_INDEX=(16); CHILD_PIDS=(""); AUTOSCALER_PIDS=("")
+  printf 'clone d8d99353a46378\n' > "$fleet_out/.cid"
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'd8d99353a46378\n' > "$fleet_out/boot-config-host-unresponsive"
+  : > "$fleet_out/worker-clones.ids"
+  started=$SECONDS
+  replace_rc=0
+  fleet_replace_host_unresponsive_child 0 $((SECONDS + 60)) 2>"$TMP_ROOT/replace-live.err" || replace_rc=$?
+  kill "${CHILD_PIDS[0]:-}" "${AUTOSCALER_PIDS[0]:-}" 2>/dev/null || true
+  wait 2>/dev/null || true
+  [ "$replace_rc" -eq 0 ] && [ "$(cat "$fleet_out/.cid")" = "clone m200fresh0000c" ] &&
+    [ $((SECONDS - started)) -lt 3 ] ||
+    fail "replacement waited before release for an autoscaler that cannot be ready (rc=$replace_rc): $(cat "$TMP_ROOT/replace-live.err")"
+) || fail "pre-release host replacement autoscaler checks failed"
+
 # A shared mutation lease is joined exactly when _with_timeout wrote its
 # join-native receipt for the latest attempt, whatever its exit status: a
 # signal-killed child (137) or an interruption after the child exists (143)

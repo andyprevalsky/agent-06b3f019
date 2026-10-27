@@ -64,10 +64,18 @@ The fleet stalled instead:
 In `bench_autoscaler`, the boot-launch path waits for
 `$BOOT_CONFIG_BARRIER/release` in an unbounded loop that never checks the
 child's finished marker. A child whose boot update failed never receives that
-release. Meanwhile `fleet_replace_host_unresponsive_child` waits for the same
-autoscaler to exit, bounded only by the 1800 s barrier deadline, before
-cloning. The two wait on each other, so the designed one-clone recovery could
-never run.
+release. The fleet had already entered `fleet_replace_host_unresponsive_child`, which
+was blocked waiting for the same autoscaler to exit, bounded only by the
+1800 s barrier deadline. The "🔁 cloning a replacement" line prints only after
+that wait. The two waited on each other, so the designed one-clone recovery
+could never run.
+
+A second deadlock sat behind the first, found by the independent review.
+After relaunching the slot, the replacement waited for the new autoscaler's
+readiness (`wait_for_mandatory_autoscaler_startup`, 600 s). That autoscaler
+also waits for the boot-config release before it can be ready, and the release
+follows the replacement. Fixing only the first wait would have turned a
+30-minute hang into a 10-minute abort.
 
 The existing replacement test stubbed `fleet_job_running` as already exited,
 so it never exercised a live autoscaler.
@@ -89,7 +97,10 @@ On an early finish the autoscaler exits fail-closed:
 - It writes no `autoscaler.completed-after-child`, so acceptance cannot pass.
 
 The fleet's existing replacement path can then archive the failed attempt,
-clone one fresh Machine and relaunch the same slot. Its existing refusals
+clone one fresh Machine and relaunch the same slot. Before the boot-config
+release, the replacement no longer waits for the new autoscaler's readiness.
+The normal start barrier checks every ready slot's autoscaler after release,
+exactly as it does for the original launch. Its existing refusals
 still apply: pool claims, a second failure, worker clones, and the deadline.
 
 Regression: `scripts/tests/cloudbench-env.test.sh` (a `/deploy` gate)
@@ -101,6 +112,10 @@ extracts the real pre-release region of `bench_autoscaler` from
 - A released, accepted primary still proceeds.
 - A child that finishes after release but before start acceptance also exits
   promptly.
+- A pre-release replacement runs the real `fleet_replace_host_unresponsive_child`
+  and `wait_for_mandatory_autoscaler_startup` against a live stand-in
+  autoscaler and returns at once. On the first fix alone it fails after the 3 s
+  startup wait used in the test.
 
 Scaling: the autoscaler adds one file-existence check per 0.2 s poll that it
 already performs. That is constant per copy.

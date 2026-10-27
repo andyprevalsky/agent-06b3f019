@@ -19411,6 +19411,13 @@ fleet_replace_host_unresponsive_child() {  # <child-slot> <barrier-deadline>
     fi
     printf '%s\n' "$mid" > "$out/boot-config-host-replaced" || return 1
     launch_fleet_bench_child "${CHILD_BENCH_INDEX[$j]}" "$bench" "$j" || return 1
+    # Before the boot-config release the new autoscaler cannot publish
+    # readiness (it waits for that release), and the release follows this
+    # replacement. The start barrier checks every ready slot's autoscaler
+    # after release, exactly as for the original launch.
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ] && [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; then
+        return 0
+    fi
     if [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
         && [ "${SKIP_AUTOSCALER:-0}" != 1 ]; then
         wait_for_mandatory_autoscaler_startup "$j" || return 1
