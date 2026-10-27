@@ -1,6 +1,7 @@
 """WHM opt-in reliability contracts; all provider and activity calls are offline."""
 
 import asyncio
+import time as _real_time
 from copy import deepcopy
 from datetime import timedelta
 from unittest.mock import AsyncMock
@@ -299,7 +300,7 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
     captured = []
     network_requests = []
     provider_clock = {"now": foundry.time.monotonic()}
-    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: provider_clock["now"]))
+    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: provider_clock["now"], time=_real_time.time))
 
     def respond(request):
         network_requests.append(request)
@@ -416,7 +417,7 @@ def test_actual_rose_failure_retains_foundry_retry_floor_on_terminal_waterfall(m
     monkeypatch.setattr(
         foundry.httpx, "AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(respond))
     )
-    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(foundry, "time", SimpleNamespace(monotonic=lambda: clock["now"], time=_real_time.time))
     monkeypatch.setattr(foundry, "_region_deployments", lambda *_: ["offline-deployment"])
     monkeypatch.setattr(foundry, "_cooldown_until", {})
     monkeypatch.setattr(foundry, "_auth_cooldown_until", {})
