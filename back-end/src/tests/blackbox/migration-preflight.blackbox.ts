@@ -15,6 +15,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { databaseUrl, localServerUrl } from './compute-token-authority.support';
@@ -172,9 +174,58 @@ async function wholeTableBackfillFails(): Promise<void> {
   process.stdout.write('PASS a whole-table boot-time backfill fails before merge (2026-10-02)\n');
 }
 
+async function columnDefaultsAndBatchedClauses(): Promise<void> {
+  await withScratchDatabase('defaults', async (client, url) => {
+    await client.$executeRawUnsafe(`CREATE TABLE "Widget" (id TEXT PRIMARY KEY)`);
+    await client.$executeRawUnsafe(
+      `INSERT INTO "Widget" SELECT 'w' || i FROM generate_series(1, 50) i`
+    );
+    await client.$executeRawUnsafe('ANALYZE');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-defaults-'));
+    const write = (name: string, sql: string) => {
+      fs.mkdirSync(path.join(dir, name));
+      fs.writeFileSync(path.join(dir, name, 'migration.sql'), sql);
+      return path.join(dir, name);
+    };
+    try {
+      // Existing rows receive the DEFAULT, so SET NOT NULL rejects none of them.
+      const defaulted = write(
+        '20990101000000_flag_default',
+        `SET LOCAL lock_timeout = '5s';
+ALTER TABLE "Widget" ADD COLUMN "flag" BOOLEAN DEFAULT false;
+ALTER TABLE "Widget" ALTER COLUMN "flag" SET NOT NULL;`
+      );
+      const ok = preflight(url, [defaulted]);
+      assert.equal(ok.code, 0, ok.output);
+      assert.match(ok.output, /0 violating rows in "Widget"/);
+
+      // Prisma batches columns into one ALTER TABLE; a DEFAULT on one clause must
+      // not hide a NOT NULL column without one, even with a comma in its type.
+      const batched = write(
+        '20990101000001_batched_add',
+        `ALTER TABLE "Widget" ADD COLUMN "a" TEXT NOT NULL DEFAULT 'x', ADD COLUMN "price" DECIMAL(65,30) NOT NULL;`
+      );
+      const failed = preflight(url, [batched]);
+      assert.equal(failed.code, 1, failed.output);
+      assert.match(
+        failed.output,
+        /\[add not-null column price without default\] 50 existing row\(s\) in "Widget"/,
+        failed.output
+      );
+      assert.doesNotMatch(failed.output, /add not-null column a without default/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  process.stdout.write(
+    'PASS column DEFAULTs fill existing rows and every batched ADD COLUMN clause is judged\n'
+  );
+}
+
 async function main(): Promise<void> {
   await orphanRowsFailValidate();
   await wholeTableBackfillFails();
+  await columnDefaultsAndBatchedClauses();
 }
 
 main().catch((error: unknown) => {

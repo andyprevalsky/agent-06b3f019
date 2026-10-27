@@ -141,8 +141,8 @@ class DeployLiveProbeTests(unittest.TestCase):
         probe = commands["migration-preflight"]
         self.assertIsNone(probe.after)
         self.assertEqual(
-            probe.argv[-4:],
-            (module.workspace_tsx(), "scripts/migration-preflight.ts", "--base", "origin/main"),
+            probe.argv[-2:],
+            (module.workspace_tsx(), "scripts/migration-preflight.ts"),
         )
         self.assertEqual(probe.cwd, ROOT / "back-end")
 

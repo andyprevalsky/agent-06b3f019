@@ -7,7 +7,7 @@
  * and CI databases never hold those rows, so only the target's own data can
  * prove a migration safe.
  *
- *   pending migrations (branch vs base, minus already applied on the target)
+ *   pending migrations (every prisma/migrations dir not yet applied on the target)
  *     └─ each statement, in order
  *          ├─ DML           → EXPLAIN (no ANALYZE): fail on a scan that reads
  *          │                  more than --max-scan-rows of an existing table
@@ -26,15 +26,14 @@
  *   -- migration-preflight: allow unverified <reason>
  *
  * Usage (from back-end/):
- *   npx tsx scripts/migration-preflight.ts [--base origin/main] [--migration <dir|file>]...
+ *   npx tsx scripts/migration-preflight.ts [--migration <dir|file>]...
  *     [--database-url <url>] [--max-scan-rows N] [--lock-warn-rows N] [--count-timeout-ms N]
  * The target defaults to MIGRATION_PREFLIGHT_DATABASE_URL, then DIRECT_URL,
  * then DATABASE_URL from back-end/.env (production).
  */
 
 import 'dotenv/config';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 
@@ -42,7 +41,6 @@ type Severity = 'fail' | 'warn' | 'pass';
 type Finding = { severity: Severity; check: string; message: string; query?: string };
 
 type Options = {
-  base: string;
   migrations: string[];
   databaseUrl: string;
   maxScanRows: number;
@@ -149,6 +147,30 @@ function closeParen(sql: string, open: number): number {
   return sql.length;
 }
 
+/** Split on commas at depth 0, skipping quoted text (ALTER TABLE action lists). */
+function topLevelClauses(sql: string): string[] {
+  const clauses: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < sql.length && !(sql[j] === ch && sql[j + 1] !== ch)) j += sql[j] === ch ? 2 : 1;
+      i = j;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      clauses.push(sql.slice(start, i));
+      start = i + 1;
+    }
+  }
+  clauses.push(sql.slice(start));
+  return clauses;
+}
+
 const IDENT = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][\w$]*)`;
 const QUALIFIED = String.raw`(?:${IDENT}\.)?${IDENT}`;
 
@@ -192,6 +214,8 @@ type PendingBackfill = {
 type PendingState = {
   createdTables: Set<string>;
   addedColumns: Map<string, Set<string>>;
+  /** Non-null DEFAULT of a pending column (`table.column`): existing rows get it. */
+  columnDefaults: Map<string, string>;
   constraints: Map<string, PendingConstraint>;
   backfills: PendingBackfill[];
 };
@@ -256,17 +280,20 @@ class ReadOnlyTarget {
     return rows[0] ? { table: unquote(rows[0].table), definition: rows[0].definition } : null;
   }
 
+  /** Applied migrations; an unreadable ledger fails closed (it would mis-select). */
   async appliedMigrations(): Promise<Set<string>> {
-    try {
-      const rows = await this.query<{ name: string }>(
-        `SELECT migration_name AS name FROM _prisma_migrations
-         WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`,
-        EXPLAIN_TIMEOUT_MS
-      );
-      return new Set(rows.map((row) => row.name));
-    } catch {
-      return new Set();
-    }
+    const [ledger] = await this.query<{ exists: boolean }>(
+      `SELECT to_regclass('public._prisma_migrations') IS NOT NULL AS exists`,
+      EXPLAIN_TIMEOUT_MS
+    );
+    // A database Prisma never migrated has applied nothing; any other read error throws.
+    if (!ledger?.exists) return new Set();
+    const rows = await this.query<{ name: string }>(
+      `SELECT migration_name AS name FROM _prisma_migrations
+       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`,
+      EXPLAIN_TIMEOUT_MS
+    );
+    return new Set(rows.map((row) => row.name));
   }
 
   async disconnect(): Promise<void> {
@@ -473,12 +500,22 @@ class Preflight {
     ).exec(statement);
     if (alter) {
       const table = unquote(alter[1]);
-      for (const add of statement.matchAll(
-        new RegExp(`ADD\\s+COLUMN\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${IDENT})`, 'gi')
-      )) {
+      for (const clause of topLevelClauses(statement.slice(alter[0].length))) {
+        const add = new RegExp(
+          `^\\s*ADD\\s+(?:COLUMN\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${IDENT})\\s`,
+          'i'
+        ).exec(clause);
+        if (!add || /^\s*ADD\s+(CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK)\b/i.test(clause)) continue;
+        const column = unquote(add[1]);
         const set = state.addedColumns.get(table) ?? new Set<string>();
-        set.add(unquote(add[1]));
+        set.add(column);
         state.addedColumns.set(table, set);
+        const fallback =
+          /\bDEFAULT\s+([\s\S]+?)(?:\s+(?:NOT\s+NULL|NULL|CONSTRAINT|CHECK|REFERENCES|UNIQUE|PRIMARY|GENERATED|COLLATE)\b|\s*$)/i.exec(
+            clause
+          );
+        if (fallback && !/^NULL\b/i.test(fallback[1].trim()))
+          state.columnDefaults.set(`${table}.${column}`, fallback[1].trim());
       }
       const constraint = new RegExp(
         `ADD\\s+CONSTRAINT\\s+(${IDENT})\\s+(CHECK|FOREIGN\\s+KEY)\\s*\\(`,
@@ -682,6 +719,9 @@ class Preflight {
   ): { alias: string; predicate: string } | null {
     if (!pendingColumnsOf(state, table).has(column))
       return { alias: '', predicate: `${quote(column)} IS NULL` };
+    // Existing rows receive the column's non-null DEFAULT when it is added.
+    const fallback = state.columnDefaults.get(`${table}.${column}`);
+    if (fallback !== undefined) return { alias: '', predicate: `(${fallback}) IS NULL` };
     const backfills = state.backfills.filter((b) => b.table === table && b.column === column);
     if (backfills.length === 0) return { alias: '', predicate: 'TRUE' };
     const alias = backfills[0].alias;
@@ -785,19 +825,23 @@ class Preflight {
             }
       );
     }
-    const addNotNull = new RegExp(
-      `ADD\\s+COLUMN\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${IDENT})\\s+[^,]*\\bNOT\\s+NULL\\b(?![^,]*\\bDEFAULT\\b)`,
-      'i'
-    ).exec(action);
-    if (addNotNull && !/\bDEFAULT\b/i.test(action))
-      findings.push(
-        await this.countViolations(
-          table,
-          'TRUE',
-          `add not-null column ${unquote(addNotNull[1])} without default`,
-          state
-        )
-      );
+    // Prisma batches several columns into one ALTER TABLE; judge each clause.
+    for (const clause of topLevelClauses(action)) {
+      const addNotNull = new RegExp(
+        `^\\s*ADD\\s+(?:COLUMN\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${IDENT})\\s[\\s\\S]*\\bNOT\\s+NULL\\b`,
+        'i'
+      ).exec(clause);
+      const isConstraint = /^\s*ADD\s+(CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK)\b/i.test(clause);
+      if (addNotNull && !isConstraint && !/\bDEFAULT\b/i.test(clause))
+        findings.push(
+          await this.countViolations(
+            table,
+            'TRUE',
+            `add not-null column ${unquote(addNotNull[1])} without default`,
+            state
+          )
+        );
+    }
     return findings;
   }
 
@@ -956,7 +1000,6 @@ class Preflight {
 
 function parseArgs(argv: string[]): Options {
   const options: Options = {
-    base: 'origin/main',
     migrations: [],
     databaseUrl:
       process.env.MIGRATION_PREFLIGHT_DATABASE_URL ??
@@ -976,9 +1019,6 @@ function parseArgs(argv: string[]): Options {
       return parsed;
     };
     switch (argv[i]) {
-      case '--base':
-        options.base = value;
-        break;
       case '--migration':
         options.migrations.push(value);
         break;
@@ -1003,42 +1043,25 @@ function parseArgs(argv: string[]): Options {
   return options;
 }
 
-/** Migration files added on this branch relative to the base (committed, staged or untracked). */
+/**
+ * The migrations `prisma migrate deploy` would consider: every directory in
+ * prisma/migrations (applied ones are filtered against the target later), or
+ * the explicit `--migration` list.
+ */
 function pendingMigrationFiles(options: Options): string[] {
   if (options.migrations.length > 0)
     return options.migrations.map((path) => {
       const full = resolve(path);
       return existsSync(full) && statSync(full).isDirectory() ? join(full, 'migration.sql') : full;
     });
-  const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-  const listed = [
-    execFileSync(
-      'git',
-      [
-        'diff',
-        '--name-only',
-        '--diff-filter=A',
-        `${options.base}...HEAD`,
-        '--',
-        'back-end/prisma/migrations',
-      ],
-      { cwd: root, encoding: 'utf8' }
-    ),
-    execFileSync(
-      'git',
-      ['diff', '--name-only', '--diff-filter=A', 'HEAD', '--', 'back-end/prisma/migrations'],
-      { cwd: root, encoding: 'utf8' }
-    ),
-    execFileSync(
-      'git',
-      ['ls-files', '--others', '--exclude-standard', '--', 'back-end/prisma/migrations'],
-      { cwd: root, encoding: 'utf8' }
-    ),
-  ]
-    .join('\n')
-    .split('\n')
-    .filter((path) => path.endsWith('/migration.sql'));
-  return [...new Set(listed)].sort().map((path) => join(root, path));
+  return readdirSync(MIGRATIONS_DIR, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isDirectory() && existsSync(join(MIGRATIONS_DIR, entry.name, 'migration.sql'))
+    )
+    .map((entry) => entry.name)
+    .sort()
+    .map((name) => join(MIGRATIONS_DIR, name, 'migration.sql'));
 }
 
 function displayUrl(url: string): string {
@@ -1067,6 +1090,7 @@ export async function runPreflight(options: Options): Promise<number> {
     const state: PendingState = {
       createdTables: new Set(),
       addedColumns: new Map(),
+      columnDefaults: new Map(),
       constraints: new Map(),
       backfills: [],
     };

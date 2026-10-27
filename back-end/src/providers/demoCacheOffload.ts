@@ -24,6 +24,7 @@ export const OFFLOAD_KINDS: ReadonlySet<string> = new Set(['browser_http']);
 const OFFLOAD_PREFIX = 'fast-mode-cache/values/';
 const OFFLOAD_MARKER = '$fastCacheOffload';
 const REHYDRATE_CONCURRENCY = 8;
+const REHYDRATE_TIMEOUT_MS = 10_000;
 
 /** 82% of production browser_http bytes were in rows at or above this size. */
 export const OFFLOAD_MIN_BYTES = 64 * 1024;
@@ -44,7 +45,11 @@ export function offloadPointer(value: unknown): OffloadPointer | null {
     !pointer ||
     typeof pointer.path !== 'string' ||
     typeof pointer.sha256 !== 'string' ||
-    typeof pointer.bytes !== 'number'
+    typeof pointer.bytes !== 'number' ||
+    // Only this module's own content-addressed paths: a cached value that merely
+    // has the marker shape must not read arbitrary bucket objects.
+    !/^[0-9a-f]{64}$/.test(pointer.sha256) ||
+    pointer.path !== `${OFFLOAD_PREFIX}${pointer.sha256}.json`
   )
     return null;
   return { path: pointer.path, sha256: pointer.sha256, bytes: pointer.bytes };
@@ -81,11 +86,23 @@ export async function rehydrateValue(value: unknown): Promise<unknown> {
   const pointer = offloadPointer(value);
   if (!pointer) return value;
   let body: Buffer | null;
+  let timer: NodeJS.Timeout | undefined;
   try {
-    body = await getStorageObject(pointer.path);
+    // A stalled download must not pin the cache read (and its single-flight waiters).
+    body = await Promise.race([
+      getStorageObject(pointer.path),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`timed out after ${REHYDRATE_TIMEOUT_MS} ms`)),
+          REHYDRATE_TIMEOUT_MS
+        );
+      }),
+    ]);
   } catch (error) {
     log.warn('demo_cache.offload_read_failed', { path: pointer.path, error: String(error) });
     return undefined;
+  } finally {
+    clearTimeout(timer);
   }
   if (!body || sha256(body) !== pointer.sha256) {
     log.warn('demo_cache.offload_missing_or_corrupt', { path: pointer.path, found: body !== null });

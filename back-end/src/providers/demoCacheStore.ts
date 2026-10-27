@@ -329,7 +329,7 @@ export async function cacheSetWithAck(args: {
   const prepared = blobPath === null ? prepareOffload(args.kind, value) : null;
   if (prepared) {
     // Re-recording an identical large body: the row already points at it, so
-    // skip the upload and the write (each used to rewrite the TOASTed value).
+    // skip the row write (it used to rewrite the whole TOASTed value).
     const existing = await demoCachePrisma.fastModeCacheEntry.findUnique({
       where: { key: args.key },
       select: { kind: true, goalHash: true, value: true, blobPath: true },
@@ -341,6 +341,9 @@ export async function cacheSetWithAck(args: {
       existing.blobPath === null &&
       offloadPointer(existing.value)?.sha256 === prepared.pointer.sha256
     ) {
+      // Content-addressed and immutable: a no-op unless the object was lost,
+      // in which case this re-record repairs it.
+      await uploadOffload(prepared);
       writeMemoryCache(args.key, args.goalHash, { hit: true, value, blobPath });
       return true;
     }

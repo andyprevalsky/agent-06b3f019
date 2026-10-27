@@ -86,10 +86,9 @@ async function main(): Promise<void> {
     assert.equal(objects.size, 1);
     assert.deepEqual((await store.cacheGet(key)).value, big);
 
-    // 2. An identical re-record neither uploads nor rewrites the row.
-    const before = { uploads, xmin: stored.xmin };
+    // 2. An identical re-record does not rewrite the row.
+    const before = { xmin: stored.xmin };
     await store.cacheSetWithAck({ key, kind: 'browser_http', goalHash: 'g', value: big });
-    assert.equal(uploads, before.uploads, 'identical re-record must not upload');
     assert.equal(
       (await row(key)).xmin,
       before.xmin,
@@ -107,9 +106,24 @@ async function main(): Promise<void> {
     assert.deepEqual((await row(`${prefix}b`)).value, small);
     assert.deepEqual((await row(`${prefix}c`)).value, big);
 
-    // 4. An unreadable body is a miss, never a corrupt hit.
+    // 4. An unreadable body is a miss, never a corrupt hit; re-recording it repairs it.
     objects.clear();
     assert.equal((await store.cacheGet(key)).hit, false);
+    await store.cacheSetWithAck({ key, kind: 'browser_http', goalHash: 'g', value: big });
+    assert.equal(objects.size, 1, 'an identical re-record must restore a lost body');
+    assert.deepEqual((await store.cacheGet(key)).value, big);
+    assert.equal(uploads > 0, true);
+
+    // 4b. A cached value that only has the marker shape is never a Storage read.
+    const forged = {
+      $fastCacheOffload: {
+        path: 'some-user/private-upload.pdf',
+        sha256: 'f'.repeat(64),
+        bytes: 10,
+      },
+    };
+    await store.cacheSetWithAck({ key: `${prefix}e`, kind: 'llm', goalHash: 'g', value: forged });
+    assert.deepEqual((await store.cacheGet(`${prefix}e`)).value, forged);
 
     // 5. Existing inline rows move through the batched backfill; dry run first.
     const legacy = `${prefix}d`;

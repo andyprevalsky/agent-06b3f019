@@ -916,7 +916,8 @@ All four stage records must pass before closing the `runtime-blackbox`
 boundary.
 
 `migration-preflight` runs `back-end/scripts/migration-preflight.ts` read-only
-against production for every migration this branch adds. It fails on a
+against production for every migration in `back-end/prisma/migrations` that
+production has not applied, the set `prisma migrate deploy` will run. It fails on a
 statement whose plan scans more than 100,000 rows of an existing table, and on
 existing rows that a VALIDATE, CHECK, foreign key, SET NOT NULL or unique key
 would reject (it simulates pending ADD COLUMN plus backfill UPDATEs). It warns

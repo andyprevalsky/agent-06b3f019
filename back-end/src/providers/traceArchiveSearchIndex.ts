@@ -596,14 +596,15 @@ export async function normalizeTrajectoryGoalBatch(
       AND ("agentGoal" <> '' OR "agentTitle" IS NOT NULL)
     ORDER BY "agentId", "createdAt" DESC, "messageId" DESC
   `;
-  const result = await runTransactionWithRetry(async (tx) => {
-    // SET TRANSACTION must precede every other statement in the transaction.
-    if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${GOAL_BATCH_STATEMENT_TIMEOUT}'`);
-    await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${GOAL_BATCH_LOCK_TIMEOUT}'`);
-    if (options.dryRun) {
-      const [counts] = await tx.$queryRaw<Array<{ inserted: bigint; cleared: bigint }>>(
-        Prisma.sql`
+  const result = await runTransactionWithRetry(
+    async (tx) => {
+      // SET TRANSACTION must precede every other statement in the transaction.
+      if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${GOAL_BATCH_STATEMENT_TIMEOUT}'`);
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${GOAL_BATCH_LOCK_TIMEOUT}'`);
+      if (options.dryRun) {
+        const [counts] = await tx.$queryRaw<Array<{ inserted: bigint; cleared: bigint }>>(
+          Prisma.sql`
           WITH c AS (${candidates}),
           target AS (
             SELECT c."agentId", c."userId", c."agentGoal", c."agentTitle", FALSE AS existing
@@ -622,20 +623,20 @@ export async function normalizeTrajectoryGoalBatch(
                AND t."agentGoal" = s."agentGoal"
                AND t."agentTitle" IS NOT DISTINCT FROM s."agentTitle") AS cleared
         `
-      );
-      return {
-        inserted: Number(counts.inserted),
-        cleared: Number(counts.cleared),
-        clearedRows: [] as TrajectoryGoalBatch['clearedRows'],
-      };
-    }
-    const inserted = await tx.$executeRaw(Prisma.sql`
+        );
+        return {
+          inserted: Number(counts.inserted),
+          cleared: Number(counts.cleared),
+          clearedRows: [] as TrajectoryGoalBatch['clearedRows'],
+        };
+      }
+      const inserted = await tx.$executeRaw(Prisma.sql`
       INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle")
       ${candidates}
       ON CONFLICT ("agentId") DO NOTHING
     `);
-    const clearedRows = await tx.$queryRaw<TrajectoryGoalBatch['clearedRows']>(
-      Prisma.sql`
+      const clearedRows = await tx.$queryRaw<TrajectoryGoalBatch['clearedRows']>(
+        Prisma.sql`
         UPDATE "AgentTrajectorySearch" s SET "agentGoal" = '', "agentTitle" = NULL
         FROM "AgentTrajectoryAgent" g
         WHERE ${sAfter}
@@ -648,8 +649,11 @@ export async function normalizeTrajectoryGoalBatch(
           AND g."agentTitle" IS NOT DISTINCT FROM s."agentTitle"
         RETURNING s."messageId", s."agentId", g."agentGoal", g."agentTitle"
       `
-    );
-    return { inserted, cleared: clearedRows.length, clearedRows };
-  });
+      );
+      return { inserted, cleared: clearedRows.length, clearedRows };
+      // Above the statements' own 15s limits, so those, not Prisma, bound the batch.
+    },
+    { timeout: 40_000 }
+  );
   return { lastMessageId, scanned: scannedIds.length, ...result };
 }

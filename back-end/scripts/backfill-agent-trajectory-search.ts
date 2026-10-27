@@ -105,6 +105,8 @@ async function normalizeAgentGoals(args: string[]): Promise<void> {
   }
   const dryRun = args.includes('--dry-run');
   const receipt = value('--receipt');
+  // Fail before any batch commits if the receipt cannot be written.
+  if (receipt) appendFileSync(receipt, '', { mode: 0o600 });
   let afterId: string | null = value('--after') ?? null;
   let scanned = 0;
   let inserted = 0;

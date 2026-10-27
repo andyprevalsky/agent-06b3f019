@@ -67,6 +67,8 @@ async function main(): Promise<void> {
     throw new Error(usage);
   const dryRun = args.includes('--dry-run');
   const receipt = value('--receipt');
+  // Fail before any batch commits if the receipt cannot be written.
+  if (receipt) appendFileSync(receipt, '', { mode: 0o600 });
   let afterKey: string | null = value('--after') ?? null;
   const totals = { scanned: 0, offloaded: 0, bytes: 0 };
   for (let batches = 1; totals.scanned < maxRows; batches += 1) {
