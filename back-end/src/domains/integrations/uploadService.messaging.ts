@@ -9,7 +9,11 @@ import * as repo from './repo';
 import type { ContactWithMessages } from '../../services/integrations/iMessageParser';
 import type { WhatsAppContactWithMessages } from '../../services/integrations/whatsappParser';
 import type { TelegramContactWithMessages } from '../../services/integrations/telegramParser';
-import { enqueueMessagingUpload, type MessagingPlatform } from './uploadService.messagingJobs';
+import {
+  enqueueMessagingUpload,
+  kickMessagingUploadJobs,
+  type MessagingPlatform,
+} from './uploadService.messagingJobs';
 
 export { runMessagingUploadJobs } from './uploadService.messagingJobs';
 
@@ -45,28 +49,30 @@ async function acceptMessagingUpload(
 
   const existing = await repo.findIntegrationByUserAndName(userId, platform);
   const existingConfig = (existing?.config as Prisma.JsonObject | null) ?? {};
+  const config = {
+    ...existingConfig,
+    contacts: contacts.length,
+    messages: totalMessages,
+    uploadedAt: new Date().toISOString(),
+  };
+  // The parts are written before the integration is marked SYNCING. A drain
+  // finalizing in between must not see SYNCING without them, or it would mark
+  // the sync CONNECTED from the earlier parts and never revisit the final one.
   // The cursor (lastFrontendAccessAt) is not touched here: it advances only
   // once every part of the client's sync is processed (see finalizeIntegration).
-  const integration = await repo.upsertIntegrationForUpload({
-    userId,
-    name: platform,
-    config: {
-      ...existingConfig,
-      contacts: contacts.length,
-      messages: totalMessages,
-      uploadedAt: new Date().toISOString(),
-    },
-  });
-
+  const integrationId =
+    existing?.id ?? (await repo.upsertIntegrationForUpload({ userId, name: platform, config })).id;
   const jobId = await enqueueMessagingUpload({
     userId,
-    integrationId: integration.id,
+    integrationId,
     platform,
     contacts,
     totalMessages,
     accessedAt: accessedAt ?? null,
     syncComplete,
   });
+  const integration = await repo.upsertIntegrationForUpload({ userId, name: platform, config });
+  kickMessagingUploadJobs();
   return { integration, jobId };
 }
 

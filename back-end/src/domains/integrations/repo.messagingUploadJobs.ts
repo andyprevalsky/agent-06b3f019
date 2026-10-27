@@ -171,6 +171,34 @@ export async function findMessagingSyncParts(
   });
 }
 
+/**
+ * Mark a finished sync CONNECTED, but only while nothing newer arrived: the
+ * integration is still SYNCING and no part was stored after the one this
+ * finalization read. A request accepted meanwhile keeps the integration
+ * SYNCING for the next drain instead of being overwritten by a stale view.
+ */
+export async function finalizeMessagingIntegrationIfCurrent(
+  integrationId: string,
+  latestPartCreatedAt: Date,
+  config: Prisma.InputJsonValue
+): Promise<boolean> {
+  const updated = await prisma.$executeRaw`
+    UPDATE "Integration"
+    SET "status" = 'CONNECTED'::"IntegrationStatus",
+        "isActive" = true,
+        "lastSyncAt" = NOW(),
+        "lastSuccessfulSyncAt" = NOW(),
+        "config" = ${JSON.stringify(config)}::jsonb,
+        "updatedAt" = NOW()
+    WHERE "id" = ${integrationId}
+      AND "status" = 'SYNCING'::"IntegrationStatus"
+      AND NOT EXISTS (
+        SELECT 1 FROM "MessagingUploadJob" j
+        WHERE j."integrationId" = ${integrationId} AND j."createdAt" > ${latestPartCreatedAt}
+      )`;
+  return updated === 1;
+}
+
 /** Drop finished parts (payloads already cleared) after the retention window. */
 export async function deleteFinishedMessagingUploadJobs(before: Date): Promise<number> {
   const { count } = await prisma.messagingUploadJob.deleteMany({
