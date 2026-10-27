@@ -19,6 +19,29 @@ import tempfile
 import time
 import sys
 import shutil
+# A uv/python-build-standalone interpreter (agents/venv) can lack the pidfd
+# wrappers although the Linux kernel provides them. Bind the same syscalls so
+# exact-owner signals stay pinned to a pidfd and never fall back to a raw PID.
+if not hasattr(os, "pidfd_open") or not hasattr(__import__("signal"), "pidfd_send_signal"):
+    import ctypes as _pidfd_ctypes
+    import signal as _pidfd_signal
+
+    def _pidfd_syscall(number, *args):
+        libc = _pidfd_ctypes.CDLL(None, use_errno=True)
+        result = libc.syscall(_pidfd_ctypes.c_long(number), *args)
+        if result < 0:
+            error = _pidfd_ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return result
+
+    if not hasattr(os, "pidfd_open"):
+        # Syscall numbers are shared by every Linux architecture (>= 5.1).
+        os.pidfd_open = lambda pid, flags=0: _pidfd_syscall(434, _pidfd_ctypes.c_int(pid), _pidfd_ctypes.c_uint(flags))
+    if not hasattr(_pidfd_signal, "pidfd_send_signal"):
+        def _pidfd_send_signal(fd, sig, siginfo=None, flags=0):
+            _pidfd_syscall(424, _pidfd_ctypes.c_int(fd), _pidfd_ctypes.c_int(int(sig)), None, _pidfd_ctypes.c_uint(flags))
+
+        _pidfd_signal.pidfd_send_signal = _pidfd_send_signal
 
 os.umask(0o077)
 
@@ -46,32 +69,54 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-c", "safe.directory="+str(repo), "-C", str(repo), *args]).decode().strip()
 
 
+# A foreign process changing credentials mid-scan (e.g. sudo) is briefly unreadable.
+WRITER_OBSERVATION_ATTEMPTS = 5
+WRITER_OBSERVATION_DELAY = 0.2
+
+
+def process_paths(process):
+    # A zombie leader keeps no cwd/fd/maps while its other threads can still
+    # write; read every live thread of the group, not only the leader.
+    paths = []
+    for task in (process / "task").iterdir():
+        try:
+            paths.append(os.readlink(task / "cwd"))
+            for fd in (task / "fd").iterdir():
+                try: paths.append(os.readlink(fd))
+                except FileNotFoundError: continue
+            for line in (task / "maps").read_text().splitlines():
+                fields = line.split(None, 5)
+                if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
+        except FileNotFoundError:
+            continue
+    return paths
+
+
+def observed_paths(process):
+    """Re-observe an unreadable process; fail closed only while it stays unreadable and alive."""
+    for attempt in range(WRITER_OBSERVATION_ATTEMPTS):
+        try:
+            return process_paths(process)
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if not process.exists():
+                return None
+            if attempt + 1 == WRITER_OBSERVATION_ATTEMPTS:
+                raise ValueError("cannot observe controller writer ownership") from None
+            time.sleep(WRITER_OBSERVATION_DELAY)
+
+
 def writers(roots, permitted):
     found = []
     for process in Path("/proc").iterdir():
         if not process.name.isdecimal() or int(process.name) in permitted:
             continue
-        try:
-            # A zombie leader keeps no cwd/fd/maps while its other threads can still
-            # write; read every live thread of the group, not only the leader.
-            paths = []
-            for task in (process / "task").iterdir():
-                try:
-                    paths.append(os.readlink(task / "cwd"))
-                    for fd in (task / "fd").iterdir():
-                        try: paths.append(os.readlink(fd))
-                        except FileNotFoundError: continue
-                    for line in (task / "maps").read_text().splitlines():
-                        fields = line.split(None, 5)
-                        if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
-                except FileNotFoundError:
-                    continue
-            if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
-                found.append({"pid": int(process.name), "birth": birth(int(process.name))})
-        except FileNotFoundError:
+        paths = observed_paths(process)
+        if paths is None:
             continue
-        except PermissionError:
-            raise ValueError("cannot observe controller writer ownership")
+        if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
+            found.append({"pid": int(process.name), "birth": birth(int(process.name))})
     return found
 
 

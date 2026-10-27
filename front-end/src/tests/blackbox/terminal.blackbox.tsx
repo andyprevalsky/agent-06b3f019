@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import postcss from 'postcss';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -269,6 +272,33 @@ describe('Terminal page', () => {
         'h-[var(--mobile-terminal-header-height)]',
         'md:h-24',
       );
+    });
+
+    it('locks document scroll while mounted so the mobile query box stays fixed', async () => {
+      setViewport(390, 844);
+      const root = document.documentElement;
+
+      const { unmount } = renderWithProviders(<Terminal />);
+
+      expect(await screen.findByTestId('terminal-input-area')).toBeInTheDocument();
+      expect(root).toHaveClass('rose-app-shell');
+      unmount();
+      expect(root).not.toHaveClass('rose-app-shell');
+
+      const css = fs.readFileSync(path.resolve(__dirname, '../../index.css'), 'utf-8');
+      const lock: Record<string, string> = {};
+      postcss.parse(css).walkRules((rule) => {
+        if (!rule.selectors.includes('html.rose-app-shell body')) return;
+        expect(rule.selectors).toContain('html.rose-app-shell');
+        rule.walkDecls((d) => {
+          lock[d.prop] = d.value;
+        });
+      });
+      expect(lock).toMatchObject({
+        height: '100%',
+        overflow: 'hidden',
+        'overscroll-behavior': 'none',
+      });
     });
 
     it('applies only a visual mobile transform to the opening ASCII art', async () => {

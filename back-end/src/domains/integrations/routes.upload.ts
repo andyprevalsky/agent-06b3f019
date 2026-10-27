@@ -219,7 +219,9 @@ router.post(
       return res.status(400).json({ error: 'contacts array is required' });
     }
 
-    const result = await service.processIMessageUpload(userId, contacts, accessedAt);
+    // Chunked clients send syncComplete:false on every request but the last.
+    const syncComplete = req.body.syncComplete !== false;
+    const result = await service.processIMessageUpload(userId, contacts, accessedAt, syncComplete);
     res.json({
       message: 'iMessage payload received, processing in background',
       integration: result.integration,
@@ -240,7 +242,9 @@ router.post(
       return res.status(400).json({ error: 'contacts array is required' });
     }
 
-    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt);
+    // Chunked clients send syncComplete:false on every request but the last.
+    const syncComplete = req.body.syncComplete !== false;
+    const result = await service.processWhatsAppUpload(userId, contacts, accessedAt, syncComplete);
     res.json({
       message: 'WhatsApp payload received, processing in background',
       integration: result.integration,
@@ -283,7 +287,9 @@ router.post(
       return res.status(400).json({ error: 'contacts array is required' });
     }
 
-    const result = await service.processTelegramUpload(userId, contacts, accessedAt);
+    // Chunked clients send syncComplete:false on every request but the last.
+    const syncComplete = req.body.syncComplete !== false;
+    const result = await service.processTelegramUpload(userId, contacts, accessedAt, syncComplete);
     res.json({
       message: 'Telegram payload received, processing in background',
       integration: result.integration,

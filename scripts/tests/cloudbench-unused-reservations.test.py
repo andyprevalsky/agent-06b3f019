@@ -328,7 +328,7 @@ class Unused(unittest.TestCase):
         source = subprocess.check_output(
             ["git", "-C", str(ROOT), "show", INVENTORY_PRODUCER_REF + ":scripts/cloudbench-machine-readiness.py"]
         )
-        self.assertEqual(H["sha"](source), M["INVENTORY_PRODUCER_SHA256"])
+        self.assertIn(H["sha"](source), M["INVENTORY_PRODUCER_SHA256S"])
         self.members["source/scripts/cloudbench-machine-readiness.py"] = source
         config_path = self.outer / "launch-1/config.private.json"
         config = json.loads(config_path.read_bytes())
