@@ -306,6 +306,10 @@ class Scorecard(unittest.TestCase):
 
     def test_descent_iteration_count_controls_trend_threshold(self):
         run = self.f.fleet()
+        sparse = render(run, self.f, iterations=4)
+        self.assertEqual(len(sparse["trend"]), 1, "four iterations may have only one recorded launch")
+        self.assertIn("SUCCESS RATE OVER TIME", self.valid(sparse))
+        self.assertIn("SUCCESS RATE OVER TIME", CARD["render_text"](sparse))
         for number in range(2, 5):
             run_id = f"historical-{number}"
             LEDGER["record"]("launch", run_id, ledger=self.f.ledger, goal="fleet-goal",

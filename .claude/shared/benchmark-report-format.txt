@@ -188,7 +188,7 @@ Cost <metered or UNMETERED> · <unmetered providers> UNMETERED
 Cache <rate and denominator or UNMEASURED> · LLM latency <UNMEASURED or measured>
 Lifecycle
   <✅/🔴/🟠/🔵> <release, controllers, exports, results, publication evidence>
-SUCCESS RATE OVER TIME (only after >3 experiments)
+SUCCESS RATE OVER TIME (after >3 completed descent iterations, or >3 generic experiments)
   #<n> <task pass % | gap> [running]
 LAST 3 EXPERIMENTS
   #<n> <state> <label> · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>

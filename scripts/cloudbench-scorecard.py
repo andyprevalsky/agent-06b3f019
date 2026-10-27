@@ -1382,11 +1382,11 @@ def _history_html(card) -> str:
 
 def _trend_html(card: dict) -> str:
     trend = card.get("trend") or []
-    if len(trend) <= 3:
+    if not trend or (len(trend) <= 3 and (card.get("iterations") or 0) <= 3):
         return ""
     width, height, left, top = 600, 150, 34, 10
     usable_width, usable_height = width - left - 10, height - top - 22
-    x = lambda i: left + usable_width * i / (len(trend) - 1)
+    x = lambda i: left + (usable_width / 2 if len(trend) == 1 else usable_width * i / (len(trend) - 1))
     y = lambda rate: top + usable_height * (1 - rate)
     parts = [f'<section data-section="trend" class="trend"><h2>SUCCESS RATE OVER TIME</h2>',
              f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Task pass percentage by experiment; gaps mean no scored tasks">',
@@ -1452,7 +1452,7 @@ def render_text(card: dict) -> str:
                  + " · LLM latency UNMEASURED")
     lines.append("Lifecycle")
     lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
-    if len(card.get("trend") or []) > 3:
+    if card.get("trend") and (len(card["trend"]) > 3 or (card.get("iterations") or 0) > 3):
         lines.append("SUCCESS RATE OVER TIME")
         lines.append("  " + " · ".join(f'#{t["number"]} {t["rate"]*100:.1f}%{" (running)" if t["running"] else ""}'
                                        if t["rate"] is not None else f'#{t["number"]} gap' for t in card["trend"]))
