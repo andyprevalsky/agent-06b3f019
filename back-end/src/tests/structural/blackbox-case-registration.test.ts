@@ -25,8 +25,9 @@ const blackboxDir = path.resolve(__dirname, '../blackbox');
 
 const CASE_FILE_PATTERN = /\.(cases|case)\.ts$/;
 // `from './x'`, `import './x'`, and `await import('./x')` — with or without a
-// `.ts`/`.js` extension.
-const RELATIVE_IMPORT_PATTERN = /(?:from|import)\s*\(?\s*['"]\.\/([\w.-]+)['"]/g;
+// `.ts`/`.js` extension. Explicit fixture URLs are child-process entrypoints;
+// traverse them too so their imported case files remain part of the ratchet.
+const RELATIVE_IMPORT_PATTERN = /(?:from|import|new\s+URL)\s*\(?\s*['"]\.\/([\w.-]+)['"]/g;
 
 function moduleKey(fileName: string): string {
   return fileName.replace(/\.(ts|js)$/, '');
