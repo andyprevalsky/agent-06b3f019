@@ -93,7 +93,7 @@ export async function createSteelRecoverySession(
           userAgent: input.userAgent,
         })
       )) as SteelSessionResult;
-      registerInFlightSteelSession(session.id);
+      await registerInFlightSteelSession(session.id);
       const wsUrl = steelCdpUrl(session.id);
       const validation = await validateBrowserConnection(wsUrl, {
         connect: deps?.connect,
