@@ -117,6 +117,8 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
+    Gate("sharded-coordinator", ("python3", "scripts/tests/cloudbench-shard-coordinator.test.py")),
     Gate(
         "original600-portable-operator",
         ("python3", "scripts/tests/original600-portable-operator.test.py"),

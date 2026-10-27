@@ -714,7 +714,7 @@ def barrier_never_released(coordination: dict, outs: list[Path]) -> bool:
                         for out in outs))
 
 
-def load_sharded(run_dir: Path, deep: bool = True) -> dict:
+def load_sharded(run_dir: Path, deep: bool = True, raw: bool = False) -> dict:
     exp = empty_experiment("sharded", run_dir)
     coordination = read_json(run_dir / "coordination.json") or {}
     starts = [read_json(p) or {} for p in sorted(run_dir.glob("shard-*/attempt-start.safe.json"))]
@@ -840,6 +840,8 @@ def load_sharded(run_dir: Path, deep: bool = True) -> dict:
             exp["state"], exp["state_reason"] = "FAILED", f"{result['missing_jobs']} scheduled jobs without results"
     elif finished:
         exp["state_reason"] = "runners joined; operator writing result.json"
+    if raw:  # one bounded wave of a larger batch: the batch card derives the totals
+        return exp
     finish = finish_experiment(exp)
     if finish["infra_breached"] and finish["state"] in ("COMPLETE", "INCOMPLETE"):
         finish["state"], finish["state_reason"] = "FAILED", "infra stop threshold reached"
@@ -869,8 +871,63 @@ def _rows_from_aggregate(result: dict) -> list[dict]:
     return rows
 
 
+def load_waves(run_dir: Path, deep: bool = True) -> dict:
+    """One run-bench batch run as bounded sharded waves (batch.json): one card over every wave.
+
+    The denominator is the batch's original scheduled copies; copies of waves that never
+    launched stay QUEUED rows and are named, never dropped from the total."""
+    batch = read_json(run_dir / "batch.json") or {}
+    exp = empty_experiment("sharded-waves", run_dir)
+    exp["scheduled_total"] = batch.get("scheduled_total")
+    exp["tasks"], exp["runs"] = len(batch.get("tasks") or []) or None, batch.get("runs")
+    exp["triggered_at"] = batch.get("created_at")
+    refs, unlaunched = set(), []
+    for wave in batch.get("waves") or []:
+        index, state = wave.get("index"), wave.get("state")
+        admission = Path(wave["admission_dir"]) if wave.get("admission_dir") else None
+        if admission is not None and (admission / "coordination.json").exists():
+            sub = load_sharded(admission, deep, raw=True)
+            exp["rows"] += sub["rows"]
+            refs.add(sub.get("source_ref"))
+            for item in sub["lifecycle"]:
+                exp["lifecycle"].append(dict(item, label=f"Wave {index + 1}: {item['label']}"))
+            if exp.get("released_at") is None:
+                exp["released_at"] = sub.get("released_at")
+        elif state in ("LAUNCHED", "JOINED", "RELEASED", "FAILED_NO_RESULT"):
+            lifecycle_item(exp, "fail" if state == "FAILED_NO_RESULT" else "pending", f"Wave {index + 1}",
+                           f"{state}: no admission record yet")
+        else:
+            unlaunched.append(wave)
+            exp["rows"] += [{"status": "queued", "task_status": None, "infra_failure": None, "attempts": 0,
+                             "terminal_attempts": 0, "infra_attempts": 0, "synthetic": True}] * (wave.get("copies") or 0)
+    exp["source_ref"] = next(iter(refs)) if len(refs - {None}) == 1 and None not in refs else None
+    exp["rows_source"] = "batch.json waves (wave result.json / exports)"
+    waves = batch.get("waves") or []
+    lifecycle_item(exp, "ok" if not unlaunched else "fail" if batch.get("stop_reason") else "pending",
+                   "Waves launched", f"{len(waves) - len(unlaunched)}/{len(waves)} waves"
+                   + (f"; not launched: {sum(len(w.get('tasks') or []) for w in unlaunched)} tasks "
+                      f"({', '.join(t for w in unlaunched for t in (w.get('tasks') or [])[:3])}…)" if unlaunched else ""))
+    exp["notes"].append(f"Bounded waves: at most {batch.get('concurrency')} simultaneous copies; infra "
+                        f"{batch.get('infra_confirmed')}/{batch.get('scheduled_total')} confirmed across waves")
+    if batch.get("stop_reason"):
+        exp["state"], exp["state_reason"] = "ABORTED", str(batch["stop_reason"])[:160]
+        exp["ended_at"], exp["end_evidence"] = batch.get("ended_at"), "batch.json ended_at" if batch.get("ended_at") else None
+    elif batch.get("ended_at"):
+        exp["ended_at"], exp["end_evidence"] = batch["ended_at"], "batch.json ended_at"
+        gaps = [i for i in exp["lifecycle"] if i["state"] in ("fail", "warn", "pending")]
+        exp["state"] = "COMPLETE" if batch.get("batch_complete") and not gaps else "INCOMPLETE"
+    finish = finish_experiment(exp)
+    if finish["infra_breached"] and finish["state"] in ("COMPLETE", "INCOMPLETE"):
+        finish["state"], finish["state_reason"] = "FAILED", "infra stop threshold reached"
+    if finish["state"] == "INCOMPLETE" and not finish["state_reason"]:
+        finish["state_reason"] = "ended; open: " + ", ".join(i["label"] for i in finish["lifecycle"] if i["state"] != "ok")
+    return finish
+
+
 def load(run_dir: Path, deep: bool = True) -> dict:
     run_dir = Path(run_dir).absolute()
+    if (run_dir / "batch.json").exists() and (read_json(run_dir / "batch.json") or {}).get("schema") == "run-bench-sharded-waves-v1":
+        return load_waves(run_dir, deep)
     if (run_dir / "coordination.json").exists():
         return load_sharded(run_dir, deep)
     if (run_dir / "summary.json").exists() and (read_json(run_dir / "summary.json") or {}).get("jobs") is not None:

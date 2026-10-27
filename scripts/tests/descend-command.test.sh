@@ -258,6 +258,29 @@ grep -Fq "sharded controller operator: 70 simultaneous copies exceed one control
 ! grep -Fq "using the ordinary fleet path" "$tmp/wide70.out" ||
   { echo "FAIL: operator-only options must not fall back" >&2; exit 1; }
 [ ! -s "$tmp/wide-capture" ] || { echo "FAIL: a sharded route started an ordinary fleet" >&2; exit 1; }
+# 70 tasks x K3 at --concurrency 70 is one batch of bounded sharded waves
+# (descend I3): it neither refuses nor falls back to one ordinary host campaign.
+: >"$tmp/wide-capture"
+for wave_mode in run check; do
+  wave_flags=(); [ "$wave_mode" = run ] || wave_flags=(--check)
+  RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+  RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+  RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+    "$RUN_BENCH" "${wide70_names[@]}" -k 3 --concurrency 70 --timeout 7200 "${wave_flags[@]}" >"$tmp/wide70-waves.out" 2>&1 || true
+  grep -Fq "bounded sharded waves: 210 copies, at most 70 at once (23 tasks x 3 per wave); infra stop uses all 210 scheduled copies" "$tmp/wide70-waves.out" &&
+    ! grep -Fq "using the ordinary fleet path" "$tmp/wide70-waves.out" &&
+    ! grep -Fq "admits all 210 copies behind one barrier" "$tmp/wide70-waves.out" ||
+    { cat "$tmp/wide70-waves.out" >&2; echo "FAIL: 70x3 at --concurrency 70 ($wave_mode) did not route to bounded sharded waves" >&2; exit 1; }
+  [ ! -s "$tmp/wide-capture" ] || { echo "FAIL: bounded waves started an ordinary fleet" >&2; exit 1; }
+done
+rc=0
+RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+RUN_BENCH_SHARDED_ROUTE=always \
+  "$RUN_BENCH" "${wide70_names[@]}" -k 40 --concurrency 39 --timeout 300 --check >"$tmp/wide70-narrow.out" 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && grep -Fq "cannot hold one task's 40 copies" "$tmp/wide70-narrow.out" ||
+  { cat "$tmp/wide70-narrow.out" >&2; echo "FAIL: a wave narrower than one task's copies was not refused" >&2; exit 1; }
 # A 2-hour execution window routes to the sharded operator; longer windows
 # are refused before any operator or fleet starts (descend I1, Polar 2h cap).
 : >"$tmp/wide-capture.operator"

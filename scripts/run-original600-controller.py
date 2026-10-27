@@ -1343,6 +1343,18 @@ def experiment_fields(args, plan):
                 runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
 
 
+def wave_denominator(args, copies):
+    """(scheduled_total, prior_infra) for the fixed infra stop: this launch alone, or one bounded wave of a larger run."""
+    total, prior = getattr(args, 'scheduled_total', None), getattr(args, 'prior_infra', 0)
+    if total is None and not prior:
+        return copies, 0
+    if total is None or type(total) is not int or total < copies or type(prior) is not int or prior < 0:
+        raise ValueError('--scheduled-total must cover this wave\'s %d copies and --prior-infra must be >= 0' % copies)
+    if getattr(args, 'infra_early_stop', 'enabled') == 'enabled' and 20 * prior >= total:
+        raise ValueError('earlier waves already reached the 5%% infra threshold (%d/%d); launch nothing' % (prior, total))
+    return total, prior
+
+
 def native_release_audit(root, directory, token):
     """Final read-only native audit of every owned guest/volume/controller identity (never mutates)."""
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
@@ -1451,6 +1463,9 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     binding['shards'] = dict(controllers=plan['controllers'], copies=plan['copies'],
                              tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'],
                              **shard_bindings(args, runner))
+    wave_total, prior_infra = wave_denominator(args, plan['copies'])
+    if (wave_total, prior_infra) != (plan['copies'], 0):
+        binding['shards']['wave'] = dict(scheduled_total=wave_total, prior_infra=prior_infra)
     directory, started_at = open_admission(parent, None, binding, runner, False)
     token = token_from_agents(runner['read'](args.agents_env))
     os.environ['FLY_API_TOKEN'] = token
@@ -1545,8 +1560,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         preallocation_abort(ledger, root, directory, runner, fields['goal'], error)
         raise
 
-    record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
-                                       infra_early_stop=args.infra_early_stop, respawn=respawn,
+    record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=wave_total,
+                                       prior_infra=prior_infra, infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
     exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]
     summaries = [record['summary'] for record in exports]
@@ -1556,6 +1571,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                       for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
+    if 'wave' in binding['shards']:
+        merged['wave'] = binding['shards']['wave']
     merged.update(publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards,
                                             summaries, merged, record))
     runner['save'](directory / 'result.json', merged)
@@ -2444,6 +2461,10 @@ def main():
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')
     parser.add_argument('--label', help='operator slice label for the scorecard (default: tasks file name)')
+    parser.add_argument('--scheduled-total', type=int,
+                        help='bounded wave of a larger run: that run\'s original scheduled copies, the fixed 5%% infra denominator (default: this launch\'s copies)')
+    parser.add_argument('--prior-infra', type=int, default=0,
+                        help='bounded wave: confirmed infrastructure-failed jobs of its earlier waves (default 0)')
     parser.add_argument('--catalog-eligibility', choices=sorted(CATALOG_ELIGIBILITY), default='live',
                         help="'live' (default): LIVE acceptance refuses zero-spend/DEMO-replay tasks; "
                              "'ordinary': a user-requested wide run admits every cloud-runnable ready task, as the ordinary fleet does")
@@ -2492,6 +2513,10 @@ def main():
     # refuse a width above the provider rate-limit cap before any credential,
     # Fly CLI or provider read.
     copies = simultaneous_copies(args, runner)
+    if args.scheduled_total is not None or args.prior_infra:
+        if args.archive_run or recovery or args.resume_bound_launch or args.resume_admission or manifest['original']:
+            raise ValueError('--scheduled-total/--prior-infra bind one fresh bounded wave of a non-original manifest only')
+        wave_denominator(args, copies)
     capacity = runpy.run_path(str(root/'scripts/cloudbench-provider-capacity.py'))
     try:
         refused = capacity['check'](copies)
@@ -2566,6 +2591,9 @@ def main():
             # --check never refreshes: it reports the path --run takes (reuse or refresh) and why.
             check['input_discovery'] = {k: v for k, v in discovery.items() if k not in ('warm_snapshot', 'provider_calls')}
         check.update(manifest=manifest)
+        if args.scheduled_total is not None or args.prior_infra:
+            wave_total, prior_infra = wave_denominator(args, simultaneous_copies(args, runner))
+            check.update(wave=dict(scheduled_total=wave_total, prior_infra=prior_infra))
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:
             first = bound_shard(plan['shards'][0], args, runner, 'original600-check', plan['copies'], time.time())

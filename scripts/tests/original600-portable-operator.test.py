@@ -3522,6 +3522,33 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, ops, fleets), (2, [], []))
             self.assertIn('fit one controller', result.stderr)
 
+    def test_concurrency_below_the_copies_runs_one_batch_of_bounded_waves(self):
+        # descend I3: 40 tasks x K3 at --concurrency 70 is one batch of task-aligned sharded
+        # waves (23 + 17 tasks), each bound to the batch's 120 scheduled copies.
+        names = polar_names(40)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names, '-k', '3', '--concurrency', '70', '--timeout', '7200', '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 2, []), result.stderr)
+            self.assertIn('bounded sharded waves: 120 copies, at most 70 at once (23 tasks x 3 per wave)', result.stdout)
+            waves = [json.loads(Path(self.option(op, '--tasks')).read_text()) for op in ops]
+            self.assertEqual(waves, [names[:23], names[23:]])
+            for op in ops:
+                self.assertNotIn('--run', op)
+                self.assertEqual((self.option(op, '--scheduled-total'), self.option(op, '--prior-infra')), ('120', '0'))
+                self.assertEqual((self.option(op, '--source-ref'), self.option(op, '--task-timeout'), self.option(op, '--repetitions')),
+                                 (fx.head, '7200', '3'))
+            batch = json.loads(next(Path(self.option(ops[0], '--state-dir')).glob('waves-*/batch.json')).read_text())
+            self.assertEqual(([w['state'] for w in batch['waves']], batch['scheduled_total'], batch['unlaunched_copies']),
+                             (['CHECKED', 'CHECKED'], 120, 120))
+            # A launch whose first wave never reports an admission launches nothing more.
+            result, ops, fleets = fx.run(*names, '-k', '3', '--concurrency', '70', '--timeout', '7200')
+            self.assertEqual((result.returncode, fleets), (1, []), result.stderr)
+            self.assertEqual([op.count('--run') for op in ops], [0, 1])  # wave 1 check + run; wave 2 never checked
+            batch = json.loads(sorted(Path(self.option(ops[0], '--state-dir')).glob('waves-*/batch.json'))[-1].read_text())
+            self.assertEqual([w['state'] for w in batch['waves']], ['FAILED_NO_RESULT', 'NOT_LAUNCHED'])
+            self.assertEqual(batch['unlaunched_copies'], 51)
+            self.assertFalse(batch['batch_complete'])
+
     def test_routed_runs_refuse_unpushed_dirty_foreign_ref_and_unsupported_options(self):
         names = polar_names(40)
         with self.checkout() as fx:
@@ -3529,7 +3556,7 @@ class RunBenchShardedRouting(unittest.TestCase):
                 (('--ref', 'HEAD~0^{tree}'), 'execute the pushed checkout HEAD'),
                 (('--sim-on', names[0]), 'not a sharded operator option'),
                 (('--retry-infra', '2'), 'exactly once'),
-                (('--concurrency', '39', '--retry-infra', '1'), 'admits all 40 copies'),
+                (('-k', '40', '--concurrency', '39', '--retry-infra', '1'), "cannot hold one task's 40 copies"),
                 (('--e2e-started-at', '1'), 'owns its admission clock'),
             ]
             # The strict route refuses every unsupported option before any launch.

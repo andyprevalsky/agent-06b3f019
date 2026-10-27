@@ -160,8 +160,11 @@ def infra_stop_reached(infra_jobs, scheduled_total):
 
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
-               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS):
+               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, prior_infra=0):
     """Run K runners to completion under one global barrier. Returns the coordination record.
+
+    scheduled_total is the original scheduled denominator; a bounded wave of a larger run passes
+    that run's total and the confirmed infra jobs of its earlier waves as prior_infra.
 
     shards: [{'index': i, 'out': Path}], spawn(shard) -> Popen-like (poll/wait/send_signal/pid).
     respawn(shard) -> (shard, Popen-like): a fresh attempt for a shard whose runner ended
@@ -169,6 +172,9 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
     """
     journal = Path(journal)
     need(scheduled_total > 0 and shards, 'scheduled shards required')
+    need(type(prior_infra) is int and prior_infra >= 0, 'invalid prior infra count')
+    need(infra_early_stop != 'enabled' or not infra_stop_reached(prior_infra, scheduled_total),
+         'earlier waves already reached the 5%% infra threshold (%d/%d); launch nothing' % (prior_infra, scheduled_total))
     release_id = secrets.token_hex(12)
     stop = [None]
     previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
@@ -182,6 +188,8 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                   scheduled_total=scheduled_total, infra_early_stop=infra_early_stop, started_at=clock(),
                   released_at=None, aborted_at=None, abort_reason=None, terminated_at=None,
                   terminate_reason=None, shards={})
+    if prior_infra:
+        record['prior_infra'] = prior_infra
     runners, attempts = {}, {}
     record['retries'] = []
     try:
@@ -244,10 +252,10 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     target = Path(shard['out'])
                     if target.is_dir() and not (target / decision[0]).exists():
                         write_once(target / decision[0], decision[1])
-            threshold = infra_early_stop == 'enabled' and infra_stop_reached(infra, scheduled_total)
+            threshold = infra_early_stop == 'enabled' and infra_stop_reached(infra + prior_infra, scheduled_total)
             if record['terminated_at'] is None and (stop[0] or threshold):
                 record.update(terminated_at=clock(), terminate_reason=(
-                    'operator ' + stop[0] if stop[0] else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
+                    'operator ' + stop[0] if stop[0] else 'infra %d/%d reached the 5%% threshold' % (infra + prior_infra, scheduled_total)))
                 for process in runners.values():
                     if process.poll() is None:
                         process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only
