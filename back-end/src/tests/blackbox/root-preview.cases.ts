@@ -25,7 +25,11 @@ type Fixture = {
 export function rootPreviewCases(f: Fixture) {
   test('root preview is owner-scoped, stable before code, and allocates no sessions on reads', async () => {
     const root = await f.agentFor(f.devUser);
-    const before = await prisma.codeSession.count();
+    // Scoped to what a read of this root could allocate: other domains create
+    // CodeSessions concurrently, so a global count is not this test's signal.
+    const ownSessions = () =>
+      prisma.codeSession.count({ where: { OR: [{ userId: f.devUser }, { rootAgentId: root }] } });
+    const before = await ownSessions();
     const first = await f.http('GET', `/api/agents/${root}/local-preview`, f.devUser);
     assert.equal(first.status, 200);
     assert.equal(first.data.status, 'unavailable');
@@ -33,7 +37,7 @@ export function rootPreviewCases(f: Fixture) {
     assert.equal(first.data.preview_url, null);
     const again = await f.http('GET', `/api/agents/${root}/local-preview`, f.devUser);
     assert.equal(again.data.stable_path, first.data.stable_path);
-    assert.equal(await prisma.codeSession.count(), before);
+    assert.equal(await ownSessions(), before);
     const foreign = await f.agentFor(f.otherUser);
     const denied = await f.http('GET', `/api/agents/${foreign}/local-preview`, f.devUser);
     assert.equal(denied.status, 404);

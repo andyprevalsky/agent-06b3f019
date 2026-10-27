@@ -199,6 +199,13 @@ export class FakeIdp {
     };
   }
 
+  /** Whether this refresh token has already been exchanged (rotated away). */
+  refreshTokenSpentSync(refreshToken: string): boolean {
+    const grantId = this.index.get(refreshToken);
+    if (grantId === undefined) return false;
+    return this.grants.get(grantId)?.refreshTokens.get(refreshToken)?.spent === true;
+  }
+
   accessTokenLiveSync(accessToken: string): boolean {
     for (const grant of this.grants.values()) {
       if (grant.liveAccessTokens.has(accessToken)) return true;

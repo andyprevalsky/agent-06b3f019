@@ -78,7 +78,7 @@ test('a materialised Codex grant is visible to the main GPT token read path', as
   );
 });
 
-test('a complete Codex OAuth grant is visible to the Codex CLI sandbox path', async () => {
+test('a complete Codex OAuth grant reaches the Codex CLI sandbox path access-token-only', async () => {
   const userId = `${USER}-codex-cli`;
   await materializeGrantAsIntegration({
     userId,
@@ -93,9 +93,15 @@ test('a complete Codex OAuth grant is visible to the Codex CLI sandbox path', as
   });
   const credentials = await fetchGptCodeCredentialsWithMeta(userId);
   assert(credentials !== null, 'Codex CLI path rejected a complete OAuth grant');
+  // The sandbox gets the access token only: a sandbox refresh would rotate the
+  // grant out from under every other holder (integrations.codex-shared-grant).
   assert(
-    credentials.credentials.includes('refresh-token-readpath'),
-    'Codex CLI path dropped the refresh lineage'
+    !credentials.credentials.includes('refresh-token-readpath'),
+    'Codex CLI path handed the sandbox the refresh lineage'
+  );
+  assert(
+    credentials.credentials.includes('access-token-readpath'),
+    'Codex CLI path dropped the access token'
   );
   assert(credentials.accountId === 'chatgpt-account-cli', 'Codex CLI path lost account identity');
 });

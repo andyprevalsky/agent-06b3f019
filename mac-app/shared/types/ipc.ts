@@ -373,6 +373,17 @@ export interface UploadResult {
   message?: string;
 }
 
+/**
+ * Per-request options for a chunked messaging (contacts JSON) upload. A
+ * chunked sync sends one `accessedAt` (its start) on every request and
+ * `syncComplete: false` on all but the last, so the backend only advances the
+ * incremental-read cursor once the whole sync has been delivered.
+ */
+export interface MessagingUploadOptions {
+  accessedAt?: string;
+  syncComplete?: boolean;
+}
+
 export interface DirectIMessagePayload {
   to: string;
   message: string;
