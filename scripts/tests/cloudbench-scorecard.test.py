@@ -192,6 +192,68 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_cancelled_campaign_keeps_started_lifecycles_and_infra_uncertainty(self):
+        capture = json.loads((GOLDEN / "cancelled-campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / capture["summary"]["campaign_id"]
+        summary = dict(capture["summary"], jobs=[])
+        for record in capture["records"]:
+            job_record = dict(record["job"])
+            fleet = root / ".context/fleet/runs" / record["card"]["run_id"]
+            job_record["log"] = str(directory / Path(job_record["log"]).name)
+            write(Path(job_record["log"]), f"{root}/scripts/run-bench monitor {fleet}\n")
+            summary["jobs"].append(job_record)
+            write(fleet / "_batch/report-card.json", record["card"])
+            write(fleet / "_batch/lifecycle.json", dict(record["lifecycle"], workspace_root=str(root)))
+            for name in ("meta", "provider-teardown-verified.epoch"):
+                if name in record:
+                    write(fleet / "teardown-ownership" / name, record[name].replace("/home/boxes/rose", str(root)))
+        write(directory / "summary.json", summary)
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["terminal_attempts"], 20, "empty attempts does not mean an exited controller never started")
+        self.assertEqual((exp["scored"], exp["outcomes"]["CANCELLED"]), (0, 20))
+        self.assertEqual(exp["released"], {"yes": 1, "of": 20}, "one provider seal is independent of failed execution")
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 20})
+        self.assertIsNone(exp["infra_jobs"], "post-cancel INFRA_ERROR is not qualified pre-cancel evidence")
+        self.assertIsNone(exp["infra_attempts"])
+        self.assertEqual(exp["infra_unattributed_cancelled"], 20)
+        self.assertEqual(CARD["_infra_text"](exp)[0], "UNCLASSIFIED")
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        self.assertTrue(any("cancel" in i["text"].lower() for i in CARD["_issues"](exp)))
+        rendered = CARD["build"](directory, ledger=self.f.ledger,
+                                 now=CARD["epoch_of"](summary["finished_at"]) + 60)
+        self.assertIn("INFRA UNCLASSIFIED", CARD["render_text"](rendered))
+        self.assertIn("■ INFRA UNCLASSIFIED", self.valid(rendered))
+        for record in capture["records"]:
+            write(root / ".context/fleet/runs" / record["card"]["run_id"] / record["job"]["task"]
+                  / "benchmark-child.finished", record["child_exit"])
+        native = CARD["load"](directory)
+        self.assertEqual((native["infra_jobs"], native["infra_attempts"]), (1, 1))
+        self.assertEqual((native["outcomes"]["INFRA"], native["outcomes"]["CANCELLED"]), (1, 19))
+        self.assertEqual(native["terminal_attempts"], 20)
+        self.assertEqual(native["infra_unattributed_cancelled"], 0)
+        self.assertTrue(native["infra_breached"])
+        self.assertEqual(native["reasons"], [["INFRA", "Native child exit 125; no current run artifact produced", 1]])
+        for record in capture["records"]:
+            (root / ".context/fleet/runs" / record["card"]["run_id"] / record["job"]["task"]
+             / "benchmark-child.finished").unlink()
+        # A canonical pre-cancellation breach receipt retains the authentic job;
+        # a generic post-TERM INFRA_ERROR alone cannot provide this distinction.
+        summary["infra_stop"] = {"infra_jobs": 1, "scheduled_total": 20,
+                                 "infra_job_ids": ["r002-j0017"]}
+        write(directory / "summary.json", summary)
+        with_stop = CARD["load"](directory)
+        self.assertEqual(with_stop["infra_confirmed_jobs"], 1)
+        self.assertTrue(with_stop["infra_breached"])
+        self.assertEqual(with_stop["infra_unattributed_cancelled"], 19)
+        self.assertEqual(with_stop["outcomes"]["CANCELLED"], 19)
+        summary["infra_stop"]["scheduled_total"] = 600
+        write(directory / "summary.json", summary)
+        self.assertEqual(CARD["load"](directory)["infra_confirmed_jobs"], 0, "foreign cohort receipt cannot certify a failure")
+        # A never-dispatched queued cancellation still owns no resource/attempt.
+        pending = {"status": "cancelled", "attempts": 0, "started_at": None}
+        self.assertFalse(CARD["started_terminal"](pending))
+
     def test_fleet_golden_and_html(self):
         data = render(self.f.fleet(), self.f)
         self.golden("fleet", CARD["render_text"](data))

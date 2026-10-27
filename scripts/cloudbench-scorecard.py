@@ -178,7 +178,7 @@ def classify(row: dict) -> str:
     if status not in TERMINAL_JOB:
         return "RUNNING" if status == "running" or row.get("attempts") else "QUEUED"
     if status == "cancelled":
-        return "CANCELLED"
+        return "INFRA" if row.get("infra_confirmed") is True else "CANCELLED"
     verdict = str(row.get("task_status") or "").upper()
     if row.get("infra_failure") is True or verdict == "INFRA_ERROR":
         return "INFRA"
@@ -232,7 +232,10 @@ def compact_rows(summary: dict, cards: dict | None = None) -> list[dict]:
             "infra_failure": job.get("infra_failure"),
             "attempts": len(attempts),
             "terminal_attempts": sum(a.get("status") in TERMINAL_JOB and bool(a.get("finished_at")) for a in attempts),
-            "infra_attempts": sum(a.get("infra_failure") is True for a in attempts),
+            "infra_attempts": sum(a.get("infra_failure") is True and a.get("status") in TERMINAL_JOB - {"cancelled"}
+                                  and bool(a.get("finished_at")) for a in attempts),
+            "infra_confirmed": any(a.get("infra_failure") is True and a.get("status") in TERMINAL_JOB - {"cancelled"}
+                                   and a.get("finished_at") for a in attempts),
             "wall_s": job.get("wall_clock_seconds"),
             "started_at": epoch_of(job.get("started_at")), "finished_at": epoch_of(job.get("finished_at")),
             "released": job.get("resources_released"), "lifecycle": job.get("lifecycle_verified"),
@@ -248,8 +251,9 @@ def compact_rows(summary: dict, cards: dict | None = None) -> list[dict]:
                 and task.get("lifecycle_stage") in ("evaluated", "teardown", "released"):
             row["task_status"] = task["status"].upper()
             row["verdict_source"] = "report-card"
-        if row["status"] in TERMINAL_JOB - {"cancelled"} and row["terminal_attempts"] == 0 and not attempts:
+        if started_terminal(row) and row["terminal_attempts"] == 0 and not attempts:
             row["terminal_attempts"] = 1
+            row["infra_attempts"] = int(row["status"] != "cancelled" and row["infra_failure"] is True)
         rows.append(row)
     return rows
 
@@ -330,9 +334,15 @@ def finish_experiment(exp: dict) -> dict:
     exp["scored"] = outcomes["PASS"] + outcomes["AGENT FAIL"] if rows else None
     exp["terminal_attempts"] = sum(r.get("terminal_attempts", 1 if classify(r) in CATEGORIES else 0) for r in rows) if rows else None
     exp["infra_attempts"] = sum(r.get("infra_attempts", 1 if classify(r) == "INFRA" else 0) for r in rows) if rows else None
-    exp["infra_jobs"] = outcomes["INFRA"] if rows else exp.get("infra_jobs")
+    confirmed_infra = sum(classify(r) == "INFRA" or r.get("infra_confirmed") is True for r in rows)
+    exp["infra_unattributed_cancelled"] = sum(classify(r) == "CANCELLED" and r.get("infra_failure") is True
+                                             and not r.get("cancellation_confirmed") for r in rows)
+    exp["infra_confirmed_jobs"] = confirmed_infra
+    exp["infra_jobs"] = (None if exp["infra_unattributed_cancelled"] else confirmed_infra) if rows else exp.get("infra_jobs")
+    if exp["infra_unattributed_cancelled"]:
+        exp["infra_attempts"] = None
     exp["infra_threshold"] = math.ceil(scheduled / 20) if scheduled else None
-    exp["infra_breached"] = bool(scheduled and exp["infra_jobs"] is not None and 20 * exp["infra_jobs"] >= scheduled)
+    exp["infra_breached"] = bool(scheduled and 20 * (confirmed_infra if rows else exp["infra_jobs"] or 0) >= scheduled)
     reasons = Counter()
     for row in rows:
         category = classify(row)
@@ -552,23 +562,23 @@ def campaign_fleet(attempt: dict) -> Path | None:
     return None
 
 
-def campaign_release(fleet: Path, card: dict) -> bool:
-    """Use the run-bound producer seal, without claiming a new native audit."""
+def campaign_receipts(fleet: Path, card: dict) -> tuple[bool, bool]:
+    """Separate a run-bound provider release from the full lifecycle verdict."""
     lifecycle = read_json(fleet / "_batch/lifecycle.json") or {}
     try:
         meta = dict(line.split("=", 1) for line in (fleet / "teardown-ownership/meta").read_text().splitlines())
     except (OSError, ValueError):
-        return False
+        return False, False
     released_at = read_epoch(fleet / "teardown-ownership/provider-teardown-verified.epoch")
-    return bool(lifecycle.get("status") == "verified"
-                and lifecycle.get("run_id") == card.get("run_id") == meta.get("run_id") == fleet.name
+    released = bool(lifecycle.get("run_id") == card.get("run_id") == meta.get("run_id") == fleet.name
                 and lifecycle.get("fleet_owner_token") == meta.get("fleet_owner_token")
                 and lifecycle.get("fleet_owner_token")
                 and lifecycle.get("workspace_root") == meta.get("workspace_root") == str(fleet.parents[3])
-                and lifecycle.get("hub_publication_failed") is False
                 and meta.get("status") == "provider-teardown-verified"
                 and all(task.get("lifecycle_stage") == "released" for task in card.get("per_task") or [])
                 and released_at is not None and math.isfinite(released_at) and released_at > 0)
+    return released, bool(released and lifecycle.get("status") == "verified"
+                          and lifecycle.get("hub_publication_failed") is False)
 
 
 def load_campaign(run_dir: Path) -> dict:
@@ -582,6 +592,8 @@ def load_campaign(run_dir: Path) -> dict:
     cards = {}
     jobs = []
     releases = {}
+    lifecycles = {}
+    child_exits = {}
     for job in summary.get("jobs") or []:
         if not isinstance(job, dict):
             continue
@@ -600,22 +612,51 @@ def load_campaign(run_dir: Path) -> dict:
             if attempt.get("run_id") not in (None, card["run_id"]):
                 continue
             cards[card["run_id"]] = card
-            releases[card["run_id"]] = campaign_release(fleet, card)
+            releases[card["run_id"]], lifecycles[card["run_id"]] = campaign_receipts(fleet, card)
+            if Path(job["task"]).name == job["task"]:
+                try:
+                    child_exits[card["run_id"]] = int((fleet / job["task"] / "benchmark-child.finished").read_text().strip())
+                except (OSError, ValueError):
+                    pass
             if attempt is job and job.get("run_id") is None:
                 job["run_id"] = card["run_id"]
     exp["rows"] = compact_rows(dict(summary, jobs=jobs), cards)
     exp["rows_source"] = "summary.json + fleet receipts" if cards else "summary.json"
+    # The producer's latched breach precedes its cancellation cascade. Only
+    # exact scheduled membership can preserve confirmed infra through that stop.
+    stop = summary.get("infra_stop") or {}
+    ids = stop.get("infra_job_ids") or []
+    membership = {j.get("job_id") for j in jobs}
+    confirmed = set(ids) if (isinstance(ids, list) and all(isinstance(i, str) for i in ids)
+                            and len(set(ids)) == len(ids) == stop.get("infra_jobs")
+                            and stop.get("scheduled_total") == exp["scheduled_total"]
+                            and set(ids) <= membership) else set()
     refs = set()
     complete_sources = True
     for job, row in zip(jobs, exp["rows"]):
+        if row.get("job_id") in confirmed:
+            row["infra_confirmed"] = True
+            row["infra_attempts"] = max(1, row["infra_attempts"])
         card = card_for(job, cards)
+        if card and row["status"] == "cancelled" and row.get("infra_failure") is True:
+            child_exit = child_exits.get(card["run_id"])
+            # The native child supervisor reserves 125 for its infrastructure
+            # failure; forwarded HUP/INT/TERM are 129/130/143. The terminal
+            # task's generic INFRA_ERROR does not distinguish those paths.
+            if child_exit == 125:
+                row["infra_confirmed"] = True
+                row["infra_attempts"] = max(1, row["infra_attempts"])
+                row["reason"] = "Native child exit 125; " + (row["reason"] or "task result not recorded")
+            elif child_exit in (129, 130, 143):
+                row["cancellation_confirmed"] = True
         ref = ((card or {}).get("execution_provenance") or {}).get("base_sha")
         if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):
             complete_sources = False
         else:
             refs.add(ref)
         if card and releases.get(card["run_id"]):
-            row["released"] = row["lifecycle"] = True
+            row["released"] = True
+            row["lifecycle"] = lifecycles[card["run_id"]]
     if complete_sources and len(refs) == 1:
         exp["source_ref"] = refs.pop()
     status = summary.get("status")
@@ -630,7 +671,8 @@ def load_campaign(run_dir: Path) -> dict:
 
 def started_terminal(row) -> bool:
     """Terminal jobs that could own resources (a never-started cancellation owns none)."""
-    return classify(row) in CATEGORIES and not (classify(row) == "CANCELLED" and not row.get("attempts"))
+    return classify(row) in CATEGORIES and not (classify(row) == "CANCELLED"
+                                               and not row.get("attempts") and row.get("started_at") is None)
 
 
 def _job_lifecycle(exp, audit=None, finished_after=None):
@@ -1078,16 +1120,22 @@ def _history_row(exp: dict) -> dict:
     keys = ("number", "id", "label", "state", "state_reason", "triggered_at", "ended_at", "scheduled_total",
             "progress", "outcomes", "scored", "terminal_attempts", "infra_attempts", "infra_jobs", "cost",
             "harness_classified", "released", "rows_source", "end_evidence", "cancelled_before_release",
+            "infra_unattributed_cancelled", "infra_confirmed_jobs",
             "never_started")
     return {k: exp.get(k) for k in keys}
 
 
 def _issues(exp: dict) -> list[dict]:
     out = []
+    if exp.get("infra_unattributed_cancelled"):
+        out.append({"severity": "amber", "text": f'{exp["infra_unattributed_cancelled"]} cancelled jobs carry '
+                    'unattributed INFRA_ERROR flags; pre-cancellation infra count is UNCLASSIFIED.',
+                    "owner": "parent", "action": "retain the original failure and cancellation receipts; capture qualified pre-cancellation evidence"})
     if exp["infra_breached"]:
-        out.append({"severity": "red", "text": f"Infra stop threshold reached: {exp['infra_jobs']}/{exp['scheduled_total']} "
+        out.append({"severity": "red", "text": f"Infra stop threshold reached: {exp.get('infra_confirmed_jobs', exp['infra_jobs'])}/{exp['scheduled_total']} "
                     f"unique jobs (stop at {exp['infra_threshold']}).", "owner": "parent",
-                    "action": "stop the exact owned run; /RCA each infra cluster"})
+                    "action": "stop the exact owned run; /RCA each infra cluster" if exp["state"] == "RUNNING"
+                    else "retain the terminal stop receipt; /RCA each infra cluster"})
     elif exp.get("infra_jobs"):
         out.append({"severity": "amber", "text": f"{exp['infra_jobs']} infra-failed job(s) below the stop threshold.",
                     "owner": "parent", "action": "/RCA the first authentic failure now"})
@@ -1190,6 +1238,9 @@ def _harness(exp) -> tuple[str, str]:
 
 
 def _infra_text(exp) -> tuple[str, str, str]:
+    if exp.get("infra_unattributed_cancelled"):
+        return "UNCLASSIFIED", "warn", (f'{exp.get("infra_confirmed_jobs", 0)} confirmed; '
+                                        f'{exp["infra_unattributed_cancelled"]} cancelled flags lack attribution')
     attempts, infra = exp.get("terminal_attempts"), exp.get("infra_attempts")
     if not attempts:
         jobs = exp.get("infra_jobs")
@@ -1281,6 +1332,9 @@ def render_html(card: dict) -> str:
             continue
         if category == "HARNESS":
             legend.append(f'<span class="{harness_cls}">■ HARNESS {e(harness_text)}</span>')
+            continue
+        if category == "INFRA" and exp.get("infra_unattributed_cancelled"):
+            legend.append('<span class="warn">■ INFRA UNCLASSIFIED</span>')
             continue
         value = f"{count} · {pct(count, total)}" if o and total else "UNMEASURED"
         cls = "warn" if not o else "ok" if category == "INFRA" and not count else CATEGORY_CLASS[category]
@@ -1411,7 +1465,8 @@ def _history_html(card) -> str:
             scored = h.get("scored") or 0
             attempts = h.get("terminal_attempts") or 0
             pass_text = f'PASS {o["PASS"]}/{scored} ({pct(o["PASS"], scored)})' if scored else "NO SCORED TASKS"
-            infra_text = (f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
+            infra_text = ("INFRA UNCLASSIFIED" if h.get("infra_unattributed_cancelled") else
+                          f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
             harness = "HARNESS " + (str(o["HARNESS"]) if o["HARNESS"] or h.get("harness_classified") else "UNCLASSIFIED")
             extra = [f"{c.lower()} {o[c]}" for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
             if h.get("cancelled_before_release"):
@@ -1520,7 +1575,8 @@ def render_text(card: dict) -> str:
                      f'{pacific(h.get("triggered_at"))} → '
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
-                        + (f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
+                        + (" · INFRA UNCLASSIFIED" if h.get("infra_unattributed_cancelled") else
+                           f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
                         + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
                         + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED"))
     lines.append("ACTIVE SUB-AGENTS / PARENT")
