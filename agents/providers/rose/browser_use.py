@@ -926,10 +926,12 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     downloads = bs.get("downloaded_files") or []
     downloads_text = ""
     if downloads:
+        # File names come from the site: quote them so a name stays one inert line.
         downloads_text = "\nDownloaded files (this browser session):\n"
         for item in downloads:
             size = item.get("size")
-            downloads_text += f"  - {item.get('name')}" + (f" ({size} bytes)" if isinstance(size, int) else "") + "\n"
+            name = json.dumps(str(item.get("name") or "")[:200])
+            downloads_text += f"  - {name}" + (f" ({size} bytes)" if isinstance(size, int) else "") + "\n"
 
     viewport = bs.get("viewport") or {}
     title_part = f" - {bs['title']}" if bs.get("title") else ""

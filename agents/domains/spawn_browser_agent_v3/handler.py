@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import functools
 import gc
 import html as html_module
 import importlib
@@ -3228,115 +3227,6 @@ def _captcha_solver_wait_complete(
     if provider == "browser-use" and elapsed_seconds < 10:
         return False
     return saw_active_solver or inactive_polls >= 3
-
-
-def _challenge_patience_seconds() -> float:
-    """BROWSER_CHALLENGE_PATIENCE_SECONDS: how long to let a provider's own
-    challenge auto-solve run before recover-challenge/rotation. 0 (default) = off."""
-    try:
-        return max(0.0, float(os.getenv("BROWSER_CHALLENGE_PATIENCE_SECONDS", "0") or 0))
-    except ValueError:
-        return 0.0
-
-
-def _challenge_patience_poll_seconds() -> float:
-    try:
-        return max(0.5, float(os.getenv("BROWSER_CHALLENGE_PATIENCE_POLL_SECONDS", "5") or 5))
-    except ValueError:
-        return 5.0
-
-
-async def _page_heuristically_challenged(page: Any) -> bool:
-    """The existing cheap detector (page_looks_challenged) on the live tab; unknown = challenged."""
-    try:
-        title, body_text, html = await asyncio.wait_for(
-            asyncio.gather(page.title(), page.locator("body").inner_text(timeout=2_000), page.content()),
-            timeout=15,
-        )
-    except Exception:
-        return True
-    return page_looks_challenged(
-        status=None, title=str(title)[:1_000], body_text=str(body_text)[:20_000], html=str(html)[:100_000]
-    )
-
-
-_PATIENCE_POLL_TIMED_OUT = object()
-
-
-async def _within_deadline(awaitable: Awaitable[Any], timeout: float) -> Any:
-    """Await ``awaitable`` for at most ``timeout`` seconds; on expiry return
-    _PATIENCE_POLL_TIMED_OUT without waiting for it to finish cancelling.
-
-    asyncio.wait_for waits for the cancelled call to unwind; a page whose renderer
-    is busy on challenge JS (T83) can hold that unwinding, so the deadline would
-    slip (kokkari 0addd068 waited 996 s against a 120 s patience).
-    """
-    task = asyncio.ensure_future(awaitable)
-    done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
-    if task in done:
-        return task.result()
-    task.cancel()
-    task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
-    return _PATIENCE_POLL_TIMED_OUT
-
-
-async def _challenge_patience_wait(
-    *,
-    page: Any,
-    patience_seconds: float,
-    poll_seconds: float,
-    still_challenged: Callable[[], Awaitable[bool]],
-) -> Dict[str, Any]:
-    """Poll the live tab for up to ``patience_seconds`` while the provider's own
-    auto-solve runs. Cheap heuristic polls; the existing LLM page classifier
-    (``still_challenged``) confirms a clear before recovery is skipped.
-
-    The deadline holds even when the page never answers: every poll is bounded
-    by the patience left, and a poll that runs out counts as still challenged.
-    """
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    deadline = started + patience_seconds
-    polls = 0
-    timed_out_polls = 0
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            break
-        browser_activity_checkpoint("Waiting for the provider challenge auto-solve")
-        await asyncio.sleep(min(poll_seconds, remaining))
-        polls += 1
-        challenged = await _within_deadline(_page_heuristically_challenged(page), deadline - loop.time())
-        if challenged is _PATIENCE_POLL_TIMED_OUT:
-            timed_out_polls += 1
-            break
-        if challenged:
-            continue
-        still = await _within_deadline(still_challenged(), deadline - loop.time())
-        if still is _PATIENCE_POLL_TIMED_OUT:
-            timed_out_polls += 1
-            break
-        if not still:
-            return {"cleared": True, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
-    result = {"cleared": False, "waited_seconds": round(loop.time() - started, 1), "polls": polls}
-    if timed_out_polls:
-        result["timed_out_polls"] = timed_out_polls
-    return result
-
-
-async def _live_tab_still_challenged_after_patience(
-    page: Any, *, provider_exit_rejected: bool, network_recorder: Any, recovery_reason: Any
-) -> bool:
-    """The existing LLM page classifier, after the patience wait.
-
-    A provider-exit rejection is old network evidence, so it is judged on a
-    fresh load of the page without that evidence.
-    """
-    if provider_exit_rejected:
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(page.reload(wait_until="domcontentloaded"), timeout=30)
-        return await live_tab_looks_challenged(page)
-    return await live_tab_looks_challenged(page, network_recorder=network_recorder, recovery_reason=recovery_reason)
 
 
 def _log_antibot_event(event: str, episode: Dict[str, Any]) -> None:
@@ -11128,66 +11018,6 @@ async def _spawn_browser_agent_activity_v3_real(
                     "recovery_invoked": False,
                     "provider": browser_session_metadata.get("provider"),
                 }
-                patience_seconds = _challenge_patience_seconds()
-                if patience_seconds > 0 and input_page is not None:
-                    patience_page = input_page
-                    patience = await _challenge_patience_wait(
-                        page=patience_page,
-                        patience_seconds=patience_seconds,
-                        poll_seconds=_challenge_patience_poll_seconds(),
-                        still_challenged=functools.partial(
-                            _live_tab_still_challenged_after_patience,
-                            patience_page,
-                            provider_exit_rejected=provider_exit_rejected,
-                            network_recorder=browser_network_recorder,
-                            recovery_reason=recovery_reason,
-                        ),
-                    )
-                    antibot_episode.update(
-                        waited_seconds=patience["waited_seconds"], cleared=patience["cleared"]
-                    )
-                    if patience["cleared"]:
-                        current_url = _private_browser_runtime_url(
-                            dom_service, getattr(patience_page, "url", "") or current_url
-                        )
-                        cleared_message = (
-                            f"The challenge cleared after waiting {patience['waited_seconds']:g}s"
-                            " for the browser's own auto-solve; no recovery was needed. Continue the task."
-                        )
-                        await _save_browser_action_message(
-                            agent_id=agent_id,
-                            title="Challenge cleared while waiting",
-                            task_id=task_id,
-                            message=cleared_message,
-                            status=MessageStatus.FINISHED,
-                            browser_url=browser_url,
-                            action_type="browser_challenge_recovery",
-                            tool_call_id=recovery_call_id,
-                            extra_metadata={"recoveryStage": "cleared_after_patience", "resumeUrl": current_url},
-                        )
-                        action_result = {
-                            "success": True,
-                            "message": cleared_message,
-                            "recovery_action": "cleared_after_patience",
-                            "current_url": current_url,
-                        }
-                        antibot_episode["recovery_outcome"] = "cleared_after_patience"
-                        _log_antibot_event("antibot.episode", antibot_episode)
-                        antibot_unresolved.clear()
-                        await _finalize_browser_recovery_action_result(
-                            action_result=action_result,
-                            dom_service=dom_service,
-                            action_history=action_history,
-                            thinking=thinking,
-                            recovery_reason=recovery_reason,
-                            browser_turn_messages=browser_turn_messages,
-                            task_prompt=task_prompt,
-                            browser_state={},
-                            unified_action=unified_action,
-                            recovery_call_id=recovery_call_id,
-                            browser_stream=browser_stream,
-                        )
-                        continue
                 antibot_episode["recovery_invoked"] = True
 
                 progress_titles = {

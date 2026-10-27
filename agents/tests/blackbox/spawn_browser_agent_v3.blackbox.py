@@ -8924,93 +8924,23 @@ async def test_click_rect_relocates_when_cdp_reports_no_node_with_given_id():
     assert resolved_ids == [6900]
 
 
-async def test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes():
-    """Anti-bot experiment knobs (default OFF): BROWSER_CHALLENGE_PATIENCE_SECONDS lets
-    the provider's own CAPTCHA auto-solve (Tilion cdp_observe) run before
-    recover-challenge or rotation; every challenge episode logs 'antibot.episode'
-    and a task ending unresolved logs 'antibot.stuck'. Uses the existing detectors."""
+async def test_challenge_episodes_are_logged_on_every_recovery_path():
+    """Every challenge episode logs 'antibot.episode' (one greppable line with its detector,
+    provider and outcome) and a task ending unresolved logs 'antibot.stuck'. Observation
+    only: recovery itself is unchanged."""
     import inspect
-    import time
+    import re
 
     from structlog.testing import capture_logs
 
     from domains.spawn_browser_agent_v3 import handler
-
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("BROWSER_CHALLENGE_PATIENCE_SECONDS", None)
-        assert handler._challenge_patience_seconds() == 0.0, "default off: production unchanged"
-    for raw, expected in (("90", 90.0), ("-5", 0.0), ("soon", 0.0)):
-        with patch.dict(os.environ, {"BROWSER_CHALLENGE_PATIENCE_SECONDS": raw}):
-            assert handler._challenge_patience_seconds() == expected, raw
-
-    class _Page:
-        def __init__(self, titles):
-            self.titles = list(titles)
-            self.url = "https://shop.example/cart"
-
-        async def title(self):
-            return self.titles.pop(0) if len(self.titles) > 1 else self.titles[0]
-
-        def locator(self, _selector):
-            page = self
-
-            class _Body:
-                async def inner_text(self, timeout=None):
-                    return "Verifying you are human" if "moment" in page.titles[0] else "Your cart: 1 item"
-
-            return _Body()
-
-        async def content(self):
-            return "<html><body>cart</body></html>"
-
-    assert await handler._page_heuristically_challenged(_Page(["Just a moment..."])) is True
-
-    class _Broken:
-        def title(self):
-            raise RuntimeError("target closed")
-
-        def locator(self, _selector):
-            raise RuntimeError("target closed")
-
-        def content(self):
-            raise RuntimeError("target closed")
-
-    assert await handler._page_heuristically_challenged(_Broken()) is True, "unknown state is not 'clear'"
-
-    # Clears once the interstitial is gone and the existing classifier confirms.
-    classifier_calls = []
-
-    async def classifier_says_clean():
-        classifier_calls.append(1)
-        return False
-
-    checkpoint = patch.object(handler, "browser_activity_checkpoint", lambda *_args, **_kwargs: None)
-    checkpoint.start()
-    page = _Page(["Just a moment...", "Just a moment...", "Cart"])
-    result = await handler._challenge_patience_wait(
-        page=page, patience_seconds=5, poll_seconds=0.01, still_challenged=classifier_says_clean
-    )
-    assert result["cleared"] is True and result["polls"] == 3, result
-    assert classifier_calls == [1], "the LLM classifier only confirms a heuristic clear"
-
-    # Never clears: bounded by the patience window, then recovery proceeds.
-    async def classifier_says_challenged():
-        return True
-
-    started = time.monotonic()
-    stuck = await handler._challenge_patience_wait(
-        page=_Page(["Cart"]), patience_seconds=0.3, poll_seconds=0.05, still_challenged=classifier_says_challenged
-    )
-    assert stuck["cleared"] is False and 0.25 <= stuck["waited_seconds"] <= 1.0, stuck
-    assert time.monotonic() - started < 2
-    checkpoint.stop()
 
     episode = {
         "agent_id": "agent-1",
         "host": "shop.example",
         "detector": "llm_classifier",
         "recovery_reason": "Cloudflare Turnstile interstitial",
-        "waited_seconds": 30.0,
+        "waited_seconds": 0.0,
         "cleared": False,
         "recovery_invoked": True,
         "recovery_outcome": "failed: no viable configuration",
@@ -9022,87 +8952,18 @@ async def test_challenge_patience_waits_for_provider_auto_solve_and_logs_episode
     assert [entry["event"] for entry in logs] == ["antibot.episode", "antibot.stuck"]
     assert all(entry[key] == value for entry in logs for key, value in episode.items())
 
-    # Wiring: patience runs after the existing clean-page check and before any
-    # recover-challenge call; every path logs the episode; the end logs 'stuck'.
+    # Wiring: no wait between the existing clean-page check and recovery; every
+    # recovery path logs its episode; the activity end logs 'stuck'.
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     recovery = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
         'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     clean_check = recovery.index("and not await live_tab_looks_challenged(")
-    patience = recovery.index("patience = await _challenge_patience_wait(")
     first_recovery = recovery.index("await recover_browser_challenge(")
-    assert clean_check < patience < first_recovery
-    assert "if patience_seconds > 0 and input_page is not None:" in recovery
-    import re
-
-    assert len(re.findall(r'_log_antibot_event\(\s*"antibot\.episode"', recovery)) == 3
+    assert clean_check < first_recovery
+    assert "_challenge_patience_wait" not in source
+    assert len(re.findall(r'_log_antibot_event\(\s*"antibot\.episode"', recovery)) == 2  # cleared before recovery, then recovery ran
     assert '_log_antibot_event("antibot.stuck"' in source
-
-
-async def test_challenge_patience_deadline_holds_when_the_page_never_answers():
-    """T100 (kokkari 0addd068): with BROWSER_CHALLENGE_PATIENCE_SECONDS=120 the patience wait took
-    996 s. Its polls awaited the page and the classifier without a bound, and a renderer busy on
-    challenge JS (T83) never answers. Each poll is bounded by the patience left, even when the
-    call resists cancellation; a poll that runs out counts as still challenged."""
-    import time
-
-    from domains.spawn_browser_agent_v3 import handler
-
-    class _SilentPage:
-        url = "https://www.kokkari.com/api/menu"
-
-        async def title(self):
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                await asyncio.sleep(5)  # a busy renderer holds the unwinding too
-                raise
-
-        def locator(self, _selector):
-            page = self
-
-            class _Body:
-                async def inner_text(self, timeout=None):
-                    return await page.title()
-
-            return _Body()
-
-        async def content(self):
-            return await self.title()
-
-    class _CleanPage:
-        url = "https://www.kokkari.com/"
-
-        async def title(self):
-            return "Kokkari Estiatorio"
-
-        def locator(self, _selector):
-            class _Body:
-                async def inner_text(self, timeout=None):
-                    return "Menu Reservations"
-
-            return _Body()
-
-        async def content(self):
-            return "<html><body>menu</body></html>"
-
-    async def classifier_never_returns():
-        await asyncio.Event().wait()
-        return True
-
-    async def classifier_says_challenged():
-        return True
-
-    with patch.object(handler, "browser_activity_checkpoint", lambda *_args, **_kwargs: None):
-        for page, classifier in ((_SilentPage(), classifier_says_challenged), (_CleanPage(), classifier_never_returns)):
-            started = time.monotonic()
-            result = await handler._challenge_patience_wait(
-                page=page, patience_seconds=0.6, poll_seconds=0.1, still_challenged=classifier
-            )
-            elapsed = time.monotonic() - started
-            assert result["cleared"] is False and result.get("timed_out_polls") == 1, result
-            assert elapsed < 1.2, f"patience deadline slipped to {elapsed:.1f}s ({type(page).__name__})"
-
 
 def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     """A failed promoted-session attach must preserve its real error result."""
@@ -33873,16 +33734,12 @@ async def run_all_tests():
         test_promoted_session_reattach_retries_once_then_fails_typed,
     )
     await r.record_async(
-        "challenge_patience_waits_and_logs_episodes",
-        test_challenge_patience_waits_for_provider_auto_solve_and_logs_episodes,
+        "challenge_episodes_logged_on_every_recovery_path",
+        test_challenge_episodes_are_logged_on_every_recovery_path,
     )
     await r.record_async(
         "click_rect_relocates_on_no_node_with_given_id",
         test_click_rect_relocates_when_cdp_reports_no_node_with_given_id,
-    )
-    await r.record_async(
-        "challenge_patience_deadline_holds_when_page_silent",
-        test_challenge_patience_deadline_holds_when_the_page_never_answers,
     )
     r.record(
         "recovery_guest_cookie_commit_from_tool_param",
