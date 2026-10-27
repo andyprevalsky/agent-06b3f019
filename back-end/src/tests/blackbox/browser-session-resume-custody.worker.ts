@@ -10,6 +10,7 @@ const kernelPath = path.resolve(__dirname, '../../providers/browser/kernel.ts');
 const checkpointPath = path.resolve(__dirname, '../../providers/browser/checkpoint.ts');
 const indexPath = path.resolve(__dirname, '../../providers/browser/index.ts');
 const recoveryPath = path.resolve(__dirname, '../../providers/browser/resumeRecovery.ts');
+const profileWriterPath = path.resolve(__dirname, '../../providers/browser/kernelProfileWriter.ts');
 const local = createRequire(providerPath);
 const { prisma } = local('../database');
 if (process.env.CUSTODY_OBSERVE_ACTIVE === '1') {
@@ -117,7 +118,10 @@ Module._load = function (id, parent, isMain) {
       };
     if (id === './captchaSolveIndicator') return { installCaptchaSolveIndicator: async () => {} };
   }
-  if ([kernelPath, recoveryPath].includes(parent?.filename) && id === './kernelClient')
+  if (
+    [kernelPath, recoveryPath, profileWriterPath].includes(parent?.filename) &&
+    id === './kernelClient'
+  )
     return { kernelClient: () => kernel };
   return original.call(this, id, parent, isMain);
 };

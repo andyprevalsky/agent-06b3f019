@@ -226,6 +226,10 @@ GATES = (
         "cloudbench-maintenance-env",
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),
+    Gate(
+        "cloudbench-controller-orphan-drain",
+        ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
+    ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate(
         "cloudbench-prelaunch-cancel",
@@ -246,6 +250,10 @@ GATES = (
     Gate(
         "wait-for-code-review",
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
+    ),
+    Gate(
+        "read-graphide-review",
+        ("python3", "scripts/tests/read-graphide-review.test.py"),
     ),
     Gate(
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")

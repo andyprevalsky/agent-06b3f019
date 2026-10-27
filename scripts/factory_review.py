@@ -5,21 +5,35 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import re
 import sqlite3
 import statistics
+import subprocess
+import sys
 import webbrowser
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 DEFAULT_DB = Path.home() / "Library/Application Support/com.conductor.app/conductor.db"
 DEFAULT_REPO = "navi-whisper-lux-v2"
+DEFAULT_FACTORY_LEDGER = Path("agents/benchmarks/history/factory_events.jsonl")
+DEFAULT_TELEMETRY_ROOT = Path(".context")
+DEFAULT_HISTORY_DIR = Path("agents/benchmarks/history")
+DEFAULT_CATALOG = Path("agents/benchmarks/tasks.json")
+# Same-branch predeploy attempts further apart than this are separate deploys.
+PREDEPLOY_DEPLOY_GAP_SECONDS = 6 * 60 * 60
+# Attempts without a branch-named span file are clustered by this time gap.
+PREDEPLOY_UNATTRIBUTED_GAP_SECONDS = 2 * 60 * 60
+PREDEPLOY_WINDOW_DAYS = 30
+SPAN_BRANCH_FILE_RE = re.compile(r"^span_durations\.(\d{8})\.(.+)\.jsonl$")
+SPAN_UNBRANCHED_SUFFIX_RE = re.compile(r"\d+|overflow")
 DEFAULT_DEPLOY_SINCE = "2026-07-11"
 DEFAULT_DESCEND_HISTORY = (
     Path(__file__).resolve().parents[1]
@@ -841,6 +855,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "credential-health": "credential-health",
         "amplitude-live": "credential-health",
         "chat-router-failover-live": "credential-health",
+        "migration-preflight": "credential-health",
         "backend-blackbox": "backend-blackbox",
         "smoke": "smoke",
         "semantic": "semantic",
@@ -1556,6 +1571,260 @@ def load_turns(db_path: Path, repo_name: str) -> list[Turn]:
         conn.close()
 
 
+def _factory_ledger_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "factory_ledger", Path(__file__).with_name("factory_ledger.py")
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def remote_main_text(path: Path, ref: str = "origin/main") -> str:
+    """The ledger as last fetched from main; deploys publish there directly."""
+    try:
+        return subprocess.run(
+            ["git", "show", f"{ref}:{path.as_posix()}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def load_ledger_rows(
+    ledger: Path, roots: Sequence[Path], extra_texts: Sequence[str] = ()
+) -> list[dict[str, Any]]:
+    """Tracked ledger rows (working tree and main) plus unpublished local telemetry."""
+    module = _factory_ledger_module()
+    rows: dict[tuple[Any, ...], dict[str, Any]] = {}
+    sources = [module.read_jsonl(ledger), *(module.parse_jsonl(text) for text in extra_texts)]
+    for row in (row for source in sources for row in source):
+        if row.get("kind") in {"deploy-stage", "factory-event"}:
+            rows.setdefault(module.row_key(row), row)
+    for root in roots:
+        for row in (*module.stage_rows(root), *module.event_rows(root)):
+            rows.setdefault(module.row_key(row), row)
+    return sorted(rows.values(), key=module.row_epoch)
+
+
+def _epoch_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def _ledger_event_invocation(
+    identifier: str, row: dict[str, Any], origin: float
+) -> Invocation:
+    workflow, event, value = (str(row.get(key, "")) for key in ("workflow", "event", "value"))
+    at = float(row["recorded_epoch"]) - origin
+    return Invocation(
+        identifier,
+        "Bash",
+        f"python3 scripts/record_factory_event.py {workflow} {event} {value}",
+        "FACTORY_EVENT "
+        + json.dumps(
+            {"workflow": workflow, "event": event, "value": value},
+            separators=(",", ":"),
+        ),
+        at,
+        at,
+        False,
+    )
+
+
+def _ledger_approvals(
+    events: Sequence[dict[str, Any]], workspace: str, session_id: str, turn_id: str, started_at: str
+) -> list[ApprovalLifecycle]:
+    lifecycles: list[ApprovalLifecycle] = []
+    requested: float | None = None
+    for row in events:
+        if row.get("event") == "approval-request":
+            # A fresh snapshot request restarts the human wait.
+            requested = float(row["recorded_epoch"])
+        elif row.get("event") == "approval-decision" and requested is not None:
+            lifecycles.append(
+                ApprovalLifecycle(
+                    workspace=workspace,
+                    session_id=session_id,
+                    request_turn_id=turn_id,
+                    deploy_started_at=started_at,
+                    requested_at=_epoch_iso(requested),
+                    decided_at=_epoch_iso(float(row["recorded_epoch"])),
+                    decision=str(row.get("value", "")),
+                    request_source="event",
+                    decision_source="event",
+                )
+            )
+            requested = None
+    return lifecycles
+
+
+def _ledger_deploy_groups(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    runs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("kind") != "deploy-stage":
+            continue
+        run = runs.setdefault(
+            str(row["run_id"]),
+            {"key": str(row["run_id"]), "branch": str(row.get("branch") or ""), "stages": [], "events": []},
+        )
+        run["stages"].append(row)
+    for run in runs.values():
+        run["start"] = min(float(stage["started_epoch"]) for stage in run["stages"])
+    by_branch: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for run in sorted(runs.values(), key=lambda value: value["start"]):
+        by_branch[run["branch"]].append(run)
+
+    orphans: list[dict[str, Any]] = []
+    open_orphan: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("kind") != "factory-event" or row.get("workflow") != "deploy":
+            continue
+        epoch = float(row["recorded_epoch"])
+        branch = str(row.get("branch") or "")
+        owner = None
+        for run in by_branch.get(branch, []):
+            if run["start"] <= epoch:
+                owner = run
+        if owner is not None and (
+            branch not in open_orphan or open_orphan[branch]["start"] < owner["start"]
+        ):
+            owner["events"].append(row)
+        else:
+            group = open_orphan.get(branch)
+            if group is None:
+                group = {"key": f"{branch or 'unknown'}@{int(epoch)}", "branch": branch, "stages": [], "events": [], "start": epoch}
+                orphans.append(group)
+                open_orphan[branch] = group
+            group["events"].append(row)
+        if row.get("event") == "outcome":
+            open_orphan.pop(branch, None)
+    return sorted([*runs.values(), *orphans], key=lambda value: value["start"])
+
+
+def ledger_deploy_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
+    turns: list[Turn] = []
+    for group in _ledger_deploy_groups(rows):
+        stage_bounds = [
+            (float(stage["started_epoch"]), float(stage["finished_epoch"])) for stage in group["stages"]
+        ]
+        event_times = [float(event["recorded_epoch"]) for event in group["events"]]
+        origin = min([start for start, _ in stage_bounds] + event_times)
+        finish = max([end for _, end in stage_bounds] + event_times)
+        invocations = [
+            Invocation(
+                f"ledger-stage-{group['key']}-{index}",
+                "Bash",
+                f"bash scripts/run-deploy-stage {stage['stage']} -- recorded",
+                "",
+                float(stage["started_epoch"]) - origin,
+                float(stage["finished_epoch"]) - origin,
+                stage.get("status") != "passed",
+            )
+            for index, stage in enumerate(group["stages"])
+        ]
+        invocations.extend(
+            _ledger_event_invocation(f"ledger-event-{group['key']}-{index}", event, origin)
+            for index, event in enumerate(group["events"])
+        )
+        invocations.sort(key=lambda value: (value.start, value.end))
+        workspace = group["branch"] or "unknown-branch"
+        session_id = f"ledger:{workspace}"
+        started_at = _epoch_iso(origin)
+        approvals = _ledger_approvals(group["events"], workspace, session_id, group["key"], started_at)
+        turns.append(
+            Turn(
+                command="deploy",
+                workspace=workspace,
+                session_id=session_id,
+                turn_id=group["key"],
+                started_at=started_at,
+                duration=finish - origin,
+                status=classify_status("deploy", "", invocations),
+                final_text="",
+                invocations=tuple(invocations),
+                approval_durations=tuple(event.duration for event in approvals),
+                approval_events=tuple(approvals),
+            )
+        )
+    # A completed deploy that resumes blocked attempts on the same branch is one
+    # logical deploy: it spans the first blocked start and consumes their waits.
+    logical: list[Turn] = []
+    blocked: dict[str, list[Turn]] = defaultdict(list)
+    for turn in turns:
+        if turn.status == "blocked":
+            blocked[turn.workspace].append(turn)
+            logical.append(turn)
+            continue
+        if turn.status != "completed":
+            logical.append(turn)
+            continue
+        earlier = blocked.pop(turn.workspace, [])
+        consumed = tuple(
+            duration for prior in (*earlier, turn) for duration in prior.approval_durations
+        )
+        lifecycle = None
+        if earlier:
+            lifecycle = (
+                parse_time(turn.started_at) - parse_time(earlier[0].started_at)
+            ).total_seconds() + turn.duration
+        logical.append(
+            replace(turn, consumed_approval_durations=consumed, lifecycle_duration=lifecycle)
+        )
+    return logical
+
+
+def ledger_rca_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
+    segments: list[list[dict[str, Any]]] = []
+    open_segment: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("kind") != "factory-event" or row.get("workflow") != "rca":
+            continue
+        key = (str(row.get("workspace") or ""), str(row.get("branch") or ""))
+        segment = open_segment.get(key)
+        if segment is None:
+            segment = []
+            segments.append(segment)
+            open_segment[key] = segment
+        segment.append(row)
+        if row.get("event") == "outcome":
+            open_segment.pop(key, None)
+    turns = []
+    for segment in segments:
+        origin = float(segment[0]["recorded_epoch"])
+        invocations = tuple(
+            _ledger_event_invocation(f"ledger-rca-{int(origin)}-{index}", row, origin)
+            for index, row in enumerate(segment)
+        )
+        workspace = str(segment[0].get("branch") or segment[0].get("workspace") or "unknown")
+        turns.append(
+            Turn(
+                command="rca",
+                workspace=workspace,
+                session_id=f"ledger:{workspace}",
+                turn_id=f"rca@{int(origin)}",
+                started_at=_epoch_iso(origin),
+                duration=float(segment[-1]["recorded_epoch"]) - origin,
+                status=classify_status("rca", "", invocations),
+                final_text="",
+                invocations=invocations,
+            )
+        )
+    return turns
+
+
+def load_ledger_turns(
+    ledger: Path, roots: Sequence[Path], extra_texts: Sequence[str] = ()
+) -> list[Turn]:
+    rows = load_ledger_rows(ledger, roots, extra_texts)
+    return sorted(
+        [*ledger_deploy_turns(rows), *ledger_rca_turns(rows)],
+        key=lambda turn: turn.started_at,
+    )
+
+
 def metric_row(
     label: str,
     runs: int,
@@ -1565,9 +1834,9 @@ def metric_row(
     incomplete_commands: int = 0,
 ) -> dict[str, Any]:
     denominator = command_count or 1
-    unavailable = bool(
-        command_count
-        and incomplete_commands == command_count
+    # No source command means no measurement: render "—", never a zero.
+    unavailable = command_count == 0 or bool(
+        incomplete_commands == command_count
         and runs == 0
         and not durations
         and wall_seconds == 0
@@ -1760,6 +2029,10 @@ def rca_measurement_mode(turn: Turn) -> str:
 def explicit_rca_state_rows(turn: Turn) -> list[StepTiming] | None:
     if rca_measurement_mode(turn) != "instrumented":
         return None
+    return rca_marker_state_rows(turn)
+
+
+def rca_marker_state_rows(turn: Turn) -> list[StepTiming] | None:
     markers: list[tuple[str, float]] = []
     for item in sorted(turn.invocations, key=lambda value: value.start):
         event = factory_event(item)
@@ -1792,6 +2065,12 @@ def rca_state_rows(turn: Turn) -> list[StepTiming]:
     explicit = explicit_rca_state_rows(turn)
     if explicit is not None:
         return explicit
+    if turn.invocations and all(factory_event(item) for item in turn.invocations):
+        # Ledger turns hold only stage events, with no tool calls to infer
+        # boundaries from: time the recorded stages and flag the gaps.
+        recorded = rca_marker_state_rows(turn)
+        if recorded is not None:
+            return [replace(timing, incomplete=True) for timing in recorded]
     categorized = [(rca_label(item), item) for item in turn.invocations]
     reproductions = [item for label, item in categorized if label == "reproduce"]
     reviews = [item for label, item in categorized if label == "review"]
@@ -1989,13 +2268,18 @@ def descend_trend(values: Sequence[float], window: int) -> dict[str, Any]:
     }
 
 
-def load_descend_factory_events(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
+def load_descend_factory_events(
+    path: Path, extra_texts: Sequence[str] = ()
+) -> list[dict[str, Any]]:
+    texts = [path.read_text(errors="replace")] if path.exists() else []
+    texts.extend(extra_texts)
     records: dict[str, dict[str, Any]] = {}
-    for line_number, line in enumerate(
-        path.read_text(errors="replace").splitlines(), 1
-    ):
+    numbered = (
+        (line_number, line)
+        for text in texts
+        for line_number, line in enumerate(text.splitlines(), 1)
+    )
+    for line_number, line in numbered:
         if not line.strip():
             continue
         try:
@@ -2107,6 +2391,241 @@ def descend_metrics(
     }
 
 
+def span_agent_branches(history_dir: Path) -> dict[str, str]:
+    """Map benchmark agent IDs to the deploy branch named by their span ledger."""
+    branches: dict[str, str] = {}
+    for path in sorted(history_dir.glob("span_durations.*.jsonl")):
+        match = SPAN_BRANCH_FILE_RE.match(path.name)
+        if match is None or SPAN_UNBRANCHED_SUFFIX_RE.fullmatch(match.group(2)):
+            continue
+        branch = match.group(2)
+        previous = b""
+        with path.open("rb") as handle:
+            for line in handle:
+                if not line.startswith(b'{"agent_id": "'):
+                    continue
+                agent_id = line[14:50]
+                if agent_id != previous:
+                    branches.setdefault(agent_id.decode(errors="replace"), branch)
+                    previous = agent_id
+    return branches
+
+
+def _percentile(values: Sequence[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))]
+
+
+def _cluster_deploys(
+    attempts: Sequence[dict[str, Any]], gap_seconds: float, label: str
+) -> list[list[dict[str, Any]]]:
+    clusters: list[list[dict[str, Any]]] = []
+    last_end: float | None = None
+    for attempt in sorted(attempts, key=lambda value: value["start"]):
+        if last_end is None or attempt["start"] - last_end > gap_seconds:
+            clusters.append([])
+        clusters[-1].append({**attempt, "deploy_branch": label})
+        last_end = max(last_end or attempt["end"], attempt["end"])
+    return clusters
+
+
+def catalog_categories(catalog_path: Path) -> dict[str, tuple[str, bool]]:
+    """Deploy category and smoke flag per task, as the predeploy selector derives them."""
+    spec = importlib.util.spec_from_file_location(
+        "select_predeploy_benches",
+        Path(__file__).resolve().parents[1] / "agents/benchmarks/select_predeploy_benches.py",
+    )
+    assert spec and spec.loader
+    selector = sys.modules.get(spec.name)
+    if selector is None:
+        selector = importlib.util.module_from_spec(spec)
+        # Its dataclasses resolve annotations through sys.modules.
+        sys.modules[spec.name] = selector
+        spec.loader.exec_module(selector)
+    try:
+        tasks = selector.load_tasks(catalog_path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    result = {}
+    for task in tasks:
+        floor = list(getattr(selector, "FLOOR_CATEGORIES", ()))
+        derived = sorted(
+            selector.categories_for_task(task) - {"harness"},
+            key=lambda name: (floor.index(name) if name in floor else len(floor), name),
+        )
+        category = task.deploy_category or (derived[0] if derived else None)
+        if category is None and task.is_smoke:
+            category = "harness"
+        result[task.name] = (category or "uncategorized", task.is_smoke)
+    return result
+
+
+def predeploy_consumption(
+    history_dir: Path, catalog_path: Path, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Measured resource use of each predeploy benchmark trajectory per deploy."""
+    attempts = []
+    for row in _factory_ledger_module().read_jsonl(history_dir / "task_attempts.jsonl"):
+        if row.get("suite") != "predeploy" or not row.get("task") or not row.get("timestamp"):
+            continue
+        try:
+            end = parse_time(str(row["timestamp"])).timestamp()
+            duration = max(0.0, float(row.get("duration_seconds") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        attempts.append(
+            {
+                "task": str(row["task"]),
+                "agent_id": str(row.get("agent_id") or ""),
+                "passed": bool(row.get("passed")),
+                "cost_cents": float(row.get("cost_cents") or 0.0),
+                "duration": duration,
+                "start": end - duration,
+                "end": end,
+            }
+        )
+    if not attempts:
+        return {"attempts": 0, "deploys": 0, "tasks": [], "categories": [], "windows": []}
+    branches = span_agent_branches(history_dir)
+    by_branch: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for attempt in attempts:
+        by_branch[branches.get(attempt["agent_id"], "")].append(attempt)
+    deploys: list[list[dict[str, Any]]] = []
+    for branch, members in by_branch.items():
+        if branch:
+            deploys.extend(_cluster_deploys(members, PREDEPLOY_DEPLOY_GAP_SECONDS, branch))
+        else:
+            deploys.extend(
+                _cluster_deploys(members, PREDEPLOY_UNATTRIBUTED_GAP_SECONDS, "unattributed")
+            )
+    deploys.sort(key=lambda members: min(item["start"] for item in members))
+
+    categories = catalog_categories(catalog_path)
+
+    deploy_summaries = []
+    task_deploys: dict[str, int] = defaultdict(int)
+    task_failed_deploys: dict[str, int] = defaultdict(int)
+    for index, members in enumerate(deploys):
+        tasks = {item["task"] for item in members}
+        for task in tasks:
+            task_deploys[task] += 1
+            if not any(item["passed"] for item in members if item["task"] == task):
+                task_failed_deploys[task] += 1
+        deploy_summaries.append(
+            {
+                "index": index,
+                "branch": members[0]["deploy_branch"],
+                "started_at": _epoch_iso(min(item["start"] for item in members)),
+                "attempts": len(members),
+                "tasks": len(tasks),
+                "agent_minutes": sum(item["duration"] for item in members) / 60,
+                "wall_minutes": interval_union_seconds(
+                    [(item["start"], item["end"]) for item in members]
+                )
+                / 60,
+                "cents": sum(item["cost_cents"] for item in members),
+            }
+        )
+
+    by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for attempt in attempts:
+        by_task[attempt["task"]].append(attempt)
+    task_rows = []
+    for task, members in by_task.items():
+        category, smoke = categories.get(task, ("uncategorized", False))
+        durations = [item["duration"] for item in members]
+        costs = [item["cost_cents"] for item in members]
+        passes = sum(item["passed"] for item in members)
+        deploy_count = task_deploys[task]
+        task_rows.append(
+            {
+                "task": task,
+                "category": category,
+                "smoke": smoke,
+                "attempts": len(members),
+                "deploys": deploy_count,
+                "attempts_per_deploy": len(members) / deploy_count if deploy_count else 0.0,
+                "median_seconds": statistics.median(durations),
+                "p90_seconds": _percentile(durations, 0.9),
+                "median_cents": statistics.median(costs),
+                "total_cents": sum(costs),
+                "agent_minutes_per_deploy": sum(durations) / 60 / deploy_count if deploy_count else 0.0,
+                "cents_per_deploy": sum(costs) / deploy_count if deploy_count else 0.0,
+                "agent_minutes": sum(durations) / 60,
+                "pass_rate": passes / len(members),
+                "failed_deploys": task_failed_deploys[task],
+                "last_seen": _epoch_iso(max(item["end"] for item in members)),
+            }
+        )
+    total_agent_minutes = sum(row["agent_minutes"] for row in task_rows) or 1.0
+    for row in task_rows:
+        row["agent_share"] = row["agent_minutes"] / total_agent_minutes
+    task_rows.sort(key=lambda row: -row["agent_minutes"])
+
+    by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in task_rows:
+        by_category[row["category"]].append(row)
+    category_rows = []
+    for category, members in by_category.items():
+        joint_pass = 1.0
+        for row in members:
+            joint_pass *= row["pass_rate"]
+        category_rows.append(
+            {
+                "category": category,
+                "tasks": [row["task"] for row in members],
+                "agent_share": sum(row["agent_share"] for row in members),
+                "agent_minutes_per_deploy": sum(row["agent_minutes_per_deploy"] for row in members),
+                "cents_per_deploy": sum(row["cents_per_deploy"] for row in members),
+                "trajectories_per_deploy": sum(row["attempts_per_deploy"] for row in members),
+                # A merged trajectory passes only when every member behavior passes.
+                "joint_pass_rate": joint_pass,
+            }
+        )
+    category_rows.sort(key=lambda row: -row["agent_share"])
+
+    current = now or datetime.now(timezone.utc)
+    # Whole UTC days: the latest window ends with today, inclusive.
+    tomorrow = datetime.combine(current.date() + timedelta(days=1), datetime.min.time(), timezone.utc)
+    windows = []
+    for label, offset in (("latest", 0), ("previous", 1)):
+        window_end = tomorrow - timedelta(days=PREDEPLOY_WINDOW_DAYS * offset)
+        window_start = window_end - timedelta(days=PREDEPLOY_WINDOW_DAYS)
+        members = [
+            summary
+            for summary in deploy_summaries
+            if window_start <= parse_time(summary["started_at"]) < window_end
+        ]
+
+        def median_of(key: str, members: list[dict[str, Any]] = members) -> float | None:
+            return statistics.median(item[key] for item in members) if members else None
+
+        windows.append(
+            {
+                "label": label,
+                "start": window_start.date().isoformat(),
+                "end": (window_end - timedelta(days=1)).date().isoformat(),
+                "deploys": len(members),
+                "median_attempts": median_of("attempts"),
+                "median_agent_minutes": median_of("agent_minutes"),
+                "median_wall_minutes": median_of("wall_minutes"),
+                "median_cents": median_of("cents"),
+            }
+        )
+    return {
+        "attempts": len(attempts),
+        "deploys": len(deploys),
+        "attributed_deploys": sum(1 for summary in deploy_summaries if summary["branch"] != "unattributed"),
+        "first": _epoch_iso(min(item["start"] for item in attempts)),
+        "last": _epoch_iso(max(item["end"] for item in attempts)),
+        "tasks": task_rows,
+        "categories": category_rows,
+        "windows": windows,
+    }
+
+
 def analyze(
     turns: Sequence[Turn],
     deploy_since: str,
@@ -2114,6 +2633,8 @@ def analyze(
     *,
     descend_records: Sequence[dict[str, Any]] = (),
     descend_window: int = 5,
+    predeploy: dict[str, Any] | None = None,
+    sources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_deploy_attempts = [turn for turn in turns if turn.command == "deploy"]
     all_deploys = [
@@ -2214,6 +2735,8 @@ def analyze(
         "deploy": deploy,
         "rca": rca,
         "descend": descend_metrics(descend_records, descend_window),
+        **({"predeploy": predeploy} if predeploy is not None else {}),
+        **({"sources": sources} if sources is not None else {}),
         "deploy_runs": [
             {
                 "workspace": turn.workspace,
@@ -2346,6 +2869,8 @@ def render_table(
     completion_summary = (
         f"{format_minutes(metrics['end_to_end_minutes'])} end-to-end · "
         f"{metrics['completed']} completed"
+        if metrics["completed"]
+        else "No completed runs in this data source"
     )
     completion_summary += (
         f" · {metrics.get('instrumented', 0)} instrumented · "
@@ -2411,10 +2936,105 @@ def render_descend_table(metrics: dict[str, Any]) -> str:
         f"<p>{summary}</p></div>"
         '<p class="note">Completed main-lane factory events from the checked-in '
         "append-only timing ledger. Negative change is faster.</p>"
-        '<table class="descend-table" aria-label="/descend iteration timing">'
+        '<div class="table-scroll"><table class="descend-table" aria-label="/descend iteration timing">'
         "<thead><tr><th>Step</th><th>Samples</th><th>Latest</th>"
         "<th>Recent median</th><th>Previous median</th><th>Change</th></tr></thead>"
-        f'<tbody>{"".join(rows)}</tbody></table></section>'
+        f'<tbody>{"".join(rows)}</tbody></table></div></section>'
+    )
+
+
+def render_sources_note(sources: dict[str, Any]) -> str:
+    gaps = "".join(f"<li>{html.escape(gap)}</li>" for gap in sources.get("gaps", []))
+    return (
+        '<section class="flow"><p class="history-note"><strong>Data source:</strong> '
+        f'{html.escape(sources["description"])}</p>'
+        + (f'<ul class="note source-gaps">{gaps}</ul>' if gaps else "")
+        + "</section>"
+    )
+
+
+def render_predeploy_section(metrics: dict[str, Any]) -> str:
+    if not metrics.get("attempts"):
+        return (
+            '<section class="flow"><div class="heading"><h2>Deploy-path benchmark '
+            "trajectories</h2><p>No predeploy attempts recorded</p></div></section>"
+        )
+
+    def money(cents: float | None) -> str:
+        return "—" if cents is None else f"${cents / 100:.2f}"
+
+    def minutes(value: float | None) -> str:
+        return "—" if value is None else format_minutes(value)
+
+    def count(value: float | None) -> str:
+        return "—" if value is None else f"{value:.0f}"
+
+    window_rows = "".join(
+        "<tr>"
+        f'<td>{html.escape(window["label"].title())} {window["start"]} → {window["end"]}</td>'
+        f'<td>{window["deploys"]}</td>'
+        f'<td>{count(window["median_attempts"])}</td>'
+        f'<td>{minutes(window["median_agent_minutes"])}</td>'
+        f'<td>{minutes(window["median_wall_minutes"])}</td>'
+        f'<td>{money(window["median_cents"])}</td>'
+        "</tr>"
+        for window in metrics["windows"]
+    )
+    task_rows = "".join(
+        "<tr>"
+        f'<td>{html.escape(row["task"])}{" · smoke" if row["smoke"] else ""}</td>'
+        f'<td>{html.escape(row["category"])}</td>'
+        f'<td>{row["agent_share"] * 100:.1f}%</td>'
+        f'<td>{row["deploys"]}</td>'
+        f'<td>{row["attempts_per_deploy"]:.2f}</td>'
+        f'<td>{format_seconds(row["median_seconds"])}</td>'
+        f'<td>{format_minutes(row["agent_minutes_per_deploy"])}</td>'
+        f'<td>{money(row["cents_per_deploy"])}</td>'
+        f'<td>{row["pass_rate"] * 100:.0f}%</td>'
+        f'<td>{row["failed_deploys"]}</td>'
+        "</tr>"
+        for row in metrics["tasks"]
+    )
+    category_rows = "".join(
+        "<tr>"
+        f'<td>{html.escape(row["category"])}</td>'
+        f'<td class="wrap-cell">{html.escape(", ".join(row["tasks"]))}</td>'
+        f'<td>{row["agent_share"] * 100:.1f}%</td>'
+        f'<td>{row["trajectories_per_deploy"]:.2f}</td>'
+        f'<td>{format_minutes(row["agent_minutes_per_deploy"])}</td>'
+        f'<td>{money(row["cents_per_deploy"])}</td>'
+        f'<td>{row["joint_pass_rate"] * 100:.0f}%</td>'
+        "</tr>"
+        for row in metrics["categories"]
+        if len(row["tasks"]) > 1
+    )
+    return (
+        '<section class="flow">'
+        '<div class="heading"><h2>Deploy-path benchmark trajectories</h2>'
+        f'<p>{metrics["attempts"]} predeploy attempts · {metrics["deploys"]} deploys '
+        f'({metrics["attributed_deploys"]} branch-attributed) · '
+        f'{metrics["first"][:10]} → {metrics["last"][:10]}</p></div>'
+        '<p class="note">Each attempt is one agent trajectory from the checked-in '
+        "predeploy ledger (task_attempts.jsonl, suite=predeploy). Deploys are grouped "
+        "by the branch-named span ledger, or by time gaps when no branch file exists. "
+        "Agent time sums trajectory durations; wall clock unions them.</p>"
+        '<div class="table-scroll"><table class="predeploy-table" aria-label="Predeploy cost per deploy window">'
+        "<thead><tr><th>Window</th><th>Deploys</th><th>Trajectories</th>"
+        "<th>Agent time</th><th>Wall clock</th><th>Cost</th></tr></thead>"
+        f"<tbody>{window_rows}</tbody></table></div>"
+        '<div class="table-scroll"><table class="predeploy-table" aria-label="Predeploy trajectories by consumption">'
+        "<thead><tr><th>Trajectory</th><th>Category</th><th>Agent-time share</th>"
+        "<th>Deploys</th><th>Runs/deploy</th>"
+        "<th>Median</th><th>Agent time/deploy</th><th>Cost/deploy</th><th>Pass</th>"
+        "<th>Failed deploys</th></tr></thead>"
+        f"<tbody>{task_rows}</tbody></table></div>"
+        '<p class="note">Combination candidates: trajectories that share a deploy '
+        "category. Joint pass is the product of member pass rates — the expected pass "
+        "rate if their behaviors were asserted in one trajectory.</p>"
+        '<div class="table-scroll"><table class="predeploy-table" aria-label="Same-category combination candidates">'
+        "<thead><tr><th>Category</th><th>Trajectories</th><th>Agent-time share</th><th>Runs/deploy</th>"
+        "<th>Agent time/deploy</th><th>Cost/deploy</th><th>Joint pass</th></tr></thead>"
+        f"<tbody>{category_rows}</tbody></table></div></section>"
     )
 
 
@@ -2429,7 +3049,10 @@ def render_html(payload: dict[str, Any]) -> str:
         "and fixes, commits, transitions, and waits can sit outside them. "
         "End-to-end is the full logical /deploy start → finish."
     )
-    content = render_table("/deploy", "deploy", deploy, deploy_note) + render_table(
+    content = (
+        render_sources_note(payload["sources"]) if "sources" in payload else ""
+    )
+    content += render_table("/deploy", "deploy", deploy, deploy_note) + render_table(
         "/RCA",
         "rca",
         payload["rca"],
@@ -2437,6 +3060,8 @@ def render_html(payload: dict[str, Any]) -> str:
     )
     if "descend" in payload:
         content += render_descend_table(payload["descend"])
+    if "predeploy" in payload:
+        content += render_predeploy_section(payload["predeploy"])
     trend_data = json.dumps(
         {
             "generated_at": payload["generated_at"],
@@ -2507,6 +3132,13 @@ def render_html(payload: dict[str, Any]) -> str:
     .wall-only-cell { color: var(--muted); vertical-align: middle; }
     .descend-table th:nth-child(1), .descend-table td:nth-child(1) { width: 31%; }
     .descend-table th:nth-child(n+2), .descend-table td:nth-child(n+2) { width: 13.8%; }
+    .table-scroll { margin-top: 10px; overflow-x: auto; }
+    .predeploy-table { table-layout: auto; }
+    .predeploy-table th:nth-child(n), .predeploy-table td:nth-child(n) { width: auto; }
+    .predeploy-table td.wrap-cell { min-width: 220px; white-space: normal; }
+    .predeploy-table td:first-child { white-space: nowrap; }
+    .predeploy-table td, .predeploy-table th { font-size: 13px; padding-left: 6px; padding-right: 6px; }
+    .source-gaps { margin: 4px 0 0; padding-left: 18px; }
     .sr-only { clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
     .total-row td { border-top: 2px solid var(--border); font-weight: 600; }
     .cell-chart { margin-top: 6px; }
@@ -2535,6 +3167,7 @@ def render_html(payload: dict[str, Any]) -> str:
       th:nth-child(1), td:nth-child(1) { width: 34%; }
       th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { width: 25%; }
       th:nth-child(4), td:nth-child(4) { width: 16%; }
+      .descend-table { min-width: 560px; }
     }
   </style>
 </head>
@@ -2786,12 +3419,15 @@ def render_html(payload: dict[str, Any]) -> str:
 def print_summary(payload: dict[str, Any]) -> None:
     for name in ("deploy", "rca"):
         metrics = payload[name]
+        label = f"/{name.upper() if name == 'rca' else name}"
         print(
-            f"/{name.upper() if name == 'rca' else name} {metrics['end_to_end_minutes']:.1f}m average ({metrics['completed']} completed)"
+            f"{label} {metrics['end_to_end_minutes']:.1f}m average ({metrics['completed']} completed)"
+            if metrics["completed"]
+            else f"{label}: no completed runs in this data source"
         )
         print("Step                       Runs  Avg/run  Total")
         for step in metrics["steps"]:
-            if step["step"] in DEPLOY_GROUP_SUMMARIES:
+            if step["step"] in DEPLOY_GROUP_SUMMARIES and not step.get("unavailable"):
                 print(
                     f"{step['step']:<26} {'—':>4}  {'—':>7}  "
                     f"{step['total_minutes']:>5.1f}m"
@@ -2825,6 +3461,22 @@ def print_summary(payload: dict[str, Any]) -> None:
                 f"{format_seconds(step['recent_median_seconds']):>6}  "
                 f"{format_seconds(step['previous_median_seconds']):>8}  "
                 f"{step_change_text:>6}"
+            )
+        print()
+    predeploy = payload.get("predeploy")
+    if predeploy and predeploy.get("attempts"):
+        print(
+            f"Predeploy trajectories {predeploy['attempts']} attempts across "
+            f"{predeploy['deploys']} deploys ({predeploy['first'][:10]} → {predeploy['last'][:10]})"
+        )
+        print("Trajectory                                Share  Deploys  Runs/dep  Median  Agent/dep  Cost/dep  Pass")
+        for row in predeploy["tasks"]:
+            print(
+                f"{row['task'][:41]:<41} {row['agent_share'] * 100:>4.1f}%  "
+                f"{row['deploys']:>7}  {row['attempts_per_deploy']:>8.2f}  "
+                f"{format_seconds(row['median_seconds']):>6}  "
+                f"{format_minutes(row['agent_minutes_per_deploy']):>9}  "
+                f"${row['cents_per_deploy'] / 100:>7.2f}  {row['pass_rate'] * 100:>3.0f}%"
             )
         print()
 
@@ -3063,7 +3715,24 @@ def self_test() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source",
+        choices=("auto", "conductor", "ledger"),
+        default="auto",
+        help="auto uses the Conductor DB when present, else the tracked factory ledger",
+    )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--ledger", type=Path, default=DEFAULT_FACTORY_LEDGER)
+    parser.add_argument(
+        "--telemetry-root",
+        action="append",
+        type=Path,
+        default=None,
+        help="extra directory with deploy-runs/ and factory-events.jsonl "
+        "(default: .context; repeatable)",
+    )
+    parser.add_argument("--history-dir", type=Path, default=DEFAULT_HISTORY_DIR)
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--deploy-since", default=DEFAULT_DEPLOY_SINCE)
     parser.add_argument("--limit", type=int, default=20)
@@ -3086,13 +3755,43 @@ def main() -> int:
         raise SystemExit("--limit must be positive")
     if args.descend_window < 1:
         raise SystemExit("--descend-window must be positive")
-    turns = load_turns(args.db, args.repo)
+    source = args.source
+    if source == "auto":
+        source = "conductor" if args.db.exists() else "ledger"
+    if source == "conductor":
+        turns = load_turns(args.db, args.repo)
+        sources = {
+            "mode": "conductor",
+            "description": f"Conductor transcripts ({args.db}).",
+            "gaps": [],
+        }
+    else:
+        roots = args.telemetry_root or [DEFAULT_TELEMETRY_ROOT]
+        turns = load_ledger_turns(args.ledger, roots, [remote_main_text(args.ledger)])
+        sources = {
+            "mode": "ledger",
+            "description": (
+                f"Tracked factory ledger {args.ledger} (working tree and origin/main) "
+                "plus unpublished local telemetry in "
+                + ", ".join(str(root) for root in roots)
+                + ". No Conductor database on this machine."
+            ),
+            "gaps": [
+                "/deploy and /RCA rows include only runs whose stage records and factory "
+                "events reached the ledger; older Conductor-only history is not in the repo.",
+                "A run without a final outcome event is excluded, not counted as zero.",
+            ],
+        }
     payload = analyze(
         turns,
         args.deploy_since,
         args.limit,
-        descend_records=load_descend_factory_events(args.descend_history),
+        descend_records=load_descend_factory_events(
+            args.descend_history, [remote_main_text(args.descend_history)]
+        ),
         descend_window=args.descend_window,
+        predeploy=predeploy_consumption(args.history_dir, args.catalog),
+        sources=sources,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = (args.output_dir / "factory-review.json").resolve()

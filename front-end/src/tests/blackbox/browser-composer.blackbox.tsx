@@ -25,6 +25,7 @@ function browser(value: Partial<RoseAppsValue> = {}) {
     openApp: 'browser',
     browserMode: 'remote',
     browserTabAgentId: 'owner',
+    browserTabTaskId: 'browser-task',
     selectedAgentId: 'owner',
     browserComposerSlot: slot,
     tabs: [{ agentId: 'owner', taskId: 'browser-task', live: true }],
@@ -157,4 +158,33 @@ it('keeps the native code composer usable on its original direct channel in Brow
   expect(box.queryByPlaceholderText('Message Rose about this browser')).toBeNull();
   fireEvent.keyDown(box.getByRole('textbox'), { key: 'Enter' });
   expect(nativeSubmit).toHaveBeenCalledOnce();
+});
+
+it('rejects the stale sibling task slot while both browser tabs remain registered', () => {
+  renderWithProviders(
+    <RoseAppsContext.Provider
+      value={browser({
+        browserTabTaskId: 'other-browser-task',
+        tabs: [
+          { agentId: 'owner', taskId: 'browser-task', live: true },
+          {
+            agentId: 'owner',
+            taskId: 'other-browser-task',
+            live: true,
+            actualModel: 'other-model',
+          },
+        ],
+      })}
+    >
+      <QueryInput
+        liftAboveApps
+        agentId="owner"
+        value="draft"
+        onChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />
+    </RoseAppsContext.Provider>,
+  );
+  expect(screen.queryByTestId('browser-query-input')).toBeNull();
+  expect(slot?.childElementCount).toBe(0);
 });

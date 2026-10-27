@@ -11,7 +11,7 @@
 
 import { config } from '../../base/config';
 import { UPLOAD_ENDPOINTS, WHATSAPP_CONNECT_ENDPOINT } from './config';
-import type { IMessageUploadPayload, UploadStrategy } from './types';
+import type { IMessageUploadPayload, MessagingUploadOptions, UploadStrategy } from './types';
 
 /** Result of a single upload HTTP call — unwrapped for the service layer. */
 export interface UploadHttpResult {
@@ -35,9 +35,14 @@ function toResult(response: Response): UploadHttpResult {
 async function postContactsJson(
   strategy: Extract<UploadStrategy, 'imessage' | 'whatsapp' | 'telegram'>,
   contacts: unknown,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadHttpResult> {
-  const body = { contacts, accessedAt: new Date().toISOString() };
+  const body = {
+    contacts,
+    accessedAt: options.accessedAt ?? new Date().toISOString(),
+    ...(options.syncComplete === false ? { syncComplete: false } : {}),
+  };
   const response = await fetch(urlFor(strategy), {
     method: 'POST',
     headers: {
@@ -52,9 +57,10 @@ async function postContactsJson(
 /** POST an iMessage payload (already grouped into contacts). */
 export function postIMessagePayload(
   payload: IMessageUploadPayload,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadHttpResult> {
-  return postContactsJson('imessage', payload.contacts, accessToken);
+  return postContactsJson('imessage', payload.contacts, accessToken, options);
 }
 
 /** POST a WhatsApp contacts blob to the dedicated endpoint. */

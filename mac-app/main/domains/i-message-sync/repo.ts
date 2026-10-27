@@ -8,6 +8,7 @@ import type {
   AuthSession,
   IMessageData,
   Integration,
+  MessagingUploadOptions,
   NormalizedMessage,
   UploadResult,
 } from './types';
@@ -83,7 +84,8 @@ export function startImessageProgressRun(): ProgressRun {
  */
 export async function uploadImessagePayload(
   data: unknown,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadResult> {
-  return BatchUploader.uploadInBatches('imessage', data, accessToken, null);
+  return BatchUploader.uploadInBatches('imessage', data, accessToken, null, options);
 }

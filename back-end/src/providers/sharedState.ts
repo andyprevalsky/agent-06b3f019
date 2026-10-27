@@ -64,6 +64,23 @@ export async function getEphemeral<T>(namespace: string, key: string): Promise<T
   return rows[0]?.value;
 }
 
+/** Which of `keys` hold a live value. Bounded by the caller's candidate list. */
+export async function liveEphemeralKeys(namespace: string, keys: string[]): Promise<Set<string>> {
+  if (keys.length === 0) return new Set();
+  const rows = await prisma.$queryRaw<Array<{ key: string }>>`
+    SELECT key FROM "SharedEphemeralState"
+    WHERE namespace = ${namespace} AND key = ANY(${keys}::text[]) AND "expiresAt" > now()
+  `;
+  return new Set(rows.map((row) => row.key));
+}
+
+/** Delete a value whether or not it is still live. */
+export async function deleteEphemeral(namespace: string, key: string): Promise<void> {
+  await prisma.$executeRaw`
+    DELETE FROM "SharedEphemeralState" WHERE namespace = ${namespace} AND key = ${key}
+  `;
+}
+
 /** Atomically read and delete a live value: exactly one caller across all instances gets it. */
 export async function takeEphemeral<T>(namespace: string, key: string): Promise<T | undefined> {
   const rows = await prisma.$queryRaw<Array<{ value: T }>>`
@@ -78,6 +95,11 @@ export async function takeEphemeral<T>(namespace: string, key: string): Promise<
  * Claim `key` until `ttlMs` elapses, unless another live claim holds it.
  * Returns an owner token on success, null when another instance holds it.
  * An expired claim is taken over, so a crashed holder never wedges the key.
+ *
+ * The token is minted before the statement, so the query layer's retry on a
+ * dropped connection (P1001/P1017) replays the same token: an INSERT that
+ * committed before its reply was lost then matches its own claim instead of
+ * reporting it as another instance's.
  */
 export async function acquireLease(
   namespace: string,
@@ -92,9 +114,44 @@ export async function acquireLease(
     ON CONFLICT (namespace, key) DO UPDATE
       SET value = EXCLUDED.value, "expiresAt" = EXCLUDED."expiresAt", "createdAt" = now()
       WHERE "SharedEphemeralState"."expiresAt" <= now()
+        OR "SharedEphemeralState".value->>'token' = ${token}
     RETURNING key
   `;
   return rows.length === 1 ? token : null;
+}
+
+/** Store `value` only if no live row holds `key` (an expired row is replaced). Atomic. */
+export async function insertEphemeralIfAbsent(
+  namespace: string,
+  key: string,
+  value: Prisma.InputJsonValue,
+  ttlMs: number
+): Promise<boolean> {
+  const rows = await prisma.$queryRaw<Array<{ key: string }>>`
+    INSERT INTO "SharedEphemeralState" (namespace, key, value, "expiresAt")
+    VALUES (${namespace}, ${key}, ${JSON.stringify(value)}::jsonb, now() + ${ttlInterval(ttlMs)})
+    ON CONFLICT (namespace, key) DO UPDATE
+      SET value = EXCLUDED.value, "expiresAt" = EXCLUDED."expiresAt", "createdAt" = now()
+      WHERE "SharedEphemeralState"."expiresAt" <= now()
+    RETURNING key
+  `;
+  return rows.length === 1;
+}
+
+/** Replace a lease's value only while `token` still owns it. Returns false when it does not. */
+export async function replaceLeaseValue(
+  namespace: string,
+  key: string,
+  token: string,
+  value: Prisma.InputJsonValue,
+  ttlMs: number
+): Promise<boolean> {
+  const count = await prisma.$executeRaw`
+    UPDATE "SharedEphemeralState"
+    SET value = ${JSON.stringify(value)}::jsonb, "expiresAt" = now() + ${ttlInterval(ttlMs)}
+    WHERE namespace = ${namespace} AND key = ${key} AND value->>'token' = ${token}
+  `;
+  return count === 1;
 }
 
 /** Release a lease only if `token` still owns it (a taken-over lease is left alone). */
