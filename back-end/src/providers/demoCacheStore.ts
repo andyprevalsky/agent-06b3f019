@@ -575,20 +575,20 @@ export async function offloadFastCacheBatch(
   options: { dryRun?: boolean; concurrency?: number } = {}
 ): Promise<FastCacheOffloadBatch> {
   const client = getDemoCachePrisma();
-  const bounded = async <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
-    client.$transaction(
-      async (tx) => {
-        if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '15s'`);
-        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`);
-        return fn(tx);
-        // Workers queue for the bounded pool; statement_timeout bounds the work.
-      },
-      { maxWait: 30_000, timeout: 30_000 }
-    );
+  // One non-interactive transaction per statement: its timeouts apply to that
+  // statement only and nothing holds a pooled connection between statements.
+  const bounded = async <T>(statement: Prisma.PrismaPromise<T>): Promise<T> => {
+    const settings = [
+      ...(options.dryRun ? [client.$executeRawUnsafe('SET TRANSACTION READ ONLY')] : []),
+      client.$executeRawUnsafe(`SET LOCAL statement_timeout = '15s'`),
+      client.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`),
+    ];
+    const results = await client.$transaction([...settings, statement]);
+    return results[results.length - 1] as T;
+  };
   // pg_column_size reads the TOAST pointer, not the value: no detoasting here.
-  const rows = await bounded((tx) =>
-    tx.$queryRaw<Array<{ key: string; kind: string; size: number }>>(Prisma.sql`
+  const rows = await bounded(
+    client.$queryRaw<Array<{ key: string; kind: string; size: number }>>(Prisma.sql`
       SELECT key, kind, pg_column_size(value)::int AS size FROM "FastModeCacheEntry"
       WHERE ${afterKey === null ? Prisma.sql`TRUE` : Prisma.sql`key > ${afterKey}`}
         AND "blobPath" IS NULL
@@ -610,8 +610,8 @@ export async function offloadFastCacheBatch(
   );
   // Each row is independent; a bounded pool overlaps the round trips.
   const moveOne = async (candidate: (typeof candidates)[number]): Promise<void> => {
-    const [current] = await bounded((tx) =>
-      tx.$queryRaw<Array<{ value: unknown; digest: string }>>(Prisma.sql`
+    const [current] = await bounded(
+      client.$queryRaw<Array<{ value: unknown; digest: string }>>(Prisma.sql`
         SELECT value, md5(value::text) AS digest FROM "FastModeCacheEntry"
         WHERE key = ${candidate.key} AND "blobPath" IS NULL
       `)
@@ -626,8 +626,8 @@ export async function offloadFastCacheBatch(
     await uploadOffload(prepared);
     const check = await rehydrateRows([{ key: candidate.key, value: prepared.marker }]);
     if (check.length !== 1) throw new Error(`offloaded body did not read back: ${candidate.key}`);
-    const updated = await bounded((tx) =>
-      tx.$executeRaw(Prisma.sql`
+    const updated = await bounded(
+      client.$executeRaw(Prisma.sql`
         UPDATE "FastModeCacheEntry" SET value = ${JSON.stringify(prepared.marker)}::jsonb
         WHERE key = ${candidate.key} AND "blobPath" IS NULL
           AND md5(value::text) = ${current.digest}
