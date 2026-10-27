@@ -106,3 +106,42 @@ Dependency proof must bind the artifact actually consumed by the selected
 storage mode. A valid mutable-volume receipt cannot establish immutable-image
 dependency compatibility. Preserve fail-closed guest validation and collect
 identities at the failing boundary rather than inferring them from image age.
+
+## I21 follow-up: match maintenance to consumed storage
+
+After the I19 image guard, `warm_deps_preflight` still attempted central volume
+dependency refresh for disposable cohorts whose primaries and workers all use
+fresh storage. The actual owned Volume create omits a snapshot ID in this mode;
+new workers likewise retain no donor storage. The selected complete snapshot
+and native donor volume/template/region checks remain necessary existing
+admission metadata and were preserved. This follow-up removes only dependency
+maintenance for trees this narrow cohort does not consume.
+
+The image gate now uses the same canonical `primary_clone_storage_mode` as
+allocation, including native catalog SIM and explicit overrides. It records the
+validated semantic identity in the existing current-fingerprint fields. The
+warm gate captures that identity before recomputing current manifests and can
+skip volume dependency work only when identity still matches, tasks are
+nonempty and all fresh, lifecycle is disposable, there is no active pool
+ledger, and the private-source branch did not apply. Changed or missing
+manifests between gates reject before maintenance. Mixed/SIM/snapshot,
+retained-pool and private-source dependency contracts remain intact.
+
+The unchanged reproduction failed four controls on parent `e6f6e7033`: redundant
+fresh-only refresh, native SIM incorrectly requiring image proof, changed
+manifest drift and missing manifest drift. Nine controls already passed. Exact
+candidate selection controls passed alongside all 38 I19 controls. Actual
+function tests mock only external snapshot/refresh effects and Git dirtiness;
+semantic fingerprints, receipt validation and storage classification execute.
+This is offline source proof, not a live wall-time improvement measurement.
+Snapshot selection/readiness and provider checks were not removed. The frozen
+image build and the parent-owned next cohort were not changed by this owner.
+
+Independent reviewer `ph74rex3pescaywbxyjn3njr158h3pp9` grounded final I21v3
+four-path patch SHA256
+`3556075202a9b3e469e89fe6c37078113038297d84e5d7f06d59783c2110fa38`
+against `e6f6e7033d9f7b87e3898b040c23632d80cfc46a` before application and
+independently passed all 13 selection controls. The intermediate v2 verdict was
+withdrawn when the missing-manifest counterexample was identified; only final
+v3 was applied. This appendix is truthful documentation added after protected
+patch review and makes no live benchmark or resource-release claim.

@@ -69,11 +69,13 @@ def admission(tmp_path, fault='', storage='fresh', simulate=False, namespace='or
     # On the original source only the volume gate existed and admitted this
     # matching volume proof, regardless of which baked image fresh storage used.
     volume_gate = _extract_fleet_function(source, 'warm_deps_preflight() {')
+    classifier = _extract_fleet_function(source, 'primary_clone_storage_mode() {')
     script = f'''set -eu
 source {shlex.quote(str(HELPER))}
 ROOT_DIR=fixture
 FRESH_VOLUMES={int(storage == 'fresh')}
 BENCHES=(fixture)
+CATALOG_MODES=(real)
 WARM_ID={source_id}
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
 CLOUDBENCH_IMAGE_BUILD_RECEIPT={shlex.quote(str(path))}
@@ -91,6 +93,7 @@ cloudbench_node_dependency_fingerprint() {{ printf {NODE}; }}
 cloudbench_manifest_fingerprint() {{ printf {PYTHON}; }}
 is_sim_on() {{ return {0 if simulate else 1}; }}
 campaign_inventory_capture() {{ printf inventory >> {shlex.quote(str(trace))}; printf -v "$1" '%s' {shlex.quote(json.dumps(inventory))}; }}
+{classifier}
 {volume_gate}
 {gate}
 {('fresh_image_deps_preflight' if gate else 'warm_deps_preflight')}

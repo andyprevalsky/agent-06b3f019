@@ -16304,12 +16304,33 @@ warm_deps_preflight() {
         fi
         return 0
     fi
+    local admitted_node_fp="${CURRENT_NODE_FP:-}" admitted_py_fp="${CURRENT_PY_FP:-}"
     local state="$WARM_DEPS_STATE_FILE"
     local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap recorded_state
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
     CURRENT_NODE_FP="$node_fp"
     CURRENT_PY_FP="$py_fp"
+    # Disposable fresh primaries and their fresh workers consume the admitted
+    # image, not snapshot dependency trees. Retain volume proof for every
+    # snapshot, private-source, or retained-pool path.
+    if [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] \
+        && [ ! -s "${POOL_IDS_FILE:-}" ] && [ "${#BENCHES[@]}" -gt 0 ]; then
+        local bench storage_mode all_fresh=1
+        for bench in "${BENCHES[@]}"; do
+            storage_mode="$(primary_clone_storage_mode "$bench")" || return 1
+            [ "$storage_mode" = fresh ] || all_fresh=0
+        done
+        if [ "$all_fresh" = 1 ]; then
+            if [ -z "$node_fp" ] || [ -z "$py_fp" ] \
+                || [ "$node_fp" != "$admitted_node_fp" ] || [ "$py_fp" != "$admitted_py_fp" ]; then
+                echo "❌ fresh dependency identity differs from the admitted image; refusing volume maintenance" >&2
+                return 1
+            fi
+            echo "✅ fresh-only disposable guests use admitted image dependencies; no volume dependency refresh"
+            return 0
+        fi
+    fi
     if [ -z "$node_fp" ] || [ -z "$py_fp" ]; then
         echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
         return 0
@@ -16395,9 +16416,14 @@ warm_deps_preflight() {
 }
 fresh_image_deps_preflight() {
     [ "$FRESH_VOLUMES" = 1 ] || return 0
-    local bench needs_image=0 image_inventory node_fp py_fp
+    local bench storage_mode needs_image=0 image_inventory node_fp py_fp
     for bench in "${BENCHES[@]}"; do
-        is_sim_on "$bench" || needs_image=1
+        storage_mode="$(primary_clone_storage_mode "$bench")" || return 1
+        case "$storage_mode" in
+            fresh) needs_image=1 ;;
+            snapshot) ;;
+            *) return 1 ;;
+        esac
     done
     [ "$needs_image" = 1 ] || return 0
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
@@ -16411,6 +16437,8 @@ fresh_image_deps_preflight() {
         echo "   then pin its receipt via CLOUDBENCH_IMAGE_BUILD_RECEIPT and CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256." >&2
         return 1
     fi
+    CURRENT_NODE_FP="$node_fp"
+    CURRENT_PY_FP="$py_fp"
     echo "✅ fresh-storage baked image dependencies match the current ref"
 }
 fresh_image_deps_preflight || exit 1
