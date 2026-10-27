@@ -97,3 +97,25 @@ The full-agent positive test now covers the successful continuation/recreation
 criteria. Activating this as a permanent catalog case still needs the reviewed
 fixture/evaluator integration and definition approval. The controlled real-model
 failed-retry and iframe variants were not run in this full-agent follow-up.
+
+## Final combined-source Rose verification
+
+After integrating shared Steel/Kernel custody, partitioned frame persistence,
+and same-agent denial continuation, ordinary Rose agent
+`a280adfb-ddb9-427a-9d76-41e35e039f3e` repeated the positive approval flow on
+the final runtime in **174.5 seconds**. It used actual root/browser models,
+Temporal Cloud, Kernel, and the normal attention-request API. The merchant
+recorded zero attempts before approval and exactly one valid synthetic order
+afterward, with no duplicate or invalid attempt. Cookie, localStorage,
+IndexedDB and sessionStorage proofs all passed across native recreation under
+the same logical browser. The original click result retained its call ID and
+`action_executed=false`; the next actual model action was `read_browser_state`.
+No real payment or shipment occurred. This run does not add a full-model
+negative-denial, intentional failed-retry, or cross-site-frame claim; owning
+integration tests cover those separately.
+
+[Final Rose recording and 84 messages](https://www.roselabs.ai/?agent-id=a280adfb-ddb9-427a-9d76-41e35e039f3e#benchmark-share=98dab579-4c4f-45b5-bc54-0bf53f495064.1795725487.6259e800cece29507247ee9e63a18b44fe7b7a50d8396de78553c521d658c403) were published
+and verified in a fresh browser. The exact terminal agent, merchant and
+merchant tunnel were retired; the deployment semantic stack remains owned
+until its mandatory gate finishes. Runtime source binding and strict ledger:
+`.context/rca-3392/final-rose-positive-validation.json`.
