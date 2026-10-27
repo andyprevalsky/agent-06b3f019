@@ -2735,6 +2735,13 @@ PY
 }
 
 cloudbench_collect_remaining_runtime_evidence() {
+    # A rejected configuration has no guest runtime to manifest. Reverify its
+    # existing zero-credit whole-owner archive before accepting that phase.
+    if [ -e "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] \
+        || [ -L "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ]; then
+        fleet_recovery_confirm_preconfig_cohort "$FLEET_REGISTRY_DIR"
+        return $?
+    fi
     local out owner wid pid j failed=0
     local -a capture_pids=()
     for j in "${!CHILD_OUT[@]}"; do
@@ -15388,6 +15395,28 @@ cleanup() {
         # cancellation that lost a permit retains exact ownership fail-closed.
         fleet_native_reap_close && fleet_native_reap_open \
             || { KEEP_CLONES=1; ec=1; teardown_failed=1; billing_owned_joins=0; }
+    fi
+    # Rejected boot configuration cannot produce a guest runtime manifest.
+    # Preserve its original failed projection and prove the complete inert
+    # cohort before disposable retirement removes the native evidence source.
+    if [ "$billing_owned_joins" = "1" ] && [ "$guest_shutdown_failed" = "0" ] \
+        && [ "$KEEP_CLONES" != "1" ] && [ "$FLEET_REGISTRY_PUBLISHED" = "1" ]; then
+        local preconfig_output preconfig_candidate=0
+        for preconfig_output in "${CHILD_OUT[@]}"; do
+            if [ -e "$preconfig_output/boot-config-unapplied" ] \
+                || [ -L "$preconfig_output/boot-config-unapplied" ]; then
+                preconfig_candidate=1
+            fi
+        done
+        if [ "$preconfig_candidate" = "1" ]; then
+            if ! finalize_terminal_projection "$ec" \
+                || ! fleet_recovery_confirm_preconfig_cohort "$FLEET_REGISTRY_DIR"; then
+                echo "❌ rejected boot configuration evidence is unverified; retaining exact ownership and resources" >&2
+                KEEP_CLONES=1
+                ec=1
+                teardown_failed=1
+            fi
+        fi
     fi
     # Guest ACK and copied runtime evidence are independent receipts. Keep the
     # durable evidence latch through every crash window until all primary and

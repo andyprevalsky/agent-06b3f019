@@ -36393,3 +36393,77 @@ fleet_reap_registry_record_native {shlex.quote(str(registry))} stale 2 0 {shlex.
         assert not any(call.startswith("audit ") for call in call_log)
         assert record.read_text() == "name=cloudbench-late\nvolume_id=vol_late\n"
         assert "does not mount owned volume vol_late; retaining record" in result.stderr
+
+
+@pytest.mark.parametrize('fault', ['none', 'changed-native', 'accepted', 'worker', 'unjoined', 'projection'])
+def test_current_preconfig_captures_before_disposable_reap(tmp_path, fault):
+    root, registry, audit, run, out, native = _preconfig_recovery_integration_fixture(tmp_path)
+    source = fleet_source_text()
+    if fault == 'accepted':
+        (out / 'post-config-start.accepted').write_text(native['id'])
+    elif fault == 'worker':
+        (out / 'worker-clones.ids').write_text('feedface\n')
+    before, after = tmp_path / 'before.json', tmp_path / 'after.json'
+    before.write_text(json.dumps(native))
+    after.write_text(json.dumps({**native, 'instance_id': 'changed'} if fault == 'changed-native' else native))
+    names = ('fleet_preconfig_recovery_plan', 'fleet_recovery_confirm_preconfig_cohort',
+             'cloudbench_collect_remaining_runtime_evidence', 'cloudbench_validate_primary_runtime_evidence',
+             'cloudbench_validate_worker_evidence_coverage')
+    helpers = '\n'.join(_extract_fleet_function(source, n + '() {') for n in names)
+    start = source.index('    # Rejected boot configuration cannot') if '    # Rejected boot configuration cannot' in source else source.index('    # Guest ACK and copied runtime evidence')
+    block = source[start:source.index('    # Finish all data-plane reads first.', start)]
+    calls = tmp_path / 'calls'
+    command = f'''set -uo pipefail
+APP=fixture-app
+ROOT_DIR={shlex.quote(str(ROOT))}
+FLEET_OWNER_TOKEN={registry.name}
+RUN_ID=original-run
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}
+STARTUP_FAILURE_ARCHIVE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-startup-failure-archive.py"
+POOL_REUSE_ONLY=0
+FLEET_REGISTRY_PUBLISHED=1
+KEEP_CLONES=0
+CHILD_OUT=({shlex.quote(str(out))})
+CHILD_MACHINE=({native['id']})
+CLOUDBENCH_BOOT_LAUNCH=1
+{helpers}
+fleet_preconfig_native_read() {{
+ printf 'read\\n' >> {shlex.quote(str(calls))}
+ if [ "$(wc -l < {shlex.quote(str(calls))})" = 1 ]; then cp {shlex.quote(str(before))} "$2"; else cp {shlex.quote(str(after))} "$2"; fi
+}}
+cloudbench_fsync_directory() {{ return 0; }}
+finalize_terminal_projection() {{ printf 'projection\\n' >> {shlex.quote(str(tmp_path / 'ordering'))}; return {1 if fault == 'projection' else 0}; }}
+fleet_current_disposable_registry() {{ return 0; }}
+cloudbench_retain_runtime_evidence() {{ touch "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed"; }}
+fleet_record_disposable_cleanup_state() {{ printf '%s %s %s %s\\n' "$1" "$2" "$KEEP_CLONES" "$ec" > {shlex.quote(str(tmp_path / 'result'))}; }}
+FLY() {{ echo FORBIDDEN >&2; return 99; }}
+main() {{
+ local ec=1 teardown_failed=0 runtime_evidence_failed=0 guest_shutdown_failed=0 billing_owned_joins={0 if fault == 'unjoined' else 1}
+{block}
+}}
+main
+'''
+    result = subprocess.run(['bash', '-c', command], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    receipt = out / 'failed-preconfig-runtime-archive/consumed.json'
+    if fault == 'none':
+        assert receipt.exists(), 'rejected boot was retired without preserving a phase receipt'
+        proof = json.loads(receipt.read_text())
+        assert proof['proof_credit'] == 0 and proof['runtime_evidence_complete'] is False
+        assert proof['native_release_verified'] is False and proof['preconfig_evidence_verified'] is True
+        assert not (out / 'runtime-evidence.pending').exists()
+        assert not (registry / 'runtime-evidence-unconfirmed').exists()
+        assert (tmp_path / 'result').read_text().strip() == '0 0 0 1'
+        assert calls.read_text().splitlines() == ['read', 'read']
+    else:
+        assert not receipt.exists(), result.stderr
+        assert (out / 'runtime-evidence.pending').exists()
+        assert (registry / 'runtime-evidence-unconfirmed').exists()
+        assert (tmp_path / 'result').read_text().split()[1] == '1'
+        if fault != 'unjoined':
+            assert (tmp_path / 'result').read_text().split()[2] == '1', 'failed capture must preserve original resources'
+    assert not (out / 'guest-shutdown.confirmed').exists()
+    assert not (out / 'cloudbench-run.json').exists()
