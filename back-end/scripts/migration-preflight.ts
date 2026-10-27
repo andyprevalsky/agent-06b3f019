@@ -832,7 +832,11 @@ class Preflight {
         'i'
       ).exec(clause);
       const isConstraint = /^\s*ADD\s+(CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK)\b/i.test(clause);
-      if (addNotNull && !isConstraint && !/\bDEFAULT\b/i.test(clause))
+      // DEFAULT, identity/generated columns and SERIAL types all fill existing rows;
+      // top-level only, so quoted names or literals containing "default" do not count.
+      const fillsExistingRows =
+        topLevelMatches(clause, /^(DEFAULT|GENERATED|(?:BIG|SMALL)?SERIAL)\b/i).length > 0;
+      if (addNotNull && !isConstraint && !fillsExistingRows)
         findings.push(
           await this.countViolations(
             table,

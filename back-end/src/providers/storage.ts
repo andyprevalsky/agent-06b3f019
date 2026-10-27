@@ -218,9 +218,14 @@ export async function putStorageObject(
 }
 
 /** Read an object at an exact storage path; returns null when it does not exist. */
-export async function getStorageObject(storagePath: string): Promise<Buffer | null> {
+export async function getStorageObject(
+  storagePath: string,
+  signal?: AbortSignal
+): Promise<Buffer | null> {
   const client = getSupabaseClient();
-  const { data, error } = await client.storage.from(ATTACHMENT_BUCKET).download(storagePath);
+  const { data, error } = await client.storage
+    .from(ATTACHMENT_BUCKET)
+    .download(storagePath, {}, { signal });
   if (error) {
     const status = storageErrorStatus(error);
     const message = storageErrorMessage(error).toLowerCase();

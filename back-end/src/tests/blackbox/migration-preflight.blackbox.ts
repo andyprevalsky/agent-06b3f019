@@ -213,6 +213,22 @@ ALTER TABLE "Widget" ALTER COLUMN "flag" SET NOT NULL;`
         failed.output
       );
       assert.doesNotMatch(failed.output, /add not-null column a without default/);
+
+      // SERIAL fills existing rows from its sequence; a quoted name that merely
+      // says "default" supplies nothing.
+      const serial = write(
+        '20990101000002_serial',
+        `ALTER TABLE "Widget" ADD COLUMN "n" SERIAL NOT NULL;`
+      );
+      const serialRun = preflight(url, [serial]);
+      assert.equal(serialRun.code, 0, serialRun.output);
+      const quoted = write(
+        '20990101000003_quoted_default_name',
+        `ALTER TABLE "Widget" ADD COLUMN "default" TEXT NOT NULL;`
+      );
+      const quotedRun = preflight(url, [quoted]);
+      assert.equal(quotedRun.code, 1, quotedRun.output);
+      assert.match(quotedRun.output, /\[add not-null column default without default\]/);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

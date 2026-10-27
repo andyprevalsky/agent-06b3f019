@@ -63,7 +63,8 @@ async function backfillLiveMessages(args: string[]): Promise<void> {
  * Move legacy per-row goal/title copies onto AgentTrajectoryAgent in
  * primary-key-ordered batches (no statement scans the whole table).
  * Idempotent and resumable with `--after <last cursor>`. `--dry-run` counts
- * the same work read-only. `--receipt <file>` appends one JSON line per batch
+ * the same work read-only; its totals are per-batch upper bounds (nothing is
+ * committed, so an agent spanning batches is counted in each). `--receipt <file>` appends one JSON line per batch
  * with its cursor range, counts and the exact cleared rows, so every cleared
  * copy is recoverable from AgentTrajectoryAgent plus the receipt.
  */

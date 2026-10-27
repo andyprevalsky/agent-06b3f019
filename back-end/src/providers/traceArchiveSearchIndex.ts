@@ -543,9 +543,12 @@ export interface TrajectoryGoalBatch {
   /** Highest AgentTrajectorySearch.messageId scanned; pass back as `afterId`. */
   lastMessageId: string | null;
   scanned: number;
-  /** Agent rows created (dry run: that would be created). */
+  /**
+   * Agent rows created. A dry run commits nothing, so an agent whose copies span
+   * batches is counted in each: dry-run totals are per-batch upper bounds.
+   */
   inserted: number;
-  /** Row copies cleared (dry run: that would be cleared). */
+  /** Row copies cleared (dry run: a per-batch upper bound, as for `inserted`). */
   cleared: number;
   /**
    * Exact rows whose copy was cleared, with the value each copy held, for the

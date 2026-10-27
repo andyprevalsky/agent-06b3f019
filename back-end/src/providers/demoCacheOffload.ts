@@ -87,15 +87,16 @@ export async function rehydrateValue(value: unknown): Promise<unknown> {
   if (!pointer) return value;
   let body: Buffer | null;
   let timer: NodeJS.Timeout | undefined;
+  const controller = new AbortController();
   try {
     // A stalled download must not pin the cache read (and its single-flight waiters).
     body = await Promise.race([
-      getStorageObject(pointer.path),
+      getStorageObject(pointer.path, controller.signal),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`timed out after ${REHYDRATE_TIMEOUT_MS} ms`)),
-          REHYDRATE_TIMEOUT_MS
-        );
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`timed out after ${REHYDRATE_TIMEOUT_MS} ms`));
+        }, REHYDRATE_TIMEOUT_MS);
       }),
     ]);
   } catch (error) {

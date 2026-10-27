@@ -344,7 +344,8 @@ export async function cacheSetWithAck(args: {
       // Content-addressed and immutable: a no-op unless the object was lost,
       // in which case this re-record repairs it.
       await uploadOffload(prepared);
-      writeMemoryCache(args.key, args.goalHash, { hit: true, value, blobPath });
+      // No memory refresh: a concurrent /set may have changed the row meanwhile;
+      // the entry was already evicted, so the next read loads the current row.
       return true;
     }
     await uploadOffload(prepared);
