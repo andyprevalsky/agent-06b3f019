@@ -35,6 +35,10 @@ export const DISCONNECTED_BACKFILL_FAST_WINDOW_MS = 3000;
 
 /** Bound a disconnected reconcile so one hung request cannot disable all later polls. */
 export const DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS = 10000;
+/** Reads of a deferred INSERT's row before its placeholder is left for the next reconcile. */
+export const DEFERRED_INSERT_HYDRATION_ATTEMPTS = 3;
+/** Backoff unit between those reads (attempt n waits n units). */
+export const DEFERRED_INSERT_HYDRATION_RETRY_MS = 500;
 
 /**
  * Max attempts for the one-shot post-subscribe reconcile (cold-start backfill).

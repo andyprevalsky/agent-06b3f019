@@ -110,6 +110,9 @@ export function extractInsertDeferredPayload(wrapper: unknown): InsertDeferredPa
       return 'Missing or invalid role';
     }
     if (typeof record.reason !== 'string' || record.reason === '') return 'Missing reason';
+    if (record.preview !== undefined && typeof record.preview !== 'string') {
+      return 'Invalid preview';
+    }
     return null;
   });
 }

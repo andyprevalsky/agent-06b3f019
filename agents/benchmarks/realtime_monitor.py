@@ -168,7 +168,9 @@ class NoHangingToolCallsInvariant:
         return self._sequence > tool.sequence
 
     def handle_broadcast(self, event: str, payload: Any) -> None:
-        if event == "INSERT":
+        # Rows over the backend's 8 KB live cap arrive as INSERT_DEFERRED notices that
+        # keep the tool lifecycle (and small) metadata, but never the full text.
+        if event in ("INSERT", "INSERT_DEFERRED"):
             self.handle_insert(_record_from_broadcast(payload))
 
     def reconcile_snapshot(self, messages: list[dict[str, Any]]) -> Optional[str]:
@@ -252,7 +254,7 @@ class SupabaseRealtimeSmokeMonitor:
                 {"config": {"private": self.private}},
             )
 
-            for event_name in ("INSERT", "UPDATE", "DELETE", "ASSISTANT_STREAM", "TOOL_STREAM"):
+            for event_name in ("INSERT", "INSERT_DEFERRED", "UPDATE", "DELETE", "ASSISTANT_STREAM", "TOOL_STREAM"):
                 channel.on_broadcast(
                     event_name,
                     lambda payload, name=event_name: self.invariant.handle_broadcast(name, payload),
