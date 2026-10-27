@@ -63,7 +63,7 @@ proactive-SMS advisory-locked lease). It was not generalized.
 ## Solution
 
 - `providers/sharedState.ts` (new), backed by the `SharedEphemeralState` table
-  (migration `20261026210000_shared_ephemeral_state`, RLS enabled, writers
+  (migration `20261027013000_shared_ephemeral_state`, RLS enabled, writers
   reap expired rows in batches):
   - `putEphemeral` / `getEphemeral` / `takeEphemeral`: atomic single-use via
     `DELETE ... RETURNING`.
