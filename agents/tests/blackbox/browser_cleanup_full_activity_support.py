@@ -245,9 +245,9 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                 assert not cleanup, r
                 assert all(message['status'].value == 'FINISHED' for message in resource_terminals), r
                 if scenario == 'cancellation':
-                    # A pause ending kept (paused) the provider session: every terminal row
-                    # says paused and names the kept session; none reads cancelled/closed.
-                    assert r['terminalTitles'] == ['Browser Session Paused', 'Browser Paused'], r
+                    # The workflow owns the parent tool result. The activity only
+                    # records the provider session's resource cleanup outcome.
+                    assert r['terminalTitles'] == ['Browser Paused'], r
                     assert all((m.get('extra_metadata') or {}).get('session_id') == 'session-1' for m in terminal), r
                 else:
                     assert any(message['title'] == 'Browser Session Closed' for message in resource_terminals), r
