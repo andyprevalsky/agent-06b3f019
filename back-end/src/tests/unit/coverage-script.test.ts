@@ -422,6 +422,11 @@ assert.match(
 );
 assert.match(
   blackboxRunner,
+  /lateExclusiveDomainNames = new Set\(\[[\s\S]*'code-preview',[\s\S]*'codex-code',[\s\S]*\]\)/,
+  'the HMR latency domain must run uncontended, before the cooldown-setting codex-code domain'
+);
+assert.match(
+  blackboxRunner,
   /domainWeights[\s\S]*\.sort\(/,
   'parallel blackbox domains must schedule measured long poles first'
 );
