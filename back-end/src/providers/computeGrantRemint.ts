@@ -176,8 +176,12 @@ export class ComputeGrantReminter {
     }
   }
 
+  /** A failed cooldown read means "not cooling": the per-account lock still single-flights. */
   private async cooldownOutcome(key: string): Promise<RemintOutcome | null> {
-    const until = await this.coordination.cooldownUntil(key);
+    const until = await this.coordination.cooldownUntil(key).catch((error: unknown) => {
+      this.log('compute_grant.cooldown_read_failed', { key, error: String(error) });
+      return undefined;
+    });
     if (until === undefined || this.now() >= until) return null;
     return {
       status: 'cooldown',
@@ -249,7 +253,12 @@ export class ComputeGrantReminter {
       const message = err instanceof Error ? err.message : String(err);
       // Cool down regardless of cause: without this, a permanently broken
       // connection turns every agent failure into another mint attempt.
-      await this.coordination.startCooldown(key, this.now() + this.cooldownMs, this.cooldownMs);
+      // Never let the cooldown write replace the mint outcome or skip needs_reconnect.
+      await this.coordination
+        .startCooldown(key, this.now() + this.cooldownMs, this.cooldownMs)
+        .catch((cooldownError: unknown) =>
+          this.log('compute_grant.cooldown_write_failed', { key, error: String(cooldownError) })
+        );
 
       if (CONNECTION_DEAD.test(message)) {
         await this.deps.store.setConnectionState(

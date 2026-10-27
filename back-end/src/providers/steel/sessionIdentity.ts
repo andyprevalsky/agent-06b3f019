@@ -18,7 +18,10 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { createLogger } from '../logger';
 import { deleteEphemeral, liveEphemeralKeys, putEphemeral } from '../sharedState';
+
+const log = createLogger('SteelSessionIdentity');
 
 const MARKER_LENGTH = 8;
 
@@ -67,14 +70,36 @@ const IN_FLIGHT_TTL_MS = 20 * 60 * 1000;
 const IN_FLIGHT_NAMESPACE = 'steel-in-flight';
 const inFlight = new Map<string, number>();
 
+/**
+ * The shared row is best-effort: a database error must never fail the caller
+ * between a paid Steel create and its BrowserSession commit (that would retry
+ * into a second session or report a committed replacement as failed). The
+ * local entry still protects the session from this instance's reaper; a
+ * missing shared row only weakens the cross-instance guard, and a leftover row
+ * expires with the TTL.
+ */
+function sharedInFlightWrite(op: string, sessionId: string, write: () => Promise<void>) {
+  return write().catch((error: unknown) =>
+    log.warn('Shared Steel in-flight registry write failed', {
+      op,
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  );
+}
+
 export async function registerInFlightSteelSession(sessionId: string): Promise<void> {
   inFlight.set(sessionId, Date.now());
-  await putEphemeral(IN_FLIGHT_NAMESPACE, sessionId, {}, IN_FLIGHT_TTL_MS);
+  await sharedInFlightWrite('register', sessionId, () =>
+    putEphemeral(IN_FLIGHT_NAMESPACE, sessionId, {}, IN_FLIGHT_TTL_MS)
+  );
 }
 
 export async function unregisterInFlightSteelSession(sessionId: string): Promise<void> {
   inFlight.delete(sessionId);
-  await deleteEphemeral(IN_FLIGHT_NAMESPACE, sessionId);
+  await sharedInFlightWrite('unregister', sessionId, () =>
+    deleteEphemeral(IN_FLIGHT_NAMESPACE, sessionId)
+  );
 }
 
 /** This process's in-flight sessions; no query. */

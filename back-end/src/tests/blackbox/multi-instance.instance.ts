@@ -25,6 +25,44 @@ async function barrier(): Promise<void> {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Route this process's database traffic through a proxy that drops the
+ * connection on the first reply carrying one of `tags` (a CommandComplete):
+ * the statement commits but its acknowledgement never arrives. Call before
+ * anything imports the Prisma client.
+ */
+async function dropFirstCommitAck(tags: string[]): Promise<{ dropped: () => boolean }> {
+  const net = await import('node:net');
+  const upstream = new URL(process.env.DATABASE_URL ?? '');
+  let dropped = false;
+  const proxy = net.createServer((client) => {
+    const server = net.connect(Number(upstream.port || 5432), upstream.hostname);
+    client.on('data', (chunk) => server.write(chunk));
+    server.on('data', (chunk: Buffer) => {
+      if (!dropped && tags.some((tag) => chunk.includes(tag))) {
+        dropped = true;
+        client.destroy();
+        server.destroy();
+        return;
+      }
+      client.write(chunk);
+    });
+    client.on('error', () => server.destroy());
+    server.on('error', () => client.destroy());
+    client.on('close', () => server.destroy());
+    server.on('close', () => client.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', () => resolve()));
+  const proxied = new URL(upstream.toString());
+  proxied.hostname = '127.0.0.1';
+  proxied.port = String((proxy.address() as { port: number }).port);
+  // Plaintext, so the proxy can see the CommandComplete tag.
+  proxied.searchParams.set('sslmode', 'disable');
+  process.env.DATABASE_URL = proxied.toString();
+  process.env.DIRECT_URL = proxied.toString();
+  return { dropped: () => dropped };
+}
+
 async function main(): Promise<unknown> {
   const [op, ...args] = process.argv.slice(2);
   switch (op) {
@@ -129,38 +167,19 @@ async function main(): Promise<unknown> {
       // The dedupe claim commits, then the connection drops before Postgres's
       // reply reaches this instance (Supavisor closing a client: P1017). The
       // query layer retries the INSERT; it must still see its own claim.
-      const net = await import('node:net');
-      const upstream = new URL(process.env.DATABASE_URL ?? '');
-      let dropped = false;
-      const proxy = net.createServer((client) => {
-        const server = net.connect(Number(upstream.port || 5432), upstream.hostname);
-        client.on('data', (chunk) => server.write(chunk));
-        server.on('data', (chunk: Buffer) => {
-          if (!dropped && chunk.includes('INSERT 0 1')) {
-            dropped = true;
-            client.destroy();
-            server.destroy();
-            return;
-          }
-          client.write(chunk);
-        });
-        client.on('error', () => server.destroy());
-        server.on('error', () => client.destroy());
-        client.on('close', () => server.destroy());
-        server.on('close', () => client.destroy());
-      });
-      await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', () => resolve()));
-      const proxied = new URL(upstream.toString());
-      proxied.hostname = '127.0.0.1';
-      proxied.port = String((proxy.address() as { port: number }).port);
-      // Plaintext, so the proxy can see the INSERT's CommandComplete.
-      proxied.searchParams.set('sslmode', 'disable');
-      process.env.DATABASE_URL = proxied.toString();
-      process.env.DIRECT_URL = proxied.toString();
+      const lostAck = await dropFirstCommitAck(['INSERT 0 1']);
       const wa = await import('../../domains/whatsapp-webhook/service');
       await barrier();
       const duplicate = await wa.alreadyProcessedMessage(args[0]);
-      return { duplicate, dropped };
+      return { duplicate, dropped: lostAck.dropped() };
+    }
+    case 'sms-clear-lost-ack': {
+      // Same lost ack on /clear: the replayed write must not clear again.
+      const lostAck = await dropFirstCommitAck(['UPDATE 1', 'INSERT 0 1']);
+      const repo = await import('../../domains/sms-webhook/repo');
+      await barrier();
+      await repo.clearSmsSession(args[0]);
+      return { dropped: lostAck.dropped() };
     }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');

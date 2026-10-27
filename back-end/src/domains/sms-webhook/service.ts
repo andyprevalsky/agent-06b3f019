@@ -28,6 +28,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import { alertError } from '../../providers/errorAlert';
 import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
+import { withCommitLock } from '../../providers/smsSupervisor/supervisorHandler';
 
 const log = createLogger('SMS Webhook');
 
@@ -93,8 +94,10 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
   // Abort any in-flight supervisor runs so they don't send SMS after clear
   abortAllSupervisorRuns(userId);
 
-  // Clear SMS session history
-  await repo.clearSmsSession(userId);
+  // Clear SMS session history under the per-user commit lock, so a supervisor
+  // on another instance that already passed its seq gate finishes its commit
+  // before the clear supersedes it.
+  await withCommitLock(userId, () => repo.clearSmsSession(userId));
 
   // Find and terminate all active SMS-source agents for this user
   const activeAgents = await repo.findActiveSmsAgents(userId);

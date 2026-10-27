@@ -10,6 +10,7 @@
  *  - an AgentCard PKCE connect started on A completes on B
  *  - the per-user SMS commit lock serializes commits across instances
  *  - an SMS /clear on B supersedes a supervisor run in flight on A
+ *  - an SMS /clear whose commit ack was lost advances the seq once
  *  - two instances minting one agent identity agree on one inbox
  *  - a revoked compute grant seen on two instances is re-minted once
  *  - B's Steel reaper skips a session A is still setting up
@@ -149,6 +150,29 @@ async function main(): Promise<void> {
         assert(clear.cleared === true, `clear failed: ${JSON.stringify(clear)}`);
         assert(typeof run.mySeq === 'number', `run failed: ${JSON.stringify(run)}`);
         assert(run.ownsReply === false, "A's run must not reply after B cleared the session");
+      } finally {
+        await prisma.smsSession.deleteMany({ where: { userId: smsUser } });
+        await prisma.user.deleteMany({ where: { userId: smsUser } });
+      }
+    });
+
+    await test('an SMS /clear whose commit ack was lost advances the seq once', async () => {
+      const smsUser = randomUUID();
+      await prisma.user.create({ data: { userId: smsUser, name: 'Multi-instance SMS user' } });
+      try {
+        await prisma.smsSession.create({
+          data: { userId: smsUser, messages: JSON.stringify([]), lastInboundSeq: 5 },
+        });
+        const [clear] = await concurrently([['sms-clear-lost-ack', [smsUser]]]);
+        assert(
+          clear.dropped === true,
+          `the proxy must drop the commit ack: ${JSON.stringify(clear)}`
+        );
+        const row = await prisma.smsSession.findUnique({ where: { userId: smsUser } });
+        assert(
+          row?.lastInboundSeq === 6,
+          `the replayed clear advanced the seq to ${row?.lastInboundSeq}`
+        );
       } finally {
         await prisma.smsSession.deleteMany({ where: { userId: smsUser } });
         await prisma.user.deleteMany({ where: { userId: smsUser } });
