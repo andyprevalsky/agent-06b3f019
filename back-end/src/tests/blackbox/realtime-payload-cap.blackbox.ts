@@ -99,8 +99,8 @@ async function main() {
           `largest_frame=${largest} reduction=${(100 * (1 - wireBytes / rowBytes)).toFixed(1)}%\n`
       );
       assert(
-        largest <= publisher.LIVE_INSERT_MAX_BYTES + 256,
-        `largest live frame ${largest} B exceeds the ${publisher.LIVE_INSERT_MAX_BYTES} B cap`
+        largest <= publisher.LIVE_INSERT_MAX_BYTES,
+        `largest wire message ${largest} B exceeds the ${publisher.LIVE_INSERT_MAX_BYTES} B cap`
       );
       assert(
         wireBytes <= rowBytes * 0.25,
@@ -145,6 +145,37 @@ async function main() {
         title: 'Read the page',
       });
       assert.equal(notice.topic, 'agent:cap-agent-3000', 'per-agent topic is unchanged');
+    });
+
+    await test('a notice that cannot fit even without preview falls back to the minimal notice', async () => {
+      const frames: Wire[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        frames.push(...(JSON.parse(String(init?.body)) as { messages: Wire[] }).messages);
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      const huge = row(5000, 20_000);
+      await publisher.broadcastMessageInsert('cap-agent-minimal', {
+        ...huge,
+        filePointer: { url: `https://files.invalid/${'f'.repeat(12_000)}` },
+        metadata: { ...huge.metadata, toolName: `tool-${'n'.repeat(9_000)}` },
+      });
+      await publisher.__flushBroadcastQueueForTests();
+      assert.equal(frames.length, 1, 'the row is still announced once');
+      const [notice] = frames;
+      assert.equal(notice.event, 'INSERT_DEFERRED');
+      assert(
+        Buffer.byteLength(JSON.stringify(notice)) <= publisher.LIVE_INSERT_MAX_BYTES,
+        'the minimal notice fits the live cap'
+      );
+      const record = notice.payload.record;
+      assert.equal(record.id, 'cap-5000');
+      assert.equal(record.reason, publisher.OVERSIZE_STREAM_REASON);
+      assert.equal(record.preview, undefined);
+      assert.equal(record.filePointer, undefined);
+      const metadata = record.metadata as Record<string, unknown>;
+      assert.equal(metadata.toolStatus, 'FINISHED');
+      assert.equal(metadata.toolCallId, 'call-5000');
+      assert.equal(String(metadata.toolName).length, 256, 'lifecycle strings are bounded');
     });
 
     await test('a refused bounded notice falls back to the blocked notice without preview', async () => {

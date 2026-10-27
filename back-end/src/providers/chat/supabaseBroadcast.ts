@@ -106,16 +106,30 @@ export const LIVE_INSERT_MAX_BYTES = Math.max(
 );
 /** Characters of `text` a bounded notice previews before the client hydrates. */
 export const LIVE_INSERT_PREVIEW_CHARS = 1000;
-/** Control fields every bounded notice keeps, whatever their size. */
+/** Longest lifecycle string a content-free notice repeats. */
+const LIFECYCLE_VALUE_MAX_CHARS = 256;
+/** Control fields every bounded notice keeps (each fits its own notice). */
 const LIFECYCLE_METADATA_KEYS = new Set(['toolName', 'toolStatus', 'toolCallId', 'success']);
 
-const frameBytes = (payload: Record<string, unknown>, topic: string): number =>
-  Buffer.byteLength(JSON.stringify(payload)) + Buffer.byteLength(topic);
+/** Bytes of the exact message `sendBroadcastBatch` puts on the wire for this item. */
+const wireBytes = (
+  item: Pick<QueuedBroadcast, 'topic' | 'event' | 'payload' | 'private'>
+): number =>
+  Buffer.byteLength(
+    JSON.stringify({
+      topic: item.topic,
+      event: item.event,
+      payload: { record: item.payload },
+      private: item.private,
+    })
+  );
 
 /**
  * A committed row too large to stream live: ids, a text preview, filePointer and
  * the metadata that fits, dropping the largest non-lifecycle keys first. The
  * frame never carries `text`, so every client treats it as a notice to hydrate.
+ * If it still exceeds the cap with an empty preview (a huge filePointer or
+ * lifecycle string), the minimal content-free notice is sent instead.
  */
 function boundedInsert(item: QueuedBroadcast): QueuedBroadcast {
   const { agentId, id, timestamp, role, text, metadata, filePointer } = item.payload;
@@ -131,16 +145,19 @@ function boundedInsert(item: QueuedBroadcast): QueuedBroadcast {
     metadata: kept,
     filePointer: filePointer ?? null,
   });
+  const fits = () =>
+    wireBytes({ ...item, event: 'INSERT_DEFERRED', payload: build() }) <= LIVE_INSERT_MAX_BYTES;
   const droppable = Object.keys(kept)
     .filter((key) => !LIFECYCLE_METADATA_KEYS.has(key))
     .sort((a, b) => JSON.stringify(kept[b]).length - JSON.stringify(kept[a]).length);
   for (const key of droppable) {
-    if (frameBytes(build(), item.topic) <= LIVE_INSERT_MAX_BYTES) break;
+    if (fits()) break;
     delete kept[key];
   }
-  while (preview.length > 0 && frameBytes(build(), item.topic) > LIVE_INSERT_MAX_BYTES) {
+  while (preview.length > 0 && !fits()) {
     preview = preview.slice(0, Math.floor(preview.length / 2));
   }
+  if (!fits()) return deferredInsert(item, OVERSIZE_STREAM_REASON);
   return { ...item, event: 'INSERT_DEFERRED', payload: build() };
 }
 
@@ -163,7 +180,9 @@ function deferredInsert(item: QueuedBroadcast, reason: string): QueuedBroadcast 
   const source = (metadata ?? {}) as Record<string, unknown>;
   const lifecycle: Record<string, unknown> = {};
   for (const key of ['toolName', 'toolStatus', 'toolCallId']) {
-    if (typeof source[key] === 'string') lifecycle[key] = source[key];
+    // Bounded so a notice always fits both the live cap and the agent lane.
+    if (typeof source[key] === 'string')
+      lifecycle[key] = source[key].slice(0, LIFECYCLE_VALUE_MAX_CHARS);
   }
   if (typeof source.success === 'boolean') lifecycle.success = source.success;
   return {
@@ -494,12 +513,13 @@ async function broadcast(
     const serialized = JSON.stringify(item.payload);
     item.payload = JSON.parse(serialized) as Record<string, unknown>;
     const bytes = Buffer.byteLength(serialized) + Buffer.byteLength(item.topic);
-    if (bytes <= LIVE_INSERT_MAX_BYTES) {
+    if (wireBytes(item) <= LIVE_INSERT_MAX_BYTES) {
       committedDelivery.enqueue(item, bytes);
       return;
     }
     const bounded = boundedInsert(item);
-    const boundedBytes = frameBytes(bounded.payload, bounded.topic);
+    const boundedBytes =
+      Buffer.byteLength(JSON.stringify(bounded.payload)) + Buffer.byteLength(bounded.topic);
     log.info('[Broadcast] INSERT bounded to a live notice', {
       topic: item.topic,
       message_id: item.payload.id,

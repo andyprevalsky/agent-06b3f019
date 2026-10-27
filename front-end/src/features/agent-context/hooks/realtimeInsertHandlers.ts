@@ -11,13 +11,18 @@
  *        followed by the reason (closes the tool card, keeps ordering)
  *     -> GET /agents/:agentId/messages/:id (bounded by a request timeout)
  *          -> ok      -> replace the placeholder with the canonical row
- *          -> failure -> warn; the placeholder and its reason stay visible
+ *          -> failure -> retry (3 reads, linear backoff) while the agent is active
+ *          -> all fail -> warn; the placeholder and its reason stay visible
  */
 import type { InsertDeferredPayload, InsertMessagePayload } from '@/lib/realtime';
 import { notifyOpenAgentActivity } from '@/lib/openAgentActivity';
 
 import { fetchAgentMessage } from '../api';
-import { DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS } from '../config';
+import {
+  DEFERRED_INSERT_HYDRATION_ATTEMPTS,
+  DEFERRED_INSERT_HYDRATION_RETRY_MS,
+  DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS,
+} from '../config';
 import { endsCloudAgentMode, startsCloudAgentMode } from './cloudAgentMode';
 import { handleInsertMessage, type RealtimeSetters } from './realtimeHandlers';
 import type { ReceivedInserts } from './useReceivedInserts';
@@ -71,19 +76,29 @@ export function createInsertHandlers(
       role: deferred.role,
       metadata: { ...deferred.metadata, liveStreamBlocked: true },
     });
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS);
-    void fetchAgentMessage(agentId, deferred.id, controller.signal)
-      .then((row) => {
-        if (!active()) return;
-        setters.setMessages((previous) =>
-          previous.map((message) => (message.message_id === row.message_id ? row : message)),
-        );
-      })
-      .catch((error: unknown) => {
-        if (active()) console.warn('AgentContext: deferred INSERT hydration failed', error);
-      })
-      .finally(() => clearTimeout(timer));
+    const hydrate = (attempt: number) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS);
+      void fetchAgentMessage(agentId, deferred.id, controller.signal)
+        .then((row) => {
+          if (!active()) return;
+          setters.setMessages((previous) =>
+            previous.map((message) => (message.message_id === row.message_id ? row : message)),
+          );
+        })
+        .catch((error: unknown) => {
+          if (!active()) return;
+          if (attempt < DEFERRED_INSERT_HYDRATION_ATTEMPTS) {
+            setTimeout(() => {
+              if (active()) hydrate(attempt + 1);
+            }, DEFERRED_INSERT_HYDRATION_RETRY_MS * attempt);
+            return;
+          }
+          console.warn('AgentContext: deferred INSERT hydration failed', error);
+        })
+        .finally(() => clearTimeout(timer));
+    };
+    hydrate(1);
   };
 
   return { onInsert, onInsertDeferred };

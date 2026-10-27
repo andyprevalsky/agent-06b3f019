@@ -261,7 +261,8 @@ describe('committed INSERT delivery', () => {
       success: true,
     },
   };
-  async function renderDeferred(status: number) {
+  async function renderDeferred(statuses: number | number[]) {
+    const sequence = Array.isArray(statuses) ? [...statuses] : [statuses];
     let handlers: Handlers = {};
     vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
       handlers = next;
@@ -277,6 +278,7 @@ describe('committed INSERT delivery', () => {
       http.get(`${API_BASE}/agents/:agentId/messages/:messageId`, async ({ params }) => {
         reads.push(`${String(params.agentId)}/${String(params.messageId)}`);
         await gate;
+        const status = sequence.length > 1 ? sequence.shift()! : sequence[0];
         return status === 200
           ? HttpResponse.json({ message: blockedRow })
           : HttpResponse.json({ error: 'nope' }, { status });
@@ -359,12 +361,22 @@ describe('committed INSERT delivery', () => {
     hook.unmount();
   });
 
-  it('a deferred INSERT keeps its visible reason when the row read fails', async () => {
+  it('a deferred INSERT retries a failed row read and swaps in the row once it succeeds', async () => {
+    const { handlers, hook, reads, state, release } = await renderDeferred([503, 200]);
+    act(() => handlers.onInsertDeferred?.(deferred));
+    release();
+    await waitFor(() => expect(state.messages).toEqual([blockedRow]), { timeout: 3000 });
+    expect(reads).toEqual([`agent-1/${blockedRow.message_id}`, `agent-1/${blockedRow.message_id}`]);
+    hook.unmount();
+  });
+
+  it('a deferred INSERT keeps its visible reason when every bounded row read fails', async () => {
     const { handlers, hook, reads, state, release } = await renderDeferred(500);
     act(() => handlers.onInsertDeferred?.(deferred));
     release();
-    await waitFor(() => expect(reads).toHaveLength(1));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => expect(reads).toHaveLength(3), { timeout: 3000 });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(reads).toHaveLength(3);
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0]?.text).toBe(reason);
     hook.unmount();

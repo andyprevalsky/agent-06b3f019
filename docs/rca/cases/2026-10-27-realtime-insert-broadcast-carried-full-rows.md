@@ -70,8 +70,8 @@ env `SUPABASE_BROADCAST_LIVE_INSERT_MAX_BYTES`). A larger row is sent as
 - the metadata that fits, dropping the largest keys first while always keeping
   `toolName`, `toolStatus`, `toolCallId` and `success`.
 
-It never sends `text`. The front-end shows the preview and the reason, then
-reads the row by id, as it already did for deferred rows. A refused bounded
+It never sends `text`. The cap is measured on the exact wire message (`topic`, `event`, wrapped record, `private`). If a notice still exceeds it with an empty preview (a huge `filePointer` or lifecycle string), the minimal content-free notice is sent, with lifecycle strings bounded to 256 characters. The front-end shows the preview and the reason, then
+reads the row by id, as it already did for deferred rows, retrying a failed read up to three times with linear backoff. Deferred rows are now about 5.7% of messages, so a single failed read must not leave a preview in place. A refused bounded
 notice falls back to the content-free blocked notice. Per-agent `agent:<id>`
 topics and FIFO committed delivery are unchanged. `realtime-types`
 (`InsertDeferredPayload.preview`, extractor validation) and the benchmark
