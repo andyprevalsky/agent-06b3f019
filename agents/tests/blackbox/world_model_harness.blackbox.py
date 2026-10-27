@@ -4748,6 +4748,7 @@ async def test_simulated_browser_preserves_user_input_queued_before_activity_exe
 
 
 async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False):
+    import copy
     from domains.spawn_browser_agent_v3 import handler as browser_handler
     from datetime import datetime, timedelta, timezone
 
@@ -4772,7 +4773,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
             assert allow_real_fallback is False
             assert tool_args["action"] == "evaluate"
             assert tool_args["approval"]["granted"] is True
-            assert tool_call_id == "place-order:approved"
+            assert tool_call_id == "policy-retry"
             executed_actions.append(tool_args["action"])
             return {
                 "success": True,
@@ -4809,13 +4810,26 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         def set_thinking_stream(self, stream):
             self.stream = stream
 
-    policy = AsyncMock(
-        return_value={
+    async def decide(**kwargs):
+        if policy.await_count == 1:
+            assert not executed_actions, "approval executed before the ordinary actor decision"
+            messages = kwargs["turn_messages"]
+            assert messages[0] == original_call
+            resolved = json.loads(messages[1]["content"])
+            assert messages[1]["tool_call_id"] == "place-order"
+            assert resolved["status"] == "write_permission_granted"
+            assert resolved["action_executed"] is False
+            if not user_feedback:
+                assert len(messages) == 2, "approval added a separate synthetic message"
+                return {
+                    "action": copy.deepcopy(resume_state["pending_action"]),
+                    "tool_call_id": "policy-retry", "usage": {},
+                }
+        return {
             "action": {"action": "attempt_completion", "thinking": "Confirmation is visible"},
-            "tool_call_id": "policy-complete",
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "tool_call_id": "policy-complete", "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-    )
+    policy = AsyncMock(side_effect=decide)
     verifier = AsyncMock(
         return_value={
             "score": 1,
@@ -4834,7 +4848,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
             "action": "evaluate",
             "params": {"expression": "document.querySelector('#place-order').click()"},
         },
-        "approval_type": "payment",
+        "approval_type": "purchase",
         "step_count": 6,
         "task_id": "browser-task",
         "world_model_session_id": "wmh-session-approval",
@@ -4854,6 +4868,18 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         "simulated_reasoning_messages": [],
         "simulated_action_summary": ["evaluate: place order"],
     }
+    from domains.spawn_browser_agent_v3.service_actions import apply_user_write_lock_grant
+    approved_at = datetime.now(timezone.utc).timestamp()
+    resume_state["write_lock_approved_at"] = approved_at
+    resume_state["write_lock_approvals"] = apply_user_write_lock_grant(
+        {}, "purchase", checkout_state["url"], approved_at,
+    )
+    browser_handler._append_browser_turn_messages(
+        resume_state["simulated_turn_messages"], unified_action=resume_state["pending_action"],
+        result={"status": "needs_write_approval", "approval_type": "purchase"}, tool_call_id="place-order",
+    )
+    original_call = copy.deepcopy(resume_state["simulated_turn_messages"][0])
+    original_grants = copy.deepcopy(resume_state["write_lock_approvals"])
     correction = "Do not place this order. Inspect the checkout instead."
     now = datetime.now(timezone.utc)
     if not legacy_resume:
@@ -4928,6 +4954,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         )
 
     assert result["status"] == "completed"
+    assert resume_state["write_lock_approvals"] == original_grants
     if user_feedback:
         assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
         assert [message for message in policy.await_args.kwargs["turn_messages"] if message.get("role") == "user"] == [
@@ -4937,18 +4964,13 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
         generation.assert_awaited_once()
         return
-    assert executed_actions == ["evaluate"], "ordinary approval omitted its authorized queued action"
+    assert executed_actions == ["evaluate"], "ordinary actor retry did not execute exactly once"
     generation.assert_not_awaited()
     assert result["current_url"] == confirmation_url
     assert confirmation_url in result["message"]
-    approval_event = next(
-        call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "place-order:approved"
-    )
-    approval_evidence = json.loads(approval_event.kwargs["message"])
-    assert approval_evidence["approved"] is True
-    assert approval_evidence["browser_state"]["url"] == confirmation_url
-    assert "Order placed, thanks Aman!" in approval_evidence["browser_state"]["dom_tree"]
-    assert approval_event.kwargs["steps_taken"] == 6
+    retry_event = next(call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "policy-retry")
+    assert retry_event.kwargs["steps_taken"] == 7
+    assert not any(str(call.kwargs.get("tool_call_id")).endswith(":approved") for call in saved_actions.await_args_list)
 
 
 async def test_simulated_browser_persists_post_approval_confirmation_state():

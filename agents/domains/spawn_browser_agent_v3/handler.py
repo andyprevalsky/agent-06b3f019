@@ -139,10 +139,10 @@ from .config import (
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
 from .recording import (
-    _redact_url_query,
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
+    _redact_url_query,
     blocked_resource_requires_payment_cdn,
     blocked_resource_url_for_recovery,
     browser_recording_output_dir,
@@ -204,6 +204,7 @@ from .service_actions import (
     get_domain_from_url,
     get_element_description,
     grant_site_write_lock_approvals,
+    is_approval_valid,
     resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
 )
@@ -378,6 +379,7 @@ async def record_used_passkey_credentials(
     agent_id: str,
     task_id: Optional[str],
     browser_url: str = "",
+    require_complete: bool = False,
 ) -> int:
     """Persist references for passkeys whose authenticator counter advanced.
 
@@ -385,12 +387,21 @@ async def record_used_passkey_credentials(
     can invoke WebAuthn automatically, and approval-style tasks may return to
     the workflow before the browser agent reaches its completion branch.
     """
-    if not task_id or not passkey_ref_by_credential_id:
+    if not passkey_ref_by_credential_id:
+        return 0
+    if not task_id:
+        if require_complete:
+            raise RuntimeError("Passkey references cannot be saved without a browser task")
         return 0
 
     try:
-        used_credential_ids = await dom_service.get_used_passkey_credential_ids()
+        used_credential_ids = (
+            await dom_service.get_used_passkey_credential_ids(require_complete=True)
+            if require_complete else await dom_service.get_used_passkey_credential_ids()
+        )
     except Exception as exc:
+        if require_complete:
+            raise RuntimeError("Passkey usage could not be verified before approval capture") from exc
         logger.warning("Failed to read passkey usage", error=extract_error_message(exc))
         return 0
 
@@ -400,6 +411,8 @@ async def record_used_passkey_credentials(
             continue
         credential_ref = passkey_ref_by_credential_id.get(credential_id)
         if not credential_ref:
+            if require_complete:
+                raise RuntimeError("Used passkey has no reference for approval capture")
             continue
         saved = await save_browser_credential_ref_message(
             agent_id=agent_id,
@@ -411,6 +424,8 @@ async def record_used_passkey_credentials(
             browser_url=browser_url,
         )
         if not saved:
+            if require_complete:
+                raise RuntimeError("Passkey reference persistence was not acknowledged before approval capture")
             continue
         recorded_credential_ids.add(credential_id)
         recorded_count += 1
@@ -484,6 +499,24 @@ async def _await_bounded_browser_cleanup(
     return False
 
 
+async def _capture_browser_passkey_usage(capture_passkey_usage: Any) -> bool:
+    return await _await_bounded_browser_cleanup(
+        capture_passkey_usage(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Passkey usage capture timed out before disconnect",
+        failure_message="Passkey usage capture failed before disconnect",
+    )
+
+
+async def _disconnect_browser(dom_service: Any) -> bool:
+    return await _await_bounded_browser_cleanup(
+        dom_service.disconnect(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser disconnect timed out; continuing terminal return",
+        failure_message="Browser disconnect failed; continuing terminal return",
+    )
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
@@ -500,12 +533,7 @@ async def disconnect_browser_after_passkey_capture(
     only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
     Bound both steps so approval/handoff paths always resume.
     """
-    capture_complete = await _await_bounded_browser_cleanup(
-        capture_passkey_usage(),
-        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        timeout_message="Passkey usage capture timed out before disconnect",
-        failure_message="Passkey usage capture failed before disconnect",
-    )
+    capture_complete = await _capture_browser_passkey_usage(capture_passkey_usage)
     observation = None
     if capture_complete and observe_parked_page is not None:
         try:
@@ -514,12 +542,7 @@ async def disconnect_browser_after_passkey_capture(
             # Optional observation failure supplies no park proof; disconnect
             # remains owned here. Cancellation and other control signals escape.
             logger.warning("Parked browser observation unavailable", error_type=type(error).__name__)
-    detached = await _await_bounded_browser_cleanup(
-        dom_service.disconnect(),
-        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        timeout_message="Browser disconnect timed out; continuing terminal return",
-        failure_message="Browser disconnect failed; continuing terminal return",
-    )
+    detached = await _disconnect_browser(dom_service)
     return observation if detached else None
 
 
@@ -797,25 +820,6 @@ def _private_browser_runtime_url(dom_service: Any, fallback: Any = "") -> str:
     if callable(accessor):
         return str(dom_service.runtime_current_url(fallback=str(fallback or "")) or fallback or "")
     return str(fallback or "")
-
-
-async def _prepare_pending_write_lock_action(
-    dom_service: Any,
-    pending_action: Dict[str, Any],
-    *,
-    target_signature: Optional[Dict[str, Any]] = None,
-) -> tuple[Dict[str, Any], Dict[str, Any], str]:
-    """Rehydrate browser state before replaying the exact action a user approved."""
-    browser_state = await dom_service.get_browser_state(include_screenshot=False)
-    current_url = _private_browser_runtime_url(dom_service, browser_state.get("url"))
-    if not current_url:
-        raise RuntimeError("Cannot execute an approved browser action without a resumed page URL")
-    action = _remap_cached_browser_action_target(
-        pending_action,
-        cached_target=target_signature,
-        dom_service=dom_service,
-    )
-    return action, browser_state, current_url
 
 
 def _browser_ground_truth_checkpoint(
@@ -3527,6 +3531,60 @@ def _append_browser_turn_messages(
         )
 
 
+def _resolve_browser_tool_result_for_resume(
+    turn_messages: List[Dict[str, Any]],
+    *,
+    pending_status: str,
+    result_updates: Dict[str, Any],
+    tool_name: Optional[str] = None,
+) -> bool:
+    """Resolve the original correlated pending result, without adding a tool call."""
+    for index in range(len(turn_messages) - 1, 0, -1):
+        message = turn_messages[index]
+        if message.get("role") != "tool" or (tool_name and message.get("name") != tool_name):
+            continue
+        prior = turn_messages[index - 1]
+        if prior.get("role") != "assistant" or not any(
+            call.get("id") == message.get("tool_call_id")
+            and (call.get("function") or {}).get("name") == message.get("name")
+            for call in prior.get("tool_calls") or []
+        ):
+            continue
+        try:
+            previous_result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(previous_result, dict) or previous_result.get("status") != pending_status:
+            continue
+        turn_messages[index] = {
+            **message,
+            "content": json_dumps_compact({**previous_result, **result_updates}),
+        }
+        return True
+    return False
+
+
+def _resolve_write_permission_tool_result_for_resume(
+    turn_messages: List[Dict[str, Any]], resume: Dict[str, Any],
+) -> bool:
+    if not isinstance(resume.get("write_lock_approved_at"), (int, float)):
+        return False
+    for pending_status in ("needs_write_approval", "awaiting_write_approval"):
+        if _resolve_browser_tool_result_for_resume(
+            turn_messages,
+            pending_status=pending_status,
+            result_updates={
+                "success": False,
+                "status": "write_permission_granted",
+                "action_executed": False,
+                "requires_approval": False,
+                "message": "Permission granted; the original action was not executed. Retry your action.",
+            },
+        ):
+            return True
+    return False
+
+
 def _resolve_payment_card_tool_result_for_resume(
     turn_messages: List[Dict[str, Any]],
     payment_card_refs: Dict[str, Any],
@@ -3535,37 +3593,20 @@ def _resolve_payment_card_tool_result_for_resume(
     """Finish the pending browser tool result with safe refs after approval."""
     if not has_payment_card_secret_refs(payment_card_refs):
         return False
-
-    for index in range(len(turn_messages) - 1, 0, -1):
-        message = turn_messages[index]
-        if message.get("role") != "tool" or message.get("name") != "request_payment_card":
-            continue
-        prior = turn_messages[index - 1]
-        if prior.get("role") != "assistant" or not any(
-            call.get("id") == message.get("tool_call_id")
-            and (call.get("function") or {}).get("name") == "request_payment_card"
-            for call in prior.get("tool_calls") or []
-        ):
-            continue
-        try:
-            previous_result = json.loads(message.get("content") or "")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(previous_result, dict) or previous_result.get("status") != "awaiting_payment_card_approval":
-            continue
-
-        finished_result: Dict[str, Any] = {
-            **previous_result,
-            "success": True,
-            "status": "payment_card_ready",
-            "card_secret_refs": {ref: secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS},
-        }
-        safe_last4 = _normalize_payment_card_last4(payment_card_last4)
-        if safe_last4:
-            finished_result["card_last4"] = safe_last4
-        turn_messages[index] = {**message, "content": json_dumps_compact(finished_result)}
-        return True
-    return False
+    updates: Dict[str, Any] = {
+        "success": True,
+        "status": "payment_card_ready",
+        "card_secret_refs": {ref: secret_placeholder(ref) for ref in PAYMENT_CARD_SECRET_REFS},
+    }
+    safe_last4 = _normalize_payment_card_last4(payment_card_last4)
+    if safe_last4:
+        updates["card_last4"] = safe_last4
+    return _resolve_browser_tool_result_for_resume(
+        turn_messages,
+        pending_status="awaiting_payment_card_approval",
+        result_updates=updates,
+        tool_name="request_payment_card",
+    )
 
 
 async def _get_browser_state_soft(
@@ -6534,6 +6575,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             resume.get("payment_card_refs") or {},
             resume.get("payment_card_last4"),
         )
+    _resolve_write_permission_tool_result_for_resume(turn_messages, resume)
     frames: List[Dict[str, Any]] = []
     visited_urls = list(resume.get("simulated_visited_urls") or [])
     reasoning_messages = list(resume.get("simulated_reasoning_messages") or [])
@@ -6579,9 +6621,6 @@ async def _spawn_browser_agent_activity_v3_simulated(
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
     browser_stream: Optional[BrowserThinkingStream] = None
-    resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(
-        instruction_state.get("delivered_user_instruction_count") or 0
-    )
     _append_browser_user_instructions(instruction_state, turn_messages)
     instruction_state["delivered_user_instruction_count"] = len(
         instruction_state.get("user_instruction_messages") or []
@@ -6773,62 +6812,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 frames=frames,
             )
 
-        previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
-        initial_read_confirmed = await sync_user_instructions()
-        if not initial_read_confirmed and isinstance(resume.get("pending_action"), dict):
-            await sync_user_instructions(require_confirmed_read=True)
-        new_user_input = resumed_unread_user_input or previous_instruction_count != len(
-            instruction_state.get("user_instruction_messages") or []
-        )
-        pending_action = None if new_user_input else resume.get("pending_action")
-        if isinstance(pending_action, dict):
-            pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
-            approved_action_name = str(pending_action.get("action") or "unknown")
-            approved_result, browser_state, approved_frame = await _execute_simulated_browser_transition(
-                world_model=world_model,
-                goal=goal,
-                action=pending_action,
-                browser_state=browser_state,
-                tool_call_id=f"{pending_call_id}:approved",
-                write_lock_enabled=write_lock_enabled,
-                approved=True,
-                approval_type=str(resume.get("approval_type") or "unknown"),
-                payment_card_last4=payment_card_last4,
-            )
-            history_result = _browser_tool_result_for_history(approved_action_name, approved_result)
-            if action_entries and action_entries[-1].get("step") == iteration:
-                action_entries[-1].update(result=history_result, approved=True)
-            current_url = str(browser_state.get("url") or "")
-            if current_url and (not visited_urls or visited_urls[-1] != current_url):
-                visited_urls.append(current_url)
-            await remember_frame(
-                approved_frame,
-                step=iteration,
-                label="Approved action applied",
-                action_name=approved_action_name,
-            )
-            # The approval boundary pauses and resumes the Temporal activity. Persist
-            # the resulting WMH state as its own trajectory event so evaluators,
-            # recordings, and live clients can see that the approved action actually
-            # executed. Without this event the policy saw the confirmation state, but
-            # the durable trajectory ended at the pre-approval checkout page.
-            await save_step(
-                title=f"Approved {approved_action_name} applied",
-                action_name=approved_action_name,
-                action_call_id=f"{pending_call_id}:approved",
-                step=iteration,
-                message=json.dumps(
-                    {
-                        "action": approved_action_name,
-                        "approved": True,
-                        "browser_state": browser_state,
-                        "success": approved_result.get("success", True),
-                        "status": approved_result.get("status"),
-                    },
-                    ensure_ascii=False,
-                    default=str,
-                ),
-            )
+        await sync_user_instructions()
 
         while iteration < MAX_ITERATIONS:
             jev_session.schedule(goal, output_schema, browser_prefix_events(action_entries))
@@ -7086,6 +7070,11 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 browser_state=browser_state,
                 tool_call_id=action_call_id,
                 write_lock_enabled=write_lock_enabled,
+                approved=is_approval_valid(
+                    write_lock_approvals, str(resume.get("approval_type") or "unknown"),
+                    str(browser_state.get("url") or ""),
+                ),
+                approval_type=resume.get("approval_type"),
                 payment_card_last4=payment_card_last4,
             )
             requires_approval = bool(transition.get("requires_approval")) or str(
@@ -7712,22 +7701,10 @@ async def _spawn_browser_agent_activity_v3_real(
     require_payment_cdn = False
     payment_cdn_verify_url = ""
 
-    pending_write_lock_action: Optional[Dict[str, Any]] = None
-    pending_write_lock_target: Optional[Dict[str, Any]] = None
     resume_step_count: int = 0
     auth_assistance_resume_mode: Optional[str] = None
     payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
-        has_new_user_input = len(write_lock_resume_state.get("user_instruction_messages") or []) > int(
-            write_lock_resume_state.get("delivered_user_instruction_count") or 0
-        )
-        # An approved queued action predates this input. The actor must decide
-        # what to do after reading it, even when write permission remains valid.
-        if not has_new_user_input:
-            pending_write_lock_action = write_lock_resume_state.get("pending_action")
-            pending_write_lock_target = private_browser_runtime.get(
-                "pending_action_target"
-            ) or write_lock_resume_state.get("pending_action_target")
         write_lock_approvals = dict(
             private_browser_runtime.get("write_lock_approvals")
             or write_lock_resume_state.get("write_lock_approvals")
@@ -7803,7 +7780,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
         logger.info(
             "Resuming from write lock approval",
-            has_pending_action=pending_write_lock_action is not None,
             approval_type=write_lock_resume_state.get("approval_type"),
             step_count=resume_step_count,
         )
@@ -7841,6 +7817,7 @@ async def _spawn_browser_agent_activity_v3_real(
             (write_lock_resume_state or {}).get("payment_card_refs") or {},
             payment_card_last4,
         )
+    _resolve_write_permission_tool_result_for_resume(browser_turn_messages, write_lock_resume_state or {})
     otp_user_messages: List[Dict[str, str]] = []
     # The background OTP poll writes here, not into credential_refs_by_secret_ref,
     # because a realm transition rebinds that dict while a poll is in flight.
@@ -7869,8 +7846,10 @@ async def _spawn_browser_agent_activity_v3_real(
     # evidence that validates those logins in the user's browser template (A6).
     credential_signin_realms: set[str] = set()
 
-    async def record_passkey_usage_once() -> None:
+    async def record_passkey_usage_once(*, require_complete: bool = False) -> None:
         if dom_service is None:
+            if require_complete and passkey_ref_by_credential_id:
+                raise RuntimeError("Browser is unavailable for approval passkey capture")
             return
         # Read-only. Do NOT re-seed / rebuild the virtual authenticator here.
         # Agent f380ca3c (browser-amazon-return 2026-09-28): syncing before every
@@ -7889,6 +7868,7 @@ async def _spawn_browser_agent_activity_v3_real(
             agent_id=agent_id,
             task_id=task_id,
             browser_url=browser_url or "",
+            **({"require_complete": True} if require_complete else {}),
         )
         passkey_realm = auth_realm_from_url(browser_url or "")
         if len(recorded_passkey_credential_ids) > asserted_before and passkey_realm:
@@ -7949,8 +7929,14 @@ async def _spawn_browser_agent_activity_v3_real(
         exact_session_id: str, pause: bool = False, current_url: str = ""
     ) -> None:
         nonlocal cleanup_failure
-        await _stop_kernel_replay_before_session_close(browser_recorder)
         try:
+            if pause and exact_session_id == session_id and dom_service is not None:
+                captured = await _capture_browser_passkey_usage(
+                    lambda: record_passkey_usage_once(require_complete=True)
+                )
+                if not captured:
+                    raise BrowserSessionCloseError(exact_session_id, pause)
+            await _stop_kernel_replay_before_session_close(browser_recorder)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url
@@ -7967,7 +7953,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
         except BrowserSessionCloseError as cleanup_error:
             cleanup_failure = cleanup_error.receipt()
-        except asyncio.CancelledError:
+        except (Exception, asyncio.CancelledError):
             cleanup_failure = BrowserSessionCloseError(exact_session_id, pause).receipt()
             raise
 
@@ -9012,7 +8998,7 @@ async def _spawn_browser_agent_activity_v3_real(
             nonlocal instruction_state, response_schema, user_instruction_messages
             nonlocal user_message_cursor, user_instruction_message_ids, dynamic_system_context
             nonlocal latest_structured_response, total_input_tokens, total_output_tokens
-            nonlocal pending_write_lock_action, pending_write_lock_target, schema_user_instruction_count
+            nonlocal schema_user_instruction_count
             previous_count = len(user_instruction_messages)
             previous_schema = response_schema
             instruction_state, response_schema, usages = await _sync_browser_user_instructions(
@@ -9040,8 +9026,6 @@ async def _spawn_browser_agent_activity_v3_real(
             schema_user_instruction_count = int(instruction_state.get("schema_user_instruction_count") or 0)
             if len(user_instruction_messages) != previous_count:
                 latest_structured_response = None
-                pending_write_lock_action = None
-                pending_write_lock_target = None
             if response_schema != previous_schema:
                 dynamic_system_context = build_browser_dynamic_system_context(
                     base_custom_instructions,
@@ -9388,7 +9372,7 @@ async def _spawn_browser_agent_activity_v3_real(
             # replacement session (the reused one is about to be released)
             # instead of dying mid-step. Every invocation runs at least one
             # step before it may yield again.
-            if iteration > resume_step_count and pending_write_lock_action is None and not drain_checkpoint_failed:
+            if iteration > resume_step_count and not drain_checkpoint_failed:
                 drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
                 if not drain_reason and _session_expiring(reused_session_deadline, session_id):
                     drain_reason = BROWSER_SESSION_EXPIRING
@@ -9485,86 +9469,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 # previous step's tool results; RoseClient sends it as user while it trails.
                 for agent_message in agent_inbox.accept_rows(agent_message_rows):
                     browser_turn_messages.append(inter_agent_message(format_agent_message(agent_message)))
-
-            # Handle pending write lock action
-            if pending_write_lock_action:
-                state_prefetch.discard()
-                if await _wait_for_browser_user_control(config, task_id):
-                    # The approved target may have changed under user control;
-                    # retain it and re-resolve against a fresh DOM next step.
-                    tab_focus_cache.foreground = None
-                    continue
-                logger.info("Executing pending write lock action after approval")
-                unified_action, _, current_url = await _prepare_pending_write_lock_action(
-                    dom_service,
-                    pending_write_lock_action,
-                    target_signature=pending_write_lock_target,
-                )
-                pending_write_lock_action = None
-                pending_write_lock_target = None
-
-                browser_activity_checkpoint(f"Step {iteration} - executing pending write lock action")
-                if (
-                    browser_network_recorder is None
-                    and network_recorder_task is not None
-                    and network_recorder_task.done()
-                ):
-                    with contextlib.suppress(Exception):
-                        browser_network_recorder = network_recorder_task.result()
-
-                result = await _execute_action(
-                    dom_service,
-                    action_history,
-                    unified_action,
-                    available_file_paths,
-                    session_id=session_id,
-                    config=config,
-                    humanizer=humanizer,
-                    secret_refs=secret_refs,
-                    password_origins=password_origins,
-                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                    user_id=user_id,
-                    current_url=current_url,
-                    trusted_page_urls=visited_urls,
-                    write_lock_enabled=write_lock_enabled,
-                    write_lock_approvals=write_lock_approvals,
-                    system_name=system_name,
-                    browser_network_recorder=browser_network_recorder,
-                    current_auth_realm=auth_realm,
-                    prepare_credentials_for_url=_prepare_credentials_for_url,
-                    auth_context_for_url=_auth_context_for_url,
-                )
-
-                if result.get("status") == "needs_write_approval":
-                    raise RuntimeError(
-                        "The resumed page did not recognize the just-approved write action; refusing to loop"
-                    )
-
-                action_name = unified_action.get("action", "unknown")
-                logger.info(f"Pending write lock action executed: {action_name}", result=result)
-
-                browser_activity_checkpoint(f"Step {iteration} - write lock action applied")
-                if isinstance(result, dict) and result.get("current_url"):
-                    current_url = _private_browser_runtime_url(dom_service, result.get("current_url") or current_url)
-                await record_passkey_usage_once()
-
-                await action_history.record_action(
-                    dom_service=dom_service,
-                    action=action_name,
-                    thinking=f"Executed after write lock approval: {action_name}",
-                    index=unified_action.get("params", {}).get("index"),
-                    coordinates=unified_action.get("params", {}).get("coordinates"),
-                    params=unified_action.get("params", {}),
-                    result=result,
-                )
-                _append_browser_turn_messages(
-                    browser_turn_messages,
-                    unified_action=unified_action,
-                    result=result,
-                    tool_call_id=f"write-lock-resume-{iteration}",
-                )
-
-                continue
 
             # 0. Recent OTPs are polled in the background (backend HTTP); the
             # step never waits on it. Codes a finished poll found are appended
@@ -11119,9 +11023,9 @@ async def _spawn_browser_agent_activity_v3_real(
                                 file_count=len(output_files),
                             )
 
-                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                        dom_service = None
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+                        await _disconnect_browser(dom_service)
+                        dom_service = None
 
                         context_message = build_context_summary(
                             success=True,
@@ -11722,12 +11626,12 @@ Based on this feedback, I need to continue working on the task and address the i
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
+                await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+                if cleanup_failure is not None:
+                    raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
-                    try:
-                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                        dom_service = None
-                    except Exception as e:
-                        logger.warning(f"Failed to disconnect browser before write lock return: {e}")
+                    await _disconnect_browser(dom_service)
+                    dom_service = None
 
                 logger.info(
                     "Returning to workflow for write lock approval",
@@ -11882,12 +11786,12 @@ Based on this feedback, I need to continue working on the task and address the i
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
+                await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+                if cleanup_failure is not None:
+                    raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
-                    try:
-                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                        dom_service = None
-                    except Exception as e:
-                        logger.warning(f"Failed to disconnect browser before payment card return: {e}")
+                    await _disconnect_browser(dom_service)
+                    dom_service = None
 
                 await browser_stream.finish_tools(status="FINISHED")
                 resume_result = {
@@ -12176,9 +12080,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     error=extract_error_message(final_verifier_error),
                 )
 
-        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-        dom_service = None
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+        await _disconnect_browser(dom_service)
+        dom_service = None
 
         context_message = build_context_summary(
             success=False,
@@ -12280,13 +12184,13 @@ Based on this feedback, I need to continue working on the task and address the i
                         "task_actions_started": False,
                     }
 
-        if dom_service:
-            with contextlib.suppress(Exception):
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                dom_service = None
-
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
+
+        if dom_service:
+            with contextlib.suppress(Exception):
+                await _disconnect_browser(dom_service)
+                dom_service = None
 
         if task_id and browser_turn_messages:
             # A user pause: keep this run's exact conversation so a later
@@ -12353,17 +12257,17 @@ Based on this feedback, I need to continue working on the task and address the i
             traceback=traceback.format_exc(),
         )
 
-        if dom_service:
-            with contextlib.suppress(Exception):
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                dom_service = None
-
         if session_id and cleanup_failure is None:
             await _close_browser_with_cleanup_receipt(
                 session_id,
                 pause=True,
                 current_url=current_url,
             )
+
+        if dom_service:
+            with contextlib.suppress(Exception):
+                await _disconnect_browser(dom_service)
+                dom_service = None
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(

@@ -5,6 +5,7 @@ import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets'
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
+import { createOriginPayloadWriter } from '../steel/injectionOriginPage';
 
 type Storage = Awaited<ReturnType<ReturnType<Browser['contexts']>[number]['storageState']>>;
 export type BrowserCheckpoint = {
@@ -13,7 +14,10 @@ export type BrowserCheckpoint = {
   sourceLogicalId: string | null;
   sourceRevision: number;
   storage: Storage;
-  tabs: Array<{ url: string; sessionStorage: Array<{ name: string; value: string }> }>;
+  tabs: Array<{
+    url: string;
+    sessionStorage: Array<{ name: string; value: string; origin?: string }>;
+  }>;
   limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'];
 };
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -94,18 +98,46 @@ export async function checkpointLogicalBrowser(nativeId: string): Promise<void> 
   try {
     const context = browser.contexts()[0];
     if (!context) throw new Error('Browser checkpoint context missing');
-    const storage = await context.storageState({ indexedDB: true });
+    const frameOrigins = new Set<string>();
     const tabs = await Promise.all(
       context
         .pages()
         .filter((page) => /^https?:/.test(page.url()))
-        .map(async (page) => ({
-          url: page.url(),
-          sessionStorage: await page.evaluate<Array<{ name: string; value: string }>>(
-            'Object.entries(sessionStorage).map(([name,value]) => ({name,value}))'
-          ),
-        }))
+        .map(async (page) => {
+          const tabOrigin = new URL(page.url()).origin;
+          const sessionStorage: BrowserCheckpoint['tabs'][number]['sessionStorage'] = [];
+          const seenOrigins = new Set<string>();
+          for (const frame of page.frames()) {
+            if (!/^https?:/.test(frame.url())) continue;
+            const origin = new URL(frame.url()).origin;
+            frameOrigins.add(origin);
+            if (seenOrigins.has(origin)) continue;
+            seenOrigins.add(origin);
+            const entries = await frame.evaluate<Array<{ name: string; value: string }>>(
+              'Object.entries(sessionStorage).map(([name,value]) => ({name,value}))'
+            );
+            sessionStorage.push(
+              ...entries.map((entry) => (origin === tabOrigin ? entry : { ...entry, origin }))
+            );
+          }
+          return { url: page.url(), sessionStorage };
+        })
     );
+    let storage = await context.storageState({ indexedDB: true });
+    // A fresh CDP connection does not know origins visited by earlier clients.
+    // Reuse the existing exact-origin synthetic reader to register live frame
+    // origins without reloading the merchant or making a site request.
+    const capturedOrigins = new Set(storage.origins.map(({ origin }) => origin));
+    const missingOrigins = [...frameOrigins].filter((origin) => !capturedOrigins.has(origin));
+    if (missingOrigins.length) {
+      const reader = createOriginPayloadWriter(context);
+      try {
+        for (const origin of missingOrigins) await reader.writeOriginScript(origin, 'void 0');
+        storage = await context.storageState({ indexedDB: true });
+      } finally {
+        await reader.close();
+      }
+    }
     const empty = storage.cookies.length === 0 && storage.origins.length === 0 && tabs.length === 0;
     const ref = empty
       ? EMPTY_BROWSER_BASELINE
@@ -163,13 +195,14 @@ export async function restoreLogicalBrowserCheckpoint(
     const origin = new URL(target.url).origin;
     const page = index === 0 && blank ? blank : await context.newPage();
     const cdp = target.sessionStorage.length ? await context.newCDPSession(page) : null;
+    if (cdp) await cdp.send('Page.enable');
     const script = cdp
       ? await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-          source: `if (location.origin === ${JSON.stringify(origin)}) { for (const {name,value} of ${JSON.stringify(target.sessionStorage)}) sessionStorage.setItem(name,value); }`,
+          source: `for (const entry of ${JSON.stringify(target.sessionStorage)}) { if (location.origin === (entry.origin ?? ${JSON.stringify(origin)})) sessionStorage.setItem(entry.name,entry.value); }`,
         })
       : null;
     try {
-      await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.goto(target.url, { waitUntil: 'load', timeout: 30_000 });
     } finally {
       if (cdp && script)
         await cdp.send('Page.removeScriptToEvaluateOnNewDocument', {
