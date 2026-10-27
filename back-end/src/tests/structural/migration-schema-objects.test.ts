@@ -207,6 +207,44 @@ assert.deepEqual(driftProblems(livePolicies('true')), [
   'changed policy: User.Users can select own data (1_init): expected PERMISSIVE FOR SELECT ' +
     'TO public USING ((auth.uid())::text="userId"); live PERMISSIVE FOR SELECT TO public USING (true)',
 ]);
+// A hand-written policy matches its deparsed live form: pg_policies adds ::text
+// casts to literals and parenthesizes AND/OR operands (CodeRabbit on #1608).
+const handWritten = migrationObjectsFromSql([
+  {
+    name: 'a',
+    sql: `CREATE POLICY "svc" ON public."T" FOR ALL TO authenticated USING (auth.role() = 'service_role' AND "userId" = (auth.uid())::text);`,
+  },
+]).policyDefs.get('T.svc');
+assert.ok(handWritten);
+const deparsedLive = normalizePolicyExpr(
+  `((auth.role() = 'service_role'::text) AND ("userId" = (auth.uid())::text))`
+);
+const handFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-objects-hand-'));
+fs.mkdirSync(path.join(handFixture, '1_init'));
+fs.writeFileSync(
+  path.join(handFixture, '1_init', 'migration.sql'),
+  `CREATE POLICY "svc" ON public."T" FOR ALL TO authenticated USING (auth.role() = 'service_role' AND "userId" = (auth.uid())::text);`
+);
+const handReport = (using: string) =>
+  driftProblems(
+    compareCatalog(
+      {
+        applied: new Set(['1_init']),
+        indexes: new Map(),
+        triggers: new Set(),
+        functions: new Set(),
+        policies: new Map([['T.svc', { ...handWritten, using }]]),
+        extensions: new Set(),
+        rls: new Set(),
+        exposed: [],
+      },
+      handFixture
+    )
+  );
+assert.deepEqual(handReport(deparsedLive), []);
+assert.equal(handReport('true').length, 1, 'a predicate rewritten to true must still alert');
+fs.rmSync(handFixture, { recursive: true, force: true });
+
 // ALTER POLICY rewrites only the clauses it names (CodeRabbit on #1608).
 const altered = migrationObjectsFromSql([
   {

@@ -140,6 +140,24 @@ function describePolicy(def: PolicyDef): string {
     .join(' ');
 }
 
+/**
+ * pg_policies deparses hand-written expressions: literals gain casts
+ * (`'service_role'` -> `'service_role'::text`) and AND/OR operands gain
+ * parentheses. Compare with casts and grouping removed so a correct hand-written
+ * policy does not alert; a changed predicate, role or command still differs.
+ */
+function samePolicy(want: PolicyDef, live: PolicyDef): boolean {
+  const loose = (expr: string) =>
+    expr.replace(/::[a-z_][a-z0-9_ ]*(?:\[\])?/gi, '').replace(/[()]/g, '');
+  return (
+    want.permissive === live.permissive &&
+    want.cmd === live.cmd &&
+    want.roles.join(',') === live.roles.join(',') &&
+    loose(want.using) === loose(live.using) &&
+    loose(want.withCheck) === loose(live.withCheck)
+  );
+}
+
 export function compareCatalog(catalog: Catalog, migrationsDir?: string): DriftReport {
   // Replay only what the target recorded as applied, so a pending migration
   // neither adds expectations nor hides objects an applied one still declares.
@@ -169,7 +187,7 @@ export function compareCatalog(catalog: Catalog, migrationsDir?: string): DriftR
       continue;
     }
     const want = expected.policyDefs.get(key);
-    if (want && describePolicy(want) !== describePolicy(live)) {
+    if (want && !samePolicy(want, live)) {
       changedPolicies.push(
         `${key} (${migration}): expected ${describePolicy(want)}; live ${describePolicy(live)}`
       );
