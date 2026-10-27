@@ -24,6 +24,7 @@ const SheetOverlay = React.forwardRef<
 ));
 SheetOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+/** Sheets share the Dialog modal layer (z 210, see ui/dialog): the last opened is on top. */
 type SheetSide = 'top' | 'bottom' | 'left' | 'right';
 
 const sideClasses: Record<SheetSide, string> = {
@@ -48,14 +49,21 @@ const SheetContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed z-[211] gap-4 bg-background shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500',
+        'fixed z-[210] gap-4 bg-background shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500',
         sideClasses[side],
         className,
       )}
       {...props}
     >
       {children}
-      <SheetClose className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+      <SheetClose
+        className={cn(
+          'absolute right-2 grid h-10 w-10 place-items-center rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none',
+          // Sheets that start at the top of the screen sit under the status bar in an
+          // installed iOS PWA: keep the close target below the safe-area inset.
+          side === 'bottom' ? 'top-2' : 'top-[calc(0.5rem+var(--safe-area-inset-top))]',
+        )}
+      >
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </SheetClose>
