@@ -543,48 +543,113 @@ export interface TrajectoryGoalBatch {
   /** Highest AgentTrajectorySearch.messageId scanned; pass back as `afterId`. */
   lastMessageId: string | null;
   scanned: number;
+  /** Agent rows created (dry run: that would be created). */
+  inserted: number;
+  /** Row copies cleared (dry run: that would be cleared). */
   cleared: number;
+  /**
+   * Exact rows whose copy was cleared, with the value each copy held, for the
+   * operator's receipt (empty on dry run).
+   */
+  clearedRows: Array<{
+    messageId: string;
+    agentId: string;
+    agentGoal: string;
+    agentTitle: string | null;
+  }>;
 }
+
+/**
+ * Per-statement bounds for the prod backfill: a batch that cannot get its row
+ * locks quickly (a live trigger upsert holds them) fails fast and is retried
+ * by the operator from its cursor instead of queueing behind live traffic.
+ */
+const GOAL_BATCH_STATEMENT_TIMEOUT = '15s';
+const GOAL_BATCH_LOCK_TIMEOUT = '2s';
 
 /**
  * Move legacy per-row goal/title copies onto AgentTrajectoryAgent in one
  * bounded, primary-key-ordered batch. Idempotent and resumable: an agent row
  * that already exists is kept (live writers hold the newest value), and a
  * row's copy is cleared only when its owner's agent row holds the same value.
+ * `dryRun` counts the same inserts and clears inside a read-only transaction.
  */
 export async function normalizeTrajectoryGoalBatch(
   afterId: string | null,
-  limit: number
+  limit: number,
+  options: { dryRun?: boolean } = {}
 ): Promise<TrajectoryGoalBatch> {
   const after = afterId === null ? Prisma.sql`TRUE` : Prisma.sql`"messageId" > ${afterId}`;
   const scannedIds = await prisma.$queryRaw<Array<{ messageId: string }>>(Prisma.sql`
     SELECT "messageId" FROM "AgentTrajectorySearch" WHERE ${after}
     ORDER BY "messageId" LIMIT ${limit}
   `);
-  if (scannedIds.length === 0) return { lastMessageId: afterId, scanned: 0, cleared: 0 };
+  if (scannedIds.length === 0)
+    return { lastMessageId: afterId, scanned: 0, inserted: 0, cleared: 0, clearedRows: [] };
   const lastMessageId = scannedIds[scannedIds.length - 1].messageId;
-  const cleared = await runTransactionWithRetry(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`
+  const sAfter = afterId === null ? Prisma.sql`TRUE` : Prisma.sql`s."messageId" > ${afterId}`;
+  // The newest copy per agent in this batch: what the insert below would store.
+  const candidates = Prisma.sql`
+    SELECT DISTINCT ON ("agentId") "agentId", "userId", "agentGoal", "agentTitle"
+    FROM "AgentTrajectorySearch"
+    WHERE ${after} AND "messageId" <= ${lastMessageId}
+      AND ("agentGoal" <> '' OR "agentTitle" IS NOT NULL)
+    ORDER BY "agentId", "createdAt" DESC, "messageId" DESC
+  `;
+  const result = await runTransactionWithRetry(async (tx) => {
+    // SET TRANSACTION must precede every other statement in the transaction.
+    if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${GOAL_BATCH_STATEMENT_TIMEOUT}'`);
+    await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${GOAL_BATCH_LOCK_TIMEOUT}'`);
+    if (options.dryRun) {
+      const [counts] = await tx.$queryRaw<Array<{ inserted: bigint; cleared: bigint }>>(
+        Prisma.sql`
+          WITH c AS (${candidates}),
+          target AS (
+            SELECT c."agentId", c."userId", c."agentGoal", c."agentTitle", FALSE AS existing
+            FROM c WHERE NOT EXISTS (
+              SELECT 1 FROM "AgentTrajectoryAgent" g WHERE g."agentId" = c."agentId")
+            UNION ALL
+            SELECT g."agentId", g."userId", g."agentGoal", g."agentTitle", TRUE
+            FROM "AgentTrajectoryAgent" g WHERE g."agentId" IN (SELECT "agentId" FROM c)
+          )
+          SELECT
+            (SELECT count(*) FROM target WHERE NOT existing) AS inserted,
+            (SELECT count(*) FROM "AgentTrajectorySearch" s JOIN target t
+               ON t."agentId" = s."agentId" AND t."userId" = s."userId"
+             WHERE ${sAfter} AND s."messageId" <= ${lastMessageId}
+               AND (s."agentGoal" <> '' OR s."agentTitle" IS NOT NULL)
+               AND t."agentGoal" = s."agentGoal"
+               AND t."agentTitle" IS NOT DISTINCT FROM s."agentTitle") AS cleared
+        `
+      );
+      return {
+        inserted: Number(counts.inserted),
+        cleared: Number(counts.cleared),
+        clearedRows: [] as TrajectoryGoalBatch['clearedRows'],
+      };
+    }
+    const inserted = await tx.$executeRaw(Prisma.sql`
       INSERT INTO "AgentTrajectoryAgent" ("agentId", "userId", "agentGoal", "agentTitle")
-      SELECT DISTINCT ON ("agentId") "agentId", "userId", "agentGoal", "agentTitle"
-      FROM "AgentTrajectorySearch"
-      WHERE ${after} AND "messageId" <= ${lastMessageId}
-        AND ("agentGoal" <> '' OR "agentTitle" IS NOT NULL)
-      ORDER BY "agentId", "createdAt" DESC, "messageId" DESC
+      ${candidates}
       ON CONFLICT ("agentId") DO NOTHING
     `);
-    return tx.$executeRaw(Prisma.sql`
-      UPDATE "AgentTrajectorySearch" s SET "agentGoal" = '', "agentTitle" = NULL
-      FROM "AgentTrajectoryAgent" g
-      WHERE ${afterId === null ? Prisma.sql`TRUE` : Prisma.sql`s."messageId" > ${afterId}`}
-        AND s."messageId" <= ${lastMessageId}
-        AND (s."agentGoal" <> '' OR s."agentTitle" IS NOT NULL)
-        AND g."agentId" = s."agentId" AND g."userId" = s."userId"
-        -- Only an identical copy is redundant; a divergent legacy copy stays,
-        -- so normalization never changes what search returns.
-        AND g."agentGoal" = s."agentGoal"
-        AND g."agentTitle" IS NOT DISTINCT FROM s."agentTitle"
-    `);
+    const clearedRows = await tx.$queryRaw<TrajectoryGoalBatch['clearedRows']>(
+      Prisma.sql`
+        UPDATE "AgentTrajectorySearch" s SET "agentGoal" = '', "agentTitle" = NULL
+        FROM "AgentTrajectoryAgent" g
+        WHERE ${sAfter}
+          AND s."messageId" <= ${lastMessageId}
+          AND (s."agentGoal" <> '' OR s."agentTitle" IS NOT NULL)
+          AND g."agentId" = s."agentId" AND g."userId" = s."userId"
+          -- Only an identical copy is redundant; a divergent legacy copy stays,
+          -- so normalization never changes what search returns.
+          AND g."agentGoal" = s."agentGoal"
+          AND g."agentTitle" IS NOT DISTINCT FROM s."agentTitle"
+        RETURNING s."messageId", s."agentId", g."agentGoal", g."agentTitle"
+      `
+    );
+    return { inserted, cleared: clearedRows.length, clearedRows };
   });
-  return { lastMessageId, scanned: scannedIds.length, cleared };
+  return { lastMessageId, scanned: scannedIds.length, ...result };
 }

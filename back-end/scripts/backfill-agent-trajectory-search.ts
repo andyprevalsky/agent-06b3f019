@@ -1,6 +1,7 @@
 /** Rebuild the SQL grep projection from finalized encrypted R2 trace bundles. */
 
 import 'dotenv/config';
+import { appendFileSync } from 'node:fs';
 import { listArchiveBundleIdsStrict } from '../src/providers/traceArchiveAudit';
 import {
   ArchivedTraceNotFoundError,
@@ -61,40 +62,92 @@ async function backfillLiveMessages(args: string[]): Promise<void> {
 /**
  * Move legacy per-row goal/title copies onto AgentTrajectoryAgent in
  * primary-key-ordered batches (no statement scans the whole table).
- * Idempotent and resumable with `--after <last cursor>`.
+ * Idempotent and resumable with `--after <last cursor>`. `--dry-run` counts
+ * the same work read-only. `--receipt <file>` appends one JSON line per batch
+ * with its cursor range, counts and the exact cleared rows, so every cleared
+ * copy is recoverable from AgentTrajectoryAgent plus the receipt.
  */
 async function normalizeAgentGoals(args: string[]): Promise<void> {
   const usage =
-    'Usage: backfill-agent-trajectory-search.ts --agent-goals [--batch-size 1..5000] [--after <message id>]';
-  const sizeArg = args.indexOf('--batch-size');
-  const afterArg = args.indexOf('--after');
-  const batchSize = sizeArg >= 0 ? Number(args[sizeArg + 1]) : 1000;
-  const known = new Set(['--batch-size', '--after']);
-  const operands = new Set([sizeArg + 1, afterArg + 1].filter((index) => index > 0));
+    'Usage: backfill-agent-trajectory-search.ts --agent-goals [--batch-size 1..5000] [--after <message id>] [--dry-run] [--receipt <file>] [--pause-ms 0..10000]';
+  const valueFlags = ['--batch-size', '--after', '--receipt', '--pause-ms'];
+  const value = (flag: string): string | undefined => {
+    const index = args.indexOf(flag);
+    if (index < 0) return undefined;
+    const operand = args[index + 1];
+    if (!operand || operand.startsWith('-')) throw new Error(usage);
+    return operand;
+  };
+  const operands = new Set(
+    valueFlags
+      .map((flag) => args.indexOf(flag))
+      .filter((i) => i >= 0)
+      .map((i) => i + 1)
+  );
+  if (
+    args.some(
+      (arg, index) => !operands.has(index) && !valueFlags.includes(arg) && arg !== '--dry-run'
+    )
+  ) {
+    throw new Error(usage);
+  }
+  const batchSize = Number(value('--batch-size') ?? 1000);
+  const pauseMs = Number(value('--pause-ms') ?? 0);
   if (
     !Number.isInteger(batchSize) ||
     batchSize < 1 ||
     batchSize > 5_000 ||
-    (afterArg >= 0 && (!args[afterArg + 1] || args[afterArg + 1].startsWith('-'))) ||
-    args.some((arg, index) => !operands.has(index) && !known.has(arg))
+    !Number.isInteger(pauseMs) ||
+    pauseMs < 0 ||
+    pauseMs > 10_000
   ) {
     throw new Error(usage);
   }
-  let afterId: string | null = afterArg >= 0 ? args[afterArg + 1] : null;
+  const dryRun = args.includes('--dry-run');
+  const receipt = value('--receipt');
+  let afterId: string | null = value('--after') ?? null;
   let scanned = 0;
+  let inserted = 0;
   let cleared = 0;
+  const recorded = new Set<string>();
   for (let batches = 1; ; batches += 1) {
-    const batch = await normalizeTrajectoryGoalBatch(afterId, batchSize);
+    const from = afterId;
+    const batch = await normalizeTrajectoryGoalBatch(afterId, batchSize, { dryRun });
     if (batch.scanned === 0) break;
     afterId = batch.lastMessageId;
     scanned += batch.scanned;
+    inserted += batch.inserted;
     cleared += batch.cleared;
-    if (batches % 50 === 0) {
-      process.stderr.write(`Scanned ${scanned} rows (${cleared} cleared); cursor ${afterId}\n`);
+    if (receipt) {
+      appendFileSync(
+        receipt,
+        `${JSON.stringify({
+          at: new Date().toISOString(),
+          dryRun,
+          after: from,
+          through: batch.lastMessageId,
+          scanned: batch.scanned,
+          inserted: batch.inserted,
+          cleared: batch.cleared,
+          // Each cleared copy equalled its agent row; record that value once per
+          // agent so the receipt alone restores every copy.
+          agents: batch.clearedRows
+            .filter((row) => !recorded.has(row.agentId) && recorded.add(row.agentId))
+            .map(({ agentId, agentGoal, agentTitle }) => ({ agentId, agentGoal, agentTitle })),
+          clearedRows: batch.clearedRows.map(({ messageId, agentId }) => ({ messageId, agentId })),
+        })}\n`,
+        { mode: 0o600 }
+      );
     }
+    if (batches % 50 === 0) {
+      process.stderr.write(
+        `Scanned ${scanned} rows (${inserted} agents, ${cleared} cleared${dryRun ? ', dry run' : ''}); cursor ${afterId}\n`
+      );
+    }
+    if (pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs));
   }
   process.stdout.write(
-    `${JSON.stringify({ mode: 'agent-goals', scanned, cleared, cursor: afterId })}\n`
+    `${JSON.stringify({ mode: 'agent-goals', dryRun, scanned, inserted, cleared, cursor: afterId })}\n`
   );
 }
 

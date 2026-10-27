@@ -371,8 +371,24 @@ export async function testLegacyGoalCopiesNormalizeIdempotently(seed: RunSeed): 
     }).then((rows) => rows.map((row) => [row.messageId, row.agentGoal, row.agentTitle]));
   const before = await search();
   const cursor = `legacy-goal-${seed.rootAgentId}-0`;
+  // The prod operator measures first: a dry run predicts the batch exactly and writes nothing.
+  const dry = await normalizeTrajectoryGoalBatch(cursor, 10, { dryRun: true });
+  const untouched = await prisma.agentTrajectorySearch.count({
+    where: { messageId: { in: ids }, NOT: { agentGoal: '' } },
+  });
+  assert.strictEqual(untouched, 3, 'a dry run must not clear any copy');
   const first = await normalizeTrajectoryGoalBatch(cursor, 10);
   assert.strictEqual(first.cleared, 2, 'both redundant legacy copies must be cleared');
+  assert.deepStrictEqual(
+    { inserted: dry.inserted, cleared: dry.cleared },
+    { inserted: first.inserted, cleared: first.cleared },
+    'the dry run must predict the real batch'
+  );
+  assert.deepStrictEqual(
+    first.clearedRows.map((row) => row.messageId).sort(),
+    ids.slice(0, 2).sort(),
+    'the receipt must list exactly the cleared rows'
+  );
   assert.deepStrictEqual(await search(), before, 'normalization changed search output');
   const again = await normalizeTrajectoryGoalBatch(cursor, 10);
   assert.strictEqual(again.cleared, 0, 'a rerun must be a no-op');
