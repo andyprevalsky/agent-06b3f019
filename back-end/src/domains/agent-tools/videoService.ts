@@ -24,9 +24,7 @@
  * bounded per call (≤ 10 s, ≤ 3 reference images) and per user by an in-process
  * in-flight cap (MAX_IN_FLIGHT_PER_USER); idle cost is zero.
  */
-import { Prisma } from '@prisma/client';
 import { createHash } from '../../providers/crypto';
-import { prisma } from '../../providers/database';
 import {
   OmniVideoError,
   generateOmniVideo,
@@ -35,8 +33,7 @@ import {
 } from '../../providers/gemini/omniVideo';
 import { createLogger } from '../../providers/logger';
 import { sniffDisplayMediaType, putDisplayObject } from '../../providers/agentTools/media';
-import { WorkflowGenerationMismatchError, saveToolUsage } from '../tool-usage/service';
-import { findAgent } from './repo';
+import * as repo from './repo';
 import { resolveAll } from './displayResolution';
 import { AgentToolsError, type ToolContext } from './service';
 import type { GenerateVideoBody, GenerateVideoResult } from './videoTypes';
@@ -97,34 +94,20 @@ async function loadReferences(ctx: ToolContext, files: string[]): Promise<OmniIm
   return images;
 }
 
-type Row = NonNullable<Awaited<ReturnType<typeof prisma.toolSideEffect.findUnique>>>;
-
 /** Returns a stored result to replay, or null once this call owns the claim. */
 async function claimOrReplay(key: string, agentId: string): Promise<GenerateVideoResult | null> {
   const claim: Claim = { claimedAt: new Date().toISOString() };
-  const create = () =>
-    prisma.toolSideEffect.create({
-      data: {
-        operationKey: key,
-        operationType: OPERATION_TYPE,
-        status: 'STARTED',
-        externalId: agentId,
-        request: claim as unknown as Prisma.InputJsonObject,
-      },
-    });
-  let row: Row | null = await prisma.toolSideEffect.findUnique({ where: { operationKey: key } });
-  if (row === null) {
-    try {
-      await create();
-      return null;
-    } catch (err) {
-      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
-      row = await prisma.toolSideEffect.findUnique({ where: { operationKey: key } });
-      if (row === null) throw err;
-    }
-  }
+  const created = await repo.createSideEffectClaim({
+    operationKey: key,
+    operationType: OPERATION_TYPE,
+    externalId: agentId,
+    request: { ...claim },
+  });
+  if (created) return null;
+  const row = await repo.findSideEffect(key);
+  if (row === null) throw new AgentToolsError(409, 'This video claim changed; retry shortly.');
   if (row.status === 'DONE') {
-    return { ...(row.response as unknown as GenerateVideoResult), replayed: true };
+    return { ...(row.response as GenerateVideoResult), replayed: true };
   }
   if (row.status === 'UNCERTAIN') {
     throw new AgentToolsError(
@@ -132,42 +115,20 @@ async function claimOrReplay(key: string, agentId: string): Promise<GenerateVide
       `An earlier attempt with this idempotency_key may already have been billed (${row.error ?? 'unknown outcome'}). Use a new idempotency_key to generate again.`
     );
   }
+  const previous = (row.request as Claim | null)?.claimedAt ?? '';
   if (row.status === 'STARTED') {
-    const claimedAt = Date.parse((row.request as Claim | null)?.claimedAt ?? '');
+    const claimedAt = Date.parse(previous);
     if (Number.isFinite(claimedAt) && Date.now() - claimedAt < GENERATE_VIDEO_STALE_CLAIM_MS) {
       throw new AgentToolsError(409, 'This video is still being generated; retry shortly.');
     }
   }
   // FAILED (definitive, nothing billed) or a dead STARTED claim: exactly one caller wins.
-  const won = await prisma.toolSideEffect.updateMany({
-    where: {
-      operationKey: key,
-      status: row.status,
-      // Compare-and-set on the previous claim so two racing retries cannot both win.
-      request: { path: ['claimedAt'], equals: (row.request as Claim | null)?.claimedAt ?? '' },
-    },
-    data: { status: 'STARTED', error: null, request: claim as unknown as Prisma.InputJsonObject },
-  });
-  if (won.count !== 1)
+  if (
+    !(await repo.reclaimSideEffect(key, { status: row.status, claimedAt: previous }, { ...claim }))
+  ) {
     throw new AgentToolsError(409, 'This video is still being generated; retry shortly.');
+  }
   return null;
-}
-
-async function settle(
-  key: string,
-  status: 'DONE' | 'FAILED' | 'UNCERTAIN',
-  fields: { error?: string; response?: GenerateVideoResult }
-): Promise<void> {
-  await prisma.toolSideEffect.update({
-    where: { operationKey: key },
-    data: {
-      status,
-      error: fields.error ?? null,
-      ...(fields.response
-        ? { response: fields.response as unknown as Prisma.InputJsonObject }
-        : {}),
-    },
-  });
 }
 
 async function produce(
@@ -189,32 +150,20 @@ async function produce(
   const storagePath = `${agent.userId}/generated-video/${sha256}.mp4`;
   await putDisplayObject(storagePath, video.bytes, 'video/mp4');
   const cost = omniCost(body.resolution, video.durationSeconds);
-  const usage = {
-    agent_id: agent.id,
-    user_id: agent.userId,
-    tool_name: GENERATE_VIDEO_TOOL,
-    total_cost_cents: cost.cents,
-    operation_key: `${key}:usage`,
-    usage_items: [
+  await repo.recordServiceUsageOnce({
+    operationKey: `${key}:usage`,
+    agentId: agent.id,
+    userId: agent.userId,
+    toolName: GENERATE_VIDEO_TOOL,
+    totalCostCents: cost.cents,
+    usageItems: [
       {
         type: 'service',
         cost_cents: cost.cents,
         provider: `Gemini Omni video (${video.model}, ${body.resolution}, ${video.durationSeconds.toFixed(2)}s)`,
       },
     ],
-  };
-  try {
-    await saveToolUsage({ ...usage, workflow_generation: ctx.workflowGeneration });
-  } catch (err) {
-    if (!(err instanceof WorkflowGenerationMismatchError)) throw err;
-    // The workflow rolled over during generation: the money is spent, so record it
-    // against the agent's current generation rather than losing it.
-    const fresh = await findAgent(agent.id);
-    await saveToolUsage({
-      ...usage,
-      workflow_generation: fresh?.temporalWorkflowId ?? agent.id,
-    });
-  }
+  });
   return {
     status: 'completed',
     replayed: false,
@@ -260,7 +209,7 @@ export async function generateVideo(
     return replay;
   }
   if ((inFlight.get(agent.userId) ?? 0) >= MAX_IN_FLIGHT_PER_USER) {
-    await settle(key, 'FAILED', { error: 'too many concurrent video generations' });
+    await repo.settleSideEffect(key, 'FAILED', { error: 'too many concurrent video generations' });
     throw new AgentToolsError(
       429,
       `At most ${MAX_IN_FLIGHT_PER_USER} videos can be generated at once; wait for one to finish.`
@@ -273,7 +222,7 @@ export async function generateVideo(
     const result = await produce(ctx, body, key, images, () => {
       billed = true;
     });
-    await settle(key, 'DONE', { response: result });
+    await repo.settleSideEffect(key, 'DONE', { response: { ...result } });
     log.info('[GenerateVideo] completed', {
       agent_id: agent.id,
       operation_key: key,
@@ -293,9 +242,9 @@ export async function generateVideo(
       may_have_billed: ambiguous,
       latency_ms: Date.now() - started,
     });
-    await settle(key, ambiguous ? 'UNCERTAIN' : 'FAILED', { error: message }).catch(
-      () => undefined
-    );
+    await repo
+      .settleSideEffect(key, ambiguous ? 'UNCERTAIN' : 'FAILED', { error: message })
+      .catch(() => undefined);
     if (err instanceof OmniVideoError) {
       const definitive =
         err.httpStatus !== undefined && err.httpStatus >= 400 && err.httpStatus < 500;
