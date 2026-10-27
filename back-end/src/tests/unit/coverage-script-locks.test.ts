@@ -338,6 +338,68 @@ try {
   const other = tryAcquire('postgresql://postgres:postgres@localhost:5432/victoria_gate-y');
   assert.equal(other.status, 0, `a different database must not be blocked: ${other.stderr}`);
 
+  // CodeRabbit #1592: a bracketed IPv6 loopback URL split at its first colon
+  // (host `[`, port `:1]:5432`) locked a different file for the same database.
+  const keyOf = (url: string) =>
+    execFileSync(
+      'bash',
+      ['-c', 'source "$1"; test_db_run_lock_key "$2"', 'key', testDbLockLibPath, url],
+      {
+        encoding: 'utf8',
+      }
+    ).trim();
+  for (const url of [
+    'postgresql://postgres:pw@[::1]:5432/victoria_gate-x?connection_limit=4',
+    'postgresql://[::1]/victoria_gate-x',
+  ]) {
+    assert.equal(
+      keyOf(url),
+      'localhost:5432/victoria_gate-x',
+      `${url} must share the loopback key`
+    );
+  }
+  assert.equal(keyOf('postgresql://u@[::1]:6543/db'), 'localhost:6543/db');
+  const blockedIpv6 = tryAcquire('postgresql://postgres@[::1]:5432/victoria_gate-x');
+  assert.equal(blockedIpv6.status, 1, 'an IPv6 loopback URL must contend for the same lock');
+
+  // CodeRabbit #1592: a skip-sync blackbox run (existing backend) started its
+  // cases without the lock, so a second runner could db push the live database.
+  // Only coverage's own child inherits its parent's lock, by explicit key + the
+  // live holder's pid as recorded in the lock's owner file.
+  const inherited = (
+    key: string,
+    pid: string,
+    url = 'postgresql://localhost:5432/victoria_gate-x'
+  ) =>
+    spawnSync(
+      'bash',
+      ['-c', 'source "$1"; test_db_run_lock_inherited "$2"', 'inherit', testDbLockLibPath, url],
+      {
+        env: {
+          ...lockEnv,
+          ROSE_TEST_DB_LOCK_INHERITED_KEY: key,
+          ROSE_TEST_DB_LOCK_INHERITED_PID: pid,
+        },
+      }
+    ).status;
+  const holderPid = String(testDbLockHolder.pid);
+  assert.equal(
+    inherited('localhost:5432/victoria_gate-x', holderPid),
+    0,
+    'the holder child inherits the lock'
+  );
+  assert.equal(
+    inherited('localhost:5432/victoria_gate-x', String(process.pid)),
+    1,
+    'a non-holder pid inherits nothing'
+  );
+  assert.equal(
+    inherited('localhost:5432/victoria_gate-y', holderPid),
+    1,
+    'another database key inherits nothing'
+  );
+  assert.equal(inherited('', holderPid), 1, 'no inherited key means acquire');
+
   // A SIGKILLed holder never strands the lock: the kernel lock dies with its keeper.
   testDbLockHolder.kill('SIGKILL');
   let recovered = tryAcquire('postgresql://localhost:5432/victoria_gate-x');
@@ -367,10 +429,23 @@ try {
     'utf8'
   );
   const skipBranch = blackboxSource.indexOf('if [[ "$SKIP_DB_SYNC" == "1" ]]; then');
-  const skipElse = blackboxSource.indexOf('  else', skipBranch);
+  const skipEnd = blackboxSource.indexOf('\n  else\n', skipBranch);
+  const skipPath = blackboxSource.slice(skipBranch, skipEnd);
   assert.ok(
-    blackboxSource.indexOf('acquire_test_db_run_lock "') > skipElse,
-    'the coverage-launched blackbox child (skip sync) must not take its parent coverage lock'
+    skipPath.indexOf('if test_db_run_lock_inherited "$LOCAL_DB_URL"') > 0 &&
+      skipPath.indexOf('acquire_test_db_run_lock "$LOCAL_DB_URL"') >
+        skipPath.indexOf('if test_db_run_lock_inherited "$LOCAL_DB_URL"'),
+    'a skip-sync blackbox run must hold the lock unless it inherits its parent coverage lock'
+  );
+  const coverageSource = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
+  const childLaunch = coverageSource.slice(
+    coverageSource.indexOf('BLACKBOX_TEST_SKIP_DB_SYNC=1'),
+    coverageSource.indexOf('bash scripts/run-blackbox-tests.sh')
+  );
+  assert.match(
+    childLaunch,
+    /ROSE_TEST_DB_LOCK_INHERITED_KEY="\$TEST_DB_RUN_LOCK_KEY" ROSE_TEST_DB_LOCK_INHERITED_PID="\$\$"/,
+    'coverage must hand its blackbox child the lock it holds'
   );
 } finally {
   testDbLockHolder?.kill('SIGKILL');

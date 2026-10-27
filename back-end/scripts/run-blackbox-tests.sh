@@ -299,11 +299,20 @@ if $DB_FOUND; then
       echo "❌ BLACKBOX_TEST_SKIP_DB_SYNC is only valid with an existing backend." >&2
       exit 1
     fi
-    echo "Skipping local DB schema sync; existing backend caller prepared the test database."
+    # Skipping the sync does not make the database ours: a second runner's
+    # schema sync would still deadlock these cases. Only coverage's own child
+    # runs under its parent's lock (explicitly handed down); any other
+    # skip-sync run holds the lock itself.
+    source "$SCRIPT_DIR/test-db-run-lock.sh"
+    if test_db_run_lock_inherited "$LOCAL_DB_URL"; then
+      echo "Skipping local DB schema sync; running under the parent coverage run's database lock."
+    else
+      acquire_test_db_run_lock "$LOCAL_DB_URL" "run-blackbox-tests.sh $*" || exit 1
+      echo "Skipping local DB schema sync; existing backend caller prepared the test database."
+    fi
   else
     # Hold this database for the whole run: a concurrent runner's schema sync
-    # deadlocks live cases (40P01). The skip-sync child of coverage runs under
-    # its parent's lock instead.
+    # deadlocks live cases (40P01).
     source "$SCRIPT_DIR/test-db-run-lock.sh"
     acquire_test_db_run_lock "$LOCAL_DB_URL" "run-blackbox-tests.sh $*" || exit 1
     node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
