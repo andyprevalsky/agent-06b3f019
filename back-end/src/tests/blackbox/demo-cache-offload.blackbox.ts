@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     const dry = await store.offloadFastCacheBatch(prefix, 10, { dryRun: true });
     assert.equal(dry.offloaded, 1, JSON.stringify(dry));
     assert.equal((await row(legacy)).xmin, inline.xmin, 'a dry run must not write');
-    const real = await store.offloadFastCacheBatch(prefix, 10);
+    const real = await store.offloadFastCacheBatch(prefix, 10, { concurrency: 4 });
     assert.deepEqual(
       real.offloadedRows.map((r) => r.key),
       [legacy],

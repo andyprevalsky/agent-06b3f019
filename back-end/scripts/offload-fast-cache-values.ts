@@ -10,7 +10,7 @@
  *
  * Usage (from back-end/):
  *   npx tsx scripts/offload-fast-cache-values.ts [--dry-run] [--batch-size 1..2000]
- *     [--after <key>] [--receipt <file>] [--max-rows N] [--pause-ms 0..10000]
+ *     [--after <key>] [--receipt <file>] [--max-rows N] [--pause-ms 0..10000] [--concurrency 1..32]
  */
 import 'dotenv/config';
 import { appendFileSync } from 'node:fs';
@@ -19,8 +19,15 @@ import { offloadFastCacheBatch } from '../src/providers/demoCacheStore';
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const usage =
-    'Usage: offload-fast-cache-values.ts [--dry-run] [--batch-size 1..2000] [--after <key>] [--receipt <file>] [--max-rows N] [--pause-ms 0..10000]';
-  const valueFlags = ['--batch-size', '--after', '--receipt', '--max-rows', '--pause-ms'];
+    'Usage: offload-fast-cache-values.ts [--dry-run] [--batch-size 1..2000] [--after <key>] [--receipt <file>] [--max-rows N] [--pause-ms 0..10000] [--concurrency 1..32]';
+  const valueFlags = [
+    '--batch-size',
+    '--after',
+    '--receipt',
+    '--max-rows',
+    '--pause-ms',
+    '--concurrency',
+  ];
   const value = (flag: string): string | undefined => {
     const index = args.indexOf(flag);
     if (index < 0) return undefined;
@@ -43,6 +50,7 @@ async function main(): Promise<void> {
   const batchSize = Number(value('--batch-size') ?? 500);
   const maxRows = Number(value('--max-rows') ?? Number.MAX_SAFE_INTEGER);
   const pauseMs = Number(value('--pause-ms') ?? 0);
+  const concurrency = Number(value('--concurrency') ?? 8);
   if (
     !Number.isInteger(batchSize) ||
     batchSize < 1 ||
@@ -51,7 +59,10 @@ async function main(): Promise<void> {
     maxRows < 1 ||
     !Number.isInteger(pauseMs) ||
     pauseMs < 0 ||
-    pauseMs > 10_000
+    pauseMs > 10_000 ||
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > 32
   )
     throw new Error(usage);
   const dryRun = args.includes('--dry-run');
@@ -63,7 +74,7 @@ async function main(): Promise<void> {
     const batch = await offloadFastCacheBatch(
       afterKey,
       Math.min(batchSize, maxRows - totals.scanned),
-      { dryRun }
+      { dryRun, concurrency }
     );
     if (batch.scanned === 0) break;
     afterKey = batch.lastKey;

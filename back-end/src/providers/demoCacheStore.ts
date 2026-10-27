@@ -572,16 +572,20 @@ export interface FastCacheOffloadBatch {
 export async function offloadFastCacheBatch(
   afterKey: string | null,
   limit: number,
-  options: { dryRun?: boolean } = {}
+  options: { dryRun?: boolean; concurrency?: number } = {}
 ): Promise<FastCacheOffloadBatch> {
   const client = getDemoCachePrisma();
   const bounded = async <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
-    client.$transaction(async (tx) => {
-      if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
-      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '15s'`);
-      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`);
-      return fn(tx);
-    });
+    client.$transaction(
+      async (tx) => {
+        if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '15s'`);
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`);
+        return fn(tx);
+        // Workers queue for the bounded pool; statement_timeout bounds the work.
+      },
+      { maxWait: 30_000, timeout: 30_000 }
+    );
   // pg_column_size reads the TOAST pointer, not the value: no detoasting here.
   const rows = await bounded((tx) =>
     tx.$queryRaw<Array<{ key: string; kind: string; size: number }>>(Prisma.sql`
@@ -604,7 +608,8 @@ export async function offloadFastCacheBatch(
   const candidates = rows.filter(
     (row) => OFFLOAD_KINDS.has(row.kind) && row.size >= OFFLOAD_SCAN_MIN_STORED_BYTES
   );
-  for (const candidate of candidates) {
+  // Each row is independent; a bounded pool overlaps the round trips.
+  const moveOne = async (candidate: (typeof candidates)[number]): Promise<void> => {
     const [current] = await bounded((tx) =>
       tx.$queryRaw<Array<{ value: unknown; digest: string }>>(Prisma.sql`
         SELECT value, md5(value::text) AS digest FROM "FastModeCacheEntry"
@@ -612,10 +617,12 @@ export async function offloadFastCacheBatch(
       `)
     );
     const prepared = current ? prepareOffload(candidate.kind, current.value) : null;
-    if (!current || !prepared) continue;
-    batch.offloaded += 1;
-    batch.bytes += prepared.pointer.bytes;
-    if (options.dryRun) continue;
+    if (!current || !prepared) return;
+    if (options.dryRun) {
+      batch.offloaded += 1;
+      batch.bytes += prepared.pointer.bytes;
+      return;
+    }
     await uploadOffload(prepared);
     const check = await rehydrateRows([{ key: candidate.key, value: prepared.marker }]);
     if (check.length !== 1) throw new Error(`offloaded body did not read back: ${candidate.key}`);
@@ -626,13 +633,20 @@ export async function offloadFastCacheBatch(
           AND md5(value::text) = ${current.digest}
       `)
     );
-    if (updated !== 1) {
-      batch.offloaded -= 1;
-      batch.bytes -= prepared.pointer.bytes;
-      continue;
-    }
+    // A concurrent re-record changed the row: leave it; the write path decides.
+    if (updated !== 1) return;
     deleteMemoryCache(candidate.key);
+    batch.offloaded += 1;
+    batch.bytes += prepared.pointer.bytes;
     batch.offloadedRows.push({ key: candidate.key, ...prepared.pointer });
-  }
+  };
+  const queue = [...candidates];
+  const workers = Math.max(1, Math.min(options.concurrency ?? 1, 32));
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) await moveOne(next);
+    })
+  );
+  batch.offloadedRows.sort((a, b) => a.key.localeCompare(b.key));
   return batch;
 }
