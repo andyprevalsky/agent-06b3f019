@@ -311,7 +311,7 @@ export async function sectionA(): Promise<TestResult[]> {
         assert.strictEqual((await worker.closed).code, 1012);
         const late = await openSocket(url);
         assert.strictEqual((await late.closed).code, 1013);
-        h.hub.stopSession(taskId, h.deviceA);
+        await h.hub.stopSession(taskId, h.deviceA);
         const stop = frame(await control.next((m) => frame(m).type === 'stop_session'));
         assert.strictEqual(stop.task_id, taskId);
         control.ws.close();

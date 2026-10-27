@@ -96,9 +96,33 @@ Evidence logs are in `/project/s16-evidence/` (fail-before and pass-after).
 10k agents: every key is per user, per account or per session. No query scans
 more than its candidate list, and the common identity path adds no query.
 
-Still open, in a follow-up PR: the local-device hub, project workspace
-executors and local Claude Code sessions. They hold live sockets and child
-processes, so they need owner-instance routing rather than shared rows.
+Part 2 (a follow-up PR) covers the process-affine state, which holds live
+sockets or child processes and so needs routing rather than shared rows:
+
+- **Local-device hub.** `RoutedLocalDeviceHub` (`providers/localDevices/routedHub.ts`)
+  makes the instance holding a Mac's control channel the device owner. It
+  keeps a `local-device-owner/<device>` row, renewed on the control ping, and
+  records `local-relay-device/<task>` at start. A tunnel or relay-client
+  upgrade that lands on another instance is proxied over WebSocket to the
+  owner, preserving the caller's own credentials. start/stop/status calls go
+  to the owner's HMAC-authenticated internal hub endpoint. Callers use the
+  async `deviceOnline` / `sessionHome` / `sessionLive` / `stopSession`.
+  Repro: "a Mac on instance A serves a session started, relayed and stopped
+  from B" times out at `start_session on A` with the single-instance hub.
+- **Project workspace executors.** `runProjectStartupForOwner` returned null
+  when the request hit an instance other than the session's creator.
+  `resolveWorkspaceExecutor` rebuilds a transient E2B executor from the
+  session's sandbox id. Case: "an E2B code session created on A runs project
+  commands from B".
+- **Local Claude Code child processes.** The fallback (ws-server on the
+  backend host plus /tmp ownership) was only disabled when FLY_APP_NAME was
+  set, which Render does not set. It is now off on Render (`RENDER=true`);
+  covered by a unit test. It never worked in production anyway, because Fly
+  workers cannot reach a backend-local `ws://127.0.0.1`.
+
+Render has no sticky sessions and balances WebSockets across instances at
+random. Instances reach each other on their private IPs
+(`BACKEND_INSTANCE_INTERNAL_URL` overrides the derived address).
 
 ## Human feedback
 
