@@ -36,6 +36,8 @@ export async function carryForTilionSwitch(
     where: { id: taskId },
     select: { sessionId: true },
   });
+  // An unmaterialized logical browser has no provider session and no snapshot.
+  if (row.sessionId === null) return { carry, fromPausedState: false };
   const paused = await loadPausedState(taskId, row.sessionId);
   if (paused !== null) return { carry: { carriedState: paused }, fromPausedState: true };
   if (await isLive(row.sessionId)) {

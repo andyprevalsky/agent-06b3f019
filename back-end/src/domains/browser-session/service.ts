@@ -1,14 +1,18 @@
+import { initLegacySession } from './service.init-legacy';
+import { resumeOwnedBrowserSession } from './service.control';
+import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
+import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
+import { BrowserSessionReclaimConflictError } from '../../providers/browser/sessionPersist';
 /**
  * Browser-session domain service — business logic, no req/res.
  */
 
-import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import type { Browser } from 'playwright';
+import { type ProxyGeoLocation } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
-  getOrCreateContext,
-  createSessionWithContext,
-  closeSession,
   getSession,
+  injectUserData,
   uploadSessionFile,
   listFiles as listProviderFiles,
   readSessionFile,
@@ -16,29 +20,29 @@ import {
   captureScreenshot,
   pressSessionKeys,
   type BrowserViewport,
-  getFingerprintInjectionData,
 } from '../../providers/browser';
 import {
   rotateBrowserProxy,
   ProxyRotationExhaustedError,
   RotationSessionNotFoundError,
 } from '../../providers/browserSessionResume';
+import { canonicalAuthRealm } from '../../providers/authRealm';
+import { prepareWorldStateFork } from './service.world-fork';
+import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
-import { resolveExitGeoLocale } from '../../providers/browser/exitGeoLocale';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
-import {
-  findRequiredSteelProfileForStart,
-  steelProfileForSelectedProvider,
-} from './service.profile-binding';
 import {
   injectLocalStorage,
   SessionNoUserError,
   SessionNotFoundError,
 } from './service.local-storage';
-import { toUserSettings } from './service.serializers';
-import { prepareInitSessionCredentials, prepareSessionCredentials } from './service.credentials';
+import {
+  buildSessionCredentialPayload,
+  preserveSessionCredentialPayload,
+} from './service.credential-error';
+import { buildTilionWorkerApplyPayload } from './service.worker-apply';
 export { SessionCredentialInjectionError } from './service.credential-error';
 export type { SessionCredentialPayload } from './service.credential-error';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
@@ -51,7 +55,6 @@ export {
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
-export { prepareSessionCredentials };
 
 const log = createLogger('BrowserSession');
 
@@ -121,113 +124,143 @@ export function buildBrowserSessionMetadata(
   };
 }
 
-/* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
-export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
-  log.info('Initializing browser session', {
-    agentId,
-    startUrl: startUrl !== '' ? startUrl : 'none',
-  });
-  // Phase 1: Fetch session-independent data in parallel. Realm-scoped
-  // credentials are collected by the same preparation boundary used for JIT
-  // navigation after the provider session exists.
-  const [agent, contextId, user, fingerprintInjection, steelBoundProfileId] = await Promise.all([
-    repo.findAgentProxy(agentId),
-    getOrCreateContext(userId),
-    repo.findUserSettings(userId),
-    getFingerprintInjectionData(userId),
-    findRequiredSteelProfileForStart(userId, startUrl),
-  ]);
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-  const proxyGeo: ProxyGeoLocation =
-    agent !== null &&
-    agent !== undefined &&
-    agent.proxyCountry !== null &&
-    agent.proxyCountry !== ''
-      ? {
-          country: agent.proxyCountry,
-          ...(agent.proxyState !== null && agent.proxyState !== ''
-            ? { state: agent.proxyState }
-            : {}),
-          ...(agent.proxyCity !== null && agent.proxyCity !== '' ? { city: agent.proxyCity } : {}),
-        }
-      : DEFAULT_GEOLOCATION;
-
-  log.info('Using proxy location', {
-    city: proxyGeo.city ?? 'unknown',
-    state: proxyGeo.state ?? 'unknown',
-    country: proxyGeo.country,
-  });
-
-  // A sign-in bound to a Steel profile is shared with the selected provider
-  // (harvested once into the provider-neutral stores) instead of forcing Steel.
-  const requiredSteelProfileId = await steelProfileForSelectedProvider(
-    userId,
-    startUrl,
-    steelBoundProfileId
+/**
+ * A logical browser holds private state only once it has its own checkpoint or
+ * a non-empty Home baseline. Until then it is a new browser and follows the
+ * normal init contract: provider profile, saved realm credentials, full metadata.
+ */
+function logicalHasPrivateState(session: {
+  logicalOwnerKey: string | null;
+  checkpointRef: string | null;
+  baselineCheckpointRef: string | null;
+}): boolean {
+  return (
+    session.logicalOwnerKey !== null &&
+    (session.checkpointRef !== null || session.baselineCheckpointRef !== EMPTY_BROWSER_BASELINE)
   );
+}
 
-  // Phase 2: Create the session while retaining its validation CDP connection.
-  const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {
-    keepValidationConnection: true,
-    taskId: id,
-    ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
-  });
-
-  const credentials = await prepareInitSessionCredentials(session, userId, startUrl);
-  const userSettings = toUserSettings(user);
-
-  log.info('Including passwords in init response', { count: credentials.passwords.length });
-  if (credentials.passkeys.length > 0) {
-    log.info('Including passkeys in init response', {
-      count: credentials.passkeys.length,
-      realm: credentials.auth_realm,
-    });
+export async function prepareSessionCredentials(
+  sessionId: string,
+  userId: string,
+  targetUrl: string,
+  options: { browser?: Browser } = {}
+) {
+  const session = await repo.findSessionBySessionId(sessionId);
+  if (session === null || session.context.userId !== userId) {
+    throw new SessionNotFoundError();
   }
 
+  const authRealm = canonicalAuthRealm(targetUrl);
+  if (authRealm === '') {
+    throw new Error('Target URL must have an authentication realm');
+  }
+
+  const [authOptions, storedPasswords, passkeys, onCookiesReady] = await Promise.all([
+    getAuthOptions(userId, authRealm, {
+      steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
+    }),
+    repo.findPasswords(userId),
+    repo.reservePasskeysForRealm(userId, authRealm),
+    // Browser-template fork (A6): recorded once injection has chosen the account.
+    prepareWorldStateFork(session, userId, targetUrl),
+  ]);
+
+  const credentialPayload = buildSessionCredentialPayload(
+    authRealm,
+    authOptions,
+    storedPasswords,
+    passkeys
+  );
+  if (logicalHasPrivateState(session)) {
+    return {
+      ...credentialPayload,
+      auth_credential_ref: null,
+      cookies_injected: false,
+      cookies_count: 0,
+      auth_source: 'none' as const,
+      browser_state_injection: {
+        cookies: {
+          injected: false,
+          cookieCount: 0,
+          authSource: 'none' as const,
+          credentialRef: null,
+        },
+        fingerprint: { injected: false },
+        indexedDB: { injected: false, originCount: 0 },
+        localStorage: { injected: false, originCount: 0 },
+        permissions: { injected: false, grantCount: 0 },
+        cacheStorage: { injected: false, originCount: 0 },
+      },
+    };
+  }
+  if (session.provider === 'tilion' && options.browser === undefined) {
+    // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
+    // The world-state fork needs a backend CDP context, so it is not recorded here.
+    const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
+    return {
+      ...credentialPayload,
+      auth_credential_ref: injection.cookies.credentialRef,
+      cookies_injected: false,
+      cookies_count: injection.cookies.cookieCount,
+      auth_source: injection.cookies.authSource,
+      browser_state_injection: injection,
+      worker_apply: payload,
+    };
+  }
+  const injectionResult = await preserveSessionCredentialPayload(
+    () => injectUserData(sessionId, userId, targetUrl, { ...options, onCookiesReady }),
+    credentialPayload
+  );
+
   return {
-    task_id: session.taskId,
-    context_id: contextId,
-    session_id: session.sessionId,
-    debug_url: session.debugUrl,
-    ws_url: session.wsUrl,
-    browser_session_metadata: buildBrowserSessionMetadata(
-      session,
-      credentials.browser_state_injection
-    ),
-    cookies_injected: credentials.cookies_injected,
-    cookies_count: credentials.cookies_count,
-    auth_source: credentials.auth_source,
-    auth_credential_ref: credentials.auth_credential_ref,
-    auth_options: credentials.auth_options,
-    auth_realm: credentials.auth_realm,
-    fingerprint_injected: credentials.browser_state_injection.fingerprint.injected,
-    // Tilion never localises its exit: the user's zone if it is in the exit country, else the country's.
-    ...(session.provider === 'tilion'
-      ? (({ fingerprint, exitGeoLocale }) => ({
-          fingerprint_injection: fingerprint,
-          exit_geo_locale: exitGeoLocale,
-        }))(resolveExitGeoLocale(fingerprintInjection, proxyGeo.country))
-      : { fingerprint_injection: fingerprintInjection }),
-    passwords: credentials.passwords,
-    passkeys: credentials.passkeys,
-    user_settings: userSettings,
+    ...credentialPayload,
+    auth_credential_ref: injectionResult.cookies.credentialRef,
+    cookies_injected: injectionResult.cookies.injected,
+    cookies_count: injectionResult.cookies.cookieCount,
+    auth_source: injectionResult.cookies.authSource,
+    browser_state_injection: injectionResult,
   };
+}
+
+/* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
+export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
+  const logical = await ensureLogicalBrowser(userId, agentId);
+  if (id !== undefined && id !== logical.id)
+    return initLegacySession(userId, agentId, startUrl, id, {
+      prepare: prepareSessionCredentials,
+      metadata: buildBrowserSessionMetadata,
+    });
+  await repo.updateLogicalSessionUrls(
+    logical.id,
+    logical.startUrl ?? startUrl,
+    logical.currentUrl ?? startUrl
+  );
+  if (logical.sessionId === null && !logicalHasPrivateState(logical)) {
+    // First materialization of an empty logical browser: initialize it bound to
+    // its logical row. A concurrent first init that loses the row's binding race
+    // follows the winner through the resume path instead of failing.
+    try {
+      return await initLegacySession(userId, agentId, startUrl, logical.id, {
+        prepare: prepareSessionCredentials,
+        metadata: buildBrowserSessionMetadata,
+      });
+    } catch (error) {
+      if (!(error instanceof BrowserSessionReclaimConflictError)) throw error;
+    }
+  }
+  return resumeOwnedBrowserSession(logical.id, userId);
 }
 
 // ---------------------------------------------------------------------------
 // Close
 // ---------------------------------------------------------------------------
 
-export async function closeBrowserSession(sessionId: string, pause: boolean, currentUrl?: string) {
-  log.info(`${pause ? 'Pausing' : 'Closing'} browser session`, {
-    sessionId,
-    currentUrl: currentUrl !== undefined && currentUrl !== '' ? currentUrl : 'NULL/EMPTY',
-  });
-
-  await closeSession(sessionId, pause, currentUrl);
-
-  return { status: pause ? ('PAUSED' as const) : ('CLOSED' as const) };
-}
+export { closeBrowserSession } from './service.close';
 
 // rotate_ip tool — swap the browser session's outbound IP (see
 // providers/browserSessionResume.ts and docs/plans/active/rotate-ip-tool.md).
@@ -253,6 +286,7 @@ export async function resizeBrowserViewport(
   }
 
   const provider = storedBrowserProvider(session.provider);
+  if (session.sessionId === null) throw new SessionNotFoundError();
   return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 

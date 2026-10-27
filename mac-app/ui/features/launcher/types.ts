@@ -25,4 +25,6 @@ export interface ShaderTileProps {
 export interface LauncherLocalAttachment {
   id: string;
   file: File;
+  /** The screenshot captured when the launcher opened. */
+  autoCaptured?: boolean;
 }

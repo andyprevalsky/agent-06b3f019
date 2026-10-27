@@ -32,7 +32,7 @@ RESTORE_ARGS=(
 # A plain-SQL dump has no equivalent of pg_restore's --clean --if-exists: every
 # CREATE runs unconditionally, so ANY object the caller already made in the
 # target collides and (under ON_ERROR_STOP=1) fails the whole restore. run.sh
-# does exactly that — it ensures the Fast Mode cache table before the seed
+# does exactly that — it ensures the DEMO cache table before the seed
 # restore — which made a canonical base fail with `relation
 # "FastModeCacheEntry" already exists` and refuse to boot. Restoring a base
 # image means "the dump IS the database state", so reset the schema first and

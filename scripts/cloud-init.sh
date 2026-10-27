@@ -272,7 +272,7 @@ esac
 
 # ── 2. System tools a fresh cloud box lacks (idempotent, fail-soft) ───────────
 # Everything our test suites + cloud benchmark runner need beyond the base image:
-#   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
+#   ruby   — workflow-YAML parse fallback (scripts/tests/mac-app-release-drift)
 #   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
 #   lsof   — local stack/benchmark cleanup finds listener PIDs and process cwds
 #   time   — GNU /usr/bin/time for seed-memory RSS ratchet (bash builtin has no RSS)

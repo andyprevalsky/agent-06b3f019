@@ -8,8 +8,8 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../../providers/e2b';
-import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
+import { resolveSessionProject } from '../../providers/projects/session';
 import { createLogger } from '../../providers/logger';
 import {
   markPoolTokenRateLimited,
@@ -17,6 +17,7 @@ import {
 } from '../../providers/claudeCredentials';
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
+import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -59,31 +60,23 @@ export class AgentContextLookupError extends Error {
 // Create session
 // ---------------------------------------------------------------------------
 
-export interface CreateSessionParams {
-  agent_id: string;
-  goal: string;
-  attachments?: FilePointer[];
-  github_repo_url?: string;
-  user_id?: string;
-}
-
-export interface CreateSessionResult {
-  task_id: string;
-  sandbox_id: string;
-  ws_url: string;
-  uploaded_files: string[];
-  github_repo_url: string | null;
-}
+export type { CreateSessionParams, CreateSessionResult } from './types';
+import type { CloseSessionParams, CreateSessionParams, CreateSessionResult } from './types';
 
 /** Resolve the owning user and optional GitHub repo from the agent tree. */
 export async function resolveAgentContext(
   agentId: string,
   userId: string | undefined
-): Promise<{ repoUrl: string | undefined; userId: string | undefined }> {
+): Promise<{
+  repoUrl: string | undefined;
+  userId: string | undefined;
+  projectId?: string | undefined;
+}> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
     let storedOwnerId = agent?.userId ?? undefined;
     let repoUrl = agent?.githubRepoUrl ?? undefined;
+    let projectId = agent?.projectId ?? undefined;
 
     if (
       repoUrl === undefined &&
@@ -95,6 +88,7 @@ export async function resolveAgentContext(
       const rootAgent = await repo.findRootAgentGithubInfo(agent.busId);
       repoUrl = rootAgent?.githubRepoUrl ?? undefined;
       storedOwnerId ??= rootAgent?.userId;
+      projectId ??= rootAgent?.projectId ?? undefined;
     }
 
     const callerUserId = userId !== undefined && userId !== '' ? userId : undefined;
@@ -107,13 +101,7 @@ export async function resolveAgentContext(
     }
     const resolvedUserId = storedOwnerId ?? callerUserId;
 
-    if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
-      return {
-        repoUrl,
-        userId: resolvedUserId,
-      };
-    }
-    return { repoUrl, userId: resolvedUserId };
+    return { repoUrl, userId: resolvedUserId, projectId };
   } catch (err) {
     log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
@@ -133,6 +121,15 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
+  const projectWorkspace = await resolveSessionProject(
+    effectiveUserId,
+    params.project_id ?? resolved.projectId
+  );
+  if (projectWorkspace !== null) {
+    // The project restore owns the checkout; never also clone github_repo_url.
+    effectiveGithubRepoUrl = undefined;
+    resolved.repoUrl = undefined;
+  }
 
   // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
@@ -164,18 +161,37 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     log.info(`GitHub access granted for ${normalizedRepoUrl}`);
   }
 
-  const { agentFastMode } = await import('../../providers/fastCacheStore');
+  const { agentFastMode } = await import('../../providers/demoCacheStore');
   const fastMode = await agentFastMode(agent_id);
   // Code-agent Anthropic/Codex proxy is DEMO cache replay — not the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;
 
-  const session = await createClaudeCodeSession(
-    agent_id,
-    goal,
-    attachments,
-    normalizedRepoUrl,
-    effectiveUserId,
-    fastModeCacheEnabled
+  // A project session is scoped (and branched) by its project; its repo is the
+  // project's repo, cut from the project's default branch.
+  const sessionRepoUrl =
+    projectWorkspace !== null
+      ? (projectWorkspace.project.repoUrl ?? `rose-project:${projectWorkspace.project.id}`)
+      : (normalizedRepoUrl ?? null);
+  const { session, fields } = await createWithCodeSession(
+    {
+      agentId: agent_id,
+      userId: effectiveUserId,
+      repoUrl: sessionRepoUrl,
+      codeProvider: 'claude',
+      codeSessionId: params.code_session_id,
+      leaseOwner: params.lease_owner,
+      baseBranch: params.base_branch ?? projectWorkspace?.project.defaultBranch ?? null,
+    },
+    (codeSession, handoff) =>
+      createClaudeCodeSession(
+        agent_id,
+        handoff !== null ? `${handoff}\n\n${goal}` : goal,
+        attachments,
+        normalizedRepoUrl,
+        effectiveUserId,
+        fastModeCacheEnabled,
+        { projectWorkspace, codeSession, freshConversation: params.fresh_conversation === true }
+      )
   );
 
   return {
@@ -184,6 +200,9 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     ws_url: session.wsUrl,
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
+    ...fields,
+    project: session.projectRestore ?? null,
+    preview_url: session.previewUrl ?? null,
   };
 }
 
@@ -191,12 +210,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
 // Close session
 // ---------------------------------------------------------------------------
 
-export interface CloseSessionParams {
-  task_id: string;
-  user_id?: string;
-  agent_id?: string;
-  additional_paths?: string[];
-}
+export type { CloseSessionParams } from './types';
 
 export async function closeSession(params: CloseSessionParams) {
   const { task_id, user_id, agent_id, additional_paths } = params;
@@ -207,12 +221,16 @@ export async function closeSession(params: CloseSessionParams) {
     additional_paths: pathCount > 0 ? String(pathCount) : undefined,
   });
 
-  const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths);
+  const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths, {
+    reason: params.reason,
+  });
 
   return {
     status: 'CLOSED' as const,
     output_files: result.outputFiles,
     usage: result.usage,
+    code_session: result.codeSession ?? null,
+    ...(result.handoff !== undefined ? { handoff: result.handoff } : {}),
   };
 }
 
@@ -357,6 +375,8 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
         rateLimitedUntil: resetUntil,
         cooldownMs,
         failureReason: revokedOauth ? 'claude_code_auth_error' : undefined,
+        // Only the account this task ran on; the user's other accounts stay leasable.
+        ...(integrationId !== '' ? { integrationId } : {}),
       });
     }
   } else if (tokenSource === 'anthropic') {

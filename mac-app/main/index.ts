@@ -25,6 +25,7 @@ import { handleDeepLink, registerDeepLinkProtocol, registerOpenUrlHandler } from
 import { createMainWindow } from './app/mainWindow';
 import { QuickQueryController } from './app/quickQuery';
 import { saveWindowState } from './app/windowState';
+import { startLocalCodeRunner } from './domains/local-code-runner/runtime';
 import { getErrorMessage } from '../shared/utils/error';
 
 app.name = 'Rose';
@@ -140,6 +141,8 @@ void app
     }
 
     createAppMenu();
+    // C14: this Mac can run code agents in folders the user shares with Rose.
+    startLocalCodeRunner();
     IMessageReader.checkAccess();
     handleInitialDeepLink();
     initializeShortcuts();

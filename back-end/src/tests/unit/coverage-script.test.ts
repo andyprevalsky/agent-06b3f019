@@ -67,6 +67,11 @@ for (const variable of [
   'SLACK_BOT_TOKEN',
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
+  'AUTO_RCA_ENABLED',
+  'SLACK_AUTO_RCA_OWNER_USER_ID',
+  'SLACK_AUTO_RCA_FEEDBACK_USER_IDS',
+  'SLACK_AUTO_RCA_REPO_URL',
+  'BLACKBOX_TEST_FAKE_SLACK',
   'STRIPE_SECRET_KEY',
   'WHATSAPP_PHONE_NUMBER_ID',
   'WHATSAPP_ACCESS_TOKEN',
@@ -495,6 +500,10 @@ function runSqlHooks(workflowMigration: string): {
     });
     mkdirSync(join(migrations, '20260724002500_temporal_cleanup_utc_grace'), { recursive: true });
     mkdirSync(join(migrations, '20260929120000_agent_trajectory_search'), { recursive: true });
+    mkdirSync(join(migrations, '20261026210002_agent_trajectory_agent'), { recursive: true });
+    mkdirSync(join(migrations, '20261026210001_tool_side_effect_operation_key_trgm'), {
+      recursive: true,
+    });
     copyFileSync(
       join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
       join(backend, 'scripts', 'apply-local-runtime-sql-hooks.sh')
@@ -510,6 +519,14 @@ function runSqlHooks(workflowMigration: string): {
     writeFileSync(
       join(migrations, '20260929120000_agent_trajectory_search', 'migration.sql'),
       'SELECT trajectory_search;\n'
+    );
+    writeFileSync(
+      join(migrations, '20261026210002_agent_trajectory_agent', 'migration.sql'),
+      'SELECT trajectory_agent;\n'
+    );
+    writeFileSync(
+      join(migrations, '20261026210001_tool_side_effect_operation_key_trgm', 'migration.sql'),
+      'CREATE INDEX CONCURRENTLY tool_side_effect_trgm;\n'
     );
     const fakeBin = join(root, 'bin');
     const psqlInput = join(root, 'psql-input.sql');
@@ -544,8 +561,8 @@ const appliedHooks = runSqlHooks(
 assert.equal(appliedHooks.status, 0, 'a well-formed workflow migration must apply');
 assert.match(
   appliedHooks.psqlInput,
-  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;/,
-  'the advisory lock, the marked workflow block, the UTC cleanup, and the trajectory search projection must reach psql in order'
+  /pg_advisory_xact_lock[\s\S]*CREATE TRIGGER workflow_guard;[\s\S]*SELECT utc_cleanup;[\s\S]*SELECT trajectory_search;[\s\S]*SELECT trajectory_agent;[\s\S]*CREATE INDEX tool_side_effect_trgm;/,
+  'the advisory lock, the marked workflow block, the UTC cleanup, the trajectory search projection, its per-agent supersession and the non-concurrent trigram index must reach psql in order'
 );
 assert.doesNotMatch(
   appliedHooks.psqlInput,

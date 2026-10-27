@@ -99,9 +99,9 @@ def test_native_canonical_receipt_scores_identically_to_unwrapped_observation(le
 
 
 def test_native_cache_identity_preserves_correlated_call_ids():
-    from benchmarks.wmh_rose_provider import _WMHFastCacheContext
+    from benchmarks.wmh_rose_provider import _WMHDemoCacheContext
 
-    cache = _WMHFastCacheContext(enabled=True, goal="DEMO FIXTURE ONLY native cache", write_enabled=True)
+    cache = _WMHDemoCacheContext(enabled=True, goal="DEMO FIXTURE ONLY native cache", write_enabled=True)
 
     def key(call_id, timestamp, state_clock=30, history_clock=40, system="Native protocol"):
         payload = {
@@ -386,9 +386,9 @@ def test_native_demo_replay_identity_excludes_only_session_routing():
     from copy import deepcopy
 
     from benchmarks.wmh_execution_policy import execution_policy
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache.rose_cache import request_key_material
 
-    cache = wmh_rose_provider._WMHFastCacheContext(
+    cache = wmh_rose_provider._WMHDemoCacheContext(
         enabled=True, goal="DEMO FIXTURE ONLY native provider cache", write_enabled=True,
     )
     request = outcome_request()
@@ -902,7 +902,7 @@ def test_distribution_cache_keys_bind_exact_action_state_and_policy():
 
     from benchmarks.wmh_execution_policy import execution_policy
 
-    cache = wmh_rose_provider._WMHFastCacheContext(
+    cache = wmh_rose_provider._WMHDemoCacheContext(
         enabled=True, goal="DEMO FIXTURE ONLY distribution", write_enabled=True
     )
     request = outcome_request()
@@ -1699,7 +1699,7 @@ def test_demo_wmh_completion_uses_demo_cache_context(monkeypatch):
     import json
     from pathlib import Path
 
-    from providers.fast_cache.context import current_context
+    from providers.demo_cache.context import current_context
 
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
 
@@ -1744,7 +1744,7 @@ def test_demo_wmh_completion_extracts_root_goal_from_delegation(monkeypatch):
     import json
     from pathlib import Path
 
-    from providers.fast_cache.context import current_context
+    from providers.demo_cache.context import current_context
 
     tasks = json.loads(Path(__file__).with_name("tasks.json").read_text())
     demo_goal = next(task["prompt"] for task in tasks if "DEMO" in task.get("tags", []))
@@ -1779,7 +1779,7 @@ def test_demo_wmh_completion_extracts_root_goal_from_delegation(monkeypatch):
 
 def test_non_demo_wmh_completion_does_not_enable_demo_cache(monkeypatch):
     """Ordinary WMH inference cannot accidentally enter the DEMO cache namespace."""
-    from providers.fast_cache.context import current_context
+    from providers.demo_cache.context import current_context
 
     observed = []
 

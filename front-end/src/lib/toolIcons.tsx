@@ -55,6 +55,8 @@ import {
   Share2,
   RotateCcw,
   BellRing,
+  Send,
+  CircleStop,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -101,6 +103,12 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   send_message_to_user: AlertCircle,
   send_message_to_user_execute_phase: AlertCircle,
   read_message_history_with_person: MessageSquare,
+  // Agent-to-agent tools (background agents)
+  send_message_to_agent: Send,
+  list_agents: Network,
+  agent_notification: BellRing,
+  agent_message: Mail,
+  kill_agent: CircleStop,
   request_user_approval: AlertCircle,
   request_user_signup: Users,
   enable_write_permissions: FileEdit,

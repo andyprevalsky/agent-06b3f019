@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  Deliberately janky fixture for `rose-ui check` (must FAIL). Every rule it breaks:
+  - 80 ms busy-wait every 6th frame        → long-task, fps-p5
+  - CSS animation of `left` + `width`      → layout-animation, layout-shift
+  - rAF loop ignores visibilitychange      → hidden-loop
+  - ignores the reduced-motion media query → reduced-motion (+ static rule)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>janky</title>
+<style>
+  body { margin: 0; height: 100vh; background: #111; overflow: hidden; }
+  .bar { position: absolute; top: 40px; height: 60px; background: #f43f5e; animation: slide 900ms linear infinite alternate; }
+  @keyframes slide { from { left: 0; width: 80px; } to { left: 70%; width: 260px; } }
+  #ticker { position: absolute; top: 140px; left: 20px; color: #fff; font: 40px monospace; }
+</style>
+</head>
+<body>
+<div class="bar"></div>
+<div id="ticker">0</div>
+<script>
+  let frame = 0;
+  const ticker = document.getElementById('ticker');
+  function loop() {
+    frame++;
+    if (frame % 6 === 0) {
+      const until = performance.now() + 80;
+      while (performance.now() < until) { /* jank */ }
+    }
+    ticker.textContent = String(frame);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

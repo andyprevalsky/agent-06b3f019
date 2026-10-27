@@ -58,6 +58,7 @@
  */
 
 import { config } from 'dotenv';
+import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
@@ -401,15 +402,14 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
       return true;
     }
   }
-  // The token-only route deliberately excludes EXPIRED auth_error rows. Claude
-  // Code can still refresh Andy's full OAuth envelope in the real E2B path.
+  // The real E2B path receives only a live access token (never a refresh
+  // token), so the smoke can never rotate a grant another holder shares.
   const credential = await fetchClaudeCodeCredentialsWithMeta(DEV_USER_ID);
   return (
     credential?.source === 'user' &&
     credential.userId === DEV_USER_ID &&
-    credential.credentialMode === 'oauth_envelope' &&
-    typeof credential.credentials === 'string' &&
-    credential.credentials.length > 0
+    typeof credential.accessToken === 'string' &&
+    credential.accessToken.startsWith('sk-ant-')
   );
 }
 
@@ -694,7 +694,7 @@ function testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked() {
   );
 }
 
-async function testExpiredClaudeCredentialSelectsRefreshableAccount() {
+async function testExpiredClaudeCredentialIsNeverRefreshedInSandbox() {
   const userId = crypto.randomUUID();
   try {
     for (const [index, refreshToken] of ['', 'test-refresh'].entries()) {
@@ -715,14 +715,9 @@ async function testExpiredClaudeCredentialSelectsRefreshableAccount() {
         },
       });
     }
+    // Refreshing a stored grant revokes the user's own Claude Code that holds it.
     const credential = await fetchClaudeCodeCredentialsWithMeta(userId);
-    assert(credential?.source === 'user', 'must use this user’s own Claude credential');
-    assert(credential.credentialMode === 'oauth_envelope', 'must skip token-only expired row');
-    const parsed = JSON.parse(credential.credentials ?? '{}') as {
-      claudeAiOauth?: { refreshToken?: string; expiresAt?: number };
-    };
-    assert(parsed.claudeAiOauth?.refreshToken === 'test-refresh', 'refresh token must be retained');
-    assert(parsed.claudeAiOauth?.expiresAt === 0, 'sandbox copy must force refresh');
+    assert(credential?.source !== 'user', 'an EXPIRED own credential must not be served');
   } finally {
     await prisma.integration.deleteMany({ where: { userId, name: 'claude_code' } });
   }
@@ -1414,7 +1409,9 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({
       agent_id: crypto.randomUUID(),
-      goal: 'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.',
+      goal: handoffSmokeGoal(
+        'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.'
+      ),
       user_id: DEV_USER_ID,
     }),
   });
@@ -1446,6 +1443,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
   assert(!!body.sandbox_id, 'Missing sandbox_id in create response');
 
   const taskId = body.task_id;
+  let closed = false;
 
   // 2. Connect to WebSocket and wait for Claude Code to answer
   let wsOutput = '';
@@ -1562,16 +1560,27 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       String(fileContent).trim() === 'CLAUDE_E2B_OK',
       `Expected Claude output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    // 3. Close: the parent's result is the handoff file the real CLI wrote.
+    const closeRes = await request(`${BASE_URL}/api/claude-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    closed = true;
+    assertStatus(closeRes.status, 200, closeRes.data);
+    assertSmokeHandoff(closeRes.data, 'CLAUDE_E2B_OK', '/home/user/output/claude-smoke.txt');
   } finally {
-    // 3. Clean up: close the session
-    try {
-      await request(`${BASE_URL}/api/claude-code-session/close`, {
-        method: 'POST',
-        headers: apiKeyHeaders(),
-        body: JSON.stringify({ task_id: taskId }),
-      });
-    } catch {
-      // Best-effort cleanup
+    // Clean up: close the session if the assertions above did not
+    if (!closed) {
+      try {
+        await request(`${BASE_URL}/api/claude-code-session/close`, {
+          method: 'POST',
+          headers: apiKeyHeaders(),
+          body: JSON.stringify({ task_id: taskId }),
+        });
+      } catch {
+        // Best-effort cleanup
+      }
     }
   }
 }
@@ -1705,8 +1714,8 @@ async function runAll() {
       fn: async () => testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked(),
     },
     {
-      name: 'claude credentials -- expired account scan uses refreshable envelope',
-      fn: testExpiredClaudeCredentialSelectsRefreshableAccount,
+      name: 'claude credentials -- expired account is never refreshed in a sandbox',
+      fn: testExpiredClaudeCredentialIsNeverRefreshedInSandbox,
     },
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',

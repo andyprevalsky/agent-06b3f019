@@ -302,6 +302,8 @@ export interface RequestUserApprovalMetadata extends BaseToolMetadata {
     writePermission?: boolean;
     url?: string;
     requestPaymentCard?: RequestPaymentCardPayload;
+    /** Who asked (code agents via agent-tools); parsed by the code-agent contract. */
+    requestingAgent?: unknown;
   };
 }
 

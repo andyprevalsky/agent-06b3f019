@@ -71,6 +71,9 @@ const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
  * Fetch model pricing - checks in-process cache, then Supabase cache, then OpenRouter API
  */
 export async function getModelPricing(modelId: string): Promise<ModelPricing | null> {
+  if (poolForModel(modelId) === 'rose-local' || modelId.toLowerCase().startsWith('local/')) {
+    return { prompt: '0', completion: '0' };
+  }
   const fixed = FIXED_MODEL_PRICING[modelId.toLowerCase()];
   if (fixed) return fixed;
 

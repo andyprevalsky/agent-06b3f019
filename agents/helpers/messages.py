@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 import httpx
 import structlog
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
@@ -771,6 +772,7 @@ async def update_agent_tree_state(
         broadcast_payload: Optional payload for bus broadcast
     """
     config = load_config()
+    generation_headers = workflow_generation_headers()
 
     # Persist first. The backend generation CAS is the authority; broadcasting
     # before it accepts would let a sealed workflow overwrite current UI state.
@@ -787,6 +789,9 @@ async def update_agent_tree_state(
             # Only persist status to DB when explicitly set (not default ACTIVE/PAUSED)
             if broadcast_payload.get("_statusExplicit") and "status" in broadcast_payload:
                 update_payload["status"] = broadcast_payload["status"]
+            # In-flight background tasks (list_agents; see Agent.backgroundTasks).
+            if isinstance(broadcast_payload.get("backgroundTasks"), list):
+                update_payload["background_tasks"] = broadcast_payload["backgroundTasks"]
 
         client = get_http_client()
         response = await client.patch(
@@ -795,7 +800,7 @@ async def update_agent_tree_state(
             headers={
                 "X-API-Key": config.backend.api_key,
                 "Content-Type": "application/json",
-                **workflow_generation_headers(),
+                **generation_headers,
             },
             timeout=10.0,
         )
@@ -818,6 +823,11 @@ async def update_agent_tree_state(
 
         if bus_id and broadcast_payload:
             try:
+                # Carry the same accepted generation fence onto the existing tree bus.
+                broadcast_payload = dict(broadcast_payload)
+                generation = generation_headers.get("X-Agent-Workflow-Generation")
+                if generation:
+                    broadcast_payload["temporalWorkflowId"] = generation
                 await _queue_realtime_record(
                     f"bus:{bus_id}",
                     "AGENT_STATE_CHANGED",
@@ -882,7 +892,8 @@ async def poll_new_messages(
 
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(
-            agent_id, since=since.isoformat(),
+            agent_id,
+            since=since.isoformat(),
             **({"browser_tool_call_id": browser_tool_call_id} if browser_tool_call_id else {}),
         )
         new_messages = data.get("messages", [])
@@ -890,13 +901,21 @@ async def poll_new_messages(
             # The same durable read carries actual USER sources and the exact
             # delegated task's native start event. Browser internals and root
             # compaction summaries are not user instructions.
-            return [row for row in new_messages if (row.get("role") == "USER" and not is_internal_subagent_message(row)
-                and ((row.get("metadata") or {}).get("browserTaskId") in (None, browser_task_id))) or (
-                row.get("role") == "TOOL"
-                and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
-                and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
-                and (row.get("metadata") or {}).get("action_type") == "session_starting"
-            )]
+            return [
+                row
+                for row in new_messages
+                if (
+                    row.get("role") == "USER"
+                    and not is_internal_subagent_message(row)
+                    and ((row.get("metadata") or {}).get("browserTaskId") in (None, browser_task_id))
+                )
+                or (
+                    row.get("role") == "TOOL"
+                    and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
+                    and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
+                    and (row.get("metadata") or {}).get("action_type") == "session_starting"
+                )
+            ]
         new_messages = project_model_context_after_compaction(new_messages)
 
         # Drop sub-agent internal work-stream rows before crossing the activity
@@ -922,7 +941,19 @@ async def poll_new_messages(
 
     except Exception as e:
         logger.error(f"Failed to poll messages: agent_id={agent_id}, error={str(e)}")
+        if isinstance(e, httpx.HTTPStatusError) and not _poll_status_is_retryable(e.response.status_code):
+            # Same split as claude-code-src/src/services/api/withRetry.ts:757-785:
+            # retry 408/409/429/5xx; another 4xx will not change on retry.
+            raise ApplicationError(
+                f"poll_new_messages: {e.response.status_code} from backend: {e}",
+                type="PollNonRetryableStatus",
+                non_retryable=True,
+            ) from e
         raise
+
+
+def _poll_status_is_retryable(status_code: int) -> bool:
+    return status_code in (408, 409, 429) or status_code >= 500
 
 
 @activity.defn

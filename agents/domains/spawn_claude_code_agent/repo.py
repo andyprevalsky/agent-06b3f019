@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid as uuid_module
 from typing import Any, Optional
 
@@ -10,6 +11,12 @@ import structlog
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
+from domains.spawn_claude_code_agent.config import (
+    CODE_SESSION_RESIZE_ATTEMPTS,
+    CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
+    CODE_SESSION_RESIZE_TIMEOUT_S,
+    LOCAL_TARGET_UNAVAILABLE_CODE,
+)
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -20,6 +27,14 @@ from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
+
+
+def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _session_base_path(code_provider: str = "claude") -> str:
@@ -46,8 +61,18 @@ async def save_claude_code_message(
     tool_name: Optional[str] = None,
     agent_type: Optional[str] = None,
     steps_taken: Optional[int] = None,
+    code_session: Optional[dict[str, Any]] = None,
+    code_agent: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Save Claude Code sub-action message directly to DB via back-end API."""
+    """Save Claude Code sub-action message directly to DB via back-end API.
+
+    ``code_session`` (persistent session facts: id, branch, merge target, merge
+    facts) rides on every message's metadata, so each trajectory entry of a
+    code agent reports its branch. ``code_agent`` merges into
+    ``metadata.code_agent`` (UI contract: the local-target lane owns
+    ``target``/``device_name``/``folder``; the code-session lane owns
+    ``branch``/``base_branch``/``state``/``summary``/``failure_message``).
+    """
     config = load_config()
     unique_tool_call_id = tool_call_id or str(uuid_module.uuid4())
 
@@ -85,6 +110,15 @@ async def save_claude_code_message(
 
     if steps_taken is not None:
         metadata["steps_taken"] = max(0, int(steps_taken))
+
+    if code_session:
+        metadata["code_session"] = code_session
+    # UI contract (rose-user-ui): {task_id, provider, target, device_name?,
+    # folder?, branch, base_branch, state, started_at, ended_at?,
+    # failure_message?, summary?{commit, branch, merged_into?, files}}.
+    if code_agent:
+        existing = metadata.get("code_agent")
+        metadata["code_agent"] = {**(existing if isinstance(existing, dict) else {}), **code_agent}
     # Intermediate chip rows (progress, task_started, system) are child-scoped
     # UI and must stay out of the parent LLM context via subAgentId.
     # Parent-facing task_complete terminals reuse the spawn toolCallId — if they
@@ -134,6 +168,84 @@ async def save_claude_code_message(
         )
 
 
+async def save_code_transcript_batch(
+    *,
+    agent_id: str,
+    task_id: str,
+    tool_call_id: str,
+    code_provider: str,
+    records: list[dict[str, Any]],
+    events_from: int,
+    events_to: int,
+    text: str,
+) -> bool:
+    """Persist one batch of structured transcript records on the code agent's rows.
+
+    The row is child-scoped (``subAgentId``) like the chip's progress rows, so
+    it never enters the parent planner's context. It carries no ``toolStatus``
+    (it is not a lifecycle transition); ``isCodeTranscript`` +
+    ``idempotencyKey`` give it a deterministic id, so an activity retry that
+    re-flushes the same event range writes nothing new. Returns False on a
+    transient failure so the caller keeps the batch and retries it.
+    """
+    config = load_config()
+    metadata: dict[str, Any] = {
+        "toolCallId": tool_call_id,
+        "toolName": "spawn_claude_code_agent",
+        "title": "Transcript",
+        "task_id": task_id,
+        "action_type": "code_transcript",
+        "code_provider": code_provider,
+        "subAgentId": task_id,
+        "isCodeTranscript": True,
+        "idempotencyKey": f"code-transcript:{task_id}:{events_from}-{events_to}",
+        # UI contract: parsed transcript events for the Transcript tab, each
+        # {type, ts, text?, tool?{name, target, added?, removed?, result?}}
+        # plus upsert keys (id, rev, seq). Keep the latest rev per id.
+        "code_agent_events": records,
+        "transcript": {
+            "version": 1,
+            "task_id": task_id,
+            "provider": code_provider,
+            "events": [events_from, events_to],
+        },
+    }
+    metadata = stamp_tool_workflow_generation(metadata) or metadata
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
+                json={"message": text, "role": "TOOL", "metadata": metadata},
+            )
+            raise_if_generation_sealed(response.status_code, "spawn_claude_code_agent")
+            ok = response.status_code in (200, 201)
+            logger.info(
+                "[ClaudeCode] Saved transcript batch",
+                agent_id=agent_id,
+                task_id=task_id,
+                records=len(records),
+                events_from=events_from,
+                events_to=events_to,
+                response_status=response.status_code,
+            )
+            return ok
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning(
+            "[ClaudeCode] Failed to save transcript batch",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(e),
+        )
+        return False
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
@@ -142,11 +254,25 @@ async def create_e2b_session(
     github_repo_url: Optional[str] = None,
     code_provider: str = "claude",
     fast_mode_cache_enabled: bool = False,
+    code_session_id: Optional[str] = None,
+    lease_owner: Optional[str] = None,
+    target: str = "cloud",
+    local_device_id: Optional[str] = None,
+    fresh_conversation: bool = False,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
-    Returns the session data dict with task_id, sandbox_id, ws_url, etc.
-    Raises on HTTP failure.
+    ``code_session_id`` resumes that persistent code session; omitted, the
+    backend resumes the spawning agent's latest session for the repo.
+    ``lease_owner`` is stable per tool call so Temporal retries keep the lease.
+
+    Returns the session data dict with task_id, sandbox_id, ws_url,
+    code_session_id, branch, merge_target, resumed_from, etc.
+    Raises on HTTP failure. ``target="local"`` asks the backend to start the
+    same ws-server on the agent's Mac instead (no persistent code session: the
+    work stays in the folder the user granted); an unavailable Mac answers 409
+    ``LOCAL_TARGET_UNAVAILABLE``, raised as a non-retryable error carrying the
+    exact user-facing text (no retry, no cloud fallback).
     """
     config = load_config()
 
@@ -158,8 +284,20 @@ async def create_e2b_session(
     }
     if attachments:
         create_payload["attachments"] = attachments
-    if github_repo_url:
+    if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
+    if target == "local":
+        create_payload["target"] = "local"
+        if local_device_id:
+            create_payload["device_id"] = local_device_id
+    else:
+        if code_session_id:
+            create_payload["code_session_id"] = code_session_id
+        if lease_owner:
+            create_payload["lease_owner"] = lease_owner[:200]
+        if fresh_conversation:
+            # Keep the session's sandbox and files; start a new CLI conversation.
+            create_payload["fresh_conversation"] = True
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -170,6 +308,16 @@ async def create_e2b_session(
             },
             json=create_payload,
         )
+
+        if response.status_code == 409 and target == "local":
+            body = _json_or_empty(response)
+            if body.get("code") == LOCAL_TARGET_UNAVAILABLE_CODE and isinstance(body.get("error"), str):
+                raise ApplicationError(
+                    body["error"],
+                    {"reason": body.get("reason"), "device_name": body.get("device_name")},
+                    type=LOCAL_TARGET_UNAVAILABLE_CODE,
+                    non_retryable=True,
+                )
 
         if response.status_code not in (200, 201):
             response_text = response.text[:500]
@@ -201,6 +349,12 @@ async def create_e2b_session(
                     type="ClaudeCodeBillingBlocked",
                     non_retryable=True,
                 )
+            if response.status_code in (404, 409) and (
+                "CODE_SESSION_NOT_FOUND" in upper or "CODE_SESSION_BUSY" in upper
+            ):
+                # An unknown/foreign code_session_id or a session another agent
+                # holds does not heal on retry; the tool reports it instead.
+                raise ApplicationError(message, type="CodeSessionUnavailable", non_retryable=True)
             raise Exception(message)
 
         return response.json()
@@ -249,13 +403,19 @@ async def close_e2b_session(
     agent_id: Optional[str] = None,
     additional_paths: Optional[list[str]] = None,
     code_provider: str = "claude",
+    reason: Optional[str] = None,
 ) -> dict[str, Any]:
     """Close the E2B sandbox session and extract output files.
 
-    Returns dict with output_files and usage, or empty dict on failure.
+    A persistent code session is checkpointed and paused (never killed);
+    ``reason`` (close | failure | cancel | idle | drain) is recorded on the
+    checkpoint. Returns dict with output_files, usage and ``code_session``
+    facts (branch, merge facts, checkpoint), or empty dict on failure.
     """
     config = load_config()
     payload: dict[str, Any] = {"task_id": task_id}
+    if reason:
+        payload["reason"] = reason
     if user_id:
         payload["user_id"] = user_id
     if agent_id:
@@ -264,7 +424,8 @@ async def close_e2b_session(
         payload["additional_paths"] = additional_paths
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Checkpoint upload + pause + GitHub merge facts: a control-plane bound.
+        async with httpx.AsyncClient(timeout=180.0) as client:
             close_response = await client.post(
                 f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
                 headers={"x-api-key": config.backend.api_key or ""},
@@ -287,6 +448,155 @@ async def close_e2b_session(
             error=extract_error_message(e),
         )
         return {}
+
+
+async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:
+    """Extend an attached session's sandbox idle window and lease. Best-effort.
+
+    Returns the backend's answer (``alive``, ``awaiting_parent``) or None when
+    the call failed; a failed keepalive never ends the session.
+    """
+    config = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/keepalive",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json={},
+            )
+            if response.status_code != 200:
+                return None
+            body = response.json()
+            return body if isinstance(body, dict) else None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning("[ClaudeCode] Keepalive failed", task_id=task_id, error=extract_error_message(e))
+        return None
+
+
+async def report_code_usage_limit(
+    task_id: str, code_provider: str, resets_at: Optional[Any]
+) -> Optional[dict[str, Any]]:
+    """Rate-limit the credential this task ran on until the provider's reset (C15)."""
+    config = load_config()
+    body: dict[str, Any] = {}
+    if isinstance(resets_at, (int, float, str)) and resets_at:
+        body["resets_at"] = resets_at
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/usage-limit",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json=body,
+            )
+            if response.status_code != 200:
+                logger.warning("[ClaudeCode] Usage-limit report failed", task_id=task_id, status=response.status_code)
+                return None
+            result = response.json()
+            return result if isinstance(result, dict) else None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning("[ClaudeCode] Usage-limit report failed", task_id=task_id, error=extract_error_message(e))
+        return None
+
+
+async def resize_e2b_session(task_id: str, request_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:
+    """Apply a pending sandbox size change (C16); returns the task that continues the session.
+
+    The backend checkpoints the session, moves it into a sandbox of the new size and
+    resumes the CLI conversation there. Idempotent per ``request_id``: a retry after a
+    lost response returns the same task. A concurrent apply (409 RESIZE_IN_PROGRESS)
+    is waited out; any other failure returns None and the session stays where it is.
+    """
+    config = load_config()
+    url = f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/resize"
+    for attempt in range(1, CODE_SESSION_RESIZE_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=CODE_SESSION_RESIZE_TIMEOUT_S) as client:
+                response = await client.post(
+                    url,
+                    headers={"x-api-key": config.backend.api_key or ""},
+                    json={"request_id": request_id},
+                )
+            body = response.json() if response.content else {}
+            if response.status_code == 200 and isinstance(body, dict):
+                return body
+            code = body.get("code") if isinstance(body, dict) else None
+            retryable = response.status_code >= 500 or code == "RESIZE_IN_PROGRESS"
+            logger.warning(
+                "[ClaudeCode] Sandbox resize call failed",
+                task_id=task_id,
+                request_id=request_id,
+                status=response.status_code,
+                code=code,
+                attempt=attempt,
+            )
+            if not retryable:
+                return None
+        except WorkflowGenerationSealed:
+            raise  # a replaced generation must stop, never be swallowed
+        except Exception as e:
+            logger.warning(
+                "[ClaudeCode] Sandbox resize call failed",
+                task_id=task_id,
+                request_id=request_id,
+                error=extract_error_message(e),
+                attempt=attempt,
+            )
+        await asyncio.sleep(CODE_SESSION_RESIZE_RETRY_BACKOFF_S * attempt)
+    return None
+
+
+async def fetch_code_credential_availability(user_id: str, own_only: bool = False) -> Optional[dict[str, bool]]:
+    """Whether a Claude / Codex credential can be leased right now (no lease taken).
+
+    ``own_only``: count only the user's own logins (a local Mac run never gets a
+    pool token or a funded key).
+    """
+    config = load_config()
+    params = {"user_id": user_id}
+    if own_only:
+        params["own_only"] = "true"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{config.backend.api_url}/api/claude-code-session/credential-availability",
+                headers={"x-api-key": config.backend.api_key or ""},
+                params=params,
+            )
+            if response.status_code != 200:
+                return None
+            body = response.json()
+            if not isinstance(body, dict):
+                return None
+            return {provider: body.get(provider) is True for provider in ("claude", "codex")}
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
+    except Exception as e:
+        logger.warning("[ClaudeCode] Credential availability lookup failed", error=extract_error_message(e))
+        return None
+
+
+async def fetch_local_agent_target(agent_id: str) -> dict[str, Any]:
+    """Ask the backend whether ``agent_id`` may run a code agent on its Mac now.
+
+    ``GET /api/local-devices/agent-target/:agentId`` answers from the agent
+    tree's recorded origin and the Mac's live control channel; it never waits.
+    """
+    config = load_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/local-devices/agent-target/{agent_id}",
+            headers={"x-api-key": config.backend.api_key or ""},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Local target lookup failed for agent {agent_id}: HTTP {response.status_code} {response.text[:200]}"
+        )
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
 
 
 async def check_sandbox_health(

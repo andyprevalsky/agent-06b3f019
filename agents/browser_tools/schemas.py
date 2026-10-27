@@ -437,14 +437,64 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
-class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
-    """Ask the user to sign in after all automated auth paths are exhausted."""
+class PhoneBrowserTool(BaseModel):
+    """Operate the account's dedicated cloud iPhone through Rose."""
+    model_config = {"extra": "forbid"}
+    tool: Literal["phone"]
+    mode: Literal["operation", "status", "release", "setup"]
+    operation: Optional[str] = None
+    args: Dict[str, Any] = Field(default_factory=dict)
+    action: Optional[Literal["defer", "block", "verify"]] = None
+    reasonCode: Optional[Literal["user_constraint", "unsupported", "configuration_unavailable", "observed_signed_out"]] = None
+    evidenceOperationIds: Optional[List[str]] = Field(default=None, description="Use only for mode=setup and action=verify: 1..8 current observation IDs. Omit or null for block, defer, and all other modes.")
+    verificationTarget: Optional[Literal["apple_account", "icloud_messages", "icloud_keychain", "icloud_contacts", "imessage", "receive_address", "portrait_lock", "device_passcode", "gmail", "google_passcode_exception", "runtime"]] = Field(default=None, description="Use only for mode=setup and action=verify. Omit or null for block, defer, and all other modes.")
 
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if self.verificationTarget is not None and (self.mode != "setup" or self.action != "verify"):
+            raise ValueError("verificationTarget requires setup verify")
+        if self.mode == "operation" and not (self.operation or "").strip():
+            raise ValueError("operation mode requires an operation")
+        if self.mode != "operation" and (self.operation is not None or self.args):
+            raise ValueError("Non-operation mode does not accept commands")
+        if self.mode == "setup":
+            if self.action is None:
+                raise ValueError("setup mode requires an action")
+            if self.action == "verify":
+                evidence = self.evidenceOperationIds or []
+                if self.reasonCode is not None or not 1 <= len(evidence) <= 8 or len(set(evidence)) != len(evidence) or any(not value.strip() for value in evidence):
+                    raise ValueError("verify requires 1..8 unique observation IDs and no reasonCode")
+            elif self.evidenceOperationIds is not None or (
+                self.action == "defer" and self.reasonCode != "user_constraint"
+            ) or (self.action == "block" and self.reasonCode not in {"unsupported", "configuration_unavailable", "observed_signed_out"}):
+                raise ValueError("setup action requires its matching reasonCode and no evidence")
+        elif self.action is not None or self.reasonCode is not None or self.evidenceOperationIds is not None:
+            raise ValueError("Setup fields require setup mode")
+        return self
+
+
+class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
+    """Request browser sign-in help or critical native phone authentication."""
+
+    model_config = {"extra": "forbid"}
     tool: Literal["request_user_assistance_for_authentication"]
+    targetKind: Literal["browser", "iphone"] = "browser"
+    criticalReason: Optional[Literal["password", "verification_code", "device_passcode", "manual_verification"]] = None
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.targetKind == "iphone" and self.criticalReason is None:
+            raise ValueError("iPhone assistance requires a criticalReason")
+        if self.targetKind == "browser" and self.criticalReason is not None:
+            raise ValueError("criticalReason is only used for iPhone assistance")
+        return self
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Relatively expensive staged recovery to force-open a blocked page or service."""
+    """Relatively expensive staged recovery to force-open a blocked page or service.
+
+    It can move the browser to a different browser/IP configuration (network exit).
+    """
 
     tool: Literal["recover_from_challenge"]
     reason: str = Field(
@@ -902,6 +952,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 # Map browser tool names to their Pydantic models
 # Uses browser-use action model naming conventions
 BROWSER_TOOL_MODELS = {
+    "phone": PhoneBrowserTool,
     # Observation
     "read_browser_state": ReadBrowserStateTool,
     "screenshot": ScreenshotTool,

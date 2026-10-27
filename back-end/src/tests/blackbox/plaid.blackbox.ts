@@ -27,6 +27,9 @@
  *   - 404 isolation: DELETE for someone else's item returns 404 (not 403)
  *   - error surface: link-token without configured credentials returns 502
  *     with a typed Plaid error body (skipped in this run since creds are set)
+ *   - sync progress: the user's `plaid` row reads `synced` in `transactions`
+ *     after the exchange-time sync, and a webhook re-sync is a new run on that
+ *     same row counting what it saved (deterministic cases: integration-accounts)
  *
  * Usage:
  *   npx tsx src/tests/blackbox/plaid.blackbox.ts
@@ -37,6 +40,7 @@ import { z } from 'zod';
 import { Configuration, PlaidApi, PlaidEnvironments, Products } from 'plaid';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
+import { cases as syncProgressCases } from './plaid.sync-progress.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL ?? 'http://localhost:3001';
@@ -271,6 +275,9 @@ async function mintSandboxPublicToken(): Promise<string> {
 async function teardown(): Promise<void> {
   if (createdAnonUserIds.size === 0) return;
   const userIds = Array.from(createdAnonUserIds);
+  await prisma.integrationSyncProgress.deleteMany({
+    where: { userId: { in: userIds }, provider: 'plaid' },
+  });
   const transactions = await prisma.plaidTransaction.deleteMany({
     where: { userId: { in: userIds } },
   });
@@ -644,6 +651,14 @@ async function runAll(): Promise<void> {
       fn: testDisconnect_someoneElsesItem_404,
     },
     { name: 'disconnect: idempotent on second DELETE', fn: testDisconnect_idempotent },
+    ...syncProgressCases({
+      baseUrl: BASE_URL,
+      request,
+      authHeaders,
+      createAnonSession,
+      mintSandboxPublicToken,
+      isRetryablePlaidSandboxError,
+    }),
   ];
 
   console.log(`\nRunning ${tests.length} tests sequentially...`);

@@ -114,48 +114,11 @@ export async function countMessageGrepRows(params: {
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "MessageRecord" m
-    INNER JOIN "Person" p ON p.id = m."personId"
-    WHERE p."userId" = ${params.userId}
+    WHERE m."userId" = ${params.userId}
       AND ${predicate}
       ${filters}
   `;
   return Number(rows[0]?.count ?? 0);
-}
-
-export async function searchMessageGrepRows(params: {
-  userId: string;
-  pattern: string;
-  caseInsensitive: boolean;
-  limit: number;
-  offset: number;
-  personId?: string;
-  messageId?: string;
-  since?: Date;
-  channel?: string;
-}): Promise<MessageGrepRow[]> {
-  const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since, params.channel, params.messageId);
-  return prisma.$queryRaw<MessageGrepRow[]>`
-    SELECT
-      m.id,
-      m."personId",
-      m.channel::text AS channel,
-      m."from",
-      m."to",
-      m.timestamp,
-      m.message,
-      p."firstName",
-      p."lastName",
-      p."phoneNumber",
-      p.email
-    FROM "MessageRecord" m
-    INNER JOIN "Person" p ON p.id = m."personId"
-    WHERE p."userId" = ${params.userId}
-      AND ${predicate}
-      ${filters}
-    ORDER BY m.timestamp DESC, m.id DESC
-    LIMIT ${pageSize(params.limit, params.offset)}
-  `;
 }
 
 export async function countNetworkGrepRows(params: {

@@ -5,7 +5,7 @@
  * Components covered:
  *  - QueryInput: textarea, model selector, price-limit edit, submit/pause button
  *  - AttentionInbox: empty vs populated, accept / reject / skip actions
- *  - BrowserStatusBar: minimized / expanded / fullscreen + write-lock approval
+ *  - BrowserStatusBar: minimized / expanded / Browser drawer + write-lock approval
  *
  * The tests lean on the shared `renderWithProviders` wrapper from
  * `test-wrapper.tsx` (QueryClient, TooltipProvider, MemoryRouter, AppDataProvider)
@@ -153,6 +153,10 @@ function withAgentCtx(messages: Message[], children: React.ReactNode, agentId?: 
   if (agentId !== undefined) {
     context.agent = makeAgentDetail({ agent_id: agentId });
     context.selectedAgentId = agentId;
+  } else {
+    // A browser chip always belongs to the selected agent; the Browser drawer
+    // keys its tabs by that agent id.
+    context.selectedAgentId = 'agent-selected';
   }
   return <AgentContext.Provider value={context}>{children}</AgentContext.Provider>;
 }
@@ -160,6 +164,12 @@ function withAgentCtx(messages: Message[], children: React.ReactNode, agentId?: 
 // ═══════════════════════════════════════════════════════════════════════════
 // QueryInput
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Rose Desktop: toolbar items live on the tab behind the box; hover it open first. */
+async function clickNubItem(user: ReturnType<typeof userEvent.setup>, el: Element) {
+  await user.hover(screen.getByTestId('query-toolbar-nub'));
+  await user.click(el);
+}
 
 describe('QueryInput (blackbox)', () => {
   beforeEach(() => {
@@ -199,7 +209,29 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} placeholder="Enter any goal" />);
 
     expect(screen.getByPlaceholderText('Enter any goal')).toBeInTheDocument();
-    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    // Rose Desktop (#77): only the short pool name.
+    expect(screen.getByText('rose-flash')).toBeInTheDocument();
+    expect(screen.queryByText('rose-labs/rose-fast')).toBeNull();
+  });
+
+  it('renders topAttachment flush above the box in the same column and squares its top corners', () => {
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        placeholder="attached"
+        topAttachment={<div data-query-input-attachment="" data-testid="attached-banner" />}
+      />,
+    );
+    const banner = screen.getByTestId('attached-banner');
+    const column = banner.parentElement!;
+    expect(column.className).toContain('max-w-4xl');
+    // The shell is the banner's next sibling in the same column (same edges).
+    const shell = banner.nextElementSibling!;
+    expect(shell.className).toContain('rounded-xl');
+    expect(shell.className).toContain(
+      'group-has-[[data-query-input-attachment]]/query-input:rounded-t-none',
+    );
+    expect(column.className).toContain('group/query-input');
   });
 
   it('typing updates value via onChange (controlled)', async () => {
@@ -294,7 +326,7 @@ describe('QueryInput (blackbox)', () => {
     const user = userEvent.setup();
     renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00');
-    await user.click(chip.closest('button')!);
+    await clickNubItem(user, chip.closest('button')!);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
@@ -310,7 +342,7 @@ describe('QueryInput (blackbox)', () => {
 
     // clicking opens the input
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
   });
@@ -333,8 +365,15 @@ describe('QueryInput (blackbox)', () => {
     expect(screen.getByText('42%')).toBeInTheDocument();
   });
 
-  it('shows "rose-labs/rose-1-ultra" in the model-selector when selectedModel switches', () => {
-    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />);
+  it('shows the switched model in the model-selector (Rose Desktop: rose-ultra)', () => {
+    const { unmount } = renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />,
+    );
+    expect(screen.getByText('rose-ultra')).toBeInTheDocument();
+    unmount();
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />, {
+      roseDesktop: false,
+    });
     expect(screen.getByText('rose-labs/rose-1-ultra')).toBeInTheDocument();
   });
 
@@ -358,16 +397,60 @@ describe('QueryInput (blackbox)', () => {
     );
 
     // Click the model chip button to open the popover
-    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    const chip = screen.getByText('rose-flash').closest('button')!;
     await user.click(chip);
 
     // Model picker shows both model options with their descriptions
     await waitFor(() => {
       expect(
-        screen.getByText('Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra'),
+        screen.getByText(
+          'Super fast execution with full-strength planning. Avg tok/s: not yet measured. Intelligence vs frontier: not yet benchmarked.',
+        ),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Maximum reasoning for complex, long-horizon tasks. For example: get more calls on my calendar with people who match my ideal customer profile.',
+      ),
+    ).toBeInTheDocument();
+    // Rose Desktop (#77): the options read rose-flash / rose-ultra too.
+    const options = screen.getAllByRole('option').map((o) => o.querySelector('.font-medium'));
+    expect(options.map((o) => o?.textContent)).toEqual(['rose-flash', 'rose-ultra']);
+  });
+
+  it('stock model picker keeps provider/name on the chip and model names in the options', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} showModelSelector />, {
+      roseDesktop: false,
+    });
+    await user.click(screen.getByText('rose-labs/rose-fast').closest('button')!);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(2));
+    const options = screen.getAllByRole('option').map((o) => o.querySelector('.font-medium'));
+    expect(options.map((o) => o?.textContent)).toEqual(['rose-fast', 'rose-1-ultra']);
+  });
+
+  it('shows Rose Local in the querybox with an honest privacy and speed description', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        showModelSelector
+        availableModels={[
+          ...defaultProps.availableModels,
+          {
+            id: 'rose-labs/rose-local',
+            name: 'rose-local',
+            provider: 'rose-labs',
+            description: 'local',
+          },
+        ]}
+      />,
+      { roseDesktop: true },
+    );
+    await user.click(screen.getByText('rose-flash').closest('button')!);
+    expect(screen.getByText('rose-local')).toBeInTheDocument();
+    expect(screen.getByText(/Agent data still uses Rose cloud services/)).toBeInTheDocument();
+    expect(screen.getByText(/Avg tok\/s and max throughput: unmeasured/)).toBeInTheDocument();
   });
 
   it('selecting an unknown-provider model fallbacks to provider description', async () => {
@@ -386,12 +469,14 @@ describe('QueryInput (blackbox)', () => {
       />,
     );
 
-    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
+    const chip = screen.getByText('rose-flash').closest('button')!;
     await user.click(chip);
 
     await waitFor(() => {
       expect(screen.getByText('other-provider')).toBeInTheDocument();
     });
+    // Non-Rose models keep their own name.
+    expect(screen.getByText('alpha')).toBeInTheDocument();
   });
 
   it('renders attachment paperclip button and it is enabled for running agent', () => {
@@ -424,18 +509,20 @@ describe('QueryInput (blackbox)', () => {
     expect(spy).toHaveBeenCalled();
   });
 
-  it('tooltip toggle button next to rose-1-flash is clickable', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />);
-    // The info-circle tooltip button renders an inline svg with stroke path
-    // for the "i" info icon — target by the svg path d attribute.
-    const infoSvg = document.querySelector('svg path[d*="M13 16h-1v-4h-1"]');
-    expect(infoSvg).toBeTruthy();
-    const btn = (infoSvg as SVGElement)!.closest('button')!;
-    await user.click(btn);
-    expect(
-      screen.getByText(/Rose-fast runs execute and browser on Cerebras Qwen 3.8 27B/),
-    ).toBeInTheDocument();
+  it('Rose Desktop removes the info button next to the model selector (stock keeps it)', () => {
+    const infoSelector = 'svg path[d*="M13 16h-1v-4h-1"]';
+    const { unmount } = renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />,
+    );
+    expect(screen.getByText('rose-flash')).toBeInTheDocument();
+    expect(document.querySelector(infoSelector)).toBeNull();
+    unmount();
+
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-flash" />, {
+      roseDesktop: false,
+    });
+    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
+    expect(document.querySelector(infoSelector)).not.toBeNull();
   });
 
   it('drag over + drag leave cycle toggles the drop overlay class', async () => {
@@ -469,7 +556,7 @@ describe('QueryInput (blackbox)', () => {
 
     // Click chip to enter edit mode
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     expect(input).not.toBeNull();
@@ -488,7 +575,7 @@ describe('QueryInput (blackbox)', () => {
     const user = userEvent.setup();
     renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -501,14 +588,14 @@ describe('QueryInput (blackbox)', () => {
     const agent = makeAgentDetail({ tree_cost_cents: 85, price_limit_cents: 100 });
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
     const btn = screen.getByText('0.85 / 1.00').closest('button')!;
-    expect(btn.className).toMatch(/amber/);
+    expect(btn).toHaveAttribute('data-warning', 'amber');
   });
 
   it('cost chip shows red when tree cost reaches/exceeds the limit (root agent)', () => {
     const agent = makeAgentDetail({ tree_cost_cents: 150, price_limit_cents: 100 });
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
     const btn = screen.getByText('1.50 / 1.00').closest('button')!;
-    expect(btn.className).toMatch(/red/);
+    expect(btn).toHaveAttribute('data-warning', 'red');
   });
 
   it('saving price limit for existing agent calls PATCH /api/agents/:id', async () => {
@@ -532,7 +619,7 @@ describe('QueryInput (blackbox)', () => {
     );
 
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -549,7 +636,7 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
 
     const chip = screen.getByText('5.00 / 10.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
@@ -574,7 +661,7 @@ describe('QueryInput (blackbox)', () => {
       />,
     );
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
-    await user.click(chip);
+    await clickNubItem(user, chip);
 
     const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input); // empty -> NaN
@@ -1389,7 +1476,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-proxy" browserUrl="about:blank" />),
     );
 
-    await user.hover(screen.getByLabelText('Browser proxy location'));
+    await user.hover(screen.getByRole('button', { name: 'Browser proxy location' }));
 
     await waitFor(() => {
       expect(screen.getAllByText('Proxy: Steel').length).toBeGreaterThan(0);
@@ -1800,18 +1887,22 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
     );
 
-    // Expand -> fullscreen
+    // Expand -> open in the Browser drawer
     await user.click(screen.getByText('Clicking around'));
     await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
     const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // In fullscreen + not disconnected: "Take control" chip is visible
-    await waitFor(() => expect(screen.getByText('Take control')).toBeInTheDocument());
-    await user.click(screen.getByText('Take control'));
+    // In the Browser drawer + not disconnected: "Take control" chip is visible
+    // on the agent's live view (the fullscreen portal no longer exists).
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(within(drawer).getByText('Take control')).toBeInTheDocument());
+    await user.click(within(drawer).getByText('Take control'));
     expect(resumeCalled).toBe(false);
-    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(
+      await within(drawer).findByRole('button', { name: 'Hand back control' }),
+    ).toBeInTheDocument();
     expect(controlModes).toEqual(['user']);
     expect(controlStateReads).toBeLessThanOrEqual(1);
     expect(screen.getByTitle('Browser')).toHaveAttribute(
@@ -2121,7 +2212,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
-  it('fullscreen with disconnected session shows Disconnected state + Take Control overlay button', async () => {
+  it('fullscreen with disconnected session shows the reconnect Take Control overlay', async () => {
     const messages: Message[] = [
       {
         message_id: 'm-disc',
@@ -2141,15 +2232,18 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
     );
 
-    // Expand -> fullscreen
+    // Expand -> open in the Browser drawer
     await user.click(screen.getByText('Paused'));
     await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
     const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // Fullscreen "Disconnected" header label + overlay "Take Control" button
-    await waitFor(() => expect(screen.getByText('Disconnected')).toBeInTheDocument());
+    // Disconnected sessions expose the reconnect overlay, not an active-session control.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^Take Control$/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: /^Take control$/ })).toBeNull();
     expect(screen.getByText('Take Control')).toBeInTheDocument();
   });
 
@@ -2181,7 +2275,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header.closest('div')!.parentElement!).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
     const oldIframe = await screen.findByTitle('Browser');
-    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Take Control$/ })).toBeInTheDocument();
 
     const replacement: Message = {
       message_id: 'replacement-session',
@@ -2210,8 +2304,8 @@ describe('BrowserStatusBar (blackbox)', () => {
     const newIframe = await screen.findByTitle('Browser');
     expect(newIframe).not.toBe(oldIframe);
     expect(newIframe).toHaveAttribute('src', 'https://steel.example/live/new?interactive=false');
-    expect(screen.getByText('Active')).toBeInTheDocument();
-    expect(screen.queryByText('Disconnected')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Take control$/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Take Control$/ })).toBeNull();
   });
 
   it('resumes a disconnected fullscreen session instead of completing stale auth assistance', async () => {
@@ -2322,7 +2416,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
-  it('closing fullscreen via X button returns to expanded view', async () => {
+  it('opens the Browser drawer on the agent tab and closing it returns to the expanded chip', async () => {
     const user = userEvent.setup();
     renderWithProviders(
       withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
@@ -2334,19 +2428,23 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    // Fullscreen header has "Active" label (green dot label)
-    await waitFor(() => expect(screen.getByText('Active')).toBeInTheDocument());
+    // The drawer (not a fullscreen portal) shows this agent's live browser.
+    const drawer = screen.getByTestId('browser-app-drawer');
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'open'));
+    expect(within(drawer).getByTestId('browser-tab-agent-selected')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(within(drawer).getByTestId('browser-agent-pane')).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: /^Take control$/ })).toBeInTheDocument();
 
-    // Click the X close button — it's the only button in the top bar of fullscreen
-    // Locate via the Active text's parent header
-    const fsHeader = screen.getByText('Active').closest('div')!.parentElement!;
-    const closeBtn = within(fsHeader).getByRole('button');
-    await user.click(closeBtn);
+    // No close X on desktop (UI ledger row 67): Escape / the Browser icon close it.
+    await user.keyboard('{Escape}');
 
-    // Back to expanded view — Task progress heading is present
-    await waitFor(() => {
-      expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
-    });
+    await waitFor(() => expect(drawer).toHaveAttribute('data-state', 'closed'));
+    expect(screen.queryByTestId('browser-agent-pane')).not.toBeInTheDocument();
+    // Back to the expanded chip — Task progress heading is present.
+    expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
   });
 
   it('shows SchemaChip with output_schema fields + hovering reveals the tooltip', async () => {
@@ -2577,15 +2675,18 @@ describe('ChatScrollArea Join Waitlist auth-gating (blackbox)', () => {
   it('shows the Join Waitlist CTA for a logged-out visitor', () => {
     renderChat({ isAuthenticated: false, isAnonymous: false });
     expect(screen.getByTestId('opening-join-waitlist')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-opening-loader')).toHaveStyle({ opacity: 1 });
   });
 
   it('shows the Join Waitlist CTA for an anonymous-bootstrap session', () => {
     renderChat({ isAuthenticated: true, isAnonymous: true });
     expect(screen.getByTestId('opening-join-waitlist')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-opening-loader')).toHaveStyle({ opacity: 1 });
   });
 
   it('hides the Join Waitlist CTA when signed in with a real account', () => {
     renderChat({ isAuthenticated: true, isAnonymous: false });
     expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
+    expect(screen.getByTestId('terminal-opening-loader')).toHaveStyle({ opacity: 0.2 });
   });
 });

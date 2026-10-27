@@ -80,6 +80,26 @@ def _safe_http_error_metadata(error: urllib.error.HTTPError) -> dict:
     return result
 
 
+def _hub_rejection_reason(error: urllib.error.HTTPError) -> str | None:
+    """The Hub's own one-line reason for a permanent 4xx rejection.
+
+    Only a small JSON body from the Hub's error handler is read (an edge
+    challenge page or proxy body is ignored), and only its printable
+    `error` string is kept, so a 409/400 receipt names the violated contract.
+    """
+    headers = error.headers or {}
+    if not 400 <= error.code < 500 or headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return None
+    try:
+        body = error.read(4097)
+        reason = json.loads(body).get("error") if len(body) <= 4096 else None
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(reason, str) or not re.fullmatch(r"[ -~]{1,300}", reason):
+        return None
+    return reason
+
+
 def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0) -> float:
     """Derive a Hub POST timeout that scales with payload size.
 
@@ -743,7 +763,10 @@ def _post_run_bundle(
             if isinstance(exc, urllib.error.HTTPError):
                 try:
                     metadata = json.dumps(_safe_http_error_metadata(exc), sort_keys=True)
-                    failure = f"HTTP Error {exc.code}; response_metadata={metadata}"
+                    reason = _hub_rejection_reason(exc)
+                    failure = f"HTTP Error {exc.code}; response_metadata={metadata}" + (
+                        f"; response_error={json.dumps(reason)}" if reason else ""
+                    )
                 finally:
                     exc.close()
             else:
@@ -873,10 +896,12 @@ def final_record_matches(bundle: dict, stored: dict) -> bool:
     def projected(task: dict) -> tuple:
         # Mirrors taskSummary in back-end/src/providers/benchmarkHubRunProjection.ts.
         status = task.get("status")
-        infrastructure = task.get("passed") is not True and status in ("INFRA_ERROR", "error")
+        infrastructure = task.get("passed") is not True and status in ("INFRA_ERROR", "error", "ERROR")
         passed = task.get("passed") if not infrastructure and isinstance(task.get("passed"), bool) else None
         if passed is not None:
             status = "passed" if passed else "failed"
+        elif status == "ERROR":
+            status = "error"
         elif not (isinstance(status, str) and status):
             status = "running"
         agent_id = task.get("agent_id").strip() if isinstance(task.get("agent_id"), str) else ""

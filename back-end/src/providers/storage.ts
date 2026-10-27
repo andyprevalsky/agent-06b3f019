@@ -75,8 +75,12 @@ function isRetryableStorageError(error: unknown): boolean {
 }
 
 function isAlreadyUploadedStorageError(error: unknown): boolean {
-  const status = storageErrorStatus(error);
-  if (status !== undefined && status !== 409) return false;
+  // Supabase answers a duplicate with HTTP status 400 and statusCode "409" in the body.
+  const codes = [
+    storageErrorStatus(error),
+    storageErrorStatus({ status: (error as { statusCode?: unknown } | null)?.statusCode }),
+  ].filter((code) => code !== undefined);
+  if (codes.length > 0 && !codes.includes(409)) return false;
 
   const message = storageErrorMessage(error).toLowerCase();
   return message.includes('already exists') || message.includes('resource already exists');
@@ -90,6 +94,7 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  auto_captured?: boolean;
 }
 
 /**
@@ -183,6 +188,46 @@ export async function downloadFromStorage(storagePath: string): Promise<Buffer> 
     );
   }
   return buf;
+}
+
+/**
+ * Write an object at an exact storage path (immutable: never upserts). Used by
+ * stores that own their own key layout, e.g. `user-ui/<userId>/<versionId>/…`.
+ * An already-existing identical key is treated as success so retries are safe.
+ */
+export async function putStorageObject(
+  storagePath: string,
+  body: Buffer,
+  contentType: string
+): Promise<void> {
+  const client = getSupabaseClient();
+  await retryWithBackoff(
+    async () => {
+      const result = await client.storage
+        .from(ATTACHMENT_BUCKET)
+        .upload(storagePath, body, { contentType, upsert: false });
+      if (result.error && !isAlreadyUploadedStorageError(result.error)) throw result.error;
+    },
+    {
+      maxRetries: 3,
+      initialBackoffMs: 500,
+      component: 'StoragePutObject',
+      isRetryable: isRetryableStorageError,
+    }
+  );
+}
+
+/** Read an object at an exact storage path; returns null when it does not exist. */
+export async function getStorageObject(storagePath: string): Promise<Buffer | null> {
+  const client = getSupabaseClient();
+  const { data, error } = await client.storage.from(ATTACHMENT_BUCKET).download(storagePath);
+  if (error) {
+    const status = storageErrorStatus(error);
+    const message = storageErrorMessage(error).toLowerCase();
+    if (status === 400 || status === 404 || message.includes('not found')) return null;
+    throw new Error(`Failed to download ${storagePath}: ${storageErrorMessage(error)}`);
+  }
+  return Buffer.from(await data.arrayBuffer());
 }
 
 /**

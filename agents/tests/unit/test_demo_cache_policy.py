@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from providers.fast_cache.normalize import (
+from providers.demo_cache.normalize import (
     OAI_DEMO_ROOT_GOAL_HASH,
     demo_cache_allowed,
     demo_cache_goal_hashes,
@@ -42,7 +42,7 @@ def test_demo_cache_goal_hashes_include_mass_agent_prompt():
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
     mass = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")
-    from providers.fast_cache.normalize import goal_hash
+    from providers.demo_cache.normalize import goal_hash
 
     assert goal_hash(mass["prompt"]) in hashes
 
@@ -76,7 +76,7 @@ def test_demo_cache_goal_hashes_include_fleet_concurrency_prompts():
     hashes = demo_cache_goal_hashes()
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
-    from providers.fast_cache.normalize import goal_hash
+    from providers.demo_cache.normalize import goal_hash
 
     for name in ("demo-fleet-alpha", "demo-fleet-beta", "demo-fleet-gamma"):
         task = next(t for t in tasks if t.get("name") == name)
@@ -93,16 +93,16 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
     alpha = next(t for t in tasks if t.get("name") == "demo-fleet-alpha")
-    fleet = SimpleNamespace(goal=alpha["prompt"], fast_cache_goal="")
-    mass = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal="")
-    live = SimpleNamespace(goal="Buy socks", fast_cache_goal="")
+    fleet = SimpleNamespace(goal=alpha["prompt"], demo_cache_goal="")
+    mass = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, demo_cache_goal="")
+    live = SimpleNamespace(goal="Buy socks", demo_cache_goal="")
     assert is_demo_cache_task(fleet) is True
     assert is_oai_demo_mass_agent_task(fleet) is False
     assert is_demo_cache_task(mass) is True
     assert is_oai_demo_mass_agent_task(mass) is True
     leftover = SimpleNamespace(
         goal="Produce fresh tool-grounded evidence for Andy Prevalsky's brand task.",
-        fast_cache_goal="",
+        demo_cache_goal="",
         root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
     )
     assert is_demo_cache_task(leftover) is True
@@ -110,8 +110,8 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     assert is_demo_cache_task(live) is False
 
 
-def test_is_demo_cache_task_reads_restored_fast_cache_goal(monkeypatch):
-    """continue_as_new may restore demo fast_cache_goal while input goal is live."""
+def test_is_demo_cache_task_reads_restored_demo_cache_goal(monkeypatch):
+    """continue_as_new may restore demo demo_cache_goal while input goal is live."""
     import asyncio
     import hashlib
 
@@ -145,11 +145,11 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal(monkeypatch):
                 resume_state={
                     "version": 1,
                     "kind": "continuation",
-                    "runtime_state": {"fast_cache_goal": alpha["prompt"]},
+                    "runtime_state": {"fast_cache_goal": alpha["prompt"]},  # stored runtime key (wire name kept)
                 },
             )
         )
-    assert resumed.fast_cache_goal == alpha["prompt"]
+    assert resumed.demo_cache_goal == alpha["prompt"]
     assert resumed.fast_mode_cache_enabled is True
     assert resumed.provider_fast_mode is False
     material = json.dumps(
@@ -157,15 +157,15 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal(monkeypatch):
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert resumed.compute_token_fast_cache_affinity_key == (
+    assert resumed.compute_token_demo_cache_affinity_key == (
         "fast-cache-agent-provider:" + hashlib.sha256(material.encode()).hexdigest()
     )
 
 
 def test_simulation_writes_demo_goals_only_to_its_scoped_namespace(monkeypatch):
     """A cold WHM simulation miss seeds its scoped keys; real DEMO recordings stay frozen."""
-    from providers.fast_cache import client
-    from providers.fast_cache.normalize import build_key, goal_hash
+    from providers.demo_cache import client
+    from providers.demo_cache.normalize import build_key, goal_hash
 
     tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))

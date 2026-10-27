@@ -38,8 +38,16 @@ if not os.getenv("BACKEND_API_KEY"):
 from activities.param_populator import populate_tool_params_activity
 from browser_tools.secret_refs import redact_secret_log_values
 from config import load_config
+from domains.agent_messaging.service import (
+    kill_agent_activity,
+    list_agent_tree_activity,
+    resolve_agent_address_activity,
+    send_agent_message_activity,
+    send_agent_message_to_address_activity,
+)
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
+from domains.display.repo import display_media_activity
 from domains.gate.repo import (
     create_gate_request_activity,
     has_message_corpus_activity,
@@ -84,10 +92,12 @@ from domains.spawn_claude_code_agent.service import (
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
+from domains.spawn_claude_code_agent.service_target import resolve_code_agent_target_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
     spawn_sub_agents_batch_activity,
 )
+from domains.user_tools.repo import resolve_user_tools_activity, run_user_tool_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import (
@@ -125,9 +135,11 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
+from helpers.jev_progress import predict_jev_progress
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -152,6 +164,7 @@ from helpers.sms_activities import (
 )
 from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
@@ -748,6 +761,7 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         # old-gen pollers mid cooperative drain.
         if my_surface:
             machines = [m for m in machines if _machine_surface(m) == my_surface]
+
         # A retained generation can share this surface again after a rollback.
         # Its stopped pool entries need leased custody reuse before any start.
         def _owned_active_pool(machine: dict) -> bool:
@@ -791,8 +805,10 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
             current_build = os.getenv("TEMPORAL_WORKER_BUILD_ID")
             current_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
             stopped = [
-                m for m in stopped
-                if current_build and current_token
+                m
+                for m in stopped
+                if current_build
+                and current_token
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_BUILD_ID") == current_build
                 and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == current_token
             ]
@@ -1551,6 +1567,11 @@ async def main():
     )
 
     registered_activities = [
+        list_agent_tree_activity,
+        resolve_agent_address_activity,
+        send_agent_message_activity,
+        send_agent_message_to_address_activity,
+        kill_agent_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,
@@ -1566,12 +1587,16 @@ async def main():
         mint_purchase_card_activity,
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
+        resolve_code_agent_target_activity,
         spawn_claude_code_activity,
         close_detached_code_session_activity,
         web_search_activity,
         people_search_activity,
         web_fetch_activity,
         web_fetch_download_activity,
+        resolve_user_tools_activity,
+        run_user_tool_activity,
+        send_agent_graph_message_activity,
         save_tool_usage,
         read_message_history_activity,
         generate_message_activity,
@@ -1597,6 +1622,7 @@ async def main():
         mark_gpt_token_rate_limited_activity,
         release_compute_token_lineage_activity,
         update_agent_status,
+        predict_jev_progress,
         acknowledge_workflow_replacement_bootstrap,
         finalize_workflow_replacement_bootstrap,
         compress_context,
@@ -1633,6 +1659,8 @@ async def main():
         get_agent_source,
         send_direct_sms_activity,
         notify_sms_event_activity,
+        resolve_user_ui_inline_view_activity,
+        display_media_activity,
         populate_tool_params_activity,
         execute_reasoning_activity,
         query_parent_state_activity,

@@ -60,7 +60,12 @@ export function ClaudeCodeBubble({ message, shouldType, onTypingComplete }: Clau
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1 min-w-0">
-        <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} codeProvider={codeProvider} />
+        <ClaudeCodeChip
+          taskId={taskId}
+          wsUrl={wsUrl}
+          codeProvider={codeProvider}
+          toolCallId={typeof metadata?.toolCallId === 'string' ? metadata.toolCallId : undefined}
+        />
       </div>
     </div>
   );

@@ -106,6 +106,11 @@ def money(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def agent_id_of(url) -> str | None:
+    match = re.search(r"[?&]agent-id=([0-9a-fA-F-]{8,})", str(url or ""))
+    return match.group(1) if match else None
+
+
 def short_ref(ref) -> str:
     return ref[:9] if isinstance(ref, str) and ref else "UNRECORDED"
 
@@ -141,6 +146,17 @@ def read_epoch(path: Path) -> float | None:
         return float(Path(path).read_text().strip())
     except (OSError, ValueError):
         return None
+
+
+def local_cleanup_clean(path: Path, token: str) -> bool:
+    """Check that an owned local cleanup receipt matches its recorded token."""
+    if not token or path.is_symlink():
+        return False
+    try:
+        fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+        return fields.get("state") == "clean" and fields.get("token") == token
+    except (OSError, ValueError):
+        return False
 
 
 def reason_key(text) -> str:
@@ -368,12 +384,52 @@ def load_fleet(run_dir: Path) -> dict:
     code = str(card.get("code") or "")
     match = re.search(r"@([0-9a-f]{7,40})", code)
     exp["source_ref"] = match.group(1) if match else None
+    if local and exp["source_ref"] is None and re.fullmatch(r"[0-9a-f]{7,40}", str(card.get("source_sha") or "")):
+        exp["source_ref"] = card["source_sha"]  # Local producer records the checkout HEAD it ran.
     exp["task_ref"] = ((card.get("execution_provenance") or {}).get("base_sha"))
     starts = [read_epoch(p) for p in run_dir.glob("*/bench-e2e.started-epoch")]
     starts = [s for s in starts if s]
     exp["triggered_at"] = min(starts) if starts else epoch_of(card.get("timestamp"))
+    if local and exp["triggered_at"] is None:
+        exp["triggered_at"] = epoch_of(card.get("started_at"))
+    if local and exp["triggered_at"] is None:
+        try:
+            exp["triggered_at"] = float(run_dir.name.split("-", 1)[0])
+        except ValueError:
+            pass
     exp["window_s"] = _window(card)
     lifecycle = read_json(batch / "lifecycle.json")
+    local_run = read_json(run_dir / "run.json") if local else None
+    local_tasks = {task.get("name"): task for task in (local_run or {}).get("tasks", [])
+                   if isinstance(task, dict) and task.get("name")}
+    local_cache_pct = ((local_run or {}).get("summary") or {}).get("cache_hit_pct")
+    stack_owner = read_json(run_dir / "local-stack-owner.json") if local else None
+    benchmark_owner = read_json(run_dir / "local-benchmark-owner.json") if local else None
+    stack_token = (stack_owner or {}).get("token")
+    benchmark_token = (benchmark_owner or {}).get("token")
+    local_stack_clean = bool(local and (stack_owner or {}).get("run_id") == run_dir.name and
+                             local_cleanup_clean(run_dir / "local-stack-cleanup.status", stack_token))
+    local_benchmark_clean = bool(local and (benchmark_owner or {}).get("run_id") == run_dir.name and
+                                 (benchmark_owner or {}).get("state") == "cleanup_verified" and
+                                 local_cleanup_clean(run_dir / f"benchmark-cleanup-{benchmark_token}.status",
+                                                     benchmark_token))
+    local_released = bool(local_stack_clean and local_benchmark_clean)
+    # A run context assembled from several lanes' stacks (run_captcha_probe.py --assemble) carries
+    # each stack's own cleanup receipts under sources/; it is released only when every one is clean.
+    assembled = read_json(run_dir / "assembled-from.json") if local else None
+    unclean_stacks: list = []
+    if isinstance(assembled, dict):
+        for stack in assembled.get("stacks") or []:
+            receipts = run_dir / str(stack.get("receipts") or "") if stack.get("receipts") else None
+            owner = read_json(receipts / "local-stack-owner.json") if receipts else None
+            clean = bool(owner and local_cleanup_clean(receipts / "local-stack-cleanup.status", owner.get("token")))
+            bench_owner = read_json(receipts / "local-benchmark-owner.json") if receipts else None
+            if clean and bench_owner:
+                clean = local_cleanup_clean(receipts / f"benchmark-cleanup-{bench_owner.get('token')}.status",
+                                            bench_owner.get("token"))
+            if not clean:
+                unclean_stacks.append(f"{stack.get('lane')}/{stack.get('stack_run_id')}")
+        local_released = bool(assembled.get("stacks")) and not unclean_stacks
     rows = []
     stage_status = {"queued": "queued", "starting": "running", "ready": "running", "running": "running",
                     "evaluated": "running", "teardown": "running"}
@@ -381,23 +437,39 @@ def load_fleet(run_dir: Path) -> dict:
         if not isinstance(task, dict):
             continue
         name, status = task.get("name"), task.get("status")
+        local_task = local_tasks.get(name, {})
         task_dir = run_dir / str(name)
         finished = (task_dir / "bench-e2e.finished-epoch").exists() or task.get("lifecycle_stage") == "released"
         verdict = {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED"}.get(status)
+        # A task the run interrupted has no task verdict: the local producer records it as
+        # cancelled (benchmark_status CANCELLED in run.json; older cards flattened it to failed).
+        cancelled = local and status != "passed" and (
+            status == "cancelled" or str(local_task.get("benchmark_status") or "").upper() == "CANCELLED")
+        if cancelled:
+            verdict = None
+        if local and (verdict or cancelled):
+            finished = True  # Local CLI records terminal task status directly in report-card.json.
         rows.append({
             "job_id": name, "task": name,
-            "status": ("passed" if verdict else "failed") if finished else stage_status.get(task.get("lifecycle_stage"), "queued"),
+            "status": ("cancelled" if cancelled else ("passed" if verdict else "failed")) if finished
+            else stage_status.get(task.get("lifecycle_stage"), "queued"),
             "task_status": verdict, "infra_failure": False if verdict else None,
-            "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"), "agent_id": task.get("agent_id"),
-            "reason": reason_key(task.get("failure_reason")),
-            "released": True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None,
-            "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate"),
+            "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
+            "agent_id": task.get("agent_id") or local_task.get("agent_id") or agent_id_of(task.get("agent_url")),
+            "agent_url": task.get("agent_url"),
+            "reason": reason_key(task.get("failure_reason") or local_task.get("failure_reason")),
+            "released": (local_released if local else True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None),
+            "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate") if not local else (
+                local_cache_pct / 100 if isinstance(local_cache_pct, (int, float)) else None),
             "unmetered": sorted(k.replace("_usd", "") for k, v in (card.get("cost") or {}).items()
                                 if k.endswith("_usd") and k != "total_usd" and v is None),
             "wall_s": (read_epoch(task_dir / "bench-e2e.finished-epoch") or 0) - (read_epoch(task_dir / "bench-e2e.started-epoch") or 0)
             if (task_dir / "bench-e2e.finished-epoch").exists() and (task_dir / "bench-e2e.started-epoch").exists() else None,
         })
     exp["rows"], exp["rows_source"] = rows, "report-card.json"
+    if local:  # A local run is small: list every task with its recorded agent and FE link.
+        exp["task_links"] = [{"task": r["task"], "outcome": classify(r), "agent_id": r["agent_id"],
+                              "agent_url": r["agent_url"]} for r in rows]
     teardown = read_epoch(run_dir / "teardown-ownership/provider-teardown-verified.epoch")
     finishes = [read_epoch(p) for p in run_dir.glob("*/bench-e2e.finished-epoch")]
     finishes = [f for f in finishes if f]
@@ -412,10 +484,32 @@ def load_fleet(run_dir: Path) -> dict:
         lifecycle_item(exp, "fail" if lifecycle.get("hub_publication_failed") else "ok", "Final Hub publication")
         lifecycle_item(exp, "ok" if lifecycle.get("controller_exit_code") in (0, 1) else "fail", "Controller exited",
                        f"exit {lifecycle.get('controller_exit_code')}")
-    elif local:
-        lifecycle_item(exp, "warn", "Owned resources released", "local stack: no lifecycle receipt")
+    elif local and isinstance(assembled, dict):
+        stacks = len(assembled.get("stacks") or [])
+        lifecycle_item(exp, "ok" if local_released else "warn", "Owned resources released",
+                       f"all {stacks} lane stacks have clean cleanup receipts" if local_released else
+                       "cleanup receipt not clean: " + ", ".join(unclean_stacks or ["no stacks recorded"]))
         if rows and all(r["status"] in TERMINAL_JOB for r in rows):
-            exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; no release receipt"
+            exp["ended_at"] = epoch_of(card.get("finished_at"))
+            exp["end_evidence"] = "report-card.json finished_at (last recorded agent message)"
+            if local_released:
+                exp["state"] = "COMPLETE"
+            else:
+                exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; a lane stack's cleanup receipt is not clean"
+    elif local:
+        lifecycle_item(exp, "ok" if local_released else "warn", "Owned resources released",
+                       "local stack and benchmark cleanup clean" if local_released else "local cleanup receipt pending")
+        if rows and all(r["status"] in TERMINAL_JOB for r in rows):
+            if local_run and local_released:
+                exp["state"] = "COMPLETE"
+                exp["ended_at"] = max((run_dir / "local-stack-cleanup.status").stat().st_mtime,
+                                      (run_dir / f"benchmark-cleanup-{benchmark_token}.status").stat().st_mtime,
+                                      (run_dir / "run.json").stat().st_mtime)
+                exp["end_evidence"] = "run.json and local cleanup receipts"
+            else:
+                exp["state"], exp["state_reason"] = "INCOMPLETE", "results recorded; local cleanup pending"
+                if epoch_of(card.get("finished_at")):
+                    exp["ended_at"], exp["end_evidence"] = epoch_of(card["finished_at"]), "report-card.json finished_at"
     else:
         lifecycle_item(exp, "pending", "Owned resources released", "lifecycle.json pending")
     return finish_experiment(exp)
@@ -713,6 +807,48 @@ def load(run_dir: Path, deep: bool = True) -> dict:
 
 # ------------------------------------------------------------- whole card
 
+OVERLAY_MAX_AGE_S = 15 * 60
+
+
+class StaleOverlay(ValueError):
+    """Hand-supplied --agents/--issues rows that cannot be shown as current."""
+
+
+def _observed_epoch(value) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: float | None) -> list[str]:
+    """Overlay rows are claims made outside the run's artifacts, so each carries ``observed_at``.
+
+    A claim older than the 15-minute checkpoint, or made before the run's latest
+    evidence (its end), may describe a world that no longer exists; it is refused
+    rather than shown as current.
+    """
+    problems = []
+    for row in rows:
+        label = str(row.get("name") or row.get("text") or "?")[:80]
+        at = _observed_epoch(row.get("observed_at"))
+        if at is None:
+            problems.append(f"{kind} row {label!r}: no parseable observed_at")
+            continue
+        reasons = []
+        if now - at > OVERLAY_MAX_AGE_S:
+            reasons.append(f"observed {duration(now - at)} ago (max {duration(OVERLAY_MAX_AGE_S)})")
+        if evidence_at is not None and at < evidence_at:
+            reasons.append(f"observed {duration(evidence_at - at)} before the run's latest evidence")
+        if reasons:
+            problems.append(f"{kind} row {label!r}: " + "; ".join(reasons))
+    return problems
+
+
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, agents=None, issues=None,
           now: float | None = None, deep: bool = True) -> dict:
     now = time.time() if now is None else now
@@ -753,8 +889,14 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
         since = {"state": "ENDED", "label": label, "at": at, "age": now - at}
     elif exp.get("ended_at") is None:
         since = {"state": "END UNRECORDED"}
-    exp_issues = _issues(exp) + [i for i in (issues or []) if isinstance(i, dict) and i.get("text")]
+    overlay_issues = [i for i in (issues or []) if isinstance(i, dict) and i.get("text")]
     agents = [a for a in (agents or []) if isinstance(a, dict) and a.get("name")]
+    stale = (stale_overlay_rows(agents, "agent", now=now, evidence_at=exp.get("ended_at"))
+             + stale_overlay_rows(overlay_issues, "issue", now=now, evidence_at=exp.get("ended_at")))
+    if stale:
+        raise StaleOverlay("stale overlay; refresh these rows from current evidence before rendering:\n  "
+                           + "\n  ".join(stale))
+    exp_issues = _issues(exp) + overlay_issues
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
             "since": since, "experiment": exp, "history": history, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
@@ -995,8 +1137,13 @@ def render_html(card: dict) -> str:
                  f"Stop at {threshold}/{total} unique infra-failed jobs (5% of scheduled)." if threshold
                  else "Stop at 5% of the original scheduled total; scheduled total UNRECORDED.")
     source = f' Source: {e(exp["rows_source"])}.' if exp.get("rows_source") else ""
+    links = "".join(
+        f'<div class="note"><span class="{CATEGORY_CLASS.get(t["outcome"], "run")}">{e(t["outcome"])}</span> {e(t["task"])} · '
+        + (e(t["agent_url"]) if t.get("agent_url")  # text, not href: cards load nothing remote
+           else e(t["agent_id"]) + " · FE link UNRECORDED" if t.get("agent_id") else "agent UNRECORDED") + '</div>'
+        for t in exp.get("task_links") or [])
     out.append(f'<section data-section="outcomes"><h2>Outcomes</h2>{_bar(o, total)}'
-               f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div></section>')
+               f'<div class="legend">{"".join(legend)}</div><div class="note">{e(stop_note)}{source}</div>{links}</section>')
     # Failure causes
     reasons = exp.get("reasons") or []
     if reasons:
@@ -1025,7 +1172,7 @@ def render_html(card: dict) -> str:
         timing.append(("💲 Cost", f'{e(money(cost["metered_usd"]))} agent LLM metered · {cost["n"]}/{cost["of"]} runs{unmetered}'))
     else:
         timing.append(("💲 Cost", _span("warn", "UNMETERED")))
-    timing.append(("Cache", f'agent fast-cache hit avg {cache["avg"] * 100:.0f}% · {cache["n"]}/{cache["of"]} runs'
+    timing.append(("Cache", f'agent demo-cache hit avg {cache["avg"] * 100:.0f}% · {cache["n"]}/{cache["of"]} runs'
                    if cache else _span("warn", "UNMEASURED")))
     timing.append(("LLM latency", _span("warn", "UNMEASURED")))
     out.append('<section data-section="timing"><h2>Timing · Cost</h2><dl>'
@@ -1167,11 +1314,15 @@ def render_text(card: dict) -> str:
         lines.append(f'Stop at {exp["infra_threshold"]}/{total} unique infra-failed jobs (5%)')
     for cat, text, count in exp.get("reasons") or []:
         lines.append(f"  {count:>4} {cat}: {text}")
+    if exp.get("task_links"):
+        lines.append("TASKS")
+        lines += [f'  {t["outcome"]} {t["task"]} · ' + (t.get("agent_url") or (f'{t["agent_id"]} · FE link UNRECORDED'
+                  if t.get("agent_id") else "agent UNRECORDED")) for t in exp["task_links"]]
     cost = exp.get("cost") or {}
     lines.append("Cost " + (f'{money(cost["metered_usd"])} metered ({cost["n"]}/{cost["of"]})' if cost.get("metered_usd") is not None else "UNMETERED")
                  + (" · " + "/".join(cost["unmetered"]) + " UNMETERED" if cost.get("unmetered") else ""))
     cache = exp.get("cache")
-    lines.append("Cache " + (f'agent fast-cache avg {cache["avg"] * 100:.0f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
+    lines.append("Cache " + (f'agent demo-cache avg {cache["avg"] * 100:.0f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
                  + " · LLM latency UNMEASURED")
     lines.append("Lifecycle")
     lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
@@ -1312,9 +1463,13 @@ def main(argv=None) -> int:
         parser.error("an existing <run-dir> is required")
     agents = read_json(args.agents) if args.agents else None
     issues = read_json(args.issues) if args.issues else None
-    card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
-                 agents=agents if isinstance(agents, list) else None,
-                 issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
+    try:
+        card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
+                     agents=agents if isinstance(agents, list) else None,
+                     issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
+    except StaleOverlay as error:
+        print(f"scorecard refused: {error}", file=sys.stderr)
+        return 1
     if args.html:
         document = render_html(card)
         problems = validate_html(document)

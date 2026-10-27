@@ -195,6 +195,15 @@ async function buildRoseModels(allModels: OpenRouterModel[]): Promise<SortedMode
       contextLength: roseUltraMetadata.contextLength,
       pricing: roseUltraMetadata.pricing,
     },
+    {
+      id: 'rose-labs/rose-local',
+      name: 'rose-local',
+      provider: 'rose-labs',
+      description:
+        'Local model inference on the configured Rose worker. No model API fees. Agent data still uses Rose cloud services. Speed and throughput depend on hardware; benchmarks pending.',
+      contextLength: DEFAULT_CONTEXT_LENGTH,
+      pricing: { prompt: '0', completion: '0' },
+    },
   ];
 }
 

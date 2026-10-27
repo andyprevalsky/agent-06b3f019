@@ -55,7 +55,7 @@ from benchmarks.wmh_outcomes import (
 from benchmarks.wmh_provider_capture import REJECTION_RECORDER
 from benchmarks.wmh_response_schema import response_model_for_protocol
 from benchmarks.wmh_wire_stream import STREAM_GUIDE, StreamBook, completed_batch_ends, fold_stream
-from providers.fast_cache.context import FastCacheContext
+from providers.demo_cache.context import DemoCacheContext
 from providers.rose import (
     ClaudeAuthContext,
     GptAuthContext,
@@ -344,7 +344,7 @@ def _wmh_cache_key_material(request: object) -> object:
     return material
 
 
-class _WMHFastCacheContext(FastCacheContext):
+class _WMHDemoCacheContext(DemoCacheContext):
     """WMH-only cache fingerprint; the Rose completion still sees exact input."""
 
     @property
@@ -626,8 +626,8 @@ async def _store_validated_wmh_response(response, prediction_request, cache_cont
         or response.usage.get("from_fast_cache")
     ):
         return
-    from providers.fast_cache import client as cache_client
-    from providers.fast_cache.rose_cache import request_key_material
+    from providers.demo_cache import client as cache_client
+    from providers.demo_cache.rose_cache import request_key_material
 
     key_material = {
         **prediction_request,
@@ -856,7 +856,7 @@ def _demo_cache_goal_from_messages(messages: List["Message"]) -> Optional[str]:
     LLM calls and WMH prediction calls can be purged together after a bad demo
     trajectory.
     """
-    from providers.fast_cache.normalize import demo_cache_allowed
+    from providers.demo_cache.normalize import demo_cache_allowed
 
     task = _wmh_task_from_messages(messages)
     if not task:
@@ -1165,7 +1165,7 @@ class RoseWMHProvider:
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
         from wmh.providers.base import Completion, TokenUsage
 
-        from providers.fast_cache.context import (
+        from providers.demo_cache.context import (
             current_context,
             reset_context,
             set_context,
@@ -1177,7 +1177,7 @@ class RoseWMHProvider:
         existing_cache_context = current_context()
         if demo_goal and (existing_cache_context is None or not existing_cache_context.active):
             cache_token = set_context(
-                _WMHFastCacheContext(
+                _WMHDemoCacheContext(
                     enabled=True,
                     goal=demo_goal,
                     write_enabled=True,

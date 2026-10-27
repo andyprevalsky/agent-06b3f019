@@ -5,28 +5,25 @@
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
-import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
 import {
-  type FilePointer,
-  processUploadedFile,
-  validateTotalSize,
-  getSignedUrl,
-} from '../../providers/storage';
+  createMessage,
+  createMessageOnce,
+  createWorkflowMessageGroup,
+} from '../../providers/messages';
+import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import {
   generateResponseSchema,
   type ResponseSchemaDirectAuth,
 } from '../../providers/setResponseSchema';
-import { createLogger } from '../../providers/logger';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
-
-const log = createLogger('Agents');
+import { readTaskInboxMessages } from './agentToAgentService';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
  * to any of these must resume chat mode, not signal a dead/paused workflow.
  */
-const TERMINAL_STATUSES: ReadonlyArray<string> = [
+export const TERMINAL_STATUSES: ReadonlyArray<string> = [
   'COMPLETED',
   'FAILED',
   'OUT_OF_CREDITS',
@@ -66,6 +63,15 @@ export function buildUserMessageSignalValue(
     });
   }
   return messageText;
+}
+
+/** USER rows written by agents rather than people (metadata flags, never text). */
+function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
+  return (
+    metadata?.agentNotification === true ||
+    metadata?.agentMessage === true ||
+    metadata?.environmentContext === true
+  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -140,6 +146,30 @@ async function deliverUserMessage(
   await routeUserMessage(agentId, signalValue, authoredByWorkflow);
 }
 
+/**
+ * One agent-graph (A2A) USER row from another agent: written once per
+ * idempotency key and delivered only by the call that wrote it, so a retried
+ * or racing send never signals the workflow twice. An agent's message is not
+ * the user's instruction to continue, so it never lifts a user pause (the
+ * paused agent reads it when the user resumes it). A finished agent still
+ * resumes in chat mode, as for any message.
+ */
+export async function deliverAgentGraphMessage(
+  agentId: string,
+  body: { message: string; metadata: Record<string, unknown> }
+): Promise<{ created: boolean }> {
+  const { created } = await createMessageOnce({
+    agentId,
+    text: body.message,
+    role: 'USER',
+    metadata: body.metadata,
+  });
+  if (created) {
+    await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata), true);
+  }
+  return { created };
+}
+
 // ---------------------------------------------------------------------------
 // Post message
 // ---------------------------------------------------------------------------
@@ -162,6 +192,21 @@ async function deliverUserMessage(
  */
 function staleWorkerRejection(): { error: string; status: number } {
   return { error: 'Workflow generation is no longer current', status: 409 };
+}
+
+/**
+ * Explore progress posts carry their task's inbox read (one bounded indexed
+ * query) instead of a separate per-step GET /:id/agent-inbox.
+ */
+async function withPiggybackedInbox<T extends object>(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean,
+  posted: T
+): Promise<T & { pending_inbox?: Awaited<ReturnType<typeof readTaskInboxMessages>> }> {
+  if (!isInternal || body.inbox === undefined) return posted;
+  const pending = await readTaskInboxMessages(agentId, body.inbox.task_id, body.inbox.since);
+  return { ...posted, pending_inbox: pending };
 }
 
 /** Post a message to an agent (user or internal). */
@@ -252,94 +297,19 @@ export async function postMessage(
     }
   }
 
-  if (role === 'USER') {
+  // Agent-authored USER rows (background-agent notifications, agent-to-agent
+  // messages) are polled by the owning workflow, which already woke itself;
+  // echoing them back as receive_user_response would read as user feedback.
+  if (role === 'USER' && !(isInternal && isAgentAuthoredRow(body.metadata))) {
     await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
   }
 
-  return {
+  return withPiggybackedInbox(agentId, body, isInternal, {
     message_id: message.id,
     timestamp: message.timestamp,
     text: message.text,
     role: message.role,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// File uploads (deprecated - use /api/upload)
-// ---------------------------------------------------------------------------
-
-/** Upload a file attachment for an agent. */
-export async function uploadAttachment(
-  userId: string,
-  agentId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string }
-) {
-  const filePointer = await processUploadedFile(
-    userId,
-    file.buffer,
-    file.originalname,
-    file.mimetype
-  );
-
-  log.info('Uploaded file', {
-    user_id: userId,
-    filename: filePointer.original_filename,
-    size_bytes: filePointer.size_bytes,
-    agent_id: agentId,
   });
-
-  return { file_pointer: filePointer };
-}
-
-/** True when the requester may mint a signed URL for this storage path. */
-export function canAccessAttachmentPath(args: {
-  requesterUserId: string;
-  storagePath: string;
-  agentOwnerUserId?: string;
-  isAdmin: boolean;
-}): boolean {
-  if (args.storagePath.startsWith(`${args.requesterUserId}/`)) {
-    return true;
-  }
-  // Admins can inspect other users' agents (same as GET /agents/:id) but may
-  // only sign files stored under that agent's owner — not arbitrary prefixes.
-  return (
-    args.isAdmin &&
-    typeof args.agentOwnerUserId === 'string' &&
-    args.agentOwnerUserId.length > 0 &&
-    args.storagePath.startsWith(`${args.agentOwnerUserId}/`)
-  );
-}
-
-/** Get a signed URL for a file attachment. */
-export async function getAttachmentSignedUrl(
-  userId: string,
-  storagePath: string,
-  access: { agentId?: string; isAdmin?: boolean } = {}
-) {
-  let agentOwnerUserId: string | undefined;
-  if (access.isAdmin === true && typeof access.agentId === 'string' && access.agentId.length > 0) {
-    const agent = await repo.findAgentById(access.agentId);
-    agentOwnerUserId = agent?.userId;
-  }
-  if (
-    !canAccessAttachmentPath({
-      requesterUserId: userId,
-      storagePath,
-      agentOwnerUserId,
-      isAdmin: access.isAdmin === true,
-    })
-  ) {
-    return { error: 'Access denied to this file', status: 403 };
-  }
-
-  // Generate signed URL (1 hour expiry)
-  const signedUrl = await getSignedUrl(storagePath, 3600);
-
-  return {
-    signed_url: signedUrl,
-    expires_in: 3600,
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -34,3 +34,35 @@ export function removeItem(key: string): void {
     // Swallow SecurityError — storage is best-effort.
   }
 }
+
+function getSessionStore(): Storage | null {
+  if (typeof sessionStorage === 'undefined') return null;
+  return sessionStorage;
+}
+
+/** Tab-scoped (sessionStorage) variant of getItem. */
+export function getSessionItem(key: string): string | null {
+  try {
+    return getSessionStore()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Tab-scoped (sessionStorage) variant of setItem. */
+export function setSessionItem(key: string, value: string): void {
+  try {
+    getSessionStore()?.setItem(key, value);
+  } catch {
+    // Swallow SecurityError / QuotaExceededError — storage is best-effort.
+  }
+}
+
+/** Tab-scoped (sessionStorage) variant of removeItem. */
+export function removeSessionItem(key: string): void {
+  try {
+    getSessionStore()?.removeItem(key);
+  } catch {
+    // Swallow SecurityError — storage is best-effort.
+  }
+}

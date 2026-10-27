@@ -4,6 +4,7 @@
  * a browser would and then reads the site's own report.
  */
 
+import { runInNewContext } from 'node:vm';
 import { prisma } from '../../providers/database';
 import { cookieDomainForStartUrl } from '../../providers/authRealm';
 import { resolveBrowserAuthCredentialSource } from '../../providers/steel/injection';
@@ -239,6 +240,152 @@ test('passkey_rejected: a genuine passkey is refused and the saved password stil
         JSON.stringify(trail(report)) ===
           JSON.stringify(['passkey:rejected:passkey_not_recognized', 'password:signed_in']),
         `unexpected trail ${trail(report)}`
+      );
+    });
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+/**
+ * Runs the methods page's own passkey script against the in-process site, the
+ * way a browser would. `network` may answer a request itself (a proxy error
+ * page) instead of letting it reach the site; `authenticator` plays the
+ * browser's navigator.credentials.get.
+ */
+async function clickPasskeyButton(
+  base: string,
+  html: string,
+  network: (url: string) => Response | null,
+  authenticator: (challenge: string) => Promise<Record<string, Uint8Array>>
+): Promise<{ status: string; redirect: string | null }> {
+  const script = /<script>([\s\S]*?passkey-button[\s\S]*?)<\/script>/.exec(html)?.[1];
+  assert(script, 'the methods page must carry the passkey script');
+  let settle: (outcome: { status: string; redirect: string | null }) => void = () => {};
+  const settled = new Promise<{ status: string; redirect: string | null }>((resolve) => {
+    settle = resolve;
+  });
+  // The script sets className before textContent; an error's text is its final write.
+  const status = {
+    className: '',
+    set textContent(text: string) {
+      if (this.className === 'error') settle({ status: text, redirect: null });
+    },
+  };
+  let click: (() => void) | null = null;
+  const sandbox = {
+    atob: (text: string) => Buffer.from(text, 'base64').toString('latin1'),
+    btoa: (text: string) => Buffer.from(text, 'latin1').toString('base64'),
+    Uint8Array,
+    JSON,
+    document: {
+      getElementById: (id: string) =>
+        id === 'passkey-status'
+          ? status
+          : { addEventListener: (_event: string, handler: () => void) => (click = handler) },
+    },
+    window: { location: { assign: (url: string) => settle({ status: '', redirect: url }) } },
+    navigator: {
+      credentials: {
+        get: (request: { publicKey: { challenge: Uint8Array } }) =>
+          authenticator(Buffer.from(request.publicKey.challenge).toString('base64url')),
+      },
+    },
+    fetch: (url: string, init: RequestInit) =>
+      Promise.resolve(network(url) ?? fetch(new URL(url, base), init)),
+  };
+  runInNewContext(script, sandbox);
+  assert(click, 'the passkey button must have a click handler');
+  (click as () => void)();
+  const timeout = new Promise<never>((_resolve, reject) =>
+    setTimeout(() => reject(new Error('the passkey click never settled')), 10_000).unref()
+  );
+  return Promise.race([settled, timeout]);
+}
+
+function signedCredential(userId: string, manifest: Manifest, base: string) {
+  return async (challenge: string) => {
+    const assertion = await signPasskeyAssertion({
+      userId,
+      realm: manifest.realm,
+      origin: base,
+      challenge,
+    });
+    const bytes = (value: string) => new Uint8Array(Buffer.from(value, 'base64url'));
+    return {
+      rawId: bytes(assertion.credentialId),
+      response: {
+        clientDataJSON: bytes(assertion.clientDataJSON),
+        authenticatorData: bytes(assertion.authenticatorData),
+        signature: bytes(assertion.signature),
+      },
+    } as unknown as Record<string, Uint8Array>;
+  };
+}
+
+const PROXY_ERROR_PAGE = () =>
+  new Response('<!doctype html><title>502 Bad Gateway</title>', {
+    status: 502,
+    headers: { 'Content-Type': 'text/html' },
+  });
+
+test('passkey_rejected: a lost passkey request is not reported as a missing passkey', async () => {
+  // r002-j0052: a proxy answered POST /login/passkey/options with a 502 page.
+  // The script's catch-all then told the site "no passkey in this browser",
+  // so the attempt the agent never got to make was recorded as passkey_unavailable.
+  const userId = await createUser('Avery Ross');
+  try {
+    await withLocalSite(async ({ base }) => {
+      const manifest = await seed(base, userId, 'passkey_rejected');
+      const identified = await postForm(base, pagePath(manifest, '/login/identify'), {
+        email: manifest.expectedSignInEmail ?? '',
+      });
+      const methods = await (await getPage(base, identified.headers.get('location') ?? '')).text();
+      const authenticator = signedCredential(userId, manifest, base);
+
+      for (const lost of ['/login/passkey/options', '/login/passkey?']) {
+        const failed = await clickPasskeyButton(
+          base,
+          methods,
+          (url) => (url.includes(lost) ? PROXY_ERROR_PAGE() : null),
+          authenticator
+        );
+        assert(
+          failed.redirect === null && /try again/i.test(failed.status),
+          `a lost ${lost} request must ask the shopper to retry, got ${JSON.stringify(failed)}`
+        );
+        assert(
+          !/could not use a passkey in this browser/i.test(failed.status),
+          `a lost ${lost} request must not claim the browser has no passkey`
+        );
+        assert(
+          trail(await fetchReport(base, manifest.siteId)).length === 0,
+          `a lost ${lost} request must record no passkey attempt`
+        );
+      }
+
+      const retried = await clickPasskeyButton(base, methods, () => null, authenticator);
+      assert(
+        retried.status.includes('removed from your account'),
+        `the retry must reach the site's verdict, got ${JSON.stringify(retried)}`
+      );
+      const noAuthenticator = await clickPasskeyButton(
+        base,
+        methods,
+        () => null,
+        () => Promise.reject(new Error('NotAllowedError'))
+      );
+      assert(
+        noAuthenticator.status.includes('could not use a passkey in this browser'),
+        `a browser without the passkey is still reported, got ${JSON.stringify(noAuthenticator)}`
+      );
+      assert(
+        JSON.stringify(trail(await fetchReport(base, manifest.siteId))) ===
+          JSON.stringify([
+            'passkey:rejected:passkey_not_recognized',
+            'passkey:rejected:passkey_unavailable',
+          ]),
+        `unexpected trail ${trail(await fetchReport(base, manifest.siteId))}`
       );
     });
   } finally {

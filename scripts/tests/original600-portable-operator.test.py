@@ -57,6 +57,10 @@ def private(path, value):
 
 PROVIDER_CAPACITY_MEMBERS = ('cloudbench-provider-capacity.py', 'cloudbench-provider-limits.json')
 MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
+CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
+# Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
+TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
+                          'polar_catalog', 'timeout_history')
 
 
 def polar_names(count=70):
@@ -1660,6 +1664,182 @@ class Portable(unittest.TestCase):
             self.assertEqual((terminal['status'],terminal['supervisor_state'],terminal['benchmark_success_inferred']),('FAILED_BEFORE_SUPERVISOR_RELEASED','NOT_PUBLISHED',False))
             self.assertEqual(terminal['release']['machine_id'],mid)
 
+    def _stopped_controller_run(self,native,recover=True):
+        # descend-full69 shard-00: the gate joined with GATE_EXPORT_PENDING after a devbox
+        # suspension lost the export download, then the controller stopped (restart 'no').
+        # Every probe failed; the runner wrote supervisor-read-pending files forever.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700);root=base/'source';(root/'scripts').mkdir(parents=True)
+            state=base/'native.json';calls=base/'native-calls.jsonl';state.write_text(json.dumps(native))
+            (root/'scripts/cloudbench-original-volume-capture.py').write_text(
+                "import json\ndef resolve_token(scope):return 'fixture'\nclass Fly:\n def __init__(self,app,token):pass\n"
+                " def api(self,method,path,body=None,timeout=60):\n"
+                "  open("+repr(str(calls))+",'a').write(json.dumps([method,path])+'\\n')\n"
+                "  return json.loads(open("+repr(str(state))+").read())\n")
+            cleanup_calls=base/'cleanup-calls.jsonl'
+            (root/'scripts/cloudbench-disposable-controller.py').write_text(
+                "import json,os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:];directory=Path(args[args.index('--directory')+1])\n"
+                "with open("+repr(str(cleanup_calls))+",'a')as f:f.write(json.dumps(args)+'\\n')\n"
+                "record=json.loads((directory/'disposable-controller.ownership.json').read_bytes())\n"
+                "fd=os.open(directory/'disposable-controller.release.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+                "os.write(fd,json.dumps(dict(machine_id=record['machine']['id'],volume_id=record['volume']['id'],volume_disposition='pending_destroy',machine_deleted=True)).encode());os.close(fd)\n")
+            tasks=private(base/'tasks.json',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            inventory=private(base/'inventory.json','{}')
+            config=private(base/'config.private.json',dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(root),source_ref='a'*40,
+                source_files={'cloudbench-original600-runner.py':'f'*64,'cloudbench-original600-supervisor.py':'d'*64},tasks_path=str(tasks),started_at_epoch=time.time(),authority_template=str(template),
+                host_operator_provenance=dict(fixture=True),gate_env=dict(CLOUDBENCH_GATE_TIMEOUT_S='7200'),
+                remote_files=[dict(relative_path=RUNNER['WARM_INVENTORY_RELATIVE'],source_path=str(inventory),sha256=hashlib.sha256(inventory.read_bytes()).hexdigest())]))
+            out=base/'run';mid='0123456789abcd';probes=[];digest=[None]
+            class JoinedGate:
+                pid=os.getpid();returncode=1
+                def poll(self):return 1
+                def wait(self):return 1
+            def spawn(command,source,env,stream,output,config_path,config_sha,authority):
+                export=output/'export';export.mkdir(mode=0o700)
+                workspace=private(export/'workspace-volume.ownership.json',dict(volume_id='vol_fixture123'))
+                digest[0]=hashlib.sha256(authority.read_bytes()).hexdigest()
+                private(export/'disposable-controller.ownership.json',dict(authority_sha256=digest[0],workspace_sha256=hashlib.sha256(workspace.read_bytes()).hexdigest(),
+                        machine=dict(id=mid,instance_id='fixture-instance'),volume=dict(id='vol_fixture123')))
+                return JoinedGate()
+            def control(api,machine,payload):
+                probes.append(payload['action']);raise RUNNER['Deadline']('exec on a stopped controller')
+            real_sleep=time.sleep;slept=[0];seen=dict(receipt_before_verified=False)
+            def bounded_sleep(seconds):
+                slept[0]+=1
+                receipt=out/'export-recovery-required.json'
+                if recover and receipt.exists() and not (out/'export/disposable-export.verified.json').exists():
+                    # The documented retained-export recovery publishes the canonical marker.
+                    seen['receipt_before_verified']=True
+                    private(out/'export/disposable-export.verified.json',dict(authority_sha256=digest[0],machine_id=mid))
+                if slept[0]>400:raise TimeoutError('runner spun on a stopped controller')
+                real_sleep(.01)
+            stubs=dict(validate_source_members=lambda *unused:None,pin_warm_snapshot=lambda *unused:None,host_gate=lambda *unused:root/'gate',
+                       launch_handoff=lambda output,remote:(output/'payload.gz','e'*64,['true']),spawn_gate=spawn,machine_control=control,
+                       transfer_sidecars=lambda *unused,**kw:None,STOPPED_PROBE_GRACE_S=0)
+            result=dict(probes=probes,seen=seen)
+            with patch.dict(RUNNER['run'].__globals__,stubs),patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'),patch.object(RUNNER['time'],'sleep',bounded_sleep):
+                try:result['code']=RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                except TimeoutError as error:result['error']=str(error)
+            for key,path in (('receipt',out/'export-recovery-required.json'),('terminal',out/'terminal.json'),('intent',out/'cleanup-call.intent.json')):
+                result[key]=json.loads(path.read_bytes()) if path.exists() else None
+            result['cleanup_calls']=cleanup_calls.read_text().splitlines() if cleanup_calls.exists() else []
+            result['native_calls']=[json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return result
+
+    def test_stopped_controller_with_unverified_export_publishes_recovery_then_releases(self):
+        r=self._stopped_controller_run(dict(id='0123456789abcd',instance_id='fixture-instance',state='stopped'))
+        self.assertNotIn('error',r,'runner must not spin forever on a stopped controller')
+        self.assertTrue(r['seen']['receipt_before_verified'])
+        receipt=r['receipt']
+        self.assertEqual((receipt['status'],receipt['native_state'],receipt['export_verified'],receipt['workspace_volume']),
+                         ('EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED','stopped',False,'vol_fixture123'))
+        self.assertIn('recover-a-stopped-controllers-retained-export',receipt['recovery'])
+        self.assertTrue(Path(ROOT/'docs/original600-operator-cli.md').read_text().count('### Recover a stopped controller\'s retained export')==1)
+        self.assertEqual(len(r['cleanup_calls']),1);self.assertEqual(json.loads(r['cleanup_calls'][0])[0],'cleanup')
+        self.assertEqual({m for m,unused in r['native_calls']},{'GET'},'runner itself never mutates the controller')
+        self.assertEqual((r['intent']['supervisor_state'],r['intent']['supervisor_joined'],r['intent']['probed_after_join']),('CONTROLLER_STOPPED',False,True))
+        self.assertEqual((r['code'],r['terminal']['status'],r['terminal']['benchmark_success_inferred']),(1,'CONTROLLER_STOPPED_RELEASE_VERIFIED',False))
+
+    def test_stopped_controller_without_recovered_export_stays_owner_and_never_releases(self):
+        r=self._stopped_controller_run(dict(id='0123456789abcd',instance_id='fixture-instance',state='stopped'),recover=False)
+        self.assertEqual(r['receipt']['status'],'EXPORT_RECOVERY_REQUIRED_CONTROLLER_STOPPED')
+        self.assertIn('error',r);self.assertEqual(r['cleanup_calls'],[]);self.assertIsNone(r['terminal'])
+
+    def test_started_or_replaced_controller_never_counts_as_stopped(self):
+        for native in (dict(id='0123456789abcd',instance_id='fixture-instance',state='started'),
+                       dict(id='0123456789abcd',instance_id='other-instance',state='stopped')):
+            r=self._stopped_controller_run(native)
+            self.assertIn('error',r);self.assertIsNone(r['receipt']);self.assertEqual(r['cleanup_calls'],[]);self.assertIsNone(r['terminal'])
+
+    def _startup_deadline_run(self,machines,seal_ok=True):
+        # full run original600-1792981113422153716 shard-02: the gate's seal hit its startup
+        # Deadline after the controller was created, so no ownership record was written.
+        # cleanup-workspace refused the existing allocation and the runner sat forever.
+        with tempfile.TemporaryDirectory() as name:
+            base=Path(name);base.chmod(0o700);root=base/'source';(root/'scripts').mkdir(parents=True)
+            mid='0123456789abcd';calls=base/'native-calls.jsonl';helper_calls=base/'helper-calls.jsonl'
+            (root/'scripts/cloudbench-original-volume-capture.py').write_text(
+                "import json\ndef resolve_token(scope):return 'fixture'\nclass Fly:\n def __init__(self,app,token):pass\n"
+                " def api(self,method,path,body=None,timeout=60):\n"
+                "  open("+repr(str(calls))+",'a').write(json.dumps([method,path])+'\\n')\n"
+                "  return "+repr(machines)+" if path=='/machines' else dict(id="+repr(mid)+",instance_id='fixture-instance',state='started')\n")
+            (root/'scripts/cloudbench-disposable-controller.py').write_text(
+                "import json,os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:];directory=Path(args[args.index('--directory')+1])\n"
+                "with open("+repr(str(helper_calls))+",'a')as f:f.write(json.dumps(args)+'\\n')\n"
+                "def write(name,value):\n fd=os.open(directory/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,json.dumps(value).encode());os.close(fd)\n"
+                "if args[0]=='cleanup-workspace':print('ValueError: Machine allocation exists or is ambiguous; seal/export required');sys.exit(1)\n"
+                "if args[0]=='seal':\n"
+                " if not "+repr(seal_ok)+":sys.exit(1)\n"
+                " auth=Path(args[args.index('--authority')+1]).read_bytes();import hashlib\n"
+                " ws=(directory/'workspace-volume.ownership.json').read_bytes()\n"
+                " write('disposable-controller.ownership.json',dict(authority_sha256=hashlib.sha256(auth).hexdigest(),workspace_sha256=hashlib.sha256(ws).hexdigest(),machine=dict(id=args[args.index('--machine')+1],instance_id='fixture-instance'),volume=dict(id='vol_fixture123')))\n"
+                " sys.exit(0)\n"
+                "if args[0]=='cleanup':\n"
+                " record=json.loads((directory/'disposable-controller.ownership.json').read_bytes())\n"
+                " write('disposable-controller.release.json',dict(machine_id=record['machine']['id'],volume_id=record['volume']['id'],volume_disposition='pending_destroy',machine_deleted=True))\n")
+            tasks=private(base/'tasks.json',json.loads((ROOT/'scripts/tests/fixtures/original600-tasks.json').read_text()))
+            template=private(base/'authority-template.json',dict(allowed=True,source_ref='a'*40,protected_machines=['keep'+str(i) for i in range(4)],protected_volumes=['vol_keep']))
+            inventory=private(base/'inventory.json','{}')
+            config=private(base/'config.private.json',dict(schema='original600-controller-runner-v1',allowed=True,source_root=str(root),source_ref='a'*40,
+                source_files={'cloudbench-original600-runner.py':'f'*64,'cloudbench-original600-supervisor.py':'d'*64},tasks_path=str(tasks),started_at_epoch=time.time(),authority_template=str(template),
+                host_operator_provenance=dict(fixture=True),gate_env=dict(CLOUDBENCH_GATE_TIMEOUT_S='7200'),
+                remote_files=[dict(relative_path=RUNNER['WARM_INVENTORY_RELATIVE'],source_path=str(inventory),sha256=hashlib.sha256(inventory.read_bytes()).hexdigest())]))
+            out=base/'run';probes=[];transfers=[];digest=[None]
+            class JoinedGate:
+                pid=os.getpid();returncode=1
+                def poll(self):return 1
+                def wait(self):return 1
+            def spawn(command,source,env,stream,output,config_path,config_sha,authority):
+                export=output/'export';export.mkdir(mode=0o700)
+                private(export/'workspace-volume.ownership.json',dict(volume_id='vol_fixture123'))
+                private(export/'machine-create.intent.json',dict(name='cloudbench-gate-fixture-s02',image='registry.fly.io/app@sha256:'+'e'*64))
+                digest[0]=hashlib.sha256(authority.read_bytes()).hexdigest()
+                return JoinedGate()
+            def control(api,machine,payload):
+                probes.append(machine);return dict(state='JOINED')
+            real_sleep=time.sleep;slept=[0]
+            def bounded_sleep(seconds):
+                slept[0]+=1
+                if (out/'export-recovery-required.json').exists() and not (out/'export/disposable-export.verified.json').exists():
+                    private(out/'export/disposable-export.verified.json',dict(authority_sha256=digest[0],machine_id=mid))
+                if slept[0]>400:raise TimeoutError('runner spun after a refused workspace cleanup')
+                real_sleep(.01)
+            stubs=dict(validate_source_members=lambda *unused:None,pin_warm_snapshot=lambda *unused:None,host_gate=lambda *unused:root/'gate',
+                       launch_handoff=lambda output,remote:(output/'payload.gz','e'*64,['true']),spawn_gate=spawn,machine_control=control,
+                       transfer_sidecars=lambda *a,**kw:transfers.append(a[1]))
+            result=dict(probes=probes,transfers=transfers)
+            with patch.dict(RUNNER['run'].__globals__,stubs),patch.object(RUNNER['subprocess'],'check_output',return_value='a'*40+'\n'),patch.object(RUNNER['time'],'sleep',bounded_sleep):
+                try:result['code']=RUNNER['run'](config,hashlib.sha256(config.read_bytes()).hexdigest(),out)
+                except TimeoutError as error:result['error']=str(error)
+            for key,path in (('receipt',out/'export-recovery-required.json'),('terminal',out/'terminal.json'),('intent',out/'cleanup-call.intent.json'),
+                             ('refused',out/'cleanup-call.workspace-refused.json'),('seal',out/'controller-seal-recovery.intent.json')):
+                result[key]=json.loads(path.read_bytes()) if path.exists() else None
+            result['helper']=[json.loads(line)[0] for line in helper_calls.read_text().splitlines()] if helper_calls.exists() else []
+            result['native']=[json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return result
+
+    def test_startup_deadline_controller_is_sealed_reprobed_and_released(self):
+        r=self._startup_deadline_run([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02'),dict(id='fedcba98765432',name='other')])
+        self.assertNotIn('error',r,'runner must not spin after the allocation-exists refusal')
+        self.assertEqual(r['helper'],['cleanup-workspace','seal','cleanup'])
+        self.assertEqual(r['seal']['machine'],'0123456789abcd')
+        self.assertEqual(r['refused']['action'],'cleanup-workspace')
+        self.assertEqual(r['receipt']['status'],'EXPORT_DOWNLOAD_REQUIRED_SEAL_RECOVERED')
+        self.assertTrue(r['probes'] and set(r['probes'])=={'0123456789abcd'},'sealed controller must be re-probed')
+        self.assertEqual(r['transfers'],[],'a joined controller gets no late launch sidecars')
+        self.assertEqual({m for m,unused in r['native']},{'GET'})
+        self.assertEqual((r['intent']['action'],r['intent']['supervisor_state']),('cleanup','JOINED'))
+        self.assertEqual((r['code'],r['terminal']['status']),(1,'CONTROLLER_RELEASE_VERIFIED'))
+
+    def test_startup_deadline_ambiguous_or_refused_seal_never_releases(self):
+        for machines,seal_ok in (([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02'),dict(id='fedcba98765432',name='cloudbench-gate-fixture-s02')],True),
+                                 ([],True),([dict(id='0123456789abcd',name='cloudbench-gate-fixture-s02')],False)):
+            r=self._startup_deadline_run(machines,seal_ok)
+            self.assertIn('error',r);self.assertNotIn('cleanup',r['helper']);self.assertIsNone(r['terminal']);self.assertIsNone(r['receipt'])
+
     def test_actual_gate_typed_preallocation_refusal_terminates_only_joined_no_effect(self):
         source=Path(os.environ.get('ORIGINAL600_GATE_SOURCE',ROOT/'scripts/run-cloudbench-controller-gate')).read_text()
         message=source.index('echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)"')
@@ -1794,11 +1974,15 @@ class Portable(unittest.TestCase):
             # The committed provider rate-limit helper and its reviewed registry.
             for member in PROVIDER_CAPACITY_MEMBERS + MANIFEST_CATALOG_MEMBERS:
                 (root/'scripts'/member).write_bytes((ROOT/'scripts'/member).read_bytes())
+            # The guests' canonical base-fixture token is derived from these at the source ref.
+            for member in CANONICAL_SEED_MEMBERS:
+                (root/member).parent.mkdir(parents=True, exist_ok=True)
+                (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
             common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
             (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
-            subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True)
+            subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
             ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
@@ -1821,10 +2005,15 @@ class Portable(unittest.TestCase):
                                ('tasks', tasks), ('snapshot-inventory', fixture['inventory']), ('warm-deps', fixture['warm_deps'])]:
                 args += ['--'+flag, str(private(inputs/flag, data))]
             gh=fakebin/'gh';gh.write_text('#!/bin/sh\nexit 1\n');gh.chmod(0o700)
+            # The shared seed cache's CLI boundary: record each head read; present unless told otherwise.
+            seed_cli = fakebin/'seed-dump-cache'
+            seed_cli.write_text('#!/bin/sh\necho "$@" >> "$FIXTURE_SEED_CALLS"\nexit "${FIXTURE_SEED_HEAD_EXIT:-0}"\n')
+            seed_cli.chmod(0o700)
             env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'], PROVIDER_MARKER=str(marker),
+                       CLOUDBENCH_SEED_CACHE_CLI_UNDER_TEST=str(seed_cli), FIXTURE_SEED_CALLS=str(inputs/'seed-calls'),
                        GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1',
                        FLY_API_HOSTNAME='http://127.0.0.1:'+str(server.server_port))
-            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64']:env.pop(key,None)
+            for key in ['GITHUB_TOKEN','GH_TOKEN','CLOUDBENCH_GITHUB_TOKEN_B64','CLOUDBENCH_GUEST_PG_MAJOR','FIXTURE_SEED_HEAD_EXIT']:env.pop(key,None)
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
@@ -1991,6 +2180,46 @@ class Portable(unittest.TestCase):
             self.assertNotIn('❌', fits.stderr)
             self.assertEqual(len(requests), 2)
             self.assertEqual(list(fx.state.iterdir()), [])
+
+    def test_missing_canonical_seed_refuses_check_and_run_before_any_fly_read(self):
+        # A branch whose schema has no published PG15 base aborted after a warm refresh
+        # and three controller boots; the bound --check now refuses it first.
+        requests = []
+        with self.public_check(warm_fixture(time.time()), requests, limits=wide_provider_limits()) as fx:
+            seed = runpy.run_path(str(ROOT/'agents/benchmarks/seed_cache_path.py'))
+            token = seed['seed_cache_token'](ROOT/'back-end/prisma/schema.prisma', pg_major='15')
+            calls = fx.inputs/'seed-calls'
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '3'
+            for mode in ([], ['--run']):
+                result = subprocess.run(fx.args + mode + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                        env=fx.env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(json.loads(result.stdout), dict(status='REFUSED_CANONICAL_SEED_MISSING',
+                                                                 source_ref=fx.args[3], token=token))
+                self.assertIn('Missing canonical base fixture for cloud guests: ' + token, result.stderr)
+                self.assertIn('scripts/validate-canonical-seed-dump.sh', result.stderr)
+                self.assertNotIn('CHECKED_NOT_LAUNCHED', result.stdout)
+            self.assertEqual(calls.read_text().splitlines(), ['head ' + token] * 2)
+            # Refused before any Fly API read, warm refresh, Machine or state.
+            self.assertEqual(requests, [])
+            self.assertFalse(fx.marker.exists())
+            self.assertEqual(list(fx.state.iterdir()), [])
+            # An unreadable cache is not a miss: warn and keep the ordinary read-only check.
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '1'
+            unreadable = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                        env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(unreadable.returncode, 0, unreadable.stderr)
+            self.assertEqual(json.loads(unreadable.stdout)['status'], 'CHECKED_NOT_LAUNCHED')
+            self.assertIn(token + ' is unverified', unreadable.stderr)
+            # The guests' PG major override binds the same token rule.
+            fx.env['FIXTURE_SEED_HEAD_EXIT'] = '0'
+            fx.env['CLOUDBENCH_GUEST_PG_MAJOR'] = '16'
+            present = subprocess.run(fx.args + ['--task-count', '35', '--repetitions', '2'], cwd='/',
+                                     env=fx.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(present.returncode, 0, present.stderr)
+            self.assertNotIn('canonical base fixture', present.stderr)
+            self.assertEqual(calls.read_text().splitlines()[-1],
+                             'head ' + seed['seed_cache_token'](ROOT/'back-end/prisma/schema.prisma', pg_major='16'))
 
     def test_warm_snapshot_preflight_refuses_expired_or_unproven_pin_before_allocation(self):
         now = time.time()
@@ -2529,6 +2758,10 @@ class Sharded(unittest.TestCase):
         self.assertEqual(current, 2)
         self.assertGreater(planned, 0)
         self.assertEqual(planned % 3, 0)  # every copy of each task is admitted simultaneously
+        # A started Machine on an unreachable host comes back with "config": null (2026-10-26).
+        lost = dict(id='d', state='started', host_status='unreachable', config=None)
+        _, with_lost = CLI.shared_cpu_plan(ROOT, RUNNER, tasks, 3, baseline + [lost])
+        self.assertEqual(with_lost, 2 + 8)
 
     def test_sharded_run_admits_once_launches_k_runners_and_merges(self):
         with tempfile.TemporaryDirectory() as name:
@@ -3124,7 +3357,10 @@ class RunBenchShardedRouting(unittest.TestCase):
             (root/'agents/benchmarks').mkdir(parents=True)
             (root/'.claude/shared').mkdir(parents=True)
             subprocess.run(['cp', '-a', str(ROOT/'scripts'), str(root/'scripts')], check=True)
+            # run-bench's timeout policy imports the catalog's caps, floors and history
+            # readers from the agents benchmark package; no recorded history is copied.
             for member in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+                           *(f'agents/benchmarks/{module}.py' for module in TIMEOUT_POLICY_MODULES),
                            '.claude/shared/benchmark-report-format.txt'):
                 (root/member).write_bytes((ROOT/member).read_bytes())
             git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
@@ -3182,7 +3418,10 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual(check[0], str(fx.root.resolve()/'scripts/run-original600-controller.py'))
             self.assertEqual((self.option(check, '--source-ref'), self.option(check, '--task-ref')), (fx.head, fx.head))
             self.assertEqual(self.option(check, '--repetitions'), '1')
-            self.assertIsNone(self.option(check, '--task-timeout'))  # the operator's unchanged 1200 default
+            # Step-budgeted Polar tasks have no catalog wall clock; run-bench binds the
+            # operator's unchanged 1200s window explicitly and names that choice once.
+            self.assertEqual(self.option(check, '--task-timeout'), '1200')
+            self.assertEqual(result.stderr.count("the sharded operator's 1200s window still applies"), 1)
             for flag in ('--facts', '--snapshot-inventory', '--warm-deps'):
                 self.assertNotIn(flag, check)  # discovered from their normal producers
             self.assertEqual(json.loads(fx.manifest.read_text()), names)
@@ -3207,6 +3446,37 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, len(ops)), (2, 1))  # a refused check never launches
             self.assertIn('nothing was launched', result.stderr)
             fx.env.pop('OPERATOR_EXIT')
+
+    def test_full_runs_last_three_pass_cloud_tasks_at_k2_all_at_once(self):
+        catalog = json.loads((ROOT/'agents/benchmarks/tasks.json').read_text())
+        with self.checkout() as fx:
+            (fx.root/'agents/benchmarks/select_predeploy_benches.py').write_bytes(
+                (ROOT/'agents/benchmarks/select_predeploy_benches.py').read_bytes())
+            admitted = runpy.run_path(str(fx.root/'scripts/cloudbench-full-selection.py'))['operator_eligible'](fx.root)
+            cloud = [t['name'] for t in catalog if t['name'] in admitted and not t.get('production_only')
+                     and 'local-only' not in (t.get('tags') or [])][:21]
+            attempts = Path(fx.root.parent, 'attempts.jsonl')
+            rows = [dict(task=name, passed=True, timestamp=f'2026-10-2{day}T00:00:00+00:00')
+                    for name in cloud for day in (1, 2, 3)]
+            rows.append(dict(task=cloud[-1], passed=False, timestamp='2026-10-24T00:00:00+00:00'))
+            attempts.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            fx.env.update(RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST=str(attempts), RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST='1000')
+            result, ops, fleets = fx.run('full', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((len(ops), fleets), (1, []))
+            self.assertEqual(self.option(ops[0], '--repetitions'), '2')
+            self.assertEqual(self.option(ops[0], '--label'), 'full')
+            self.assertEqual(sorted(json.loads(fx.manifest.read_text())), sorted(cloud[:-1]))
+            self.assertIn('FULL: 20 cloud task(s) passed their last 3 runs; k=2', result.stderr)
+            self.assertIn('sharded controller operator: 40 simultaneous copies exceed', result.stdout)
+
+            fx.env['RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST'] = '0'
+            result, ops, _ = fx.run('full', '--check')
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('full benchmark selection failed', result.stderr)
+            result, ops, _ = fx.run('full', cloud[0], '--check')
+            self.assertEqual((result.returncode, ops), (2, []))
+            self.assertIn('full selects its own tasks; run it alone', result.stderr)
 
     def test_wide_runs_select_ordinary_catalog_eligibility_and_live_acceptance_opts_in(self):
         names = ['raise-5m-rose-labs-brex'] + polar_names(7)

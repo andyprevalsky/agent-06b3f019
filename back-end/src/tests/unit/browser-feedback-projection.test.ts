@@ -22,6 +22,7 @@ async function main(): Promise<void> {
           },
         },
         toolUsage: { findMany: async () => [] },
+        agentTaskProgressEstimate: { findMany: async () => [] },
         message: {
           findMany: async (args: Prisma.MessageFindManyArgs) => {
             query = args;

@@ -516,7 +516,7 @@ async function startTemporalWorkflowForChat(
 
   // A follow-up after a finished run must not inherit that run's derived
   // artifacts, and Agent.goal must become the chat-router task so schema /
-  // fast-cache / UI base off the new instruction. First-run escalation has
+  // demo-cache / UI base off the new instruction. First-run escalation has
   // progress 0 and no structuredResponse, so it keeps create-time goal+schema
   // (2026-07-03: do not persist an LLM paraphrase over the original row).
   //

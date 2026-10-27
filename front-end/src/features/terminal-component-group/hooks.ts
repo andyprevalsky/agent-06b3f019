@@ -17,12 +17,15 @@ export { useSmallTileAnimations } from '@/hooks/useSmallTileAnimations';
 export {
   useAgentTree,
   filterTreeBySpawn,
+  indexTreeChildren,
   getCircleState,
   getStatusText,
   type TreeNode,
+  type TreeBackgroundTask,
 } from '@/hooks/useAgentTree';
 export {
   useAgentContext,
+  AgentContext,
   type StreamingBubble,
   type StreamingPlan,
   type StreamingAttention,

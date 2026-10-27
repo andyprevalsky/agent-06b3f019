@@ -421,6 +421,138 @@ class Scorecard(unittest.TestCase):
         self.assertEqual((data["experiment"]["scheduled_total"], data["experiment"]["state"]), (2, "RUNNING"))
         self.valid(data)
 
+    def test_local_terminal_tasks_use_local_cleanup_receipts(self):
+        run = self.tmp / "1792604578-local-1"
+        write(run / "report-card.json", {
+            "run_id": "local-1", "tasks": {"total": 2},
+            "per_task": [task("alpha", "passed", stage="released"),
+                         task("beta", "failed", reason="Timeout after 300s", stage="running")],
+        })
+        write(run / "run.json", {"run_id": "local-1", "summary": {"passed": 1, "failed": 1,
+                                                                  "cache_hit_pct": 93.8},
+                                "tasks": [{"name": "beta", "failure_reason": "Timeout after 300s"}]})
+        write(run / "local-stack-owner.json", {"run_id": run.name, "token": "stack-owned"})
+        write(run / "local-benchmark-owner.json", {"run_id": run.name, "token": "bench-owned",
+                                                    "state": "cleanup_verified"})
+        write(run / "local-stack-cleanup.status", "version=2\ntoken=stack-owned\nstate=clean\n")
+        write(run / "benchmark-cleanup-bench-owned.status", "version=1\ntoken=bench-owned\nstate=clean\n")
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        exp = data["experiment"]
+        self.assertEqual((exp["state"], exp["progress"]["completed"]), ("COMPLETE", 2))
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"]), (1, 1))
+        self.assertEqual(exp["cache"]["avg"], 0.938)
+        self.assertIn("Timeout after 300s", CARD["render_text"](data))
+        self.valid(data)
+        # The run ends when its last required cleanup receipt lands, including a
+        # benchmark cleanup that finishes after the stack cleanup and run.json.
+        for name, mtime in (("run.json", T0), ("local-stack-cleanup.status", T0 + 5),
+                            ("benchmark-cleanup-bench-owned.status", T0 + 30)):
+            os.utime(run / name, (mtime, mtime))
+        late = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(late["ended_at"], T0 + 30)
+        write(run / "local-stack-cleanup.status", "version=2\ntoken=wrong-owner\nstate=clean\n")
+        unverified = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual(unverified["state"], "INCOMPLETE")
+
+    def test_local_run_benchmark_card_lists_terminal_tasks_with_fe_links(self):
+        # run_benchmark.py's report-card.json: no per-task dirs, no lifecycle_stage, agent only in agent_url.
+        run = self.tmp / "1792629049-local-2"
+        url = "https://roselabs.ai/?agent-id=7d7be967-eecf-4fca-80af-d1973327fdd6"
+        write(run / "report-card.json", {
+            "run_id": "local-2", "tasks": {"total": 3, "running": 0, "completed": 3, "queued": 0},
+            "per_task": [{"name": "alpha", "status": "passed", "duration_s": 160.8, "cost_usd": 0.0, "agent_url": url},
+                         {"name": "beta", "status": "failed", "duration_s": 99.0, "cost_usd": 0.01, "agent_url": None},
+                         {"name": "gamma", "status": "passed", "duration_s": 50.0, "cost_usd": 0.0, "agent_url": None}],
+        })
+        write(run / "run.json", {"run_id": "local-2", "summary": {"passed": 2, "failed": 1},
+                                "tasks": [{"name": "beta", "agent_id": "b0f841a5-5d35-4c79-8b13-f20ecf54bdcb"}]})
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        exp = data["experiment"]
+        self.assertEqual((exp["progress"]["queued"], exp["progress"]["completed"]), (0, 3))
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"]), (2, 1))
+        self.assertEqual([(t["task"], t["agent_id"]) for t in exp["task_links"]],
+                         [("alpha", "7d7be967-eecf-4fca-80af-d1973327fdd6"),
+                          ("beta", "b0f841a5-5d35-4c79-8b13-f20ecf54bdcb"), ("gamma", None)])
+        text = CARD["render_text"](data)
+        self.assertIn("PASS alpha · " + url, text)
+        self.assertIn("AGENT FAIL beta · b0f841a5-5d35-4c79-8b13-f20ecf54bdcb · FE link UNRECORDED", text)
+        self.assertIn("PASS gamma · agent UNRECORDED", text)
+        self.assertNotIn("NO SCORED TASKS", text)
+        html = CARD["render_html"](data)
+        self.assertIn(url, html)
+        self.valid(data)
+
+    def test_assembled_local_card_needs_every_lane_stack_receipt(self):
+        # run_captcha_probe.py --assemble: one run context from several lanes' stacks, each
+        # stack's own cleanup receipts copied under sources/<lane>/<stack>.
+        run = self.tmp / "tilion-captcha-round2"
+        write(run / "report-card.json", {
+            "run_id": "tilion-captcha-round2", "source_sha": None, "started_at": T0, "finished_at": T0 + 900,
+            "tasks": {"total": 3},
+            "per_task": [{"name": "alpha", "status": "passed", "agent_id": "7d7be967-eecf-4fca-80af-d1973327fdd6"},
+                         {"name": "beta", "status": "failed", "agent_id": "b0f841a5-5d35-4c79-8b13-f20ecf54bdcb"},
+                         {"name": "held", "status": "skipped"}],
+        })
+        write(run / "run.json", {"run_id": "tilion-captcha-round2",
+                                "tasks": [{"name": "beta", "failure_reason": "PerimeterX press and hold still blocking"}]})
+        stacks = []
+        for lane, stack in (("F", "stack-f"), ("A2", "stack-a2")):
+            receipts = run / "sources" / lane / stack
+            write(receipts / "local-stack-owner.json", {"run_id": stack, "token": f"{stack}-tok"})
+            write(receipts / "local-stack-cleanup.status", f"version=2\ntoken={stack}-tok\nstate=clean\n")
+            stacks.append({"lane": lane, "stack_run_id": stack, "receipts": f"sources/{lane}/{stack}"})
+        write(run / "assembled-from.json", {"stacks": stacks})
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        exp = data["experiment"]
+        self.assertEqual((exp["state"], exp["ended_at"]), ("COMPLETE", T0 + 900))
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["SKIPPED"]), (1, 1, 1))
+        text = CARD["render_text"](data)
+        self.assertIn("all 2 lane stacks have clean cleanup receipts", text)
+        self.assertIn("PerimeterX press and hold still blocking", text)
+        self.valid(data)
+        # One lane stack whose receipt is still pending keeps the run INCOMPLETE and names it.
+        write(run / "sources/A2/stack-a2/local-stack-cleanup.status", "version=2\ntoken=stack-a2-tok\nstate=pending\n")
+        data = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)
+        self.assertEqual(data["experiment"]["state"], "INCOMPLETE")
+        self.assertIn("cleanup receipt not clean: A2/stack-a2", CARD["render_text"](data))
+
+    def test_local_interrupted_tasks_are_cancelled_not_agent_failures(self):
+        # A run stopped mid-way (Tilion 402 premium_egress_exhausted, 2026-10-22): tasks that
+        # never started or were cut off have benchmark_status CANCELLED and no verdict.
+        run = self.tmp / "1792712097-local-cancel"
+        write(run / "report-card.json", {
+            "run_id": "local-cancel", "tasks": {"total": 4},
+            "per_task": [{"name": "alpha", "status": "passed"}, {"name": "beta", "status": "failed"},
+                         {"name": "gamma", "status": "failed"}, {"name": "delta", "status": "cancelled"}],
+        })
+        write(run / "run.json", {"run_id": "local-cancel", "tasks": [
+            {"name": "alpha", "status": "COMPLETED", "benchmark_status": "PASSED", "passed": True},
+            {"name": "beta", "status": "COMPLETED", "benchmark_status": "FAILED", "passed": False,
+             "failure_reason": "Expected isolated browser session metadata was not observed"},
+            {"name": "gamma", "status": "ACTIVE", "benchmark_status": "CANCELLED", "passed": False,
+             "failure_reason": "Benchmark interrupted; prod logs were collected before shutdown"},
+            {"name": "delta", "status": "CANCELLED", "benchmark_status": "CANCELLED", "passed": False}]})
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["CANCELLED"]), (1, 1, 2))
+        self.assertEqual(exp["progress"]["completed"], 4)
+
+    def test_local_card_reads_recorded_source_and_clock(self):
+        run = self.tmp / "local-run-without-epoch-name"
+        sha = "a873eae49" + "0" * 31
+        body = {"run_id": "local-3", "source_sha": sha, "started_at": T0, "finished_at": T0 + 600,
+                "tasks": {"total": 1}, "per_task": [{"name": "alpha", "status": "passed", "agent_url": None}]}
+        write(run / "report-card.json", body)
+        write(run / "run.json", {"run_id": "local-3", "summary": {"passed": 1}, "tasks": []})
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        # Results are final but no cleanup receipt exists: the producer's finish time is the end.
+        self.assertEqual((exp["source_ref"], exp["triggered_at"]), (sha, T0))
+        self.assertEqual((exp["state"], exp["ended_at"]), ("INCOMPLETE", T0 + 600))
+        self.assertIn("src a873eae49", CARD["render_text"](CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)))
+        # Missing or malformed producer fields stay unrecorded, never guessed.
+        write(run / "report-card.json", {**body, "source_sha": "HEAD", "started_at": None, "finished_at": None})
+        exp = CARD["build"](run, ledger=self.tmp / "none.jsonl", now=NOW)["experiment"]
+        self.assertEqual((exp["source_ref"], exp["triggered_at"], exp["ended_at"]), (None, None, None))
+
     def test_monitor_observation_time_respects_daylight_saving(self):
         monitor = runpy.run_path(str(ROOT / "scripts/cloudbench-monitor.py"), run_name="monitor")
         write(self.tmp / "_batch/report-card.json", {"per_task": []})
@@ -469,8 +601,9 @@ class Scorecard(unittest.TestCase):
 
     def test_blocking_agent_moves_section_above_history(self):
         agents = [{"name": "rca-timeout", "work": "480s cutoff", "blocking": True, "status": "⛔", "tokens": 1250000,
-                   "warming_s": 420, "started_at": NOW - 3000, "blocker": "needs approval", "action": "parent delivers packet"},
-                  {"name": "monitor", "status": "🔄", "tokens": None, "life_s": 600}]
+                   "warming_s": 420, "started_at": NOW - 3000, "blocker": "needs approval", "action": "parent delivers packet",
+                   "observed_at": NOW},
+                  {"name": "monitor", "status": "🔄", "tokens": None, "life_s": 600, "observed_at": NOW}]
         document = self.valid(render(self.f.fleet(), self.f, agents=agents))
         self.assertLess(document.index('data-section="agents"'), document.index('data-section="history"'))
         self.assertIn("warming 7m00s", document)
@@ -478,6 +611,44 @@ class Scorecard(unittest.TestCase):
         self.assertIn("UNMETERED", document)
         relaxed = self.valid(render(self.f.fleet(), self.f, agents=[dict(agents[1])]))
         self.assertGreater(relaxed.index('data-section="agents"'), relaxed.index('data-section="history"'))
+
+    def test_stale_overlay_rows_are_refused(self):
+        """2026-10-25 descend-full69: a card published 9m after the run ended still showed the
+        parent "shards launching (1:09 AM)" and pre-run cluster statuses from a hand-kept state
+        file. Overlay rows are claims; each must say when it was observed, after the run's
+        latest evidence and within the 15-minute checkpoint, or the card is not rendered."""
+        run = self.f.fleet()  # ended at T0 + 960; NOW = T0 + 3600
+        fresh_issue = {"text": "mass-agent T7 RCA", "owner": "ma", "action": "fix", "observed_at": NOW - 60}
+        fresh_agent = {"name": "parent", "work": "/descend", "status": "🔄", "observed_at": NOW - 60}
+        cases = {
+            "issue without observed_at": {"issues": [{"text": "shards launching", "owner": "parent"}]},
+            "agent without observed_at": {"agents": [{"name": "parent", "work": "shards launching"}]},
+            "issue observed before the run ended": {"issues": [dict(fresh_issue, observed_at=T0 + 900)]},
+            "agent older than 15 minutes": {"agents": [dict(fresh_agent, observed_at=NOW - 16 * 60)]},
+            "unparseable observed_at": {"issues": [dict(fresh_issue, observed_at="yesterday")]},
+        }
+        for name, overlay in cases.items():
+            with self.subTest(name), self.assertRaises(CARD["StaleOverlay"]) as raised:
+                render(run, self.f, **overlay)
+            self.assertIn("observed", str(raised.exception))
+        card = render(run, self.f, agents=[fresh_agent], issues=[fresh_issue])
+        self.valid(card)
+        self.assertIn("mass-agent T7 RCA", json.dumps(card["issues"]))
+        self.valid(render(run, self.f, agents=[], issues=[]))
+
+    def test_cli_refuses_stale_overlay_without_writing_the_card(self):
+        run = self.f.fleet()
+        out = self.tmp / "card/stale.html"
+        issues = write(self.tmp / "issues.json", json.dumps([{"text": "shards launching (1:09 AM)", "owner": "parent",
+                                                              "observed_at": T0 + 10}]))
+        env = dict(os.environ, CLOUDBENCH_EXPERIMENTS_LEDGER=str(self.f.ledger))
+        made = subprocess.run(["bash", str(ROOT / "scripts/run-bench"), "scorecard", str(run), "--html", str(out),
+                               "--issues", str(issues), "--now", str(NOW)],
+                              capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(made.returncode, 1, made.stdout)
+        self.assertIn("shards launching", made.stderr)
+        self.assertIn("before the run's latest evidence", made.stderr)
+        self.assertFalse(out.exists(), "a stale card must not be written")
 
     def test_cli_html_text_json_and_validate(self):
         run = self.f.fleet()

@@ -10,6 +10,11 @@
  *   Router DONE + clear_on_done -> frontend removes bubble
  *   Generator RESPONSE -> ATTENTION_STREAM accumulated frames -> keyed TOOL INSERT
  *   Python worker stream payloads -> unchanged; drain priority is never serialized
+ *   Committed INSERT refused with a non-retryable 4xx (e.g. edge WAF 403)
+ *     -> INSERT_ENCODED (same record, base64 content) -> INSERT_DEFERRED
+ *        (ids + tool lifecycle + visible reason; client reads the row by id)
+ *   Committed INSERT larger than one agent lane -> INSERT_DEFERRED with the
+ *        oversize reason instead of being dropped
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -74,8 +79,46 @@ const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
   },
   (items) => sendBroadcastBatch(items),
   BROADCAST_BATCH_SIZE,
-  (topic) => initialDispatcher.admissionBudget(topic)
+  (topic) => initialDispatcher.admissionBudget(topic),
+  [
+    { name: 'INSERT_ENCODED', map: encodedInsert },
+    { name: 'INSERT_DEFERRED', map: (item) => deferredInsert(item, BLOCKED_STREAM_REASON) },
+  ],
+  (item) => deferredInsert(item, OVERSIZE_STREAM_REASON)
 );
+
+/** Shown in place of a row whose live frame was refused, until the client reads it. */
+export const BLOCKED_STREAM_REASON =
+  'This message contained content that was blocked from live streaming to the app.';
+export const OVERSIZE_STREAM_REASON =
+  'This message is too large to stream live; loading it from the server.';
+
+/** The identical record with its content fields as one base64 JSON blob. */
+function encodedInsert(item: QueuedBroadcast): QueuedBroadcast {
+  const { agentId, id, timestamp, role, text, metadata, filePointer } = item.payload;
+  const data = Buffer.from(JSON.stringify({ text, metadata, filePointer }), 'utf8');
+  return {
+    ...item,
+    event: 'INSERT_ENCODED',
+    payload: { agentId, id, timestamp, role, encoding: 'base64', data: data.toString('base64') },
+  };
+}
+
+/** Identifiers, tool lifecycle scalars and a visible reason; no row content. */
+function deferredInsert(item: QueuedBroadcast, reason: string): QueuedBroadcast {
+  const { agentId, id, timestamp, role, metadata } = item.payload;
+  const source = (metadata ?? {}) as Record<string, unknown>;
+  const lifecycle: Record<string, unknown> = {};
+  for (const key of ['toolName', 'toolStatus', 'toolCallId']) {
+    if (typeof source[key] === 'string') lifecycle[key] = source[key];
+  }
+  if (typeof source.success === 'boolean') lifecycle.success = source.success;
+  return {
+    ...item,
+    event: 'INSERT_DEFERRED',
+    payload: { agentId, id, timestamp, role, reason, metadata: lifecycle },
+  };
+}
 
 interface AssistantStreamOptions {
   /** Remove a purely ephemeral stream at its terminal event. */
@@ -238,6 +281,23 @@ export async function broadcastAgentModeStarted(agentId: string): Promise<void> 
 }
 
 /**
+ * USER_UI_ACTIVE_CHANGED — a code agent published (and activated) a new
+ * rose_user_ui version. Sent on the publishing agent's channel and its root's
+ * so an open Rose tab refetches /api/user-ui/active without a reload.
+ */
+export async function broadcastUserUiActiveChanged(
+  agentIds: string[],
+  payload: { versionId: string; agentId: string }
+): Promise<void> {
+  log.info('[Broadcast] USER_UI_ACTIVE_CHANGED', { ...payload, channels: agentIds.length });
+  await Promise.all(
+    agentIds.map((id) =>
+      broadcast({ topic: `agent:${id}`, event: 'USER_UI_ACTIVE_CHANGED', payload })
+    )
+  );
+}
+
+/**
  * Broadcast agent UPDATE event - notifies frontend of agent state changes
  * Use this for tree_cost_cents, context_size, and other agent-level updates
  *
@@ -251,6 +311,8 @@ export async function broadcastAgentUpdate(
     treeCostCents?: number;
     contextSize?: number;
     progress?: number;
+    progressEstimate?: import('../../utils/progressEstimate').ProgressEstimate | null;
+    taskProgressEstimates?: Record<string, import('../../utils/progressEstimate').ProgressEstimate>;
     status?: string;
     statusMessage?: string;
     tokenCount?: number;
@@ -258,17 +320,17 @@ export async function broadcastAgentUpdate(
     tokensOut?: number;
     messageCount?: number;
     temporalWorkflowId?: string | null;
-  }
+    updatedAt?: string;
+  },
+  busId?: string
 ): Promise<void> {
   log.info('[Broadcast] UPDATE', { agentId, ...updates });
-  await broadcast({
-    topic: `agent:${agentId}`,
-    event: 'UPDATE',
-    payload: {
-      agentId,
-      ...updates,
-    },
-  });
+  const payload = { agentId, ...updates };
+  // Reuse the batched realtime transport and existing tree subscription. No per-row channels.
+  await Promise.all([
+    broadcast({ topic: `agent:${agentId}`, event: 'UPDATE', payload }),
+    ...(busId ? [broadcast({ topic: `bus:${busId}`, event: 'UPDATE', payload })] : []),
+  ]);
 }
 
 /**

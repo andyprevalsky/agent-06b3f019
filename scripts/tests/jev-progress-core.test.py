@@ -1,0 +1,270 @@
+"""Offline regression gate: no secrets, network or production writes."""
+from pathlib import Path
+import copy
+import sys
+import tempfile
+import unittest
+import json
+import gzip
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "jev_progress"))
+from core import SEED, BINS, FORMATS, request, decode, evaluate, summarize
+from optimize import dominates, joint_loss
+from weekly import partition, goal_key
+from checkpoint import config, validate, export_optimizer, warm_candidates
+from core import digest, prepare
+import optimize
+from learning_curve import analyze
+from previous_prediction import build_priors, builder
+from batch import select_completed_round, initialize_builder, build_request
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+from types import SimpleNamespace
+import production
+from success import success_verdict
+
+
+class CoreTests(unittest.TestCase):
+    def test_task_success_is_not_lifecycle_completion(self):
+        trace={'trace_id':'a','kind':'normal_root','events':[{'role':'assistant','calls':[{'id':'c','name':'attempt_completion'}]}]}
+        evidence={'id':'a','status':'COMPLETED','text':'Done','metadata':{'toolCallId':'c','toolStatus':'FINISHED','verifierMessage':True,'title':'Progress: 100%'}}
+        self.assertTrue(success_verdict(trace,evidence)[0])
+        for patch in ({'text':'new code version deployed, retry this tool'}, {'metadata':{**evidence['metadata'],'title':'Progress: 50%'}}, {'metadata':{**evidence['metadata'],'toolCallId':'another'}}, {'metadata':{**evidence['metadata'],'verifierMessage':False}}, {'status':'FAILED'}):
+            self.assertFalse(success_verdict(trace,{**evidence,**patch})[0])
+        browser={'trace_id':'b','kind':'browser','events':[], 'terminal_receipt':{'metadata':{'task_id':'b','toolStatus':'FINISHED','action_type':'task_complete'}}}
+        self.assertFalse(success_verdict(browser,None)[0])
+
+    def test_fresh_pull_rejects_interrupted_completion(self):
+        agent={'id':'a','parentAgentId':None,'status':'COMPLETED','goal':'Do work','responseSchema':None,'updatedAt':'2026-01-02T00:00:00Z'}
+        messages=[{'id':'m1','agentId':'a','role':'ASSISTANT','timestamp':'2026-01-01T01:00:00Z','text':'','metadata':{'tool_calls':[{'id':'c','name':'attempt_completion'}]}},
+                  {'id':'m2','agentId':'a','role':'TOOL','timestamp':'2026-01-01T01:01:00Z','text':'Done','metadata':{'toolCallId':'c','toolName':'attempt_completion','toolStatus':'FINISHED','verifierMessage':True,'title':'Progress: 100%'}}]
+        with patch.object(production,'query',side_effect=[[agent],messages]):
+            traces,_=production.pull('2026-01-01T00:00:00Z','2026-01-03T00:00:00Z',set())
+        self.assertEqual(len(traces),1)
+        self.assertEqual(traces[0]['success_evidence']['outcome'],'SUCCEEDED')
+        messages[-1]['text']='new code version deployed, retry this tool'
+        with patch.object(production,'query',side_effect=[[agent],messages]):
+            traces,audit=production.pull('2026-01-01T00:00:00Z','2026-01-03T00:00:00Z',set())
+        self.assertEqual(traces,[])
+        self.assertEqual(audit['rejected_success_evidence'],{'deployment_interruption':1})
+
+    def setUp(self):
+        self.trace = {"trace_id": "a", "kind": "normal_root", "goal": "Read and report",
+                      "output_schema": {"type": "string"}, "events": [
+                          {"role": "assistant", "calls": [{"id": "t", "name": "read"}], "timestamp": "2026-01-01T00:00:00Z"},
+                          {"role": "tool", "text": "visible", "call_id": "t"},
+                          {"role": "assistant", "calls": [{"id": "c", "name": "attempt_completion"}], "text": "SECRET_FUTURE"},
+                          {"role": "tool", "call_id": "c", "status": "FINISHED", "timestamp": "2026-01-01T00:01:00Z"}],
+                      "terminal_receipt": {"password": "SECRET_LABEL"}, "total_batches": 2,
+                      "success_evidence": {"outcome": "SUCCEEDED"}}
+        self.row = {"example_id": "row", "trace_id": "a", "cutoff_event_index": 1,
+                    "target": {"observed_batches": 1, "remaining_batches": 1, "batch_progress": .5}}
+        self.raw = {"model": "jev-1.13.0", "answers": {
+            "remaining_batches": {"probabilities": {str(i): float(i == 1) for i in range(len(BINS))}},
+            "eta": {"choice": "1m"}}, "usage": {"input_tokens": 10, "output_tokens": 3}}
+
+    def test_request_cannot_see_future_or_labels(self):
+        body = request(self.row, self.trace, SEED)
+        self.assertNotIn("SECRET", str(body))
+        self.assertNotIn("target", body["state"])
+        changed = copy.deepcopy(self.row)
+        changed["target"] = {"batch_progress": .99, "remaining_batches": 99}
+        self.assertEqual(body, request(changed, self.trace, SEED))
+
+    def test_distribution_decoding_and_model_fence(self):
+        row = decode(self.raw, self.row, self.trace)
+        self.assertEqual(row["predicted_progress"], .5)
+        self.assertEqual(row["progress_error"], 0)
+        raw = copy.deepcopy(self.raw)
+        raw["model"] = "another-model"
+        with self.assertRaises(ValueError):
+            decode(raw, self.row, self.trace)
+        self.assertEqual(decode(raw,self.row,self.trace,expected_model='another-model')['predicted_progress'],.5)
+
+    def test_every_input_format_is_prefix_only(self):
+        for fmt in FORMATS:
+            prompt = {**SEED, 'input_format': fmt}
+            before = request(self.row, self.trace, prompt)
+            trace = copy.deepcopy(self.trace)
+            trace['events'][2:]=[{'role': 'assistant', 'calls': [], 'text': 'DIFFERENT_FUTURE'}]
+            trace['total_batches']=999
+            self.assertEqual(before, request(self.row, trace, prompt))
+            self.assertNotIn('SECRET', str(before))
+        with self.assertRaises(ValueError):
+            request(self.row, self.trace, {**SEED, 'input_format': 'untrusted'})
+        raw = copy.deepcopy(self.raw)
+        raw["answers"]["remaining_batches"]["probabilities"]["1"] = -1
+        with self.assertRaises(ValueError):
+            decode(raw, self.row, self.trace)
+
+    def test_resume_cache_and_prompt_change(self):
+        calls = []
+        def transport(body, key):
+            calls.append(body)
+            return self.raw, .1
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for _ in range(2):
+                result = evaluate([self.row], {"a": self.trace}, SEED, root, transport=transport)
+                self.assertEqual(result["metrics"]["valid"], 1)
+            self.assertEqual(len(calls), 1)
+            evaluate([self.row], {"a": self.trace}, {**SEED, "progress": "Changed"}, root, transport=transport)
+            self.assertEqual(len(calls), 2)
+
+    def test_failures_remain_in_denominator(self):
+        row = {**decode(self.raw, self.row, self.trace), "ok": True}
+        metric = summarize([row, {"ok": False}], 2)
+        self.assertEqual(metric["failed"], 1)
+        self.assertEqual(metric["progress_within_10pp"], .5)
+
+    def test_joint_objective_and_pareto_preserve_time_tradeoff(self):
+        base = {"trace_macro_mae_pp": 20, "eta_log_mae": 2, "failed": 0}
+        progress_gain = {"trace_macro_mae_pp": 10, "eta_log_mae": 2, "failed": 0}
+        time_gain = {"trace_macro_mae_pp": 20, "eta_log_mae": 1, "failed": 0}
+        self.assertEqual(joint_loss(progress_gain, base), joint_loss(time_gain, base))
+        self.assertFalse(dominates(progress_gain, time_gain))
+        self.assertFalse(dominates(time_gain, progress_gain))
+        self.assertTrue(dominates(time_gain, base))
+        self.assertEqual(joint_loss({**time_gain, "failed": 1}, base), float("inf"))
+
+    def test_fresh_holdout_keeps_families_and_goals_together(self):
+        state = {'split_salt': '00'*32, 'goals': {}, 'seen_families': []}
+        traces = [{'family_id': str(i), 'goal': goal} for i, goal in enumerate(['same', ' SAME ', 'new'])]
+        sealed, train = partition(traces, state)
+        self.assertFalse({goal_key(t) for t in sealed} & {goal_key(t) for t in train})
+        repeated = [{'family_id': 'fresh-family', 'goal': 'same'}]
+        again_test, again_train = partition(repeated, state)
+        self.assertEqual(again_test + again_train, [])
+
+    def test_previously_sealed_goals_never_enter_training(self):
+        t = {'family_id': 'fresh', 'goal': 'private holdout'}
+        state = {'split_salt': '00'*32, 'goals': {goal_key(t): 'sealed'}, 'seen_families': []}
+        sealed, train = partition([t], state)
+        self.assertEqual(sealed + train, [])
+
+    def test_continuation_survives_serialization_without_stale_selection_scores(self):
+        original = {'name': 'candidate-11', 'prompt': {**SEED, 'input_format': 'timeline'},
+                    'validation': {'metrics': {'trace_macro_mae_pp': 12, 'eta_log_mae': 2}}}
+        other = {'name': 'candidate-09', 'prompt': SEED,
+                 'validation': {'metrics': {'trace_macro_mae_pp': 20, 'eta_log_mae': 1}}}
+        state = {'champion': original['prompt'], 'champion_sha256': digest(original['prompt']),
+                 'watermark': '2026-10-21T00:00:00+00:00', 'config': config(),
+                 'optimizer': export_optimizer([original, other], original, 12)}
+        state['config']['filters']['result_text_chars'] = 1200
+        state['config']['search']['iterations_per_run'] = 3
+        restored = json.loads(json.dumps(state))
+        saved = validate(restored)
+        self.assertEqual(saved['filters']['result_text_chars'], 1200)
+        self.assertEqual(saved['search']['iterations_per_run'], 3)
+        self.assertEqual(restored['optimizer']['next_iteration'], 12)
+        candidates = warm_candidates(restored['optimizer'], original['prompt'])
+        self.assertEqual(candidates, [{'name': 'candidate-09', 'prompt': SEED}])
+        self.assertNotIn('validation_metrics', candidates[0])
+        restored['config']['protocol']['model'] = 'changed-model'
+        with self.assertRaises(ValueError):
+            validate(restored)
+        with self.assertRaises(ValueError):
+            validate({'champion': SEED})
+
+    def test_new_training_data_does_not_move_validation_boundary(self):
+        old = {'example_id': 'validation-old', 'split_group': 'v', 'family_id': 'v',
+               'agent_kind': 'normal_root', 'trace_id': 'v'}
+        dev = {**old, 'example_id': 'dev-old', 'split_group': 'd', 'family_id': 'd', 'trace_id': 'd'}
+        new = {**old, 'example_id': 'new', 'split_group': 'n', 'family_id': 'n', 'trace_id': 'n'}
+        frozen = {'validation_groups': ['v'], 'validation_ids': ['validation-old']}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, rows in [('train', [old, dev, new]), ('test', []), ('traces', [])]:
+                with gzip.open(root / (name + '.jsonl.gz'), 'wt') as f:
+                    for row in rows:
+                        f.write(json.dumps(row)+'\n')
+            manifest = prepare(root, root / 'run', frozen_split=frozen)
+            self.assertEqual(manifest['validation_ids'], ['validation-old'])
+            self.assertEqual(set(manifest['train_ids']), {'dev-old', 'new'})
+
+    def test_optimizer_rescores_saved_candidates_instead_of_reusing_old_scores(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data, output = root / 'data', root / 'run'
+            data.mkdir()
+            dev = {**self.row, 'agent_kind': 'normal_root', 'family_id': 'd', 'split_group': 'd'}
+            val = {**dev, 'example_id': 'val', 'family_id': 'v', 'split_group': 'v'}
+            for name, rows in [('train', [dev, val]), ('test', []), ('traces', [self.trace])]:
+                with gzip.open(data / (name + '.jsonl.gz'), 'wt') as f:
+                    for row in rows:
+                        f.write(json.dumps(row)+'\n')
+            prepare(data, output, {'validation_groups': ['v'], 'validation_ids': ['val']})
+            seed_result = {'metrics': {'failed': 0, 'trace_macro_mae_pp': 10, 'eta_log_mae': 2}, 'rows': []}
+            for split in ('train', 'validation'):
+                (output / (split + '-baseline.json')).write_text(json.dumps(seed_result))
+            old_prompt = {**SEED, 'progress': 'Retained candidate'}
+            warm = {'next_iteration': 12, 'frontier': [digest(old_prompt)], 'candidates': [
+                {'name': 'candidate-09', 'prompt': old_prompt,
+                 'validation_metrics': {'trace_macro_mae_pp': 0.01, 'eta_log_mae': 0.01}}]}
+            warm_path = root / 'warm.json'
+            warm_path.write_text(json.dumps(warm))
+            worse_now = {'metrics': {'failed': 0, 'trace_macro_mae_pp': 30, 'eta_log_mae': 5}, 'rows': []}
+            with patch.object(sys, 'argv', ['optimize.py', '--dataset', str(data), '--output', str(output),
+                                           '--warm-start', str(warm_path), '--start-at', '12', '--iterations', '11']), \
+                    patch.object(optimize, 'evaluate', return_value=worse_now) as evaluator:
+                optimize.main()
+            self.assertEqual(evaluator.call_count, 2)
+            self.assertEqual(json.loads((output/'winner.json').read_text())['name'], 'seed')
+            self.assertEqual(json.loads((output/'optimizer-state.json').read_text())['next_iteration'], 12)
+
+    def test_late_drop_requires_a_plateau_then_a_material_improvement(self):
+        points = [{'iteration': i, 'joint_loss': v} for i,v in enumerate([1.1,1.2,1.05,1.03,.90],12)]
+        report = analyze(points)
+        self.assertEqual(report['late_drops'][0]['iteration'], 16)
+        self.assertAlmostEqual(report['late_drops'][0]['drop_from_plateau'], .1)
+        steady = [{'iteration': i, 'joint_loss': v} for i,v in enumerate([.99,.95,.9,.85,.8])]
+        self.assertEqual(analyze(steady)['late_drops'], [])
+
+    def test_previous_prediction_feature_excludes_labels_and_future_predictions(self):
+        first = {**self.row, 'example_id': 'first', 'cutoff_event_index': 0}
+        current = {**self.row, 'example_id': 'current', 'cutoff_event_index': 1}
+        prediction = {'example_id':'first','ok':True,'predicted_progress':.4,
+                      'remaining_predicted':1.5,'eta_predicted':60,'actual_progress':'SECRET_LABEL'}
+        future_prediction = {**prediction,'example_id':'current','predicted_progress':.99}
+        priors = build_priors([current,first], {'a':self.trace}, {'rows':[prediction,future_prediction]})
+        self.assertNotIn('first',priors)
+        self.assertEqual(priors['current']['predicted_progress_fraction'],.4)
+        self.assertNotIn('SECRET',str(priors))
+        body = builder(priors)(current,self.trace,SEED)
+        self.assertEqual(body['state']['previous_jev_prediction'],priors['current'])
+        self.assertNotIn('SECRET',str(body))
+
+    def test_parallel_round_cannot_promote_a_partial_or_failed_round(self):
+        base={'failed':0,'trace_macro_mae_pp':10,'eta_log_mae':2}
+        def candidate(name,metrics):
+            return {'name':name,'train':{'metrics':metrics},'validation':{'metrics':metrics}}
+        incumbent=candidate('old',base)
+        improved=candidate('new',{**base,'trace_macro_mae_pp':8})
+        with self.assertRaises(ValueError):
+            select_completed_round([incumbent],[improved],2,base)
+        failed=candidate('failed',{**base,'failed':1})
+        with self.assertRaises(ValueError):
+            select_completed_round([incumbent],[improved,failed],2,base)
+        _,winner=select_completed_round([incumbent],[improved],1,base)
+        self.assertEqual(winner['name'],'new')
+
+    def test_parallel_request_builder_preserves_exact_model_inputs(self):
+        prompt={**SEED,'input_format':'timeline'}
+        expected=request(self.row,self.trace,prompt)
+        with ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
+                                 initializer=initialize_builder,initargs=({'a':self.trace},)) as executor:
+            self.assertEqual(executor.submit(build_request,self.row,prompt).result(timeout=20),expected)
+
+    def test_production_queries_have_explicit_read_only_transaction(self):
+        fake=SimpleNamespace(dotenv_values=lambda _: {'DATABASE_URL':'postgresql://test:test@example.invalid/db'})
+        result=SimpleNamespace(returncode=0,stdout='{"ok":true}\n')
+        with patch.dict(sys.modules,{'dotenv':fake}),patch.object(production.subprocess,'run',return_value=result) as run:
+            self.assertEqual(production.query('SELECT json_build_object(\'ok\',true)'),[{'ok':True}])
+        self.assertTrue(run.call_args.kwargs['input'].startswith('BEGIN READ ONLY;'))
+        self.assertTrue(run.call_args.kwargs['input'].endswith('ROLLBACK;\n'))
+        self.assertIn('ON_ERROR_STOP=1',run.call_args.args[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

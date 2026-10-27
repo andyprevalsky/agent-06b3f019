@@ -28,7 +28,7 @@ const MILESTONE_TIMEOUT_MS = 15_000;
 // before the Enter-key clock starts, so every measured lifecycle keeps the
 // same six-second reporting target.
 const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
-// The discarded warmup (sample 0) exists to populate the prompt/fast-mode cache
+// The discarded warmup (sample 0) exists to populate the prompt/DEMO cache
 // so the measured samples are warm. On a freshly seeded workspace that cache is
 // EMPTY, and a genuinely cold web_search lifecycle exceeds MILESTONE_TIMEOUT_MS
 // — so the warmup timed out, never completed, and therefore never warmed
@@ -199,7 +199,22 @@ function waitForFirstResponse(
         const persistedAssistantHasText = [
           ...document.querySelectorAll('[data-message-role="ASSISTANT"]'),
         ].some((element) => (element.textContent ?? '').trim().length > 0);
-        return thinkingHasTokens || answerHasText || persistedAssistantHasText;
+        // Rose Desktop folds persisted assistant text into a trajectory row's thinking
+        // activity, and the persisted final answer is a send_message_to_user row.
+        const foldedAssistantText =
+          document.querySelector(
+            '[data-testid="trajectory-work-group"][data-activity-kinds~="thinking"]',
+          ) !== null;
+        const persistedAnswerHasText = [
+          ...document.querySelectorAll('[data-message-kind="final-answer"]'),
+        ].some((element) => (element.textContent ?? '').trim().length > 0);
+        return (
+          thinkingHasTokens ||
+          answerHasText ||
+          persistedAssistantHasText ||
+          foldedAssistantText ||
+          persistedAnswerHasText
+        );
       },
       undefined,
       { timeout: timeoutMs },
@@ -227,8 +242,11 @@ async function waitForRoute(
   timeoutMs: number,
 ): Promise<number> {
   if (path.id === 'web_search') {
+    // Rose Desktop folds tool rows into one trajectory row carrying the same identity.
     await page
-      .locator('[data-tool-name="web_search"][data-tool-status="FINISHED"]')
+      .locator(
+        '[data-tool-name="web_search"][data-tool-status="FINISHED"], [data-testid="trajectory-work-group"][data-tool-statuses~="web_search:FINISHED"]',
+      )
       .last()
       .waitFor({ state: 'visible', timeout: timeoutMs });
     return elapsed(startedAt);
@@ -236,7 +254,7 @@ async function waitForRoute(
   if (path.terminal === 'agent_mode') {
     const cloudAgent = page
       .locator(
-        `[data-tool-name="cloud_agent"][data-agent-start-phase="${path.expectedAgentPhase}"]`,
+        `[data-tool-name="cloud_agent"][data-agent-start-phase="${path.expectedAgentPhase}"], [data-testid="trajectory-work-group"][data-agent-start-phase="${path.expectedAgentPhase}"]`,
       )
       .last();
     await cloudAgent.waitFor({ state: 'attached', timeout: timeoutMs });
@@ -393,7 +411,9 @@ test.describe('chat full-lifecycle latency', () => {
 
           if (path.id === 'direct_answer') {
             const unexpectedRouteCount = await page
-              .locator('[data-tool-name="web_search"], [data-tool-name="cloud_agent"]')
+              .locator(
+                '[data-tool-name="web_search"], [data-tool-name="cloud_agent"], [data-tool-statuses*="web_search"], [data-tool-statuses*="cloud_agent"]',
+              )
               .count();
             if (unexpectedRouteCount > 0) failures.push('direct answer used another router path');
           }

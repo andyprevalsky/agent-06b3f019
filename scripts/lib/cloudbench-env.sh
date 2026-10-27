@@ -599,6 +599,52 @@ cloudbench_require_agentcard_org_oauth() {
   echo "agentcard org oauth verified: id_len=${#client_id} secret_len=${#client_secret}"
 }
 
+# Benchmark guests restore their own database, so without a shared authority
+# every guest runs its own compute-token lease semaphore and cooldowns on the
+# same real credentials (70 copies held ~80 live leases on one GPT token whose
+# capacity is 16 and drew 429s). back-end routes.compute.ts already delegates
+# internal /compute-code/* requests to COMPUTE_TOKEN_AUTHORITY_URL; this points
+# a guest's backend at production's single lease store. The guest's internal
+# BACKEND_API_KEY is production's, so it authenticates the delegation.
+# CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL selects another origin; =off keeps the
+# guest-local semaphore. An authority already in the env file is left as is.
+CLOUDBENCH_DEFAULT_COMPUTE_TOKEN_AUTHORITY_URL=https://navi-j9a9.onrender.com
+cloudbench_apply_compute_token_authority() {  # <backend-env>
+  local backend_env="$1" url api_key existing
+  url="${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_DEFAULT_COMPUTE_TOKEN_AUTHORITY_URL}"
+  if [ "$url" = off ]; then
+    echo "compute-token authority: off (guest-local leases)"
+    return 0
+  fi
+  existing="$(cloudbench_env_value "$backend_env" COMPUTE_TOKEN_AUTHORITY_URL)" || return 1
+  if [ -n "$existing" ]; then
+    [ -n "$(cloudbench_env_value "$backend_env" COMPUTE_TOKEN_AUTHORITY_API_KEY)" ] || {
+      echo "FATAL: back-end/.env sets COMPUTE_TOKEN_AUTHORITY_URL without COMPUTE_TOKEN_AUTHORITY_API_KEY" >&2
+      return 1
+    }
+    echo "compute-token authority: $existing (from back-end/.env)"
+    return 0
+  fi
+  case "$url" in
+    https://*) ;;
+    *) echo "FATAL: compute-token authority must be an https origin, got ${url:-<empty>}" >&2; return 1 ;;
+  esac
+  url="${url%/}"
+  case "${url#https://}" in
+    ''|*/*|*@*|*\?*|*\#*) echo "FATAL: compute-token authority must be a bare https origin, got $url" >&2; return 1 ;;
+  esac
+  api_key="$(cloudbench_env_value "$backend_env" BACKEND_API_KEY)" || return 1
+  [ -n "$api_key" ] || {
+    echo "FATAL: back-end/.env has no BACKEND_API_KEY to authenticate the compute-token authority" >&2
+    return 1
+  }
+  if [ -s "$backend_env" ] && [ "$(tail -c 1 "$backend_env")" != "" ]; then
+    printf '\n' >> "$backend_env"
+  fi
+  printf 'COMPUTE_TOKEN_AUTHORITY_URL=%s\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=%s\n' "$url" "$api_key" >> "$backend_env"
+  echo "compute-token authority: $url"
+}
+
 cloudbench_validate_browser_provider_contract() {
   local agents_env="$1" backend_env="$2" prod_backend="$3" prod_worker="$4"
   local agents_provider backend_provider

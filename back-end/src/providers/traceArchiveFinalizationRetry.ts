@@ -284,9 +284,14 @@ export async function runTraceArchiveFinalizationRetries(
     }
   });
   if (failures.length > 0) {
+    // Carry the inner causes in the message: callers log `error.message`, and
+    // an AggregateError's own text alone hides why each obligation failed.
+    const causes = failures.map((failure) =>
+      failure instanceof Error ? failure.message : String(failure)
+    );
     throw new AggregateError(
       failures,
-      `${failures.length} trace archive finalization obligation(s) failed`
+      `${failures.length} trace archive finalization obligation(s) failed: ${causes.join('; ')}`
     );
   }
   return { discovered: claims.length, finalized };

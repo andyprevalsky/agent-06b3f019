@@ -38,6 +38,7 @@ class WebFetchHaikuResponse(BaseModel):
         ),
     )
 
+
 # Minimum number of recent TOOL/ASSISTANT/USER messages kept verbatim in
 # head/tail-protected compaction. The primary boundary is token-budget based,
 # following OpenClaw's `keepRecentTokens` and Hermes' `_find_tail_cut_by_tokens`.
@@ -56,7 +57,9 @@ SUMMARY_FIELD_CHAR_BUDGET = 5_000
 SUMMARY_TOOL_ARGS_CHAR_BUDGET = 2_000
 
 _SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*([^\s,;]+)"
+    ),
     re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
 ]
 
@@ -311,10 +314,7 @@ def hard_cap_tool_result_text(
         tool_result_text = str(tool_result_text)
     if limit <= 0 or len(tool_result_text) <= limit:
         return tool_result_text
-    return (
-        tool_result_text[:limit]
-        + f"\n\n...[truncated, original_len={len(tool_result_text)}]"
-    )
+    return tool_result_text[:limit] + f"\n\n...[truncated, original_len={len(tool_result_text)}]"
 
 
 def _json_dumps_safe(value: Any, *, limit: int = SUMMARY_FIELD_CHAR_BUDGET) -> str:
@@ -384,11 +384,7 @@ def estimate_context_tokens(context: List[Dict[str, Any]]) -> int:
     ``loop.context_utils.filter_internal_subagent_messages`` strips them before
     the context is ever sent to the model.
     """
-    return sum(
-        _message_summary_weight(msg)
-        for msg in context
-        if not (msg.get("metadata") or {}).get("subAgentId")
-    )
+    return sum(_message_summary_weight(msg) for msg in context if not (msg.get("metadata") or {}).get("subAgentId"))
 
 
 def compaction_saved_ratio(original_tokens: int, compressed_tokens: int) -> float:
@@ -596,7 +592,7 @@ async def compress_context(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
 ) -> Dict:
     """Head/tail-protected context compaction.
 
@@ -650,7 +646,7 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
             compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+            compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             skip_cache_write=True,
             call_site="context_compression",
             agent_id=agent_id,
@@ -674,11 +670,7 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             "metadata": {"compactionSummary": True},
         }
 
-        new_context = (
-            [context[i] for i in head_indices]
-            + [synthetic_summary_msg]
-            + [context[i] for i in tail_indices]
-        )
+        new_context = [context[i] for i in head_indices] + [synthetic_summary_msg] + [context[i] for i in tail_indices]
 
         # A compaction that does not shrink the context is a failed compaction.
         # Handing it back would replace the context with a LARGER one and then
@@ -831,8 +823,7 @@ Output the summary only — no preamble."""
         original_len = len(tool_result_text)
         if original_len > TOOL_RESULT_HARD_CAP_CHARS:
             truncated = (
-                tool_result_text[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
+                tool_result_text[:TOOL_RESULT_HARD_CAP_CHARS] + f"\n\n...[truncated, original_len={original_len}]"
             )
         else:
             truncated = tool_result_text
@@ -981,10 +972,7 @@ Rules for files_to_download:
         )
         original_len = len(markdown)
         if original_len > TOOL_RESULT_HARD_CAP_CHARS:
-            truncated = (
-                markdown[:TOOL_RESULT_HARD_CAP_CHARS]
-                + f"\n\n...[truncated, original_len={original_len}]"
-            )
+            truncated = markdown[:TOOL_RESULT_HARD_CAP_CHARS] + f"\n\n...[truncated, original_len={original_len}]"
         else:
             truncated = markdown
         return {
@@ -1015,7 +1003,7 @@ async def generate_completion_summary(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    compute_token_fast_cache_affinity_key: Optional[str] = None,
+    compute_token_demo_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -1039,17 +1027,23 @@ async def generate_completion_summary(
             - usage: Token usage stats
             - tool_counts: Merged tool counts (for parent aggregation)
     """
+    # The Fast Cache context is task-scoped state: restore it on every exit so
+    # a summary never leaks its cache identity into later work on this task.
+    demo_cache_token = None
     try:
         activity.heartbeat("Generating completion summary")
 
         # Import here to avoid circular dependency
-        from helpers.llm import call_llm, convert_context_to_messages
-        from providers.fast_cache.context import (
-            FastCacheContext,
+        from helpers.llm import call_llm, convert_context_to_messages, resolve_context_attachments
+        from providers.demo_cache.context import (
+            DemoCacheContext,
             write_through_enabled_for_user,
         )
-        from providers.fast_cache.context import (
-            set_context as set_fast_cache_context,
+        from providers.demo_cache.context import (
+            reset_context as reset_demo_cache_context,
+        )
+        from providers.demo_cache.context import (
+            set_context as set_demo_cache_context,
         )
         from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
 
@@ -1080,7 +1074,14 @@ Just write plain text describing what was done."""
         # Convert context to messages (exclude system messages like blueprints)
         # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
+        messages.extend(
+            convert_context_to_messages(
+                context,
+                include_system=False,
+                include_assistant=True,
+                attachments=await resolve_context_attachments(context),
+            )
+        )
         messages.append(
             {
                 "role": "user",
@@ -1091,11 +1092,11 @@ Just write plain text describing what was done."""
         cache_user_id = claude_token_user_id or gpt_token_user_id
         write_through_enabled = write_through_enabled_for_user(cache_user_id)
         if goal and (fast_mode_cache_enabled or write_through_enabled):
-            from providers.fast_cache.client import resolve_soft_complete_root_goal
+            from providers.demo_cache.client import resolve_soft_complete_root_goal
 
             root_goal = await resolve_soft_complete_root_goal(agent_id, goal)
-            set_fast_cache_context(
-                FastCacheContext(
+            demo_cache_token = set_demo_cache_context(
+                DemoCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=goal,
                     base_step=fast_mode_step,
@@ -1126,7 +1127,7 @@ Just write plain text describing what was done."""
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
-                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                compute_token_demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
                 skip_cache_write=True,  # One-shot call — no cache reuse
                 call_site="completion_summary",
                 agent_id=agent_id,
@@ -1193,3 +1194,6 @@ Just write plain text describing what was done."""
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "tool_counts": {},
         }
+    finally:
+        if demo_cache_token is not None:
+            reset_demo_cache_context(demo_cache_token)

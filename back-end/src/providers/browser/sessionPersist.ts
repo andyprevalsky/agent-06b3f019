@@ -37,9 +37,9 @@ export type BrowserSessionPersistInput = {
 export class BrowserSessionReclaimConflictError extends Error {
   readonly taskId: string;
   readonly attemptedSessionId: string;
-  readonly winningSessionId: string;
+  readonly winningSessionId: string | null;
 
-  constructor(taskId: string, attemptedSessionId: string, winningSessionId: string) {
+  constructor(taskId: string, attemptedSessionId: string, winningSessionId: string | null) {
     super(
       `Browser session ${taskId} was reclaimed concurrently: ${attemptedSessionId} lost to ${winningSessionId}`
     );
@@ -74,10 +74,10 @@ export function isIdUniqueConstraint(error: unknown): boolean {
 
 async function releaseRemote(
   release: ((sessionId: string) => Promise<void>) | undefined,
-  sessionId: string,
+  sessionId: string | null,
   context: string
 ): Promise<void> {
-  if (release === undefined || sessionId === '') return;
+  if (release === undefined || sessionId === null || sessionId === '') return;
   try {
     await release(sessionId);
   } catch (releaseError) {

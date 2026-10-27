@@ -46,33 +46,42 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-c", "safe.directory="+str(repo), "-C", str(repo), *args]).decode().strip()
 
 
-# A task that is exiting (address space released) or mid-exec briefly has a
-# root-owned /proc entry, so an unprivileged observer gets EACCES on its fd
-# list even for its own UID. Re-observe that exact task for a bounded time:
-# an exiting task vanishes and an exec settles, while a live task that stays
-# unreadable (another UID, non-dumpable) still fails closed.
-TASK_REOBSERVE_ATTEMPTS = 20
-TASK_REOBSERVE_SECONDS = 0.05
+# A foreign process changing credentials mid-scan (e.g. sudo) is briefly unreadable.
+WRITER_OBSERVATION_ATTEMPTS = 5
+WRITER_OBSERVATION_DELAY = 0.2
 
 
-def task_paths(task):
-    """Paths one thread holds open or mapped writable; None once it is gone."""
-    for attempt in range(TASK_REOBSERVE_ATTEMPTS):
+def process_paths(process):
+    # A zombie leader keeps no cwd/fd/maps while its other threads can still
+    # write; read every live thread of the group, not only the leader.
+    paths = []
+    for task in (process / "task").iterdir():
         try:
-            paths = [os.readlink(task / "cwd")]
+            paths.append(os.readlink(task / "cwd"))
             for fd in (task / "fd").iterdir():
                 try: paths.append(os.readlink(fd))
                 except FileNotFoundError: continue
             for line in (task / "maps").read_text().splitlines():
                 fields = line.split(None, 5)
                 if len(fields) == 6 and "w" in fields[1]: paths.append(fields[5])
-            return paths
+        except FileNotFoundError:
+            continue
+    return paths
+
+
+def observed_paths(process):
+    """Re-observe an unreadable process; fail closed only while it stays unreadable and alive."""
+    for attempt in range(WRITER_OBSERVATION_ATTEMPTS):
+        try:
+            return process_paths(process)
         except FileNotFoundError:
             return None
         except PermissionError:
-            if attempt + 1 == TASK_REOBSERVE_ATTEMPTS:
-                raise
-            time.sleep(TASK_REOBSERVE_SECONDS)
+            if not process.exists():
+                return None
+            if attempt + 1 == WRITER_OBSERVATION_ATTEMPTS:
+                raise ValueError("cannot observe controller writer ownership") from None
+            time.sleep(WRITER_OBSERVATION_DELAY)
 
 
 def writers(roots, permitted):
@@ -80,20 +89,11 @@ def writers(roots, permitted):
     for process in Path("/proc").iterdir():
         if not process.name.isdecimal() or int(process.name) in permitted:
             continue
-        try:
-            # A zombie leader keeps no cwd/fd/maps while its other threads can still
-            # write; read every live thread of the group, not only the leader.
-            paths = []
-            for task in (process / "task").iterdir():
-                observed = task_paths(task)
-                if observed is not None:
-                    paths.extend(observed)
-            if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
-                found.append({"pid": int(process.name), "birth": birth(int(process.name))})
-        except FileNotFoundError:
+        paths = observed_paths(process)
+        if paths is None:
             continue
-        except PermissionError:
-            raise ValueError("cannot observe controller writer ownership")
+        if any(any(path == str(root) or path.startswith(str(root) + "/") for root in roots) for path in paths):
+            found.append({"pid": int(process.name), "birth": birth(int(process.name))})
     return found
 
 

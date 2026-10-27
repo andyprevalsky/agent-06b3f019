@@ -12,7 +12,7 @@ import uvicorn
 from benchmarks import wmh_provider_capture as capture_module
 from benchmarks import wmh_rose_provider as wmh
 from benchmarks.experiential_bridge import build_provider_bridge
-from providers.fast_cache import client as cache
+from providers.demo_cache import client as cache
 from providers.rose.client import RoseClient
 from providers.rose.types import StreamChunk
 

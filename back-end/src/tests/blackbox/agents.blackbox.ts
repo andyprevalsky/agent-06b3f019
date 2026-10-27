@@ -46,6 +46,11 @@ async function runAll(): Promise<void> {
   await import('./agents-terminal-browser-release.cases');
   await import('./agents-cutover-subagent-close.cases');
   await import('./agents-cutover-replace-not-failed.cases');
+  await import('./agents-agent-messages.cases');
+  await import('./agents-agent-message-guard.cases');
+  await import('./agents-agent-tree.cases');
+  await import('./agents-agent-address.cases');
+  await import('./agents-agent-control.cases');
   const {
     testBoundary_createAgentModelPricing,
     testBoundary_createAgentGeoip,

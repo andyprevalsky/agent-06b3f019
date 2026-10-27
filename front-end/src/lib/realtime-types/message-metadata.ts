@@ -84,6 +84,13 @@ export type ClaudeCodeWsMessage =
   | { type: 'exit'; code: number } // Process exited
   | { type: 'error'; data: string }; // Server error
 
+/** `metadata.inlineView` payload: `view@versionId` plus small JSON props. */
+export interface InlineViewMessageMetadata {
+  view: string;
+  versionId: string;
+  props?: unknown;
+}
+
 /**
  * Metadata attached to messages.
  * Different message types use different subsets of these fields.
@@ -118,11 +125,59 @@ export interface MessageMetadata {
   browser_url?: string;
   /** Action type for browser/code agents */
   action_type?:
-    BrowserActionType | CodeActionType | ClaudeCodeActionType | 'credential_failure_classification';
+    | 'phone'
+    | BrowserActionType
+    | CodeActionType
+    | ClaudeCodeActionType
+    | 'credential_failure_classification';
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */
   preview_url?: string;
+  /**
+   * Per-user inline trajectory view (rose_user_ui `inline/<view>/`), pinned to
+   * the published version it was sent with; rendered in a sandboxed frame.
+   */
+  inlineView?: InlineViewMessageMetadata;
   /** Allow additional fields for extensibility */
   [key: string]: unknown;
+}
+
+// -----------------------------------------------------------------------------
+// Agent-to-agent rows (background agents + send_message_to_agent)
+// -----------------------------------------------------------------------------
+
+/**
+ * USER row carrying a message from another agent in the same tree (not the
+ * human). Written by the backend agent-messages endpoint.
+ */
+export interface AgentMessageMetadata {
+  agentMessage?: true;
+  /** Codex message type: MESSAGE | NEW_TASK. */
+  messageType?: string;
+  /** Sender agent id. */
+  fromAgentId?: string;
+  /** Sender agent goal (for the notice header). */
+  fromGoal?: string;
+  /** Sender's Codex-style tree path, e.g. `/root/outreach` (absent on older rows). */
+  fromAgentPath?: string;
+  /** Explore/browser task address when delivered to an in-activity agent. */
+  recipientTaskId?: string;
+}
+
+/**
+ * Row announcing that a sub-agent finished. Its text is a Codex body:
+ * `Message Type: FINAL_ANSWER|FAILED\nTask name: …\nSender: …\nPayload:\n…`.
+ */
+export interface AgentNotificationMetadata {
+  agentNotification?: true;
+  toolName?: 'agent_notification';
+  /** Codex message type: FINAL_ANSWER | FAILED (a killed agent failed). */
+  messageType?: string;
+  /** Address of the finished sub-agent (a tree path, e.g. `/root/a/b`). */
+  fromAgentAddress?: string;
+  fromAgentPath?: string;
+  toAgentPath?: string;
+  /** Terminal status (completed / failed). */
+  status?: string;
 }

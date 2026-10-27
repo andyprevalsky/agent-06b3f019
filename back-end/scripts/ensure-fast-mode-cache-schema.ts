@@ -1,5 +1,5 @@
 /**
- * Ensure the shared Fast Mode cache database has the minimal table/indexes used
+ * Ensure the shared DEMO cache database has the minimal table/indexes used
  * by /api/fast-cache. This intentionally does not sync the whole Prisma schema:
  * FAST_MODE_CACHE_DATABASE_URL points at the shared/prod cache DB, while the
  * normal app DATABASE_URL can still be local.
@@ -8,11 +8,12 @@ import { PrismaClient } from '@prisma/client';
 
 const url =
   process.env.FAST_MODE_CACHE_DATABASE_URL ??
+  process.env.DEMO_CACHE_DATABASE_URL ??
   (process.env.NODE_ENV === 'production' ? process.env.DATABASE_URL : undefined);
 
 if (!url) {
   console.error(
-    'FAST_MODE_CACHE_DATABASE_URL is required outside production; Fast Mode cache must not fall back to the local app database.'
+    'FAST_MODE_CACHE_DATABASE_URL is required outside production; DEMO cache must not fall back to the local app database.'
   );
   process.exit(1);
 }

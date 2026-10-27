@@ -47,6 +47,9 @@ export interface UpdateAgentPayload {
   agentId?: string;
   title?: string | null;
   progress?: number;
+  progressEstimate?: import('../api/types').ProgressEstimate | null;
+  taskId?: string;
+  taskProgressEstimates?: Record<string, import('../api/types').ProgressEstimate>;
   status?: Agent['status'];
   statusMessage?: string | null;
   model?: string;
@@ -58,6 +61,23 @@ export interface UpdateAgentPayload {
   treeCostCents?: number; // Real-time tree cost updates (for price limit feature)
   updatedAt?: string;
   temporalWorkflowId?: string | null;
+}
+
+/**
+ * INSERT_DEFERRED event payload - a committed message that could not be streamed
+ * live (its frame was refused, e.g. by an edge WAF rule, or it was too large).
+ * It carries no message content: `reason` is shown in place of the body until
+ * the client reads the row by ID from the API.
+ */
+export interface InsertDeferredPayload {
+  agentId: string;
+  id: string;
+  timestamp: string;
+  role: MessageRole;
+  reason: string;
+  metadata?: Pick<MessageMetadata, 'toolName' | 'toolStatus' | 'toolCallId'> & {
+    success?: boolean;
+  };
 }
 
 // -----------------------------------------------------------------------------

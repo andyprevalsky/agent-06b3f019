@@ -62,6 +62,7 @@ from providers.rose.transforms import (
 )
 from providers.rose.transport import anthropic_error_fields, get_error_body, post_anthropic_stream
 from providers.rose.types import ClaudeAuthContext, StreamChunk
+from providers.rose.uncached_context import is_uncached_context
 from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 logger = structlog.get_logger()
@@ -71,6 +72,16 @@ def _anthropic_400_message(error_body: str) -> str:
     """Name the provider's error code so a fall-through reason is diagnosable."""
     code = anthropic_error_fields(error_body)["error_code"]
     return f"Anthropic 400 ({code})" if code else "Anthropic 400"
+
+
+def _anthropic_error_message(error_body: str) -> Optional[str]:
+    """Anthropic's validation message (names the rejected field), capped at 200 chars."""
+    try:
+        error = json.loads(error_body).get("error")
+    except (ValueError, AttributeError):
+        return None
+    message = error.get("message") if isinstance(error, dict) else None
+    return message[:200] if isinstance(message, str) else None
 
 
 _MAX_ATTEMPTS_PER_TOKEN = 3
@@ -104,17 +115,33 @@ def _add_cache_breakpoint(messages: List[Dict[str, Any]]) -> None:
     caller's message dicts are not — they are reused for the waterfall
     fallback). Mirrors Claude Code's addCacheBreakpoints: exactly one
     message-level marker so the server knows where the reusable prefix ends.
+
+    Trailing uncached runtime context (``UncachedContextText``, e.g. the
+    environment status tail) is skipped: the marker lands on the last stable
+    block before it (TS parity: claudeAuth.ts ``addCacheBreakpoint``).
     """
-    if not messages:
-        return
-    last = messages[-1]
-    content = last.get("content")
-    if isinstance(content, str):
-        messages[-1] = {**last, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
-    elif isinstance(content, list) and content:
-        target = content[-1]
-        if isinstance(target, dict):
-            messages[-1] = {**last, "content": content[:-1] + [{**target, "cache_control": {"type": "ephemeral"}}]}
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        content = message.get("content")
+        if isinstance(content, str):
+            if is_uncached_context(content):
+                continue
+            messages[index] = {
+                **message,
+                "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
+            }
+            return
+        if not isinstance(content, list) or not content:
+            return
+        for block_index in range(len(content) - 1, -1, -1):
+            target = content[block_index]
+            if not isinstance(target, dict):
+                return
+            if target.get("type") == "text" and is_uncached_context(target.get("text")):
+                continue
+            marked = {**target, "cache_control": {"type": "ephemeral"}}
+            messages[index] = {**message, "content": [*content[:block_index], marked, *content[block_index + 1 :]]}
+            return
 
 
 def _add_tool_cache_breakpoint(body: Dict[str, Any]) -> None:
@@ -289,11 +316,7 @@ def _model_rejects_forced_tool_choice(model: str) -> bool:
     credited call shows it accepts forced tool_choice.
     """
     canonical = model.lower().replace(".", "-")
-    return (
-        "claude-fable-5-1" in canonical
-        or "claude-mythos-5-1" in canonical
-        or "claude-opus-5-5" in canonical
-    )
+    return "claude-fable-5-1" in canonical or "claude-mythos-5-1" in canonical or "claude-opus-5-5" in canonical
 
 
 def _downgrade_forced_tool_choice_if_unsupported(body: Dict[str, Any], model: str) -> None:
@@ -624,9 +647,7 @@ async def anthropic_api_key_complete(
 
                 error_body = get_error_body(response)
                 if status == 402:
-                    raise RosePaymentRequiredError(
-                        "Anthropic 402 (out of credits)", status=status
-                    )
+                    raise RosePaymentRequiredError("Anthropic 402 (out of credits)", status=status)
                 if status in (401, 403):
                     raise RoseAuthError(f"Anthropic {status}", status=status)
                 if status == 429:
@@ -636,9 +657,7 @@ async def anthropic_api_key_complete(
                     error_body,
                     re.IGNORECASE,
                 ):
-                    raise RosePaymentRequiredError(
-                        "Anthropic 400 (out of credits)", status=status
-                    )
+                    raise RosePaymentRequiredError("Anthropic 400 (out of credits)", status=status)
                 if status == 400:
                     raise RoseInvalidRequest(_anthropic_400_message(error_body), status=status)
                 if status >= 500:
@@ -803,6 +822,7 @@ async def _attempt_with_token(
                         agent_id=agent_id,
                         call_site=call_site,
                         body_len=len(error_body),
+                        provider_message=_anthropic_error_message(error_body),
                     )
                     raise RoseInvalidRequest(
                         _anthropic_400_message(error_body),

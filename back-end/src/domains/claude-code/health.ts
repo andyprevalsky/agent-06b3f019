@@ -5,6 +5,8 @@
 
 import { connectToSandbox } from '../../providers/e2b';
 import { createLogger } from '../../providers/logger';
+import { isLocalDeviceSandboxId } from '../../providers/localDevices/hub';
+import { localDeviceSessionHealth } from '../../providers/localDevices/session';
 import { logJson } from '../../utils/log';
 
 const log = createLogger('ClaudeCode');
@@ -123,6 +125,7 @@ async function probeSandboxProcesses(
 
 export async function checkSandboxHealth(sandboxId: string): Promise<HealthCheckResult> {
   log.info(`Health check for sandbox ${sandboxId}`);
+  if (isLocalDeviceSandboxId(sandboxId)) return localDeviceSessionHealth(sandboxId);
 
   try {
     const sandbox = await connectToSandbox(sandboxId);

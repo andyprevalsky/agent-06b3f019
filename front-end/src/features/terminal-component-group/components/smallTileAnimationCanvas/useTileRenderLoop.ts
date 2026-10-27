@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, type MutableRefObject, type RefObject } from 'react';
 import type { AnimatingTile } from '@/lib/smallTileAnimations';
 import { computeGridOrigin, drawAnimations, drawDots } from './renderTiles';
 
@@ -9,6 +9,8 @@ interface ScrollOffset {
 
 interface Args {
   enabled: boolean;
+  /** Rose dark mode: draw nothing; un-hiding repaints the dots in that same commit. */
+  hidden?: boolean;
   dotsRef: RefObject<HTMLCanvasElement>;
   animationsRef: RefObject<HTMLCanvasElement>;
   bordersRef: RefObject<HTMLCanvasElement>;
@@ -28,8 +30,39 @@ function clearCanvases(...contexts: CanvasRenderingContext2D[]) {
   });
 }
 
+function cancelFrame(frameRef: MutableRefObject<number | null>) {
+  if (frameRef.current) {
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+  }
+}
+
+/** Repaints only the dot canvas (the theme-switch path; see useRepaintDotsWhenShown). */
+function repaintDots(...args: Parameters<typeof drawDots>) {
+  clearCanvases(args[0]);
+  drawDots(...args);
+}
+
+/**
+ * Theme switch: un-hiding paints the dots now, in the commit that removed
+ * html.dark (layout phase, after the class flipped), never on a later tick.
+ */
+function useRepaintDotsWhenShown(
+  hidden: boolean | undefined,
+  repaintDotsRef: MutableRefObject<(() => void) | null>,
+) {
+  const wasHiddenRef = useRef(hidden === true);
+  useLayoutEffect(() => {
+    const isHidden = hidden === true;
+    if (wasHiddenRef.current === isHidden) return;
+    wasHiddenRef.current = isHidden;
+    if (!isHidden) repaintDotsRef.current?.();
+  }, [hidden, repaintDotsRef]);
+}
+
 export function useTileRenderLoop({
   enabled,
+  hidden,
   dotsRef,
   animationsRef,
   bordersRef,
@@ -43,6 +76,8 @@ export function useTileRenderLoop({
   removeAnimatingTile,
 }: Args) {
   const animationFrameRef = useRef<number | null>(null);
+  const repaintDotsRef = useRef<(() => void) | null>(null);
+  useRepaintDotsWhenShown(hidden, repaintDotsRef);
 
   useEffect(() => {
     const dotsCtx = dotsRef.current?.getContext('2d');
@@ -51,11 +86,9 @@ export function useTileRenderLoop({
     if (!dotsCtx || !animationsCtx || !bordersCtx) return;
 
     if (!enabled) {
+      repaintDotsRef.current = null;
       clearCanvases(dotsCtx, animationsCtx, bordersCtx);
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
+      cancelFrame(animationFrameRef);
       return;
     }
 
@@ -70,7 +103,12 @@ export function useTileRenderLoop({
       scrollOffset,
     });
 
+    repaintDotsRef.current = () =>
+      repaintDots(dotsCtx, origin, tileSize, everColoredTiles, animatingPositions);
+
     clearCanvases(dotsCtx, animationsCtx, bordersCtx);
+    // Rose dark mode: no dots and no animations are drawn at all.
+    if (hidden === true) return;
     drawDots(dotsCtx, origin, tileSize, everColoredTiles, animatingPositions);
 
     if (animatingTiles.length === 0) {
@@ -91,14 +129,10 @@ export function useTileRenderLoop({
     };
 
     animationFrameRef.current = requestAnimationFrame(render);
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-    };
+    return () => cancelFrame(animationFrameRef);
   }, [
     enabled,
+    hidden,
     dotsRef,
     animationsRef,
     bordersRef,

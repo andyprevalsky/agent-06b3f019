@@ -16,12 +16,20 @@
  * CHIP STATE (derived from agent messages + WS signals):
  * spinning_up -> live -> (verifying) -> (completed | failed)
  *
+ * ROSE DESKTOP (flag on AND a `metadata.code_agent` snapshot for this task):
+ * [DESKTOP] <-- DesktopCodeAgentChip (target label, timer, Transcript/Terminal
+ *               tabs, steer input, commit summary, paused state; see
+ *               codeAgentChip.desktop.tsx). Fullscreen shows the same desktop state.
+ * Flag off, or no snapshot → the stock branches below, unchanged.
+ *
  * All effects, refs, and sub-hooks live in `useClaudeCodeChip`. This file is a
  * presentational router: it picks one renderer branch per state.
  */
 
+import { desktopChipState, useDesktopCodeAgent } from '../hooks/codeAgentSteering';
 import { type ClaudeCodeChipProps } from '../types';
 import { useClaudeCodeChip } from './claudeCodeChip.hooks';
+import { DesktopCodeAgentChip } from './codeAgentChip.desktop';
 import {
   CollapsedChip,
   FullscreenView,
@@ -34,19 +42,40 @@ export default function ClaudeCodeChip({
   wsUrl,
   codeProvider = 'claude',
   forceShow = false,
+  toolCallId,
 }: ClaudeCodeChipProps) {
-  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow, codeProvider);
+  const desktop = useDesktopCodeAgent(taskId, toolCallId);
+  const desktopMeta = desktop.meta;
+  // The desktop chip keeps its Terminal tab mounted while live, so the xterm
+  // must attach even before the WS reports `live`.
+  const vm = useClaudeCodeChip(
+    taskId,
+    wsUrl,
+    forceShow || desktopMeta?.state === 'live',
+    desktopMeta?.provider ?? codeProvider,
+  );
 
   if (vm.isFullscreen) {
     return (
       <FullscreenView
-        state={vm.chipState}
+        state={desktopMeta ? desktopChipState(desktopMeta, vm.chipState) : vm.chipState}
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
         codeProvider={vm.codeProvider}
         terminalTranscript={vm.terminalTranscript}
         terminalContainerRef={vm.fullscreenContainerRef}
         onClose={vm.closeFullscreen}
+      />
+    );
+  }
+
+  if (desktopMeta) {
+    return (
+      <DesktopCodeAgentChip
+        meta={desktopMeta}
+        vm={vm}
+        events={desktop.events}
+        toolCallId={desktop.toolCallId}
       />
     );
   }

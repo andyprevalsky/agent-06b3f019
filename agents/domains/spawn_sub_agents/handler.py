@@ -36,9 +36,9 @@ logger = structlog.get_logger()
 
 USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
 CHILD_FAILURE_STATUSES = {"failed", "error", "max_iterations"}
-def _with_for_each_child_marker(
-    metadata: Dict[str, Any], *, for_each_child: bool
-) -> Dict[str, Any]:
+
+
+def _with_for_each_child_marker(metadata: Dict[str, Any], *, for_each_child: bool) -> Dict[str, Any]:
     """Stamp ``forEachChild`` from the known spawn origin (never infer from toolCallId)."""
     if for_each_child:
         metadata["forEachChild"] = True
@@ -156,8 +156,7 @@ class SpawnSubAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Sub-agent complete",
                     message=(
-                        "Research already gathered; skipping nested general-purpose "
-                        "spawn so this sub-agent handles it."
+                        "Research already gathered; skipping nested general-purpose spawn so this sub-agent handles it."
                     ),
                     status=MessageStatus.FINISHED,
                     metadata={"skippedNestedSpawn": True},
@@ -187,7 +186,10 @@ class SpawnSubAgentManager(ToolManager):
 
             parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             parent_source = getattr(workflow_instance, "agent_source", "WEB")
-            child_agent_id = str(workflow.uuid4())
+            # A background spawn minted the child id when it started so the
+            # parent's "started" result could already name the address.
+            preassigned = getattr(workflow_instance, "_preassigned_child_agent_id", None)
+            child_agent_id = (preassigned(tool_call_id) if callable(preassigned) else None) or str(workflow.uuid4())
 
             result = await workflow.execute_activity(
                 spawn_sub_agent_activity,

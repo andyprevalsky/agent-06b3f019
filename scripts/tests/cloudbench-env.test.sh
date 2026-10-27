@@ -1068,6 +1068,38 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'cloudbench_require_agentcard_org_oauth back-end/.env' \
   "run-bench-cloud must refuse to stage a BACKEND_ENV_B64 without AgentCard org OAuth"
 
+# Guests restore their own DB, so a guest-local lease store gives each copy its
+# own semaphore on the same real token (proof 2: ~80 live leases against the
+# shared capacity of 16, 429 burst). The decoded guest back-end/.env must point
+# compute-token requests at the single production authority.
+authority_env="$TMP_ROOT/authority-backend.env"
+printf 'BACKEND_API_KEY=guest-internal-key-0123456789\nOTHER=1' > "$authority_env"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null ||
+  fail "a guest backend env with BACKEND_API_KEY must gain the compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" = https://navi-j9a9.onrender.com ] ||
+  fail "guests must default to the production compute-token authority"
+[ "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_API_KEY)" = guest-internal-key-0123456789 ] ||
+  fail "the authority must be authenticated with the guest's internal BACKEND_API_KEY"
+[ "$(cloudbench_env_value "$authority_env" OTHER)" = 1 ] ||
+  fail "appending the authority must not corrupt an unterminated last line"
+cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ "$(grep -c '^COMPUTE_TOKEN_AUTHORITY_URL=' "$authority_env")" = 1 ] ||
+  fail "an env file that already names an authority must be left unchanged"
+printf 'BACKEND_API_KEY=k\n' > "$authority_env"
+CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off cloudbench_apply_compute_token_authority "$authority_env" >/dev/null
+[ -z "$(cloudbench_env_value "$authority_env" COMPUTE_TOKEN_AUTHORITY_URL)" ] ||
+  fail "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=off must keep guest-local leases"
+if CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=http://example.test cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a non-https compute-token authority must fail closed"
+fi
+printf 'OTHER=1\n' > "$authority_env"
+if cloudbench_apply_compute_token_authority "$authority_env" >/dev/null 2>&1; then
+  fail "a guest backend env without BACKEND_API_KEY must fail closed"
+fi
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env"' \
+  "cloudbench-run must point the guest backend at the shared compute-token authority"
+
 retry_attempts=0
 fail_twice_then_succeed() {
   retry_attempts=$((retry_attempts + 1))
@@ -1685,8 +1717,13 @@ unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 # primary shape rather than inheriting the oversized warm maintenance machine.
 primary_default_line="$(grep '^FLEET_PRIMARY_VM_SIZE=' "$ROOT_DIR/scripts/run-bench-fleet")"
 primary_memory_line="$(grep '^FLEET_PRIMARY_VM_MEMORY=' "$ROOT_DIR/scripts/run-bench-fleet")"
-[[ "$primary_default_line" = *"shared-cpu-2x"* && "$primary_memory_line" = *"4096"* ]] ||
+[[ "$primary_default_line" = *":-shared-cpu-4x}\"" && "$primary_memory_line" = *"4096"* ]] ||
   fail "fleet default must fit both Fly's shared-memory matrix and performance-CPU reservation ceiling"
+# descend-full69 proof 2: 3 of 15 shared-cpu-2x primaries were throttled to
+# 81-93% steal and expired interactive transactions; 0 of 55 shared-cpu-4x
+# primaries exceeded 9%. The default primary must never fall back to 2x.
+[ "$(CLOUDBENCH_FLEET_PRIMARY_VM_SIZE='' bash -c "$primary_default_line"'; printf %s "$FLEET_PRIMARY_VM_SIZE"')" = "shared-cpu-4x" ] ||
+  fail "default fleet primary must be shared-cpu-4x (shared-cpu-2x guests were throttled to 81-93% steal)"
 clone_function_source="$(awk '
   /^clone_machine_target\(\)/ { capture = 1 }
   capture { print }
@@ -1963,6 +2000,170 @@ unset -f boot_update_with_capacity_recovery _with_timeout sleep
 unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
   CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
 
+# Production replay (original600-1792976687768099299 shard-01): Fly answered
+# every same-ID boot-config update for Machine 863745ce73de38 with
+# "request returned non-2xx status: 408". The child replayed it ten times on
+# the dead host and the update log kept only the last response; the fleet
+# barrier then aborted every copy. A fake flyctl returns that exact 408 for
+# one Machine only.
+(
+  boot_timeout_source="$(awk '
+    /^_with_timeout\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$boot_timeout_source"
+  eval "$boot_update_source"
+  fake_fly_dir="$TMP_ROOT/fake-fly-408"
+  mkdir -p "$fake_fly_dir"
+  cat > "$fake_fly_dir/flyctl" <<'FAKEFLY'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_FLY_CALLS:?}"
+if [ "$1 $2 $3" = "machine update m408dead00000a" ]; then
+  echo "Updating machine $3"
+  echo "Error: could not update machine $3: failed to update VM $3: request returned non-2xx status: 408:  (Request ID: 01M5TWKRQW2VX1JSXAQHWGVFME-iad)"
+  exit 1
+fi
+if [ "$1 $2 $3" = "machine update m503api00000d" ]; then
+  echo "Error: request returned non-2xx status: 503"
+  exit 1
+fi
+echo "Machine $3 updated"
+FAKEFLY
+  chmod +x "$fake_fly_dir/flyctl"
+  PATH="$fake_fly_dir:$PATH"
+  BOOT_CONFIG_UPDATE_SLOT_SHARED=0
+  CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=0
+  CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS=0
+  for host_case in m408dead00000a:1 m200live00000b:0 m503api00000d:2; do
+    host_mid="${host_case%%:*}"
+    host_expect="${host_case#*:}"
+    FAKE_FLY_CALLS="$TMP_ROOT/fake-fly-$host_mid.calls"
+    export FAKE_FLY_CALLS
+    : > "$FAKE_FLY_CALLS"
+    host_log="$TMP_ROOT/host-$host_mid-update.log"
+    host_marker="$TMP_ROOT/host-$host_mid.unresponsive"
+    rm -f "$host_log" "$host_marker"
+    host_rc=0
+    BOOT_UPDATE_MACHINE_ID="$host_mid" BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$host_marker" \
+      boot_update_with_capacity_recovery "$host_log" \
+      flyctl machine update "$host_mid" -a fixture --skip-start --yes 2>/dev/null || host_rc=$?
+    if [ "$host_expect" = 2 ]; then
+      # An app-wide API 5xx is not evidence about this Machine's host.
+      [ "$host_rc" = 1 ] && [ ! -e "$host_marker" ] && [ "$(wc -l < "$FAKE_FLY_CALLS")" = 10 ] ||
+        fail "API-wide 503 was treated as an unresponsive Machine host"
+      continue
+    fi
+    if [ "$host_expect" = 0 ]; then
+      [ "$host_rc" = 0 ] && [ ! -e "$host_marker" ] && [ "$(wc -l < "$FAKE_FLY_CALLS")" = 1 ] ||
+        fail "healthy-host boot update did not succeed once without a replacement marker"
+      continue
+    fi
+    [ "$host_rc" = 1 ] || fail "unresponsive-host boot update returned $host_rc"
+    [ "$(wc -l < "$FAKE_FLY_CALLS")" = 3 ] ||
+      fail "unresponsive-host boot update replayed $(wc -l < "$FAKE_FLY_CALLS") same-ID mutations (expected 3 consecutive host timeouts)"
+    [ "$(cat "$host_marker" 2>/dev/null)" = "$host_mid" ] ||
+      fail "unresponsive-host boot update did not name the exact Machine for replacement"
+    [ "$(grep -Ec '^=== boot update attempt [1-3] at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z rc=1 ===$' "$host_log")" = 3 ] &&
+      [ "$(grep -c 'non-2xx status: 408' "$host_log")" = 3 ] ||
+      fail "boot update log did not keep every timestamped attempt"
+    [ ! -e "$host_log.attempt" ] || fail "boot update left its per-attempt scratch log"
+  done
+) || fail "unresponsive Fly host boot update checks failed"
+
+# The fleet barrier replaces that one disposable clone once instead of
+# aborting the whole fleet; pool claims and a second dead host still abort.
+(
+  for fleet_fn in boot_config_failed_child fleet_replace_host_unresponsive_child; do
+    fleet_fn_source="$(awk -v name="$fleet_fn" '
+      $0 ~ "^" name "\\(\\) *\\{" { capture = 1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$ROOT_DIR/scripts/run-bench-fleet")"
+    [ -n "$fleet_fn_source" ] || fail "missing fleet function $fleet_fn"
+    eval "$fleet_fn_source"
+  done
+  awk '/boot_config_failed_slot="\$\(boot_config_failed_child\)"/ { found = 1 } found && /fleet_replace_host_unresponsive_child "\$boot_config_failed_slot"/ { ok = 1; exit } END { exit !ok }' \
+    "$ROOT_DIR/scripts/run-bench-fleet" || fail "boot-config barrier does not try a host replacement before aborting"
+  fleet_job_running() { return 1; }
+  wait_for_mandatory_autoscaler_startup() { printf 'autoscaler-wait %s\n' "$*" >> "$TMP_ROOT/fleet-replace.events"; }
+  provision_primary_machine() { fail "host replacement must not claim from the pool"; }
+  primary_vm_size_for_bench() { echo shared-cpu-2x; }
+  primary_vm_memory_for_bench() { echo 4096; }
+  primary_clone_storage_mode() { echo fresh; }
+  WARM_ID=warm00000000; SNAP_ID=snap0
+  clone_machine_target() {
+    printf 'provision %s\n' "${1%/primary.ids}" >> "$TMP_ROOT/fleet-replace.events"
+    [ -n "${FAKE_REPLACEMENT_ID:-}" ] || return 1
+    printf '%s\n' "$FAKE_REPLACEMENT_ID"
+  }
+  launch_fleet_bench_child() {
+    printf 'launch %s\n' "$*" >> "$TMP_ROOT/fleet-replace.events"
+    CHILD_MACHINE[$3]="$FAKE_REPLACEMENT_ID"
+    CHILD_PIDS[$3]=""
+  }
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/fleet-replace-barrier"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready"
+  fleet_out="$TMP_ROOT/fleet-replace/browser-auth-saved-password-retry"
+  ok_out="$TMP_ROOT/fleet-replace/healthy"
+  mkdir -p "$fleet_out" "$ok_out"
+  CHILD_OUT=("$ok_out" "$fleet_out")
+  CHILD_BENCH=(healthy browser-auth-saved-password-retry)
+  CHILD_MACHINE=(m200live00000b m408dead00000a)
+  CHILD_BENCH_INDEX=(0 3)
+  CHILD_PIDS=("" "")
+  AUTOSCALER_PIDS=()
+  : > "$BOOT_CONFIG_BARRIER/ready/m200live00000b"
+  printf 'clone m408dead00000a\n' > "$fleet_out/.cid"
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'm408dead00000a\n' > "$fleet_out/boot-config-unapplied"
+  printf 'm408dead00000a\n' > "$fleet_out/boot-config-host-unresponsive"
+  echo 'non-2xx status: 408' > "$fleet_out/cloudbench-boot-update.log"
+  printf '{"machine_id": "m408dead00000a"}\n' > "$fleet_out/runtime-evidence.owner.json"
+  : > "$fleet_out/runtime-evidence.pending"
+  # A failed replacement clone restores the exact original failure state.
+  : > "$TMP_ROOT/fleet-replace.events"
+  FAKE_REPLACEMENT_ID=""
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ "$(cat "$fleet_out/.cid")" = "clone m408dead00000a" ] &&
+    [ -e "$fleet_out/runtime-evidence.owner.json" ] && [ -e "$fleet_out/boot-config-unapplied" ] &&
+    [ -e "$fleet_out/boot-config-host-unresponsive" ] && [ ! -e "$fleet_out/boot-config-host-replaced" ] &&
+    [ ! -e "$fleet_out/host-replaced-m408dead00000a" ] ||
+    fail "a failed replacement clone did not restore the original failure state"
+  : > "$TMP_ROOT/fleet-replace.events"
+  failed_slot="$(boot_config_failed_child)" && [ "$failed_slot" = 1 ] ||
+    fail "boot-config barrier did not identify the unapplied child slot"
+  FAKE_REPLACEMENT_ID=m200fresh0000c
+  fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null ||
+    fail "host-unresponsive clone was not replaced before the barrier aborted"
+  [ "$(cat "$TMP_ROOT/fleet-replace.events")" = "$(printf 'provision %s\nlaunch 3 browser-auth-saved-password-retry 1' "$fleet_out")" ] ||
+    fail "host replacement did not re-provision and relaunch the same bench slot: $(cat "$TMP_ROOT/fleet-replace.events")"
+  [ "${CHILD_MACHINE[1]}" = m200fresh0000c ] && [ ! -e "$fleet_out/benchmark-child.finished" ] &&
+    grep -q 408 "$fleet_out/host-replaced-m408dead00000a/cloudbench-boot-update.log" &&
+    [ "$(cat "$fleet_out/host-replaced-m408dead00000a/.cid")" = "clone m408dead00000a" ] &&
+    [ "$(cat "$fleet_out/.cid")" = "clone m200fresh0000c" ] &&
+    [ ! -e "$fleet_out/runtime-evidence.owner.json" ] && [ ! -e "$fleet_out/runtime-evidence.pending" ] &&
+    [ -e "$fleet_out/host-replaced-m408dead00000a/runtime-evidence.owner.json" ] ||
+    fail "host replacement did not preserve the failed attempt's evidence"
+  # The replacement's host also dies: strict abort, no second replacement.
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'm200fresh0000c\n' > "$fleet_out/boot-config-host-unresponsive"
+  : > "$TMP_ROOT/fleet-replace.events"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "a second unresponsive host was replaced again"
+  # Ordinary unapplied failures and pool claims keep the strict abort.
+  rm -f "$fleet_out/boot-config-host-replaced" "$fleet_out/boot-config-host-unresponsive"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null ||
+    fail "a boot failure without host-timeout proof was replaced"
+  printf 'pool m200fresh0000c\n' > "$fleet_out/.cid"
+  printf 'm200fresh0000c\n' > "$fleet_out/boot-config-host-unresponsive"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS + 60)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "a claimed pool Machine was replaced by a clone"
+  printf 'clone m200fresh0000c\n' > "$fleet_out/.cid"
+  ! fleet_replace_host_unresponsive_child 1 $((SECONDS - 1)) 2>/dev/null &&
+    [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "host replacement ran past the boot-config deadline"
+) || fail "fleet host-unresponsive replacement checks failed"
+
 # A shared mutation lease is joined exactly when _with_timeout wrote its
 # join-native receipt for the latest attempt, whatever its exit status: a
 # signal-killed child (137) or an interruption after the child exists (143)
@@ -2116,7 +2317,7 @@ rows = get_task_metadata(
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
 PY_BROWSER_METADATA
-for function_name in is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
+for function_name in is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
   function_source="$(awk -v name="$function_name" '
     $0 ~ ("^" name "\\(\\)") { capture = 1 }
@@ -2176,9 +2377,55 @@ INFRA_PROBE=0
 SIM_ON_CSV=""
 [ "$(primary_vm_size_for_bench raise-5m-rose-labs-brex)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
   fail "a REAL run of a SIM-capable task must keep the default primary shape"
-unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY
+# A catalog-declared wide tree (min_agent_count >= FLEET_FANOUT_MIN_AGENT_COUNT)
+# gets dedicated vCPUs: shared-cpu-2x was throttled under the 51-agent tree
+# (descend-full69 P3). Other tasks keep exactly their previous shape.
+FLEET_FANOUT_MIN_AGENT_COUNT=20
+FLEET_FANOUT_VM_SIZE="performance-2x"
+FLEET_FANOUT_VM_MEMORY="4096"
+CATALOG_FANOUT_TASKS=(test-mass-agent-run-0)
+CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)/$(primary_vm_memory_for_bench test-mass-agent-run-0)" = "performance-2x/4096" ] ||
+  fail "a catalog fan-out task must request dedicated vCPUs"
+[ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
+  fail "tasks without a fan-out declaration must keep the default primary shape"
+[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+  fail "browser tasks must keep the large shared primary shape beside a fan-out task"
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "a fan-out task must not claim a default shared-cpu pool Machine"
+fi
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+if bench_uses_default_pool_shape test-mass-agent-run-0; then
+  fail "dynamic pool resize opt-in must not turn a fan-out task into a shared-cpu claim"
+fi
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "$FLEET_PRIMARY_VM_SIZE" ] ||
+  fail "task-free infra probes must never request the fan-out shape"
+INFRA_PROBE=0
+FLEET_SIM_VM_SIZE="performance-8x"; FLEET_SIM_VM_MEMORY="65536"; SIM_ON_CSV="test-mass-agent-run-0"
+[ "$(primary_vm_size_for_bench test-mass-agent-run-0)" = "performance-8x" ] ||
+  fail "--sim-on serving shape must outrank the fan-out shape"
+python3 - "$ROOT_DIR" <<'PY_FANOUT_METADATA' || fail "catalog must declare the fan-out task through min_agent_count"
+import sys
+from pathlib import Path
+
+sys.path.insert(0, f"{sys.argv[1]}/scripts")
+from cloudbench_catalog import get_task_metadata
+
+rows = {
+    row["name"]: row
+    for row in get_task_metadata(
+        Path(sys.argv[1]) / "agents/benchmarks/tasks.json",
+        ["test-mass-agent-run-0", "parallel-tool-calls"],
+    )
+}
+assert rows["test-mass-agent-run-0"]["min_agent_count"] >= 20, rows["test-mass-agent-run-0"]
+assert (rows["parallel-tool-calls"]["min_agent_count"] or 0) < 20, rows["parallel-tool-calls"]
+PY_FANOUT_METADATA
+unset SIM_ON_CSV FLEET_SIM_VM_SIZE FLEET_SIM_VM_MEMORY CATALOG_FANOUT_TASKS FLEET_FANOUT_VM_SIZE FLEET_FANOUT_VM_MEMORY FLEET_FANOUT_MIN_AGENT_COUNT
 unset CATALOG_BROWSER_REQUIRED_TASKS
-unset -f is_sim_on bench_needs_large_primary primary_vm_size_for_bench \
+unset -f is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape
 
 machine_states="$TMP_ROOT/machine-states"

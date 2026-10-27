@@ -78,7 +78,8 @@ class _SchemaProjection:
         self.properties_count += len(props)
         self.counted_text += sum(len(key) for key in props)
         # Cerebras supports omitted optional properties. Preserve required
-        # and nullable fields rather than introducing null into non-null types.
+        # fields and never introduce null into non-null types; omittable
+        # Optional[X] = None fields arrive here already collapsed to X.
         return {
             "properties": {key: self.walk(value, depth + 1) for key, value in props.items()},
             "required": list(required),
@@ -142,3 +143,45 @@ def project_cerebras_tool_schema(schema: Any) -> tuple[dict | None, str | None]:
         return projected, None
     except ValueError as exc:
         return None, str(exc)
+
+
+_NULL_BRANCH = {"type": "null"}
+
+
+def _collapse_node(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_collapse_node(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    result = {key: _collapse_node(value) for key, value in node.items()}
+    props = result.get("properties")
+    if isinstance(props, dict):
+        required = node.get("required") if isinstance(node.get("required"), list) else []
+        for key, prop in props.items():
+            branches = prop.get("anyOf") if isinstance(prop, dict) else None
+            if (
+                key in required
+                or "default" not in prop
+                or prop["default"] is not None
+                or not isinstance(branches, list)
+                or len(branches) != 2
+                or _NULL_BRANCH not in branches
+            ):
+                continue
+            (kept,) = [branch for branch in branches if branch != _NULL_BRANCH]
+            if not isinstance(kept, dict):
+                continue
+            # The field's own description/title win over a nested model's docstring.
+            props[key] = {**kept, **{name: value for name, value in prop.items() if name not in ("anyOf", "default")}}
+    return result
+
+
+def collapse_omittable_nulls(schema: Any) -> Any:
+    """Send an omittable ``Optional[X] = None`` property as plain ``X``.
+
+    qwen on Cerebras serializes arrays and integers inside ``anyOf[X, null]``
+    as JSON strings, with or without strict decoding. Omission already
+    validates to None, so the null branch adds nothing for these properties.
+    Required or non-null-default properties keep their union.
+    """
+    return _collapse_node(deepcopy(schema))

@@ -36,6 +36,8 @@ export async function findUserSettings(userId: string) {
   return prisma.user.findUnique({
     where: { userId },
     select: {
+      userId: true,
+      isAnonymous: true,
       name: true,
       email: true,
       phone: true,
@@ -266,5 +268,12 @@ export async function findRealmLocalStorageOrigins(userId: string, authRealm: st
     },
     select: { origin: true, entries: true, updatedAt: true },
     orderBy: { updatedAt: 'asc' },
+  });
+}
+
+export function updateLogicalSessionUrls(taskId: string, startUrl: string, currentUrl: string) {
+  return prisma.browserSession.update({
+    where: { id: taskId },
+    data: { startUrl, currentUrl },
   });
 }

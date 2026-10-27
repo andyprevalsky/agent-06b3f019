@@ -239,9 +239,7 @@ async def execute_grep(
                 )
                 or []
             )
-            unavailable = [
-                s for s in statuses if isinstance(s, dict) and not s.get("connected", True)
-            ]
+            unavailable = [s for s in statuses if isinstance(s, dict) and not s.get("connected", True)]
             if unavailable:
                 unavailable_targets = {str(s.get("source")) for s in unavailable}
                 unavailable_search_sources = set()

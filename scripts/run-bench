@@ -188,6 +188,17 @@ if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
     exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
 
+# Rose vs raw-CLI parity for the code-bench tasks (plan C8): runs the CLI directly
+# on the same fixture archives and compares pass rates with Rose run records.
+if [[ "${1:-}" == "code-parity" ]]; then
+    shift
+    if [[ "$PY" == venv/* ]]; then
+        PY="$ROOT_DIR/agents/$PY"
+    fi
+    cd "$CALLER_DIR"
+    PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -u -m benchmarks.code_bench_parity "$@"
+fi
+
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
     benchmark_agent_instructions
@@ -233,6 +244,7 @@ Usage: scripts/run-bench <slice-or-task...> [options]
        scripts/run-bench report-format
        scripts/run-bench scorecard <run-dir> [--html OUT] [--text] [--json] | --validate <card.html>
        scripts/run-bench monitor <exact-run-directory>
+       scripts/run-bench code-parity [--run-rose local | --rose-records RUN.json...] [-k K] [--cli claude|codex]
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
 
@@ -244,6 +256,10 @@ Image builds:
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
   or one or more exact benchmark task names
+  full               Every cloud task whose last 3 recorded runs passed, at -k 2
+                     by default with all copies at once. When that exceeds the
+                     measured Fly capacity, keeps the tasks most relevant to
+                     this branch's changes (scripts/cloudbench-full-selection.py)
   stability-proof    Run random ready-catalog slices sequentially; ordinary
                      benchmark failures advance and any INFRA outcome aborts
 
@@ -276,7 +292,7 @@ Wide runs (sharded controllers):
   the clean pushed HEAD. Launch facts, the warm dependency proof and snapshot
   inventory are discovered; a snapshot not produced for this exact HEAD (or
   expiring before the deadline) is refreshed first via the normal producer.
-  Supported options: -k K, --timeout S (default 1200), --ref <HEAD>,
+  Supported options: -k K, --timeout S (default: longest selected task), --ref <HEAD>,
   --e2e-timeout S. Every routed launch runs --check first.
   --check             Dry run: local checks plus read-only provider preflight,
                       reporting the warm snapshot reuse/refresh decision.
@@ -300,7 +316,8 @@ Startup reuse:
                       exact source plus baked deps. SIM snapshots remain.
                       Requires boot launch; cannot prepare a generic pool.
   --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
-  --timeout SECONDS  Set this run's task execution timeout.
+  --timeout SECONDS  Explicit hard task cap; warns if below a selected task's
+                     effective timeout. Default covers the longest selected task.
   --wait             Wait for the detached fleet and return its exit status.
 
 Monitoring:
@@ -326,6 +343,7 @@ EOF
 }
 
 RUNS=1
+RUNS_EXPLICIT=0
 CONCURRENCY=1
 CONCURRENCY_EXPLICIT=0
 RETRY_INFRA=0
@@ -342,10 +360,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -k|--runs)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a positive integer" >&2; exit 2; }
-            RUNS="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            RUNS="$2"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         -k=*|--runs=*)
-            RUNS="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            RUNS="${1#*=}"; RUNS_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
             ;;
         --concurrency)
             [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
@@ -466,11 +484,31 @@ fi
 [ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
 
 CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
-RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
-    resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
-    echo "❌ benchmark selection failed" >&2
-    exit 2
-}
+FULL_SELECTION=0
+for selector in "${SELECTORS[@]}"; do
+    [ "$selector" = full ] && FULL_SELECTION=1
+done
+if [ "$FULL_SELECTION" -eq 1 ]; then
+    [ "${#SELECTORS[@]}" -eq 1 ] || { echo "❌ full selects its own tasks; run it alone" >&2; exit 2; }
+    [ "$RUNS_EXPLICIT" -eq 1 ] || RUNS=2
+    CAMPAIGN_REQUESTED=1
+    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+        export PATH="$HOME/.fly/bin:$PATH"
+    fi
+    FULL_ARGS=(--catalog "$CATALOG_PATH" --runs "$RUNS")
+    [ -z "${RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--free-slots "$RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST")
+    [ -z "${RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--attempts "$RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST")
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-full-selection.py" "${FULL_ARGS[@]}")" || {
+        echo "❌ full benchmark selection failed" >&2
+        exit 2
+    }
+else
+    RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+        resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
+        echo "❌ benchmark selection failed" >&2
+        exit 2
+    }
+fi
 RESOLVED_TASKS=()
 while IFS= read -r task; do
     [ -n "$task" ] && RESOLVED_TASKS+=("$task")
@@ -479,6 +517,28 @@ done <<< "$RESOLVED_OUTPUT"
     echo "❌ benchmark selection resolved no tasks" >&2
     exit 2
 }
+# full runs every selected copy at once, so wide selections take the sharded route.
+if [ "$FULL_SELECTION" -eq 1 ] && [ "$CONCURRENCY_EXPLICIT" -eq 0 ]; then
+    CONCURRENCY=$(( ${#RESOLVED_TASKS[@]} * RUNS ))
+fi
+EXPLICIT_TIMEOUT=""
+for ((timeout_arg=0; timeout_arg<${#FLEET_ARGS[@]}; timeout_arg++)); do
+    if [ "${FLEET_ARGS[$timeout_arg]}" = --timeout ]; then
+        EXPLICIT_TIMEOUT="${FLEET_ARGS[$((timeout_arg+1))]}"
+    fi
+done
+TIMEOUT_POLICY_ARGS=(--catalog "$CATALOG_PATH")
+[ -z "$EXPLICIT_TIMEOUT" ] || TIMEOUT_POLICY_ARGS+=(--requested "$EXPLICIT_TIMEOUT")
+SELECTED_MAX_TIMEOUT="$("$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" \
+    "${TIMEOUT_POLICY_ARGS[@]}" "${RESOLVED_TASKS[@]}")" || exit 2
+if [ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-}" ]; then
+    "$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" --catalog "$CATALOG_PATH" \
+        --requested "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "${RESOLVED_TASKS[@]}" >/dev/null || exit 2
+fi
+# Ordinary fleet/campaign children retain an implicit (extendable) default;
+# explicit --timeout remains the caller's hard cap. Wide shards require one
+# bound timeout, so the wrapper passes the selected maximum to their operator.
+export RUN_BENCH_DEFAULT_TIMEOUT="$SELECTED_MAX_TIMEOUT"
 echo "🎯 resolved ${#RESOLVED_TASKS[@]} benchmark task(s): ${RESOLVED_TASKS[*]}"
 
 if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
@@ -580,7 +640,11 @@ if [ -n "$SHARDED_ROUTE_REASON" ]; then
         echo "❌ the sharded operator admits all $sharded_copies copies behind one barrier; omit --concurrency or pass $sharded_copies" >&2
         exit 2
     fi
-    SHARDED_TIMEOUT=""
+    SHARDED_TIMEOUT="$SELECTED_MAX_TIMEOUT"
+    if [ -z "$EXPLICIT_TIMEOUT" ]; then
+        SHARDED_TIMEOUT="$("$PY" "$ROOT_DIR/scripts/cloudbench-timeout-policy.py" \
+            --catalog "$CATALOG_PATH" --mode sharded "${RESOLVED_TASKS[@]}")" || exit 2
+    fi
     SHARDED_REF=""
     set -- "${FLEET_ARGS[@]}"
     while [ "$#" -gt 0 ]; do

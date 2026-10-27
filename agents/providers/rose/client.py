@@ -44,7 +44,7 @@ from providers.rose.browser_use import (
     normalize_browser_use_tool_call,
     normalize_browser_use_tool_calls,
 )
-from providers.rose.cerebras import cerebras_complete
+from providers.rose.cerebras import CEREBRAS_DIRECT_POOL, cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
@@ -62,8 +62,9 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.foundry import foundry_candidates, foundry_complete, foundry_configured
-from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
+from providers.rose.foundry import _NO_REASONING_MODELS, foundry_candidates, foundry_complete, foundry_configured
+from providers.rose.gpt_auth import _normalize_reasoning_effort, gpt_auth_complete, openai_api_key_complete
+from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
@@ -507,9 +508,24 @@ def _browser_use_dump_config(
     """Capture behavior-shaping values for a browser-use LLM call dump."""
     actual_model = response.actual_model or ""
     effective_model = _dump_display_model(actual_model)
-    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh).
-    # Record the effective wire value so dumps match what was actually sent.
-    effective_effort = DEFAULT_REASONING_EFFORT
+    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh) on
+    # direct auth. Pool-pinned routes override it; record the value the serving
+    # route actually sent so the dump matches the wire.
+    effective_effort: Optional[str] = DEFAULT_REASONING_EFFORT
+    wire_temperature: Optional[float] = temperature
+    if mode not in ("gpt", "claude"):
+        if response.pool_name == CEREBRAS_DIRECT_POOL:
+            effective_effort = pool_spec.cerebras_reasoning_effort
+        elif response.pool_name == "foundry":
+            # The Responses body carries no temperature; no-reasoning models drop effort.
+            wire_temperature = None
+            effective_effort = (
+                None
+                if effective_model in _NO_REASONING_MODELS
+                else _normalize_reasoning_effort(pool_spec.waterfall_reasoning_effort)
+            )
+        else:
+            effective_effort = pool_spec.waterfall_reasoning_effort or DEFAULT_REASONING_EFFORT
     if mode == "gpt":
         effective_params = {
             "model": pool_spec.gpt_auth_model,
@@ -532,7 +548,7 @@ def _browser_use_dump_config(
     else:
         effective_params = {
             "model": effective_model,
-            "temperature": temperature,
+            "temperature": wire_temperature,
             "max_tokens": max_tokens,
             "reasoning_effort": effective_effort,
             "stream": True,
@@ -625,39 +641,50 @@ class RoseClient:
         return load_config().openrouter.api_key
 
     async def complete(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
-        """CENTRAL Fast Mode cache notch. EVERY agent LLM call funnels through
+        """CENTRAL DEMO cache notch. EVERY agent LLM call funnels through
         `RoseClient.complete()`, so record/replay lives here — one place, no gaps,
         no per-call-site wiring. The cache context is read from the contextvar
         (position keying, set by the main loop for drift-robustness) or auto-resolved
         from `agent_id` (content keying, for every other call). On a hit the stored
         response is re-emitted as a synthetic stream; on a miss the live stream is
         teed and written when the `done` chunk arrives (never in a finally — see the
-        GeneratorExit note in fast_cache.rose_cache). Allowlisted accounts can
+        GeneratorExit note in demo_cache.rose_cache). Allowlisted accounts can
         write-through with Fast Mode off: no read/replay, but successful calls are
         recorded for future Fast Mode runs.
         """
-        from providers.fast_cache import client as _fc
-        from providers.fast_cache.context import cache_writes_disabled, current_context
-        from providers.fast_cache.rose_cache import FastCacheLookupError
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache import client as _fc
+        from providers.demo_cache.context import cache_writes_disabled, current_context
+        from providers.demo_cache.rose_cache import DemoCacheLookupError
+        from providers.demo_cache.rose_cache import (
             accumulate_chunk as _fc_accumulate,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             empty_response as _fc_empty,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             replay_with_context as _fc_replay,
         )
-        from providers.fast_cache.rose_cache import (
+        from providers.demo_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
         )
-        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
-        from providers.fast_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
+        from providers.demo_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
+        from providers.demo_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
+        # A trailing inter-agent (assistant-role) message would be stripped as
+        # assistant prefill by every transport; send it as user role instead.
+        settled_messages = settle_trailing_inter_agent_messages(kwargs.get("messages"))
+        if settled_messages is not kwargs.get("messages"):
+            kwargs = {**kwargs, "messages": settled_messages}
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        if pool == "rose-local":
+            # Local mode must never consult the cloud-backed DEMO cache.
+            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+                async for chunk in live_stream:
+                    yield chunk
+            return
         probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
             "BENCHMARK_ISOLATED_RUN", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -670,7 +697,7 @@ class RoseClient:
         browser_use = bool(kwargs.pop("browser_use", False))
         if browser_use or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
+                raise DemoCacheLookupError("DEMO replay probe forbids live browser LLM calls")
             async with aclosing(self._complete_impl(**kwargs, browser_use=True)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -684,7 +711,7 @@ class RoseClient:
             if ctx is not None and ctx.active:
                 kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
             elif agent_id:
-                from providers.fast_cache.client import resolve_provider_fast_mode
+                from providers.demo_cache.client import resolve_provider_fast_mode
 
                 kwargs = {
                     **kwargs,
@@ -693,24 +720,25 @@ class RoseClient:
 
         if ctx is None or not ctx.active or messages is None:
             if probe_read_only:
-                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
+                raise DemoCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
             return
 
-        key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
+        key_material = _fc_request_key_material(kwargs)
+        key, lookup_keys = ctx.llm_keys(call_site, key_material)
         if ctx.read_enabled:
             lookup_failed = False
             stored: Any = None
             hit_key: Any = None
             try:
-                from providers.fast_cache.rose_cache import lookup_llm_cache
+                from providers.demo_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await lookup_llm_cache(ctx, call_site, _fc_request_key_material(kwargs))
-            except FastCacheLookupError as exc:
+                stored, hit_key = await lookup_llm_cache(ctx, call_site, key_material, lookup_keys)
+            except DemoCacheLookupError as exc:
                 logger.warning(
-                    "fast_cache.get_error",
+                    "demo_cache.get_error",
                     key=key,
                     error=f"{type(exc).__name__}: {exc}"[:200],
                 )
@@ -842,7 +870,7 @@ class RoseClient:
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
                 # as cold when the first get-position flakes.
-                from providers.fast_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
+                from providers.demo_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
 
                 if (
                     soft is not None
@@ -880,9 +908,9 @@ class RoseClient:
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
         if probe_read_only:
-            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
+            raise DemoCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
         if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled() and not ctx.should_write:
-            raise FastCacheLookupError(
+            raise DemoCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
             )
 
@@ -992,6 +1020,22 @@ class RoseClient:
             waterfall_tools = direct_auth_tools
         if waterfall_tools:
             waterfall_tool_choice = effective_tool_choice or "any"
+        if pool == "rose-local":
+            # No auth, cloud cache, remote dump, or paid fallback is reachable.
+            from providers.rose.local import local_complete
+
+            async for chunk in local_complete(
+                messages=messages,
+                tools=waterfall_tools,
+                tool_choice=waterfall_tool_choice,
+                response_format=None if waterfall_tools else openrouter_response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                request_id=rid,
+            ):
+                yield chunk
+            return
         dump_path: Optional[str] = None
         dump_result = RoseResponse()
         if dump_context:

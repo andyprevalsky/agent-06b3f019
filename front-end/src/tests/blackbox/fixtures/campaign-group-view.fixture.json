@@ -1,1 +1,144 @@
-{"list":{"runs":[{"run_id":"group-first","timestamp":"2026-10-06T18:48:18.465325+00:00","suite":"cloud-fleet","source":"benchmark-campaign","live":true,"uploaded_at":"2026-10-06T18:48:19.019Z","tasks":[{"name":"demo-fleet-alpha","passed":true,"status":"passed","agent_id":"00000000-0000-4000-8000-000000000001","duration_seconds":null,"cost_cents":null,"world_model_mode":null,"fast_mode":false,"tree_agent_count":null,"failure_reason":null,"tokens_in":7,"tokens_out":3,"cache_hit_pct":null,"llm_call_count":null,"message_count":null,"row_id":"r001-j0001-0","child_run_id":"owned-group-first-r001-j0001","run_number":1},{"name":"demo-fleet-alpha","passed":true,"status":"passed","agent_id":"00000000-0000-4000-8000-000000000002","duration_seconds":null,"cost_cents":null,"world_model_mode":null,"fast_mode":false,"tree_agent_count":null,"failure_reason":null,"tokens_in":7,"tokens_out":3,"cache_hit_pct":null,"llm_call_count":null,"message_count":null,"row_id":"r002-j0002-0","child_run_id":"owned-group-first-r002-j0002","run_number":2}],"task_counts":{"passed":2,"failed":0,"queued":0,"infra_error":0,"cancelled":0},"task_total":2,"is_group":true,"code":null,"elapsed_s":0.573,"cost":{"agents_llm_usd":null,"wmh_grounding_usd":null,"infra_usd":null,"total_usd":null,"fast_cache_hit_rate":null}}],"pagination":{"offset":0,"limit":100,"total":1}},"detail":{"run":{"run_id":"group-first","timestamp":"2026-10-06T18:48:18.465325+00:00","suite":"cloud-fleet","source":"benchmark-campaign","live":true,"uploaded_at":"2026-10-06T18:48:19.019Z","tasks":[{"name":"demo-fleet-alpha","passed":true,"status":"passed","agent_id":"00000000-0000-4000-8000-000000000001","duration_seconds":null,"cost_cents":null,"world_model_mode":null,"fast_mode":false,"tree_agent_count":null,"failure_reason":null,"tokens_in":7,"tokens_out":3,"cache_hit_pct":null,"llm_call_count":null,"message_count":null,"row_id":"r001-j0001-0","child_run_id":"owned-group-first-r001-j0001","run_number":1},{"name":"demo-fleet-alpha","passed":true,"status":"passed","agent_id":"00000000-0000-4000-8000-000000000002","duration_seconds":null,"cost_cents":null,"world_model_mode":null,"fast_mode":false,"tree_agent_count":null,"failure_reason":null,"tokens_in":7,"tokens_out":3,"cache_hit_pct":null,"llm_call_count":null,"message_count":null,"row_id":"r002-j0002-0","child_run_id":"owned-group-first-r002-j0002","run_number":2}],"task_counts":{"passed":2,"failed":0,"queued":0,"infra_error":0,"cancelled":0},"task_total":2,"is_group":true,"code":null,"elapsed_s":0.578,"cost":{"agents_llm_usd":null,"wmh_grounding_usd":null,"infra_usd":null,"total_usd":null,"fast_cache_hit_rate":null},"pagination":{"offset":0,"limit":100,"total":2},"totals":{"passed":2,"failed":0,"running":0,"cost_cents":0,"tokens_in":14,"tokens_out":6,"agents":0},"dispatch":null}}}
+{
+  "list": {
+    "runs": [
+      {
+        "run_id": "group-first",
+        "timestamp": "2026-10-06T18:48:18.465325+00:00",
+        "suite": "cloud-fleet",
+        "source": "benchmark-campaign",
+        "live": true,
+        "uploaded_at": "2026-10-06T18:48:19.019Z",
+        "tasks": [
+          {
+            "name": "demo-fleet-alpha",
+            "passed": true,
+            "status": "passed",
+            "agent_id": "00000000-0000-4000-8000-000000000001",
+            "duration_seconds": null,
+            "cost_cents": null,
+            "world_model_mode": null,
+            "fast_mode": false,
+            "tree_agent_count": null,
+            "failure_reason": null,
+            "tokens_in": 7,
+            "tokens_out": 3,
+            "cache_hit_pct": null,
+            "llm_call_count": null,
+            "message_count": null,
+            "row_id": "r001-j0001-0",
+            "child_run_id": "owned-group-first-r001-j0001",
+            "run_number": 1
+          },
+          {
+            "name": "demo-fleet-alpha",
+            "passed": true,
+            "status": "passed",
+            "agent_id": "00000000-0000-4000-8000-000000000002",
+            "duration_seconds": null,
+            "cost_cents": null,
+            "world_model_mode": null,
+            "fast_mode": false,
+            "tree_agent_count": null,
+            "failure_reason": null,
+            "tokens_in": 7,
+            "tokens_out": 3,
+            "cache_hit_pct": null,
+            "llm_call_count": null,
+            "message_count": null,
+            "row_id": "r002-j0002-0",
+            "child_run_id": "owned-group-first-r002-j0002",
+            "run_number": 2
+          }
+        ],
+        "task_counts": { "passed": 2, "failed": 0, "queued": 0, "infra_error": 0, "cancelled": 0 },
+        "task_total": 2,
+        "is_group": true,
+        "code": null,
+        "elapsed_s": 0.573,
+        "cost": {
+          "agents_llm_usd": null,
+          "wmh_grounding_usd": null,
+          "infra_usd": null,
+          "total_usd": null,
+          "fast_cache_hit_rate": null
+        }
+      }
+    ],
+    "pagination": { "offset": 0, "limit": 100, "total": 1 }
+  },
+  "detail": {
+    "run": {
+      "run_id": "group-first",
+      "timestamp": "2026-10-06T18:48:18.465325+00:00",
+      "suite": "cloud-fleet",
+      "source": "benchmark-campaign",
+      "live": true,
+      "uploaded_at": "2026-10-06T18:48:19.019Z",
+      "tasks": [
+        {
+          "name": "demo-fleet-alpha",
+          "passed": true,
+          "status": "passed",
+          "agent_id": "00000000-0000-4000-8000-000000000001",
+          "duration_seconds": null,
+          "cost_cents": null,
+          "world_model_mode": null,
+          "fast_mode": false,
+          "tree_agent_count": null,
+          "failure_reason": null,
+          "tokens_in": 7,
+          "tokens_out": 3,
+          "cache_hit_pct": null,
+          "llm_call_count": null,
+          "message_count": null,
+          "row_id": "r001-j0001-0",
+          "child_run_id": "owned-group-first-r001-j0001",
+          "run_number": 1
+        },
+        {
+          "name": "demo-fleet-alpha",
+          "passed": true,
+          "status": "passed",
+          "agent_id": "00000000-0000-4000-8000-000000000002",
+          "duration_seconds": null,
+          "cost_cents": null,
+          "world_model_mode": null,
+          "fast_mode": false,
+          "tree_agent_count": null,
+          "failure_reason": null,
+          "tokens_in": 7,
+          "tokens_out": 3,
+          "cache_hit_pct": null,
+          "llm_call_count": null,
+          "message_count": null,
+          "row_id": "r002-j0002-0",
+          "child_run_id": "owned-group-first-r002-j0002",
+          "run_number": 2
+        }
+      ],
+      "task_counts": { "passed": 2, "failed": 0, "queued": 0, "infra_error": 0, "cancelled": 0 },
+      "task_total": 2,
+      "is_group": true,
+      "code": null,
+      "elapsed_s": 0.578,
+      "cost": {
+        "agents_llm_usd": null,
+        "wmh_grounding_usd": null,
+        "infra_usd": null,
+        "total_usd": null,
+        "fast_cache_hit_rate": null
+      },
+      "pagination": { "offset": 0, "limit": 100, "total": 2 },
+      "totals": {
+        "passed": 2,
+        "failed": 0,
+        "running": 0,
+        "cost_cents": 0,
+        "tokens_in": 14,
+        "tokens_out": 6,
+        "agents": 0
+      },
+      "dispatch": null
+    }
+  }
+}

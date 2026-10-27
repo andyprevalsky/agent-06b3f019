@@ -56,7 +56,7 @@ export async function getBrowserControlState(taskId: string, userId?: string) {
 
 export interface BrowserLiveView {
   taskId: string;
-  sessionId: string;
+  sessionId: string | null;
   debugUrl: string | null;
   status: string;
   /** false: closed or provider reports it ended; null: provider health unknown. */
@@ -107,15 +107,18 @@ export async function getBrowserLiveView(
     throw new SessionNotFoundError();
   }
   const live =
-    session.status === ACTIVE
+    session.status === ACTIVE && session.sessionId !== null
       ? await providerLiveness(session.sessionId, deps.health ?? getBrowserSessionHealth)
       : false;
   return {
     taskId: session.id,
     sessionId: session.sessionId,
     debugUrl:
-      session.provider === 'tilion' && live !== false
-        ? await freshTilionLiveViewUrl(session, deps.mintTilionLiveViewUrl ?? getTilionLiveViewUrl)
+      session.provider === 'tilion' && live !== false && session.sessionId !== null
+        ? await freshTilionLiveViewUrl(
+            { sessionId: session.sessionId, debugUrl: session.debugUrl },
+            deps.mintTilionLiveViewUrl ?? getTilionLiveViewUrl
+          )
         : session.debugUrl,
     status: session.status,
     live,

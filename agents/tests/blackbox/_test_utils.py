@@ -56,6 +56,7 @@ def live_funded_azure():
                 os.environ[name] = value
 
 
+
 import httpx
 from helpers.httpx_capture import (
     clear_captures,
@@ -81,7 +82,19 @@ from unittest.mock import patch as _patch
 
 import temporalio.workflow as _temporal_workflow
 
-_patch.object(_temporal_workflow, "uuid4", side_effect=_uuid.uuid4).start()
+_real_workflow_uuid4 = _temporal_workflow.uuid4
+
+
+def _replay_stable_uuid4() -> _uuid.UUID:
+    # Inside a real test workflow keep Temporal's deterministic uuid4: a random
+    # id there changes tool-call ids whenever the worker replays history (a
+    # sticky-cache miss under load), so a resumed tool looks like a new call.
+    if _temporal_workflow.in_workflow():
+        return _real_workflow_uuid4()
+    return _uuid.uuid4()
+
+
+_patch.object(_temporal_workflow, "uuid4", side_effect=_replay_stable_uuid4).start()
 _patch.object(_temporal_workflow, "now", return_value=_dt(2026, 1, 1, tzinfo=_tz.utc)).start()
 
 
@@ -241,4 +254,10 @@ async def native_browser_start_source(timestamp: str, *, tool_call_id: str = "to
     persistence = AsyncMock()
     await handle_tool_event(event, "agent-1", tool_call_id, "spawn_browser_agent", persistence)
     args = persistence.await_args.kwargs["args"]
-    return {"id": "native-browser-origin", "role": args[2], "text": args[1], "metadata": args[3], "timestamp": timestamp}
+    return {
+        "id": "native-browser-origin",
+        "role": args[2],
+        "text": args[1],
+        "metadata": args[3],
+        "timestamp": timestamp,
+    }

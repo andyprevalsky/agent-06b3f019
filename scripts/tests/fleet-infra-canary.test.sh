@@ -36,6 +36,29 @@ grep -Fq 'CLOUDBENCH_INFRA_PROBE:-0}" = "1"' "$ROOT_DIR/scripts/run-bench-cloud"
   || fail "infra-probe must accept DONE without waiting for driver exit"
 grep -Fq 'recovering OUTCOME_OK from validated pass artifacts' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "cloud must recover OUTCOME_OK from validated pass artifacts after FINISHED race"
+# Behavioural outcome contract: artifact recovery covers only the unobserved
+# terminal race (FINISHED=0). An observed nonzero benchmark exit is
+# authoritative: run.json is saved before post-run gates such as the cache
+# ratchet, so a validated pass artifact must never convert that exit into PASS
+# (descend-full69 claude-code-agent 31f51d25: 14.7% < 35% ratchet, rc=1).
+outcome_function="$(awk '/^cloudbench_outcome_ok\(\)/{c=1} c{print} c&&/^}$/{exit}' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$outcome_function" ] || fail "run-bench-cloud must define cloudbench_outcome_ok"
+eval "$outcome_function"
+assert_outcome() {  # expected finished timed_out bench_exit identity pass relay
+  local expected="$1"
+  FINISHED="$2" TIMED_OUT="$3" BENCH_EXIT="$4" RUN_IDENTITY_OK="$5" RUN_PASS_OK="$6" IMESSAGE_RELAY_OK="$7"
+  OUTCOME_OK=""
+  cloudbench_outcome_ok >/dev/null
+  [ "$OUTCOME_OK" = "$expected" ] \
+    || fail "outcome(finished=$2 timed_out=$3 bench_exit=$4 identity=$5 pass=$6 relay=$7)=$OUTCOME_OK, want $expected"
+}
+assert_outcome 1 1 0 0 1 1 1   # clean pass
+assert_outcome 0 1 0 1 1 1 1   # observed gate failure (cache ratchet) stays FAIL
+assert_outcome 1 0 0 1 1 1 1   # unobserved terminal race recovers from artifacts
+assert_outcome 0 0 1 1 1 1 1   # timeout never recovers
+assert_outcome 0 0 0 1 1 0 1   # artifact without strict pass never recovers
+assert_outcome 0 0 0 1 0 1 1   # wrong-run artifact never recovers
+assert_outcome 0 1 0 0 1 1 0   # missing relay confirmation fails
 grep -Fq 'CLOUDBENCH_INFRA_PROBE' "$DRIVER" || fail "driver must honor CLOUDBENCH_INFRA_PROBE"
 grep -Fq 'skipping run_benchmark.py' "$DRIVER" || fail "infra probe must skip run_benchmark"
 grep -Fq 'infra_probe' "$DRIVER" || fail "infra probe must emit synthetic artifacts"

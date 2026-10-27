@@ -555,6 +555,9 @@ async def gpt_auth_complete(
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
+    # No cache_breakpoints here: the ChatGPT backend answers prompt_cache_breakpoint
+    # with HTTP 400 (measured 2026-10-25 on gpt-6-sol) and already caches by prefix
+    # without it.
     body = build_codex_responses_body(
         pool_spec=pool_spec,
         messages=messages,

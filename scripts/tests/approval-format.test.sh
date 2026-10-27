@@ -280,6 +280,24 @@ require_text "$RCA" 'The golden-reference check (Step 6b in `docs/root-cause-ana
   "RCA completion must record the golden-reference check"
 require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
   "RCA methodology must check the reference harnesses before choosing a fix"
+require_text "$FORMAT" "## Golden-reference adversarial review" \
+  "every approval request must pass the adversarial golden-reference review first"
+require_text "$FORMAT" "to refute the grounding, not to confirm it" \
+  "the golden-reference reviewer must be adversarial"
+require_text "$FORMAT" '**`GROUNDED` clears the human gate.**' \
+  "a GROUNDED review must clear deploy and fix-decision human gates"
+require_text "$FORMAT" "Operational approvals return \`HUMAN_REQUIRED\`" \
+  "operational approvals must still reach the user after review"
+require_text "$FORMAT" "**Golden review:** verdict" \
+  "an approval that reaches the user without its review verdict must be invalid"
+require_text "$DEPLOY" "golden-reference review GROUNDED <approval-id>" \
+  "/deploy guards must record a GROUNDED review instead of stopping"
+require_text "$RCA" "Golden-reference adversarial review" \
+  "/rca must review approval-gated fixes before stopping"
+require_text "$DESCEND" "Fix approved (golden review)" \
+  "/descend must let a GROUNDED review clear the harness-fix decision"
+require_text "$ROOT_DIR/CLAUDE.md" "Golden-reference review precedes every approval request" \
+  "CLAUDE.md must state the golden-reference review rule"
 require_text "$FORMAT" "Never invent a failing test." \
   "approval requests must distinguish proactive changes from reproduced failures"
 require_text "$FORMAT" "Not applicable — <reason>" \

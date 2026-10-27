@@ -49,6 +49,13 @@ After Behavior, How, TL;DR, Evidence, Detail, and Downstream Implications sectio
 are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
+Before any request reaches the user, run that file's Golden-reference
+adversarial review. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
+gates: rerun the guard with its mandatory flag, record
+`<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
+in `TEST_REPORT`, list it in the PR body and continue. Only `NOT_GROUNDED` and
+`HUMAN_REQUIRED` packets stop for the user.
+
 ---
 
 # Step 0: Capture original Conductor workspace title
@@ -79,7 +86,8 @@ end and stays active for the user's reply. Only the user ends it early, with
     production lane is verified, and the scorecard ending in READY TO CLOSE
     is posted. Stopping earlier is allowed only when the last message is one
     of /deploy's defined stops: a prompt, agent-behavior or
-    trajectory-injection approval request (Steps 0p/0b/0c); a credential or
+    trajectory-injection approval request (Steps 0p/0b/0c) that the
+    golden-reference review did not clear; a credential or
     billing escalation; a request for an explicit gate override; an approval
     for a destructive or irreversible action; or a deploy failure that cannot
     be fixed without the user.
@@ -196,6 +204,35 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
+### Whole-devbox collection and parallel-thread cross-validation
+
+This command obeys **Whole-devbox deploy ownership** in `CLAUDE.md`. Invoking
+`/deploy` in any thread makes that thread the coordinator for the entire devbox's
+Rose work, or joins the existing coordinator. The invoking thread is never the
+scope boundary. Before change detection or freezing gate inputs:
+
+1. Resolve the canonical shared source checkout (or the recorded
+   `ROSE_DEPLOY_SOURCE_WORKSPACE` for a prepared deploy worktree). Discover
+   same-devbox Rose threads by `devboxId`, read their handoffs, and cross-validate
+   active owners plus UI Main / Code Main when present using the read/message
+   skills. Record unavailable discovery explicitly.
+2. Inventory `git worktree list --porcelain` and `git status --short`, including
+   committed, staged, unstaged and untracked non-ignored source. Integrate each
+   outstanding current deliverable from parallel isolated worktrees into that
+   shared source. Use owner receipts and history to distinguish deliverables
+   from historical branches and disposable test copies; never merge every old
+   branch blindly or silently omit known unfinished integration.
+3. Keep one deploy owner; join an existing run instead of racing its Git or
+   production mutations. Agree a source freeze with editors, then record the
+   combined SHA/source digest, included paths, owners and blockers in the
+   existing deploy-run receipt. Preserve all work and required approvals.
+4. Run the normal gates on that combined snapshot. Prior subset-only green
+   receipts do not cover newly included changes. Reconcile any later edits
+   before merge and rerun affected gates; do not claim an older snapshot includes
+   the whole devbox. Never stage secrets, ignored env files, caches, dependencies,
+   raw research datasets or generated evidence as source.
+
+
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
@@ -299,7 +336,7 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
 2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
-3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request prompt-approval`. When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
+3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — run the golden-reference review; unless it returns `GROUNDED`, stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request prompt-approval`. When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
 
 **Operational gate maintenance is pre-authorized and MUST NOT block for human approval.** Changes limited to `.claude/commands/deploy.md` instructions that detect changed paths, select or invoke tests, record verification evidence, or tighten CI/deploy gates do not alter product or agent prompts. Classify those hunks as operational code behavior, rerun the guard with the mandatory flag immediately, and continue. Never stop an active implementation, RCA, benchmark, or deploy goal to ask permission for test-gate wiring.
 
@@ -311,9 +348,9 @@ bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
 
-If it fails, apply the classification above. For hunks that change LLM-visible text, stop and ask the human to review them, **linking each one as a clickable `path:line` reference** so they can open the file. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
+If it fails, apply the classification above. For hunks that change LLM-visible text, unless the golden-reference review returns `GROUNDED`, stop and ask the human to review them, **linking each one as a clickable `path:line` reference** so they can open the file. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
 
-Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
+Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, run a new golden-reference review of the new prompt diff and, unless it returns `GROUNDED`, show that diff and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
 
 After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`). A rejection remains blocked. After an approval, rerun the guard with the mandatory flag:
 
@@ -321,7 +358,7 @@ After the human responds, first run `python3 scripts/record_factory_event.py dep
 bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff, or a `GROUNDED` golden-reference review covers that exact diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` (or the review line from Canonical human-approval format) in `TEST_REPORT`.
 
 ## Step 0b: Agent recovery / terminal-behavior human-approval guard (no skip — always runs)
 
@@ -337,13 +374,13 @@ bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agen
 
 If it passes (no watched-file change, or no recovery/terminal-semantics hunk), record `Agent Behavior Approval Guard | Pass | no agent-behavior changes detected` in `TEST_REPORT`.
 
-If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request agent-behavior-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Run the golden-reference review; unless it returns `GROUNDED`, stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request agent-behavior-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard; pass it only after human approval or a `GROUNDED` golden-reference review of the current hunks. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` (or the review line) in `TEST_REPORT`.
 
 ## Step 0c: LLM trajectory-injection human-approval guard (no skip — always runs)
 
@@ -359,19 +396,19 @@ bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/
 
 If it passes (no watched-file change, or no trajectory-injection hunk), record `LLM Trajectory Injection Approval Guard | Pass | no trajectory-injection changes detected` in `TEST_REPORT`.
 
-If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** a runtime trajectory-injection change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, what synthetic context the planner will now see (or stop seeing) at runtime. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request llm-trajectory-injection-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change trajectory-injection hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** a runtime trajectory-injection change by construction. Run the golden-reference review; unless it returns `GROUNDED`, stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, what synthetic context the planner will now see (or stop seeing) at runtime. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request llm-trajectory-injection-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change trajectory-injection hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/check-llm-trajectory-injection-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `LLM Trajectory Injection Approval Guard | Pass | human approval retrieved for trajectory-injection edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard; pass it only after human approval or a `GROUNDED` golden-reference review of the current hunks. Record `LLM Trajectory Injection Approval Guard | Pass | human approval retrieved for trajectory-injection edits` (or the review line) in `TEST_REPORT`.
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
+1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
+   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
@@ -407,7 +444,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
      `CHANGED_BACKEND` is empty)
    - Step 4b: front-end blackbox + structural tests under coverage (skip if
      `CHANGED_FRONTEND` is empty)
-   - Step 4g: agents blackbox + fast-cache + unit tests under coverage (skip if
+   - Step 4g: agents blackbox + DEMO cache + unit tests under coverage (skip if
      `CHANGED_AGENTS` is empty)
    - Step 4m-coverage: mac-app blackbox tests under coverage (skip if
      `CHANGED_MAC_APP` is empty)
@@ -542,8 +579,11 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
-`bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
+`python3 scripts/tests/jev-progress-core.test.py`,
+`python3 scripts/tests/benchmark-history-latest-only.test.py`,
+`python3 scripts/tests/cloudbench-full-selection.test.py`,
+`python3 -m unittest discover -s scripts/live_display -p test_*.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
@@ -557,6 +597,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/cloudbench-bootstrap-recovery.test.py`,
 `python3 scripts/tests/cloudbench-staged-boot.test.py`,
+`python3 scripts/tests/cloudbench-prelaunch-cancel.test.py`,
 `python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py`,
 `python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/cloudbench-scorecard.test.py`,
@@ -568,6 +609,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-live-primary-return.test.py`,
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
+`python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -589,9 +631,9 @@ cannot be silently dropped from the deploy path. `run-deploy-structural-gates.te
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
 
-The descend and auto-RCA gates own their behavioral fixtures. The semantic
-deploy gate verifies their registration and documented commands without
-recursively executing them, so each runs once in the complete registry.
+The descend gate owns its behavioral fixtures. The semantic deploy gate
+verifies its registration and documented command without recursively executing
+it, so it runs once in the complete registry.
 
 The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
@@ -732,7 +774,7 @@ cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-p
       bash scripts/run-coverage.sh
 ```
 
-This one command runs every agents blackbox plus fast-cache and unit tests under
+This one command runs every agents blackbox plus DEMO cache and unit tests under
 coverage. Every test must pass and coverage must meet `agents/pyproject.toml`.
 Never loosen the threshold or rerun the blackbox suite separately.
 
@@ -2687,3 +2729,35 @@ rows, follow-ups); `❌` when the deploy is not complete.
 That example is the PR #1456 deploy. Keep the layout and replace every value. For
 a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
 failing lane is listed first, and lanes that never ran are omitted.
+
+
+### Required post-deploy: cloud-origin local Mac execution and computer use
+
+This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
+owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+Do not start a new database, migrate production, replace encryption keys, or reset
+sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
+
+1. Start a WEB/cloud-origin Rose root using the deployed revision. Explicitly call
+   `spawn_agent(type="code", target="local", ...)`. Resolve the intended owned Mac:
+   one registered Mac may resolve automatically; multiple Macs require explicit
+   selection. Preserve that device ID through recorded target resolution, session
+   creation, reconnect and replay. Never fall back to E2B or another device.
+2. Record root/child/task/device IDs (no credentials), the granted project folder,
+   `uname -s` = `Darwin`, actual working directory and checked-out revision. Verify
+   commands travel through the authenticated local relay to this same Mac.
+3. Exercise a harmless local computer-use action through the supported relay and
+   verify its visible effect on that Mac. Record the actual transport, permission
+   state and evidence. Terminal command success alone does not pass computer use;
+   absent screen/control support or missing macOS consent is a precise blocker.
+4. Build the current Rose native Mac app in the granted existing checkout using
+   its existing production backend/auth configuration and authoritative Mac setup
+   instructions. Retain the user's existing keys, credentials, account, app data
+   and database. Capture build command, exit status and native artifact path/hash;
+   launch/verify that artifact against the intended production account.
+5. Record disconnect, denied-folder and foreign-device rejection; no session or
+   cloud fallback may be created. Close only the test-owned session and preserve
+   the Mac app, granted files, data, user services and Freedom.
+
+Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
+report that prerequisite instead of marking a mocked or Linux-only run successful.

@@ -59,6 +59,9 @@ Decide from the evidence only (final browser pages, tool results, anti-bot log e
 - INCONCLUSIVE: the agent never reached the CAPTCHA point for a reason that is NOT a challenge
   (for example it asked a question, needed a login or payment approval, chose a different site,
   crashed, or ran out of time before navigating there). Give that reason.
+When the task itself says its end is a pending payment-card request or a pending approval at a final
+confirm click, that pending request for the task's order or booking IS the post-wall point: grade
+PASSED_CAPTCHA when it was raised past the wall, and FAILED_CAPTCHA if a wall blocked before it.
 Assistant claims without page/tool evidence do not count.
 
 The evidence object holds: agent_final_answer (may be terse; it is not proof either way),
@@ -651,6 +654,225 @@ def load_saved_run(path: str, probe_names: Iterable[str] = ()) -> Dict[str, Any]
     return {**loaded, "root": [m for m in messages if m not in children], "children": children}
 
 
+# ---------------------------------------------------------------------------------------------
+# Run context for the standard scorecard (`scripts/run-bench scorecard <run-dir>`).
+#
+# A probe run writes its result line to <run-dir>/results.jsonl and rebuilds
+# <run-dir>/report-card.json (the local run-context shape the scorecard renders).
+# `--assemble` builds the same run context from several lanes' recorded probe runs (their
+# manifests point at the runner's own result lines, rejudge lines, saved transcripts and stack
+# cleanup receipts), so one scorecard covers a whole multi-lane experiment. Nothing is typed in:
+# every value comes from those files, and anything absent stays absent.
+
+_CARD_STATUS = {"PASSED_CAPTCHA": "passed", "FAILED_CAPTCHA": "failed", "HELD": "skipped", "INCONCLUSIVE": "skipped"}
+
+
+def _json_lines(path: Path) -> List[Dict[str, Any]]:
+    """Every JSON object line in a runner stdout capture (log lines around them are skipped)."""
+    rows: List[Dict[str, Any]] = []
+    for line in path.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                rows.append(value)
+    return rows
+
+
+def _last_verdict_line(path: Path, probe: str) -> Optional[Dict[str, Any]]:
+    lines = [row for row in _json_lines(path) if row.get("probe") == probe and row.get("verdict")]
+    return lines[-1] if lines else None
+
+
+def _epoch(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value) / (1000.0 if value > 1e11 else 1.0)
+    if isinstance(value, str) and value:
+        from datetime import datetime
+
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def transcript_window(path: Path) -> tuple:
+    """(first, last) message epoch of a saved probe transcript or exported agent tree."""
+    try:
+        saved = load_saved_run(str(path))
+    except (OSError, ValueError, KeyError):
+        return None, None
+    stamps = [
+        _epoch(message.get("timestamp") or message.get("createdAt") or message.get("created_at"))
+        for message in [*saved["root"], *saved["children"]]
+        if isinstance(message, dict)
+    ]
+    stamps = [stamp for stamp in stamps if stamp]
+    return (min(stamps), max(stamps)) if stamps else (None, None)
+
+
+def probe_entry(result: Dict[str, Any], *, started_at: Optional[float] = None, finished_at: Optional[float] = None,
+                source_sha: Optional[str] = None, provenance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """One results.jsonl row: the runner's verdict line plus where and when it ran."""
+    entry = dict(result)
+    entry.update(started_at=started_at, finished_at=finished_at, source_sha=source_sha)
+    if provenance:
+        entry["provenance"] = provenance
+    return entry
+
+
+def write_run_context(run_dir: Path, entries: List[Dict[str, Any]], *, run_id: str, probes: Dict[str, Dict[str, Any]],
+                      stacks: Optional[List[Dict[str, Any]]] = None) -> Path:
+    """results.jsonl + report-card.json (+ assembled-from.json for multi-lane runs) under run_dir.
+
+    The latest entry per probe wins; every probe in the suite is a scheduled task, so a probe with
+    no entry stays queued and a held probe without a run is recorded as skipped.
+    """
+    from benchmarks.report_card import RunState, TaskCard, build_report_card, write_report_card
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.jsonl").write_text("".join(json.dumps(entry, default=str) + "\n" for entry in entries))
+    latest: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        latest[str(entry.get("probe"))] = entry
+    cards = []
+    for name, probe in probes.items():
+        entry = latest.get(name)
+        if entry is None:
+            if probe.get("hold"):
+                cards.append(TaskCard(name=name, status="skipped"))
+            continue
+        cards.append(
+            TaskCard(
+                name=name,
+                status=_CARD_STATUS.get(str(entry.get("verdict")), "skipped"),
+                duration_s=entry.get("duration_s"),
+                agent_id=entry.get("agent_id"),
+                agent_url=entry.get("fe_link"),
+            )
+        )
+    starts = [entry["started_at"] for entry in latest.values() if entry.get("started_at")]
+    ends = [entry["finished_at"] for entry in latest.values() if entry.get("finished_at")]
+    shas = {entry.get("source_sha") for entry in latest.values()}
+    state = RunState(
+        run_id=run_id,
+        elapsed_s=(max(ends) - min(starts)) if starts and ends else 0.0,
+        total_tasks=len(probes),
+        task_names=list(probes),
+        per_task=cards,
+        # One recorded 40-hex checkout for every run, or no claim at all (lanes ran mixed sources).
+        source_sha=next(iter(shas)) if len(shas) == 1 and re.fullmatch(r"[0-9a-f]{40}", str(next(iter(shas)))) else None,
+        started_at=min(starts) if starts else None,
+        finished_at=max(ends) if ends else None,
+    )
+    write_report_card(build_report_card(state), run_dir)
+    # run.json carries what the card has no field for: each probe's judge reason and source.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "tasks": [
+                    {
+                        "name": name,
+                        "agent_id": entry.get("agent_id"),
+                        "verdict": entry.get("verdict"),
+                        "confidence": entry.get("confidence"),
+                        "failure_reason": entry.get("reason") if entry.get("verdict") != "PASSED_CAPTCHA" else None,
+                        "provenance": entry.get("provenance"),
+                    }
+                    for name, entry in latest.items()
+                ],
+            },
+            indent=1,
+            default=str,
+        )
+    )
+    if stacks is not None:
+        (run_dir / "assembled-from.json").write_text(json.dumps({"stacks": stacks}, indent=1))
+    return run_dir / "report-card.json"
+
+
+def _first_path(base: Path, value: Any) -> Optional[Path]:
+    """A manifest file field ('path' or 'path (note)') resolved against the manifest directory."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = base / value.strip().split(" ", 1)[0]
+    return path if path.is_file() else None
+
+
+def assemble_entries(manifest_paths: Iterable[str], run_dir: Path) -> tuple:
+    """Entries and copied stack receipts from lane manifests.
+
+    A manifest is a list of rows (or {"entries"|"probes": [rows]}); rows: {probe, agent_id, result_file, final_regrade_file? | final_verdict_file?, original_run_result_file?,
+    transcript_file? | substitute_transcript_file?, source_sha?, stack_run_id?, receipts?}.
+    The verdict is the last verdict line of final_regrade_file (else result_file); agent id,
+    duration and FE link come from the run's own result line; the time window from the transcript.
+    """
+    import shutil
+
+    entries: List[Dict[str, Any]] = []
+    stacks: Dict[str, Dict[str, Any]] = {}
+    for manifest_path in manifest_paths:
+        manifest = Path(manifest_path)
+        base = manifest.parent
+        lane = base.name
+        rows = json.loads(manifest.read_text())
+        for row in (rows.get("entries") or rows.get("probes") or []) if isinstance(rows, dict) else rows:
+            probe = str(row["probe"])
+            verdict_file = (
+                _first_path(base, row.get("final_regrade_file"))
+                or _first_path(base, row.get("final_verdict_file"))
+                or _first_path(base, row.get("result_file"))
+            )
+            verdict = _last_verdict_line(verdict_file, probe) if verdict_file else None
+            if verdict is None:
+                raise ValueError(f"{manifest}: no recorded verdict line for {probe}")
+            run_line: Dict[str, Any] = {}
+            run_file: Optional[Path] = None
+            for field in ("result_file", "original_run_result_file"):
+                path = _first_path(base, row.get(field))
+                line = _last_verdict_line(path, probe) if path else None
+                if line and line.get("agent_id"):
+                    run_line, run_file = line, path
+                    break
+            transcript = _first_path(base, row.get("transcript_file")) or _first_path(base, row.get("substitute_transcript_file"))
+            started, finished = transcript_window(transcript) if transcript else (None, None)
+            result = dict(verdict)
+            for key in ("agent_id", "fe_link", "duration_s"):
+                result[key] = result.get(key) or run_line.get(key) or (row.get(key) if key == "agent_id" else None)
+            sha = str(row.get("source_sha") or "")
+            entries.append(
+                probe_entry(
+                    result,
+                    started_at=started,
+                    finished_at=finished,
+                    source_sha=sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None,
+                    provenance={
+                        "lane": lane,
+                        "manifest": str(manifest),
+                        "verdict_file": str(verdict_file),
+                        "run_file": str(run_file or ""),
+                        "transcript": str(transcript or ""),
+                        "source": sha or None,
+                        "stack_run_id": row.get("stack_run_id"),
+                    },
+                )
+            )
+            stack_id = row.get("stack_run_id")
+            receipts = base / "receipts" / str(stack_id) if stack_id else None
+            if stack_id and receipts and receipts.is_dir() and stack_id not in stacks:
+                target = run_dir / "sources" / lane / str(stack_id)
+                shutil.copytree(receipts, target, dirs_exist_ok=True, copy_function=shutil.copy2)
+                stacks[str(stack_id)] = {"lane": lane, "stack_run_id": stack_id, "receipts": str(target.relative_to(run_dir))}
+            elif stack_id and stack_id not in stacks:
+                stacks[str(stack_id)] = {"lane": lane, "stack_run_id": stack_id, "receipts": None}
+    return entries, list(stacks.values())
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("probe", nargs="?")
@@ -668,16 +890,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--save-dir", default=".context/captcha-probe-runs", help="where each run's transcripts are saved")
     parser.add_argument(
+        "--sites",
+        default="",
+        help="probe catalog to judge against (default: captcha_probe_sites.json next to this file); e.g. an earlier "
+        "first-wall version to grade only the wall a run met",
+    )
+    parser.add_argument(
         "--rejudge",
         metavar="FILE",
         help="re-grade a saved transcript (a --save-dir file, GET /api/agents/:id JSON or benchmark run record); no agent is run",
     )
     parser.add_argument("--cap-minutes", type=float, default=30.0)
+    parser.add_argument("--run-dir", default="", help="also record this run in <run-dir>/results.jsonl + report-card.json")
+    parser.add_argument(
+        "--assemble",
+        default="",
+        metavar="RUN_DIR",
+        help="build one scorecard run context in RUN_DIR from lane manifests (--manifest); no agent is run",
+    )
+    parser.add_argument("--manifest", action="append", default=[], help="lane evidence manifest.json (repeatable)")
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--user-id", default=DEFAULT_USER_ID)
     parser.add_argument("--include-held", action="store_true", help="run a probe marked hold")
     args = parser.parse_args(argv)
-    probes = load_probes()
+    probes = load_probes(Path(args.sites)) if args.sites else load_probes()
+    if args.assemble:
+        run_dir = Path(args.assemble)
+        entries, stacks = assemble_entries(args.manifest, run_dir)
+        card = write_run_context(run_dir, entries, run_id=run_dir.name, probes=probes, stacks=stacks)
+        print(json.dumps({"report_card": str(card), "probes": len({e["probe"] for e in entries}), "stacks": len(stacks)}))
+        return 0
     if args.rejudge:
         saved = load_saved_run(args.rejudge, probes)
         name = args.probe or saved["probe"]
@@ -711,8 +953,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"probe": probe["name"], "site": probe["site"], "verdict": "HELD", "reason": probe.get("hold_reason", "")}))
         return 0
     os.environ.setdefault("BACKEND_API_URL", args.base_url)
+    started = time.time()
     result = asyncio.run(run_probe(args, probe))
     print(json.dumps(result), flush=True)
+    if args.run_dir:
+        from benchmarks.report_card import clean_source_sha
+
+        run_dir = Path(args.run_dir)
+        previous = [json.loads(line) for line in (run_dir / "results.jsonl").read_text().splitlines()] if (run_dir / "results.jsonl").exists() else []
+        entry = probe_entry(result, started_at=started, finished_at=time.time(), source_sha=clean_source_sha(Path(_AGENTS_DIR).parent))
+        write_run_context(run_dir, [*previous, entry], run_id=run_dir.name, probes=probes)
     return 0
 
 

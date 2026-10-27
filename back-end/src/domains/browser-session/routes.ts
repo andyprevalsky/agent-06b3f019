@@ -16,7 +16,7 @@
  */
 
 import { type RequestHandler, type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticateInternal } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
@@ -76,12 +76,14 @@ registerBrowserInitRoute(router, auth);
  */
 router.post(
   '/close',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { session_id, pause, current_url } = closeSessionSchema.parse(req.body);
+      const { session_id, pause, current_url, signed_in_sites } = closeSessionSchema.parse(
+        req.body
+      );
 
-      const result = await closeBrowserSession(session_id, pause, current_url);
+      const result = await closeBrowserSession(session_id, pause, current_url, signed_in_sites);
 
       res.json({ success: true, ...result });
     } catch (error) {
@@ -207,7 +209,7 @@ router.get(
  */
 router.get(
   '/:sessionId',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { sessionId } = req.params;
@@ -235,7 +237,7 @@ router.get(
  */
 router.post(
   '/:sessionId/files',
-  authenticate,
+  authenticateInternal,
   upload.single('file') as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
@@ -288,7 +290,7 @@ router.post(
  */
 router.get(
   '/:sessionId/files/list',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { sessionId } = req.params;
@@ -322,7 +324,7 @@ registerBrowserCredentialRoutes(router);
  */
 router.post(
   '/:sessionId/inject-localStorage',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { sessionId } = req.params;

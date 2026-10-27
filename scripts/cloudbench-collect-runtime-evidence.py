@@ -202,13 +202,21 @@ while True:
     time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
-required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
-# Present only when the stack served a world model (its per-step server timing).
-OPTIONAL = "wmh-serve-log.txt"
+# A guest stopped before launching anything seals only its exact bench.log.
+prelaunch = expected.get("prelaunch") is True
+if prelaunch:
+    required = {"bench.log"}
+    assert set(expected) == {"version", "run_token", "machine_id", "files", "prelaunch"}
+    assert isinstance(files, dict) and set(files) == required
+else:
+    required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+# Present only when the stack served a world model (its per-step server timing),
+# or when the guest diagnostics sampler ran (CPU/load, DB pool, pg_stat_activity).
+OPTIONAL = {"wmh-serve-log.txt", "guest-diagnostics.jsonl"}
 assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
 total = 0
 for name, metadata in files.items():
-    assert name in required or name == OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert name in required or name in OPTIONAL or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
     assert set(metadata) == {"bytes", "sha256"}
     assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
@@ -234,10 +242,15 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
-services = json.loads((pending / "services.json").read_text())
-count = services["env"]["worker_processes"]
-assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
-assert set(files) - {OPTIONAL} == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+if prelaunch:
+    with (pending / "bench.log").open("rb") as log:
+        stamp = ("RUNSTAMP-" + run_token + "\n").encode()
+        assert log.read(len(stamp)) == stamp, "pre-launch log belongs to another run"
+else:
+    services = json.loads((pending / "services.json").read_text())
+    count = services["env"]["worker_processes"]
+    assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+    assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 if options:
     collect_driver_log()
 assert manifest() == expected, "runtime evidence changed across collection"
@@ -248,7 +261,7 @@ with (pending / "manifest.json").open("x") as output:
     os.fsync(output.fileno())
 # Persist child directory entries before acknowledging the published capture.
 # File fsync alone does not make their names durable across controller failure.
-for directory in (pending / "logs", pending):
+for directory in ((pending,) if prelaunch else (pending / "logs", pending)):
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -260,4 +273,13 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
+if prelaunch:
+    # No run result can exist to bind the latch to; the sealed pre-launch
+    # bundle is the complete runtime evidence, so release the latch here.
+    intent.unlink()
+    descriptor = os.open(intent.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 signal.alarm(0)

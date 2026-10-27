@@ -796,9 +796,139 @@ def publish_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+UNDELIVERED_CAPTURE_POINTER = "guest-cleanup.undelivered-capture.json"
+# Every file the guest stack writes. A capture proving pre-stack absence must
+# list all of them as missing; any present one means services may have run.
+PRESTACK_ABSENT = (
+    "cloudbench-driver.pid",
+    "repo/.context/cloudbench/services.json",
+    "repo/.context/cloudbench/stack.log",
+    "repo/.context/cloudbench/run.json",
+    "repo/.context/cloudbench/logs/backend.log",
+    "repo/.context/cloudbench/logs/worker.log",
+)
+PRESTACK_FORBIDDEN_LOG = (
+    "launching stack",
+    "waiting for stack",
+    "stack healthy",
+    "running benchmark",
+)
+
+
+def undelivered_native_stop_sha(args: argparse.Namespace, volume_id: str | None = None) -> tuple[str, str]:
+    """The controller's exact verified native stop of a never-delivered guest."""
+    payload = read_bytes(Path(args.output_dir) / "guest-native-stop.json", maximum=65536)
+    record = parse_json_object(payload, Path(args.output_dir) / "guest-native-stop.json")
+    expected = {
+        "version": 1, "kind": "guest-native-stop", "fleet_owner_token": args.owner,
+        "run_id": args.fleet_run_id, "bench": args.bench, "machine_id": args.machine_id,
+        "ownership": "fresh", "delivery_receipt": "absent", "stop_requested": True,
+        "verified": True, "verified_state": "stopped", "destroyed": False,
+    }
+    volume = record.get("volume_id")
+    if (
+        any(record.get(key) != value or type(record.get(key)) is not type(value)
+            for key, value in expected.items())
+        or not isinstance(volume, str) or re.fullmatch(r"vol_[A-Za-z0-9]+", volume) is None
+        or (volume_id is not None and volume != volume_id)
+    ):
+        raise CleanupEvidenceError("guest-native-stop.json is not an exact verified undelivered stop")
+    return sha256_bytes(payload), volume
+
+
+def undelivered_prestack_zero_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    """Zero provider sessions for a guest natively stopped before its stack started.
+
+    The authenticated shutdown was never delivered, so no guest-side receipt
+    exists. The original-volume capture is the evidence: the driver was still
+    booting and none of the files the stack writes exists, so no backend ever
+    ran and no browser session could have been allocated.
+    """
+    import io
+    import tarfile
+
+    exact_identity = identity(args)
+    native_sha, volume = undelivered_native_stop_sha(args)
+    pointer_path = Path(args.output_dir) / UNDELIVERED_CAPTURE_POINTER
+    pointer = read_json_object(pointer_path, maximum=65536)
+    capture_dir = Path(str(pointer.get("capture_dir", "")))
+    if (
+        set(pointer) != {"version", "capture_dir", "archive_sha256"} or pointer.get("version") != 1
+        or not capture_dir.is_absolute() or capture_dir.resolve() != capture_dir
+        or not plain_directory(capture_dir)
+    ):
+        raise CleanupEvidenceError("undelivered capture pointer is unsafe")
+    archive = read_bytes(capture_dir / f"{args.machine_id}.tar.gz")
+    provenance_payload = read_bytes(capture_dir / f"{args.machine_id}.provenance.json", maximum=1024 * 1024)
+    provenance = parse_json_object(provenance_payload, capture_dir)
+    archive_sha = sha256_bytes(archive)
+    if (
+        pointer.get("archive_sha256") != archive_sha
+        or provenance.get("schema") != "cloudbench-original-volume-capture-v1"
+        or provenance.get("kind") != "original-volume-inert-capture"
+        or provenance.get("admission") != "undelivered-native-stop"
+        or provenance.get("direct_original_volume") is not True
+        or provenance.get("proof_credit") != 0
+        or provenance.get("guest_native_stop_sha256") != native_sha
+        or provenance.get("fleet_owner_token") != args.owner
+        or provenance.get("run_id") != args.fleet_run_id
+        or provenance.get("bench") != args.bench
+        or provenance.get("machine_id") != args.machine_id
+        or provenance.get("volume_id") != volume
+        or provenance.get("guest_run_token") != args.guest_run_token
+        or provenance.get("archive_sha256") != archive_sha
+        or provenance.get("archive_bytes") != len(archive)
+        or provenance.get("native_final_state") != "stopped"
+    ):
+        raise CleanupEvidenceError("undelivered capture provenance is not exact for this guest")
+    originals: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as stream:
+        for member in stream:
+            if not member.isfile() or member.name in originals:
+                raise CleanupEvidenceError("unsafe undelivered capture member")
+            reader = stream.extractfile(member)
+            originals[member.name] = reader.read(member.size + 1) if reader else b""
+            if len(originals[member.name]) != member.size:
+                raise CleanupEvidenceError("truncated undelivered capture member")
+    files, missing = provenance.get("files"), provenance.get("missing")
+    bench_log = originals.get("bench.log", b"").decode("utf-8", "replace")
+    if (
+        not isinstance(files, dict) or not isinstance(missing, list)
+        or files != {name: {"bytes": len(data), "sha256": sha256_bytes(data)}
+                     for name, data in originals.items()}
+        or set(originals) != {"bench.log", "cloudbench-driver.state"}
+        or not set(PRESTACK_ABSENT) <= set(missing)
+        or originals["cloudbench-driver.state"] != b"booting\n"
+        or not bench_log.startswith(f"RUNSTAMP-{args.guest_run_token}\n")
+        or any(marker in bench_log for marker in PRESTACK_FORBIDDEN_LOG)
+    ):
+        raise CleanupEvidenceError("undelivered capture does not prove the stack never started")
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-undelivered-prestack-zero-manifest",
+        **exact_identity,
+        "root_agent_id": None,
+        "sessions": {"kernel": [], "steel": []},
+        "evidence": {
+            "guest_native_stop_sha256": native_sha,
+            "capture_archive_sha256": archive_sha,
+            "capture_provenance_sha256": sha256_bytes(provenance_payload),
+            "driver_state": "booting",
+            "allocation_event_count": 0,
+        },
+    }
+
+
 def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
-    payload = read_bytes(Path(args.backend_log))
+    backend_path = Path(args.backend_log)
+    if (
+        not backend_path.exists() and not backend_path.is_symlink()
+        and (Path(args.output_dir) / UNDELIVERED_CAPTURE_POINTER).exists()
+    ):
+        return undelivered_prestack_zero_manifest(args)
+    payload = read_bytes(backend_path)
     try:
         text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
@@ -1581,7 +1711,8 @@ def validate_recovery_receipt(args: argparse.Namespace) -> int:
                 "provider manifest no longer matches exact durable evidence"
             )
     elif manifest.get("kind") in {
-        "provider-active-exact-manifest", "provider-prestart-zero-manifest"
+        "provider-active-exact-manifest", "provider-prestart-zero-manifest",
+        "provider-undelivered-prestack-zero-manifest",
     }:
         if not all(
             (

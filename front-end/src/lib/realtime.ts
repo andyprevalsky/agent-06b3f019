@@ -19,6 +19,7 @@ export {
   type InsertMessagePayload,
   type UpdateAgentPayload,
   type DeleteMessagePayload,
+  type InsertDeferredPayload,
   type AssistantStreamPayload,
   type PlanStreamPayload,
   type ToolStreamPayload,
@@ -66,6 +67,8 @@ export {
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
+  extractInsertDeferredPayload,
+  extractInsertEncodedPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -85,12 +88,16 @@ import {
   type InsertMessagePayload,
   type UpdateAgentPayload,
   type DeleteMessagePayload,
+  type InsertDeferredPayload,
   type AgentStateChangedPayload,
   type AgentModeStartedPayload,
   type BrowserSessionBindingPayload,
+  type UserUiActiveChangedPayload,
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
+  extractInsertDeferredPayload,
+  extractInsertEncodedPayload,
   extractAssistantStreamPayload,
   extractPlanStreamPayload,
   extractToolStreamPayload,
@@ -98,6 +105,7 @@ import {
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
   extractBrowserSessionBindingPayload,
+  extractUserUiActiveChangedPayload,
 } from './realtime-types';
 
 // Legacy type aliases for backward compatibility
@@ -217,6 +225,8 @@ export async function subscribeToChannel(
  */
 export interface AgentHandlers {
   onInsert?: (payload: InsertMessagePayload) => void;
+  /** A committed message that could not be streamed live; show its reason, fetch it by ID. */
+  onInsertDeferred?: (payload: InsertDeferredPayload) => void;
   onUpdate?: (payload: UpdateAgentPayload) => void;
   onDelete?: (payload: DeleteMessagePayload) => void;
   onAssistantStream?: (payload: AssistantStreamPayload) => void;
@@ -225,6 +235,8 @@ export interface AgentHandlers {
   onToolStream?: (payload: ToolStreamPayload) => void;
   onAgentModeStarted?: (payload: AgentModeStartedPayload) => void;
   onBrowserSession?: (payload: BrowserSessionBindingPayload) => void;
+  /** A code agent in this tree activated a new Rose UI version (rose-ui publish). */
+  onUserUiActiveChanged?: (payload: UserUiActiveChangedPayload) => void;
   onDisconnect?: () => void;
 }
 
@@ -249,6 +261,17 @@ export async function subscribeToAgent(
     eventHandlers['INSERT'] = (wrapper: unknown) => {
       const record = extractInsertPayload(wrapper);
       if (record) handlers.onInsert!(record);
+    };
+    // The same committed record, re-sent base64-encoded after a refused frame.
+    eventHandlers['INSERT_ENCODED'] = (wrapper: unknown) => {
+      const record = extractInsertEncodedPayload(wrapper);
+      if (record) handlers.onInsert!(record);
+    };
+  }
+  if (handlers.onInsertDeferred) {
+    eventHandlers['INSERT_DEFERRED'] = (wrapper: unknown) => {
+      const record = extractInsertDeferredPayload(wrapper);
+      if (record) handlers.onInsertDeferred!(record);
     };
   }
   if (handlers.onUpdate) {
@@ -298,6 +321,12 @@ export async function subscribeToAgent(
     eventHandlers['BROWSER_SESSION'] = (wrapper: unknown) => {
       const record = extractBrowserSessionBindingPayload(wrapper);
       if (record) handlers.onBrowserSession!(record);
+    };
+  }
+  if (handlers.onUserUiActiveChanged) {
+    eventHandlers['USER_UI_ACTIVE_CHANGED'] = (wrapper: unknown) => {
+      const record = extractUserUiActiveChangedPayload(wrapper);
+      if (record) handlers.onUserUiActiveChanged!(record);
     };
   }
 
@@ -350,6 +379,7 @@ export async function subscribeToAttentionRequests(
  * Uses typed payloads from realtime-types.ts.
  */
 export interface BusHandlers {
+  onUpdate?: (payload: UpdateAgentPayload) => void;
   onAgentStateChanged?: (payload: AgentStateChangedPayload) => void;
   onDisconnect?: () => void;
 }
@@ -373,6 +403,13 @@ export async function subscribeToBus(
     eventHandlers['AGENT_STATE_CHANGED'] = (wrapper: unknown) => {
       const record = extractAgentStateChangedPayload(wrapper);
       if (record) handlers.onAgentStateChanged!(record);
+    };
+  }
+
+  if (handlers.onUpdate) {
+    eventHandlers['UPDATE'] = (wrapper: unknown) => {
+      const record = extractUpdatePayload(wrapper);
+      if (record) handlers.onUpdate!(record);
     };
   }
 

@@ -78,6 +78,9 @@ export async function remove(id: string) {
   return repo.deletePlannerMemory(id);
 }
 
+/** Non-internal callers see their own rows and ownerless benchmark fixtures. */
+export const visibleTo = repo.plannerMemoryVisibleTo;
+
 export async function get(id: string) {
   return repo.findPlannerMemory(id);
 }

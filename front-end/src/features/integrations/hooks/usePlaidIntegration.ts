@@ -8,6 +8,7 @@
  *     --connect()--> [CONNECTING] --success--> [LOADED + new item]
  *     --update(id)--> [CONNECTING] --success--> [LOADED + repaired item]
  *     --disconnect(id)--> [DISCONNECTING(id)] --success--> [LOADED - item]
+ *     --refresh()--> [LOADED] (in-place re-read; drives sync progress polling)
  */
 
 import { useCallback, useState } from 'react';
@@ -25,6 +26,8 @@ export function usePlaidIntegration(): {
   onConnect: () => void;
   onUpdate: (itemId: string) => void;
   onDisconnect: (itemId: string) => void;
+  /** Re-read the items (Rose Desktop polls this while an item is syncing). */
+  refresh: () => Promise<void>;
 } {
   const items = usePlaidItems();
   const [disconnectingItemId, setDisconnectingItemId] = useState<string | null>(null);
@@ -72,5 +75,6 @@ export function usePlaidIntegration(): {
     onConnect,
     onUpdate,
     onDisconnect,
+    refresh: items.refresh,
   };
 }

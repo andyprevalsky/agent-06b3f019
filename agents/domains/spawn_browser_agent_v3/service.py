@@ -376,22 +376,31 @@ async def build_browser_verifier_context(
     effects on the caller.
     """
     all_action_entries = action_history.get_entries()
-    action_entries = all_action_entries[-30:]
-    # The card request can predate many form-fill actions. Keep its actual
-    # recorded result in the verifier's bounded history when it ages out.
-    if not any(
-        entry.get("action") == "request_payment_card"
-        and (entry.get("result") or {}).get("status") == "approved"
-        for entry in action_entries
-    ):
-        card_request = next(
-            (entry for entry in reversed(all_action_entries[:-30])
-             if entry.get("action") == "request_payment_card"
-             and (entry.get("result") or {}).get("status") == "approved"),
-            None,
-        )
-        if card_request is not None:
-            action_entries = [card_request, *action_entries[-29:]]
+    window, older = all_action_entries[-30:], all_action_entries[:-30]
+
+    def approved_card(entry: Dict[str, Any]) -> bool:
+        return entry.get("action") == "request_payment_card" and (entry.get("result") or {}).get("status") == "approved"
+
+    def has_auth_context(entry: Dict[str, Any]) -> bool:
+        return "auth_context" in (entry.get("result") or {})
+
+    # Some receipts prove a fact that later receipts do not repeat: the approved
+    # card request, and the observed sign-in options (stored only when they
+    # change). Carry the latest older one forward when it ages out of the
+    # verifier's bounded history, keeping the same 30-receipt size.
+    carried = []
+    for proves in (approved_card, has_auth_context):
+        if not any(proves(entry) for entry in window):
+            carrier = next((entry for entry in reversed(older) if proves(entry)), None)
+            if carrier is not None and carrier not in carried:
+                carried.append(carrier)
+    carried.sort(key=lambda entry: entry.get("step", 0))
+    # Make room by dropping the oldest receipts that prove neither fact.
+    drop = {
+        id(entry)
+        for entry in [e for e in window if not (approved_card(e) or has_auth_context(e))][: len(carried)]
+    }
+    action_entries = [*carried, *(entry for entry in window if id(entry) not in drop)]
     action_details_lines = []
     for entry in action_entries:
         step = entry.get("step", "?")
@@ -805,7 +814,7 @@ def build_browser_task_prompt(goal: str) -> str:
 # Internal-only suffix that splits a model's Fast-Mode replays from its paid
 # calls in the usage ledger. It contains NUL so it can never collide with a real
 # model name, and it must NEVER escape into an emitted usage row.
-_FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+_DEMO_CACHE_LEDGER_MARKER = "\x00fast_cache"
 _CACHE_SEQUENCE_LEDGER_MARKER = "\x00cache_sequence:"
 
 
@@ -845,7 +854,7 @@ def accumulate_model_usage(
     model = str(actual_model or "")
     # NUL can never occur in a model name, so this cannot collide with a real
     # model whose name happens to end in the marker text.
-    key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
+    key = f"{model}{_DEMO_CACHE_LEDGER_MARKER}" if from_fast_cache else model
     sequence_id = str(cache_sequence_id or "").strip()
     if sequence_id:
         key = (
@@ -915,7 +924,7 @@ def build_browser_llm_usage_items(
             # Strip internal markers defensively so they can never reach a
             # usage row, even when a test or legacy caller constructs the
             # ledger without going through `accumulate_model_usage`.
-            model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+            model = str(ledger_key).split(_DEMO_CACHE_LEDGER_MARKER, 1)[0]
             model = model.split(_CACHE_SEQUENCE_LEDGER_MARKER, 1)[0]
         else:
             model = str(raw_model)
@@ -1052,7 +1061,7 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
                     "provider": item.get("provider", ""),
                     "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
-                    # Propagate fast-cache replay so replayed browser
+                    # Propagate demo-cache replay so replayed browser
                     # steps bill $0 instead of their replayed tokens.
                     "from_fast_cache": item.get("from_fast_cache", False),
                     **(
@@ -1077,7 +1086,7 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
 # ========================================
 
 
-def build_action_titles(  # noqa: C901
+def build_action_titles(
     action_name: str,
     unified_action: Dict[str, Any],
     element_desc: Optional[str],
@@ -1171,6 +1180,9 @@ def build_action_titles(  # noqa: C901
     elif action_name == "request_user_assistance_for_authentication":
         title_progress = "Requesting authentication assistance..."
         title_done = "Requested authentication assistance"
+    elif action_name == "phone":
+        title_progress = "Using cloud iPhone..."
+        title_done = "Cloud iPhone result"
     elif action_name == "request_payment_card":
         total_cents = unified_action.get("params", {}).get("total_cents", 0)
         merchant = unified_action.get("params", {}).get("merchant", "merchant")

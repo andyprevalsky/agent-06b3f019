@@ -58,6 +58,11 @@ at its actual completion receipt; later assignments get their own baseline.
   monitors; reuse immutable completion receipts. Do not add provider probes or
   wake idle agents solely to freshen a label. Mark overdue evidence `STALE` with
   its actual age without delaying safety notifications.
+- Never present a saved or hand-kept summary as current. Every status line,
+  parent/worker row and issue is rebuilt from current evidence at render time
+  and carries the instant it was checked. A claim made before the latest run
+  ended, or more than 15 minutes ago, is re-observed or left out; the scorecard
+  renderer refuses such overlay rows.
 
 ### Rolling token usage and stalled work
 

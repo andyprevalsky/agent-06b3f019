@@ -225,6 +225,7 @@ export async function seedFixture() {
     data: [
       {
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
@@ -234,6 +235,7 @@ export async function seedFixture() {
       },
       {
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
@@ -243,6 +245,7 @@ export async function seedFixture() {
       },
       {
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
@@ -252,6 +255,7 @@ export async function seedFixture() {
       },
       {
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
@@ -266,6 +270,7 @@ export async function seedFixture() {
       },
       ...Array.from({ length: 30 }, (_, idx) => ({
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL' as const,
         from: 'ledger@example.com',
         to: 'benchmark@example.com',
@@ -275,6 +280,7 @@ export async function seedFixture() {
       })),
       ...WORD_BOUNDARY_MESSAGES.map((message, index) => ({
         personId: lighthouse.id,
+        userId,
         channel: 'EMAIL' as const,
         from: 'boundary@example.com',
         to: 'benchmark@example.com',

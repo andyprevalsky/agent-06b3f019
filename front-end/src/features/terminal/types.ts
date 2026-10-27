@@ -15,7 +15,6 @@ import type {
   CreateAgentPayload,
   InspectionContext,
 } from '@/lib/api';
-import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
 // ── View state ────────────────────────────────────────────────────────────
@@ -69,12 +68,7 @@ export type { BrowserPanelData } from '@/lib/browserPanelLifecycle';
 
 // ── Approval state ────────────────────────────────────────────────────────
 
-export interface PendingApproval {
-  attentionRequestId: string;
-  question: string;
-  imageUrl: string | null;
-  requestPaymentCard?: RequestPaymentCardPayload;
-}
+export type { PendingApproval } from '@/lib/pendingApproval';
 
 export interface PendingGate {
   attentionRequestId: string;
@@ -97,6 +91,8 @@ export interface TerminalAgentActions {
   handleLogout: () => Promise<void>;
   handleLoginClick: () => void;
   handleCreateNewAgent: () => void;
+  /** Rose Desktop project "+": the next goal creates the agent in that project. */
+  handleCreateNewAgentInProject: (project: { id: string }) => void;
   handleSubmitFeedback: (feedback: BlueprintFeedback) => Promise<void>;
   refreshAgentDetail: (agentId: string) => Promise<void>;
   cleanupAgentState: () => void;
@@ -108,6 +104,7 @@ export interface TerminalUIState {
   setCurrentView: (view: TerminalView) => void;
   agents: Agent[];
   isLoadingAgents: boolean;
+  hasLoadedAgents: boolean;
   createModalOpen: boolean;
   setCreateModalOpen: (open: boolean) => void;
   loginModalOpen: boolean;

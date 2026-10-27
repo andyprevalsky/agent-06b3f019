@@ -8,7 +8,8 @@ const { fetchSession, messages } = vi.hoisted(() => ({
   fetchSession: vi.fn().mockResolvedValue(null),
   messages: { current: [] as unknown[] },
 }));
-vi.mock('@/features/agent-context', () => ({
+vi.mock('@/features/agent-context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/agent-context')>()),
   useAgentContext: () => ({ messages: messages.current, agent: null }),
 }));
 vi.mock('@/features/terminal-component-group/api', async (importOriginal) => ({

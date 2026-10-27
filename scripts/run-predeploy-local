@@ -243,7 +243,7 @@ trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
 
 # Split the smoke set so Tokyo/other FM-off tasks stay on the isolated local
-# cache, while fast_cache:on tasks (test-mass-agent-run-0) read the shared July
+# cache, while demo_cache:on tasks (test-mass-agent-run-0) read the shared July
 # cache with write-through disabled. One shared stack would either empty-cache
 # the OAi replay or let Andy write-through poison prod.
 LOCAL_CACHE_TASKS=()
@@ -260,7 +260,7 @@ with open(sys.argv[1]) as handle:
     tasks = json.load(handle)
 for task in tasks:
     if task.get("name") == name:
-        print("on" if task.get("fast_cache") == "on" else "off")
+        print("on" if task.get("demo_cache", task.get("fast_cache")) == "on" else "off")
         break
 else:
     print("off")
@@ -298,12 +298,12 @@ run_smoke_batch() {
     # This launcher promises a per-run isolated stack. Do not let a caller's remote
     # cache override—or run.sh's shared-cache default—turn startup into a production
     # pooler dependency. run.sh creates the same cache schema in this run's local DB.
-    unset FAST_MODE_CACHE_DATABASE_URL
+    unset FAST_MODE_CACHE_DATABASE_URL DEMO_CACHE_DATABASE_URL
     if [ "$cache_mode" = "shared" ]; then
         FAST_MODE_CACHE_DATABASE_URL="$(shared_fast_mode_cache_url)"
         export FAST_MODE_CACHE_DATABASE_URL
         [ -n "$FAST_MODE_CACHE_DATABASE_URL" ] || {
-            echo "FAST_MODE_CACHE_DATABASE_URL is required for fast_cache:on smoke tasks" >&2
+            echo "FAST_MODE_CACHE_DATABASE_URL is required for demo_cache:on smoke tasks" >&2
             return 2
         }
         FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1 \
@@ -320,7 +320,7 @@ run_smoke_batch() {
     fi
     # Seeded prod users can have Fast Mode on. If the create body omits
     # fast_mode_cache_enabled, local-cache smokes inherit that default.
-    # Pin the flag off for this batch only; shared/fast_cache:on tasks
+    # Pin the flag off for this batch only; shared/demo_cache:on tasks
     # keep Fast Mode. This does not change oss-pinned tasks
     # (browser-biometrics-webdecoy uses rose-1-oss / OpenRouter).
     FAST_MODE_CACHE_USE_LOCAL=1 \

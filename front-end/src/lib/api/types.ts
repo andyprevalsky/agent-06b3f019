@@ -9,11 +9,26 @@ export interface FilePointer {
   mime_type: string;
   size_bytes: number;
   created_at: string;
+  /** Optional intrinsic pixel size (images/videos); reserves inline layout. */
+  width?: number;
+  height?: number;
+  /** Desktop launcher screenshot attached automatically; agents treat it as possibly unrelated. */
+  auto_captured?: boolean;
 }
 
 // Size thresholds for file handling
 export const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB max per file
 export const MAX_TOTAL_ATTACHMENTS_SIZE = 100 * 1024 * 1024; // 100MB max total
+
+export interface ProgressEstimate {
+  progress: number;
+  etaSeconds: number;
+  observedAt: string;
+  sequence: number;
+  model: string;
+  promptVersion: string;
+  taskId?: string;
+}
 
 export interface Agent {
   agent_id: string;
@@ -24,10 +39,15 @@ export interface Agent {
   pinned_at?: string | null;
   /** Non-null means archived (soft-deleted); only set on rows from the archive view. */
   archived_at?: string | null;
+  /** Owning project (Rose Desktop groups the sidebar by it); absent/null → Home (root project). */
+  project_id?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
   progress: number;
+  progress_estimate?: ProgressEstimate | null;
+  task_progress_estimates?: Record<string, ProgressEstimate>;
+  task_id?: string | null;
   status:
     | 'STARTING_UP'
     | 'ACTIVE'
@@ -157,6 +177,7 @@ export interface Message {
     busId?: string;
     spawnGroupId?: string;
     forEachAggregate?: boolean;
+    inlineView?: import('../realtime-types/message-metadata').InlineViewMessageMetadata;
     [key: string]: unknown;
   };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)
@@ -175,6 +196,9 @@ export interface CreateAgentPayload {
   start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
   fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
+  project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
+  // Rose Desktop "New agent in this branch": work in that agent's code session (same branch).
+  share_code_session_with?: string;
 }
 
 // Sub-agent Tree Types
@@ -198,6 +222,12 @@ export interface OutputSchema {
 }
 
 export interface AgentTreeNode {
+  taskProgressEstimates?: Record<string, ProgressEstimate>;
+  temporal_workflow_id?: string | null;
+  progress_estimate?: ProgressEstimate | null;
+  task_progress_estimates?: Record<string, ProgressEstimate>;
+  progressEstimate?: ProgressEstimate | null;
+  task_id?: string | null;
   agent_id: string;
   parent_agent_id: string | null;
   goal: string;
@@ -209,6 +239,12 @@ export interface AgentTreeNode {
   structured_output?: Record<string, unknown>;
   failure_context?: import('@/lib/realtime-types').FailureContext;
   tree_cost_cents: number;
+  created_at?: string;
+  updated_at?: string;
+  /** Background explore/browser/code tasks owned by this agent (optional). */
+  background_tasks?: unknown;
+  /** Codex-style tree address, e.g. `/root/outreach/draft_a` (optional). */
+  task_path?: string | null;
 }
 
 export interface AncestorNode {

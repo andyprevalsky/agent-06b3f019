@@ -1,5 +1,6 @@
 import { Router, type Response } from 'express';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { authenticate, authenticateInternal, type AuthRequest } from '../../providers/auth';
+import { callerCanAccessAgent } from '../../providers/agentAccess';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
 import type {
@@ -12,7 +13,7 @@ const router = Router();
 
 router.post(
   '/artifacts',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     try {
       res.json(await service.storeWorkerArtifacts(req.body));
@@ -29,7 +30,7 @@ router.post(
 
 router.post(
   '/artifact',
-  authenticate,
+  authenticateInternal,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const body = req.body as StoreEncryptedArtifactRequest;
     if (typeof body.rootAgentId !== 'string' || typeof body.path !== 'string') {
@@ -67,6 +68,10 @@ router.post(
       res.status(400).json({ error: 'agentId is required' });
       return;
     }
+    if (!(await callerCanAccessAgent(req, body.agentId))) {
+      res.status(403).json({ error: 'Agent not owned by caller' });
+      return;
+    }
     const result = await service.captureAgentStart(body);
     res.json(result);
   })
@@ -79,6 +84,10 @@ router.post(
     const body = req.body as AgentFinalizeRequest;
     if (typeof body.rootAgentId !== 'string' || body.rootAgentId === '') {
       res.status(400).json({ error: 'rootAgentId is required' });
+      return;
+    }
+    if (!(await callerCanAccessAgent(req, body.rootAgentId))) {
+      res.status(403).json({ error: 'Agent not owned by caller' });
       return;
     }
     const result = await service.finalizeAgent(body);

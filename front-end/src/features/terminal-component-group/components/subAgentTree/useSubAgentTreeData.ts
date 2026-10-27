@@ -1,5 +1,5 @@
 import { useMemo, useCallback } from 'react';
-import { useAgentTree, filterTreeBySpawn, type TreeNode } from '../../hooks';
+import { useAgentTree, filterTreeBySpawn, indexTreeChildren, type TreeNode } from '../../hooks';
 import {
   getLeafNodes,
   getIntermediaryNodes,
@@ -9,6 +9,7 @@ import {
 } from '../subAgentTree.helpers';
 
 const GOAL_MAX_CHARS = 80;
+const NO_CHILDREN: TreeNode[] = [];
 
 /**
  * Derives all tree-shape data the SubAgentTree renderer needs from the raw
@@ -23,17 +24,11 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
     [allNodes, subAgentIds],
   );
 
+  // Indexed once per tree update; every walk and rendered row is a lookup.
+  const childIndex = useMemo(() => indexTreeChildren(relevantNodes.values()), [relevantNodes]);
   const getChildren = useCallback(
-    (parentId: string): TreeNode[] => {
-      const children: TreeNode[] = [];
-      for (const node of relevantNodes.values()) {
-        if (node.parentAgentId === parentId) {
-          children.push(node);
-        }
-      }
-      return children;
-    },
-    [relevantNodes],
+    (parentId: string): TreeNode[] => childIndex.get(parentId) ?? NO_CHILDREN,
+    [childIndex],
   );
 
   // Drive roots off the known subAgentIds, not off whichever nodes have arrived.

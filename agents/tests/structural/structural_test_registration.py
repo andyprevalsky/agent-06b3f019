@@ -134,14 +134,16 @@ STRUCTURAL_GATE = "scripts/tests/agents-structural.test.sh"
 def test_every_structural_suite_runs_in_test_sh_and_deploy():
     """Every structural suite runs wherever the agents structural gate runs.
 
-    `/deploy` Step 4s and both scripts/test.sh paths (serial and background)
-    run the one gate script, and the gate must run every suite file: a suite
-    named by hand in only some of those places silently never runs there.
+    `/deploy` Step 4s and every scripts/test.sh "Agents Structural" suite run
+    the one gate script, and the gate must run every suite file: a suite named
+    by hand in only some of those places silently never runs there.
     """
     repo_root = AGENTS_ROOT.parent
     test_sh = (repo_root / "scripts" / "test.sh").read_text()
-    assert test_sh.count(f"bash {STRUCTURAL_GATE}") >= 2, (
-        f'both the run_suite and bg_suite "Agents Structural" lines of scripts/test.sh must run {STRUCTURAL_GATE}'
+    structural_lines = [line for line in test_sh.splitlines() if '"Agents Structural"' in line]
+    assert structural_lines, 'scripts/test.sh must register an "Agents Structural" suite'
+    assert all(f"bash {STRUCTURAL_GATE}" in line for line in structural_lines), (
+        f'every "Agents Structural" line of scripts/test.sh must run {STRUCTURAL_GATE}: {structural_lines}'
     )
 
     with tempfile.TemporaryDirectory() as tmp:

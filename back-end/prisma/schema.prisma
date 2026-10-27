@@ -12,7 +12,7 @@ datasource db {
 }
 
 model Agent {
-  id                               String                    @id @default(uuid())
+  id                               String                      @id @default(uuid())
   userId                           String
   goal                             String
   // Short sidebar label. Generated from the goal at spawn time, overridable by
@@ -20,65 +20,88 @@ model Agent {
   title                            String?
   // Non-null pins the agent to the top of the sidebar list.
   pinnedAt                         DateTime?
-  progress                         Float                     @default(0.0)
-  status                           AgentStatus               @default(STARTING_UP)
+  progress                         Float                       @default(0.0)
+  progressEstimate                 Json?
+  progressEstimateGeneration       String?
+  taskEstimateRows                 AgentTaskProgressEstimate[]
+  status                           AgentStatus                 @default(STARTING_UP)
   statusMessage                    String?
   // Archive marker. Set by DELETE /api/agents/:id (soft delete); the sidebar's
   // archived view lists rows where this is non-null.
   deletedAt                        DateTime?
-  createdAt                        DateTime                  @default(now())
-  updatedAt                        DateTime                  @updatedAt
+  createdAt                        DateTime                    @default(now())
+  updatedAt                        DateTime                    @updatedAt
   temporalWorkflowId               String?
   temporalFirstExecutionRunId      String?
   workflowReplacementToken         String?
   workflowReplacementState         Json?
   staleTemporalWorkflowId          String?
   staleTemporalFirstExecutionRunId String?
-  temporalWorkflowStartPending     Boolean                   @default(false)
+  temporalWorkflowStartPending     Boolean                     @default(false)
   temporalWorkflowStartLeaseUntil  DateTime?
-  temporalCleanupPending           Boolean                   @default(false)
-  workflowIterationOffset          Int                       @default(0)
+  temporalCleanupPending           Boolean                     @default(false)
+  workflowIterationOffset          Int                         @default(0)
   workflowMaxIterations            Int?
   workflowContextGates             Json?
   workflowStartPhase               String?
   workflowTaskQueue                String?
-  model                            String                    @default("rose-labs/rose-1-ultra")
-  contextSize                      Int                       @default(0)
-  messageCount                     Int                       @default(0)
-  tokenCount                       Int                       @default(0)
-  tokensIn                         Int                       @default(0)
-  tokensOut                        Int                       @default(0)
+  model                            String                      @default("rose-labs/rose-1-ultra")
+  contextSize                      Int                         @default(0)
+  messageCount                     Int                         @default(0)
+  tokenCount                       Int                         @default(0)
+  tokensIn                         Int                         @default(0)
+  tokensOut                        Int                         @default(0)
   parentAgentId                    String?
   tokenInPriceMicrodollars         Int?
   tokenOutPriceMicrodollars        Int?
-  source                           AgentSource               @default(WEB)
-  depth                            Int                       @default(0)
+  source                           AgentSource                 @default(WEB)
+  depth                            Int                         @default(0)
   parentWorkflowId                 String?
-  reasoningMaxTokens               Int                       @default(2048)
+  reasoningMaxTokens               Int                         @default(2048)
   responseSchema                   Json?
   busId                            String?
-  toolsInUse                       String[]                  @default([])
+  toolsInUse                       String[]                    @default([])
+  // In-flight background explore/browser/code tasks this agent owns, written by
+  // its workflow's tree-state PATCH: [{address, type, goal, status, started_at}].
+  // Listed by GET /:id/tree as child nodes `<agentId>/<address>`.
+  backgroundTasks                  Json?
+  // Codex-style address from the root: "/root" or "<parent path>/<task_name>".
+  // Unique among live rows of one tree (enforced on create; agentTaskPath.ts).
+  taskPath                         String?
+  // Agent-to-agent message guard (repoAgentMessageGuard.ts), Prime-style:
+  // {rateTatMs} = this agent's GCRA send-bucket theoretical arrival time (DB clock, ms);
+  // {readAt, taskReadAt: {<task address>: iso}} = newest agent message this agent /
+  // its explore-browser tasks consumed (returned by their own message reads).
+  agentMessaging                   Json?
   structuredResponse               Json?
   proxyCity                        String?
   proxyCountry                     String?
   proxyState                       String?
-  priceLimitCents                  Int                       @default(100)
-  treeCostCents                    Int                       @default(0)
-  ownCostCents                     Float                     @default(0)
-  writeLockEnabled                 Boolean                   @default(true)
-  fastModeCacheEnabled             Boolean                   @default(true)
-  worldModelMode                   String                    @default("real")
-  memoryEnabled                    Boolean                   @default(true)
-  isBenchmark                      Boolean                   @default(false)
+  priceLimitCents                  Int                         @default(100)
+  treeCostCents                    Int                         @default(0)
+  ownCostCents                     Float                       @default(0)
+  writeLockEnabled                 Boolean                     @default(true)
+  fastModeCacheEnabled             Boolean                     @default(true)
+  worldModelMode                   String                      @default("real")
+  memoryEnabled                    Boolean                     @default(true)
+  isBenchmark                      Boolean                     @default(false)
   githubRepoUrl                    String?
-  parent                           Agent?                    @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
-  children                         Agent[]                   @relation("AgentHierarchy")
+  /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
+  /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
+  originDeviceId                   String?
+  /// Owning Project (left-bar grouping, code-session workspace). Null = Home.
+  /// Set on create (owner-validated) or inherited from the parent agent.
+  projectId                        String?
+  project                          Project?                    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  parent                           Agent?                      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
+  children                         Agent[]                     @relation("AgentHierarchy")
   tools                            AgentTool[]
   messages                         Message[]
   toolUsages                       ToolUsage[]
   temporalWorkflowCleanups         TemporalWorkflowCleanup[]
   traceArchiveFinalization         TraceArchiveFinalization?
   purchaseSpends                   PurchaseSpend[]
+  iphoneLeases                     IPhoneLease[]
   verifier                         Verifier?
 
   @@index([userId, deletedAt])
@@ -91,6 +114,8 @@ model Agent {
   @@index([parentAgentId, createdAt])
   @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
+  @@index([projectId])
+  @@index([busId, taskPath])
 }
 
 model TemporalWorkflowCleanup {
@@ -195,6 +220,28 @@ model Message {
 /// Search projection of live messages and finalized R2 trace bundles. Archive
 /// rows deliberately have no FK to Message: archived traces remain searchable
 /// after operational Agent/Message rows are purged.
+/// Per-root trace-archive manifest lease. A row lease (not a transaction-held
+/// advisory lock) so no pooled connection is pinned across R2 storage I/O.
+model TraceArchiveManifestLease {
+  rootAgentId String   @id
+  ownerId     String
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// One row per agent in trajectory search: its goal and title, stored once
+/// instead of on every AgentTrajectorySearch message row.
+model AgentTrajectoryAgent {
+  agentId    String   @id
+  userId     String
+  agentGoal  String   @default("")
+  agentTitle String?
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+}
+
 model AgentTrajectorySearch {
   messageId   String   @id
   userId      String
@@ -366,6 +413,10 @@ model User {
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?
+  /// Largest code-agent sandbox CPU count / memory (GB) this user's code agents
+  /// may resize to; null = the deployment default (C16).
+  codeSandboxMaxCpu           Int?
+  codeSandboxMaxMemoryGb      Int?
   // Per-number WhatsApp deliverability for mirrored lifecycle notifications.
   // null = unknown (try once, learn); true = reachable (received an inbound WA
   // message or a send succeeded); false = not on WhatsApp / undeliverable (skip
@@ -379,6 +430,7 @@ model User {
   credits                     Credit[]
   subscriptions               Subscription?
   cookieBundles               CookieBundle[]
+  browserSiteStates           BrowserSiteState[]
   steelSessionAuths           SteelSessionAuth[]
   mintedAccounts              MintedAccount[]
   passkeyCredentials          PasskeyCredential[]
@@ -390,6 +442,14 @@ model User {
   dataProviderSyncStates      UserDataProviderSyncState[]
   userSnapshot                UserSnapshot?
   userSnapshotRevisions       UserSnapshotRevision[]
+  /// Active published rose_user_ui version (UserUiVersion.id); null = stock UI.
+  activeUiVersionId           String?
+  uiVersions                  UserUiVersion[]
+  localDevices                LocalDevice[]
+  projects                    Project[]
+  previewHandoffCodes         PreviewHandoffCode[]
+  iphoneDevice                IPhoneDevice?
+  iphoneLeases                IPhoneLease[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -541,7 +601,13 @@ model BrowserSession {
   id                     String               @id @default(uuid())
   contextId              String
   agentId                String
-  sessionId              String               @unique
+  sessionId              String?              @unique
+  // Internal owner key: agent:<Agent.id> or home:<BrowserContext.userId>.
+  logicalOwnerKey        String?              @unique
+  // Private immutable encrypted artifact IDs, never public/presigned URLs.
+  baselineCheckpointRef  String?
+  checkpointRef          String?
+  checkpointRevision     Int                  @default(0)
   status                 BrowserSessionStatus @default(ACTIVE)
   debugUrl               String?
   startUrl               String?
@@ -573,6 +639,7 @@ model BrowserSession {
   // on whichever backend instance serves it.
   pausedBrowserState     Json?
   context                BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  siteForks              BrowserSiteFork[]
 
   @@index([contextId])
   @@index([agentId])
@@ -583,7 +650,9 @@ model BrowserSession {
 model ClaudeCodeSession {
   id                       String                  @id @default(uuid())
   agentId                  String
-  sandboxId                String                  @unique
+  // Not unique: a persistent CodeSession resumes the same paused sandbox for
+  // every spawn, so several ClaudeCodeSession rows can share one sandbox.
+  sandboxId                String
   streamUrl                String?
   goal                     String
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
@@ -595,10 +664,113 @@ model ClaudeCodeSession {
   // rate-limited if the CLI output reports "You've hit your limit · resets X:XX (UTC)".
   claudeTokenSource        String?
   claudeTokenIntegrationId String?
+  /// Persistent code session this spawn attached to (null for legacy rows).
+  codeSessionId            String?
+  /// CLI this task ran ('claude' | 'codex'); null for legacy rows. Per task, so a
+  /// usage-limit provider switch (C15) keeps each task's own provider.
+  codeProvider             String?
+  /// Question this code agent asked its spawning Rose agent ({message_id, question, at}).
+  /// The spawn blocked on this task pauses the session and returns the question.
+  awaitingParent           Json?
+  /// Project restored into this session (runProjectStartup reads it on resume).
+  projectId                String?
+  /// Why the task was closed: close | failure | cancel | idle | awaiting_parent |
+  /// usage_limit (null for legacy rows and cleanup closes). The code-agents list
+  /// reports the latest task of a live session as PAUSED for the resumable ones.
+  closeReason              String?
 
   @@index([agentId])
   @@index([sandboxId])
   @@index([status])
+  @@index([codeSessionId])
+}
+
+/// Persistent code-agent workspace owned by one agent for one repo
+/// (userId, ownerAgentId, repoKey). Every code-agent spawn by that agent
+/// resumes its latest session: a paused sandbox when it survived, otherwise
+/// the latest verified checkpoint under user/<userId>/code-sessions/<id>/<seq>/.
+/// Branch model (docs/plans/active/code-agent-persistent-sessions.md §1b): a
+/// root agent's branch is cut from the repo default branch; a sub-agent's is
+/// cut from its parent's branch and merges back into it.
+model CodeSession {
+  id                  String    @id @default(uuid())
+  userId              String
+  rootAgentId         String
+  /// Agent whose code-agent spawns work in this session's worktree.
+  ownerAgentId        String
+  repoUrl             String?
+  /// repoUrl ?? '' so the scope lookup is one indexed equality.
+  repoKey             String    @default("")
+  codeProvider        String    @default("claude")
+  /// ACTIVE (leased by a spawn) | PAUSED | RETIRED
+  state               String    @default("ACTIVE")
+  /// 'e2b' | 'local'
+  sandboxKind         String?
+  sandboxId           String?
+  /// Local fallback only: the persistent session HOME on the backend host.
+  homeDir             String?
+  cliSessionId        String?
+  /// Stable per tool call (Temporal retries of one spawn share it).
+  leaseOwner          String?
+  leaseExpiresAt      DateTime?
+  latestCheckpointSeq Int       @default(0)
+  nextCheckpointSeq   Int       @default(0)
+  lastRepoFacts       Json?
+  /// Branch this session works on (repo sessions only).
+  branch              String?
+  /// Ref the branch was cut from; null = the repo's default branch.
+  baseBranch          String?
+  /// Branch this one merges into; null = the repo's default branch.
+  mergeTarget         String?
+  /// The parent agent's session this branch was cut from (sub-agents).
+  parentCodeSessionId String?
+  /// vCPUs / memory (GB) of the sandbox the session holds; null = created
+  /// before sized sandboxes (the default size). C16.
+  sandboxCpu          Int?
+  sandboxMemoryGb     Int?
+  lastActiveAt        DateTime  @default(now())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  retiredAt           DateTime?
+
+  @@index([userId, ownerAgentId, repoKey, lastActiveAt(sort: Desc)])
+  @@index([userId, state, lastActiveAt])
+}
+
+/// A code agent's request to move its session to another sandbox size (C16).
+model CodeSessionResize {
+  id            String    @id @default(uuid())
+  codeSessionId String
+  userId        String
+  agentId       String
+  /// Task (ClaudeCodeSession) whose CLI asked for the resize.
+  taskId        String?
+  fromCpu       Int
+  fromMemoryGb  Int
+  toCpu         Int
+  toMemoryGb    Int
+  reason        String
+  /// PENDING (recorded) | RUNNING (being applied) | DONE | FAILED
+  status        String    @default("PENDING")
+  /// Task that continues the session after the resize (DONE, or FAILED on the old tier).
+  newTaskId     String?
+  error         String?
+  requestedAt   DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([codeSessionId, requestedAt(sort: Desc)])
+}
+
+/// "New agent in this branch": agentId works in the code session (worktree,
+/// branch, CLI conversation) of sharedWithAgentId instead of its own.
+model CodeSessionShare {
+  agentId           String   @id
+  userId            String
+  sharedWithAgentId String
+  createdAt         DateTime @default(now())
+
+  @@index([sharedWithAgentId])
 }
 
 model GithubRepoAccess {
@@ -613,36 +785,41 @@ model GithubRepoAccess {
 }
 
 model MessageRecord {
-  id         String         @id @default(uuid())
-  personId   String
-  channel    MessageChannel
-  from       String
-  to         String
-  timestamp  DateTime
-  message    String
-  externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  id                 String         @id @default(uuid())
+  personId           String
+  channel            MessageChannel
+  from               String
+  to                 String
+  timestamp          DateTime
+  message            String
+  externalId         String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   googleAccountEmail String? // Source Gmail account for account-scoped deletion
-  createdAt  DateTime       @default(now())
-  person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  createdAt          DateTime       @default(now())
+  /// Owner, denormalized from Person so per-user reads use (userId, timestamp)
+  /// instead of joining every user's rows. The composite relation keeps it equal
+  /// to Person.userId (insert mismatch fails; owner changes cascade).
+  userId             String
+  person             Person         @relation(fields: [personId, userId], references: [id, userId], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
-  @@index([timestamp])
   @@index([personId, timestamp])
-  @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
+  // Every timestamp-ordered read is per user. A global timestamp index lets the
+  // planner walk other users' rows whenever one user owns a large share.
+  @@index([userId, timestamp])
   @@index([googleAccountEmail, createdAt])
 }
 
 model GoogleDataPurge {
-  id          String    @id @default(uuid())
-  userId      String
-  email       String?
+  id              String    @id @default(uuid())
+  userId          String
+  email           String?
   /// Encrypted token kept only until Google confirms revocation.
   revocationToken String?
-  requestedAt DateTime  @default(now())
-  claimedUntil DateTime?
-  processedAt DateTime?
-  createdAt   DateTime  @default(now())
+  requestedAt     DateTime  @default(now())
+  claimedUntil    DateTime?
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
 
   @@index([processedAt, claimedUntil, requestedAt])
   @@index([userId, email])
@@ -685,6 +862,7 @@ model Person {
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
+  @@unique([id, userId]) // Target of MessageRecord's (personId, userId) relation
   @@index([userId])
   @@index([firstName])
   @@index([lastName])
@@ -733,6 +911,52 @@ model Integration {
   @@index([type])
   @@index([status])
   @@index([poolingEnabled, rateLimitedUntil])
+}
+
+/// Live sync progress for ONE connected account of an integration.
+///
+/// Keyed like Integration: `provider` is the Integration `name` slug and
+/// `accountId` the provider-side account ("" = the legacy/default account; the
+/// API spells it "default"). Exactly one row per account, overwritten in place
+/// by each batch, so a 1M-item sync costs O(batches) writes and this table
+/// grows with accounts, never with items. Writes are serialized per account and
+/// coalesced to at most one per second while a run is syncing.
+///
+/// `total` is null when the writer does not know it (indeterminate progress);
+/// `pct` is derived from done/total on the server and is never computed from a
+/// guessed total.
+model IntegrationSyncProgress {
+  id            String    @id @default(uuid())
+  userId        String
+  provider      String
+  accountId     String    @default("")
+  /// Writer-chosen id of the sync run this row describes. A new id starts a new run.
+  runId         String
+  /// Recently superseded run ids (newest first, capped). Late writes for these are stale.
+  retiredRunIds String[]  @default([])
+  /// Optional writer sequence within the run; lower or equal values are stale or replays.
+  seq           Int       @default(0)
+  /// "idle" | "syncing" | "synced" | "failed" | "needs_reconnect"
+  state         String    @default("idle")
+  /// Optional writer phase label (for example "uploading", "parsing"); counts reset per phase.
+  phase         String?
+  done          BigInt?
+  total         BigInt?
+  /// 0-100, one decimal. Derived from done/total; writer-supplied only while total is unknown.
+  pct           Float?
+  unit          String?
+  etaSec        Int?
+  lastError     String?
+  startedAt     DateTime  @default(now())
+  /// When the current run reached a terminal state; null while it is running.
+  finishedAt    DateTime?
+  /// Last time any run of this account finished "synced".
+  lastSyncedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([userId, provider, accountId])
+  @@index([userId, updatedAt])
 }
 
 model ComputeTokenLineageLease {
@@ -860,23 +1084,23 @@ model ComputeGrant {
 }
 
 model UserDataDocument {
-  id              String                 @id @default(uuid())
-  userId          String
-  source          String
+  id                 String                 @id @default(uuid())
+  userId             String
+  source             String
   googleAccountEmail String?
-  externalId      String
-  title           String
-  content         String
-  url             String?
-  metadata        Json?                  @default("{}")
-  contentHash     String
-  sourceUpdatedAt DateTime?
-  lastSeenAt      DateTime               @default(now())
-  deletedAt       DateTime?
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
-  user            User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  snapshotUpdates UserSnapshotRevision[]
+  externalId         String
+  title              String
+  content            String
+  url                String?
+  metadata           Json?                  @default("{}")
+  contentHash        String
+  sourceUpdatedAt    DateTime?
+  lastSeenAt         DateTime               @default(now())
+  deletedAt          DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  user               User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshotUpdates    UserSnapshotRevision[]
 
   @@unique([userId, source, externalId])
   @@index([userId, source])
@@ -920,21 +1144,21 @@ model UserSnapshot {
 }
 
 model UserSnapshotRevision {
-  id         String            @id @default(uuid())
-  userId     String
-  snapshotId String
-  documentId String?
-  source     String
+  id                 String            @id @default(uuid())
+  userId             String
+  snapshotId         String
+  documentId         String?
+  source             String
   googleAccountEmail String?
-  before     Json              @default("{}")
-  after      Json              @default("{}")
-  changes    Json?             @default("{}")
-  model      String?
-  promptKey  String?
-  createdAt  DateTime          @default(now())
-  user       User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  snapshot   UserSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
-  document   UserDataDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  before             Json              @default("{}")
+  after              Json              @default("{}")
+  changes            Json?             @default("{}")
+  model              String?
+  promptKey          String?
+  createdAt          DateTime          @default(now())
+  user               User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshot           UserSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  document           UserDataDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
   @@index([snapshotId])
@@ -1239,21 +1463,24 @@ model GoalHistory {
 }
 
 model ImessageQueue {
-  id           String    @id @default(uuid())
-  userId       String
-  agentId      String
-  phoneNumber  String
-  message      String
-  createdAt    DateTime  @default(now())
-  expiresAt    DateTime?
-  claimedAt    DateTime?
-  claimToken   String?
-  dispatchedAt DateTime?
-  sentAt       DateTime?
-  failedAt     DateTime?
-  lastError    String?
-  attempts     Int       @default(0)
-  failures     Int       @default(0)
+  id                   String    @id @default(uuid())
+  userId               String
+  agentId              String
+  phoneNumber          String
+  message              String
+  createdAt            DateTime  @default(now())
+  expiresAt            DateTime?
+  claimedAt            DateTime?
+  claimToken           String?
+  dispatchedAt         DateTime?
+  sentAt               DateTime?
+  failedAt             DateTime?
+  lastError            String?
+  attempts             Int       @default(0)
+  failures             Int       @default(0)
+  transport            String    @default("mac")
+  phoneBrowserTaskId   String?   @unique
+  phoneSendOperationId String?   @unique
 
   @@index([userId])
   @@index([agentId])
@@ -1385,6 +1612,80 @@ model CookieBundle {
 
   @@unique([userId, authRealm, browserSource, browserProfile])
   @@index([userId, authRealm])
+}
+
+// The user's one browser template (A6), split by website and account. One
+// head row per (user, registrable domain, account). `account` is the template
+// CookieBundle's browserProfile under browserSource "rose_root": every account
+// is an ordinary CookieBundle + Cookie rows that agents fork through the
+// existing injection path, the same way each synced Chrome profile is its own
+// account. Two states of the SAME account resolve by keep-best
+// (providers/browser/worldStateKeepBest.ts); different accounts never compete.
+// `revision` only moves forward, one step per accepted write.
+model BrowserSiteState {
+  id                     String            @id @default(uuid())
+  userId                 String
+  site                   String
+  account                String            @default("")
+  revision               Int               @default(0)
+  authFingerprint        String            @default("")
+  // Latest finite expiry among the head's live auth cookies (null: session only).
+  authExpiresAt          DateTime?
+  // When this exact login was last validated (agent sign-in evidence or a
+  // completed live-view sign-in); null when never validated.
+  validatedAt            DateTime?
+  authVerifiedAt         DateTime?
+  authBundleCiphertext   String?
+  authRevokedAt          DateTime?
+  authTransferability    String?
+  // Age of the head's login, for "ties go to the newer".
+  observedAt             DateTime?
+  // Logins this account already replaced or the user forgot, newest first and
+  // bounded: an unchanged stale copy of one never wins again.
+  supersededFingerprints String[]          @default([])
+  cookieCount            Int               @default(0)
+  lastWriterTaskId       String?
+  lastWriterAgentId      String?
+  lastWriterKind         String?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+  user                   User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  credentialSubscribers  BrowserSiteFork[] @relation("BrowserVerifiedCredentialSubscription")
+
+  @@unique([userId, site, account])
+}
+
+// One row per (browser task, site) the task forked from the template, or whose
+// login it merged into it: the template account its state belongs to, the head
+// revision it started from and the session's own auth fingerprint right after
+// injection. Merge records its outcome here, so a retried close is idempotent.
+model BrowserSiteFork {
+  id                        String            @id @default(uuid())
+  userId                    String
+  browserSessionId          String
+  agentId                   String
+  site                      String
+  account                   String            @default("")
+  credentialAccountKey      String?
+  credentialAppliedRevision Int               @default(0)
+  credentialPendingRevision Int               @default(0)
+  baseRevision              Int
+  baseFingerprint           String
+  baseAuthKeys              String[]          @default([])
+  // Age of the injected login the task started from (its freshest cookie);
+  // null when nothing was injected for the site.
+  baseObservedAt            DateTime?
+  mergedRevision            Int?
+  lastOutcome               String?
+  forkedAt                  DateTime          @default(now())
+  mergedAt                  DateTime?
+  updatedAt                 DateTime          @updatedAt
+  browserSession            BrowserSession    @relation(fields: [browserSessionId], references: [id], onDelete: Cascade)
+  credentialState           BrowserSiteState? @relation("BrowserVerifiedCredentialSubscription", fields: [userId, site, credentialAccountKey], references: [userId, site, account], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([browserSessionId, site])
+  @@index([userId, agentId])
+  @@index([userId, site, credentialAccountKey])
 }
 
 model SteelSessionAuth {
@@ -1709,4 +2010,300 @@ model PlannerMemoryEmbedding {
   updatedAt       DateTime                    @updatedAt
 
   @@index([model])
+}
+
+/// One immutable published `rose_user_ui` bundle for a user. Files live in
+/// storage under `user-ui/<userId>/<id>/<path>`; `manifest` is the validated
+/// `rose-ui.json`. `User.activeUiVersionId` points at the version the app renders.
+model UserUiVersion {
+  id                 String   @id @default(uuid())
+  userId             String
+  manifest           Json
+  fileCount          Int
+  totalBytes         Int
+  createdAt          DateTime @default(now())
+  /// Code agent whose session published this version (publish token `agt`);
+  /// null for user/API-key publishes and rows from before L-APPS2.
+  publishedByAgentId String?
+  /// ClaudeCodeSession.id of that publish (publish token `tsk`); the Apps list
+  /// resolves its code session from this task. Null like publishedByAgentId.
+  publishedByTaskId  String?
+  user               User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+/// One-time sign-in code for a Rose dev account's own code-agent preview
+/// (Rose-in-Rose A1 follow-up, L-APPS2). Only the SHA-256 of the code is
+/// stored. The first presentation burns it (redeemedAt), whatever the outcome;
+/// expiry and the bound preview origin are checked after that. Backend-only
+/// (service role); no client policy.
+model PreviewHandoffCode {
+  id         String    @id @default(uuid())
+  codeHash   String    @unique
+  userId     String
+  taskId     String
+  /// Preview origin resolved server-side from the task (scheme://host[:port]).
+  origin     String
+  expiresAt  DateTime
+  redeemedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+/// A Rose Mac app install that can run local code agents (C14). `id` is minted
+/// and persisted by the Mac app; the first authenticated register binds it to a
+/// user and it can never move to another user. Live connectivity is in-process
+/// (the device's control WebSocket), not stored; `lastSeenAt` is informational.
+/// Backend-only (service role).
+model LocalDevice {
+  id         String   @id
+  userId     String
+  name       String
+  platform   String   @default("darwin")
+  appVersion String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Slack #errors incident owned by one Rose RCA root agent. One row per error
+/// signature per fixed window, so an error storm creates one agent. `agentId`
+/// is minted with the row and the agent is created with that id, which makes
+/// Slack webhook retries idempotent. Backend-only (service role).
+model SlackAutoRcaIncident {
+  id              String    @id @default(uuid())
+  signature       String
+  windowStart     DateTime
+  agentId         String    @unique
+  ownerUserId     String
+  slackChannel    String
+  slackThreadTs   String
+  occurrenceCount Int       @default(1)
+  appendedCount   Int       @default(0)
+  startNotifiedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([signature, windowStart])
+}
+
+/// Slack Events API delivery processed by the auto-RCA webhook. The primary
+/// key dedupes Slack retries; (slackChannel, slackTs) maps an alert thread back
+/// to its incident for reviewer feedback.
+model SlackAutoRcaEvent {
+  eventId      String   @id
+  incidentId   String
+  kind         String
+  slackChannel String
+  slackTs      String
+  createdAt    DateTime @default(now())
+
+  @@index([slackChannel, slackTs])
+  @@index([incidentId])
+}
+
+/// A user's codebase ("Project"): the settings a code session needs to run it
+/// plus its latest codebase-sync snapshot (rose-sync CLI / mac app). Secret-
+/// bearing content (env files, linked config, git artifacts) is stored only as
+/// credential envelopes (RSA-OAEP + AES-256-GCM, CLAUDE_CREDENTIAL_DECRYPTION_KEY).
+model Project {
+  id              String               @id @default(uuid())
+  userId          String
+  name            String
+  repoUrl         String?
+  defaultBranch   String               @default("main")
+  startupScript   String?
+  startupTimeoutS Int                  @default(120)
+  autoWake        Boolean              @default(false)
+  /// Default sandbox size for new code sessions: {cpu, memoryGb}; null = deployment default.
+  sandboxSize     Json?
+  /// Per-project salt for content fingerprints (incremental re-sync).
+  syncSalt        String
+  /// Monotonic snapshot revision; bumped by every accepted sync.
+  syncRevision    Int                  @default(0)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  user            User                 @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  envFiles        ProjectEnvFile[]
+  syncSnapshot    ProjectSyncSnapshot?
+  agents          Agent[]
+
+  @@unique([userId, name])
+  @@index([userId, updatedAt])
+}
+
+/// One secret-bearing file materialized into a project checkout with 0600
+/// permissions. `variables` holds names/descriptions only (searchable); values
+/// exist only inside `encryptedContent`.
+model ProjectEnvFile {
+  id               String   @id @default(uuid())
+  projectId        String
+  /// Repo-relative destination path.
+  path             String
+  description      String?
+  /// "env" (dotenv) | "config" (other linked or secret config file)
+  kind             String   @default("env")
+  /// "managed" (project settings) | "sync" (codebase sync) | "declared" (awaiting sync)
+  source           String   @default("managed")
+  variables        Json     @default("[]")
+  encryptedContent String?
+  fingerprint      String?
+  /// Original symlink target recorded by codebase sync (link structure only).
+  linkTarget       String?
+  sizeBytes        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+}
+
+/// Latest codebase-sync snapshot of a project: non-secret manifest plus
+/// encrypted git artifacts. One row per project, replaced by each revision.
+model ProjectSyncSnapshot {
+  projectId                 String   @id
+  revision                  Int
+  /// Non-secret: git remote/branch/head, symlinks, toolchain, setup hints, source.
+  manifest                  Json
+  encryptedGitBundle        String?
+  gitBundleFingerprint      String?
+  encryptedUncommittedPatch String?
+  patchFingerprint          String?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model AgentTaskProgressEstimate {
+  agentId            String
+  workflowGeneration String
+  taskId             String
+  estimate           Json
+  agent              Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, workflowGeneration, taskId])
+}
+
+// Account-owned persistent device; binding never transfers between accounts.
+model IPhoneDevice {
+  id                       String                @id @default(uuid())
+  userId                   String                @unique
+  providerDeviceId         String                @unique
+  enabled                  Boolean               @default(false)
+  setupState               String                @default("not_started")
+  providerState            String                @default("IDLE")
+  providerEpoch            Int                   @default(0)
+  providerStartKey         String?
+  providerSessionId        String?
+  providerSessionEncrypted String?
+  privateInputEncrypted    String?
+  setupEncrypted           String?
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+  user                     User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  leases                   IPhoneLease[]
+  operations               IPhoneOperation[]
+  acquireIntents           IPhoneAcquireIntent[]
+}
+
+// device row lock -> reconcile -> mutate -> admit smallest ticket, all in one transaction.
+model IPhoneLease {
+  id                 String                @id @default(uuid())
+  deviceId           String
+  userId             String
+  agentId            String
+  requestKey         String
+  browserTaskId      String?
+  status             String                @default("WAITING")
+  ticket             BigInt                @unique @default(autoincrement())
+  // A nullable unique slot also enforces one ACTIVE holder during db-push tests.
+  activeDeviceId     String?               @unique
+  queueDeadlineAt    DateTime
+  leaseExpiresAt     DateTime?
+  controlOwner       String                @default("agent")
+  attentionRequestId String?
+  actionCursor       Int                   @default(0)
+  lastOperationId    String?
+  releaseRequestedAt DateTime?
+  releaseStatus      String?
+  revision           Int                   @default(1)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  device             IPhoneDevice          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user               User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  agent              Agent                 @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  operations         IPhoneOperation[]
+  acquireIntents     IPhoneAcquireIntent[]
+
+  @@unique([deviceId, agentId, requestKey])
+  @@index([deviceId, status, ticket])
+  @@index([deviceId, browserTaskId, ticket])
+  @@index([deviceId, status, queueDeadlineAt])
+  @@index([deviceId, status, leaseExpiresAt])
+  @@index([userId])
+  @@index([agentId])
+}
+
+// A command's durable slot is held through uncertain execution until provider cleanup is proven.
+model IPhoneOperation {
+  id               String       @id @default(uuid())
+  deviceId         String
+  leaseId          String
+  requestKey       String
+  operation        String
+  actor            String
+  cursor           Int          @default(0)
+  inputHash        String
+  requestEncrypted String
+  state            String       @default("CONNECTING")
+  activeDeviceId   String?      @unique
+  providerEpoch    Int
+  deadlineAt       DateTime
+  resultEncrypted  String?
+  errorCode        String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  completedAt      DateTime?
+  device           IPhoneDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  lease            IPhoneLease  @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+
+  @@unique([leaseId, requestKey])
+  @@index([deviceId, state, deadlineAt])
+  @@index([leaseId, createdAt])
+}
+
+// Every accepted acquisition intent retains its original lease, including reuse aliases.
+model IPhoneAcquireIntent {
+  id            String       @id @default(uuid())
+  deviceId      String
+  browserTaskId String
+  requestKey    String
+  leaseId       String
+  createdAt     DateTime     @default(now())
+  device        IPhoneDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  lease         IPhoneLease  @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, browserTaskId, requestKey])
+  @@index([leaseId])
+}
+
+/// Cross-instance ephemeral state (providers/sharedState.ts): short-lived flow
+/// state, dedupe claims and leases that every backend instance must agree on.
+/// Rows expire; writers reap expired rows in small batches.
+model SharedEphemeralState {
+  namespace String
+  key       String
+  value     Json
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@id([namespace, key])
+  @@index([expiresAt])
 }

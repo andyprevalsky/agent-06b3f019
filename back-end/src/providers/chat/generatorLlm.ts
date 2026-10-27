@@ -13,9 +13,9 @@ import {
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
-import { agentFastMode, cacheSet } from '../fastCacheStore';
-import { goalHash } from '../fastCacheNormalizeCore';
-import { contentKey } from '../fastCacheNormalizeKeys';
+import { agentFastMode, cacheSet } from '../demoCacheStore';
+import { goalHash } from '../demoCacheNormalizeCore';
+import { contentKey } from '../demoCacheNormalizeKeys';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { createLogger } from '../logger';
@@ -370,7 +370,7 @@ async function callGeneratorLlmCore(
     agentId: params.agentId,
     attempt: async (attempt) => {
       lastStreamedText = '';
-      const skipFastCache = attempt > 1 && fcCacheWon;
+      const skipDemoCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
       const attemptUsage = emptyChatLlmUsage();
       try {
@@ -387,7 +387,7 @@ async function callGeneratorLlmCore(
         // After a cache-won miss, skip cache so the same invalid JSON is not replayed.
         // A live timeout still hedges cache on retry.
         let stream: AsyncIterable<CompletionChunk>;
-        if (fcKey && fastModeRead && !skipFastCache) {
+        if (fcKey && fastModeRead && !skipDemoCache) {
           stream = createGeneratorCacheStream({
             agentId: params.agentId,
             cacheKey: fcKey,
@@ -400,7 +400,7 @@ async function callGeneratorLlmCore(
           });
         } else {
           if (fcKey) {
-            log.info('fast_cache.chat_generator_write_only', {
+            log.info('demo_cache.chat_generator_write_only', {
               agentId: params.agentId,
               key: fcKey,
             });
@@ -518,9 +518,9 @@ async function callGeneratorLlmCore(
             goalHash: goalHash(cacheGoal),
             value: { json: fullJson },
           }),
-        () => log.info('fast_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey }),
+        () => log.info('demo_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey }),
         (error) =>
-          log.warn('fast_cache.chat_generator_store_failed', {
+          log.warn('demo_cache.chat_generator_store_failed', {
             agentId: params.agentId,
             key: fcKey,
             error: error instanceof Error ? error.message : String(error),

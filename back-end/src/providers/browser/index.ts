@@ -1,3 +1,4 @@
+import { checkpointLogicalBrowser } from './checkpoint';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
@@ -36,6 +37,7 @@ import {
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { persistSignedInBrowserState } from './sessionAuthPersist';
+import { mergeSessionWorldState, type WorldStateMergeReceipt } from './worldState';
 import {
   closeTilionSession,
   createTilionSessionWithContext,
@@ -277,28 +279,55 @@ function tilionKillSwitchRedirect(): boolean {
 export async function closeSession(
   sessionId: string,
   pause = false,
-  currentUrl?: string
-): Promise<void> {
-  await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
-    log.warn('Failed to persist signed-in browser state before close', {
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  currentUrl?: string,
+  worldState: { signedInSites?: string[] } = {}
+): Promise<{ worldState: WorldStateMergeReceipt | null }> {
+  const logical = await prisma.browserSession.findUnique({
+    where: { sessionId },
+    select: { id: true, logicalOwnerKey: true },
   });
+  if (pause && logical?.logicalOwnerKey) await checkpointLogicalBrowser(sessionId);
+  const providerPause = pause && !logical?.logicalOwnerKey;
+  // A logical pause keeps its state private in the checkpoint. Retiring a
+  // logical browser ends that state, so its verified logins are published like
+  // any other browser's: the harvest takes only realms with sign-in evidence on
+  // this exact session.
+  if (!(pause && logical?.logicalOwnerKey))
+    await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
+      log.warn('Failed to persist signed-in browser state before close', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  // Root world state (A6): merge the sites this task forked while its browser
+  // still exists. Best-effort and bounded; never blocks the provider release.
+  const merged = logical?.logicalOwnerKey
+    ? null
+    : await mergeSessionWorldState(sessionId, {
+        signedInSites: worldState.signedInSites,
+      }).catch((error: unknown) => {
+        log.warn('Failed to merge browser world state before close', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      });
   const provider = await providerForSession(sessionId);
   if (provider === 'kernel') {
-    await closeKernelSession(sessionId, pause, currentUrl);
-    return;
+    await closeKernelSession(sessionId, providerPause, currentUrl);
+  } else if (provider === 'browser-use') {
+    await closeBrowserUseSession(sessionId, providerPause, currentUrl);
+  } else if (provider === 'tilion') {
+    await closeTilionSession(sessionId, providerPause, currentUrl);
+  } else {
+    await closeSteelSession(sessionId, providerPause, currentUrl);
   }
-  if (provider === 'browser-use') {
-    await closeBrowserUseSession(sessionId, pause, currentUrl);
-    return;
-  }
-  if (provider === 'tilion') {
-    await closeTilionSession(sessionId, pause, currentUrl);
-    return;
-  }
-  await closeSteelSession(sessionId, pause, currentUrl);
+  if (pause && logical?.logicalOwnerKey)
+    await prisma.browserSession.update({
+      where: { id: logical.id },
+      data: { status: 'PAUSED', closedAt: null },
+    });
+  return { worldState: merged };
 }
 
 export async function resumeSession(
@@ -318,7 +347,11 @@ export async function resumeSession(
       ...providerOptions,
       ...(carriedState !== undefined ? { carriedState } : {}),
     });
-    if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
+    if (
+      previousSessionId !== null &&
+      previousSessionId !== '' &&
+      previousSessionId !== session.sessionId
+    ) {
       await releaseSupersededBrowser({
         taskId,
         previousProvider,
@@ -446,7 +479,11 @@ export async function rotateProxy(
       { ...providerOptions, ...(carriedState !== undefined ? { carriedState } : {}) }
     );
     // An in-place rotate-ip keeps the session id; releasing it would kill the live browser.
-    if (previousSessionId !== '' && previousSessionId !== session.sessionId) {
+    if (
+      previousSessionId !== null &&
+      previousSessionId !== '' &&
+      previousSessionId !== session.sessionId
+    ) {
       await releaseSupersededBrowser({
         taskId,
         previousProvider,
@@ -534,7 +571,8 @@ export async function getBrowserCaptchaTelemetry(taskId: string) {
     where: { id: taskId },
     select: { provider: true, sessionId: true },
   });
-  if (session === null) throw new Error(`Browser task not found: ${taskId}`);
+  if (session === null || session.sessionId === null)
+    throw new Error(`Browser task has no physical session: ${taskId}`);
   if (session.provider === 'browser-use') {
     return {
       provider: 'browser-use' as const,
@@ -556,6 +594,10 @@ export async function closeAllActiveSessions(): Promise<number> {
     where: { status: 'ACTIVE' },
     select: { sessionId: true },
   });
-  await Promise.allSettled(sessions.map((session) => closeSession(session.sessionId)));
+  await Promise.allSettled(
+    sessions.flatMap((session) =>
+      session.sessionId === null ? [] : [closeSession(session.sessionId)]
+    )
+  );
   return sessions.length;
 }

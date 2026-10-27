@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { request, runTest, type TestResult } from './browser-session-test-support';
 /**
  * Black-box tests for /api/browser-session
  *
@@ -46,6 +47,13 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
+import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
+import {
+  runBrowserRootTeardownSavesStateCases,
+  runBrowserTerminalPauseCases,
+} from './browser-session-terminal-pause.cases';
+import { runBrowserResumeCustodyCases } from './browser-session-resume-custody.cases';
+import { runLogicalBrowserCases } from './browser-session-logical.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -60,13 +68,6 @@ const ErrorResponse = z.object({ error: z.string() });
 
 // ==================== TEST INFRASTRUCTURE ====================
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
 interface TestContext {
   accessToken?: string;
   userId?: string;
@@ -74,42 +75,7 @@ interface TestContext {
 
 const ctx: TestContext = {};
 
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function apiKeyHeaders(): Record<string, string> {
-  return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
+const apiKeyHeaders = (): Record<string, string> => ({ 'X-API-Key': API_KEY });
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
@@ -616,8 +582,34 @@ async function testReproducibility_threeSequential() {
 // ==================== RUN ====================
 
 async function runAll() {
+  if (
+    process.argv.includes('--logical-browser-only') ||
+    process.argv.includes('--resume-custody-only')
+  ) {
+    await (
+      process.argv.includes('--logical-browser-only')
+        ? runLogicalBrowserCases
+        : runBrowserResumeCustodyCases
+    )();
+    await prisma.$disconnect();
+    return;
+  }
+  if (process.argv.includes('--pause-checkpoint-only')) {
+    await runBrowserPauseCheckpointCases();
+    await runBrowserTerminalPauseCases();
+    await runBrowserRootTeardownSavesStateCases();
+    console.log(
+      'PASS browser-session pause checkpoint/terminal release (8 cases; fixture provider)'
+    );
+    return;
+  }
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
+  await runBrowserPauseCheckpointCases();
+  await runBrowserTerminalPauseCases();
+  await runBrowserRootTeardownSavesStateCases();
+  await runBrowserResumeCustodyCases();
+  await runLogicalBrowserCases();
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);

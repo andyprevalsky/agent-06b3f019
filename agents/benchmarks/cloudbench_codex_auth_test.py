@@ -682,7 +682,7 @@ def test_explicit_codex_driver_wait_owns_spawn_signal_boundary(tmp_path, handoff
     gate = driver[driver.index("unset CODEX_AUTH_PATH\n") : driver.index("# ── 0. Sanity:")]
     request = tmp_path / "shutdown.request"
     pidfile = tmp_path / "child.pid"
-    setup = 'set -euT\nACTIVE_COMMAND_PID=""\nACTIVE_COMMAND_STARTING=0\nACTIVE_COMMAND_SHUTDOWN_PENDING=0\nACTIVE_COMMAND_SIGNALLED=0\nHEARTBEAT_SLEEP_PID=""\nCODEX_AUTH_ADMISSION_TOKEN=""\nSTACK_PID=""\nTAIL_PID=""\n'
+    setup = 'set -euT\nACTIVE_COMMAND_PID=""\nACTIVE_COMMAND_STARTING=0\nACTIVE_COMMAND_SHUTDOWN_PENDING=0\nACTIVE_COMMAND_SIGNALLED=0\nHEARTBEAT_SLEEP_PID=""\nCODEX_AUTH_ADMISSION_TOKEN=""\nSTACK_PID=""\nTAIL_PID=""\nGUEST_DIAGNOSTICS_PID=""\n'
     setup += 'log() { :; }\nfinish() { exit "$1"; }\npublish_cleanup_ack() { :; }\n'
     setup += function("run_with_heartbeat") + function("request_graceful_shutdown") + function("cleanup_stack")
     # Exact instruction after spawn and before PID publication: a direct signal

@@ -4,7 +4,6 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../../providers/e2b';
-import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import {
@@ -14,6 +13,7 @@ import {
 } from '../../providers/gptCredentials';
 
 import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
+import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -39,24 +39,8 @@ export class GitHubAccessDeniedError extends Error {
   }
 }
 
-export interface CreateSessionParams {
-  agent_id: string;
-  goal: string;
-  attachments?: FilePointer[];
-  github_repo_url?: string;
-  user_id: string;
-  fast_mode_cache_enabled?: boolean;
-  memory_enabled?: boolean;
-  harness_mode?: 'code' | 'rose';
-  rose_api_base_url?: string;
-}
-
-export interface CloseSessionParams {
-  task_id: string;
-  user_id?: string;
-  agent_id?: string;
-  additional_paths?: string[];
-}
+export type { CloseSessionParams, CreateSessionParams } from './types';
+import type { CloseSessionParams, CreateSessionParams } from './types';
 
 async function resolveGithubRepo(
   agentId: string,
@@ -112,22 +96,36 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const { agentFastMode } = await import('../../providers/fastCacheStore');
+  const { agentFastMode } = await import('../../providers/demoCacheStore');
   const fastMode = await agentFastMode(agent_id);
   // Codex proxy is DEMO cache replay — independent of the Fast Mode button.
   const fastModeCacheEnabled = fastMode.enabled;
-  const session = await createCodexCodeSession(
-    agent_id,
-    goal,
-    attachments,
-    normalizedRepoUrl,
-    effectiveUserId,
-    fastModeCacheEnabled,
+  const { session, fields } = await createWithCodeSession(
     {
-      harnessMode: params.harness_mode,
-      roseApiBaseUrl: params.rose_api_base_url,
-      memoryEnabled: params.memory_enabled,
-    }
+      agentId: agent_id,
+      userId: effectiveUserId,
+      repoUrl: normalizedRepoUrl ?? null,
+      codeProvider: 'codex',
+      codeSessionId: params.code_session_id,
+      leaseOwner: params.lease_owner,
+      baseBranch: params.base_branch ?? null,
+    },
+    (codeSession, handoff) =>
+      createCodexCodeSession(
+        agent_id,
+        handoff !== null ? `${handoff}\n\n${goal}` : goal,
+        attachments,
+        normalizedRepoUrl,
+        effectiveUserId,
+        fastModeCacheEnabled,
+        {
+          harnessMode: params.harness_mode,
+          roseApiBaseUrl: params.rose_api_base_url,
+          memoryEnabled: params.memory_enabled,
+          freshConversation: params.fresh_conversation === true,
+        },
+        codeSession
+      )
   );
 
   return {
@@ -136,6 +134,9 @@ export async function createSession(params: CreateSessionParams) {
     ws_url: session.wsUrl,
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
+    ...fields,
+    // Live dev-server preview URL (Rose dev accounts, A1); null otherwise.
+    preview_url: session.previewUrl ?? null,
   };
 }
 
@@ -144,13 +145,16 @@ export async function closeSession(params: CloseSessionParams) {
     params.task_id,
     params.user_id,
     params.agent_id,
-    params.additional_paths
+    params.additional_paths,
+    { reason: params.reason }
   );
 
   return {
     status: 'CLOSED' as const,
     output_files: result.outputFiles,
     usage: result.usage,
+    code_session: result.codeSession ?? null,
+    ...(result.handoff !== undefined ? { handoff: result.handoff } : {}),
   };
 }
 

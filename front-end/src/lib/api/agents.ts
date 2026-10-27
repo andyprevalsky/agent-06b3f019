@@ -1,6 +1,14 @@
+import { hydrateProgressEstimate } from '../progressEstimate';
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 import { getAdminAccessToken } from '../impersonation';
-import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
+import type {
+  Agent,
+  AgentDetail,
+  AgentDetailResponse,
+  CreateAgentPayload,
+  Message,
+  Tool,
+} from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
 import { benchmarkShareToken } from '../benchmarkShare';
 
@@ -33,7 +41,7 @@ export async function getAllAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 /** Search active chats by title, goal, or message content. */
@@ -50,7 +58,7 @@ export async function searchAgents(query: string, signal?: AbortSignal): Promise
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Get agent details with messages
@@ -74,6 +82,24 @@ export async function getAgent(
   }
 
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
+}
+
+/** Read one committed message by ID (bounded hydration of a deferred realtime INSERT). */
+export async function getAgentMessage(
+  agentId: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<Message> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/agents/${agentId}/messages/${encodeURIComponent(messageId)}`,
+    { headers: getAuthHeaders(), signal },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch message (${response.status})`);
+  }
+  const { message } = (await response.json()) as { message: Message };
+  if (message.message_id !== messageId) throw new Error('Fetched message identity mismatch');
+  return message;
 }
 
 export async function getBenchmarkAgentPreview(
@@ -111,6 +137,21 @@ export async function getBenchmarkSharedAgent(
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
+/** `share_code_session_with` named an agent that does not exist (or another user's): 404. */
+export const CODE_SESSION_SHARE_TARGET_NOT_FOUND = 'CODE_SESSION_SHARE_TARGET_NOT_FOUND';
+
+/** A rejected POST /api/agents, with the backend's HTTP status and error `code`. */
+export class CreateAgentError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+  ) {
+    super(message);
+    this.name = 'CreateAgentError';
+  }
+}
+
 // Create a new agent
 export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   const headers = getAuthHeaders();
@@ -123,8 +164,12 @@ export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to create agent');
+    const error = (await response.json()) as { error?: string; code?: string };
+    throw new CreateAgentError(
+      error.error || 'Failed to create agent',
+      response.status,
+      typeof error.code === 'string' ? error.code : undefined,
+    );
   }
 
   return await response.json();
@@ -162,7 +207,7 @@ export async function getArchivedAgents(): Promise<Agent[]> {
   }
 
   const data = await response.json();
-  return data.agents;
+  return data.agents.map(hydrateProgressEstimate);
 }
 
 // Restore an archived agent (does not resume its run)

@@ -63,9 +63,16 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
-    repeatable_cache_read_input_tokens: int = 0
-    repeatable_cache_creation_input_tokens: int = 0
-    repeatable_cache_hit_pct: float = 0.0
+    # Prompt-cache share over cache-sequenced calls (llm_usage.aggregate_prompt_cache_share).
+    prompt_cache_read_input_tokens: int = 0
+    prompt_cache_creation_input_tokens: int = 0
+    prompt_cache_uncached_input_tokens: int = 0
+    prompt_cache_share_pct: float = 0.0
+    prompt_cache_call_count: int = 0
+    # Cache lanes that served the sequenced calls (llm_usage.cache_route); selects the floor.
+    prompt_cache_routes: list[str] = field(default_factory=list)
+    # Pre-run static-prefix warmup receipt (benchmarks.cache_warmup); never part of the share.
+    prompt_cache_warmup: Optional[dict] = None
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0
@@ -83,6 +90,10 @@ class TaskResult:
     # Agent lifecycle status is a snapshot (for example PAUSED after a passed
     # abandonment check), not the evaluator or harness outcome.
     benchmark_status: Optional[str] = None
+    # Post-verdict owned-resource cleanup that could not be verified (provider
+    # sessions, payments). A harness/cleanup failure of the run: it fails CI and the
+    # owned batch, but never rewrites the evaluator's verdict above.
+    cleanup_failure: Optional[str] = None
 
 
 @dataclass
@@ -119,6 +130,7 @@ class BenchmarkRun:
             "total": total,
             "passed": passed,
             "failed": failed,
+            "cleanup_failures": sum(1 for r in self.task_results if getattr(r, "cleanup_failure", None)),
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
             "pass_rate": round(passed / eligible, 2) if eligible > 0 else 0.0,

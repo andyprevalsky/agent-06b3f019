@@ -43,6 +43,7 @@ import {
 } from '../generationQueueCutover';
 import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from '../workflowGeneration';
 import { SmsSupervisorToolCallSchema } from './schema';
+import { nativePhoneReplyRefusal } from './nativePhoneReply';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -140,7 +141,11 @@ export async function dispatchToolCall(
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
 
-  log.info('Dispatching tool', { tool, args: JSON.stringify(args), userId });
+  const loggedArgs =
+    tool === 'reply_to_agent'
+      ? { hasAttentionRequest: args.attention_request_id !== undefined }
+      : args;
+  log.info('Dispatching tool', { tool, args: JSON.stringify(loggedArgs), userId });
 
   try {
     const parsed = SmsSupervisorToolCallSchema.safeParse(toolCall);
@@ -215,7 +220,7 @@ export async function dispatchToolCall(
     const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Tool dispatch failed', {
       tool,
-      args: JSON.stringify(args),
+      args: JSON.stringify(loggedArgs),
       error: errorMsg,
       stack: error instanceof Error ? error.stack : undefined,
       durationMs: Date.now() - startTime,
@@ -307,6 +312,8 @@ async function validateReplyToAgent(
       error: `No agent found matching "${args.agent_id_or_prefix}"`,
     };
   }
+  const refusal = await nativePhoneReplyRefusal(userId, agent.id, args.attention_request_id);
+  if (refusal) return refusal;
   // A rejection is only expressible as a resolved attention request: without an
   // `attention_request_id` the commit signals the bare `message`, which
   // `receive_user_response` reads as ordinary feedback. Accepting this pair
@@ -471,6 +478,9 @@ async function commitReplyToAgent(
       error: `Agent ${agentId.substring(0, 6)} no longer exists`,
     };
   }
+
+  const refusal = await nativePhoneReplyRefusal(userId, agent.id, attention_request_id);
+  if (refusal) return refusal;
 
   log.info('Replying to agent', {
     phase: 'reply',

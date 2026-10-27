@@ -394,6 +394,157 @@ def test_general_purpose_faulty_tool_retry_warns_recursion():
     assert "circumvent faulty tools" not in MAIN_SYSTEM_PROMPT
 
 
+def test_code_agent_advertises_rose_user_ui_and_agent_display():
+    """Rose Desktop root and planner learn that coding and Rose-app changes belong to a code agent.
+
+    The code sandbox holds the user's rose_user_ui and its `rose-ui publish`
+    CLI. Without saying so, the root explored and drove a browser against
+    roselabs.ai to change the user's Rose background, and a game was returned
+    only as a file. Execute-phase tools see the `type` description; the planner
+    also sees the spawn_agent prompt. Both must advertise the capability, and
+    the display tool must remain declared and name the Agent Display panel. These are Rose
+    Desktop surfaces (utils.rose_desktop), so the flagged variants carry them.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts.spawn_agent import PROMPT_ROSE_DESKTOP as PROMPT
+    from utils.tool_schemas import (
+        INLINE_VIEW_DESCRIPTION,
+    )
+    from utils.tool_schemas import (
+        SendMessageToUserExecutePhaseRoseDesktopTool as SendMessageToUserExecutePhaseTool,
+    )
+    from utils.tool_schemas import (
+        SpawnAgentRoseDesktopTool as SpawnAgentTool,
+    )
+
+    type_desc = " ".join((SpawnAgentTool.model_fields["type"].description or "").split())
+    for phrase in (
+        "Delegate all code writing to it",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
+        "user's Rose app UI (rose_user_ui)",
+        "how Rose looks or behaves for the user",
+        "in Agent Display",
+        "rose display",
+    ):
+        assert phrase in type_desc, f"spawn_agent type description lost {phrase!r}"
+
+    code_line = next(line for line in PROMPT.splitlines() if line.startswith("- code:"))
+    for phrase in (
+        "give it all code writing",
+        "except one HTML page you can write yourself, such as a chart or scorecard, which you show with display html",
+        "user's Rose app UI",
+        "show it in Agent Display using rose display",
+        "return the display receipt",
+    ):
+        assert phrase in code_line, f"spawn_agent prompt code line lost {phrase!r}"
+    # A chart or scorecard is the caller's own display html: no clause routes it to the code agent.
+    for text in (type_desc, code_line):
+        assert text.count("chart") == 1 and "visual" not in text, text
+    from tools.prompts.display import PROMPT_ROSE_DESKTOP as display_prompt
+
+    assert "tool is named display" in display_prompt
+    assert "Agent Display" in display_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    assert "display" in EXECUTE_PHASE_TOOLS
+    assert "Anthropic's Claude Code" not in code_line, "code agents also run Codex CLI"
+
+    planner_tools = get_planner_tools_description(rose_desktop=True)
+    assert code_line in planner_tools, "planner must render the spawn_agent code line"
+    assert "user's Rose app UI (rose_user_ui)" in " ".join(planner_tools.split())
+
+    assert "a code agent published" in INLINE_VIEW_DESCRIPTION
+    inline_field = SendMessageToUserExecutePhaseTool.model_fields["inline_view"]
+    assert inline_field.description == INLINE_VIEW_DESCRIPTION
+
+
+STOCK_SPAWN_CODE_LINE = (
+    "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
+    "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
+    "completion. The task should be tightly scoped and self-sufficient."
+)
+ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
+
+
+def test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces():
+    """Unflagged accounts: the planner tool text and tool prompts carry no new-UI surface.
+
+    The stock spawn_agent `code` line is main's line with the persistent-sandbox
+    wording (W5b); display documents inline media only. The Rose Desktop prompt
+    differs from the stock one only in that `code` line.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts import TOOL_PROMPTS, get_tool_prompts, tool_prompts_for
+    from tools.prompts.display import PROMPT as DISPLAY_PROMPT
+    from tools.prompts.display import PROMPT_ROSE_DESKTOP as DISPLAY_PROMPT_ROSE_DESKTOP
+    from tools.prompts.spawn_agent import PROMPT, PROMPT_ROSE_DESKTOP
+
+    stock = get_planner_tools_description()
+    assert stock == get_planner_tools_description(rose_desktop=False), "the default is the stock text"
+    for term in ROSE_DESKTOP_PROMPT_TERMS:
+        assert term not in stock, f"stock planner tools mention {term!r}"
+    assert STOCK_SPAWN_CODE_LINE in stock.splitlines()
+
+    assert tool_prompts_for() == dict(TOOL_PROMPTS) == tool_prompts_for(rose_desktop=False)
+    assert get_tool_prompts()["spawn_agent"] == PROMPT
+    for name, prompt in TOOL_PROMPTS.items():
+        for term in ROSE_DESKTOP_PROMPT_TERMS:
+            assert term not in prompt, f"stock {name} prompt mentions {term!r}"
+
+    stock_lines, flagged_lines = PROMPT.splitlines(), PROMPT_ROSE_DESKTOP.splitlines()
+    assert len(stock_lines) == len(flagged_lines)
+    changed = [(a, b) for a, b in zip(stock_lines, flagged_lines) if a != b]
+    assert len(changed) == 1 and changed[0][0] == STOCK_SPAWN_CODE_LINE, changed
+    assert DISPLAY_PROMPT_ROSE_DESKTOP.startswith(DISPLAY_PROMPT + "\n- The tool is named display")
+    assert "pinned" not in DISPLAY_PROMPT_ROSE_DESKTOP, "display never asks a question"
+
+    flagged = get_planner_tools_description(rose_desktop=True)
+    assert flagged != stock
+    assert tool_prompts_for(rose_desktop=True)["display"] == DISPLAY_PROMPT_ROSE_DESKTOP
+    assert "inline_view" in flagged
+    # The planner lists only DAG-assignable tools (PLANNER_EXECUTE_TOOLS); display is one,
+    # so the flagged planner text carries its Rose Desktop prompt and the stock one does not.
+    # Neither offers a pinned question.
+    assert "Agent Display" in flagged and "Agent Display" not in stock
+    assert 'placement "pinned"' not in flagged and 'placement "pinned"' not in stock
+
+
+async def test_planner_tools_description_follows_the_workflow_account():
+    """set_plan renders the planner tool text for the workflow's own account."""
+    import datetime
+    from unittest.mock import patch
+
+    from domains.set_plan.handler import SetPlanManager
+
+    captured: list = []
+
+    def fake_description(*, rose_desktop: bool = False) -> str:
+        captured.append(rose_desktop)
+        return "tools"
+
+    async def fake_attempt(**kwargs):
+        raise RuntimeError("stop after the description is built")
+
+    class _Wf:
+        context: list = []
+        user_context_section = ""
+        output_schema = None
+
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+    for user_id in ("1f85ff25-6e29-4c1b-8739-f917bd101a30", "00000000-0000-4000-8000-000000000001", None):
+        with (
+            patch("domains.set_plan.handler.get_planner_tools_description", fake_description),
+            patch("domains.set_plan.handler.run_planner_attempt", fake_attempt),
+            patch("domains.set_plan.handler.workflow") as wf_mod,
+        ):
+            wf_mod.now.return_value = datetime.datetime(2026, 10, 20)
+            async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
+                pass
+    assert captured == [True, True, False]
+
+
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -423,14 +574,19 @@ def test_planner_spawn_aliases_documented_in_prompt():
 
 
 def test_attempt_completion_base_schema_has_no_result_field():
-    """AttemptCompletionTool must not expose result in verified flows."""
+    """Verified attempt_completion takes only an OPTIONAL authored result.
+
+    The verifier reads it as the agent's own writing (a draft, message or
+    summary), never as proof (tree-feedback-routing b056f571: a drafter had no
+    other way to show its draft). It must never be required, so a verified
+    loop is never forced to restate tool evidence as a payload.
+    """
     from utils.tool_schemas import AttemptCompletionTool
 
-    fields = set(AttemptCompletionTool.model_fields.keys())
-    assert fields == {"tool"}, (
-        f"AttemptCompletionTool.model_fields = {fields}, expected {{'tool'}}. "
-        f"`result` must be injected only for skip_verification=true loops."
-    )
+    fields = AttemptCompletionTool.model_fields
+    assert set(fields) == {"tool", "result"}, f"AttemptCompletionTool.model_fields = {set(fields)}"
+    assert not fields["result"].is_required(), "verified attempt_completion.result must stay optional"
+    assert "own work" in (fields["result"].description or ""), fields["result"].description
 
 
 def test_attempt_completion_result_schema_is_skip_verification_variant():
@@ -569,6 +725,9 @@ def _iter_production_py_files():
             continue
         rel = str(path.relative_to(AGENTS_ROOT))
         if any(s in rel for s in skip_path_substrings):
+            continue
+        # Top-level agents/scripts/ holds offline maintenance tools (documented above).
+        if rel.startswith("scripts/"):
             continue
         yield path
 
@@ -835,8 +994,9 @@ def test_check_progress_is_canonical_verifier_entrypoint():
 
 def test_browser_use_v3_actions_in_catalog():
     """Every action listed in the v3 system prompt must exist in BROWSER_USE_TOOLS."""
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     missing = set(AVAILABLE_ACTIONS) - set(BROWSER_USE_TOOLS.keys())
     assert not missing, (
@@ -865,8 +1025,9 @@ def test_browser_use_catalog_matches_v3_actions_or_is_exempt():
     it in the v3 executor (preferred) or add it to the exempt set with a
     code comment explaining why.
     """
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     catalog_only = set(BROWSER_USE_TOOLS.keys()) - set(AVAILABLE_ACTIONS) - _BROWSER_CATALOG_ONLY
     assert not catalog_only, (
@@ -1008,6 +1169,24 @@ def test_verifier_static_prompt_clears_anthropic_cache_threshold():
         f"safe threshold for Anthropic's 1024-token cache write minimum. "
         f"Add content or accept that every verifier call writes a fresh cache."
     )
+
+
+def test_verifier_credits_completed_sub_agent_results_as_evidence():
+    """A delegating agent's verifier treats a child's reported findings as evidence.
+
+    The execute verifier never receives a sub-agent's own tool rows (they are
+    scoped out of the parent's context), so the child's spawn_agent result /
+    FINAL_ANSWER notification is the only evidence a delegating agent can have.
+    Replay of the explore-agent-mid-run-message b1cff031 verifier call: with
+    the old "do not treat this as evidence for a positive fact" wording it
+    scored 0.0 twice out of three ("only the agent's summary"); with this rule
+    it scored 1.0 three out of three.
+    """
+    from utils.prompts import _VERIFIER_STATIC_PROMPT
+
+    assert "grounded evidence for positive facts" in _VERIFIER_STATIC_PROMPT
+    assert "sub-agent's own tool\n   calls are never shown to you" in _VERIFIER_STATIC_PROMPT
+    assert "Do not treat this as evidence for a positive fact" not in _VERIFIER_STATIC_PROMPT
 
 
 # ============================================================================
@@ -1351,6 +1530,42 @@ _BANNED_MARKETING_ADJECTIVES = (
 )
 
 
+_ENV_SIZE_SKILL = (
+    AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-skills" / "change-environment-size" / "SKILL.md"
+)
+
+
+def test_change_environment_size_skill_guards_against_runaways():
+    """C16: the change-environment-size skill says when NOT to resize, not only when to.
+
+    A bigger sandbox hides a runaway process, an infinite loop or a leak. The
+    skill must send the code agent to kill, fix or clean up first, to look at
+    `rose env status` before asking, and to downsize after the heavy phase.
+    It is read by the code-agent CLI, so it follows the prompt style rules.
+    """
+    text = _ENV_SIZE_SKILL.read_text()
+    front = re.match(r"^---\nname: change-environment-size\ndescription: (Use [^\n]+)\n---\n", text)
+    assert front, "SKILL.md needs frontmatter: name change-environment-size and a one-line 'Use ...' description"
+    assert len(front.group(1)) < 160, f"description must stay one short line: {front.group(1)!r}"
+    lower = text.lower()
+    for needle in (
+        "## when to use",
+        "## when not to use",
+        "runaway",
+        "leak",
+        "kill",
+        "rose env status",
+        "rose env size",
+        "--reason",
+        "downsize",
+        "continues automatically",
+    ):
+        assert needle in lower, f"SKILL.md must cover {needle!r}"
+    assert "\u2014" not in text and "\u2013" not in text, "no em-dashes or en-dashes in the skill"
+    for phrase in _BANNED_HEDGE_PHRASES + _BANNED_BRAND_TERMS:
+        assert phrase not in lower, f"banned phrase {phrase!r} in the skill"
+
+
 def test_no_banned_phrases_in_prompt_strings():
     """Banned phrases must not appear in prompt-source string literals.
 
@@ -1485,8 +1700,9 @@ def test_no_all_caps_underlined_section_labels_in_prompts():
     asciidoc/RST convention that escaped from the historical prompt files;
     removed during the audit.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         EXPLORE_AGENT_SYSTEM_PROMPT,
         build_planner_system_prompt,
@@ -1608,8 +1824,9 @@ def test_system_prompt_boundary_marker_present():
     only included here so a regression that adds dynamic data without a
     boundary trips this test.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
         build_planner_system_prompt,
@@ -1674,8 +1891,9 @@ def test_all_caps_marker_count_under_limit():
     limit is generous to allow legitimate correctness gates without forcing
     a constant grooming chore.
     """
-    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
     from utils.prompts import (
         EXPLORE_AGENT_SYSTEM_PROMPT,
         build_planner_system_prompt,
@@ -1836,7 +2054,8 @@ def test_tool_prompts_open_with_declarative_sentence():
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
     "grep": 1600,
-    "spawn_agent": 3600,
+    # +50: explore's one-line code-inspection hint (a code_session_id → inspect_code).
+    "spawn_agent": 3650,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100
@@ -1932,8 +2151,9 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
 
 def test_browser_prompt_says_commit_click_requests_approval():
     """The browser prompt states that the commit click is the approval request."""
-    from browser_tools.schemas import AVAILABLE_ACTIONS
     from providers.rose.browser_use import build_browser_use_system_prompt
+
+    from browser_tools.schemas import AVAILABLE_ACTIONS
 
     prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
     assert "Clicking the commit control is how approval is requested; no tool requests it." in prompt, (
@@ -1968,6 +2188,33 @@ def test_parent_prompts_route_browser_approval_through_commit_click():
             "click. Parents then write 'do not click Place order' and the approval prompt never fires."
         )
 
+
+
+# ============================================================================
+# 24. Browser sign-up identity facts
+# ----------------------------------------------------------------------------
+# WHY: the spawn_agent goal description said spawned agents get no context and
+# to include names/addresses, so the root restated the user's email in a
+# browser goal; the browser signed up with an inbox it cannot read and later
+# handed the unreadable code to a human (run e0c401c1). Browser agents receive
+# the profile and Auth Options themselves, and sign-up identities come from
+# Auth Options.
+# ============================================================================
+
+
+def test_browser_identity_facts_in_spawn_goal_and_auth_contract():
+    from utils.browser_auth_contract import build_authentication_contract
+    from utils.tool_schemas import SpawnAgentTool, SpawnAgentToolNoGP, SpawnExploreAgentTool
+
+    note = "a browser agent also receives the user's profile"
+    for tool in (SpawnAgentTool, SpawnAgentToolNoGP):
+        goal = tool.model_json_schema()["properties"]["goal"]["description"]
+        assert note in goal and "do not restate the user's profile" in goal, tool.__name__
+    explore_goal = SpawnExploreAgentTool.model_json_schema()["properties"]["goal"]["description"]
+    assert note not in explore_goal
+    rule = "Sign in or sign up only with identities listed in Auth Options."
+    for recover in (True, False):
+        assert rule in build_authentication_contract(recover_enabled=recover)
 
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
@@ -2124,6 +2371,11 @@ async def run_all_tests():
         test_verifier_static_prompt_clears_anthropic_cache_threshold,
     )
 
+    r.record(
+        "verifier_credits_completed_sub_agent_results_as_evidence",
+        test_verifier_credits_completed_sub_agent_results_as_evidence,
+    )
+
     # 9. TS-side static prompts have no dynamic dates (E1)
     r.record(
         "ts_prompt_files_have_no_dynamic_dates_in_system_blocks",
@@ -2138,6 +2390,10 @@ async def run_all_tests():
     r.record(
         "no_banned_phrases_in_prompt_strings",
         test_no_banned_phrases_in_prompt_strings,
+    )
+    r.record(
+        "change_environment_size_skill_guards_against_runaways",
+        test_change_environment_size_skill_guards_against_runaways,
     )
 
     # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)
@@ -2210,6 +2466,27 @@ async def run_all_tests():
     r.record(
         "parent_prompts_route_browser_approval_through_commit_click",
         test_parent_prompts_route_browser_approval_through_commit_click,
+    )
+
+    # 22. Code agents advertise rose_user_ui + inline views to root and planner
+    r.record(
+        "code_agent_advertises_rose_user_ui_and_inline_views",
+        test_code_agent_advertises_rose_user_ui_and_agent_display,
+    )
+
+    # 23. Rose Desktop gate: stock accounts get no new-UI prompt text
+    r.record(
+        "stock_planner_and_tool_prompts_omit_rose_desktop_surfaces",
+        test_stock_planner_and_tool_prompts_omit_rose_desktop_surfaces,
+    )
+    await r.record_async(
+        "planner_tools_description_follows_the_workflow_account",
+        test_planner_tools_description_follows_the_workflow_account,
+    )
+    # 24. Browser sign-up identity facts (RCA Q3b, run e0c401c1)
+    r.record(
+        "browser_identity_facts_in_spawn_goal_and_auth_contract",
+        test_browser_identity_facts_in_spawn_goal_and_auth_contract,
     )
     teardown_mock()
     return r.all_passed

@@ -6,6 +6,10 @@ BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
 UTC_CLEANUP_MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260724002500_temporal_cleanup_utc_grace/migration.sql"
 TRAJECTORY_SQL="$BACKEND_DIR/prisma/migrations/20260929120000_agent_trajectory_search/migration.sql"
+# Prisma cannot model trigram indexes, so `db push` never creates them locally.
+# Supersedes the trajectory trigger above (goals stored once per agent).
+TRAJECTORY_AGENT_SQL="$BACKEND_DIR/prisma/migrations/20261026210002_agent_trajectory_agent/migration.sql"
+TOOL_SIDE_EFFECT_TRGM_SQL="$BACKEND_DIR/prisma/migrations/20261026210001_tool_side_effect_operation_key_trgm/migration.sql"
 
 validate_local_database_url() {
   local variable_name=$1
@@ -17,6 +21,8 @@ validate_local_database_url() {
   node -e '
     const parsed = new URL(process.argv[1]);
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+    // libpq/Prisma prefer a `host`/`hostaddr` query parameter over the authority.
+    if (["host", "hostaddr"].some((key) => parsed.searchParams.has(key))) process.exit(1);
   ' "$value" || {
     echo "Refusing local runtime SQL hooks: $variable_name is not a localhost database" >&2
     exit 2
@@ -55,4 +61,7 @@ WORKFLOW_SQL="$(awk '
   printf '%s\n' "$WORKFLOW_SQL"
   cat "$UTC_CLEANUP_MIGRATION_SQL"
   cat "$TRAJECTORY_SQL"
+  cat "$TRAJECTORY_AGENT_SQL"
+  # CONCURRENTLY cannot run inside this hook's single transaction.
+  sed 's/INDEX CONCURRENTLY/INDEX/' "$TOOL_SIDE_EFFECT_TRGM_SQL"
 } | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction

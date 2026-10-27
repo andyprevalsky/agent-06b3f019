@@ -1,5 +1,10 @@
+import { createNative, readNative } from './service.native';
+import type { NativePhoneInput } from '../../providers/nativePhoneAttention';
 import { canonicalAuthRealm } from '../../providers/authRealm';
-import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import {
+  completeAuthAssistanceForUser,
+  type AuthAssistanceCompletionDependencies,
+} from '../../providers/authAssistanceCompletion';
 import { createLogger } from '../../providers/logger';
 import { notifyAuthAssistance } from '../../providers/smsSupervisor/outboundEvents';
 import { getBrowserSessionHealth } from '../../providers/browser';
@@ -80,6 +85,7 @@ export async function createAuthAssistanceRequest(
   userId: string,
   input: CreateAuthAssistanceInput
 ) {
+  if (input.targetKind === 'iphone') return createNative(userId, input as NativePhoneInput);
   const agent = await repo.findAgentForUser(input.agentId, userId);
   if (agent === null) throw new NotFoundError('Agent not found');
 
@@ -114,7 +120,9 @@ export async function createAuthAssistanceRequest(
   // Tilion view tokens are minted here, never taken from the worker: it sends a
   // redacted browserUrl, and the stored debugUrl expires after 1800 s.
   const tilionViewUrl =
-    session?.provider === 'tilion' ? await getTilionLiveViewUrl(session.sessionId) : undefined;
+    session?.provider === 'tilion' && session.sessionId !== null
+      ? await getTilionLiveViewUrl(session.sessionId)
+      : undefined;
   const handoff = handoffForMode(input.mode, steelSessionId, tilionViewUrl ?? session?.debugUrl);
   const request = await repo.createRequest({
     ...input,
@@ -146,6 +154,8 @@ export async function createAuthAssistanceRequest(
 }
 
 export async function getAuthAssistanceRequest(id: string, userId: string) {
+  const native = await readNative(id, userId);
+  if (native !== null) return native;
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
@@ -187,6 +197,8 @@ async function liveSameSessionHandoff(
 }
 
 export async function refreshAuthAssistanceSession(id: string, userId: string) {
+  const native = await readNative(id, userId, true);
+  if (native !== null) return native;
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
@@ -215,7 +227,7 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     throw new BadRequestError('Browser context is not available for this request');
   const liveSteelSessionId = session.sessionId;
 
-  if (liveSteelSessionId.startsWith('local-')) {
+  if (liveSteelSessionId?.startsWith('local-') === true) {
     const liveViewUrl = interactiveDebugUrl(session.debugUrl);
     return {
       request: serializeRequest(request),
@@ -227,8 +239,8 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   }
 
   /* c8 ignore start -- non-local Steel health/resume path requires Steel SDK/session */
-  let sameSessionAvailable = session.status === 'ACTIVE';
-  if (sameSessionAvailable) {
+  let sameSessionAvailable = session.status === 'ACTIVE' && liveSteelSessionId !== null;
+  if (sameSessionAvailable && liveSteelSessionId !== null) {
     try {
       const health = await getBrowserSessionHealth(liveSteelSessionId);
       const hasEnoughTtl = health.ttlMs === null || health.ttlMs > REFRESH_TTL_BUFFER_MS;
@@ -243,8 +255,12 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
     }
   }
 
-  const sameSessionHandoff = () => liveSameSessionHandoff(request, session);
-  if (sameSessionAvailable) return sameSessionHandoff();
+  // sessionId is null for a logical browser that never materialized a provider session.
+  const sameSessionHandoff = (sessionId: string) =>
+    liveSameSessionHandoff(request, { ...session, sessionId });
+  if (sameSessionAvailable && liveSteelSessionId !== null) {
+    return sameSessionHandoff(liveSteelSessionId);
+  }
 
   let resumed: Awaited<ReturnType<typeof resumeBrowserSession>>;
   try {
@@ -252,7 +268,9 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   } catch (error) {
     // A live (only expiring) Tilion browser holds state only the worker can
     // capture; replacing it here would lose that state, so hand off the same one.
-    if (error instanceof TilionUncarriedStateError) return sameSessionHandoff();
+    if (error instanceof TilionUncarriedStateError && liveSteelSessionId !== null) {
+      return sameSessionHandoff(liveSteelSessionId);
+    }
     throw error;
   }
   const liveViewUrl = interactiveDebugUrl(resumed.debug_url);
@@ -273,8 +291,19 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   /* c8 ignore stop */
 }
 
-export async function completeAuthAssistanceRequest(id: string, userId: string) {
-  const result = await completeAuthAssistanceForUser(id, userId);
+export async function completeAuthAssistanceRequest(
+  id: string,
+  userId: string,
+  userMessage?: string,
+  dependencies?: Partial<AuthAssistanceCompletionDependencies>
+) {
+  const result = await completeAuthAssistanceForUser(
+    id,
+    userId,
+    new Date(),
+    dependencies,
+    userMessage
+  );
 
   if (result.status === 'not_found') throw new NotFoundError('Auth assistance request not found');
   if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
@@ -283,7 +312,7 @@ export async function completeAuthAssistanceRequest(id: string, userId: string) 
   }
 
   return {
-    request: serializeRequest(result.request),
+    request: (await readNative(id, userId))?.request ?? serializeRequest(result.request),
     completed: true,
     alreadyCompleted: result.status === 'already_completed',
   };

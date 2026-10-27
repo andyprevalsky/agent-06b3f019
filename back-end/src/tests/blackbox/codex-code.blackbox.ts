@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
+import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
@@ -207,6 +208,7 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  let closed = false;
   const sharedCooldown = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -233,7 +235,11 @@ async function testSmoke_codexCompletesE2bTask() {
       body: JSON.stringify({
         agent_id: agentId,
         user_id: DEV_USER_ID,
-        goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
+        // The result is the handoff (turn/start outputSchema makes the final
+        // message that JSON), so no free-text reply sentinel is requested.
+        goal: handoffSmokeGoal(
+          'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK.'
+        ),
       }),
     });
     // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
@@ -282,15 +288,25 @@ async function testSmoke_codexCompletesE2bTask() {
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
     // a deploy-approved SKIP rather than a FAIL.
-    const creditSkip = codexSmokeCreditSkipReason(output, events);
+    const turnCompleted = events.some((event) => {
+      const typed = event as { type?: string; raw_type?: string; status?: string };
+      return (
+        typed.type === 'turn_ended' &&
+        typed.raw_type === 'turn/completed' &&
+        typed.status === 'completed'
+      );
+    });
+    const succeeded = turnCompleted || exitCode === 0;
+    // A completed turn is the success signal; success always wins over a skip.
+    const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
         `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
       );
     }
     assert(
-      output.includes('CODEX_E2B_DONE'),
-      `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
+      succeeded,
+      `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
     assert(
       events.some((event) => {
@@ -302,7 +318,7 @@ async function testSmoke_codexCompletesE2bTask() {
 
     // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
     // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise CODEX_E2B_DONE above
+    // (auth_fallback event) rather than giving up — otherwise the completed turn above
     // could never have been produced on an exhausted token. This is exactly the
     // failure that stalled deploy; it passes trivially when the OAuth token is
     // healthy (no usage-limit event → no requirement).
@@ -350,8 +366,17 @@ async function testSmoke_codexCompletesE2bTask() {
       String(fileContent).trim() === 'CODEX_E2B_OK',
       `Expected output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    // The parent's result is the handoff file the real CLI wrote.
+    const closeRes = await request(`${BASE_URL}/api/codex-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    closed = true;
+    assertStatus(closeRes.status, 200, closeRes.data);
+    assertSmokeHandoff(closeRes.data, 'CODEX_E2B_OK', '/home/user/output/codex-smoke.txt');
   } finally {
-    if (taskId) {
+    if (taskId && !closed) {
       await request(`${BASE_URL}/api/codex-code-session/close`, {
         method: 'POST',
         headers: apiKeyHeaders(),

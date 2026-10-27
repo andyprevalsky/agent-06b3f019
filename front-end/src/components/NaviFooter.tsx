@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: NaviFooter
  *
- * [IDLE] <-- contactModalOpen: false
+ * [SIGNED_IN] --> no public-site footer
+ * [SIGNED_OUT/IDLE] <-- contactModalOpen: false
  *   |
  *   | (click contact link)
  *   v
@@ -12,6 +13,7 @@
  * [IDLE]
  */
 
+import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
@@ -53,7 +55,8 @@ const NaviFooter = () => {
   const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
   // Only hide the waitlist CTA for a real signed-in account — anonymous
   // bootstrap sessions (every landing visitor) are NOT "logged in".
-  const showWaitlistCta = !(isAuthenticated && !isAnonymous);
+  const showWaitlistCta = !isStandaloneApp() && !(isAuthenticated && !isAnonymous);
+  if (!showWaitlistCta) return null;
   return (
     <footer className="relative z-20 bg-primary text-primary-foreground py-16">
       <div className="container mx-auto px-6">

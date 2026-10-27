@@ -33,8 +33,15 @@ import { attachCdp } from './cdp';
 import { CAPTCHA_SOLVE_INDICATOR_SCRIPT } from '../../providers/browser/captchaSolveIndicator';
 import { finish } from './connectSession.lifecycle';
 import { pending } from './connectSession.state';
+import {
+  cancelPeerConnect,
+  pollPeerConnect,
+  pollResultFor,
+  startSharedMirror,
+  type ConnectPollResult,
+} from './connectSession.shared';
 import { startSignInWatcher } from './connectSession.watcher';
-import type { ConnectProviderConfig, ConnectStage, PendingConnect } from './connectSession.types';
+import type { ConnectProviderConfig, PendingConnect } from './connectSession.types';
 
 export type { ConnectProviderConfig, ConnectStage, PendingConnect } from './connectSession.types';
 
@@ -137,6 +144,7 @@ export async function startConnectSession(
   const deadline = Date.now() + CONNECT_SESSION_TTL_MS;
   const entry = createPendingConnect(userId, provider, connectId, deadline);
   pending.set(connectId, entry);
+  startSharedMirror(entry);
 
   // Provision, seed and navigate entirely OFF the request path.
   //
@@ -227,57 +235,33 @@ export async function startConnectSession(
   };
 }
 
-export type ConnectPollState = 'pending' | 'connected' | 'expired' | 'unknown';
+export type { ConnectPollResult, ConnectPollState } from './connectSession.shared';
 
 /**
- * Fine-grained progress for the connect modal.
- *
- * Only the server knows which step it is on, so the stage is reported rather
- * than guessed client-side -- a single spinner covering ~10s of setup plus an
- * unbounded human wait is what made a working flow read as a hang.
+ * Status read. A session started on this instance is read from memory (it must
+ * never touch the remote browser -- see `startSignInWatcher`); one started on
+ * another instance is read from its shared snapshot.
  */
-export interface ConnectPollResult {
-  stage?: ConnectStage;
-  /** Sent once the cloud browser has booted; null while still provisioning. */
-  liveViewUrl?: string | null;
-  state: ConnectPollState;
-  accountEmail?: string;
-  accountId?: string;
-  reason?: string;
-}
-
-/**
- * Pure in-memory status read.
- *
- * Must never touch the remote browser -- see `startSignInWatcher`.
- */
-export function pollConnectSession(userId: string, connectId: string): ConnectPollResult {
+export async function pollConnectSession(
+  userId: string,
+  connectId: string
+): Promise<ConnectPollResult> {
   const entry = pending.get(connectId);
-  if (entry === undefined || entry.userId !== userId) return { state: 'unknown' };
-  if (entry.done) {
-    return { state: 'connected', accountEmail: entry.accountEmail, accountId: entry.accountId };
-  }
-  if (entry.failed !== undefined) {
-    pending.delete(connectId);
-    return { state: 'unknown', reason: entry.failed };
-  }
-  if (Date.now() > entry.deadline) {
-    return { state: 'expired', reason: 'sign-in window elapsed' };
-  }
-  return {
-    state: 'pending',
-    stage: entry.stage,
-    liveViewUrl: entry.liveViewUrl,
-    // Known as soon as the seeded session identifies itself, so the modal can
-    // show WHICH account is being connected while the user is still working.
-    accountEmail: entry.accountEmail,
-  };
+  if (entry === undefined) return pollPeerConnect(userId, connectId);
+  if (entry.userId !== userId) return { state: 'unknown' };
+  const result = pollResultFor(entry);
+  if (entry.failed !== undefined) pending.delete(connectId);
+  return result;
 }
 
 /** Abandon a connect in progress (user cancelled / navigated away). */
 export async function cancelConnectSession(userId: string, connectId: string): Promise<void> {
   const entry = pending.get(connectId);
-  if (entry === undefined || entry.userId !== userId) return;
+  if (entry === undefined) {
+    await cancelPeerConnect(userId, connectId);
+    return;
+  }
+  if (entry.userId !== userId) return;
   await finish(entry);
 }
 

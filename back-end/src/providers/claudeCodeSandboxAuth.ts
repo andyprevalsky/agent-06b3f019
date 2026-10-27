@@ -94,6 +94,18 @@ export function resolveClaudeCodeTokenSource(
 }
 
 /**
+ * The Integration row a Claude Code task runs on (pool token or the user's own
+ * account), so a usage limit marks exactly that account; null for the funded key.
+ */
+export function claudeTaskIntegrationId(
+  credentialMeta: ClaudeCodeCredentialResult | null
+): string | null {
+  if (credentialMeta === null) return null;
+  if (credentialMeta.source === 'pool') return credentialMeta.poolTokenId ?? null;
+  return credentialMeta.integrationId ?? null;
+}
+
+/**
  * Host ANTHROPIC_BASE_URL override for Claude Code sandboxes (Anthropic SDK
  * compatible gateways such as OpenRouter).
  */

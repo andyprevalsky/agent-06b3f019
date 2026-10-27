@@ -23,7 +23,7 @@ const log = createLogger('BrowserSession');
 
 type TaskInfoResponse = {
   task_id: string;
-  session_id: string;
+  session_id: string | null;
   debug_url: string | null;
   ws_url: string | null;
   status: string;
@@ -152,7 +152,7 @@ function buildTaskInfoResponse(
     passkeys: injection.passkeys,
     user_settings: injection.userSettings,
     browser_session_metadata: {
-      provider: session.sessionId.startsWith('local-') ? 'local' : provider,
+      provider: session.sessionId?.startsWith('local-') === true ? 'local' : provider,
       profile_id: profileId,
       ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },
@@ -200,6 +200,11 @@ async function applyLiveSessionAvailability(
     return response;
   }
 
+  if (session.sessionId === null) {
+    response.same_session_available = false;
+    response.same_session_unavailable_reason = 'unmaterialized';
+    return response;
+  }
   let health: BrowserSessionHealth;
   try {
     health = await getBrowserSessionHealth(session.sessionId);
@@ -253,7 +258,12 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
   const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
   const injection = await collectUserInjectionData(session.context?.userId, authRealm, taskId);
   const response = buildTaskInfoResponse(session, currentUrl, startUrl, authRealm, injection);
-  if (session.provider === 'tilion' && session.status === 'ACTIVE' && response.ws_url !== null) {
+  if (
+    session.provider === 'tilion' &&
+    session.status === 'ACTIVE' &&
+    session.sessionId !== null &&
+    response.ws_url !== null
+  ) {
     response.ws_url = await freshTilionConnectUrl(session.sessionId, response.ws_url);
   }
   if (session.provider === 'tilion') {

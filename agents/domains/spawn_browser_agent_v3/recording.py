@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional
-from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse, urlsplit
 
 import httpx
 import structlog
@@ -281,6 +281,14 @@ def kernel_replay_enabled() -> bool:
 
 def _kernel_api_base() -> str:
     return (os.getenv("KERNEL_API_BASE_URL") or "https://api.onkernel.com").rstrip("/")
+
+
+def _kernel_response_body(response: Any) -> str:
+    """Bounded provider error text for a failed Kernel replay request."""
+    content = getattr(response, "content", b"") or b""
+    if isinstance(content, bytes):
+        return content[:300].decode("utf-8", "replace")
+    return str(content)[:300]
 
 
 def _kernel_replay_headers() -> Optional[Dict[str, str]]:
@@ -1359,12 +1367,23 @@ class BrowserAgentRecorder:
                             f"{base}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
                             headers=headers,
                         )
-                        stop_response.raise_for_status()
+                        if stop_response.status_code >= 400:
+                            # Keep Kernel's error body: the status line alone cannot
+                            # tell an already-stopped replay from a closed session.
+                            logger.warning(
+                                "Kernel replay stop failed; reading persisted replay anyway",
+                                agent_id=self.agent_id,
+                                task_id=self.task_id,
+                                replay_id=self._kernel_replay_id,
+                                status_code=stop_response.status_code,
+                                error=_kernel_response_body(stop_response),
+                            )
                     except Exception as exc:  # noqa: BLE001 — best-effort stop
                         logger.warning(
                             "Kernel replay stop failed; reading persisted replay anyway",
                             agent_id=self.agent_id,
                             task_id=self.task_id,
+                            replay_id=self._kernel_replay_id,
                             error=str(exc)[:300],
                         )
                 response = await client.get(f"{base}/browsers/{self.session_id}/replays", headers=headers)
@@ -2407,6 +2426,15 @@ _FIRST_PARTY_TUNNEL_FAILURE_MARKERS = (
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
 )
+# Response header Kernel's managed proxy sets on pages it generates itself
+# (upstream_connect_failed, ...). Origins never send it.
+_KERNEL_PROXY_ERROR_HEADER = "x-kernel-proxy-error"
+
+
+def _document_url_key(url: str) -> tuple[str, str, str, str]:
+    """Compare navigation URLs the way Chromium requests them (``/`` path, no fragment)."""
+    parts = urlsplit(str(url or "").strip())
+    return (parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", parts.query)
 
 
 def _host_looks_like_script_cdn(url: str) -> bool:
@@ -4062,6 +4090,39 @@ class BrowserNetworkRecorder:
             url=_redact_url_query(url),
             cleared=cleared,
         )
+
+    def network_clock_ms(self) -> int:
+        """Recorder clock used by ``request_ts_ms``/``response_ts_ms``."""
+        return int((time.monotonic() - self._started_at) * 1000)
+
+    def provider_proxy_error_document(self, url: str, *, since_ms: int | None = None) -> Optional[Dict[str, Any]]:
+        """Latest Document response for ``url``, when the provider's proxy generated it.
+
+        Returns None when the newest matching document response came from the
+        origin (any status), so a later real load supersedes an earlier proxy page.
+        """
+        target = _document_url_key(url)
+        generation = getattr(self, "_network_generation", 0)
+        for entry in reversed(list(self.entries.values())):
+            if str(entry.get("resource_type") or "").lower() != "document" or entry.get("status") is None:
+                continue
+            if (entry.get("browser_generation") or 0) != (generation or 0):
+                continue
+            if since_ms is not None and int(entry.get("response_ts_ms") or 0) < since_ms:
+                continue
+            chain = [str(hop.get("url") or "") for hop in entry.get("redirects") or []]
+            chain.append(str(entry.get("url") or ""))
+            if target not in {_document_url_key(hop) for hop in chain if hop}:
+                continue
+            proxy_error = (entry.get("response_headers") or {}).get(_KERNEL_PROXY_ERROR_HEADER)
+            if not proxy_error:
+                return None
+            return {
+                "url": str(entry.get("url") or ""),
+                "status": entry.get("status"),
+                "proxy_error": str(proxy_error),
+            }
+        return None
 
     def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
         """Consume one explicit rejection verdict for the active browser exit.

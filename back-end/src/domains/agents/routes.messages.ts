@@ -14,6 +14,9 @@ import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema
 import { postMessageSchema, generateSchemaRequestSchema } from './types';
 import * as controlService from './agentControlService';
 import * as messageService from './agentMessageService';
+import * as attachmentService from './agentAttachmentService';
+import * as queryService from './agentQueryService';
+import { resolveAgentReadAccess } from './routes.guards';
 
 const log = createLogger('Agents');
 const router = Router({ mergeParams: true });
@@ -105,7 +108,7 @@ router.post(
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const result = await messageService.uploadAttachment(req.userId, req.params.id, req.file);
+      const result = await attachmentService.uploadAttachment(req.userId, req.params.id, req.file);
       res.status(201).json(result);
     } catch (error) {
       log.error('Upload attachment error', {
@@ -135,7 +138,7 @@ router.get(
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const result = await messageService.getAttachmentSignedUrl(req.userId, storagePath, {
+      const result = await attachmentService.getAttachmentSignedUrl(req.userId, storagePath, {
         agentId: req.params.id,
         isAdmin: isAdminUser(req.userId),
       });
@@ -227,6 +230,33 @@ router.post(
       res.json({ schema, tokensIn, tokensOut });
     } catch (error) {
       handleRouteError(res, error, 'Failed to generate response schema');
+    }
+  })
+);
+
+// GET /:id/messages/:messageId — one row, read with the agent-detail access rules
+router.get(
+  '/:id/messages/:messageId',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      const { userId } = resolveAgentReadAccess(req);
+      const message = await queryService.getAgentMessage(
+        req.params.id,
+        req.params.messageId,
+        userId
+      );
+      if (message === null) {
+        res.status(404).json({ error: 'Message not found' });
+        return;
+      }
+      res.json({ message });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch message', {
+        agent_id: req.params.id,
+        message_id: req.params.messageId,
+      });
     }
   })
 );

@@ -395,7 +395,12 @@ async def test_get_custom_prompt_missing():
 
 async def test_get_user_context_boundary():
     """Verify outbound HTTP calls hit the expected backend endpoints."""
-    _setup()
+    def authenticated_backend(request):
+        # Check the actual wire boundary, including metadata-only phone calls.
+        assert "x-api-key" in request.headers
+        assert request.headers["x-user-id"] == "user-boundary-001"
+        return _mock_handler(request)
+    setup_mock_fn(authenticated_backend)
     _clear_user_context_cache()
 
     with patch("temporalio.activity.heartbeat"):
@@ -417,6 +422,9 @@ async def test_get_user_context_boundary():
 
     # Verify X-API-Key header present on all calls
     for c in captures:
+        if c["url"] == "https://private.invalid/api/iphone":
+            assert c["requestHeaders"] == {} and c["requestBody"] is None and c["responseBody"] is None
+            continue
         headers_lower = {k.lower() for k in c["requestHeaders"]}
         assert "x-api-key" in headers_lower, f"Missing X-API-Key header on {c['url']}"
 
@@ -1102,7 +1110,80 @@ async def run_all_tests():
     r.record("is_auth_cookie", test_is_auth_cookie)
     await r.record_async("readable_inbox_scope_transport_formatter", test_readable_inbox_scope_transport_and_formatter)
     teardown_mock()
+    await r.record_async("phone_off_profile_makes_no_phone_requests", test_phone_off_profile_makes_no_phone_requests)
+    await r.record_async("phone_profile_capability_is_fresh_and_fail_closed", test_phone_profile_capability_is_fresh_and_fail_closed)
+    await r.record_async("phone_full_context_refresh_never_caches_entitlement", test_phone_full_context_refresh_never_caches_entitlement)
     return r.all_passed
+
+
+
+
+
+async def test_phone_profile_capability_is_fresh_and_fail_closed():
+    teardown_mock()
+    from types import SimpleNamespace
+    from helpers.get_user_context import _fetch_user_settings_with_status, _render_profile_context
+    enabled = True
+    def backend(request):
+        if request.url.path.endswith('/user-settings'):
+            return httpx.Response(200,json={'name':'fixture', **({'iphoneCapability':{'enabled':True}} if enabled else {})})
+        raise AssertionError('profile must not discover phone capability')
+    config=SimpleNamespace(backend=SimpleNamespace(api_url='https://backend.test',api_key='synthetic'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        first, ok=await _fetch_user_settings_with_status(client,config,'u')
+        assert ok and 'cloud iPhone' in _render_profile_context(first)
+        enabled=False
+        second, ok=await _fetch_user_settings_with_status(client,config,'u')
+        assert ok and 'cloud iPhone' not in _render_profile_context(second)
+
+
+
+
+
+async def test_phone_full_context_refresh_never_caches_entitlement():
+    from helpers.get_user_context import get_user_context, _format_user_context
+    module = _get_user_context_module()
+    _clear_user_context_cache()
+    phase = 'enabled'
+    def backend(request):
+        assert '/api/iphone' not in str(request.url), 'profile made a phone request'
+        if '/api/user-settings' in str(request.url):
+            if phase in ('error', 'stale-profile'):
+                return httpx.Response(503, json={'error':'settings outage'})
+            response = _mock_handler(request)
+            return httpx.Response(200, json={**response.json(), **({'iphoneCapability': {'enabled': True}} if phase == 'enabled' else {})})
+        return _mock_handler(request)
+    setup_mock_fn(backend)
+    with patch('temporalio.activity.heartbeat'):
+        enabled = await get_user_context(user_id='phone-context-fixture')
+        assert 'cloud iPhone' in enabled and 'Alice Test' in enabled and 'Connected Integrations' in enabled
+        assert 'cloud iPhone' not in str(module._user_context_cache['phone-context-fixture'])
+        phase = 'disabled'
+        disabled = await get_user_context(user_id='phone-context-fixture')
+        phase = 'error'
+        error = await get_user_context(user_id='phone-context-fixture')
+        phase = 'stale-profile'
+        stale = await get_user_context(user_id='phone-context-fixture')
+    for result in (disabled,error,stale):
+        assert 'cloud iPhone' not in result
+        assert 'Alice Test' in result and 'Connected Integrations' in result
+    assert 'cloud iPhone' in _format_user_context([], {'name':'fixture','iphoneCapability':{'enabled':True}}, [], [])
+
+
+async def test_phone_off_profile_makes_no_phone_requests():
+    from types import SimpleNamespace
+    from helpers.get_user_context import _fetch_user_settings_with_status, _render_profile_context
+    calls = []
+    def backend(request):
+        calls.append(request.url.path)
+        assert request.url.path == "/api/user-settings", "off profile made extra phone request"
+        return httpx.Response(200, json={"name": "Ordinary", "systemName": "Rose"})
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.test", api_key="synthetic"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        data, ok = await _fetch_user_settings_with_status(client, config, "ordinary")
+    assert ok and data == {"name": "Ordinary", "systemName": "Rose"}
+    assert calls == ["/api/user-settings"]
+    assert _render_profile_context(data) == "## Personal Information\nFull Name: Ordinary"
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ const log = createLogger('BrowserProvider');
 export interface SupersededBrowserRelease {
   taskId: string;
   previousProvider: BrowserProviderName;
-  previousSessionId: string;
+  previousSessionId: string | null;
   operation: 'resume' | 'rotation';
   /** The replacement's session id; equal to previousSessionId on a reattach/in-place rotate. */
   currentSessionId?: string;
@@ -35,6 +35,7 @@ export async function releaseSupersededBrowser(
   release: SupersededBrowserRelease,
   dependencies: SupersededBrowserReleaseDependencies = defaultDependencies
 ): Promise<boolean> {
+  if (release.previousSessionId === null) return true;
   // A reattach or in-place rotate keeps the same remote session: nothing was superseded.
   if (release.currentSessionId === release.previousSessionId) return true;
   try {

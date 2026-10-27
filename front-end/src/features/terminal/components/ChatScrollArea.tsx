@@ -62,7 +62,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         data-testid="terminal-opening-loader"
         className="pointer-events-none absolute inset-x-0 bottom-0 top-[var(--mobile-terminal-header-height)] flex items-center justify-center transition-all duration-700 ease-in-out md:inset-0 md:h-[100dvh]"
         style={{
-          opacity: showLoader ? 1 : 0.2,
+          opacity: showLoader && showWaitlistCta ? 1 : 0.2,
           transform: showLoader ? 'translateY(0)' : 'translateY(8px)',
           zIndex: 18,
         }}

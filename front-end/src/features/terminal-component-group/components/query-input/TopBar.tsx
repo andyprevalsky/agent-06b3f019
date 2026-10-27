@@ -12,6 +12,9 @@
  *     |
  *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
  *
+ * Stock UI only: Rose Desktop accounts get NubToolbar on the tab behind the
+ * query box instead (see QueryInput / ToolbarNub.tsx).
+ *
  * TopBar owns layout only; account and viewport gating stay in QueryInputBody.
  */
 
@@ -26,7 +29,7 @@ import { ContextMeter } from './ContextMeter';
 import type { AgentDetail } from '../../hooks';
 import type { UsePriceLimitResult } from './usePriceLimit';
 
-interface TopBarProps {
+export interface TopBarProps {
   agentDetail?: AgentDetail | null;
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;

@@ -444,4 +444,60 @@ check_frontend_cleanup true "$builds/shared_55051" present "an isolated run keep
 check_frontend_cleanup true "$TMP_ROOT/elsewhere/1790000000-2-2" present "cleanup never deletes outside .context/frontend-builds"
 check_frontend_cleanup true "$builds/1790000000-1-1" absent "an isolated run deletes its own frontend bundle on exit"
 
+# ── T112: a repeated TERM/INT/HUP must not abort a teardown in progress ──
+# run.sh runs cleanup from its EXIT trap; bash dies on a second signal in the
+# middle of that trap, which stranded the backend/worker/vite/tunnel of a stopped
+# antibot run (cleanup receipt left pending). Fixture: the library's own signal
+# functions around a slow, multi-step cleanup written like run.sh's.
+grep -q '^run_install_teardown_signal_traps$' "$ROOT_DIR/scripts/run.sh" \
+  || { echo "FAIL: run.sh must install the teardown signal traps" >&2; exit 1; }
+grep -q '^    run_ignore_repeated_teardown_signals$' "$ROOT_DIR/scripts/run.sh" \
+  || { echo "FAIL: run.sh cleanup must ignore repeated signals" >&2; exit 1; }
+signal_fixture="$TMP_ROOT/teardown-signal-fixture.sh"
+cat > "$signal_fixture" <<FIXTURE
+#!/usr/bin/env bash
+. "$ROOT_DIR/scripts/lib/run-process-cleanup.sh"
+STEPS="\$1"
+SHUTTING_DOWN=false
+cleanup() {
+  if \$SHUTTING_DOWN; then return; fi
+  SHUTTING_DOWN=true
+  run_ignore_repeated_teardown_signals
+  echo started >> "\$STEPS"
+  for step in 1 2 3 4 5; do sleep 0.4; echo "step\$step" >> "\$STEPS"; done
+  echo done >> "\$STEPS"
+}
+trap cleanup EXIT
+run_install_teardown_signal_traps
+echo ready >> "\$STEPS"
+sleep 60 &
+wait
+FIXTURE
+chmod +x "$signal_fixture"
+run_signal_case() { # <label> <extra signals after the first TERM...>
+  local label="$1"; shift
+  local steps="$TMP_ROOT/steps-$label" status=0 sig
+  : > "$steps"
+  "$signal_fixture" "$steps" &
+  local fixture_pid=$!
+  PIDS+=("$fixture_pid")
+  local deadline=$((SECONDS + 10))
+  until grep -q '^ready$' "$steps"; do
+    [ "$SECONDS" -lt "$deadline" ] || { echo "FAIL: $label fixture not ready" >&2; exit 1; }
+    sleep 0.05
+  done
+  kill -TERM "$fixture_pid"
+  until grep -q '^started$' "$steps"; do sleep 0.02; done
+  sleep 0.5
+  for sig in "$@"; do kill -"$sig" "$fixture_pid" 2>/dev/null || true; sleep 0.2; done
+  wait "$fixture_pid" || status=$?
+  [ "$status" = 143 ] || { echo "FAIL: $label exited $status, expected 143" >&2; exit 1; }
+  [ "$(grep -c '^started$' "$steps")" = 1 ] || { echo "FAIL: $label cleanup did not run exactly once" >&2; exit 1; }
+  tail -1 "$steps" | grep -q '^done$' || { echo "FAIL: $label cleanup was aborted: $(tr '\n' ' ' < "$steps")" >&2; exit 1; }
+  echo "PASS: $label teardown completes once and exits 143"
+}
+run_signal_case "single-TERM"
+run_signal_case "second-TERM" TERM
+run_signal_case "TERM-INT-HUP-burst" TERM INT HUP TERM
+
 echo "All run process cleanup tests passed."

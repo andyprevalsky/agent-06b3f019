@@ -312,14 +312,14 @@ export {
 
 // Bulk operations and misc queries — split for max-lines compliance
 export {
-  getCookieCount,
   bulkUpsertCookies,
-  cookieBundleSnapshotChanged,
-  upsertCookieBundle,
+  insertMissingCookieBundles,
+  markCookieBundlesChanged,
   deleteCookiesMissingFromProfileSnapshot,
   deleteCookiesForBrowserSnapshot,
   deleteCookieBundlesForBrowserSnapshot,
-  deleteCookieBundlesWithoutCookiesForProfile,
+  findCookieBundlesForProfiles,
+  deleteCookieBundlesById,
   bulkUpsertLocalStorage,
   bulkUpsertIndexedDB,
   bulkUpsertPermissions,

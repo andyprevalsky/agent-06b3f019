@@ -25,7 +25,10 @@ async def test_count_tool_usage():
         {"role": "TOOL", "metadata": {"toolName": "wait_for", "toolStatus": "FINISHED"}},
         {"role": "TOOL", "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"}},
         # Verifier-feedback row: filtered via verifierMessage flag, not by toolName.
-        {"role": "TOOL", "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED", "verifierMessage": True}},
+        {
+            "role": "TOOL",
+            "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED", "verifierMessage": True},
+        },
         {"role": "TOOL", "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"}},  # excluded by name
         {"role": "ASSISTANT", "text": "Done"},
     ]
@@ -79,7 +82,7 @@ async def test_format_tool_stats_footer():
     assert "Tool Usage Statistics" in footer
     assert "Total:** 8" in footer
     assert "Web Searches" in footer  # mapped display name
-    assert "Wait Operations" in footer   # mapped display name
+    assert "Wait Operations" in footer  # mapped display name
     assert "Plans Set" in footer
 
 
@@ -115,16 +118,20 @@ def _build_test_context(n_pairs: int = 6):
         {"role": "USER", "text": "original goal", "metadata": {}},
     ]
     for i in range(n_pairs):
-        ctx.append({
-            "role": "ASSISTANT",
-            "text": f"assistant turn {i}",
-            "metadata": {"tool_calls": [{"tool_call_id": f"tc-{i}"}]},
-        })
-        ctx.append({
-            "role": "TOOL",
-            "text": f"tool result {i}",
-            "metadata": {"toolCallId": f"tc-{i}", "toolName": "web_search", "toolStatus": "FINISHED"},
-        })
+        ctx.append(
+            {
+                "role": "ASSISTANT",
+                "text": f"assistant turn {i}",
+                "metadata": {"tool_calls": [{"tool_call_id": f"tc-{i}"}]},
+            }
+        )
+        ctx.append(
+            {
+                "role": "TOOL",
+                "text": f"tool result {i}",
+                "metadata": {"toolCallId": f"tc-{i}", "toolName": "web_search", "toolStatus": "FINISHED"},
+            }
+        )
     return ctx
 
 
@@ -141,7 +148,9 @@ async def test_compress_context_happy_head_tail_protected():
         with patch.object(llm_mod, "call_llm", fake_llm):
             with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
                 out = await summarize.compress_context(
-                    context=ctx, iteration_count=12, model="test-model",
+                    context=ctx,
+                    iteration_count=12,
+                    model="test-model",
                 )
 
     assert out["success"] is True
@@ -174,7 +183,9 @@ async def test_compress_context_no_orphan_tool_use():
         with patch.object(llm_mod, "call_llm", fake_llm):
             with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
                 out = await summarize.compress_context(
-                    context=ctx, iteration_count=10, model="m",
+                    context=ctx,
+                    iteration_count=10,
+                    model="m",
                 )
 
     new_ctx = out["context"]
@@ -209,7 +220,9 @@ async def test_compress_context_too_small_to_compact():
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
             out = await summarize.compress_context(
-                context=ctx, iteration_count=1, model="m",
+                context=ctx,
+                iteration_count=1,
+                model="m",
             )
     assert out["success"] is True
     assert out["context"] == ctx
@@ -605,6 +618,7 @@ async def test_summarize_tool_result_below_threshold_unused():
     documents the constant value contract.)
     """
     from helpers import summarize
+
     assert summarize.TOOL_SUMMARIZER_CHAR_THRESHOLD == 5_000
 
 
@@ -689,7 +703,7 @@ async def test_generate_completion_summary_happy():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": m.get("text", "")} for m in context]
 
     context = [
@@ -727,7 +741,7 @@ async def test_generate_completion_summary_forwards_compute_auth():
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -758,30 +772,36 @@ async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
     """Fast Mode summary caching is owned by call_llm; no outer summary cache."""
     from helpers import summarize
     import helpers.llm as llm_mod
-    import providers.fast_cache.client as fast_cache_client
+    import providers.demo_cache.client as demo_cache_client
+
+    from providers.demo_cache.context import current_context
 
     observed_kwargs = []
+    observed_contexts = []
 
     async def fake_llm(messages, **kwargs):
         observed_kwargs.append(kwargs)
+        observed_contexts.append(current_context())
         return {
             "content": "Completed from call_llm cache path.",
             "usage": {"total_tokens": 10, "prompt_tokens": 0, "completion_tokens": 10},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return [{"role": "user", "content": "done"}]
 
     async def fail_outer_cache(*args, **kwargs):
-        raise AssertionError("generate_completion_summary should not call fast-cache directly")
+        raise AssertionError("generate_completion_summary should not call demo-cache directly")
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
             with patch.object(llm_mod, "convert_context_to_messages", fake_convert):
-                with patch.object(fast_cache_client, "cache_get", fail_outer_cache):
-                    with patch.object(fast_cache_client, "cache_set", fail_outer_cache):
+                with patch.object(demo_cache_client, "cache_get", fail_outer_cache):
+                    with patch.object(demo_cache_client, "cache_set", fail_outer_cache):
                         out = await summarize.generate_completion_summary(
-                            context=[{"role": "TOOL", "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"}}],
+                            context=[
+                                {"role": "TOOL", "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"}}
+                            ],
                             goal="G",
                             model="m",
                             fast_mode_cache_enabled=True,
@@ -792,6 +812,11 @@ async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
     assert out["tool_counts"]["web_search"] == 1
     assert observed_kwargs[0]["call_site"] == "completion_summary"
     assert observed_kwargs[0]["agent_id"] == "agent-1"
+    # The summary's Fast Cache context is task-scoped: it must not leak into
+    # later work on the same task (a leaked active context made the next WMH
+    # prediction skip its own DEMO cache context in the same event loop).
+    assert observed_contexts and observed_contexts[0] is not None and observed_contexts[0].goal == "G"
+    assert current_context() is None
 
 
 async def test_generate_completion_summary_on_error():
@@ -801,7 +826,7 @@ async def test_generate_completion_summary_on_error():
     async def boom(*a, **kw):
         raise RuntimeError("LLM boom")
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -825,7 +850,7 @@ async def test_generate_completion_summary_no_structured_response():
     async def fake_llm(messages, **kwargs):
         return {"content": "Summary.", "usage": {"total_tokens": 10}}
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -866,7 +891,7 @@ async def test_generate_completion_summary_retries_length_truncation():
             "usage": {"total_tokens": 80, "prompt_tokens": 40, "completion_tokens": 40},
         }
 
-    def fake_convert(context, include_system=False, include_assistant=True):
+    def fake_convert(context, include_system=False, include_assistant=True, attachments=None):
         return []
 
     with patch("temporalio.activity.heartbeat"):
@@ -937,9 +962,7 @@ async def test_summarize_and_filter_links_actually_summarizes():
             "usage": {"total_tokens": 42},
         }
     )
-    with patch.object(summarize_module, "activity", MagicMock()), patch(
-        "helpers.llm.call_llm", new=llm
-    ):
+    with patch.object(summarize_module, "activity", MagicMock()), patch("helpers.llm.call_llm", new=llm):
         result = await summarize_module.summarize_and_filter_links(
             url="https://order.toasttab.com/online/lunette-cambodia",
             objective="find the price of Lok Lak",
@@ -974,7 +997,9 @@ async def run_all_tests():
     await r.record_async("compress_context_no_orphan_tool_use", test_compress_context_no_orphan_tool_use)
     await r.record_async("compress_context_too_small_to_compact", test_compress_context_too_small_to_compact)
     await r.record_async("compress_context_forwards_compute_auth", test_compress_context_forwards_compute_auth)
-    await r.record_async("compress_context_on_llm_error_returns_failure", test_compress_context_on_llm_error_returns_failure)
+    await r.record_async(
+        "compress_context_on_llm_error_returns_failure", test_compress_context_on_llm_error_returns_failure
+    )
     await r.record_async("compress_context_empty_summary_is_failure", test_compress_context_empty_summary_is_failure)
     await r.record_async(
         "compress_context_prompt_includes_structured_tool_metadata",
@@ -992,12 +1017,21 @@ async def run_all_tests():
         "compaction_saved_ratio_can_go_negative",
         test_compaction_saved_ratio_can_go_negative,
     )
-    await r.record_async("split_head_middle_tail_uses_recent_token_budget", test_split_head_middle_tail_uses_recent_token_budget)
+    await r.record_async(
+        "split_head_middle_tail_uses_recent_token_budget", test_split_head_middle_tail_uses_recent_token_budget
+    )
     await r.record_async("compress_context_strips_analysis_block", test_compress_context_strips_analysis_block)
-    await r.record_async("summarize_tool_result_below_threshold_unused", test_summarize_tool_result_below_threshold_unused)
+    await r.record_async(
+        "summarize_tool_result_below_threshold_unused", test_summarize_tool_result_below_threshold_unused
+    )
     await r.record_async("summarize_tool_result_happy", test_summarize_tool_result_happy)
-    await r.record_async("summarize_tool_result_llm_failure_truncates", test_summarize_tool_result_llm_failure_truncates)
-    await r.record_async("summarize_tool_result_below_cap_passthrough_on_failure", test_summarize_tool_result_below_cap_passthrough_on_failure)
+    await r.record_async(
+        "summarize_tool_result_llm_failure_truncates", test_summarize_tool_result_llm_failure_truncates
+    )
+    await r.record_async(
+        "summarize_tool_result_below_cap_passthrough_on_failure",
+        test_summarize_tool_result_below_cap_passthrough_on_failure,
+    )
     await r.record_async("generate_completion_summary_happy", test_generate_completion_summary_happy)
     await r.record_async(
         "generate_completion_summary_forwards_compute_auth",
@@ -1008,7 +1042,9 @@ async def run_all_tests():
         test_generate_completion_summary_fast_mode_uses_call_llm_cache_only,
     )
     await r.record_async("generate_completion_summary_error", test_generate_completion_summary_on_error)
-    await r.record_async("generate_completion_summary_no_structured", test_generate_completion_summary_no_structured_response)
+    await r.record_async(
+        "generate_completion_summary_no_structured", test_generate_completion_summary_no_structured_response
+    )
     await r.record_async(
         "generate_completion_summary_retries_length",
         test_generate_completion_summary_retries_length_truncation,

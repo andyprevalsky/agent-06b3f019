@@ -24,6 +24,7 @@ async function main(): Promise<void> {
       data: [
         {
           personId: person.id,
+          userId,
           channel: MessageChannel.IMESSAGE,
           from: 'me',
           to: '+15550001111',
@@ -33,6 +34,7 @@ async function main(): Promise<void> {
         },
         {
           personId: person.id,
+          userId,
           channel: MessageChannel.IMESSAGE,
           from: 'me',
           to: '+15550001111',

@@ -1,5 +1,7 @@
 /**
- * Blackbox tests for TerminalHeader responsive auth actions.
+ * Blackbox tests for TerminalHeader responsive auth actions on the stock UI
+ * (Rose Desktop flag off). The flagged mobile header (hamburger · Rose pill ·
+ * app icons) is covered by rose-mobile-header.blackbox.tsx.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, screen } from '@testing-library/react';
@@ -47,6 +49,7 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
     clientSource: 'WEB',
     agents: [],
     isLoadingAgents: false,
+    hasLoadedAgents: true,
     selectedAgentId: null,
     dripStyles,
     blur: 0,
@@ -56,7 +59,7 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
     ...overrides,
   };
 
-  renderWithProviders(<TerminalHeader {...props} />);
+  renderWithProviders(<TerminalHeader {...props} />, { roseDesktop: false });
   return props;
 }
 
@@ -113,6 +116,7 @@ describe('TerminalHeader responsive auth action', () => {
       clientSource: 'WEB',
       agents: [],
       isLoadingAgents: false,
+      hasLoadedAgents: true,
       selectedAgentId: null,
       dripStyles,
       blur: 0,
@@ -122,7 +126,7 @@ describe('TerminalHeader responsive auth action', () => {
     };
 
     const user = userEvent.setup();
-    renderWithProviders(<MobileAuthHarness />);
+    renderWithProviders(<MobileAuthHarness />, { roseDesktop: false });
     await user.click(screen.getByRole('button', { name: 'Open menu' }));
     await user.click(screen.getByRole('button', { name: 'Login' }));
     await act(async () => {

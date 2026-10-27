@@ -1,8 +1,8 @@
 /** Shared message creation for API routes, workers, and chat handlers. */
 
 import { Prisma, type Message } from '@prisma/client';
-import { createHash } from 'node:crypto';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { idempotentMessageId } from './messageIdempotency';
 import { prisma, runTransactionWithRetry } from './database';
 import { createLogger } from './logger';
 import {
@@ -50,15 +50,6 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
   return (
     candidates.find((candidate) => metadataEquals(params.metadata, candidate.metadata)) ?? null
   );
-}
-
-function idempotentMessageId(params: CreateMessageParams): string | null {
-  if (params.role !== 'USER' || params.metadata?.isResponseSchemaUpdate !== true) return null;
-  const key = stringMetadataValue(params.metadata, 'idempotencyKey');
-  if (key === null) return null;
-  const hex = createHash('sha256').update(`${params.agentId}:${key}`).digest('hex').slice(0, 32);
-  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
 
 async function findIdempotentMessage(params: CreateMessageParams) {
@@ -172,11 +163,18 @@ export async function createUserMessageInTransaction(
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */
-export async function createMessage(input: CreateMessageParams): Promise<Message> {
+export async function createMessage(params: CreateMessageParams): Promise<Message> {
+  return (await createMessageOnce(params)).message;
+}
+
+/** Persist once after canonical authored-input normalization; signal only on creation. */
+export async function createMessageOnce(
+  input: CreateMessageParams
+): Promise<{ message: Message; created: boolean }> {
   const params = storableMessageParams(input);
   const idempotentId = idempotentMessageId(params);
   const idempotentDuplicate = await findIdempotentMessage(params);
-  if (idempotentDuplicate !== null) return idempotentDuplicate;
+  if (idempotentDuplicate !== null) return { message: idempotentDuplicate, created: false };
 
   const lifecycle = toolLifecycleIdentity(params);
   const result =
@@ -185,13 +183,13 @@ export async function createMessage(input: CreateMessageParams): Promise<Message
       : await persistToolLifecycleMessage(params, lifecycle);
   if (!result.created) {
     logUncreatedMessageWrite(params, result.message);
-    return result.message;
+    return { message: result.message, created: false };
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
   // Browser (and other tool) completions carry structured_response on the FINISHED
   // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
   scheduleMessageGmvCapture(params);
-  return result.message;
+  return { message: result.message, created: true };
 }
 
 export interface WorkflowMessageGroupResult {

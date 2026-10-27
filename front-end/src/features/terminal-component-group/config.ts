@@ -76,12 +76,24 @@ export const ROSE_MODEL_IDS = {
   /** @deprecated Use `flash`. Kept for older imports/tests. */
   lite: 'rose-labs/rose-1-flash',
   ultra: 'rose-labs/rose-1-ultra',
+  local: 'rose-labs/rose-local',
 } as const;
+
+/** Rose Desktop model selector: only the short pool name (UI ledger row 77). */
+export const ROSE_MODEL_SHORT_NAMES: Record<string, string> = {
+  [ROSE_MODEL_IDS.flash]: 'rose-flash',
+  [ROSE_MODEL_IDS.ultra]: 'rose-ultra',
+  [ROSE_MODEL_IDS.local]: 'rose-local',
+};
 
 /** Static descriptions for the built-in Rose models in the model picker. */
 export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
-  [ROSE_MODEL_IDS.flash]: 'Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra',
-  [ROSE_MODEL_IDS.ultra]: 'Most capable for complex reasoning',
+  [ROSE_MODEL_IDS.flash]:
+    'Super fast execution with full-strength planning. Avg tok/s: not yet measured. Intelligence vs frontier: not yet benchmarked.',
+  [ROSE_MODEL_IDS.ultra]:
+    'Maximum reasoning for complex, long-horizon tasks. For example: get more calls on my calendar with people who match my ideal customer profile.',
+  [ROSE_MODEL_IDS.local]:
+    'Local model inference on the configured Rose worker. No model API fees. Agent data still uses Rose cloud services. Avg tok/s and max throughput: unmeasured; % of Flash and Ultra: unmeasured.',
 };
 
 /** Tool name to human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES). */
@@ -109,4 +121,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   query_blueprints: 'Query Blueprints',
   search_x402_bazaar: 'Bazaar Searches',
   pay_for_x402_bazaar_service: 'Bazaar Payments',
+  send_message_to_agent: 'Agent Messages Sent',
+  list_agents: 'Agent Tree Listings',
+  kill_agent: 'Agents Killed',
 };

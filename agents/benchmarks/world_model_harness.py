@@ -96,11 +96,11 @@ _VAPI_ORCHESTRATION_TOOLS = {"call_phone_number", "vapi"}
 _VAPI_BOUNDARY_TOOLS = {"vapi_create_call", "vapi_poll_call", "vapi_recording_fetch"}
 _VAPI_TOOLS = _VAPI_ORCHESTRATION_TOOLS | _VAPI_BOUNDARY_TOOLS
 _GREP_TOOLS = {"grep", "web_search", "web_fetch", "web_fetch_download", "people_search"}
-_FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
-# Fast cache is intentionally NOT an environment boundary: simulated runs keep
+_DEMO_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
+# DEMO cache is intentionally NOT an environment boundary: simulated runs keep
 # the real cache active (WMH steps are expensive) and are isolated from real-run
 # entries by the world-model scope segment in every cache key
-# (fast_cache/normalize.py:world_model_cache_scope).
+# (demo_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
     _EXPLORE_ORCHESTRATION_TOOLS
     | _CODE_TOOLS
@@ -852,7 +852,7 @@ def canonical_category_for_tool(tool_name: str) -> str:
         return "vapi"
     if tool_name in _GREP_TOOLS or tool_name.startswith("grep"):
         return "grep"
-    if tool_name in _FAST_CACHE_TOOLS or "cache" in tool_name:
+    if tool_name in _DEMO_CACHE_TOOLS or "cache" in tool_name:
         return "fast_cache"
     if tool_name in {"request_user_approval", "request_user_signup", "request_user_auth"}:
         return "auth_approval"
@@ -1172,8 +1172,8 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
     )
 
 
-def _is_fast_cache_replay_transition(raw: JsonObject) -> bool:
-    """A transition whose observation was replayed from the fast cache.
+def _is_demo_cache_replay_transition(raw: JsonObject) -> bool:
+    """A transition whose observation was replayed from the DEMO cache.
 
     The fresh write that populated the cache is the original signal and is
     already in the corpus from the run that recorded it; replays are
@@ -1198,17 +1198,17 @@ def _transitions_from_trace_artifact(root_agent_id: str, redaction_mode: str) ->
     if not isinstance(raw_transitions, list):
         raise ValueError("trace/transitions.json.gz.enc must contain a transitions array")
     raw_dicts = [raw for raw in raw_transitions if isinstance(raw, dict)]
-    replay_count = sum(1 for raw in raw_dicts if _is_fast_cache_replay_transition(raw))
+    replay_count = sum(1 for raw in raw_dicts if _is_demo_cache_replay_transition(raw))
     if replay_count:
         print(
-            f"[WorldModel] Dropped {replay_count} fast-cache replay transition(s) from "
+            f"[WorldModel] Dropped {replay_count} demo-cache replay transition(s) from "
             f"{root_agent_id} (corpus keeps fresh interactions only)",
             flush=True,
         )
     return [
         _transition_from_raw(raw, root_agent_id, redaction_mode)
         for raw in raw_dicts
-        if not _is_fast_cache_replay_transition(raw)
+        if not _is_demo_cache_replay_transition(raw)
     ]
 
 
@@ -1313,7 +1313,7 @@ def _transitions_from_llm_dumps(
                 )
     if replay_dump_count:
         print(
-            f"[WorldModel] Dropped {replay_dump_count} fast-cache replay LLM dump(s) from "
+            f"[WorldModel] Dropped {replay_dump_count} demo-cache replay LLM dump(s) from "
             f"{root_agent_id} (corpus keeps fresh interactions only)",
             flush=True,
         )

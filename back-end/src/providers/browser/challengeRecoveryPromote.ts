@@ -291,6 +291,8 @@ export async function searchAndPromoteBrowserConfig(
         );
       }
       await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
+      // An unmaterialized logical browser had no provider session to release.
+      if (current.sessionId === null) return;
       await releaseRecoveryProviderSession(dependencies, current.provider, current.sessionId).catch(
         () => {}
       );

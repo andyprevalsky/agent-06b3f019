@@ -43,6 +43,14 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 
 const tests: Array<[string, () => Promise<void> | void]> = [
   [
+    'Local chat keeps both synchronous phases on the local pool',
+    () => {
+      const selected = selectChatPhaseModels('rose-labs/rose-local');
+      assertEqual(selected.router, 'rose-labs/rose-local', 'router model');
+      assertEqual(selected.generator, 'rose-labs/rose-local', 'generator model');
+    },
+  ],
+  [
     'Ultra chat uses rose-fast via direct-cerebras hedge for both synchronous phases',
     () => {
       const requestedModel = 'rose-labs/rose-1-ultra';

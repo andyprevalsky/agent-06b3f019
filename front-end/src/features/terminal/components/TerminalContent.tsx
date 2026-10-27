@@ -15,6 +15,25 @@
  *   currentView === 'agents'       → agent chat / landing
  *   open-agent deep link           → force 'agents' even from browse/settings
  *   agents + inspectionContext     → compact read-only pill in global control rail
+ *
+ * PER-USER UI (features/user-ui; Rose Desktop, signed-in non-archive users):
+ *   none / safe mode → stock layout; published shell → UserUiShell replaces chrome
+ *   whole-app theme, background + fade and slots are removed (UI ledger row 89):
+ *     the stock background, sidebar and query box always render
+ * ROSE DESKTOP APPS (RoseAppsProvider, flag on only): bare top-right icons
+ *   (Browser, Phone, Integrations, Dark mode) + the right-panel slot; panels
+ *   overlay the content (no right bar, no content inset). Flag off: no icons.
+ * APP VIEW (AppViewProvider): a code-agent chip's live preview card opens the
+ *   code session's preview full screen in place of the chat column (Rose
+ *   Desktop only; AgentChatArea). It holds no list and reads nothing itself.
+ * CODE AGENT VIEW (CodeAgentViewProvider, flag on only): a left-bar code-agent
+ *   row (or ?agent-id=<owner>&code-agent=<task id>) opens that Claude Code /
+ *   Codex session as its own conversation in the chat column; the sidebar marks
+ *   its row and AgentChatArea renders it. Flag off: never opens.
+ * THEME (RoseThemeProvider, Rose Desktop accounts only): light (default) <->
+ *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
+ *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
+ *   calm dark background. Stock accounts and shared views never leave light.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -22,27 +41,31 @@ import { useState, useMemo, lazy } from 'react';
 import {
   AppSidebar,
   AttentionRequestsProvider,
+  CodeAgentViewProvider,
   NetworkView,
+  RoseAppIcons,
+  RoseAppsProvider,
   SIDEBAR_WIDTH_COLLAPSED,
+  AppViewProvider,
   unansweredAgentIds,
   useAttentionRequests,
 } from '@/features/terminal-component-group';
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
+import { isRoseDesktopUser } from '@/lib/roseDesktop';
+import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
+import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
+import { UserUiProvider, UserUiShell } from '@/features/user-ui';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
+import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
 import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
-import {
-  computeActiveBrowserPanels,
-  derivePendingApproval,
-  derivePendingGates,
-  deriveHasActiveAttentionRequest,
-} from '../hooks/derivations';
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
@@ -91,51 +114,58 @@ export function TerminalContent() {
   );
 }
 
-function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
-  const activeBrowserPanels = useMemo(
-    () => computeActiveBrowserPanels(agents.messages),
-    [agents.messages],
-  );
-  const pendingApproval = useMemo(() => derivePendingApproval(agents.messages), [agents.messages]);
-  const pendingGates = useMemo(() => derivePendingGates(agents.messages), [agents.messages]);
-  const hasActiveAttention = useMemo(
-    () => deriveHasActiveAttentionRequest(agents.messages),
-    [agents.messages],
-  );
-  const browserStatusProps = useMemo(
-    () => (activeBrowserPanels.length === 0 ? null : { browsers: activeBrowserPanels }),
-    [activeBrowserPanels],
-  );
-  return {
-    pendingApproval,
-    pendingGates,
-    hasActiveAttention,
-    browserStatusProps,
-    systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
-    showAdminHealth: isAdminOperator(agents.user),
-  };
+/** The per-user UI belongs to the signed-in session user only. */
+function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): string | null {
+  if (!isRoseDesktopAccount(agents) || isBenchmarkArchiveMode()) return null;
+  return agents.user?.id ?? null;
 }
 
-interface TerminalLayoutProps {
-  agents: ReturnType<typeof useTerminalAgents>;
-  drip: ReturnType<typeof useDrippiness>;
-  tileAnimation: ReturnType<typeof useTileAnimation>;
-  patternOffset: ReturnType<typeof usePatternOffset>['patternOffset'];
-  tileColors: ReturnType<typeof usePatternOffset>['tileColors'];
-  colorPalette: ReturnType<typeof usePatternOffset>['colorPalette'];
-  currentView: TerminalView;
-  setCurrentView: (view: TerminalView) => void;
-  models: ReturnType<typeof useAppData>['models'];
-  modelsLoading: boolean;
-  derived: ReturnType<typeof useTerminalDerivedState>;
+/** Rose Desktop chrome is on only for flagged, signed-in accounts (lib/roseDesktop.ts). */
+function isRoseDesktopAccount(agents: ReturnType<typeof useTerminalAgents>): boolean {
+  return !agents.isAnonymous && isRoseDesktopUser(agents.user);
 }
 
 function TerminalLayout(props: TerminalLayoutProps) {
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
-  return <InteractiveTerminalLayout {...props} />;
+  const roseDesktop = isRoseDesktopAccount(props.agents);
+  return (
+    <RoseDesktopContext.Provider value={roseDesktop}>
+      <RoseThemeProvider userId={props.agents.user?.id ?? null} darkOnLogin>
+        <RoseAppsProvider
+          agents={props.agents.agents}
+          selectedAgentId={props.agents.selectedAgentId}
+          onSelectAgent={props.agents.handleSelectAgent}
+          publishLayout={roseDesktop}
+          onLogout={() => void props.agents.handleLogout()}
+          onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
+        >
+          <AppViewProvider userId={props.agents.user?.id ?? null}>
+            <CodeAgentViewProvider
+              enabled={roseDesktop}
+              selectedAgentId={props.agents.selectedAgentId}
+              onSelectAgent={props.agents.handleSelectAgent}
+            >
+              <InteractiveTerminalLayout {...props} />
+            </CodeAgentViewProvider>
+          </AppViewProvider>
+          {roseDesktop && <RoseAppIcons />}
+        </RoseAppsProvider>
+      </RoseThemeProvider>
+    </RoseDesktopContext.Provider>
+  );
 }
 
 function InteractiveTerminalLayout(props: TerminalLayoutProps) {
+  return (
+    <UserUiProvider userId={resolveUserUiUserId(props.agents)}>
+      <UserUiShell>
+        <InteractiveTerminalChrome {...props} />
+      </UserUiShell>
+    </UserUiProvider>
+  );
+}
+
+function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   // THE app-wide attention subscription. Held here because this is the common
   // ancestor of the header (bell + mobile drawer) and the sidebar; every other
@@ -173,6 +203,7 @@ function InteractiveTerminalLayout(props: TerminalLayoutProps) {
             clientSource={agents.clientSource}
             agents={agents.agents}
             isLoadingAgents={agents.isLoadingAgents}
+            hasLoadedAgents={agents.hasLoadedAgents}
             selectedAgentId={agents.selectedAgentId}
             onRefreshAgents={agents.loadAgents}
             dripStyles={drip.dripStyles}
@@ -289,6 +320,10 @@ function SidebarSection({
       selectedAgentId={agents.selectedAgentId}
       onSelectAgent={agents.handleSelectAgent}
       onCreateAgent={agents.handleCreateNewAgent}
+      roseActions={{
+        onCreateAgentInProject: agents.handleCreateNewAgentInProject,
+        onNewAgentInBranch: agents.handleCreateNewAgentInBranch,
+      }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}
       attentionAgentIds={attentionAgentIds}

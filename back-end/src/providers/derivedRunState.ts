@@ -5,13 +5,15 @@ export const DERIVED_RUN_STATE_RESET = {
   responseSchema: Prisma.DbNull,
   structuredResponse: Prisma.DbNull,
   progress: 0,
+  progressEstimate: Prisma.DbNull,
+  progressEstimateGeneration: null,
   toolsInUse: [] as string[],
   statusMessage: null,
 } as const;
 
 /**
  * Follow-up after a finished run: clear derived artifacts and persist the
- * chat-router goal onto Agent.goal so schema / fast-cache / title-fallback
+ * chat-router goal onto Agent.goal so schema / demo-cache / title-fallback
  * key off the new task. First-run escalate must not call this — 2026-07-03
  * forbids overwriting create-time Agent.goal with an LLM paraphrase.
  *

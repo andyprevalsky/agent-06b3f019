@@ -54,7 +54,10 @@ export async function findAgentsByBusId(busId: string) {
       parentAgentId: true,
       goal: true,
       status: true,
+      temporalWorkflowId: true,
       progress: true,
+      progressEstimate: true,
+      progressEstimateGeneration: true,
       toolsInUse: true,
       messageCount: true,
       tokensIn: true,
@@ -62,6 +65,7 @@ export async function findAgentsByBusId(busId: string) {
       responseSchema: true,
       structuredResponse: true,
       treeCostCents: true,
+      taskPath: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -136,28 +140,6 @@ export async function findAgentStatus(agentId: string) {
   });
 }
 
-/** Resolve the minimal owner context needed by the external failure-alert workflow. */
-export async function findAgentAlertContext(agentId: string) {
-  const agent = await prisma.agent.findFirst({
-    where: {
-      id: agentId,
-      deletedAt: null,
-    },
-    select: {
-      id: true,
-      userId: true,
-      status: true,
-    },
-  });
-  if (!agent) return null;
-
-  const user = await prisma.user.findUnique({
-    where: { userId: agent.userId },
-    select: { name: true },
-  });
-  return { ...agent, userName: user?.name ?? null };
-}
-
 /** Resolve the account identity displayed while an administrator inspects a run. */
 export async function findUserInspectionIdentity(userId: string) {
   return prisma.user.findUnique({
@@ -225,6 +207,7 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
       worldModelMode: true,
       memoryEnabled: true,
       isBenchmark: true,
+      projectId: true,
     },
   });
 }
@@ -307,6 +290,17 @@ export async function findExploreToolEvidence(agentId: string, userId: string, t
   // Read at most 16 rows so failed fetches can be removed before selecting
   // early and late successful evidence.
   return [...new Map([...first, ...last.reverse()].map((row) => [row.id, row])).values()];
+}
+
+/** One message row of a live agent by primary key, with optional owner check. */
+export async function findAgentMessage(agentId: string, messageId: string, userId?: string) {
+  return prisma.message.findFirst({
+    where: {
+      id: messageId,
+      agentId,
+      agent: { deletedAt: null, ...(userId !== undefined ? { userId } : {}) },
+    },
+  });
 }
 
 /** Batch fetch messages by IDs, scoped to a user's agents. */

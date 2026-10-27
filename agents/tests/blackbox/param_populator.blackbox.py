@@ -179,6 +179,47 @@ async def test_populate_uses_agent_model():
         seen.update(kwargs)
         return _FakePydanticResult([_FakeToolCall({"tool": "web_search", "query": "q"})]), {"total_tokens": 1}, []
 
+    async def fake_model_context(model):
+        seen["budget_model"] = model
+        return 200000
+
+    original_window = svc.get_model_context_window
+    svc.get_model_context_window = fake_model_context
+    original_fetch = svc.fetch_agent_context
+    original_call = svc.call_llm_structured_streaming
+    svc.fetch_agent_context = fake_fetch_agent_context
+    svc.call_llm_structured_streaming = fake_call_llm_structured_streaming
+    try:
+        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1", model="rose-fast")
+    finally:
+        svc.get_model_context_window = original_window
+        svc.fetch_agent_context = original_fetch
+        svc.call_llm_structured_streaming = original_call
+
+    assert seen["budget_model"] == seen["model"] == "rose-fast"
+    assert seen["call_site"] == "dag_param_populator"
+
+
+async def test_populate_keeps_metadata_for_unadmitted_attachments():
+    """An unrelated unreadable or oversized upload must not block parameter population."""
+    from domains.param_populator.service import populate_tool_params
+    import domains.param_populator.service as svc
+
+    seen: dict = {}
+    context = [
+        {"role": "USER", "text": "earlier upload", "file_pointer": {
+            "id": "unrelated-zip", "storage_path": "fixture/archive.zip", "original_filename": "archive.zip",
+            "mime_type": "application/zip", "size_bytes": 2048}},
+        {"role": "USER", "text": "find AI news"},
+    ]
+
+    async def fake_fetch_agent_context(agent_id: str):
+        return context
+
+    async def fake_call_llm_structured_streaming(**kwargs):
+        seen.update(kwargs)
+        return _FakePydanticResult([_FakeToolCall({"tool": "web_search", "query": "q"})]), {"total_tokens": 1}, []
+
     original_fetch = svc.fetch_agent_context
     original_call = svc.call_llm_structured_streaming
     svc.fetch_agent_context = fake_fetch_agent_context
@@ -189,8 +230,8 @@ async def test_populate_uses_agent_model():
         svc.fetch_agent_context = original_fetch
         svc.call_llm_structured_streaming = original_call
 
-    assert seen["model"] == "rose-fast"
-    assert seen["call_site"] == "dag_param_populator"
+    rendered = "\n".join(str(message.get("content")) for message in seen["messages"])
+    assert "archive.zip" in rendered
 
 
 async def test_populate_happy_path_returns_params_and_usage():
@@ -441,6 +482,7 @@ async def run_all_tests():
     r.record("build_prompt_file_attachment_rules_included", test_build_prompt_file_attachment_rules_included)
     await r.record_async("populate_raises_on_unknown_tool", test_populate_raises_on_unknown_tool)
     await r.record_async("populate_uses_agent_model", test_populate_uses_agent_model)
+    await r.record_async("populate_keeps_metadata_for_unadmitted_attachments", test_populate_keeps_metadata_for_unadmitted_attachments)
     await r.record_async("populate_happy_path", test_populate_happy_path_returns_params_and_usage)
     await r.record_async("populate_fallback_first_tool_call", test_populate_fallback_to_first_tool_call_on_mismatch)
     await r.record_async("populate_raises_no_tool_calls", test_populate_raises_when_no_tool_calls)

@@ -5,9 +5,9 @@ from pydantic import BaseModel,ConfigDict
 from wmh.providers.base import Message
 from providers.rose.types import RoseResponse,StreamChunk
 from providers.rose import RoseClient
-from providers.fast_cache import client as cache_client
-from providers.fast_cache.context import current_context,set_context,reset_context
-from providers.fast_cache.rose_cache import request_key_material
+from providers.demo_cache import client as cache_client
+from providers.demo_cache.context import current_context,set_context,reset_context
+from providers.demo_cache.rose_cache import request_key_material
 from benchmarks import wmh_rose_provider as module
 from benchmarks.wmh_provider_capture import REJECTION_RECORDER
 class NativeFixture(BaseModel):
@@ -75,7 +75,7 @@ def test_wmh_schema_results_store_only_after_all_native_validation(monkeypatch,c
  def transport(request):
   assert request.url.path=='/api/fast-cache/set';posts.append(json.loads(request.content));return httpx.Response(200,json={'ok':True,'stored':True})
  http=httpx.AsyncClient(transport=httpx.MockTransport(transport));monkeypatch.setattr(cache_client,'_shared_client',lambda:http)
- ctx=module._WMHFastCacheContext(enabled=True,goal='DEMO FIXTURE ONLY structured native cache',write_enabled=True,root_goal='DEMO FIXTURE ONLY structured native cache',provider_fast_mode=True)
+ ctx=module._WMHDemoCacheContext(enabled=True,goal='DEMO FIXTURE ONLY structured native cache',write_enabled=True,root_goal='DEMO FIXTURE ONLY structured native cache',provider_fast_mode=True)
  async def run():
   prior=current_context();token=set_context(ctx)
   try:
@@ -164,7 +164,7 @@ def test_wmh_structured_completion_replays_through_stock_cache(monkeypatch, shap
  async def no_auth():
   return None, None
  monkeypatch.setattr(provider, '_lease_auth', no_auth)
- ctx = module._WMHFastCacheContext(enabled=True, goal='DEMO FIXTURE ONLY structured native cache', write_enabled=True, root_goal='DEMO FIXTURE ONLY structured native cache')
+ ctx = module._WMHDemoCacheContext(enabled=True, goal='DEMO FIXTURE ONLY structured native cache', write_enabled=True, root_goal='DEMO FIXTURE ONLY structured native cache')
  async def run():
   token = set_context(ctx)
   try:

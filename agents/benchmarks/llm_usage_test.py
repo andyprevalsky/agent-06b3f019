@@ -19,6 +19,8 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
         "claude-fable-5",
     )
     assert classify_model("gpt-6-sol-foundry") == ("foundry", "gpt-6-sol")
+    # The direct Cerebras hop serves the bare pool cerebras_model id.
+    assert classify_model("qwen-3.8-27b") == ("cerebras", "qwen-3.8-27b")
     # Slot models track POOL_REGISTRY. openai/gpt-5.6-sol left the ultra
     # waterfall when it moved to openai/gpt-6-sol -> kimi-k3. A model that is
     # merely a pool's direct-auth choice no longer classifies as a slot.
@@ -139,6 +141,7 @@ def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
         "gpt_api_key",
         "anthropic_api_key",
         "foundry",
+        "cerebras",
         "openrouter_model_1",
         "openrouter_model_2",
     ]

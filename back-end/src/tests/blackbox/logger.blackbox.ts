@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { createLogger } from '../../providers/logger';
+import { handleRouteError } from '../../domains/agents/routes.helpers';
 
 function captureStdout(run: () => void): string {
   const original = process.stdout.write.bind(process.stdout);
@@ -115,6 +116,61 @@ function testErrorsKeepTheirDiagnostics(): void {
   assert.ok(!line.includes('error={}'), `error must not serialize to an empty object: ${line}`);
 }
 
+function captureStderr(run: () => void): string {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    captured += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    run();
+  } finally {
+    process.stderr.write = original;
+  }
+  return captured;
+}
+
+/**
+ * descend-full69 proof 2 (r001-j0013): an expired interactive transaction made
+ * POST /api/agents/:id/messages 500. Prisma's message starts with a newline, so
+ * the dev line read `error=` and line-based triage saw an empty error while the
+ * cause sat on later lines. One log event must stay one line with its cause.
+ */
+function testMultilineRouteErrorStaysOnOneLine(): void {
+  const prismaMessage =
+    '\nInvalid `prisma.$queryRaw()` invocation:\n\n\nTransaction API error: Transaction already ' +
+    'closed: A query cannot be executed on an expired transaction. The timeout for this ' +
+    'transaction was 10000 ms, however 11302 ms passed since the start of the transaction.';
+  let status = 0;
+  let body: unknown;
+  const res = {
+    status(code: number) {
+      status = code;
+      return this;
+    },
+    json(payload: unknown) {
+      body = payload;
+      return this;
+    },
+  } as unknown as Parameters<typeof handleRouteError>[0];
+
+  const output = captureStderr(() =>
+    handleRouteError(res, new Error(prismaMessage), 'Failed to post message', {
+      agent_id: 'bcb407af-535a-4bd2-849b-8bd7e137e64b',
+    })
+  );
+
+  assert.strictEqual(status, 500);
+  assert.deepStrictEqual(body, { error: 'Failed to post message' });
+  const lines = output.split('\n').filter((line) => line !== '');
+  assert.strictEqual(lines.length, 1, `one log event must be one line: ${JSON.stringify(output)}`);
+  assert.ok(
+    lines[0].includes('Transaction already closed') && lines[0].includes('11302 ms'),
+    `the error= field must carry the cause on the logged line: ${lines[0]}`
+  );
+}
+
 /** A logger must never be the thing that throws. */
 function testCircularContextDoesNotThrow(): void {
   const log = createLogger('LoggerBlackbox');
@@ -130,5 +186,6 @@ testPrimitiveContextIsUnchanged();
 testSensitiveValuesAreRedacted();
 testErrorsKeepTheirDiagnostics();
 testCircularContextDoesNotThrow();
+testMultilineRouteErrorStaysOnOneLine();
 
-console.log('PASS logger (5 cases)');
+console.log('PASS logger (6 cases)');

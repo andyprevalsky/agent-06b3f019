@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal, run_fixture
+from providers.demo_cache.google_oauth_demo_fixture import matches_demo_goal, run_fixture
 from domains.send_message_to_user.types import build_attention_metadata
 from tools.base import EventType, MessageStatus, ToolEvent
 

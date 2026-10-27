@@ -2,7 +2,13 @@
  * Claude Code session routes -- thin controller layer.
  *
  * POST /api/claude-code-session/create   - Create a new E2B sandbox session
- * POST /api/claude-code-session/close    - Close a session (kill sandbox)
+ * POST /api/claude-code-session/close    - Close a session (checkpoint + pause a persistent
+ *                                          code session's sandbox; kill legacy sessions)
+ * POST /api/claude-code-session/checkpoint - Checkpoint a running task's code session
+ * GET  /api/claude-code-session/code-sessions/:id    - Owned code session (404 otherwise)
+ * DELETE /api/claude-code-session/code-sessions/:id - Retire it (kill + delete checkpoints)
+ * POST /api/claude-code-session/code-sessions/:id/inspect - Read-only inspection of its latest
+ *                                          checkpoint in a throwaway sandbox (internal)
  * GET  /api/claude-code-session/:taskId  - Get session info
  * GET  /api/claude-code-session/agent/:agentId - Get all sessions for an agent
  * POST /api/claude-code-session/:taskId/output - Persist terminal output
@@ -10,16 +16,76 @@
  */
 
 import { type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
+import { callerCanAccessAgent, callerCanAccessCodeTask } from '../../providers/agentAccess';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
+import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
+import { registerCodeInspectRoutes } from './routes.codeInspect';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
+import {
+  LocalTargetUnavailableError,
+  localTargetUnavailableBody,
+} from '../../providers/localDevices/messages';
+import {
+  LocalSessionOwnerMismatchError,
+  createLocalCodeSessionResponse,
+} from '../../providers/localDevices/session';
+import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
+
+registerCodeSessionRoutes(router);
+registerCodeInspectRoutes(router);
+
+/**
+ * C14: a local session runs on the agent tree's Mac with the user's own login,
+ * in the folder they granted (no clone, Project restore or persistent code
+ * session: the work stays in that folder). Otherwise an E2B sandbox resumes or
+ * starts the agent's persistent code session.
+ */
+async function createSessionForTarget(body: unknown) {
+  const {
+    agent_id,
+    goal,
+    attachments,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    fresh_conversation,
+    lease_owner,
+    base_branch,
+    project_id,
+    target,
+    device_id,
+  } = createSessionSchema.parse(body);
+  if (target === 'local') {
+    const local = await createLocalCodeSessionResponse({
+      agentId: agent_id,
+      goal,
+      provider: 'claude',
+      expectedUserId: user_id,
+      deviceId: device_id,
+    });
+    return { ...local, project: null };
+  }
+  return service.createSession({
+    agent_id,
+    goal,
+    attachments: attachments as FilePointer[] | undefined,
+    github_repo_url,
+    user_id,
+    code_session_id,
+    fresh_conversation,
+    lease_owner,
+    base_branch,
+    project_id,
+  });
+}
 
 /**
  * POST /api/claude-code-session/create
@@ -29,26 +95,24 @@ const router = Router();
  */
 router.post(
   '/create',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(
-        req.body
-      );
-
-      const result = await service.createSession({
-        agent_id,
-        goal,
-        attachments: attachments as FilePointer[] | undefined,
-        github_repo_url,
-        user_id,
-      });
+      const result = await createSessionForTarget(req.body);
 
       res.json({
         success: true,
         ...result,
       });
     } catch (error) {
+      if (error instanceof LocalTargetUnavailableError) {
+        res.status(409).json(localTargetUnavailableBody(error));
+        return;
+      }
+      if (error instanceof LocalSessionOwnerMismatchError) {
+        res.status(403).json({ error: error.message, code: 'AGENT_OWNER_MISMATCH' });
+        return;
+      }
       if (error instanceof MissingUserIdError) {
         res.status(400).json({
           error: 'user_id is required when using github_repo_url',
@@ -63,6 +127,10 @@ router.post(
         });
         return;
       }
+      if (error instanceof ProjectNotFoundForSessionError) {
+        res.status(404).json({ error: error.message, code: 'PROJECT_NOT_FOUND' });
+        return;
+      }
       if (error instanceof AgentOwnerMismatchError) {
         res.status(403).json({
           error: error.message,
@@ -70,6 +138,7 @@ router.post(
         });
         return;
       }
+      if (sendCodeSessionError(res, error)) return;
       log.error('Failed to create Claude Code session', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -86,12 +155,20 @@ router.post(
  */
 router.post(
   '/close',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
+      const { task_id, user_id, agent_id, additional_paths, reason } = closeSessionSchema.parse(
+        req.body
+      );
 
-      const result = await service.closeSession({ task_id, user_id, agent_id, additional_paths });
+      const result = await service.closeSession({
+        task_id,
+        user_id,
+        agent_id,
+        additional_paths,
+        reason,
+      });
 
       res.json({
         success: true,
@@ -119,7 +196,9 @@ router.get(
     try {
       const { taskId } = req.params;
 
-      const session = await service.getSession(taskId);
+      const session = (await callerCanAccessCodeTask(req, taskId))
+        ? await service.getSession(taskId)
+        : null;
 
       if (session === null) {
         res.status(404).json({ error: 'Session not found' });
@@ -149,6 +228,10 @@ router.get(
     try {
       const { agentId } = req.params;
 
+      if (!(await callerCanAccessAgent(req, agentId))) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
       const sessions = await service.getAgentSessions(agentId);
 
       res.json({ sessions });
@@ -168,7 +251,7 @@ router.get(
  */
 router.post(
   '/:taskId/output',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const { taskId } = req.params;
@@ -202,7 +285,7 @@ router.post(
  */
 router.get(
   '/:sandboxId/health',
-  authenticate,
+  authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { sandboxId } = req.params;
 

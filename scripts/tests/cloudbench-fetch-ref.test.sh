@@ -154,4 +154,84 @@ if CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
 fi
 [ "$(cat "$TMP_ROOT/non-git-data/asset")" = preserve ] || fail "retained data changed"
 
+
+# An autoscaled REAL worker on fresh storage only executes the runtime source.
+# Append-only benchmark history ledgers are read and written by the primary's
+# benchmark runner, never by the worker, and are already excluded from the
+# workspace patch. Exact-source startup must not inflate and write them: their
+# growth pushed every worker past the 300s queue-readiness gate (descend
+# 2026-10-23, test-mass-agent-run-0). GitHub serves partial-clone filters; the
+# local bare origin is configured the same way.
+git -C "$TMP_ROOT/origin.git" config uploadpack.allowFilter true
+mkdir -p "$TMP_ROOT/source/agents/benchmarks/history"
+printf '{"span":"ledger"}\n' > "$TMP_ROOT/source/agents/benchmarks/history/span_durations.jsonl"
+: > "$TMP_ROOT/source/agents/benchmarks/history/.gitkeep"
+printf 'print("worker")\n' > "$TMP_ROOT/source/agents/worker.py"
+git -C "$TMP_ROOT/source" add agents
+git -C "$TMP_ROOT/source" commit -qm ledger
+git -C "$TMP_ROOT/source" push -q origin HEAD:main
+ledger_target="$(git -C "$TMP_ROOT/source" rev-parse HEAD)"
+ledger_blob="$(git -C "$TMP_ROOT/source" rev-parse HEAD:agents/benchmarks/history/span_durations.jsonl)"
+worker_checkout="$TMP_ROOT/worker-checkout"
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
+GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
+CLOUDBENCH_GITHUB_TOKEN_B64="$(printf local-fixture-only | base64)" \
+CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_SOURCE_SCOPE=worker-runtime CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$worker_checkout" "$ledger_target" >/dev/null 2>&1 \
+  || fail "fresh worker volume did not bootstrap its exact runtime checkout"
+[ "$(git -C "$worker_checkout" rev-parse HEAD)" = "$ledger_target" ] \
+  || fail "fresh worker checkout did not verify the requested commit"
+[ "$(git -C "$worker_checkout" rev-parse HEAD^{tree})" = \
+  "$(git -C "$TMP_ROOT/source" rev-parse "$ledger_target^{tree}")" ] \
+  || fail "fresh worker checkout changed the requested source tree"
+for path in payload.txt agents/worker.py agents/benchmarks/history/.gitkeep; do
+  cmp "$TMP_ROOT/source/$path" "$worker_checkout/$path" \
+    || fail "fresh worker checkout changed runtime source bytes: $path"
+done
+[ ! -e "$worker_checkout/agents/benchmarks/history/span_durations.jsonl" ] \
+  || fail "fresh worker checkout wrote an unused benchmark history ledger"
+git -C "$worker_checkout" rev-list --objects --missing=print "$ledger_target" \
+  | grep -Fxq "?$ledger_blob" \
+  || fail "fresh worker checkout transferred an unused benchmark history ledger"
+unexpected_sparse="$(git -C "$worker_checkout" ls-files -t \
+  | grep '^S ' | grep -Ev '^S agents/benchmarks/history/[^/]+\.jsonl$' || true)"
+[ -z "$unexpected_sparse" ] \
+  || fail "fresh worker checkout omitted runtime source: $unexpected_sparse"
+# The worker's later restore/clean/verify steps run after the request-scoped
+# credential is gone; they must never need the omitted ledger objects.
+offline_git() {
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/no-such-origin.git.insteadOf" \
+    GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git GIT_TERMINAL_PROMPT=0 \
+    git -C "$worker_checkout" "$@"
+}
+offline_git restore --source "$ledger_target" --staged --worktree -- . \
+  || fail "worker tracked-source restore needed omitted ledger objects"
+offline_git diff --no-ext-diff --quiet "$ledger_target" -- \
+  && offline_git diff --no-ext-diff --cached --quiet "$ledger_target" -- \
+  && [ -z "$(offline_git status --porcelain)" ] \
+  || fail "worker checkout did not verify clean against the requested base"
+[ "$(git -C "$worker_checkout" config --get remote.origin.url)" = https://github.com/Rose-Ai-Labs/rose.git ] \
+  || fail "worker checkout persisted a rewritten or authenticated origin"
+assert_lock_released "$worker_checkout/.git/cloudbench-fetch.lock"
+# The primary's benchmark runner reads and appends these ledgers: its fresh
+# bootstrap keeps the complete requested tree.
+primary_checkout="$TMP_ROOT/primary-checkout"
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
+GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
+CLOUDBENCH_GITHUB_TOKEN_B64="$(printf local-fixture-only | base64)" \
+CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$primary_checkout" "$ledger_target" >/dev/null 2>&1 \
+  || fail "fresh primary volume did not bootstrap its exact checkout"
+cmp "$TMP_ROOT/source/agents/benchmarks/history/span_durations.jsonl" \
+  "$primary_checkout/agents/benchmarks/history/span_durations.jsonl" \
+  || fail "fresh primary checkout lost its benchmark history ledger"
+if CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_SOURCE_SCOPE=everything CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+  bash "$FETCH_SCRIPT" "$TMP_ROOT/unknown-scope" "$ledger_target" >/dev/null 2>&1; then
+  fail "unknown source scope must fail closed"
+fi
+grep -Fq 'CLOUDBENCH_SOURCE_SCOPE=worker-runtime' "$ROOT_DIR/scripts/cloudbench-worker.sh" \
+  || fail "autoscaled worker does not request its runtime-only source scope"
+
 echo "All cloud benchmark fetch checks passed."

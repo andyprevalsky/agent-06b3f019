@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import copy
 import gzip
 import hashlib
 import json
@@ -60,6 +61,10 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
     "attachment"; on the cloud the runner joined that list as one path and the
     task errored after 39 s ("join() argument must be ... not 'list'")."""
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.code_bench import ATTACHMENT_PREFIX, resolve_attachment
     from benchmarks.run_benchmark import TEST_ASSETS_DIR
 
     for task in all_tasks():
@@ -67,6 +72,16 @@ def test_catalog_attachments_resolve_to_single_uploadable_paths():
         files = task.attachments or ([task.attachment] if task.attachment else [])
         for name in files:
             assert isinstance(name, str), (task.name, name)
+            if name.startswith(ATTACHMENT_PREFIX):
+                # Built at run time by code_bench.resolve_attachment from its
+                # checked-in fixture; never a static asset file. Build it and
+                # require exactly one uploadable regular file.
+                with tempfile.TemporaryDirectory(prefix="code-bench-attachment-") as tmp:
+                    built = resolve_attachment(name, Path(tmp))
+                    assert built is not None and built.is_file() and not built.is_symlink(), (task.name, name)
+                    assert built.stat().st_size > 0, (task.name, name)
+                    assert [p.name for p in Path(tmp).iterdir()] == [built.name], (task.name, name)
+                continue
             assert os.path.exists(os.path.join(TEST_ASSETS_DIR, name)), (task.name, name)
     fundraiser = get_task_by_name("raise-5m-rose-labs-brex")
     assert len(fundraiser.attachments) == 5 and fundraiser.attachment is None
@@ -274,7 +289,10 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
 
 
 def test_hub_transport_owned_root_projection_preserves_evidence():
-    from benchmarks.hub_upload_test import test_hub_transport_projects_every_owned_root_without_changing_evidence as control
+    from benchmarks.hub_upload_test import (
+        test_hub_transport_projects_every_owned_root_without_changing_evidence as control,
+    )
+
     control()
 
 
@@ -402,7 +420,6 @@ def test_hub_terminal_upload_reconciles_committed_final_before_replay():
         assert not thread.is_alive()
 
 
-
 def test_hub_reconciliation_preserves_required_ack_identity():
     """An ambiguous POST must not borrow another outcome or campaign's ACK."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -418,11 +435,17 @@ def test_hub_reconciliation_preserves_required_ack_identity():
         "group_timestamp": "2026-10-12T22:26:13+00:00",
         "group_total": 50,
         "group_attempt": 1,
-        "tasks": [{"name": "browser-opentable-reservation", "passed": True,
-                   "status": "ACTIVE", "agent_id": "root-original", "lifecycle_stage": "released"}],
+        "tasks": [
+            {
+                "name": "browser-opentable-reservation",
+                "passed": True,
+                "status": "ACTIVE",
+                "agent_id": "root-original",
+                "lifecycle_stage": "released",
+            }
+        ],
     }
-    exact = {**bundle, "live": False,
-             "tasks": [{**bundle["tasks"][0], "status": "passed"}]}
+    exact = {**bundle, "live": False, "tasks": [{**bundle["tasks"][0], "status": "passed"}]}
     current_view = exact
     post_status = 503
     posts = []
@@ -452,54 +475,68 @@ def test_hub_reconciliation_preserves_required_ack_identity():
     thread.start()
     wrongly_acknowledged = []
     try:
-        with (patch.dict(os.environ, {"BENCHMARK_HUB_UPLOAD_URL":
-                                     f"http://127.0.0.1:{server.server_address[1]}",
-                                     "BENCHMARK_HUB_API_KEY": "fixture-key"}),
-              patch("benchmarks.hub_upload.time.sleep", lambda _delay: None)):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
             for verified_live in (False, True):
-                for field, wrong in (("run_id", "foreign-run"),
-                                     ("timestamp", "2026-10-13T00:00:00Z"),
-                                     ("suite", "foreign-suite"), ("source", "foreign-source"),
-                                     ("group_run_id", "campaign-foreign"),
-                                     ("group_member_id", "r001-j0001"), ("group_run_number", 2),
-                                     ("group_timestamp", "2026-10-13T00:00:00Z"),
-                                     ("group_total", 49), ("group_attempt", 2),
-                                     ("group_attempt", True)):
+                for field, wrong in (
+                    ("run_id", "foreign-run"),
+                    ("timestamp", "2026-10-13T00:00:00Z"),
+                    ("suite", "foreign-suite"),
+                    ("source", "foreign-source"),
+                    ("group_run_id", "campaign-foreign"),
+                    ("group_member_id", "r001-j0001"),
+                    ("group_run_number", 2),
+                    ("group_timestamp", "2026-10-13T00:00:00Z"),
+                    ("group_total", 49),
+                    ("group_attempt", 2),
+                    ("group_attempt", True),
+                ):
                     current_view = {**exact, "live": verified_live, field: wrong}
                     try:
-                        upload_run_bundle(bundle, live=verified_live, required=True,
-                                          verify_live_response=verified_live, max_attempts=1)
+                        upload_run_bundle(
+                            bundle,
+                            live=verified_live,
+                            required=True,
+                            verify_live_response=verified_live,
+                            max_attempts=1,
+                        )
                         wrongly_acknowledged.append(str(verified_live) + ":" + field + ":" + str(wrong))
                     except HubVisibilityError:
                         pass
             for live in (True, False):
-                current_view = {**exact, "live": live,
-                                "tasks": [{**exact["tasks"][0], "passed": False, "status": "failed"}]}
+                current_view = {
+                    **exact,
+                    "live": live,
+                    "tasks": [{**exact["tasks"][0], "passed": False, "status": "failed"}],
+                }
                 try:
-                    upload_run_bundle(bundle, live=True, required=True,
-                                      verify_live_response=True, max_attempts=1)
+                    upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
                     wrongly_acknowledged.append("verified-live:" + str(live))
                 except HubVisibilityError:
                     pass
-            current_view = {**exact, "live": True,
-                            "tasks": [{**exact["tasks"][0], "passed": 1}]}
+            current_view = {**exact, "live": True, "tasks": [{**exact["tasks"][0], "passed": 1}]}
             try:
-                upload_run_bundle(bundle, live=True, required=True,
-                                  verify_live_response=True, max_attempts=1)
+                upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
                 wrongly_acknowledged.append("numeric passed reconciled as boolean")
             except HubVisibilityError:
                 pass
             post_status = 201
-            if upload_run_bundle(bundle, live=True, required=True,
-                                 verify_live_response=True, max_attempts=1):
+            if upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1):
                 wrongly_acknowledged.append("numeric passed in successful POST ACK")
             post_status = 503
             # Matching outcomes can reconcile on the final attempt, from this same Hub.
             current_view = exact
             assert upload_run_bundle(bundle, required=True, max_attempts=1)
             current_view = {**exact, "live": True}
-            assert upload_run_bundle(bundle, live=True, required=True,
-                                     verify_live_response=True, max_attempts=1)
+            assert upload_run_bundle(bundle, live=True, required=True, verify_live_response=True, max_attempts=1)
             assert len(posts) == 28, "one POST per case; reconciliation must not add retries"
             expected_body = {**bundle, "tasks": [{**bundle["tasks"][0], "logs": {}}]}
             assert all(post == expected_body for post in posts), "reconciliation must preserve packet bytes"
@@ -520,11 +557,13 @@ def test_hub_requests_preserve_external_proxy_routing():
         control(monkeypatch)
 
 
-
-
 def test_archived_diagnostic_projection_requires_authenticated_bindings():
-    from benchmarks.hub_upload_test import test_archived_diagnostic_projection_requires_authenticated_bindings as control
+    from benchmarks.hub_upload_test import (
+        test_archived_diagnostic_projection_requires_authenticated_bindings as control,
+    )
+
     control()
+
 
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
@@ -778,59 +817,65 @@ def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass()
     assert any("not all passing" in error for error in pass_errors)
 
 
-
 # Original operator boundary regressions, shared with script-only maintenance.
 def test_controller_maintenance_process_identity():
     from controller_maintenance_cases import test_process_identity
+
     test_process_identity()
 
 
 def test_controller_maintenance_optional_inventory():
     from controller_maintenance_cases import test_optional_inventory
+
     test_optional_inventory()
 
 
 def test_controller_maintenance_privilege_separation():
     from controller_maintenance_cases import test_privilege_separation
+
     test_privilege_separation()
 
 
 def test_controller_maintenance_typed_inventory():
     from controller_maintenance_cases import test_typed_inventory
+
     test_typed_inventory()
 
 
 def test_controller_maintenance_operation_directory():
     from controller_maintenance_cases import test_operation_directory
+
     test_operation_directory()
 
 
 def test_controller_maintenance_stop_transition():
     from controller_maintenance_cases import test_stop_transition
+
     test_stop_transition()
 
 
 def test_controller_maintenance_retained_path():
     from controller_maintenance_cases import test_retained_path
+
     test_retained_path()
-
-
 
 
 def test_controller_v39_full_native_pair():
     from controller_v39_cases import test_v39_full_native_pair
+
     test_v39_full_native_pair()
 
 
 def test_controller_v39_cleanup_all_uid_writers():
     from controller_v39_cases import test_v39_cleanup_all_uid_writers
+
     test_v39_cleanup_all_uid_writers()
 
 
 def test_controller_v39_receipt_bound_runtime():
     from controller_v39_cases import test_v39_receipt_bound_runtime
-    test_v39_receipt_bound_runtime()
 
+    test_v39_receipt_bound_runtime()
 
 
 def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success():
@@ -1090,6 +1135,26 @@ def test_sms_runner_scoring_contract_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/sms_runner_test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_code_bench_evaluator_proofs_are_in_permanent_gate():
+    """Code-bench graders (agents/benchmarks/code_bench_test.py, plan C8).
+
+    Every fixture's hidden-test grader must fail the unmodified repo and pass
+    its reference solution through the returned-archive path, the attachments
+    must stay byte-identical across builds, and the raw-CLI parity runner must
+    stay reachable through ``scripts/run-bench code-parity``.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/code_bench_test.py")],
         cwd=repo_root,
         text=True,
         capture_output=True,
@@ -1451,9 +1516,13 @@ def test_cloudbench_worktree_patch_excludes_linked_dependency_environment():
         for relative in (".gitignore", "agents/.gitignore"):
             (fixture / relative).write_bytes((repo_root / relative).read_bytes())
         (fixture / "source.txt").write_text("before\n")
-        for args in (("init", "-q"), ("config", "user.email", "bench@example.com"),
-                     ("config", "user.name", "Bench"), ("add", "-A"),
-                     ("commit", "-qm", "fixture")):
+        for args in (
+            ("init", "-q"),
+            ("config", "user.email", "bench@example.com"),
+            ("config", "user.name", "Bench"),
+            ("add", "-A"),
+            ("commit", "-qm", "fixture"),
+        ):
             subprocess.run(["git", "-C", str(fixture), *args], check=True)
         (fixture / "agents/venv").symlink_to(dependencies, target_is_directory=True)
         command = ["bash", str(patch_script), str(fixture)]
@@ -1463,14 +1532,28 @@ def test_cloudbench_worktree_patch_excludes_linked_dependency_environment():
 
         source = (repo_root / "scripts/run-bench-fleet").read_text()
         start = source.index("print_code_provenance() {")
-        panel_function = source[start:source.index("\n}\n", start) + 3]
+        panel_function = source[start : source.index("\n}\n", start) + 3]
         head = subprocess.check_output(["git", "-C", str(fixture), "rev-parse", "HEAD"], text=True).strip()
         panel = subprocess.run(
-            ["bash", "-c", "source " + shlex.quote(str(repo_root / "scripts/lib/cloudbench-env.sh"))
-             + "\n" + panel_function + "\nprint_code_provenance"],
-            env={**os.environ, "ROOT_DIR": str(fixture), "BENCH_REF": head,
-                 "REQUESTED_BENCH_REF": head, "CLOUDBENCH_SKIP_LOCAL_PATCH": "0"},
-            check=True, capture_output=True, text=True,
+            [
+                "bash",
+                "-c",
+                "source "
+                + shlex.quote(str(repo_root / "scripts/lib/cloudbench-env.sh"))
+                + "\n"
+                + panel_function
+                + "\nprint_code_provenance",
+            ],
+            env={
+                **os.environ,
+                "ROOT_DIR": str(fixture),
+                "BENCH_REF": head,
+                "REQUESTED_BENCH_REF": head,
+                "CLOUDBENCH_SKIP_LOCAL_PATCH": "0",
+            },
+            check=True,
+            capture_output=True,
+            text=True,
         )
         assert "clean working tree" in panel.stdout, panel.stdout
         assert "DIRTY" not in panel.stdout, panel.stdout
@@ -1593,6 +1676,177 @@ def test_benchmark_context_path_treats_root_context_as_repo_local():
             os.environ["BENCHMARK_CONTEXT_DIR"] = previous
 
 
+def test_local_port_run_binds_judge_backend_to_the_stack_under_test():
+    """descend-full69 MA: an isolated --port stack's declared judge leased tokens from localhost:3001.
+
+    agents/.env pins BACKEND_API_URL to the default dev stack; the run's judge
+    then failed "All connection attempts failed" with nothing listening there.
+    """
+    import os
+
+    from benchmarks import run_benchmark
+    from config import load_config
+
+    previous = os.environ.get("BACKEND_API_URL")
+    try:
+        os.environ["BACKEND_API_URL"] = "http://localhost:3001"
+        run_benchmark._bind_backend_api_url("http://localhost:3201/")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ.pop("BACKEND_API_URL")
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "http://localhost:3201"
+
+        os.environ["BACKEND_API_URL"] = "https://guest-tunnel.example.com"
+        run_benchmark._bind_backend_api_url("http://localhost:3201")
+        assert load_config().backend.api_url == "https://guest-tunnel.example.com"
+    finally:
+        if previous is None:
+            os.environ.pop("BACKEND_API_URL", None)
+        else:
+            os.environ["BACKEND_API_URL"] = previous
+    main_source = Path(run_benchmark.__file__).read_text()
+    resolve = main_source.index('base_url = f"http://localhost:{args.port}"')
+    assert "_bind_backend_api_url(base_url)" in main_source[resolve : resolve + 1500]
+
+
+def test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card():
+    """descend-full69 MA7: the T7 agentic judge read every GP card as empty.
+
+    The agentic bundle kept each first-level GP's "Task Complete" row with empty
+    text and dropped metadata.completionSummary (only the root card was
+    re-rendered), and its benchmark_state lacked the typed
+    completion_outputs_count the T7 prompt tells the judge to use. The judge
+    failed a run whose 50 GP cards each showed 14 outputs.
+    """
+    import hashlib as _hashlib
+
+    from benchmarks import run_benchmark
+
+    outputs = [
+        {"key": "creator_name", "label": "Creator Name", "value": "Michael Lustgarten"},
+        {"key": "rank_from_initial_list", "label": "Rank", "value": 31},
+    ]
+    gp_card = {
+        "role": "TOOL",
+        "message": "",
+        "metadata": {
+            "toolName": "completion_summary",
+            "toolStatus": "FINISHED",
+            "title": "\u2705 Task Complete",
+            "completionSummary": {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs},
+        },
+    }
+    gp = {
+        "parent_agent_id": "root-1",
+        "goal": "You are analyzing ONE creator for Andy Prevalsky",
+        "status": "COMPLETED",
+        "messages": [{"role": "USER", "message": "analyze"}, gp_card],
+        "response_schema": {"fields": [{"name": "creator_name", "type": "str"}, {"name": "rank_from_initial_list", "type": "int"}]},
+        "structured_output": {"creator_name": "Michael Lustgarten", "rank_from_initial_list": 31},
+    }
+    root = {"goal": "Analyze the top creators", "status": "COMPLETED", "messages": []}
+    tree = {"root-1": root, "gp-db85901b": gp}
+    data = {
+        "agent": {"agent_id": "root-1", "status": "COMPLETED"},
+        "messages": [],
+        "_semantic_evaluator_tree": tree,
+        "_benchmark": {"tree": tree},
+    }
+
+    evidence = run_benchmark._declared_agentic_evaluator_evidence(data)
+
+    cards = [
+        row
+        for row in evidence["messages"]
+        if row["metadata"].get("source_agent_id") == "gp-db85901b"
+        and row["metadata"].get("evidence_type") == "final_completion"
+    ]
+    assert len(cards) == 1, evidence["messages"]
+    assert json.loads(cards[0]["text"]) == {"summary": "Analyzed Michael Lustgarten.", "outputs": outputs}
+    (typed,) = [g for g in evidence["benchmark_state"]["first_level_gps"] if g["agent_id"] == "gp-db85901b"]
+    assert typed["completion_outputs_count"] == 2
+    assert typed["completion_is_ablated"] is False
+
+    audit = run_benchmark._agentic_judge_audit("judge-1", {"id": "f1", "storage_path": "u/f1.json"}, b"{}")
+    assert audit == {
+        "judge_agent_id": "judge-1",
+        "evidence_sha256": _hashlib.sha256(b"{}").hexdigest(),
+        "evidence_bytes": 2,
+        "evidence_file_id": "f1",
+        "evidence_storage_path": "u/f1.json",
+    }
+
+
+def test_mass_agent_completion_outputs_must_satisfy_their_response_schema():
+    """descend-full69 MA5: 44 of 50 first-level GPs finished with schema-incomplete output.
+
+    Their replayed verifier rows predated the output contract, so a GP completed
+    holding only fields coalesced from its transcript (Tim Ferriss: 5 of 14,
+    hook_formulas a str). Only the T7 judge looked, and it passed that evidence
+    some of the time. The static check validates the root and every first-level
+    GP with the verifier's own completion contract.
+    """
+    from benchmarks import run_benchmark
+
+    gp_fields = [
+        ("creator_name", "str"),
+        ("rank_from_initial_list", "int"),
+        ("platform_handles_and_urls", "str"),
+        ("posting_cadence_by_platform", "str"),
+        ("hook_formulas", "list[str]"),
+        ("top_5_performing_pieces_last_90_days", "list[object]"),
+        ("core_content_pillars", "list[str]"),
+        ("audience_persona", "str"),
+        ("monetization_funnels", "str"),
+        ("content_gaps", "list[str]"),
+        ("opportunities_for_aman", "str"),
+        ("engagement_approach", "str"),
+        ("citations_sources", "list[str]"),
+        ("confidence_level", "str"),
+    ]
+    gp_schema = {"fields": [{"name": n, "type": t, "required": True} for n, t in gp_fields]}
+    complete = {
+        n: (7 if t == "int" else ["x"] if t == "list[str]" else [{"title": "x"}] if t == "list[object]" else "x")
+        for n, t in gp_fields
+    }
+    file_pointer = {
+        "id": "dc45f44f-a4ed-55ff-b334-02674f6973f2",
+        "created_at": "2026-10-25T08:37:33.678222Z",
+        "mime_type": "text/html",
+        "original_filename": "hook-tested-script-openings.html",
+        "size_bytes": 10597,
+        "storage_path": "1f85ff25/dc45f44f_hook-tested-script-openings.html",
+    }
+    root_schema = {"fields": [{"name": "report", "type": "file_pointer", "required": True}]}
+    explore = {"parent_agent_id": "gp-tim", "goal": "Explore Tim", "agent_type": "explore"}
+
+    def run(tim_output):
+        tree = {
+            "root-1": {"response_schema": root_schema, "structured_output": {"report": file_pointer}},
+            "gp-molly": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": complete},
+            "gp-tim": {"parent_agent_id": "root-1", "response_schema": gp_schema, "structured_output": tim_output},
+            "ex-1": explore,
+        }
+        data = {"agent": {"agent_id": "root-1"}, "logs": {"tree": tree}}
+        return run_benchmark._completion_structured_output_schema_check(data, {"include_first_level_gps": True})
+
+    # Tim's replayed output: 5 of 14 fields, hook_formulas a string.
+    ok, reason = run(
+        {
+            "creator_name": "Tim Ferriss",
+            "rank_from_initial_list": 3,
+            "platform_handles_and_urls": "YouTube @timferriss",
+            "monetization_funnels": "sponsors",
+            "hook_formulas": "- **Title formulas:** guest name + epithet",
+        }
+    )
+    assert ok is False
+    assert reason.startswith("T7: 1 of 3 completion outputs") and "gp-tim" in reason, reason
+    assert "hook_formulas:list_type" in reason and "posting_cadence_by_platform:missing" in reason, reason
+    assert run(dict(complete)) == (True, "")
+
+
 def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
     """Queue preflight must not require killing sibling benchmark workers."""
     import os
@@ -1640,27 +1894,6 @@ def test_ci_should_fail_on_skipped_required_task():
 
     assert _ci_should_fail({"failed": 0, "skipped": 1}) is True
     assert _ci_should_fail({"failed": 0}) is False
-
-
-def test_ci_permits_only_the_opt_in_agentcard_release_skip():
-    """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
-    from benchmarks.results import TaskResult
-    from benchmarks.run_benchmark import AGENTCARD_RELEASE_SKIP_REASON, _ci_should_fail
-
-    def skipped(reason: str) -> TaskResult:
-        return TaskResult(name="agent-payment-abandonment", passed=False, agent_id="agent-123",
-                          status="SKIPPED", progress_score=0, duration_seconds=1, cost_cents=0,
-                          message_count=0, failure_reason=reason)
-
-    summary = {"failed": 0, "skipped": 1}
-    stall = skipped(f"{AGENTCARD_RELEASE_SKIP_REASON}: owt_1 consumed")
-    with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}):
-        assert _ci_should_fail(summary, [stall]) is False
-        assert _ci_should_fail(summary, [skipped("Cloud cleanup failed: payment: TimeoutError")]) is True
-        assert _ci_should_fail({"failed": 1, "skipped": 1}, [stall]) is True
-    for value in ("", "0", "true"):
-        with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": value}):
-            assert _ci_should_fail(summary, [stall]) is True
 
 
 def test_outreach_batch_has_timeout_floor():
@@ -1789,7 +2022,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
                 await coordinator
         namespace["_tick_report_once"]()
         assert cards[-1]["tasks"] == {"total": 3, "running": 0, "completed": 3, "queued": 0}, cards[-1]["tasks"]
-        assert cards[-1]["results"]["failed"] == 3
+        # Cancelled occurrences have no task verdict: counted as cancelled, never as failures.
+        assert (cards[-1]["results"]["failed"], cards[-1]["results"]["cancelled"]) == (0, 3)
         assert all(result.status == "CANCELLED" for result in namespace["run"].task_results)
 
 
@@ -1873,8 +2107,14 @@ async def test_live_report_primary_excludes_fixture_and_keeps_first_graded():
     for with_graded in (False, True):
         entered = asyncio.Event()
         task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+
         async def executor(_base_url, actual, *, on_agent_created, **_kwargs):
-            custody = {"task_name": actual.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
+            custody = {
+                "task_name": actual.name,
+                "roots": [],
+                "callback": on_agent_created,
+                "graded_creation": "not_started",
+            }
             token = bench._task_root_custody.set(custody)
             try:
                 bench._register_task_root(actual.name, fixture, "fixture_first_run")
@@ -1885,6 +2125,7 @@ async def test_live_report_primary_excludes_fixture_and_keeps_first_graded():
                 await asyncio.Event().wait()
             finally:
                 bench._task_root_custody.reset(token)
+
         namespace, cards = _live_report_producer_harness([task], executor, 1)
         with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
             coordinator = asyncio.create_task(namespace["_drive_parallel"]())
@@ -1892,8 +2133,10 @@ async def test_live_report_primary_excludes_fixture_and_keeps_first_graded():
                 await asyncio.wait_for(entered.wait(), timeout=10)
                 namespace["_tick_report_once"]()
                 url = cards[-1]["per_task"][0]["agent_url"]
-                assert (url.endswith("=" + graded[0]) if with_graded else url is None)
-                assert namespace["_live_task_agent_ids"][task.name] == ([fixture, *graded] if with_graded else [fixture])
+                assert url.endswith("=" + graded[0]) if with_graded else url is None
+                assert namespace["_live_task_agent_ids"][task.name] == (
+                    [fixture, *graded] if with_graded else [fixture]
+                )
             finally:
                 coordinator.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -2168,6 +2411,7 @@ def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     assert task.mid_run_feedback == {
         "after_root_message_count": 2,
         "message": "Please keep going. Keep the final prose concise and easy to scan.",
+        "non_goal": True,
     }
     assert task.start_phase == "execute"
     assert task.runner == "agent"
@@ -2210,6 +2454,663 @@ def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
     reason = _validate_mid_run_feedback_schema(task, changed)
     assert reason is not None
     assert "changed after non-goal feedback" in reason
+
+    # Only feedback declared non-goal pins the schema. Goal-changing feedback
+    # ("also include the lead investor") may legitimately refresh it.
+    assert task.mid_run_feedback.get("non_goal") is True
+    for name in ("explore-agent-mid-run-message", "browser-agent-mid-run-message", "tree-feedback-routing"):
+        goal_task = get_task_by_name(name)
+        assert not goal_task.mid_run_feedback.get("non_goal")
+        goal_task._mid_run_feedback_posted = True
+        goal_task._mid_run_feedback_initial_schema = initial_schema
+        assert _validate_mid_run_feedback_schema(goal_task, changed) is None, name
+
+
+def _tree_routing_fixture(*, research_hit: bool = False, outreach_hit: bool = True, signature: str = "Prevalskii"):
+    """Run-record shape the declared evaluators see: root + research + outreach -> 3 drafters."""
+    root, research, outreach = "root-0001", "research-01", "outreach-01"
+    drafters = [f"draft-0{i}" for i in range(1, 4)]
+    correction = "Correction for the outreach: sign every email as Andy Prevalskii, not Andy Prevalsky."
+    routed = {
+        "role": "USER",
+        "message": "From root: sign every email as Andy Prevalskii.",
+        "metadata": {"agentMessage": True, "fromAgentId": root, "fromGoal": "Prepare outreach"},
+    }
+    tree = {
+        root: {"parent_agent_id": None, "goal": "Prepare outreach", "status": "COMPLETED", "messages": []},
+        research: {
+            "parent_agent_id": root,
+            "goal": "Gather sourced market facts about AI agent platforms",
+            "status": "COMPLETED",
+            "messages": [routed] if research_hit else [{"role": "USER", "message": "Andy Prevalskii", "metadata": {}}],
+        },
+        outreach: {
+            "parent_agent_id": root,
+            "goal": "Pick 3 seed investors and coordinate email drafts",
+            "status": "COMPLETED",
+            "messages": [routed] if outreach_hit else [],
+        },
+    }
+    for drafter in drafters:
+        tree[drafter] = {
+            "parent_agent_id": outreach,
+            "goal": "Write one personalized email to an investor",
+            "status": "COMPLETED",
+            "messages": [],
+        }
+    drafts = [
+        {
+            "investor_name": f"Investor {i}",
+            "investor_firm": "Fund",
+            "subject": "Rose Labs",
+            "body": f"Hi\n\nAndy {signature}",
+        }
+        for i in range(3)
+    ]
+    return {
+        "agent": {"agent_id": root, "structured_output": {"drafts": drafts, "market_facts": ["fact"]}},
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": (
+                    f"Agent tree (root: {root}). Address = first column; pass it to send_message_to_agent.\n"
+                    f"- {root} [you] agent ACTIVE: Prepare outreach\n"
+                    f"  - {research} [your child] agent ACTIVE: Gather sourced market facts\n"
+                    f"  - {outreach} [your child] agent ACTIVE: Pick 3 seed investors"
+                ),
+                "metadata": {"toolName": "list_agents", "toolStatus": "FINISHED", "toolCallId": "la-1"},
+            },
+            {"role": "USER", "message": correction, "metadata": None},
+        ],
+        "_benchmark": {
+            "tree": tree,
+            "mid_run_feedback": {"posted": True, "message": correction, "active_layers": 3},
+        },
+    }
+
+
+def test_mid_run_feedback_active_depth_trigger_requires_unbroken_active_chain():
+    """`active_depth_at_least: 3` fires only for root+child+grandchild all active; old trigger still validates."""
+    from benchmarks.tree_feedback_routing import tree_trigger_ready, validate_mid_run_feedback
+
+    config = {"when": {"active_depth_at_least": 3}, "message": "fix"}
+    agents = [
+        {"agent_id": "r", "parent_agent_id": None, "status": "ACTIVE"},
+        {"agent_id": "c", "parent_agent_id": "r", "status": "ACTIVE"},
+        {"agent_id": "g", "parent_agent_id": "c", "status": "STARTING_UP"},
+    ]
+    ready, chain = tree_trigger_ready(config, agents, "r")
+    assert ready and [row["agent_id"] for row in chain] == ["r", "c", "g"]
+    assert [row["depth"] for row in chain] == [0, 1, 2]
+
+    # A completed middle layer breaks the chain even though the grandchild row is still active.
+    broken = [dict(a, status="COMPLETED") if a["agent_id"] == "c" else a for a in agents]
+    assert tree_trigger_ready(config, broken, "r")[0] is False
+    # Two layers only (wide but shallow) never fires.
+    shallow = agents[:2] + [{"agent_id": "c2", "parent_agent_id": "r", "status": "ACTIVE"}]
+    assert tree_trigger_ready(config, shallow, "r")[0] is False
+    # Paused root never fires.
+    paused = [dict(agents[0], status="PAUSED"), *agents[1:]]
+    assert tree_trigger_ready(config, paused, "r")[0] is False
+
+    validate_mid_run_feedback(config, "t")
+    validate_mid_run_feedback({"after_root_message_count": 2, "message": "keep going"}, "t")
+    for bad in (
+        {"message": "x"},
+        {"after_root_message_count": 2, "when": {"active_depth_at_least": 3}, "message": "x"},
+        {"when": {"active_depth_at_least": 1}, "message": "x"},
+        {"when": {"depth": 3}, "message": "x"},
+        {"when": {"active_depth_at_least": 3}, "message": " "},
+        {"after_root_message_count": 0, "message": "x"},
+    ):
+        try:
+            validate_mid_run_feedback(bad, "t")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted invalid mid_run_feedback {bad}")
+
+
+async def test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence():
+    """The poll loop posts once when the tree reaches 3 active layers and records the chain."""
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("tree-feedback-routing")
+    schema = task.response_schema
+    states = [
+        [{"agent_id": "root", "parent_agent_id": None, "status": "ACTIVE"}],
+        [
+            {"agent_id": "root", "parent_agent_id": None, "status": "ACTIVE"},
+            {"agent_id": "out", "parent_agent_id": "root", "status": "ACTIVE"},
+            {"agent_id": "d1", "parent_agent_id": "out", "status": "ACTIVE"},
+        ],
+    ]
+    polls = {"n": 0}
+
+    async def fake_get_agent(_base, _aid):
+        polls["n"] += 1
+        status = "COMPLETED" if polls["n"] >= 4 else "ACTIVE"
+        return {"agent": {"agent_id": "root", "status": status, "response_schema": schema}, "messages": []}
+
+    async def fake_tree(_base, _aid):
+        return states[min(polls["n"] - 1, 1)]
+
+    posted: list[str] = []
+
+    async def fake_post(_base, _aid, message):
+        posted.append(message)
+        return True
+
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_agent_tree", side_effect=fake_tree),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(
+            bench,
+            "_fetch_tree_stats",
+            AsyncMock(
+                return_value={
+                    "agent_count": 0,
+                    "total_messages": 0,
+                    "total_cost_cents": 0,
+                    "active_count": 0,
+                    "failed_count": 0,
+                    "tree_tokens_in": 0,
+                    "tree_tokens_out": 0,
+                    "error_agents": [],
+                    "all_agents": [],
+                }
+            ),
+        ),
+    ):
+        await bench._poll_agent("http://x", "root", task, None, {})
+
+    assert posted == [task.mid_run_feedback["message"]]
+    evidence = task._mid_run_feedback_evidence
+    assert evidence["posted"] is True and evidence["active_layers"] == 3
+    assert [row["agent_id"] for row in evidence["active_chain"]] == ["root", "out", "d1"]
+
+
+def test_tree_feedback_routing_static_checks_grade_routing_and_signatures():
+    """Routing checks require outreach delivery, research precision, and corrected drafts."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("tree-feedback-routing")
+    statics = {e["id"]: e for e in task.evaluators if e["method"] == "static_check"}
+    assert set(statics) == {
+        "feedback_during_three_active_layers",
+        "routed_to_outreach_subtree",
+        "not_routed_to_research_subtree",
+        "drafts_use_corrected_signature",
+    }
+    # list_agents coverage is a check type, not a catalog requirement: a correct
+    # run may address agents from spawn results without listing the tree.
+    list_agents_probe = {
+        "id": "list_agents_listed_probe",
+        "method": "static_check",
+        "checks": [{"type": "list_agents_listed", "min_other_entries": 1}],
+    }
+
+    good = _tree_routing_fixture()
+    for evaluator in statics.values():
+        ok, reason = _run_declared_static_check(task, evaluator, good)
+        assert ok, (evaluator["id"], reason)
+
+    ok, reason = _run_declared_static_check(
+        task, statics["routed_to_outreach_subtree"], _tree_routing_fixture(outreach_hit=False)
+    )
+    assert not ok and "outreach" in reason
+    ok, reason = _run_declared_static_check(
+        task, statics["not_routed_to_research_subtree"], _tree_routing_fixture(research_hit=True)
+    )
+    assert not ok and "research" in reason
+    ok, reason = _run_declared_static_check(
+        task, statics["drafts_use_corrected_signature"], _tree_routing_fixture(signature="Prevalsky")
+    )
+    assert not ok and "Prevalsk" in reason
+
+    shallow = _tree_routing_fixture()
+    shallow["_benchmark"]["mid_run_feedback"]["active_layers"] = 2
+    ok, reason = _run_declared_static_check(task, statics["feedback_during_three_active_layers"], shallow)
+    assert not ok and "2 active layer" in reason
+    unposted = _tree_routing_fixture()
+    unposted["_benchmark"]["mid_run_feedback"] = {"posted": False}
+    assert not _run_declared_static_check(task, statics["feedback_during_three_active_layers"], unposted)[0]
+
+    # Ambiguous goals fall back to structure: the head with descendants is outreach.
+    ambiguous = _tree_routing_fixture()
+    ambiguous["_benchmark"]["tree"]["outreach-01"]["goal"] = "Research investors and draft emails"
+    ambiguous["_benchmark"]["tree"]["research-01"]["goal"] = "Research facts for the outreach emails"
+    for evaluator in statics.values():
+        assert _run_declared_static_check(task, evaluator, ambiguous)[0], evaluator["id"]
+
+    # Model-chosen task paths label a head when goals are ambiguous; never a hard-coded name.
+    pathed = _tree_routing_fixture(research_hit=True, outreach_hit=False)
+    pathed["_benchmark"]["tree"]["outreach-01"]["goal"] = "Handle part of the job"
+    pathed["_benchmark"]["tree"]["research-01"]["goal"] = "Handle part of the job"
+    pathed["_benchmark"]["tree"]["outreach-01"]["taskPath"] = "/root/market_facts"
+    pathed["_benchmark"]["tree"]["research-01"]["taskPath"] = "/root/investor_drafts"
+    # research-01 has no descendants but its path says drafts -> outreach; it received the marker.
+    ok, reason = _run_declared_static_check(task, statics["routed_to_outreach_subtree"], pathed)
+    assert ok, reason
+
+    # list_agents must have run and listed someone besides the caller.
+    no_listing = _tree_routing_fixture()
+    no_listing["messages"] = no_listing["messages"][1:]
+    ok, reason = _run_declared_static_check(task, list_agents_probe, no_listing)
+    assert not ok and "list_agents" in reason
+    self_only = _tree_routing_fixture()
+    self_only["messages"][0]["message"] = "Agent tree (root: root-0001).\n- root-0001 [you] agent ACTIVE: Prepare"
+    ok, reason = _run_declared_static_check(task, list_agents_probe, self_only)
+    assert not ok and "besides the caller" in reason
+    child_listing = _tree_routing_fixture()
+    listing_row = child_listing["messages"].pop(0)
+    child_listing["_benchmark"]["tree"]["outreach-01"]["messages"].append(listing_row)
+    assert _run_declared_static_check(task, list_agents_probe, child_listing)[0]
+
+
+def _bg_rows(bg: str, agent_type: str, *, address: str | None = None, launched: bool = True) -> list[dict]:
+    """Root rows for one activity-backed background spawn: started row (+ first IN_PROGRESS progress row).
+
+    Both live under the spawn's own tool-call id: the started row is the model's
+    result (hidden from the FE), the executor's rows are FE-only.
+    """
+    rows = [
+        {
+            "role": "TOOL",
+            "message": f"Started {agent_type} agent in background. Address: {address or bg}.",
+            "metadata": {
+                "toolCallId": bg,
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "runInBackground": True,
+                "hidden": True,
+                "backgroundTaskId": bg,
+                "backgroundAddress": address or bg,
+                "backgroundAgentType": agent_type,
+            },
+        }
+    ]
+    if launched:
+        progress_tool = "spawn_browser_agent" if agent_type == "browser" else "spawn_agent"
+        rows.append(
+            {
+                "role": "TOOL",
+                "message": "working",
+                "metadata": {
+                    "toolCallId": bg,
+                    "toolName": progress_tool,
+                    "toolStatus": "IN_PROGRESS",
+                    "agentType": agent_type,
+                    "excludeFromModel": True,
+                },
+            }
+        )
+    return rows
+
+
+def _bg_notification(bg: str, agent_type: str) -> dict:
+    return {
+        "role": "USER",
+        "message": f"Message Type: FINAL_ANSWER\nTask name: /root\nSender: {bg}\nPayload:\ndone",
+        "metadata": {
+            "agentNotification": True,
+            "toolName": "agent_notification",
+            "backgroundTaskId": bg,
+            "agentType": agent_type,
+            "status": "completed",
+        },
+    }
+
+
+def test_mid_run_feedback_background_task_trigger_detects_running_activity_task():
+    """`background_task_active` fires only for a launched, un-notified root task of the requested type."""
+    from benchmarks.tree_feedback_routing import (
+        background_tasks,
+        background_trigger_ready,
+        trigger_uses_background_task,
+        trigger_uses_tree,
+        validate_mid_run_feedback,
+    )
+
+    config = {"when": {"background_task_active": "explore"}, "message": "also X"}
+    validate_mid_run_feedback(config, "t")
+    validate_mid_run_feedback({"when": {"background_task_active": "browser"}, "message": "x"}, "t")
+    assert trigger_uses_background_task(config) and not trigger_uses_tree(config)
+    assert trigger_uses_tree({"when": {"active_depth_at_least": 3}, "message": "x"})
+    for bad in (
+        {"when": {"background_task_active": "general_purpose"}, "message": "x"},
+        {"when": {"background_task_active": "explore", "active_depth_at_least": 3}, "message": "x"},
+        {"when": {}, "message": "x"},
+    ):
+        try:
+            validate_mid_run_feedback(bad, "t")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted invalid mid_run_feedback {bad}")
+
+    # Started but the activity has not posted progress yet: not running.
+    assert background_trigger_ready(config, _bg_rows("toolu_e1", "explore", launched=False)) == (False, None)
+    # Launched explore: fires with the task identity.
+    rows = _bg_rows("toolu_e1", "explore", address="/root/funding_research")
+    ready, task = background_trigger_ready(config, rows)
+    assert ready and task["background_task_id"] == "toolu_e1" and task["address"] == "/root/funding_research"
+    # A running browser task does not satisfy an explore trigger.
+    assert background_trigger_ready(config, _bg_rows("toolu_b1", "browser"))[0] is False
+    # Completion notification ends it, even if late progress rows were posted out of order.
+    finished = rows + [_bg_notification("toolu_e1", "explore")]
+    assert background_trigger_ready(config, finished)[0] is False
+    # A second, still-running explore task fires after the first finished.
+    ready, task = background_trigger_ready(config, finished + _bg_rows("toolu_e2", "explore"))
+    assert ready and task["background_task_id"] == "toolu_e2"
+    # General-purpose background spawns are child agents, not inbox tasks.
+    gp = _bg_rows("toolu_g1", "general_purpose")
+    assert background_tasks(gp) == [] and background_trigger_ready(config, gp)[0] is False
+    # Model-visible "started" rows never count as progress of their own task.
+    assert background_tasks(_bg_rows("toolu_e3", "explore", launched=False))[0]["running"] is False
+
+
+async def test_mid_run_feedback_background_trigger_posts_once_with_task_evidence():
+    """The poll loop posts once when the root's explore task is running and records which task it was."""
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("explore-agent-mid-run-message")
+    schema = task.response_schema
+    transcripts = [[], _bg_rows("toolu_e1", "explore", launched=False), _bg_rows("toolu_e1", "explore")]
+    polls = {"n": 0}
+
+    async def fake_get_agent(_base, _aid):
+        polls["n"] += 1
+        status = "COMPLETED" if polls["n"] >= 5 else "ACTIVE"
+        messages = transcripts[min(polls["n"] - 1, 2)]
+        return {"agent": {"agent_id": "root", "status": status, "response_schema": schema}, "messages": messages}
+
+    posted: list[str] = []
+
+    async def fake_post(_base, _aid, message):
+        posted.append(message)
+        return True
+
+    tree = AsyncMock(side_effect=AssertionError("background trigger must not poll the tree endpoint"))
+    with (
+        patch.object(bench, "get_agent", side_effect=fake_get_agent),
+        patch.object(bench, "get_agent_tree", tree),
+        patch.object(bench, "post_message", side_effect=fake_post),
+        patch.object(bench, "POLL_INTERVAL", 0),
+        patch.object(
+            bench,
+            "_fetch_tree_stats",
+            AsyncMock(
+                return_value={
+                    "agent_count": 0,
+                    "total_messages": 0,
+                    "total_cost_cents": 0,
+                    "active_count": 0,
+                    "failed_count": 0,
+                    "tree_tokens_in": 0,
+                    "tree_tokens_out": 0,
+                    "error_agents": [],
+                    "all_agents": [],
+                }
+            ),
+        ),
+    ):
+        await bench._poll_agent("http://x", "root", task, None, {})
+
+    assert posted == [task.mid_run_feedback["message"]]
+    evidence = task._mid_run_feedback_evidence
+    assert evidence["posted"] is True
+    assert evidence["background_task"]["background_task_id"] == "toolu_e1"
+    assert evidence["background_task"]["agent_type"] == "explore"
+    assert evidence["root_message_count"] == 2
+
+
+def _background_routing_fixture(
+    agent_type: str,
+    *,
+    send: bool = True,
+    inbox: bool = True,
+    after_completion: bool = False,
+    listing_types: tuple[str, ...] = ("explore", "browser"),
+    progress_after: int = 2,
+    to_address: str | None = None,
+    satisfied: bool = True,
+) -> dict:
+    """Root transcript + structured output for the explore/browser mid-run message tasks."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task_name = "explore-agent-mid-run-message" if agent_type == "explore" else "browser-agent-mid-run-message"
+    feedback = get_task_by_name(task_name).mid_run_feedback["message"]
+    root, bg = "root-0001", "toolu_01"
+    marker = "Also include who led each round." if agent_type == "explore" else "Also add each story's points."
+    progress_tool = "spawn_browser_agent" if agent_type == "browser" else "spawn_agent"
+    listing_lines = [
+        f"Agent tree (root: {root}). Address = first column; pass it to send_message_to_agent.",
+        f"- {root} [you] agent ACTIVE: goal",
+    ]
+    for index, listed in enumerate(listing_types):
+        address = bg if listed == agent_type else f"toolu_other_{index}"
+        listing_lines.append(f"  - {address} [your background task] {listed} running: research")
+    messages = _bg_rows(bg, agent_type)
+    messages.append({"role": "USER", "message": feedback, "metadata": None})
+    messages.append(
+        {
+            "role": "TOOL",
+            "message": "\n".join(listing_lines),
+            "metadata": {"toolName": "list_agents", "toolStatus": "FINISHED", "toolCallId": "la-1"},
+        }
+    )
+    inbox_row = {
+        "role": "USER",
+        "message": marker,
+        "metadata": {
+            "agentMessage": True,
+            "fromAgentId": root,
+            "recipientTaskId": bg,
+            "excludeFromModel": True,
+        },
+    }
+    send_row = {
+        "role": "TOOL",
+        "message": f"Message sent to {to_address or bg}.",
+        "metadata": {
+            "toolName": "send_message_to_agent",
+            "toolStatus": "FINISHED",
+            "toolCallId": "sm-1",
+            "toAgentAddress": to_address or bg,
+            "targetAgentId": root,
+            "recipientTaskId": bg,
+        },
+    }
+    progress = [
+        {
+            "role": "TOOL",
+            "message": f"step {i}",
+            "metadata": {"toolCallId": f"step-{i}", "toolName": progress_tool, "toolStatus": "FINISHED"},
+        }
+        for i in range(progress_after)
+    ]
+    if after_completion:
+        messages += progress + [_bg_notification(bg, agent_type)]
+    if inbox:
+        messages.append(inbox_row)
+    if send:
+        messages.append(send_row)
+    if not after_completion:
+        messages += progress + [_bg_notification(bg, agent_type)]
+    if agent_type == "explore":
+        items = [
+            {
+                "company": f"Co {i}",
+                "amount": "$10M",
+                "announced_on": "2026-05-01",
+                "summary": f"Seed round. Led by Fund {i}." if satisfied else "Seed round.",
+                "source_url": f"https://example.com/{i}",
+            }
+            for i in range(8)
+        ]
+        structured = {"rounds": items}
+    else:
+        items = [
+            {
+                "rank": i + 1,
+                "title": f"Story {i}",
+                "comment_count": "12",
+                "first_commenter": "pg",
+                "notes": f"{100 + i} points" if satisfied else "popular",
+            }
+            for i in range(8)
+        ]
+        structured = {"stories": items}
+    return {
+        "agent": {"agent_id": root, "structured_output": structured},
+        "messages": messages,
+        "_benchmark": {
+            "tree": {root: {"parent_agent_id": None, "goal": "goal", "status": "COMPLETED", "messages": []}},
+            "mid_run_feedback": {
+                "posted": True,
+                "message": feedback,
+                "background_task": {"background_task_id": bg, "agent_type": agent_type, "address": bg},
+            },
+        },
+    }
+
+
+def test_background_task_mid_run_message_static_checks():
+    """Explore/browser tasks: feedback while running, list_agents lists the task, routed before completion."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+    from benchmarks.tree_feedback_routing import background_routing_trace
+
+    for agent_type, task_name in (
+        ("explore", "explore-agent-mid-run-message"),
+        ("browser", "browser-agent-mid-run-message"),
+    ):
+        task = get_task_by_name(task_name)
+        assert task.status == "ready" and task.bench == "pipeline-e2e" and task.deploy_category == "harness"
+        assert "smoke" not in (task.tags or [])
+        assert task.mid_run_feedback["when"] == {"background_task_active": agent_type}
+        # Natural feedback: routing is the model's job, never spelled out.
+        for text in (task.prompt, task.mid_run_feedback["message"]):
+            assert "send_message_to_agent" not in text and "list_agents" not in text
+        statics = {e["id"]: e for e in task.evaluators if e["method"] == "static_check"}
+        assert len(statics) == 3
+        by_type = {e["checks"][0]["type"]: e for e in statics.values()}
+        assert set(by_type) == {
+            "mid_run_feedback_background_task_active",
+            "background_task_message_routed",
+            "structured_output_signature",
+        }
+        # list_agents_listed stays a supported check type (probe below), not a
+        # catalog requirement: the spawn result already carries the address.
+        list_agents_probe = {
+            "id": "list_agents_listed_probe",
+            "method": "static_check",
+            "checks": [{"type": "list_agents_listed", "min_other_entries": 1, "required_types": [agent_type]}],
+        }
+        good_probe = _run_declared_static_check(task, list_agents_probe, _background_routing_fixture(agent_type))
+        assert good_probe[0], good_probe
+
+        good = _background_routing_fixture(agent_type)
+        for evaluator in statics.values():
+            ok, reason = _run_declared_static_check(task, evaluator, good)
+            assert ok, (task_name, evaluator["id"], reason)
+
+        routed = by_type["background_task_message_routed"]
+        # Tree-wide and path addresses resolve to the same task.
+        for address in ("root-0001/toolu_01", "/root/the_task"):
+            fixture = _background_routing_fixture(agent_type, to_address=address)
+            fixture["messages"][0]["metadata"]["backgroundPath"] = "/root/the_task"
+            assert _run_declared_static_check(task, routed, fixture)[0], address
+        for broken, needle in (
+            (_background_routing_fixture(agent_type, send=False), "no send_message_to_agent"),
+            (_background_routing_fixture(agent_type, inbox=False), "no inbox row"),
+            (_background_routing_fixture(agent_type, after_completion=True), "after the task had completed"),
+        ):
+            ok, reason = _run_declared_static_check(task, routed, broken)
+            assert not ok and needle in reason, (task_name, reason)
+        other_type = "browser" if agent_type == "explore" else "explore"
+        ok, reason = _run_declared_static_check(
+            task, list_agents_probe, _background_routing_fixture(agent_type, listing_types=(other_type,))
+        )
+        assert not ok and agent_type in reason
+        ok, reason = _run_declared_static_check(
+            task, by_type["structured_output_signature"], _background_routing_fixture(agent_type, satisfied=False)
+        )
+        assert not ok and "does not match" in reason
+        wrong_type = _background_routing_fixture(agent_type)
+        wrong_type["_benchmark"]["mid_run_feedback"]["background_task"]["agent_type"] = other_type
+        assert not _run_declared_static_check(task, by_type["mid_run_feedback_background_task_active"], wrong_type)[0]
+
+        trace = background_routing_trace(good, agent_type)
+        assert [t["background_task_id"] for t in trace["tasks"]] == ["toolu_01"]
+        assert trace["inbox_rows"] and trace["send_message_rows"] and trace["list_agents"]
+
+    # The browser must keep stepping after the message (its inbox is polled per step).
+    browser = get_task_by_name("browser-agent-mid-run-message")
+    routed = next(
+        e for e in browser.evaluators if e.get("checks") and e["checks"][0]["type"] == "background_task_message_routed"
+    )
+    ok, reason = _run_declared_static_check(browser, routed, _background_routing_fixture("browser", progress_after=0))
+    assert not ok and "progress row" in reason
+
+
+def test_background_message_smoke_accepts_verified_same_task_resume_only():
+    """A child may finish while the root processes feedback, then wake at the same address."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("background-agent-message-smoke")
+    routed = next(
+        evaluator
+        for evaluator in task.evaluators
+        if evaluator["id"] == "smoke_follow_up_consumed_by_explore"
+    )
+    fixture = _background_routing_fixture("explore", after_completion=True)
+    old_feedback = fixture["_benchmark"]["mid_run_feedback"]["message"]
+    fixture["_benchmark"]["mid_run_feedback"]["message"] = task.mid_run_feedback["message"]
+    for row in fixture["messages"]:
+        if row.get("message") == old_feedback:
+            row["message"] = task.mid_run_feedback["message"]
+        if (row.get("metadata") or {}).get("agentMessage") is True:
+            row["message"] = "Forwarded marker: HTTP core document"
+        if (row.get("metadata") or {}).get("toolName") == "send_message_to_agent":
+            row["metadata"]["woke"] = True
+    progress = {
+        "role": "TOOL",
+        "message": "continuing after forwarded feedback",
+        "metadata": {"toolCallId": "toolu_01", "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS"},
+    }
+    second_notification = _bg_notification("toolu_01", "explore")
+    second_notification["metadata"]["backgroundRun"] = 2
+    fixture["messages"].extend([progress, second_notification])
+    assert _run_declared_static_check(task, routed, fixture)[0]
+
+    # The first completion can be persisted after the inbox write but before
+    # the send result reports its wake. That first notification must not close
+    # the resumed run's progress window.
+    completion_after_inbox = copy.deepcopy(fixture)
+    rows = completion_after_inbox["messages"]
+    first_notice = next(i for i, row in enumerate(rows) if (row.get("metadata") or {}).get("agentNotification"))
+    notice = rows.pop(first_notice)
+    inbox_index = next(i for i, row in enumerate(rows) if (row.get("metadata") or {}).get("agentMessage"))
+    rows.insert(inbox_index + 1, notice)
+    assert _run_declared_static_check(task, routed, completion_after_inbox)[0]
+
+    no_wake = copy.deepcopy(fixture)
+    next(row for row in no_wake["messages"] if (row.get("metadata") or {}).get("woke"))["metadata"]["woke"] = False
+    assert not _run_declared_static_check(task, routed, no_wake)[0]
+
+    no_second_notification = copy.deepcopy(fixture)
+    no_second_notification["messages"].pop()
+    assert not _run_declared_static_check(task, routed, no_second_notification)[0]
+
+    no_progress = copy.deepcopy(fixture)
+    no_progress["messages"].pop(-2)
+    assert not _run_declared_static_check(task, routed, no_progress)[0]
 
 
 def test_toast_nopa_benchmark_uses_semantic_outcome_validation():
@@ -3478,9 +4379,7 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
         with (
             patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
             patch.object(bench, "get_agent", AsyncMock(return_value={"messages": rows})),
-            patch.object(
-                bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot
-            ) as exact_snapshot,
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot) as exact_snapshot,
             patch.object(bench.asyncio, "to_thread", mocked_owner_read),
         ):
             await bench._refresh_browser_archive_snapshot(
@@ -3587,30 +4486,30 @@ async def test_paused_browser_before_session_allocation_archives_with_exact_zero
 def test_cancelled_preparation_owner_proof_is_executor_independent():
     repo_root = Path(__file__).resolve().parents[3]
     child = (
-        'import asyncio, concurrent.futures, runpy, sys, threading\n'
-        'from pathlib import Path\n'
-        'repo = Path(sys.argv[1])\n'
+        "import asyncio, concurrent.futures, runpy, sys, threading\n"
+        "from pathlib import Path\n"
+        "repo = Path(sys.argv[1])\n"
         'sys.path[:0] = [str(repo / "agents/tests/blackbox"), str(repo / "agents")]\n'
-        'namespace = runpy.run_path(sys.argv[2])\n'
-        'import benchmarks.run_benchmark\n'
-        'import benchmarks.browser_zero_allocation\n'
-        'release = threading.Event()\n'
+        "namespace = runpy.run_path(sys.argv[2])\n"
+        "import benchmarks.run_benchmark\n"
+        "import benchmarks.browser_zero_allocation\n"
+        "release = threading.Event()\n"
         'executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="owned-proof-control")\n'
-        'ready = [threading.Event() for _ in range(executor._max_workers)]\n'
-        'def occupy(signal):\n'
-        '    signal.set()\n'
-        '    release.wait()\n'
-        'async def run():\n'
-        '    asyncio.get_running_loop().set_default_executor(executor)\n'
-        '    for signal in ready:\n'
-        '        executor.submit(occupy, signal)\n'
-        '    try:\n'
+        "ready = [threading.Event() for _ in range(executor._max_workers)]\n"
+        "def occupy(signal):\n"
+        "    signal.set()\n"
+        "    release.wait()\n"
+        "async def run():\n"
+        "    asyncio.get_running_loop().set_default_executor(executor)\n"
+        "    for signal in ready:\n"
+        "        executor.submit(occupy, signal)\n"
+        "    try:\n"
         '        assert all(signal.wait(5) for signal in ready), "owned blockers did not start"\n'
         '        await namespace["test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof"]()\n'
         '        assert not release.is_set(), "executor contention removed before ownership proof"\n'
-        '    finally:\n'
-        '        release.set()\n'
-        'asyncio.run(run())\n'
+        "    finally:\n"
+        "        release.set()\n"
+        "asyncio.run(run())\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", child, str(repo_root), str(Path(__file__).resolve())],
@@ -3739,9 +4638,7 @@ def _resumed_recording_archive_rows():
     )
 
     def row(action, status, **extra):
-        return {
-            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
-        }
+        return {"metadata": dict(identity, action_type=action, toolStatus=status, **extra)}
 
     first = row("recording", "IN_PROGRESS", toolCallId="first-start")
     saved = row(
@@ -3776,18 +4673,16 @@ def test_browser_archive_requires_each_resumed_recording_part():
     complete = rows + [latest]
     assert bench._agent_messages_ready_for_browser_hub_archive(complete)
     assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
-    assert not bench._agent_messages_ready_for_durable_browser_evidence(
-        [rows[0], rows[2], latest, rows[3]]
-    ), "a later saved part concealed an earlier missing part"
+    assert not bench._agent_messages_ready_for_durable_browser_evidence([rows[0], rows[2], latest, rows[3]]), (
+        "a later saved part concealed an earlier missing part"
+    )
     for field, value in (
         ("workflowGeneration", "foreign-generation"),
         ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
     ):
         foreign = deepcopy(latest)
         foreign["metadata"][field] = value
-        assert not bench._agent_messages_ready_for_durable_browser_evidence(
-            rows + [foreign]
-        ), field
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [foreign]), field
     empty = deepcopy(latest)
     empty["metadata"].pop("recording_view_url")
     assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
@@ -3803,9 +4698,7 @@ async def test_browser_archive_refresh_waits_for_resumed_recording_part():
     complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
     logs = {}
     with (
-        patch.object(
-            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
-        ) as tree,
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])) as tree,
         patch.object(
             bench,
             "get_agent",
@@ -3816,9 +4709,7 @@ async def test_browser_archive_refresh_waits_for_resumed_recording_part():
         observed = await bench._refresh_browser_archive_snapshot(
             "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
         )
-    assert get.await_count == tree.await_count == 2, (
-        "archive owner returned before resumed recording was attached"
-    )
+    assert get.await_count == tree.await_count == 2, "archive owner returned before resumed recording was attached"
     assert observed["messages"] == complete["messages"]
     assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
 
@@ -3830,9 +4721,7 @@ async def test_browser_archive_missing_resumed_part_preserves_existing_deadline(
     root = "owned-root-generation"
     logs = {}
     with (
-        patch.object(
-            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
-        ),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
         patch.object(
             bench,
             "get_agent",
@@ -3851,9 +4740,7 @@ async def test_browser_archive_missing_resumed_part_preserves_existing_deadline(
         except TimeoutError:
             pass
         else:
-            raise AssertionError(
-                "missing resumed recording bypassed the archive deadline"
-            )
+            raise AssertionError("missing resumed recording bypassed the archive deadline")
     assert logs["browser_archive_observation"]["ready"] is False
 
 
@@ -4800,6 +5687,90 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         )
 
 
+async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
+    """RCA 2026-10-25 judge Codex token unavailable: under a 70-copy cloud fleet the only
+    Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
+    asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
+    Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    import importlib.util
+    from dataclasses import replace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    class _NoToken404:
+        status_code = 404
+
+        def json(self):
+            return {"error": "NO_TOKENS_AVAILABLE"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return _NoToken404()
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
+    judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            judge_error = error
+        else:
+            raise AssertionError("judge must not succeed without a compute token")
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+
+    logs = {"failure_evidence": {"errors": []}}
+    with contextlib.ExitStack() as stack:
+        for name in (
+            "_apply_live_fixtures",
+            "_apply_memory_fixtures",
+            "_apply_auth_test_site",
+            "_restore_live_fixture_scenarios_async",
+            "_release_auth_test_site",
+        ):
+            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+        for name, replacement in {
+            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+            "delete_agent": AsyncMock(return_value=None),
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
+        result = await bench._run_single_task_as_run_user(
+            "https://fixture.invalid", task, False, None, "", None, None, None
+        )
+    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+    assert result.failure_reason.startswith(
+        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+        "failed: Codex compute token unavailable for agentic benchmark judge"
+    ), result.failure_reason
+    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+    spec = importlib.util.spec_from_file_location(
+        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+    )
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+
+
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
     """The AgentCard sandbox release stall is a deploy-approved SKIP only behind its exact flag."""
     from benchmarks.results import TaskResult
@@ -5168,10 +6139,6 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
         )
 
 
-
-
-
-
 async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
     """A HELD timeout must show whether AgentCard ever released THIS card's hold.
 
@@ -5486,6 +6453,30 @@ async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
             fetch_usage=fetch_outage,
         )
     assert outage_reads == 3
+
+
+async def test_settled_tool_usage_waits_for_cost_after_early_calls_stabilize():
+    """Cost-limit failure must wait for a late browser row even with two early LLM calls."""
+    import benchmarks.run_benchmark as bench
+
+    early = {"llm_call_count": 2, "agent_count": 1, "total_cost_cents": 0}
+    late = {"llm_call_count": 2, "agent_count": 1, "total_cost_cents": 278.238875}
+    reads = 0
+
+    async def fetch_usage(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return dict(early if reads <= 2 else late)
+
+    usage = await bench._get_settled_tool_usage(
+        "http://localhost:55120",
+        "24f7a59e",
+        minimum_cost_cents=120,
+        retry_delay_seconds=0,
+        fetch_usage=fetch_usage,
+    )
+    assert reads == 4
+    assert usage["total_cost_cents"] == late["total_cost_cents"]
 
 
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
@@ -6287,24 +7278,20 @@ def test_declared_evaluator_evidence_includes_structured_output_first():
     assert "org/r100" in text
 
 
-def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
+def test_declared_evaluator_evidence_keeps_code_agent_grounding_rows():
     """Fat Claude Code transcripts must not collapse judge evidence to completion-only.
 
     Regression (cuda-kernel-github-top100-code-agent k=3 r24 agent b977534d):
     root had 100+ messages including multi-100KB spawn_claude_code_agent /
-    code_agent_sdk_events / claude_code_history rows. build_single_turn_evidence
-    serialized to ~392k (>320k cap), so _declared_evaluator_evidence fell through
-    to compact_only (structured_output + final_completion + metadata) and the
-    declared judge correctly scored 0 for missing coding-agent grounding.
+    code_agent_sdk_events / claude_code_history rows. A grader-only budget fell
+    through to compact_only (structured_output + final_completion + metadata)
+    and the declared judge correctly scored 0 for missing coding-agent grounding.
 
-    Expected: within SINGLE_TURN_CHAR_BUDGET, still retain at least one capped
-    code-agent grounding row (sdk events / history / spawn_claude_code_agent).
+    Expected: every code-agent grounding row is in the evidence, whole while it
+    is under the runtime tool-result cap. A bundle too big for one judge call
+    goes to the agentic judge instead of being cut.
     """
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     repos = [
         {
@@ -6316,8 +7303,6 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
         }
         for i in range(1, 101)
     ]
-    # ~40 messages × ~12k capped bodies → >320k when naively kept, forcing the
-    # compact_only cascade on current code.
     fat_cc = "GitHub API search results for CUDA kernels:\n" + "\n".join(
         f"{i}. ggml-org/repo-{i} stars={100000 - i} "
         f"https://github.com/ggml-org/repo-{i} desc=CUDA kernel library {i} " + ("x" * 200)
@@ -6384,9 +7369,9 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
             },
         }
     )
-    dumped = json.dumps(evidence, default=str)
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
+    assert [
+        row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "spawn_claude_code_agent"
+    ] == [fat_cc] * 35
     tool_names = {
         (row.get("metadata") or {}).get("toolName")
         for row in evidence
@@ -6405,65 +7390,136 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
     assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
 
 
-def test_declared_evaluator_evidence_keeps_whole_rows_within_budget():
-    """A judge sees a whole tool result whenever the bundle fits its budget.
+def test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap():
+    """The grader cuts a tool result exactly where the runtime does, and nowhere else.
 
-    grep-agent-trajectories-code-tool-status: a 17,075-char grep result was cut
-    at 12,000 with no marker, 986 chars before the Status line its judge had to
-    cite, and the run failed on evidence the agent had actually produced.
-
-    When the bundle does not fit, a shortened row keeps both ends and says how
-    much is missing, so the judge never mistakes a cut for the whole result.
+    Andy (2026-10-24): the benchmark grader's cutoff must be the runtime's, never
+    its own. A grader-only 12k row cap dropped the fact a judge had to ground on
+    (grep-agent-trajectories-cross-surface, agent b140bb71). Tool rows must equal
+    ``hard_cap_tool_result_text`` (what agents apply before a tool result enters
+    their context); other rows are whole; the evidence module defines no caps or
+    budgets of its own. This fails if the two ever diverge.
     """
+    import benchmarks.semantic_evaluator_evidence as evidence_module
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        SINGLE_TURN_TEXT_CAP,
-        single_turn_evidence_exceeds_budget,
-    )
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS, hard_cap_tool_result_text
 
     status_line = "tool_status: FAILED"
+    at_cap = "x" * (TOOL_RESULT_HARD_CAP_CHARS - len(status_line)) + status_line
+    over_cap = "y" * TOOL_RESULT_HARD_CAP_CHARS + status_line
+    long_answer = "z" * (2 * TOOL_RESULT_HARD_CAP_CHARS)
+    data = {
+        "agent": {"agent_id": "root"},
+        "messages": [
+            {"role": "TOOL", "message": at_cap, "metadata": {"toolName": "grep"}},
+            {"role": "TOOL", "message": over_cap, "metadata": {"toolName": "grep"}},
+            {"role": "ASSISTANT", "message": long_answer, "metadata": {}},
+        ],
+    }
+    for rows in (_declared_evaluator_evidence(data), build_agentic_evidence(data)["messages"]):
+        tool_texts = [row["text"] for row in rows if row.get("role") == "TOOL"]
+        assert tool_texts == [at_cap, hard_cap_tool_result_text(over_cap)]
+        assert hard_cap_tool_result_text(over_cap) != over_cap
+        assert [row["text"] for row in rows if row.get("role") == "ASSISTANT"] == [long_answer]
 
-    def run_with_grep_result(padding: int) -> dict:
-        return {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": "x" * padding + status_line,
-                    "metadata": {"toolName": "grep", "toolStatus": "FINISHED"},
-                }
-            ]
-        }
+    assert evidence_module.hard_cap_tool_result_text is hard_cap_tool_result_text
+    grader_caps = [
+        name
+        for name, value in vars(evidence_module).items()
+        if isinstance(value, int) and ("CAP" in name or "BUDGET" in name)
+    ]
+    assert grader_caps == []
 
-    def grep_rows(evidence: list[dict]) -> list[str]:
-        return [
-            str(row.get("text") or "")
-            for row in evidence
-            if isinstance(row, dict) and (row.get("metadata") or {}).get("toolName") == "grep"
-        ]
 
-    within_budget = _declared_evaluator_evidence(run_with_grep_result(SINGLE_TURN_TEXT_CAP + 986))
-    assert [status_line in text for text in grep_rows(within_budget)] == [True]
+async def test_declared_judge_overflow_uses_runtime_compaction_trigger():
+    """A judge prompt overflows exactly where the agent loop would compact.
 
-    # A bundle too large for the judge still falls back to capped rows.
-    padding = SINGLE_TURN_CHAR_BUDGET
-    over_budget = _declared_evaluator_evidence(run_with_grep_result(padding))
-    assert not single_turn_evidence_exceeds_budget(over_budget)
-    (shortened,) = grep_rows(over_budget)
-    assert len(shortened) <= SINGLE_TURN_TEXT_CAP
-    assert shortened.startswith("x") and shortened.endswith(status_line)
-    kept = len(shortened.replace("x", "")) - len(status_line)  # the marker itself
-    omitted = padding + len(status_line) - (len(shortened) - kept)
-    assert f"[... {omitted} characters omitted ...]" in shortened
+    The threshold is ``run_agent.compaction_trigger_tokens`` over the verifier
+    model's window, measured with the runtime estimator. Moving the runtime
+    output reservation moves the grader's threshold with it.
+    """
+    import loop.run_agent as run_agent
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+    from helpers.llm import VERIFIER_MODEL
+    from helpers.model_info import get_model_context_window
+
+    window = await get_model_context_window(VERIFIER_MODEL)
+    trigger = run_agent.compaction_trigger_tokens(window)
+    assert trigger == window - run_agent.EFFECTIVE_OUTPUT_RESERVATION - run_agent.AUTOCOMPACT_BUFFER_TOKENS
+    # ~4 / 1.4 chars per estimated token (helpers.summarize estimator).
+    near_trigger = "e" * int((trigger - 2_000) * 4 / 1.4)
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger) is False
+    assert await _declared_judge_context_overflows("judge prompt", near_trigger + "e" * 10_000) is True
+    original = run_agent.EFFECTIVE_OUTPUT_RESERVATION
+    try:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original + 10_000
+        assert await _declared_judge_context_overflows("judge prompt", near_trigger) is True
+    finally:
+        run_agent.EFFECTIVE_OUTPUT_RESERVATION = original
+
+
+def _b140bb71_shaped_run() -> dict:
+    """Synthetic replay of grep-agent-trajectories-cross-surface r001-j0003 (agent b140bb71).
+
+    Same root transcript shape as the captured fleet bundle
+    (.context/fleet/runs/20261023-194039-1982682): explore grep rows of 33,116,
+    13,867 and 304,941 chars, and the prior run's step count at char 6,339 of
+    the largest one. Filler replaces the production trajectory text.
+    """
+    fact = "It printed 112 numbers and counted 111 steps."
+    big_grep = "g" * 6_339 + fact
+    big_grep += "g" * (304_941 - len(big_grep))
+    explore = {"agentType": "explore", "subAgentId": "143a50ca"}
+
+    def tool(name: str, text: str, **metadata: str) -> dict:
+        return {"role": "TOOL", "message": text, "metadata": {"toolName": name, "toolStatus": "FINISHED", **metadata}}
+
+    messages = [
+        {"role": "USER", "message": "u" * 153, "metadata": {}},
+        tool("agent_init", "i" * 70),
+        tool("spawn_agent", "s" * 200, agentType="explore"),
+        tool("list_agents", "l" * 646, **explore),
+        tool("grep", "a" * 33_116, **explore),
+        tool("grep", "b" * 13_867, **explore),
+        tool("grep", big_grep, **explore),
+        tool("spawn_agent", "Explore summary: counted 111 steps. " + "c" * 7_950, agentType="explore"),
+        tool("attempt_completion", "Example Domain; 111 steps. " + "d" * 1_350),
+    ]
+    return {
+        "agent": {
+            "agent_id": "b140bb71-f957-4b3f-a394-e1f74efbfc26",
+            "status": "COMPLETED",
+            "structured_output": {"collatz_step_count": 111, "example_com_page_title": "Example Domain"},
+        },
+        "messages": messages,
+        "_benchmark": {},
+    }
+
+
+async def test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay():
+    """The judge sees the grounding fact the runtime kept, on the single-turn path.
+
+    b140bb71's explore LLM saw the 305k grep result fit to the 50k runtime cap,
+    which includes "counted 111 steps" at char 6,339. The grader cut that row to
+    12k (~6k head) and the judge failed a correct answer. With the runtime cap
+    the fact survives and the bundle fits one judge call (no agentic fallback).
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    evidence = _declared_evaluator_evidence(_b140bb71_shaped_run())
+    grep_rows = [row["text"] for row in evidence if (row.get("metadata") or {}).get("toolName") == "grep"]
+    assert len(grep_rows) == 3
+    assert "counted 111 steps" in grep_rows[2], len(grep_rows[2])
+
+    from benchmarks.run_benchmark import _declared_judge_context_overflows
+
+    assert await _declared_judge_context_overflows("judge prompt", json.dumps(evidence, default=str)) is False
 
 
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
-    from benchmarks.semantic_evaluator_evidence import (
-        SINGLE_TURN_CHAR_BUDGET,
-        single_turn_evidence_exceeds_budget,
-    )
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
     tree = {
@@ -6537,12 +7593,9 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
             },
         }
     )
-    dumped = json.dumps(evidence)
-    assert len(dumped) < 200_000
-    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
-    assert not single_turn_evidence_exceeds_budget(evidence)
-    assert huge not in dumped
     state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
+    # Transcripts appear once as rows; the typed state never repeats child bodies.
+    assert huge not in json.dumps(state)
     assert state["tree"]["gp-0"]["research_tool_count"] >= 1
     assert state["tree"]["gp-0"]["explore_spawn_count"] >= 1
     assert state["tree"]["gp-0"]["message_count"] == 2
@@ -6558,9 +7611,15 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     assert state["usage"]["cost_cents"] == 0
 
 
-async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
-    """Hydrated 50-GP trees must stay on single_turn — agentic Codex token fetch is a fail-closed flake."""
+async def test_overflowing_single_turn_judge_falls_back_to_agentic():
+    """A judge prompt that overflows the model goes to the agentic judge, uncut.
+
+    Andy (2026-10-24): "if context overflows we fallback to an agentic verifier".
+    A hydrated 50-GP tree plus 130 fat root rows is far over the runtime
+    compaction trigger, so no single-turn call (or credential lease) is made.
+    """
     import benchmarks.run_benchmark as bench
+    import helpers.llm as llm
     from benchmarks.benchmark_tasks import BenchmarkTask
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
@@ -6643,35 +7702,29 @@ async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
         "_benchmark": {"tree": tree, "all_agents": all_agents},
     }
     agentic_calls = []
-    single_calls = []
-
-    async def fake_single(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
-        single_calls.append(evaluator_arg["id"])
-        assert evidence is not None
-        from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
-
-        assert not single_turn_evidence_exceeds_budget(evidence)
-        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
     async def fake_agentic(task_arg, evaluator_arg, data_arg, **_kwargs):
-        agentic_calls.append(evaluator_arg["id"])
-        raise AssertionError("mass-agent single_turn must not upgrade to agentic")
+        agentic_calls.append((evaluator_arg["id"], data_arg is data))
+        return {"score": 1.0, "reasoning": "Andy is the principal user"}
 
-    original_single = bench._call_declared_llm_judge
+    async def no_single_turn(*_args, **_kwargs):
+        raise AssertionError("an overflowing judge prompt must not reach the single-turn verifier")
+
     original_agentic = bench._call_declared_agentic_llm_judge
+    original_check_progress = llm.check_progress
     try:
-        bench._call_declared_llm_judge = fake_single
         bench._call_declared_agentic_llm_judge = fake_agentic
+        llm.check_progress = no_single_turn
         passed, reason, results = await bench._run_declared_evaluators(task, data)
     finally:
-        bench._call_declared_llm_judge = original_single
         bench._call_declared_agentic_llm_judge = original_agentic
+        llm.check_progress = original_check_progress
 
     assert passed is True
     assert reason is None
-    assert single_calls == ["t1-andy-only"]
-    assert agentic_calls == []
+    assert agentic_calls == [("t1-andy-only", True)]
     assert results[0]["passed"] is True
+    assert results[0]["evidence_mode"] == "agentic_llm_judge"
 
 
 def test_first_level_gp_count_static_uses_collected_transcripts():
@@ -8530,6 +9583,94 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
+def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362308052156") -> dict:
+    """Saved-run shape of spawn-sub-agents agent 30434b44 (original600 run 1792738962466034914).
+
+    The root posts its general-purpose completions as ``spawn_agent`` FINISHED rows, so a
+    tree-wide ``spawn_agent`` count is 2 even when no explore ever ran.
+    """
+    root, tokyo, nyc = "30434b44-root", "450a67e0-tokyo", "c9c5cad6-nyc"
+
+    def tool(name: str, call_id: str, **extra) -> dict:
+        metadata = {"toolName": name, "toolStatus": "FINISHED", "toolCallId": call_id, **extra}
+        return {"role": "TOOL", "message": "", "metadata": metadata}
+
+    def gp_messages(call_id: str, child: str) -> list[dict]:
+        if not gp_explores:
+            return [tool("web_search", f"{call_id}-search")]
+        return [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "metadata": {"tool_calls": [{"tool": "spawn_agent", "type": "explore", "tool_call_id": call_id}]},
+            },
+            tool("spawn_agent", call_id, agentType="explore", taskId=child),
+            tool("spawn_agent", f"{call_id}-progress", agentType="explore", taskId=child),
+            tool("web_fetch", f"{call_id}-fetch"),
+        ]
+
+    root_messages = [
+        tool("spawn_agent", "da7db8fe"),
+        tool("spawn_agent", "230e1dd3"),
+        {
+            "role": "TOOL",
+            "message": "I verified both official figures and multiplied them.",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "completionSummary": {
+                    "summary": "I verified both official figures and multiplied them.",
+                    "outputs": [
+                        {"key": "tokyo_population", "value": "14137164"},
+                        {"key": "nyc_population", "value": "8584629"},
+                        {"key": "product", "value": product},
+                    ],
+                },
+            },
+        },
+    ]
+    tree = {
+        root: {"status": "COMPLETED", "goal": "spawn-sub-agents", "messages": root_messages},
+        tokyo: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("call_55fc", "e88ee23d")},
+        nyc: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("toolu_01Ate", "706a812c")},
+    }
+    return {"agent": {"agent_id": root}, "messages": root_messages, "_benchmark": {"tree": tree}}
+
+
+async def test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product():
+    """spawn-sub-agents: >=2 explore spawns and the official figures with their exact product.
+
+    Repro: original600 run 1792738962466034914 failed 3/5 valid copies on the stale
+    ``min_tool_counts.web_search=2`` while the 2026-06-02 bulk eval_prompt removal (79fe5c19e)
+    left the final answer unchecked.
+    """
+    from benchmarks import run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("spawn-sub-agents")
+    assert not (task.min_tool_counts or {}).get("web_search")
+    assert task.enforce_declared_evaluators is True
+
+    async def run(record: dict) -> tuple[bool, str | None]:
+        ok, reason, _ = await rb._run_declared_evaluators(task, record, base_url=None)
+        return ok, reason
+
+    valid = _spawn_sub_agents_record()
+    assert await run(valid) == (True, None)
+
+    no_explore = _spawn_sub_agents_record(gp_explores=False)
+    tree_counts: dict[str, int] = {}
+    for node in no_explore["_benchmark"]["tree"].values():
+        for name, count in rb._count_logical_tool_calls_from_messages(node["messages"]).items():
+            tree_counts[name] = tree_counts.get(name, 0) + count
+    assert tree_counts.get("spawn_agent") == 2  # root GP rows: a spawn_agent tool count cannot prove explores
+    ok, reason = await run(no_explore)
+    assert not ok and "explore-research" in reason and "spawned 0 explore" in reason
+
+    ok, reason = await run(_spawn_sub_agents_record(product="121362308052000"))
+    assert not ok and "final-answer-population-product" in reason and "121362308052156" in reason
+
+
 def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
     """CUDA ranking bench requires coding-agent route with zero tool failures."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -8556,12 +9697,15 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     Local repro (k=3 r7, 2026-09-02): agent 193b753e failed at ~872s with
     ``tree stalled … silent for 518s (threshold=510s)`` while Claude Code was
     still mid-session updating a progress chip (message_count frozen). Stall
-    budget for CC tasks must cover MAX_RUNTIME_S + buffer; cost idle is also
-    required so a truly dead tree still fails fast.
+    budget for CC tasks must cover a 30-minute progress chip + buffer; cost idle
+    is also required so a truly dead tree still fails fast.
     """
-    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds
+    from benchmarks.run_benchmark import (
+        AGENT_STALL_SECONDS,
+        CLAUDE_CODE_PROGRESS_SILENCE_SECONDS,
+        agent_stall_limit_seconds,
+    )
 
     cuda = get_task_by_name("cuda-kernel-github-top100-code-agent")
     chat = get_task_by_name("chat-mode")
@@ -8570,7 +9714,7 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
 
     assert cuda.requires_claude_code is True
     assert "spawn_claude_code_agent" in cuda.expected_tools
-    assert cuda_limit == max(AGENT_STALL_SECONDS, int(MAX_RUNTIME_S) + 120)
+    assert cuda_limit == max(AGENT_STALL_SECONDS, CLAUDE_CODE_PROGRESS_SILENCE_SECONDS)
     assert cuda_limit >= 1920
     assert chat_limit == AGENT_STALL_SECONDS
     assert chat_limit < cuda_limit
@@ -12414,62 +13558,130 @@ def test_timeout_default_respects_explicit_floor():
 
 
 def _exercise_history_output_sink(mode):
-    import json, sys, tempfile, types
+    import json
+    import sys
+    import tempfile
+    import types
     from pathlib import Path
     from unittest.mock import patch
     from benchmarks import results, timeout_history, span_history
+
     with tempfile.TemporaryDirectory() as directory:
         d = Path(directory)
         hub = []
         sink_calls = []
 
         def span_edge(**kwargs):
-            return span_history.record_span_observations([span_history.make_observation(agent_id=kwargs['agent_id'], benchmark=kwargs['benchmark'], environment=kwargs['environment'], span_key='synthetic:owned', span_name='synthetic', duration_ms=10, run_status='passed')], history_file=str(d / 'spans.jsonl'))
+            return span_history.record_span_observations(
+                [
+                    span_history.make_observation(
+                        agent_id=kwargs["agent_id"],
+                        benchmark=kwargs["benchmark"],
+                        environment=kwargs["environment"],
+                        span_key="synthetic:owned",
+                        span_name="synthetic",
+                        duration_ms=10,
+                        run_status="passed",
+                    )
+                ],
+                history_file=str(d / "spans.jsonl"),
+            )
 
         def output(message):
             sink_calls.append(message)
-            if mode == 'unrelated' and (d / 'spans.jsonl').exists():
-                raise ValueError('synthetic unrelated sink error')
-            if mode in ('success', 'recorder_failure') and ((d / 'spans.jsonl').exists() or mode == 'recorder_failure'):
-                raise BrokenPipeError('synthetic diagnostic sink closed')
+            if mode == "unrelated" and (d / "spans.jsonl").exists():
+                raise ValueError("synthetic unrelated sink error")
+            if mode in ("success", "recorder_failure") and ((d / "spans.jsonl").exists() or mode == "recorder_failure"):
+                raise BrokenPipeError("synthetic diagnostic sink closed")
+
         real_pass = timeout_history.record_pass
 
         def passes(**kwargs):
-            if mode in ('recorder_failure', 'healthy_recorder_failure') and kwargs['task_name'] == 'first':
-                raise ValueError('synthetic recorder failure')
+            if mode in ("recorder_failure", "healthy_recorder_failure") and kwargs["task_name"] == "first":
+                raise ValueError("synthetic recorder failure")
             return real_pass(**kwargs)
-        run = results.BenchmarkRun(suite='synthetic-history', base_url='http://localhost', task_results=[results.TaskResult(name=n, passed=True, agent_id=n, status='COMPLETED', progress_score=1, duration_seconds=1, cost_cents=0, message_count=0, logs={'worker_logs': ['synthetic']}) for n in ('first', 'second')])
+
+        run = results.BenchmarkRun(
+            suite="synthetic-history",
+            base_url="http://localhost",
+            task_results=[
+                results.TaskResult(
+                    name=n,
+                    passed=True,
+                    agent_id=n,
+                    status="COMPLETED",
+                    progress_score=1,
+                    duration_seconds=1,
+                    cost_cents=0,
+                    message_count=0,
+                    logs={"worker_logs": ["synthetic"]},
+                )
+                for n in ("first", "second")
+            ],
+        )
         error = None
-        with patch.dict(sys.modules, {'benchmarks.agent_latency': types.SimpleNamespace(record_span_history_from_logs=span_edge)}), patch.object(timeout_history, 'HISTORY_DIR', str(d)), patch.object(timeout_history, 'HISTORY_FILE', str(d / 'durations.jsonl')), patch.object(timeout_history, 'ATTEMPTS_FILE', str(d / 'attempts.jsonl')), patch.object(timeout_history, 'record_pass', passes), patch.object(results, 'print', output, create=True), patch.object(results.BenchmarkRun, '_upload_to_hub', lambda self: hub.append(self.to_dict())):
+        with (
+            patch.dict(
+                sys.modules,
+                {"benchmarks.agent_latency": types.SimpleNamespace(record_span_history_from_logs=span_edge)},
+            ),
+            patch.object(timeout_history, "HISTORY_DIR", str(d)),
+            patch.object(timeout_history, "HISTORY_FILE", str(d / "durations.jsonl")),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(d / "attempts.jsonl")),
+            patch.object(timeout_history, "record_pass", passes),
+            patch.object(results, "print", output, create=True),
+            patch.object(results.BenchmarkRun, "_upload_to_hub", lambda self: hub.append(self.to_dict())),
+        ):
             try:
-                run.save(str(d / 'runs'))
+                run.save(str(d / "runs"))
             except BaseException as exc:
-                error = f'{type(exc).__name__}: {exc}'
+                error = f"{type(exc).__name__}: {exc}"
 
         def rows(p):
             return [json.loads(x) for x in (d / p).read_text().splitlines()] if (d / p).exists() else []
-        fact = {'mode': mode, 'error': error, 'attempts': [r['task'] for r in rows('attempts.jsonl')], 'durations': [r['task'] for r in rows('durations.jsonl')], 'spans': [r['benchmark'] for r in rows('spans.jsonl')], 'hub_calls': len(hub), 'grades': [r.passed for r in run.task_results], 'saved_json': len(list((d / 'runs').glob('*.json'))), 'sink_calls': sink_calls}
-        if mode == 'unrelated':
-            assert error == 'ValueError: synthetic unrelated sink error', fact
-            assert fact['hub_calls'] == 0, fact
+
+        fact = {
+            "mode": mode,
+            "error": error,
+            "attempts": [r["task"] for r in rows("attempts.jsonl")],
+            "durations": [r["task"] for r in rows("durations.jsonl")],
+            "spans": [r["benchmark"] for r in rows("spans.jsonl")],
+            "hub_calls": len(hub),
+            "grades": [r.passed for r in run.task_results],
+            "saved_json": len(list((d / "runs").glob("*.json"))),
+            "sink_calls": sink_calls,
+        }
+        if mode == "unrelated":
+            assert error == "ValueError: synthetic unrelated sink error", fact
+            assert fact["hub_calls"] == 0, fact
             return
         print(json.dumps(fact))
         assert error is None, fact
-        assert fact['attempts'] == ['first', 'second'] and fact['spans'] == ['first', 'second'] and (fact['hub_calls'] == 1), fact
-        assert fact['durations'] == (['second'] if mode in ('recorder_failure', 'healthy_recorder_failure') else ['first', 'second']), fact
-        assert fact['grades'] == [True, True], fact
+        assert (
+            fact["attempts"] == ["first", "second"]
+            and fact["spans"] == ["first", "second"]
+            and (fact["hub_calls"] == 1)
+        ), fact
+        assert fact["durations"] == (
+            ["second"] if mode in ("recorder_failure", "healthy_recorder_failure") else ["first", "second"]
+        ), fact
+        assert fact["grades"] == [True, True], fact
+
 
 def test_history_success_output_pipe_preserves_save_and_later_tasks():
-    _exercise_history_output_sink('success')
+    _exercise_history_output_sink("success")
+
 
 def test_history_recorder_warning_pipe_preserves_save_and_later_tasks():
-    _exercise_history_output_sink('recorder_failure')
+    _exercise_history_output_sink("recorder_failure")
+
 
 def test_history_recorder_failure_remains_per_task_best_effort():
-    _exercise_history_output_sink('healthy_recorder_failure')
+    _exercise_history_output_sink("healthy_recorder_failure")
+
 
 def test_history_unrelated_output_error_is_not_suppressed():
-    _exercise_history_output_sink('unrelated')
+    _exercise_history_output_sink("unrelated")
 
 
 def test_fast_mode_pass_does_not_seed_timeout_history():
@@ -12780,10 +13992,21 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
     )
     user_profile = {
         "userId": "test-user",
-        **dict.fromkeys((
-            "name", "email", "phone", "deliveryRecipientName", "addressLine1", "addressLine2",
-            "city", "state", "postalCode", "country", "systemName",
-        )),
+        **dict.fromkeys(
+            (
+                "name",
+                "email",
+                "phone",
+                "deliveryRecipientName",
+                "addressLine1",
+                "addressLine2",
+                "city",
+                "state",
+                "postalCode",
+                "country",
+                "systemName",
+            )
+        ),
     }
     deps = SimpleNamespace(
         is_local_base_url=lambda _: True,
@@ -12892,7 +14115,9 @@ async def test_sms_runner_harness_error_has_explicit_error_outcome():
         stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
         stack.enter_context(patch.object(sms, "_cleanup"))
         stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
-        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps)
+        result = await sms.run_sms_task(
+            "http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps
+        )
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
@@ -12913,6 +14138,56 @@ async def test_codex_runner_harness_error_has_explicit_error_outcome():
             "http://127.0.0.1:32001", get_task_by_name("claude-code-agent"), deps, "test goal"
         )
     assert result.passed is False
+    assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
+async def test_codex_runner_creates_session_on_mounted_internal_route():
+    """The runner must reach the backend's real, internal-only Codex route.
+
+    It posted to an unmounted /api/codex-session (always 404), and with a user
+    JWT, which the internal-only /api/codex-code-session/create refuses.
+    """
+    from types import SimpleNamespace
+    from aiohttp import web
+    import benchmarks.codex_runner as codex
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    server_ts = (Path(__file__).resolve().parents[3] / "back-end/src/server.ts").read_text()
+    assert f"app.use('{codex.CODEX_SESSION_PATH}'," in server_ts, codex.CODEX_SESSION_PATH
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        seen.append((request.path, dict(request.headers)))
+        if request.path == "/api/agents":
+            return web.json_response({"agent_id": "11111111-1111-4111-8111-111111111111"})
+        if request.path == "/api/codex-code-session/create":
+            return web.json_response({"error": "stop after create"}, status=500)
+        return web.json_response({"error": "not mounted"}, status=404)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        deps = SimpleNamespace(
+            benchmark_user_id=lambda: "test-user",
+            rose_api_url_for_harness=lambda url: url,
+            api_headers=AsyncMock(return_value={"Authorization": "Bearer user-jwt"}),
+            internal_api_headers=lambda user_id: {"X-API-Key": "internal-key", "X-User-Id": user_id},
+        )
+        result = await codex.run_codex_task(
+            f"http://127.0.0.1:{port}", get_task_by_name("claude-code-agent"), deps, "test goal"
+        )
+    finally:
+        await runner.cleanup()
+    creates = [h for path, h in seen if path == "/api/codex-code-session/create"]
+    assert creates, [path for path, _ in seen]
+    assert creates[0].get("X-API-Key") == "internal-key", creates[0]
+    assert "Authorization" not in creates[0], creates[0]
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
 
@@ -12972,6 +14247,41 @@ async def test_minted_benchmark_preserves_child_harness_outcomes():
                 )
             assert result.passed is False
             assert result.benchmark_status == expected, (stage, outcome, result.benchmark_status)
+
+
+def test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key():
+    """The forced bad-password fixture must name BrowserPassword's real unique key.
+
+    Postgres rejects an ON CONFLICT target that matches no unique index, so a
+    fixture left on the old (userId, origin, username) key fails outright once
+    saved logins are unique per browser source and profile.
+    """
+    import re
+
+    import benchmarks.run_benchmark as bench
+
+    schema = (Path(__file__).resolve().parents[3] / "back-end" / "prisma" / "schema.prisma").read_text()
+    model = re.search(r"model BrowserPassword \{(.*?)\n\}", schema, re.S)
+    assert model is not None
+    unique = re.search(r"@@unique\(\[([^\]]+)\]\)", model.group(1))
+    assert unique is not None
+    expected = [column.strip() for column in unique.group(1).split(",")]
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "bundle-id\tpwd-1\tpwd-2"
+        fixture = bench._seed_local_bad_amazon_auth_scenario("user-123", "amazon.com")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert fixture["password_ids"] == ["pwd-1", "pwd-2"]
+    password_inserts = re.findall(
+        r'INSERT INTO "BrowserPassword".*?ON CONFLICT \(([^)]*)\)', queries[0], re.S
+    )
+    assert len(password_inserts) == 2
+    for target in password_inserts:
+        assert [column.strip().strip('"') for column in target.split(",")] == expected
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -15360,7 +16670,7 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     original_tasks = benchmark_tasks._cached_tasks
     # configure_task_environment exports several process-wide flags (e.g.
-    # ROSE_DISABLE_CODE_AGENT_VERIFIER); restore all of them so later suites in
+    # ROSE_DISABLE_API_REQUEST); restore all of them so later suites in
     # the same runner process see the real environment.
     try:
         with patch.dict(os.environ, {}, clear=False):
@@ -15411,15 +16721,19 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
         check=False,
     )
 
+    def gate_and_cache(result: subprocess.CompletedProcess) -> list[str]:
+        # Other per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if "NON_PURCHASE_GATES_ENABLED" in line or "FAST_" in line]
+
     assert enabled.returncode == 0, enabled.stderr
-    assert enabled.stdout.splitlines() == [
+    assert gate_and_cache(enabled) == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
         "stack:FAST_MODE_CACHE_USE_LOCAL=1",
         "stack:FAST_MODE_CACHE_DATABASE_URL=",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
     ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
-    assert disabled.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert gate_and_cache(disabled) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
@@ -15441,10 +16755,134 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
 
 
-def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
-    """Only fast_cache:on DEMO replays may hold production pooler slots.
+def test_cloudbench_code_agent_tasks_pin_claude_code_like_local():
+    """Cloud guests get exactly the per-task worker environment local runs get.
 
-    Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
+    claude-code-agent failed both cloud copies of descend-full69-20261023: the
+    guest exported no ROSE_CODE_AGENT_PROVIDER, so the code tool followed the
+    root's GPT lease, ran Codex, and the sub-agent verifier rejected the
+    "Claude Code (not Codex)" goal. The same guests also lacked
+    ROSE_DISABLE_CODE_AGENT_VERIFIER, ROSE_DISABLE_API_REQUEST,
+    ROSE_DISABLE_GENERAL_PURPOSE_AGENT and BROWSER_MAX_ITERATIONS, which local
+    configure_task_environment always derives from the selected tasks. Compare
+    the whole catalog: every key local sets must reach the cloud guest with
+    the same value, through the real cloudbench-run.sh task-env path.
+
+    W2: the code-agent verifier is off by default in code, so neither local
+    nor cloud may set ROSE_DISABLE_CODE_AGENT_VERIFIER or the
+    ROSE_ENABLE_CODE_AGENT_VERIFIER opt-in for any task; benches and prod
+    take the same verifier path.
+    """
+    import importlib.util
+    import subprocess
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    # Stack fixtures cloud guests provision through their own payment/admin/
+    # frontend setup (cloudbench-run.sh BENCH_NEEDS_* blocks), not worker env.
+    stack_fixture_keys = {
+        "BENCHMARK_ISOLATED_RUN",
+        "BENCHMARK_BUNDLED_FRONTEND",
+        "ALLOW_TEMPORAL_CLEANUP",
+        "BENCHMARK_FAST_MODE_CACHE",
+        "SEED_ALLOW_MISSING_GPT_CODE",
+        "SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS",
+        local_bench.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
+        "AGENTCARD_ONBOARDING_RETURN_URL",
+        "ADMIN_USER_IDS_EXTRA",
+    }
+    worker_keys = {
+        "NON_PURCHASE_GATES_ENABLED",
+        "ROSE_CODE_AGENT_PROVIDER",
+        "ROSE_DISABLE_CODE_AGENT_VERIFIER",
+        "ROSE_ENABLE_CODE_AGENT_VERIFIER",
+        "ROSE_DISABLE_API_REQUEST",
+        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT",
+        "BROWSER_MAX_ITERATIONS",
+    }
+    verifier_keys = {"ROSE_DISABLE_CODE_AGENT_VERIFIER", "ROSE_ENABLE_CODE_AGENT_VERIFIER"}
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in worker_keys | stack_fixture_keys and key != "CLOUDBENCH_INFRA_PROBE"
+    }
+
+    def local_env(task_name: str) -> dict[str, str]:
+        with patch.dict(os.environ, clean_env, clear=True):
+            local_bench.configure_task_environment([task_name])
+            changed = {key: value for key, value in os.environ.items() if clean_env.get(key) != value}
+        return {key: value for key, value in changed.items() if key not in stack_fixture_keys and value != ""}
+
+    def cloud_env(task_name: str) -> dict[str, str]:
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **clean_env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task_name,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in lines if line.startswith("stack:"))
+        exported = dict(
+            line.removeprefix("benchmark:export ").split("=", 1) for line in lines if line.startswith("benchmark:")
+        )
+        # The stack (worker) and the benchmark process export the same values.
+        assert {key: value for key, value in stack.items() if key in worker_keys} == {
+            key: value for key, value in exported.items() if key in worker_keys
+        }, (task_name, lines)
+        return {key: value for key, value in stack.items() if key in worker_keys and value != ""}
+
+    local_by_task = {task.name: local_env(task.name) for task in benchmark_tasks.all_tasks()}
+    assert local_by_task["claude-code-agent"].get("ROSE_CODE_AGENT_PROVIDER") == "claude"
+    assert local_by_task["google-oauth"].get("ROSE_DISABLE_API_REQUEST") == "0"
+    verifier_overrides = {name: sorted(verifier_keys & set(env)) for name, env in local_by_task.items()}
+    assert not {name: keys for name, keys in verifier_overrides.items() if keys}, verifier_overrides
+    assert set().union(*local_by_task.values()) <= worker_keys, sorted(
+        set().union(*local_by_task.values()) - worker_keys
+    )
+
+    # Real guest entrypoint, once per distinct local environment.
+    representatives: dict[tuple[tuple[str, str], ...], str] = {}
+    for name, env in local_by_task.items():
+        representatives.setdefault(tuple(sorted(env.items())), name)
+    for signature, name in representatives.items():
+        cloud = cloud_env(name)
+        assert not verifier_keys & set(cloud), {"task": name, "cloud": cloud}
+        assert cloud == dict(signature), {"task": name, "local": dict(signature), "cloud": cloud}
+
+    # The guest's catalog helper resolves every task identically to local.
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_catalog_parity", repo_root / "scripts" / "cloudbench_catalog.py"
+    )
+    assert spec is not None and spec.loader is not None
+    catalog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(catalog)
+    by_name = catalog.index_unified_catalog(repo_root / "agents" / "benchmarks" / "tasks.json")
+    mismatched = {}
+    for name, env in local_by_task.items():
+        resolved = catalog.task_worker_environment([by_name[name]], clean_env)
+        cloud = {key: value for key, value in resolved.items() if value}
+        if cloud != env:
+            mismatched[name] = {"local": env, "cloud": cloud}
+    assert not mismatched, dict(list(mismatched.items())[:5])
+
+
+def test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler():
+    """Only demo_cache:on DEMO replays may hold production pooler slots.
+
+    Every other cloud guest keeps its DEMO cache in the isolated local DB,
     matching local isolated stacks; a broken resolver fails closed instead of
     silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
     still read the shared cache use bounded Prisma pools (20 per run.sh stack, 4 per
@@ -15472,50 +16910,62 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             check=False,
         )
 
+    def route(result: subprocess.CompletedProcess) -> list[str]:
+        # Per-task worker env lines are covered by the local-parity test.
+        return [line for line in result.stdout.splitlines() if line.startswith("stack:FAST_")]
+
     live = print_env("chat-mode")
     assert live.returncode == 0, live.stderr
-    assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(live) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
-    shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
+    shared_route = [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=4",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
-    # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
+    # demo_cache:on replay keeps the frozen shared cache with a small pool, so a
     # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
-    assert shared.stdout.splitlines() == shared_route
+    assert route(shared) == shared_route
 
     # An inherited local route must not divert the replay to the empty local DB.
     inherited = print_env("test-mass-agent-run-0", FAST_MODE_CACHE_USE_LOCAL="1")
     assert inherited.returncode == 0, inherited.stderr
-    assert inherited.stdout.splitlines() == shared_route
+    assert route(inherited) == shared_route
 
     mixed = print_env("chat-mode,test-mass-agent-run-0")
     assert mixed.returncode == 0, mixed.stderr
-    assert mixed.stdout.splitlines() == shared_route
+    assert route(mixed) == shared_route
 
     tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
-    assert tuned.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
+    assert route(tuned) == [
+        "stack:FAST_MODE_CACHE_USE_LOCAL=0",
+        "stack:FAST_CACHE_DB_POOL=6",
+        "stack:FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1",
+    ]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+    assert route(probe) == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
         fake_python.write_text(
-            '#!/bin/sh\ncase "$2" in requires-gate) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+            '#!/bin/sh\ncase "$2" in task-env) exit 0 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
         )
         fake_python.chmod(0o755)
         broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
     assert broken.returncode == 31
     assert "route-broken" in broken.stderr
-    assert "Fast Mode cache routing failed (exit 31)" in broken.stderr
+    assert "DEMO cache routing failed (exit 31)" in broken.stderr
     assert "FAST_MODE_CACHE_USE_LOCAL" not in broken.stdout
 
     unknown = subprocess.run(
         [
             sys.executable,
             str(repo_root / "scripts" / "cloudbench_catalog.py"),
-            "needs-shared-fast-cache",
+            "needs-shared-demo-cache",
             str(repo_root / "agents" / "benchmarks" / "tasks.json"),
             "no-such-benchmark-task",
         ],
@@ -15537,7 +16987,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             [
                 "bash",
                 "-c",
-                '. "$1"; apply_fast_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                '. "$1"; apply_demo_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
                 "pool",
                 str(lib),
                 mode,
@@ -15555,9 +17005,9 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert pool_after("any", "9") == "9", "an explicit operator pool size wins"
 
     run_sh = (repo_root / "scripts" / "run.sh").read_text()
-    pool_call = run_sh.index("apply_fast_cache_pool_default\n")
+    pool_call = run_sh.index("apply_demo_cache_pool_default\n")
     assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
-    assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
+    assert pool_call < run_sh.index('echo "🧠 Ensuring DEMO cache schema..."')
 
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
@@ -16883,7 +18333,7 @@ def test_dotenv_fast_mode_cache_falls_back_to_database_url():
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
-def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
+def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
     """test-mass-agent-run-0 must read the July cache without Andy write-through."""
     from unittest.mock import patch
 
@@ -16930,6 +18380,174 @@ def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+async def test_claude_code_only_run_withholds_gpt_compute_credentials():
+    """A run of requires_claude_code tasks leases only Claude credentials.
+
+    claude-code-agent (descend-full69 K4/K8) leased type=gpt, so every code
+    spawn ran Codex. Local stacks and cloud guests share this run-level
+    compute-token refresh, so the isolated DB must hold no leasable gpt_code row
+    for a Claude-only run, while every other run keeps both credential types.
+    """
+    import asyncio
+    import uuid
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    db_name = f"bench_k8_{uuid.uuid4().hex[:10]}"
+    db_url = admin.rsplit("/", 1)[0] + "/" + db_name
+
+    def psql(url: str, sql: str) -> str:
+        result = subprocess.run(["psql", url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                                capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def fake_seed(command, **_kwargs):
+        psql(db_url, (
+            'DELETE FROM "Integration"; '
+            'INSERT INTO "Integration" (id, name, status, "userId", "poolingEnabled") VALUES '
+            "('c1','claude_code','CONNECTED','u',false),('g1','gpt_code','CONNECTED','u',false),"
+            "('g2','gpt_code','CONNECTED',NULL,true)"
+        ))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def leasable(kind: str) -> int:
+        return int(psql(db_url, f"SELECT count(*) FROM \"Integration\" WHERE name='{kind}' AND status='CONNECTED'"))
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    claude_task = by_name["claude-code-agent"]
+    assert claude_task.requires_claude_code
+    other_task = by_name["spawn-sub-agents"]
+    assert not other_task.requires_claude_code
+
+    psql(admin, f'CREATE DATABASE "{db_name}"')
+    try:
+        psql(db_url, (
+            'CREATE TABLE "Integration" (id text primary key, name text, status text, "userId" text, '
+            '"poolingEnabled" boolean, config jsonb, "rateLimitedUntil" timestamptz)'
+        ))
+        observed = {}
+        for label, tasks in {"claude-only": [claude_task], "other": [other_task], "mixed": [claude_task, other_task]}.items():
+            with (
+                patch.object(bench, "_local_victoria_database_url", return_value=db_url),
+                patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/db", "source")),
+                patch.object(bench, "_run_seed_subprocess", side_effect=fake_seed),
+                patch.object(bench, "_is_local_base_url", return_value=True),
+                patch.object(bench, "_is_simulate_mode", return_value=False),
+                patch.object(bench, "_anthropic_family_excluded", return_value=False),
+                patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=True)),
+                patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+                patch.object(bench, "_assert_require_compute_tokens_satisfied", return_value=None),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                os.environ.pop("CODEX_AUTH_PATH", None)
+                await bench._refresh_local_compute_tokens_for_run("http://localhost:3001", tasks=tasks)
+                # A later per-task overlay sync must not hand the GPT credential back.
+                assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True)
+            observed[label] = (leasable("claude_code"), leasable("gpt_code"))
+        assert observed == {"claude-only": (1, 0), "other": (1, 2), "mixed": (1, 2)}, observed
+    finally:
+        getattr(bench, "_withheld_compute_token_types", set()).clear()
+        psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_cloudbench_demo_cache_on_guest_is_read_only_like_local():
+    """A cloud guest replays the shared July cache under the same write policy as local.
+
+    Local isolated stacks make every shared-cache (demo_cache:on) run strict
+    read-only, so a cache miss fails loudly instead of calling a live model. The
+    cloud guest route used the shared cache without that flag: the
+    test-mass-agent-run-0 root's response_schema miss went to a live model,
+    produced field names the recorded July assemble does not use, and failed the
+    T7 schema evaluator (descend-full69 p3-proof-1). google-oauth keeps its one
+    deliberate local exception on both surfaces.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    read_only = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
+
+    def local_policy(task: str) -> str | None:
+        captured: dict = {}
+
+        def fake_popen(command, **kwargs):
+            captured["env"] = kwargs["env"]
+            return object()
+
+        with (
+            patch.dict(os.environ, {"FAST_MODE_CACHE_DATABASE_URL": "postgresql://july.example.test:6543/postgres"}),
+            patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "_record_stack_cleanup_owner", new=lambda *_args: None),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            os.environ.pop(read_only, None)
+            context_dir = Path(tmp) / "parity-run"
+            stack = local_bench.ServiceStack(
+                run_id="parity-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-parity-run",
+                base_port=55160,
+            )
+            local_bench.start_services(stack, clean_first=False, tasks=[task])
+        return captured["env"].get(read_only)
+
+    def cloud_policy(task: str) -> str | None:
+        env = {key: value for key, value in os.environ.items() if key not in {read_only, "CLOUDBENCH_INFRA_PROBE"}}
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **env,
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS_B64": "",
+                "BENCH_TASKS": task,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        stack = dict(line.removeprefix("stack:").split("=", 1) for line in result.stdout.splitlines() if line.startswith("stack:"))
+        return stack.get(read_only)
+
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    start = fleet.index("    local shared_cache_read_only=0 shared_cache_status=0 shared_cache_tasks=()")
+    policy = fleet[start : fleet.index("    local wid=\"\" borrowed_worker=0", start)]
+
+    def clone_policy(task: str) -> str | None:
+        with tempfile.TemporaryDirectory() as out:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    "clone() {\n" + policy + '    [ "$shared_cache_read_only" = 0 ] || echo 1\n}\nclone',
+                ],
+                env={**os.environ, "ROOT_DIR": str(repo_root), "bench": task, "out": out},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip() or None
+
+    assert local_policy("test-mass-agent-run-0") == "1"
+    for task in ("test-mass-agent-run-0", "google-oauth"):
+        assert cloud_policy(task) == local_policy(task), task
+        assert clone_policy(task) == local_policy(task), task
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
@@ -17840,7 +19458,6 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
             local_bench._release_port_range(base)
 
 
-
 def test_local_workspace_derived_base_skips_reported_ephemeral_window():
     """A base derived from CONDUCTOR_PORT is a preference, not an owned range.
 
@@ -17860,6 +19477,7 @@ def test_local_workspace_derived_base_skips_reported_ephemeral_window():
         assert local_bench.workspace_preferred_base("abc") is None
     with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=None):
         assert local_bench.workspace_preferred_base("56060") == 56260
+
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
@@ -19500,7 +21118,7 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
 
     task = get_task_by_name("spawn-sub-agents")
 
-    assert task.min_tool_counts == {"web_search": 2}
+    assert not task.min_tool_counts  # explore research is the declared explore_spawn_count check
     assert task.expected_tool_counts["spawn_general_purpose_agent"] == 2
     assert task.expected_tool_counts["spawn_browser_agent"] == 0
     assert task.expected_tool_counts["spawn_claude_code_agent"] == 0
@@ -20344,7 +21962,7 @@ def test_root_exact_tool_count_fails_fast_after_duplicate_call():
     assert _root_exact_tool_count_exceeded(task, messages[:2]) is None
 
 
-def test_message_side_effect_benchmarks_force_fast_cache_off():
+def test_message_side_effect_benchmarks_force_demo_cache_off():
     """Cached agent decisions cannot prove a live external side effect."""
     import os
 
@@ -20356,7 +21974,7 @@ def test_message_side_effect_benchmarks_force_fast_cache_off():
     try:
         for name in ("message-person", "message-person-agent-sms"):
             task = get_task_by_name(name)
-            assert task.fast_cache == "off"
+            assert task.demo_cache == "off"
             assert _resolved_fast_mode_cache(task) is False
     finally:
         if previous is None:
@@ -20411,7 +22029,7 @@ def test_unified_catalog_delineates_bench_axes():
     mass = by_name["test-mass-agent-run-0"]
     assert "smoke" in mass["tags"]
     assert mass["group"] == "pre-deploy"
-    assert mass["fast_cache"] == "on"
+    assert mass["demo_cache"] == "on"
     assert mass["enforce_declared_evaluators"] is True
     assert mass["min_agent_count"] == 50
     evaluators = {evaluator["id"]: evaluator for evaluator in mass["evaluators"]}
@@ -20431,6 +22049,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-meaningful-task-title",
         "t7-readable-report-files",
+        "t7-schema-complete-outputs",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -20462,6 +22081,7 @@ def test_unified_catalog_delineates_bench_axes():
             "completion_summary_file_outputs",
             "completion_summary_file_outputs",
         ],
+        "t7-schema-complete-outputs": ["completion_structured_output_schema"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }
@@ -21194,7 +22814,7 @@ def test_browser_min_steps_ignores_init_timeout_retry_before_session():
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
     """Non-orchestration code-agent evidence chips must produce step_count > 0.
 
-    When ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier, spawn chips
+    With the code-agent LLM verifier off (the default), spawn chips
     alone leave every code agent at 0 steps and declared judges fail. Persisted
     `code_agent_sdk_events` / `claude_code_history` chips (agentType=code) are
     the grounded trajectory the harness expects.
@@ -21514,7 +23134,12 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}
+    assert LIVE_FIXTURE_NAMES == {
+        "live",
+        "live-tamy-identity",
+        "live-tamy-account-snapshot",
+        "live-aman-food-plan-identity",
+    }
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -21589,9 +23214,12 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-tamy-account-snapshot", "live-aman-food-plan-identity"}, (
-            f"{t.name}: noncanonical live fixture"
-        )
+        assert set(env["live_fixtures"]) <= {
+            "live",
+            "live-tamy-identity",
+            "live-tamy-account-snapshot",
+            "live-aman-food-plan-identity",
+        }, f"{t.name}: noncanonical live fixture"
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
 
@@ -21731,11 +23359,16 @@ def test_tag_slices_still_resolve():
 
 
 def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
-    """The curated anti-bot slice uses one canonical tag spelling."""
+    """The anti-bot slice uses one canonical tag spelling ("antibot"): the curated commerce
+    benches plus one probe per site on the production CAPTCHA list (captcha_probe_sites.json)."""
+    import json
+    from pathlib import Path
+
     from benchmarks.benchmark_tasks import all_tasks, get_tasks_by_tag
 
     tasks = get_tasks_by_tag("antibot")
     by_name = {task.name: task for task in tasks}
+    probes = json.loads((Path(__file__).resolve().parents[2] / "benchmarks/captcha_probe_sites.json").read_text())["probes"]
     assert set(by_name) == {
         "browser-indeed-account-create",
         "browser-google-search-single-result",
@@ -21745,13 +23378,40 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-agent-amazon-cookie-payment",
         "browser-blue-bottle-challenge-recovery",
         "browser-1015-eventim-request-card",
-    }
+    } | {f"anti-bot-{probe['name']}" for probe in probes}
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
     assert "ecommerce" in by_name["browser-blue-bottle-challenge-recovery"].tags
     assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
     assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
+    # Every probe is a catalog task with the probe's exact goal and an LLM judge on its
+    # post-wall evidence; probes held for a missing account stay incomplete.
+    for probe in probes:
+        task = by_name[f"anti-bot-{probe['name']}"]
+        assert task.prompt == probe["goal"]
+        assert task.anti_bot == "yes" and task.bench == "rose-bench" and task.requires_browser_agent
+        # Reservation probes stay held until the write lock is proven to stop booking submits
+        # (2026-10-23: a Kernel run made a real Foreign Cinema reservation).
+        held = probe.get("hold") or probe.get("ends_at_write_lock")
+        assert task.status == ("incomplete" if held else "ready")
+        assert probe["post_wall_evidence"] in task.evaluators[0]["criteria"]
+        assert task.evaluators[0]["method"] == "single_turn_llm_judge"
+        assert task.enforce_declared_evaluators is True
+        # A plan-phase spawn_agent(type=browser) is recorded as the spawn_browser_agent tool row.
+        assert task.expected_tools == ["spawn_browser_agent"]
+        # Full use of the service: purchase flows end at one pending payment-card request,
+        # bookings at one pending write lock at the final confirm (approvals left unresolved).
+        if probe.get("ends_at_payment_approval"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "payment_approval", "ignore", 1)
+            assert task.success_on_payment_card_request is True
+            assert "request_payment_card" in task.prompt
+        if probe.get("ends_at_write_lock"):
+            assert (task.expected_attention_kind, task.approval_handling, task.expected_approval_count) == (
+                "write_lock", "ignore", 1)
+    assert sum(bool(p.get("ends_at_payment_approval")) for p in probes) == 11
+    assert sum(bool(p.get("ends_at_write_lock")) for p in probes) == 3
 
 
 def test_eventim_1015_request_card_benchmark_contract():
@@ -23099,6 +24759,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
         ("test_disposable_volume_ownership_is_in_permanent_gate", "disposable_volume_ownership_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
+        ("test_code_bench_evaluator_proofs_are_in_permanent_gate", "code_bench_evaluator_proofs_permanent_gate"),
         ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
@@ -23340,67 +25001,131 @@ async def test_agentcard_release_skip_rejects_independent_native_retirement_fail
     import uuid
     from benchmarks import run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
+
     # Synthetic live response; the archived allocation has no live Stripe provenance.
     lifecycle = _agentcard_release_stall_lifecycle(livemode=True)
-    for native in ('none', 'joined', 'failed'):
-        task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
+    for native in ("none", "joined", "failed"):
+        task = deepcopy(get_task_by_name("agent-payment-production-abandonment"))
         calls = []
-        task.world_model_mode = 'simulate'
-        if native != 'none':
-            task.wmh_initial_state = {'structured': {'schema':'offline-retirement-control', 'as_of_utc':'2026-10-15T00:00:00Z'}, 'scratchpad':''}
+        task.world_model_mode = "simulate"
+        if native != "none":
+            task.wmh_initial_state = {
+                "structured": {"schema": "offline-retirement-control", "as_of_utc": "2026-10-15T00:00:00Z"},
+                "scratchpad": "",
+            }
         else:
             task.wmh_initial_state = None
         actual_client = httpx.AsyncClient
+
         def transport(request):
-            assert request.url.host == 'fixture.invalid'
+            assert request.url.host == "fixture.invalid"
             payload = json.loads(request.content)
-            assert payload['world_model_mode'] == 'simulate'
-            assert request.method == 'POST' and request.url.path == '/api/agents'
-            return httpx.Response(201, json={'agent_id': lifecycle['agentId']})
+            assert payload["world_model_mode"] == "simulate"
+            assert request.method == "POST" and request.url.path == "/api/agents"
+            return httpx.Response(201, json={"agent_id": lifecycle["agentId"]})
+
         def client(*args, **kwargs):
             return actual_client(*args, transport=httpx.MockTransport(transport), **kwargs)
+
         class NativeClient:
-            def __init__(self, base): assert base == 'http://native.test'
+            def __init__(self, base):
+                assert base == "http://native.test"
+
             async def create_session(self, model, **kwargs):
-                assert model == 'rose-test'
-                assert kwargs['session_scope_id'] == lifecycle['agentId']
-                assert kwargs['seed_state']['structured']['root_agent_id'] == lifecycle['agentId']
-                assert kwargs['seed_state']['structured']['root_goal'] == kwargs['task']
-                return 'owned-session'
+                assert model == "rose-test"
+                assert kwargs["session_scope_id"] == lifecycle["agentId"]
+                assert kwargs["seed_state"]["structured"]["root_agent_id"] == lifecycle["agentId"]
+                assert kwargs["seed_state"]["structured"]["root_goal"] == kwargs["task"]
+                return "owned-session"
+
             async def end_session(self, model, sid):
-                assert (model, sid) == ('rose-test', 'owned-session')
+                assert (model, sid) == ("rose-test", "owned-session")
                 calls.append((model, sid))
-                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
-                return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
-        cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
+                if native == "failed":
+                    raise RuntimeError("exact owned retirement unavailable")
+                return dict(
+                    engine="experiential",
+                    join_verified=True,
+                    ended=sid,
+                    session_id=sid,
+                    session_scope_id=lifecycle["agentId"],
+                    revision=1,
+                    state={},
+                    history=[],
+                    usage={},
+                )
+
+        cleanup = AsyncMock(side_effect=AssertionError("duplicate financial cleanup"))
         delete = AsyncMock()
         archive = AsyncMock(return_value=(None, None))
-        logs = {'failure_evidence': {'errors': []}}
-        stall = bench._payment_reconciliation_timeout('pending', lifecycle, task_name=task.name)
+        logs = {"failure_evidence": {"errors": []}}
+        stall = bench._payment_reconciliation_timeout("pending", lifecycle, task_name=task.name)
         assert isinstance(stall, bench.AgentCardReleaseStall)
         with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'BENCHMARK_WORLD_MODEL_MODE':'simulate','WMH_BASE_URL':'http://native.test','WMH_MODEL_NAME':'rose-test','WMH_ENGINE':'experiential'}))
-            for key in ('WMH_SESSION_ID', 'WORLD_MODEL_SESSION_ID'):
+            stack.enter_context(
+                patch.dict(
+                    os.environ,
+                    {
+                        "BENCHMARK_WORLD_MODEL_MODE": "simulate",
+                        "WMH_BASE_URL": "http://native.test",
+                        "WMH_MODEL_NAME": "rose-test",
+                        "WMH_ENGINE": "experiential",
+                    },
+                )
+            )
+            for key in ("WMH_SESSION_ID", "WORLD_MODEL_SESSION_ID"):
                 stack.enter_context(patch.dict(os.environ))
                 os.environ.pop(key, None)
-            stack.enter_context(patch.object(bench.uuid, 'uuid4', return_value=uuid.UUID(lifecycle['agentId'])))
-            stack.enter_context(patch.object(bench.httpx, 'AsyncClient', client))
-            for name in ('prepare_sandbox_payment_residual', '_preflight_production_payment_identity', '_apply_live_fixtures', '_apply_memory_fixtures', '_apply_auth_test_site', '_restore_live_fixture_scenarios_async', '_release_auth_test_site'):
+            stack.enter_context(patch.object(bench.uuid, "uuid4", return_value=uuid.UUID(lifecycle["agentId"])))
+            stack.enter_context(patch.object(bench.httpx, "AsyncClient", client))
+            for name in (
+                "prepare_sandbox_payment_residual",
+                "_preflight_production_payment_identity",
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
                 stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
-            for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
+            for name, value in {
+                "_api_headers": AsyncMock(return_value={}),
+                "WMHHttpClient": NativeClient,
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=stall),
+                "_capture_task_failure_evidence": AsyncMock(
+                    return_value=({"messages": [], "_benchmark": {"payment_lifecycle": deepcopy(lifecycle)}}, logs)
+                ),
+                "finalize_archive_and_score_world_model": archive,
+                "ensure_payment_lifecycle_cleanup": cleanup,
+                "delete_agent": delete,
+                "_run_user_id_override_for_task": lambda *_args: None,
+            }.items():
                 stack.enter_context(patch.object(bench, name, value))
-            result = await bench.run_single_task('https://fixture.invalid', task)
-        cleanup.assert_not_awaited(); delete.assert_awaited_once()
-        assert len(calls) == (native != 'none'), calls
-        assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
-        expected = 'ERROR' if native == 'failed' else 'SKIPPED'
-        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (native, result.status, result.failure_reason)
-        assert bench._is_permitted_agentcard_release_skip(result) is (native != 'failed')
-        assert archive.await_args.kwargs['benchmark_status'] == expected
-        if native == 'failed':
-            assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
-            assert 'exact owned retirement unavailable' in result.failure_reason
-        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+            result = await bench.run_single_task("https://fixture.invalid", task)
+        cleanup.assert_not_awaited()
+        delete.assert_awaited_once()
+        assert len(calls) == (native != "none"), calls
+        assert result.logs["agentcard_release_stall_lifecycle"] == lifecycle
+        expected = "ERROR" if native == "failed" else "SKIPPED"
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (
+            native,
+            result.status,
+            result.failure_reason,
+        )
+        assert bench._is_permitted_agentcard_release_skip(result) is (native != "failed")
+        assert archive.await_args.kwargs["benchmark_status"] == expected
+        if native == "failed":
+            assert result.logs["wmh_retirement_error"] == dict(
+                type="RuntimeError",
+                message="exact owned retirement unavailable",
+                session_id="owned-session",
+                session_scope_id=lifecycle["agentId"],
+                join_verified=False,
+                cost_verified=False,
+            )
+            assert "exact owned retirement unavailable" in result.failure_reason
+        elif native == "joined":
+            assert result.logs["wmh_retirement"]["join_verified"] is True
 
 
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
@@ -23585,9 +25310,34 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         assert result.logs["cloud_cleanup_evidence"]["warnings"] == []
 
 
+def test_fly_infra_detector_ignores_collector_placeholders():
+    """A '[fly.io] 0 logs ... (N total captured)' placeholder is not a log line.
+
+    Regression: on --local runs the prod Fly stream never contains local agents,
+    and a captured-line count containing "429" made every agent an INFRA ERROR.
+    """
+    import benchmarks.logs as bench_logs
+    from benchmarks.run_benchmark import _detect_infra_errors_from_fly
+
+    class _Collector:
+        def get_logs_for_agent(self, agent_id):
+            if agent_id == "real":
+                return ["2026-10-19T03:00:00Z worker got 429 Too Many Requests from provider"]
+            return [f"[fly.io] 0 logs for agent {agent_id[:12]} (674429 total captured)"]
+
+    previous = bench_logs._fly_collector
+    bench_logs._fly_collector = _Collector()
+    try:
+        assert _detect_infra_errors_from_fly(["placeholder-agent"]) == []
+        assert len(_detect_infra_errors_from_fly(["real"])) == 1
+    finally:
+        bench_logs._fly_collector = previous
+
+
 # Native elapsed-clock owning regression: real _poll_agent, only external edges fake.
-async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
-                           expect_timeout=False, mode=None, next_times=()):
+async def _clock_poll_case(
+    name, wall_delta, elapsed_delta, status="COMPLETED", expect_timeout=False, mode=None, next_times=()
+):
     from copy import deepcopy
     from types import SimpleNamespace
     from contextlib import ExitStack
@@ -23595,96 +25345,162 @@ async def _clock_poll_case(name, wall_delta, elapsed_delta, status='COMPLETED',
     from benchmarks.benchmark_tasks import get_task_by_name
     import socket
     import hashlib
-    task=deepcopy(get_task_by_name(name))
-    if name.startswith('browser-auth-'):
-        assert task.timeout_seconds in (900,1200)
-    task.approval_handling='ignore'
+
+    task = deepcopy(get_task_by_name(name))
+    if name.startswith("browser-auth-"):
+        assert task.timeout_seconds in (900, 1200)
+    task.approval_handling = "ignore"
+
     class Clock:
         def __init__(self):
-            self.calls={'wall':0,'elapsed':0}; self.wall=10000+wall_delta; self.elapsed=20000+elapsed_delta
+            self.calls = {"wall": 0, "elapsed": 0}
+            self.wall = 10000 + wall_delta
+            self.elapsed = 20000 + elapsed_delta
+
         def time(self):
-            self.calls['wall']+=1
-            return 10000 if self.calls['wall']==1 else self.wall
+            self.calls["wall"] += 1
+            return 10000 if self.calls["wall"] == 1 else self.wall
+
         def monotonic(self):
-            self.calls['elapsed']+=1
-            return 20000 if self.calls['elapsed']==1 else self.elapsed
-    clock=Clock(); reads=[]; pending=list(next_times); denial=[]; payment=[]
+            self.calls["elapsed"] += 1
+            return 20000 if self.calls["elapsed"] == 1 else self.elapsed
+
+    clock = Clock()
+    reads = []
+    pending = list(next_times)
+    denial = []
+    payment = []
+
     async def read(*args):
         reads.append(1)
-        msgs=([{'role':'USER','text':str(i)} for i in range(len(reads))] if mode=='progress' else [])
-        if mode=='chat': msgs=[{'role':'ASSISTANT','text':'answer'}]
-        if mode=='payment': msgs=[{'role':'TOOL','metadata':{'title':'Payment card ready'}}]
-        return {'agent':{'id':'00000000-0000-4000-8000-000000000001','status':status},'messages':msgs}
+        msgs = [{"role": "USER", "text": str(i)} for i in range(len(reads))] if mode == "progress" else []
+        if mode == "chat":
+            msgs = [{"role": "ASSISTANT", "text": "answer"}]
+        if mode == "payment":
+            msgs = [{"role": "TOOL", "metadata": {"title": "Payment card ready"}}]
+        return {"agent": {"id": "00000000-0000-4000-8000-000000000001", "status": status}, "messages": msgs}
+
     async def sleep(*args):
-        if not pending: raise AssertionError('poll did not terminate on declared clock schedule')
-        clock.wall,clock.elapsed=pending.pop(0)
+        if not pending:
+            raise AssertionError("poll did not terminate on declared clock schedule")
+        clock.wall, clock.elapsed = pending.pop(0)
+
     async def tree(*args):
-        return {'total_messages':len(reads) if mode=='progress' else 0,'agent_count':1,
-                'total_cost_cents':0,'failed_count':0,'error_agents':[],
-                'all_agents':[{'agent_id':'00000000-0000-4000-8000-000000000001',
-                  'message_count':len(reads) if mode=='progress' else 0,'status':status}]}
-    def deny(*args,**kwargs):
-        denial.append('external'); raise AssertionError('external network forbidden')
+        return {
+            "total_messages": len(reads) if mode == "progress" else 0,
+            "agent_count": 1,
+            "total_cost_cents": 0,
+            "failed_count": 0,
+            "error_agents": [],
+            "all_agents": [
+                {
+                    "agent_id": "00000000-0000-4000-8000-000000000001",
+                    "message_count": len(reads) if mode == "progress" else 0,
+                    "status": status,
+                }
+            ],
+        }
+
+    def deny(*args, **kwargs):
+        denial.append("external")
+        raise AssertionError("external network forbidden")
+
     async def start_payment(*args):
-        return {'status':'pending'}
-    async def wait_payment(*args,**kwargs):
-        payment.append(kwargs['timeout_seconds']); return {'status':'reclaimed'}
-    if mode=='chat': task.is_chat_mode=True
-    if mode=='payment': task.payment_card_request_action='abandon'
+        return {"status": "pending"}
+
+    async def wait_payment(*args, **kwargs):
+        payment.append(kwargs["timeout_seconds"])
+        return {"status": "reclaimed"}
+
+    if mode == "chat":
+        task.is_chat_mode = True
+    if mode == "payment":
+        task.payment_card_request_action = "abandon"
     with ExitStack() as stack:
-        for target,attr,value in [
-            (socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
-            (bench,'time',clock),(bench,'get_agent',read),
-            (bench,'get_attention_requests',AsyncMock(return_value=[])),
-            (bench,'_fetch_tree_stats',tree),(bench,'_fetch_message_counts',AsyncMock(return_value={})),
-            (bench,'_detect_infra_errors_from_fly',lambda *args:[]),
-            (bench,'_mark_expected_gate_from_data',lambda *args:None),
-            (bench,'_start_payment_abandonment_with_recovery',start_payment),
-            (bench,'_wait_for_expected_payment_lifecycle',wait_payment),
-            (bench.asyncio,'sleep',sleep),
-        ]: stack.enter_context(patch.object(target,attr,value))
-        result=await bench._poll_agent('http://offline.invalid','00000000-0000-4000-8000-000000000001',task)
-    assert denial==[]
-    assert result[0]['agent']['status']==status
-    reason=result[3]
-    assert bool(reason and reason.startswith('Timeout after')) is expect_timeout, (mode,reason)
-    if mode=='stall': assert reason and 'tree stalled' in reason
-    if mode=='payment': assert reason is None and payment==[min(420,task.timeout_seconds-elapsed_delta)]
-    if mode=='progress': assert len(reads)==3 and reason is not None
-    if mode=='chat': assert len(reads)==2 and reason is None
+        for target, attr, value in [
+            (socket.socket, "connect", deny),
+            (socket, "getaddrinfo", deny),
+            (bench, "time", clock),
+            (bench, "get_agent", read),
+            (bench, "get_attention_requests", AsyncMock(return_value=[])),
+            (bench, "_fetch_tree_stats", tree),
+            (bench, "_fetch_message_counts", AsyncMock(return_value={})),
+            (bench, "_detect_infra_errors_from_fly", lambda *args: []),
+            (bench, "_mark_expected_gate_from_data", lambda *args: None),
+            (bench, "_start_payment_abandonment_with_recovery", start_payment),
+            (bench, "_wait_for_expected_payment_lifecycle", wait_payment),
+            (bench.asyncio, "sleep", sleep),
+        ]:
+            stack.enter_context(patch.object(target, attr, value))
+        result = await bench._poll_agent("http://offline.invalid", "00000000-0000-4000-8000-000000000001", task)
+    assert denial == []
+    assert result[0]["agent"]["status"] == status
+    reason = result[3]
+    assert bool(reason and reason.startswith("Timeout after")) is expect_timeout, (mode, reason)
+    if mode == "stall":
+        assert reason and "tree stalled" in reason
+    if mode == "payment":
+        assert reason is None and payment == [min(420, task.timeout_seconds - elapsed_delta)]
+    if mode == "progress":
+        assert len(reads) == 3 and reason is not None
+    if mode == "chat":
+        assert len(reads) == 2 and reason is None
     return result
 
-async def _clock_deadline_cases(name,limit):
+
+async def _clock_deadline_cases(name, limit):
     if True:
-        for wall,elapsed,status,expired in [(30,30,'COMPLETED',False), (30,30,'FAILED',False), (2900,30,'COMPLETED',False),
-            (-2900,30,'COMPLETED',False),(limit+1,limit+1,'ACTIVE',True),
-            (limit+1,limit+1,'COMPLETED',True),(-2900,limit+1,'COMPLETED',True)]:
-            await _clock_poll_case(name,wall,elapsed,status,expired)
+        for wall, elapsed, status, expired in [
+            (30, 30, "COMPLETED", False),
+            (30, 30, "FAILED", False),
+            (2900, 30, "COMPLETED", False),
+            (-2900, 30, "COMPLETED", False),
+            (limit + 1, limit + 1, "ACTIVE", True),
+            (limit + 1, limit + 1, "COMPLETED", True),
+            (-2900, limit + 1, "COMPLETED", True),
+        ]:
+            await _clock_poll_case(name, wall, elapsed, status, expired)
+
 
 async def test_poll_elapsed_deadlines_900():
-    await _clock_deadline_cases('browser-auth-signup-already-registered',900)
+    await _clock_deadline_cases("browser-auth-signup-already-registered", 900)
+
 
 async def test_poll_elapsed_deadlines_1200():
-    await _clock_deadline_cases('browser-auth-all-options-fail-assistance',1200)
+    await _clock_deadline_cases("browser-auth-all-options-fail-assistance", 1200)
+
 
 async def test_poll_elapsed_progress_does_not_reset_deadline():
-    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',True,'progress',
-                          [(10000+899,20000+899),(10000+901,20000+901)])
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered",
+        30,
+        30,
+        "ACTIVE",
+        True,
+        "progress",
+        [(10000 + 899, 20000 + 899), (10000 + 901, 20000 + 901)],
+    )
+
 
 async def test_poll_elapsed_disabled_polar():
     from benchmarks.polar_catalog import polar_wall_clock_disabled
     from benchmarks.benchmark_tasks import get_task_by_name
-    assert polar_wall_clock_disabled(get_task_by_name('polar-bu-001'))
-    await _clock_poll_case('polar-bu-001',100000,100000)
+
+    assert polar_wall_clock_disabled(get_task_by_name("polar-bu-001"))
+    await _clock_poll_case("polar-bu-001", 100000, 100000)
+
 
 async def test_poll_elapsed_payment_budget():
-    await _clock_poll_case('browser-auth-signup-already-registered',2900,800,'ACTIVE',False,'payment')
+    await _clock_poll_case("browser-auth-signup-already-registered", 2900, 800, "ACTIVE", False, "payment")
+
 
 async def test_poll_elapsed_stall_and_chat():
-    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',False,'stall',
-                          [(10000-2900,20000+600)])
-    await _clock_poll_case('browser-auth-signup-already-registered',30,30,'ACTIVE',False,'chat',
-                          [(10000-2900,20000+41)])
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered", 30, 30, "ACTIVE", False, "stall", [(10000 - 2900, 20000 + 600)]
+    )
+    await _clock_poll_case(
+        "browser-auth-signup-already-registered", 30, 30, "ACTIVE", False, "chat", [(10000 - 2900, 20000 + 41)]
+    )
 
 
 async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
@@ -23750,9 +25566,23 @@ async def run_all_tests():
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
+    r.record(
+        "mass_agent_completion_outputs_must_satisfy_their_response_schema",
+        test_mass_agent_completion_outputs_must_satisfy_their_response_schema,
+    )
+    r.record(
+        "agentic_judge_evidence_shows_each_sub_agent_task_complete_card",
+        test_agentic_judge_evidence_shows_each_sub_agent_task_complete_card,
+    )
+    r.record(
+        "local_port_run_binds_judge_backend_to_the_stack_under_test",
+        test_local_port_run_binds_judge_backend_to_the_stack_under_test,
+    )
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
-    await r.record_async("poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline)
+    await r.record_async(
+        "poll_elapsed_progress_does_not_reset_deadline", test_poll_elapsed_progress_does_not_reset_deadline
+    )
     await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
     await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
     await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
@@ -23778,17 +25608,67 @@ async def run_all_tests():
         "test_lantern_latest_completion_and_cache_evidence_are_strict",
     ):
         r.record(name, getattr(lantern_people_trace_tests, name))
-    r.record("archived_diagnostic_projection_requires_authenticated_bindings", test_archived_diagnostic_projection_requires_authenticated_bindings)
-    await r.record_async("production_agentcard_release_stall_default_skip", test_production_agentcard_release_stall_is_skippable_by_default)
-    r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
-    await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
-    await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
-    await r.record_async("agentcard_release_skip_native_retirement_strict", test_agentcard_release_skip_rejects_independent_native_retirement_failure)
-    await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
-    await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
-    await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)
-    await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)
-    await r.record_async("agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict)
+    from benchmarks import display_check_tests
+
+    for name in (
+        "test_display_fixture_expected_totals_match_csv",
+        "test_display_task_is_registered_in_catalog_and_selector",
+    ):
+        r.record(name, getattr(display_check_tests, name))
+    for name in (
+        "test_display_correct_chart_and_answer_pass",
+        "test_display_not_called_fails_display_checks",
+        "test_display_unfiltered_revenue_fails_figure_checks",
+        "test_display_raster_chart_is_read_through_a_vision_transcript",
+        "test_display_bundle_data_file_and_subagent_tree_rows",
+        "test_display_fetch_failure_is_an_evidence_gap_not_a_pass",
+        "test_display_root_inline_html_page_is_read",
+    ):
+        await r.record_async(name, getattr(display_check_tests, name))
+    r.record(
+        "archived_diagnostic_projection_requires_authenticated_bindings",
+        test_archived_diagnostic_projection_requires_authenticated_bindings,
+    )
+    await r.record_async(
+        "production_agentcard_release_stall_default_skip",
+        test_production_agentcard_release_stall_is_skippable_by_default,
+    )
+    r.record(
+        "agentcard_release_skip_rejects_independent_failures",
+        test_agentcard_release_skip_rejects_independent_lifecycle_failures,
+    )
+    await r.record_async(
+        "agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip
+    )
+    await r.record_async(
+        "judge_compute_token_unavailable_skips",
+        test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
+    )
+    await r.record_async(
+        "agentcard_release_skip_execution_cleanup",
+        test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
+    )
+    await r.record_async(
+        "agentcard_release_skip_native_retirement_strict",
+        test_agentcard_release_skip_rejects_independent_native_retirement_failure,
+    )
+    await r.record_async(
+        "agentcard_release_skip_preserves_task_failure",
+        test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_ci",
+        test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown,
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict
+    )
+    await r.record_async(
+        "agentcard_release_skip_catalog_owned_cleanup", test_agentcard_release_skip_catalog_owned_cleanup_stays_strict
+    )
     r.record(
         "agentcard_release_policy_rejects_incomplete_foreign_state",
         test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state,
@@ -23870,7 +25750,10 @@ async def run_all_tests():
         test_hub_upload_gzip_preserves_live_and_final_bundles_across_retry,
     )
     r.record("hub_requests_preserve_external_proxy_routing", test_hub_requests_preserve_external_proxy_routing)
-    r.record("hub_transport_owned_root_projection_preserves_evidence", test_hub_transport_owned_root_projection_preserves_evidence)
+    r.record(
+        "hub_transport_owned_root_projection_preserves_evidence",
+        test_hub_transport_owned_root_projection_preserves_evidence,
+    )
     r.record("evaluated_fleet_outcomes_publish_before_teardown", test_evaluated_fleet_outcomes_publish_before_teardown)
     r.record(
         "cloudbench_rejects_stale_wrong_task",
@@ -23927,6 +25810,7 @@ async def run_all_tests():
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("disposable_volume_ownership_permanent_gate", test_disposable_volume_ownership_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
+            ("code_bench_evaluator_proofs_permanent_gate", test_code_bench_evaluator_proofs_are_in_permanent_gate),
             ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",
@@ -24056,10 +25940,21 @@ async def run_all_tests():
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
-    r.record("test_history_success_output_pipe_preserves_save_and_later_tasks", test_history_success_output_pipe_preserves_save_and_later_tasks)
-    r.record("test_history_recorder_warning_pipe_preserves_save_and_later_tasks", test_history_recorder_warning_pipe_preserves_save_and_later_tasks)
-    r.record("test_history_recorder_failure_remains_per_task_best_effort", test_history_recorder_failure_remains_per_task_best_effort)
-    r.record("test_history_unrelated_output_error_is_not_suppressed", test_history_unrelated_output_error_is_not_suppressed)
+    r.record(
+        "test_history_success_output_pipe_preserves_save_and_later_tasks",
+        test_history_success_output_pipe_preserves_save_and_later_tasks,
+    )
+    r.record(
+        "test_history_recorder_warning_pipe_preserves_save_and_later_tasks",
+        test_history_recorder_warning_pipe_preserves_save_and_later_tasks,
+    )
+    r.record(
+        "test_history_recorder_failure_remains_per_task_best_effort",
+        test_history_recorder_failure_remains_per_task_best_effort,
+    )
+    r.record(
+        "test_history_unrelated_output_error_is_not_suppressed", test_history_unrelated_output_error_is_not_suppressed
+    )
 
     r.record(
         "benchmark_run_serializes_world_model_fidelity",
@@ -24090,8 +25985,15 @@ async def run_all_tests():
         "codex_runner_harness_error_outcome", test_codex_runner_harness_error_has_explicit_error_outcome
     )
     await r.record_async(
+        "codex_runner_mounted_internal_route", test_codex_runner_creates_session_on_mounted_internal_route
+    )
+    await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
+    )
+    r.record(
+        "bad_amazon_password_fixture_unique_key",
+        test_bad_amazon_password_fixture_upserts_on_the_browser_password_unique_key,
     )
     r.record(
         "minted_cleanup_preserves_identity",
@@ -24157,7 +26059,10 @@ async def run_all_tests():
         "live_report_repeated_occurrences_keep_early_outcomes_and_agent_links",
         test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links,
     )
-    await r.record_async("live_report_primary_excludes_fixture_and_keeps_first_graded", test_live_report_primary_excludes_fixture_and_keeps_first_graded)
+    await r.record_async(
+        "live_report_primary_excludes_fixture_and_keeps_first_graded",
+        test_live_report_primary_excludes_fixture_and_keeps_first_graded,
+    )
     await r.record_async(
         "live_report_keeps_all_created_roots_for_batch_finalization",
         test_live_report_keeps_all_created_roots_for_batch_finalization,
@@ -24294,8 +26199,12 @@ async def run_all_tests():
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
     )
     r.record(
-        "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
-        test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler,
+        "cloudbench_code_agent_tasks_pin_claude_code_like_local",
+        test_cloudbench_code_agent_tasks_pin_claude_code_like_local,
+    )
+    r.record(
+        "cloudbench_demo_cache_route_keeps_live_guests_off_shared_pooler",
+        test_cloudbench_demo_cache_route_keeps_live_guests_off_the_shared_pooler,
     )
     r.record(
         "cloudbench_task_gate_resolution_fails_closed",
@@ -24370,7 +26279,15 @@ async def run_all_tests():
     )
     r.record(
         "local_isolated_july_cache_read_only",
-        test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
+        test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
+        "cloudbench_demo_cache_on_guest_read_only_like_local",
+        test_cloudbench_demo_cache_on_guest_is_read_only_like_local,
+    )
+    await r.record_async(
+        "claude_code_only_run_withholds_gpt_compute_credentials",
+        test_claude_code_only_run_withholds_gpt_compute_credentials,
     )
     r.record(
         "local_cold_seed_extended_start_timeout",
@@ -24560,7 +26477,7 @@ async def run_all_tests():
         test_logical_tool_counts_canonicalize_model_facing_routed_calls,
     )
     r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
-    r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
+    r.record("message_side_effect_demo_cache_off", test_message_side_effect_benchmarks_force_demo_cache_off)
     r.record(
         "message_person_requires_confirmed_send",
         test_message_person_benchmark_requires_confirmed_send,
@@ -24593,6 +26510,38 @@ async def run_all_tests():
     r.record(
         "mid_run_feedback_schema_evaluator",
         test_mid_run_feedback_schema_evaluator_requires_exact_stability,
+    )
+    r.record(
+        "mid_run_feedback_active_depth_trigger",
+        test_mid_run_feedback_active_depth_trigger_requires_unbroken_active_chain,
+    )
+    await r.record_async(
+        "mid_run_feedback_depth_trigger_poll_loop",
+        test_mid_run_feedback_depth_trigger_posts_once_and_records_evidence,
+    )
+    r.record(
+        "fly_infra_detector_ignores_placeholders",
+        test_fly_infra_detector_ignores_collector_placeholders,
+    )
+    r.record(
+        "tree_feedback_routing_static_checks",
+        test_tree_feedback_routing_static_checks_grade_routing_and_signatures,
+    )
+    r.record(
+        "mid_run_feedback_background_task_trigger",
+        test_mid_run_feedback_background_task_trigger_detects_running_activity_task,
+    )
+    await r.record_async(
+        "mid_run_feedback_background_trigger_poll_loop",
+        test_mid_run_feedback_background_trigger_posts_once_with_task_evidence,
+    )
+    r.record(
+        "background_task_mid_run_message_static_checks",
+        test_background_task_mid_run_message_static_checks,
+    )
+    r.record(
+        "background_message_smoke_verified_resume",
+        test_background_message_smoke_accepts_verified_same_task_resume_only,
     )
     r.record(
         "toast_nopa_semantic_outcome_validation",
@@ -24794,6 +26743,10 @@ async def run_all_tests():
         "settled_tool_usage_prompt_and_bounded",
         test_settled_tool_usage_returns_promptly_and_stays_bounded,
     )
+    await r.record_async(
+        "settled_tool_usage_late_cost_after_early_calls",
+        test_settled_tool_usage_waits_for_cost_after_early_calls_stabilize,
+    )
     r.record(
         "agent_payment_requires_lifecycle_evidence",
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
@@ -24875,20 +26828,28 @@ async def run_all_tests():
         test_declared_evaluator_evidence_includes_structured_output_first,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
-        test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
+        "declared_evaluator_evidence_keeps_code_agent_grounding_rows",
+        test_declared_evaluator_evidence_keeps_code_agent_grounding_rows,
     )
     r.record(
-        "declared_evaluator_evidence_keeps_whole_rows_within_budget",
-        test_declared_evaluator_evidence_keeps_whole_rows_within_budget,
+        "declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap",
+        test_declared_evaluator_tool_row_cap_is_the_runtime_tool_result_cap,
+    )
+    await r.record_async(
+        "declared_judge_overflow_uses_runtime_compaction_trigger",
+        test_declared_judge_overflow_uses_runtime_compaction_trigger,
+    )
+    await r.record_async(
+        "declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay",
+        test_declared_judge_keeps_grep_grounding_fact_from_b140bb71_replay,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     await r.record_async(
-        "mass_agent_single_turn_judge_does_not_upgrade_to_agentic",
-        test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic,
+        "overflowing_single_turn_judge_falls_back_to_agentic",
+        test_overflowing_single_turn_judge_falls_back_to_agentic,
     )
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
@@ -25045,6 +27006,10 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
         test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
+    )
+    await r.record_async(
+        "spawn_sub_agents_catalog_checks_explore_spawns_and_final_product",
+        test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product,
     )
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
@@ -25540,14 +27505,13 @@ async def run_all_tests():
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
     )
-    r.record(
-        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
-    )
+    r.record("browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part)
     await r.record_async(
         "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
     )
     await r.record_async(
-        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
+        "browser_archive_missing_resumed_part_deadline",
+        test_browser_archive_missing_resumed_part_preserves_existing_deadline,
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",

@@ -1,6 +1,6 @@
-import { maybeDumpFastCacheRequest } from './fastCacheRequestDump';
-import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
-import { stripSecrets } from './fastCacheNormalizeCore';
+import { maybeDumpDemoCacheRequest } from './demoCacheRequestDump';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './demoCacheNormalizeConstants';
+import { stripSecrets } from './demoCacheNormalizeCore';
 
 const CACHEABLE_CODEX_RESPONSE_PATH = '/backend-api/codex/responses';
 const traceOrdinalCounters = new Map<string, number>();
@@ -45,6 +45,8 @@ export interface CodexProxyResult {
 export interface TraceReplayContext {
   sessionId?: string;
   ordinal?: number;
+  /** False: serve a live miss without recording it. The proxy routes pass false unless the request carries a verified recorder capability. */
+  writeEnabled?: boolean;
 }
 
 export function codeAgentSlotKey(
@@ -361,7 +363,7 @@ export async function resolveCodex(
       : null;
   const ordinal = cacheable ? (traceContext.ordinal ?? ordinalReservation?.ordinal ?? null) : null;
   const key = ordinal !== null ? codeAgentSlotKey('codex', traceHash, ordinal) : null;
-  maybeDumpFastCacheRequest(traceHash, key, upstreamBody);
+  maybeDumpDemoCacheRequest(traceHash, key, upstreamBody);
   let consumedReservedOrdinal = false;
 
   try {
@@ -410,7 +412,15 @@ export async function resolveCodex(
 
     const upstream = await deps.fetchUpstream(method, pathAndQuery, upstreamBody, headers);
     let wrote = false;
-    if (key !== null && upstream.status >= 200 && upstream.status < 300) {
+    if (
+      key !== null &&
+      traceContext.writeEnabled === false &&
+      upstream.status >= 200 &&
+      upstream.status < 300
+    ) {
+      // A replay-only session still used this slot; keep later requests aligned.
+      consumedReservedOrdinal = true;
+    } else if (key !== null && upstream.status >= 200 && upstream.status < 300) {
       const value: CachedCodexResponse = stripSecrets({
         status: upstream.status,
         contentType: upstream.contentType,

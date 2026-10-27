@@ -1,3 +1,5 @@
+import type { PhoneCriticalReason } from '../../providers/nativePhoneAttention';
+
 export const AUTH_ASSISTANCE_MODES = [
   'live_view',
   'local_browser',
@@ -15,6 +17,11 @@ export interface CreateAuthAssistanceInput {
   steelSessionId?: string;
   browserUrl?: string;
   currentUrl?: string;
+  targetKind?: 'iphone' | 'browser';
+  browserTaskId?: string;
+  criticalReason?: PhoneCriticalReason;
+  requestKey?: string;
+  expectedCursor?: number;
 }
 
 export interface SerializedAuthAssistanceRequest {

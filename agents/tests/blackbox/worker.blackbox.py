@@ -263,7 +263,7 @@ def test_worker_workflow_supplier_is_fixed_size_not_resource_based():
     Pollers must reserve a slot BEFORE polling, so the lone sticky poller loses
     the permit race and every workflow task burns the full 10s
     sticky_queue_schedule_to_start_timeout, then replays on a random worker.
-    Observed: a $0-LLM fast-cache smoke replay spent ~137s of 153s in
+    Observed: a $0-LLM demo-cache smoke replay spent ~137s of 153s in
     back-to-back 10s sticky timeouts. Memory protection belongs to the activity
     admission gate + autoscaler, not workflow-task slot starvation.
     """
@@ -478,6 +478,60 @@ def test_worker_entrypoint_skips_interpreter_finalization():
     call = body[0].value
     assert isinstance(call.func, ast.Name) and call.func.id == "run_then_exit"
     assert [arg.id for arg in call.args if isinstance(arg, ast.Name)] == ["main"]
+
+
+def test_worker_event_loop_shutdown_does_not_wait_forever_on_executor_threads():
+    """T112 (local antibot run, 17 Tilion sessions): the worker logged 'Worker stopped' at 23:27:22
+    and then stayed alive 6.5 min. Recording archives run through asyncio.to_thread (the loop's
+    default executor) as blocking ~55 s POSTs to /api/archive/artifacts, and loop.shutdown_default_
+    executor() joins every running and queued job with no deadline, so the stack's drain waited on
+    uploads for a stack that was being thrown away. The loop closes within its bound (queued jobs are
+    dropped, running ones are left to the process exit) and the process exits."""
+    script = r"""
+import asyncio, os, time
+from helpers import worker_event_loop
+from helpers.worker_event_loop import run_worker_event_loop
+
+worker_event_loop._EXECUTOR_SHUTDOWN_SECONDS = 1.0
+
+async def main():
+    # Running jobs (one per default-executor thread) and a queued backlog, all slow and blocking.
+    jobs = [asyncio.create_task(asyncio.to_thread(time.sleep, 30)) for _ in range(40)]
+    await asyncio.sleep(0.3)
+    print("worker-stopped", flush=True)
+
+started = time.monotonic()
+run_worker_event_loop(main())
+elapsed = time.monotonic() - started
+print(f"loop-closed {elapsed:.1f}", flush=True)
+os._exit(0)
+"""
+    started = time.monotonic()
+    local_env = {key: value for key, value in os.environ.items() if key not in ("FLY_APP_NAME", "ENVIRONMENT")}
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=WORKER_PATH.parent,
+        env=local_env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert "worker-stopped\nloop-closed" in result.stdout, result.stdout
+    elapsed = float(result.stdout.split("loop-closed")[1].split()[0])
+    assert elapsed < 8, f"loop shutdown took {elapsed:.1f}s with blocked executor threads"
+    assert time.monotonic() - started < 15
+    # Production keeps the unbounded join (Fly's kill_timeout caps it): same input, no bound.
+    from unittest.mock import patch
+
+    from helpers import worker_event_loop
+
+    with patch.dict(os.environ, {"ENVIRONMENT": "production"}):
+        assert worker_event_loop._executor_shutdown_seconds() is None
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("FLY_APP_NAME", None)
+        os.environ.pop("ENVIRONMENT", None)
+        assert worker_event_loop._executor_shutdown_seconds() == worker_event_loop._EXECUTOR_SHUTDOWN_SECONDS
 
 
 def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup():
@@ -2942,6 +2996,10 @@ async def run_all_tests():
     r.record(
         "worker_terminal_browser_io_cannot_strand_cleanup",
         test_worker_event_loop_closes_after_terminal_browser_io_times_out,
+    )
+    r.record(
+        "worker_loop_shutdown_bounded_on_blocked_executor_threads",
+        test_worker_event_loop_shutdown_does_not_wait_forever_on_executor_threads,
     )
     r.record(
         "worker_optional_cdp_timeout_preserves_resource_drain",

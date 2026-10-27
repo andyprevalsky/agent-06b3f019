@@ -617,6 +617,27 @@ grep -qx 'update -qq' "$pg_root/apt-calls" \
   || { echo "FAIL: a successful pinned pgvector build still installed the distro package" >&2; exit 1; }
 echo "PASS: a successful pinned pgvector build skips the distro package"
 
+# Sandbox-reachable backend base: tunnel when public, untouched otherwise.
+sandbox_base() {
+  (
+    unset ROSE_UI_PUBLISH_BASE_URL USERCONTENT_BASE_URL
+    # shellcheck source=/dev/null
+    . "$HELPER_SRC"
+    export BACKEND_URL="http://localhost:24740" "$@"
+    export_sandbox_backend_base_url
+    printf '%s|%s' "${ROSE_UI_PUBLISH_BASE_URL:-}" "${USERCONTENT_BASE_URL:-}"
+  )
+}
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://rose-w4.ngrok.app/)" \
+  "https://rose-w4.ngrok.app|http://localhost:24740" "sandboxes reach the backend through the public tunnel"
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=http://localhost:24741)" "|" \
+  "a loopback PUBLIC_BASE_URL is never handed to sandboxes"
+expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://t.example ROSE_UI_PUBLISH_BASE_URL=https://explicit.example)" \
+  "https://explicit.example|" "an explicit ROSE_UI_PUBLISH_BASE_URL wins"
+grep -qx 'export_sandbox_backend_base_url' "$ROOT_DIR/scripts/run.sh" \
+  || { echo "FAIL: run.sh does not export the sandbox backend base after the tunnel" >&2; exit 1; }
+echo "PASS: run.sh exports the sandbox backend base"
+
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;
 # this already-gated environment suite runs it so a regression fails Step 4s.
 bash "$ROOT_DIR/scripts/tests/cloud-init-env.test.sh"

@@ -55,7 +55,7 @@ def test_runner_env_preserves_inherited_proxy_configuration() -> None:
     }
 
 
-def test_runner_env_keeps_an_explicit_fast_cache_choice() -> None:
+def test_runner_env_keeps_an_explicit_demo_cache_choice() -> None:
     env = benchmark_runner_env({**PROXIED_ENV, "BENCHMARK_FAST_MODE_CACHE": "true"})
     assert env["BENCHMARK_FAST_MODE_CACHE"] == "true"
 

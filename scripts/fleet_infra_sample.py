@@ -175,7 +175,7 @@ def eligible_pool(
         sys.path.insert(0, str(repo_root / "agents"))
         try:
             replay_policy = runpy.run_path(str(
-                repo_root / "agents/providers/fast_cache/normalize.py"))
+                repo_root / "agents/providers/demo_cache/normalize.py"))
         finally:
             sys.path.pop(0)
         demo_replay = {

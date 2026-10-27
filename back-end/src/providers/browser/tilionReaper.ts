@@ -51,7 +51,7 @@ async function ownedTerminalTilionSessionIds(candidates: string[]): Promise<Set<
     },
     select: { sessionId: true },
   });
-  return new Set(rows.map((row) => row.sessionId));
+  return new Set(rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId])));
 }
 
 function defaultDependencies(): TilionReaperDependencies {

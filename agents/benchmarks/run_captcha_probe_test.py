@@ -5,6 +5,8 @@ import json
 import argparse
 import asyncio
 
+import pytest
+
 from benchmarks import run_captcha_probe as probe_module
 from benchmarks.run_captcha_probe import (
     _fe_link,
@@ -426,3 +428,101 @@ def test_root_only_saved_run_reaches_high_confidence_when_the_snapshot_shows_evi
     assert probe_module.main(["--rejudge", str(path)]) == 0
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert (line["verdict"], line["confidence"], line["judge_input"]["observations"]) == ("PASSED_CAPTCHA", "high", 1)
+
+
+def _write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value if isinstance(value, str) else json.dumps(value))
+    return path
+
+
+def test_assemble_builds_one_scorecard_run_context_from_lane_evidence(tmp_path):
+    """--assemble: lanes' own runner lines, rejudges, transcripts and stack receipts -> one run context."""
+    lane = tmp_path / "lanes" / "F"
+    run_line = {"probe": "google-search", "verdict": "INCONCLUSIVE", "confidence": "low", "reason": "old judge",
+                "agent_id": "ffb7cc3f-6073-446a-b32d-8ceae2b0f32d", "fe_link": "http://localhost:28121/?agent-id=ffb7cc3f",
+                "duration_s": 1813.4}
+    _write(lane / "results/google.log", "2026-10-22 [info] judge call\n" + json.dumps(run_line) + "\nEXIT=0\n")
+    _write(lane / "regrades/google.log", "noise\n" + json.dumps(
+        {"probe": "google-search", "verdict": "FAILED_CAPTCHA", "confidence": "high", "reason": "/sorry still blocking",
+         "rejudged": True}) + "\n")
+    _write(lane / "transcripts/google.json", {"probe": "google-search", "agent_id": run_line["agent_id"], "end_reason": "cap",
+                                              "antibot": {}, "root_messages": [
+                                                  {"role": "user", "text": "go", "timestamp": "2026-10-22T18:36:40Z"},
+                                                  {"role": "assistant", "text": "done", "timestamp": "2026-10-22T19:06:50Z"}],
+                                              "child_messages": []})
+    _write(lane / "receipts/stack-f/local-stack-owner.json", {"token": "t"})
+    _write(lane / "receipts/stack-f/local-stack-cleanup.status", "token=t\nstate=clean\n")
+    _write(lane / "manifest.json", [{"probe": "google-search", "agent_id": run_line["agent_id"],
+                                     "result_file": "results/google.log", "final_regrade_file": "regrades/google.log",
+                                     "transcript_file": "transcripts/google.json", "source_sha": "stack b: 29ead6646 + copies",
+                                     "stack_run_id": "stack-f"}])
+    probes = {"google-search": {"name": "google-search", "hold": False},
+              "uber-login": {"name": "uber-login", "hold": True},
+              "bing-search": {"name": "bing-search", "hold": False}}
+    run_dir = tmp_path / "round2"
+    entries, stacks = probe_module.assemble_entries([str(lane / "manifest.json")], run_dir)
+    probe_module.write_run_context(run_dir, entries, run_id="round2", probes=probes, stacks=stacks)
+
+    card = json.loads((run_dir / "report-card.json").read_text())
+    rows = {row["name"]: row for row in card["per_task"]}
+    # The final verdict is the rejudge; agent, duration and FE link come from the run's own line.
+    assert rows["google-search"]["status"] == "failed"
+    assert rows["google-search"]["agent_id"] == run_line["agent_id"]
+    assert rows["google-search"]["duration_s"] == 1813.4
+    assert rows["google-search"]["agent_url"] == run_line["fe_link"]
+    assert rows["uber-login"]["status"] == "skipped"  # held, never run
+    assert rows["bing-search"]["status"] == "queued"  # no evidence: never invented
+    assert card["tasks"]["total"] == 3
+    assert card["source_sha"] is None  # a free-text source is not a recorded checkout sha
+    assert card["started_at"] == 1792694200.0 and card["finished_at"] == 1792696010.0  # first and last message
+    reasons = {task["name"]: task["failure_reason"] for task in json.loads((run_dir / "run.json").read_text())["tasks"]}
+    assert reasons["google-search"] == "/sorry still blocking"
+    assembled = json.loads((run_dir / "assembled-from.json").read_text())
+    assert assembled["stacks"] == [{"lane": "F", "stack_run_id": "stack-f", "receipts": "sources/F/stack-f"}]
+    assert (run_dir / "sources/F/stack-f/local-stack-cleanup.status").read_text() == "token=t\nstate=clean\n"
+
+
+def test_assemble_accepts_a_manifest_with_entries(tmp_path):
+    lane = tmp_path / "D"
+    _write(lane / "r.json", json.dumps({"probe": "proton-signup", "verdict": "FAILED_CAPTCHA", "agent_id": "1abb9bc3", "duration_s": 841.0}))
+    _write(lane / "manifest.json", {"entries": [{"probe": "proton-signup", "result_file": "r.json"}], "missing": []})
+    entries, stacks = probe_module.assemble_entries([str(lane / "manifest.json")], tmp_path / "out")
+    assert [(e["probe"], e["verdict"], e["agent_id"], e["provenance"]["lane"]) for e in entries] == [
+        ("proton-signup", "FAILED_CAPTCHA", "1abb9bc3", "D")]
+    assert stacks == []
+    _write(lane / "rejudge.jsonl", json.dumps({"probe": "proton-signup", "verdict": "PASSED_CAPTCHA", "rejudged": True}) + "\n")
+    _write(lane / "manifest.json", {"probes": [{"probe": "proton-signup", "result_file": "r.json",
+                                                "final_verdict_file": "rejudge.jsonl"}]})
+    entries, _ = probe_module.assemble_entries([str(lane / "manifest.json")], tmp_path / "out")
+    assert [(e["probe"], e["verdict"], e["agent_id"]) for e in entries] == [("proton-signup", "PASSED_CAPTCHA", "1abb9bc3")]
+
+
+def test_assemble_rejects_a_manifest_row_without_a_recorded_verdict(tmp_path):
+    lane = tmp_path / "A2"
+    _write(lane / "x.out", "no json here\n")
+    _write(lane / "manifest.json", [{"probe": "hulu-the-pitt", "result_file": "x.out"}])
+    with pytest.raises(ValueError, match="no recorded verdict line for hulu-the-pitt"):
+        probe_module.assemble_entries([str(lane / "manifest.json")], tmp_path / "out")
+
+
+def test_run_dir_keeps_the_latest_result_per_probe(tmp_path):
+    probes = {"bing-search": {"name": "bing-search", "hold": False}}
+    first = probe_module.probe_entry({"probe": "bing-search", "verdict": "FAILED_CAPTCHA", "agent_id": "a"}, started_at=1.0, finished_at=2.0)
+    second = probe_module.probe_entry({"probe": "bing-search", "verdict": "PASSED_CAPTCHA", "agent_id": "b"}, started_at=3.0, finished_at=4.0)
+    probe_module.write_run_context(tmp_path, [first, second], run_id="r", probes=probes)
+    card = json.loads((tmp_path / "report-card.json").read_text())
+    assert [(row["name"], row["status"], row["agent_id"]) for row in card["per_task"]] == [("bing-search", "passed", "b")]
+    assert len((tmp_path / "results.jsonl").read_text().splitlines()) == 2  # every run kept; latest scored
+    assert not (tmp_path / "assembled-from.json").exists()
+
+
+def test_sites_flag_selects_an_alternate_catalog(tmp_path, capsys):
+    catalog = {"version": 1, "source": "test", "probes": [{
+        "name": "only-probe", "site": "example.com", "goal": "g", "post_wall_evidence": "first-wall page",
+        "where_captcha_hit": "home", "account_needed": False, "hold": False}]}
+    path = tmp_path / "sites.json"
+    path.write_text(json.dumps(catalog))
+    assert probe_module.main(["--list", "--sites", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "only-probe" in out and "google-search" not in out

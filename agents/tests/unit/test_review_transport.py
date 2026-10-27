@@ -143,7 +143,7 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
             world_model_mode='simulate',
             resume_state={'version':1,'kind':'continuation','runtime_state':{
                 'fast_mode_cache_enabled':True,'provider_fast_mode':False,
-                'fast_cache_goal':demo}}))
+                'fast_cache_goal':demo}}))  # stored runtime key (wire name kept)
     assert state.world_model_mode == 'simulate'
     # Observe actual restored DEMO state after the durable-resolution boundary.
     assert (state.fast_mode_cache_enabled, state.provider_fast_mode) == expected
@@ -151,11 +151,16 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
 
 @pytest.mark.parametrize('resolved, expected', [((False,None,False,None,None,True),False), ((False,'',False,'agent','',True),True)])
 def test_activity_exposes_lookup_success_even_for_empty_goal(monkeypatch, resolved, expected):
-    from providers.fast_cache import client
-    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
-    async def lookup(_): return resolved
+    from providers.demo_cache import client
+    from helpers.demo_cache_goal import resolve_fast_cache_context_activity
+    calls = []
+    async def lookup(agent_id, *, refresh=False):
+        calls.append(refresh)
+        return resolved
     monkeypatch.setattr(client, 'resolve_agent_fast_mode', lookup)
     value=asyncio.run(resolve_fast_cache_context_activity('agent'))
+    # Each run start re-reads the goal (a woken agent's goal changes between runs).
+    assert calls == [True]
     assert value['resolved'] is expected
     assert value['goal'] == resolved[1]
 
@@ -219,8 +224,8 @@ def test_observer_does_not_swallow_cancellation():
 
 @pytest.mark.parametrize('status, data, expected',[(503,{},False),(200,{'enabled':False,'goal':'','providerFastMode':False},True)])
 def test_actual_lookup_distinguishes_error_and_empty_success(monkeypatch,status,data,expected):
-    from providers.fast_cache import client
-    from helpers.fast_cache_goal import resolve_fast_cache_context_activity
+    from providers.demo_cache import client
+    from helpers.demo_cache_goal import resolve_fast_cache_context_activity
     async def call():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req:httpx.Response(status,json=data))) as http:
             monkeypatch.setattr(client,'_backend',lambda:('https://offline.invalid','synthetic'))

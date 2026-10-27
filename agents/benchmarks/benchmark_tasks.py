@@ -102,7 +102,7 @@ class BenchmarkTask:
     group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing
     world_surface: Optional[str] = None  # "live" or "simulated"; binary world-model surface, independent of DB fixtures
-    fast_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode
+    demo_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode
     memory: Optional[str] = None  # Planner memory: "on" forks get_memories into the planner; "off"/None = off (default off)
     success_on_plan: bool = False  # Plan-phase A/B: terminal success once set_plan lands (plan_shape checks run on the plan)
     anti_bot: Optional[str] = None  # "yes" or "no"; daily reporting can aggregate Anti-Bot score
@@ -151,6 +151,7 @@ _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
 # only raise limits when the underlying latency is genuinely irreducible.
 SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "chat-mode": 120,
+    "background-agent-message-smoke": 180,
     # spawn-sub-agents + parallel-tool-calls: real-workload tasks that fan out
     # to multiple web-research agents and may do a final synthesis pass. Keep
     # bounded caps, but leave enough room for recent p95 * 1.5 so valid passing
@@ -219,6 +220,25 @@ def _default_environment() -> dict:
     }
 
 
+def normalize_legacy_catalog_fields(item: dict) -> dict:
+    """Accept the legacy ``fast_cache`` catalog field as ``demo_cache``.
+
+    The field was renamed to ``demo_cache`` (DEMO cache) on 2026-10-23; older
+    catalogs and checkouts still spell it ``fast_cache``.
+    """
+    if "fast_cache" not in item:
+        return item
+    legacy = item["fast_cache"]
+    if "demo_cache" in item and item["demo_cache"] != legacy:
+        raise ValueError(
+            f"Benchmark task {item.get('name')!r} sets both demo_cache={item['demo_cache']!r} "
+            f"and legacy fast_cache={legacy!r}"
+        )
+    normalized = {key: value for key, value in item.items() if key != "fast_cache"}
+    normalized["demo_cache"] = legacy
+    return normalized
+
+
 def _load_tasks() -> List[BenchmarkTask]:
     with open(_TASKS_FILE) as f:
         raw = json.load(f)
@@ -235,7 +255,7 @@ def _load_tasks() -> List[BenchmarkTask]:
 
     for item in raw:
         validate_task_process(item)
-    tasks = [BenchmarkTask(**t) for t in [*raw, *polar_raw]]
+    tasks = [BenchmarkTask(**normalize_legacy_catalog_fields(t)) for t in [*raw, *polar_raw]]
     for t in tasks:
         if t.browser_profile_mode not in {"persistent", "fresh"}:
             raise ValueError(

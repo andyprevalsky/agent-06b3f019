@@ -1,5 +1,31 @@
-from benchmarks.benchmark_tasks import get_task_by_name
+from benchmarks.benchmark_tasks import get_smoke_cap, get_task_by_name
 from benchmarks.run_benchmark import _benchmark_goal_for_task
+
+
+def test_background_agent_message_smoke_is_fast_and_proves_consumption():
+    task = get_task_by_name("background-agent-message-smoke")
+
+    assert "smoke" in task.tags
+    assert task.group == "pre-deploy"
+    assert task.deploy_category == "harness"
+    assert task.timeout_seconds == 180
+    assert get_smoke_cap(task.name) == 180
+    assert task.mid_run_feedback["when"] == {"background_task_active": "explore"}
+
+    checks = [
+        check
+        for evaluator in task.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+    ]
+    routed = next(check for check in checks if check["type"] == "background_task_message_routed")
+    assert routed["agent_type"] == "explore"
+    assert routed["min_task_rows_after_message"] == 1
+    assert routed["allow_resume_after_completion"] is True
+    output = next(check for check in checks if check["type"] == "structured_output_signature")
+    assert output["field"] == "documents"
+    assert output["required"] == "Forwarded marker: HTTP core document"
+    assert output["min_items"] == 2
 
 
 def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
@@ -56,11 +82,11 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
         load_raw_catalog,
         validate_task_contract,
     )
-    from providers.fast_cache.google_oauth_demo_fixture import (
+    from providers.demo_cache.google_oauth_demo_fixture import (
         matches_demo_goal,
         run_fixture,
     )
-    from providers.fast_cache.normalize import (
+    from providers.demo_cache.normalize import (
         demo_cache_allowed,
         goal_hash,
         google_oauth_demo_goal_hash,
@@ -71,7 +97,7 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
     assert task.title == "Google OAuth"
     assert task.tags == ["DEMO"]
     assert task.production_only is False
-    assert task.fast_cache == "on"
+    assert task.demo_cache == "on"
     demo_evaluator = next(item for item in task.evaluators if item["id"] == "google-demo-tool-sequence")
     assert demo_evaluator["method"] == "static_check"
     assert [check["type"] for check in demo_evaluator["checks"]] == [
@@ -113,13 +139,13 @@ def test_google_oauth_demo_uses_cached_fixture_without_subagents_or_google_io():
 def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
     from unittest.mock import patch
 
-    from providers.fast_cache.google_oauth_demo_fixture import matches_demo_goal
-    from providers.fast_cache.normalize import demo_cache_goal_hashes, google_oauth_demo_goal_hash
+    from providers.demo_cache.google_oauth_demo_fixture import matches_demo_goal
+    from providers.demo_cache.normalize import demo_cache_goal_hashes, google_oauth_demo_goal_hash
 
     goal = get_task_by_name("google-oauth").prompt
     demo_cache_goal_hashes.cache_clear()
     try:
-        with patch("providers.fast_cache.normalize.Path.open", side_effect=FileNotFoundError):
+        with patch("providers.demo_cache.normalize.Path.open", side_effect=FileNotFoundError):
             assert google_oauth_demo_goal_hash() in demo_cache_goal_hashes()
             assert matches_demo_goal(goal)
     finally:
@@ -391,7 +417,7 @@ def test_raise_5m_brex_long_horizon_runs_simulated_on_tamy_account_snapshot():
     assert task.tags == ["DEMO", "long-horizon"]
     assert task.timeout_seconds == 600
     assert task.world_model_mode == "simulate"
-    assert task.fast_cache == "on"
+    assert task.demo_cache == "on"
     assert task.world_surface == "simulated"
     assert task.approval_handling == "auto_approve"
     assert task.start_phase == "plan"

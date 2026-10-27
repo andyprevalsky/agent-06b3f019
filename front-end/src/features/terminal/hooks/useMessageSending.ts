@@ -12,16 +12,34 @@ import type { ClientSource } from '@/lib/clientSource';
  * The staged transition is synchronous. Agent creation, canonical detail,
  * and the sidebar refresh happen after the new conversation is visible. Fast
  * Mode and Simulator Mode are captured in the create request for that agent.
+ *
+ * NEW-AGENT PROJECT (Rose Desktop project "+"):
+ *   [HOME] --setNewAgentProjectId(id)--> [IN PROJECT id] --create ok--> [HOME]
+ *   [IN PROJECT id] --create fails--> [IN PROJECT id] (kept for the retry)
+ *   [IN PROJECT id] --setNewAgentProjectId(null) (New Super Agent)--> [HOME]
+ * While IN PROJECT, the create request carries project_id; Home omits it.
+ *
+ * NEW AGENT IN A BRANCH (Rose Desktop agent menu "New agent in this branch"):
+ *   [UNSHARED] --setNewAgentShareWith(agentId)--> [SHARING agentId] --create ok--> [UNSHARED]
+ *   [SHARING] --create 404 CODE_SESSION_SHARE_TARGET_NOT_FOUND--> toast, [UNSHARED]
+ *             (goal restored; the next send starts an ordinary agent)
+ *   [SHARING] --other create failure--> [SHARING] (kept for the retry)
+ *   [SHARING] --New Super Agent / a project's +--> [UNSHARED]
+ * While SHARING, the create request carries share_code_session_with.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
+import { useQueryPreference } from '@/hooks/useQueryPreference';
+import { readQueryPreferences } from '@/lib/queryPreferences';
 import { useToast } from '@/hooks/use-toast';
 import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
 import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
+
+import { CODE_SESSION_SHARE_TARGET_NOT_FOUND, CreateAgentError } from '@/lib/api/agents';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
@@ -71,12 +89,32 @@ export function useMessageSending({
     return '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
-  // Fast Mode aggressive cache — session-only; defaults on for allowlisted accounts.
+  const [selectedModel, syncSelectedModel] = useState(
+    () => readQueryPreferences(userId).model ?? DEFAULT_MODEL,
+  );
+  const [, rememberModel] = useQueryPreference(userId, 'model', DEFAULT_MODEL);
+  const [savedPriceLimitCents, setPendingPriceLimitCents] = useQueryPreference(
+    userId,
+    'priceLimitCents',
+    DEFAULT_PRICE_LIMIT_CENTS,
+  );
+  const pendingPriceLimitCents = savedPriceLimitCents ?? DEFAULT_PRICE_LIMIT_CENTS;
+  const [rememberedFastMode, rememberFastMode] = useQueryPreference(userId, 'fastMode', undefined);
+  const setSelectedModel = useCallback(
+    (model: string) => {
+      syncSelectedModel(model);
+      rememberModel(model);
+    },
+    [rememberModel],
+  );
+  // Provider speed defaults are remembered per account; actual agents remain authoritative.
   const [fastMode, setFastModeState] = useState(true);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
+  // Project the next new agent is created in (Rose Desktop project "+"); null = Home.
+  const [newAgentProjectId, setNewAgentProjectId] = useState<string | null>(null);
+  // Agent whose code session (branch) the next new agent shares; null = its own branch.
+  const [newAgentShareWith, setNewAgentShareWith] = useState<string | null>(null);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
@@ -91,6 +129,10 @@ export function useMessageSending({
   useEffect(() => {
     messageInputRef.current = messageInput;
   }, [messageInput]);
+
+  useEffect(() => {
+    fastModeUserOverrideRef.current = false;
+  }, [userId]);
 
   useEffect(() => {
     if (!userCanUseFastMode) {
@@ -121,8 +163,13 @@ export function useMessageSending({
       return;
     }
 
-    if (selectedAgentId !== null || fastModeUserOverrideRef.current) return;
-    const sessionOverride = getFastModeSessionOverride();
+    if (selectedAgentId !== null) return;
+    if (rememberedFastMode !== undefined) {
+      setFastModeState(rememberedFastMode);
+      return;
+    }
+    if (fastModeUserOverrideRef.current) return;
+    const sessionOverride = userId ? null : getFastModeSessionOverride();
     if (sessionOverride !== null) {
       setFastModeState(sessionOverride);
       return;
@@ -137,15 +184,20 @@ export function useMessageSending({
     user?.phone,
     userCanUseFastMode,
     userDefaultsFastModeOn,
+    rememberedFastMode,
     userId,
   ]);
 
-  const setFastMode = useCallback((enabled: boolean) => {
-    fastModeUserOverrideRef.current = true;
-    setFastModeSessionOverride(enabled);
-    setFastModeState(enabled);
-    if (enabled) setSimulatorModeState(false);
-  }, []);
+  const setFastMode = useCallback(
+    (enabled: boolean) => {
+      fastModeUserOverrideRef.current = true;
+      rememberFastMode(enabled);
+      setFastModeSessionOverride(enabled);
+      setFastModeState(enabled);
+      if (enabled) setSimulatorModeState(false);
+    },
+    [rememberFastMode],
+  );
 
   useEffect(() => {
     if (!userCanUseSimulator) {
@@ -167,7 +219,7 @@ export function useMessageSending({
 
   // Sync model from agent detail
   useEffect(() => {
-    if (agentDetail?.model) setSelectedModel(agentDetail.model);
+    if (agentDetail?.model) syncSelectedModel(agentDetail.model);
   }, [agentDetail?.model]);
 
   const handleSendMessage = useCallback(
@@ -218,10 +270,14 @@ export function useMessageSending({
               ...(userCanUseSimulator
                 ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
                 : {}),
+              ...(newAgentProjectId !== null ? { project_id: newAgentProjectId } : {}),
+              ...(newAgentShareWith !== null ? { share_code_session_with: newAgentShareWith } : {}),
             });
             if (newAgent.agent_id !== agentId) {
               throw new Error('Created agent ID did not match the requested agent ID');
             }
+            setNewAgentProjectId(null);
+            setNewAgentShareWith(null);
             await reconcilePendingAgentCreation(agentId);
             void loadAgents();
           } catch (error) {
@@ -257,7 +313,22 @@ export function useMessageSending({
         }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : '';
-        if (msg === 'Not authenticated' || msg.includes('401') || msg.includes('Unauthorized')) {
+        if (
+          error instanceof CreateAgentError &&
+          error.code === CODE_SESSION_SHARE_TARGET_NOT_FOUND
+        ) {
+          setNewAgentShareWith(null);
+          toast({
+            title: 'Branch not found',
+            description:
+              'The agent whose branch this was no longer exists. Send again to start a new agent.',
+            variant: 'destructive',
+          });
+        } else if (
+          msg === 'Not authenticated' ||
+          msg.includes('401') ||
+          msg.includes('Unauthorized')
+        ) {
           setLoginModalOpen(true);
           toast({ title: 'Authentication required', description: 'Please log in to continue' });
         } else {
@@ -280,6 +351,8 @@ export function useMessageSending({
       canSubmitGoals,
       clientSource,
       pendingPriceLimitCents,
+      newAgentProjectId,
+      newAgentShareWith,
       agentDetail,
       userCanUseFastMode,
       userCanUseSimulator,
@@ -319,12 +392,17 @@ export function useMessageSending({
     setIsSendingMessage,
     selectedModel,
     setSelectedModel,
+    syncSelectedModel,
     pendingPriceLimitCents,
     setPendingPriceLimitCents,
     fastMode,
     setFastMode,
     simulatorMode,
     setSimulatorMode,
+    newAgentProjectId,
+    setNewAgentProjectId,
+    newAgentShareWith,
+    setNewAgentShareWith,
     handleSendMessage,
   };
 }

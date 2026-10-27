@@ -170,6 +170,9 @@ class NativePool(WorkerRuntime):
         pool.operate(arguments, machine, self.client(machine["id"]))
 
     def target(self, machine, draining=False):
+        # A Machine on an unreachable host is returned with "config": null.
+        if not isinstance(machine.get("config"), dict):
+            return False
         marker = pool.metadata(machine, pool.POOL_KEY)
         env = machine["config"].get("env", {})
         return (
@@ -191,6 +194,8 @@ class NativePool(WorkerRuntime):
 
     def prepare(self, expected, previous, start=True):
         machine = self.get(expected["id"])
+        if not isinstance(machine.get("config"), dict):
+            raise ValueError("Reserved Machine config is unavailable; its host may be unreachable")
         if not self.target(machine):
             if pool.metadata(machine, pool.CUSTODY_KEY).get("rootfs_disposition") != "stateless":
                 raise ValueError("Managed banks require renewable stateless custody before image changes")
@@ -268,13 +273,20 @@ class NativePool(WorkerRuntime):
                 and pool.eligible(current, self.app, live["surfaceHash"], destination)
             ):
                 return machine_identity(current)
+            try:
+                current_identity = machine_identity(current)
+                current_queue = current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE")
+                reuse_protected = current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+            except (AttributeError, KeyError, TypeError):
+                # A null or malformed config (unreachable host) is an unverifiable bank.
+                raise ValueError("Old bank changed before its certified retirement") from None
             if (
-                machine_identity(current) != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
+                current_identity != {k: expected[k] for k in ("id", "instanceId", "configSHA256")}
                 or marker.get("job") != expected["managedJobId"]
                 or marker.get("phase") not in ("active", "draining")
                 or (marker.get("phase") == "draining" and marker.get("retiringBy") != self.ledger.job_id)
-                or current["config"].get("env", {}).get("TEMPORAL_WORKER_POOL_QUEUE") != previous["taskQueue"]
-                or current["config"].get("metadata", {}).get("rose_worker_reuse_protected")
+                or current_queue != previous["taskQueue"]
+                or reuse_protected
             ):
                 raise ValueError("Old bank changed before its certified retirement")
             draining = {**marker, "phase": "draining", "retiringBy": self.ledger.job_id}
@@ -349,16 +361,43 @@ class NativePool(WorkerRuntime):
         return self.retire(prior, destination, previous)
 
 
-def backend_command(script, *arguments):
+def backend_command(script, *arguments, timeout=60):
     result = subprocess.run(
         ["node", "--import", "tsx", "scripts/" + script, *arguments],
         cwd=ROOT / "back-end",
         check=True,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
     return result.stdout
+
+
+def broadcast_generation_handoff(previous_queue, live_queue):
+    """Push the pointer flip to workflows idling on the old queue; never blocks the deploy.
+
+    Idle parks no longer poll the pointer every 30s; this signal wakes them
+    (agents/helpers/wait_condition_or_handoff.py). Re-running it on a resumed
+    DRAINING stage is harmless: the workflow signal handler is idempotent.
+    """
+    if not previous_queue or previous_queue == live_queue:
+        return
+    try:
+        # 200 signals/s for up to 120s covers 24k workflows (10k-agent target).
+        output = backend_command(
+            "broadcast-generation-handoff.ts",
+            "--from-queue",
+            previous_queue,
+            "--live-queue",
+            live_queue,
+            "--deadline-ms",
+            "120000",
+            timeout=180,
+        )
+        lines = output.strip().splitlines()
+        print(f"Generation handoff broadcast: {lines[-1] if lines else '{}'}", flush=True)
+    except Exception as error:  # best-effort: agents still hand off at their next re-check
+        print(f"Generation handoff broadcast failed; agents hand off at their next re-check: {error}", flush=True)
 
 
 def prepare_bank(job, ledger, native, minimum):
@@ -482,6 +521,7 @@ def run(ledger=None, native_factory=NativePool):
         job = ledger.stage("ACTIVATED", "DRAINING", {})
     if job["stage"] == "DRAINING":
         previous = job["priorPointer"]
+        broadcast_generation_handoff(previous["taskQueue"], deployment_queue(job["identity"], ledger.job_id))
         prior_records = job["evidence"]["PREPARING"]["previousRecords"]
         mismatch_records = job["evidence"]["PREPARING"].get("retainedRouteMismatchRecords", [])
         held_ids = {record["id"] for record in mismatch_records}

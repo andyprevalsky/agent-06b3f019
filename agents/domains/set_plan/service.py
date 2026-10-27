@@ -22,11 +22,21 @@ from domains.set_plan.config import (
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
+from helpers.background_agents import model_agent_row_text
+from helpers.context_compaction import is_excluded_from_model
 from helpers.context_scope import is_internal_subagent_message
+from providers.rose.inter_agent_context import inter_agent_message, settle_trailing_inter_agent_messages
 from providers.rose.pools import PLANNER_MODEL
-from tools.prompts import TOOL_PROMPTS
+from tools.prompts import tool_prompts_for
 from utils.simulated_clock import world_time_cursor_ms
-from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import (
+    PLAN_PHASE_TOOLS,
+    PLANNER_EXECUTE_TOOLS,
+    PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES,
+    PLANNER_TOOL_MODEL_OVERRIDES,
+    ROSE_DESKTOP_TOOL_MODELS,
+    TOOL_MODELS,
+)
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
 PLANNER_CONTEXT_HEAD_CHARS = 3000
@@ -320,18 +330,26 @@ def _render_llm_tool_schema(name: str, description: str, model: Any) -> str:
     )
 
 
-def get_planner_tools_description() -> str:
+def get_planner_tools_description(*, rose_desktop: bool = False) -> str:
     """Get compact execute-tool schemas and descriptions for the planner.
 
-    Single source of truth: execute-phase tools, their prompt fragments, and
-    their Pydantic schemas. Planner-only spawn aliases are documented in the
-    planner prompt itself.
+    Single source of truth: the execute tools a DAG task can be assigned
+    (PLANNER_EXECUTE_TOOLS), their prompt fragments, and their Pydantic
+    schemas. Planner-only spawn aliases are documented in the planner prompt.
+    ``rose_desktop`` (``utils.rose_desktop``) renders the Rose Desktop schemas
+    and fragments; the default is the stock text.
     """
+    models = (
+        {**TOOL_MODELS, **ROSE_DESKTOP_TOOL_MODELS, **PLANNER_ROSE_DESKTOP_TOOL_MODEL_OVERRIDES}
+        if rose_desktop
+        else {**TOOL_MODELS, **PLANNER_TOOL_MODEL_OVERRIDES}
+    )
+    prompts = tool_prompts_for(rose_desktop=rose_desktop)
     sections = []
-    for name in EXECUTE_PHASE_TOOLS:
-        model = TOOL_MODELS.get(name)
-        if name in TOOL_PROMPTS:
-            description = TOOL_PROMPTS[name].strip()
+    for name in PLANNER_EXECUTE_TOOLS:
+        model = models.get(name)
+        if name in prompts:
+            description = prompts[name].strip()
         elif model:
             description = (model.__doc__ or "").strip() or "No description"
         else:
@@ -545,7 +563,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     declared_calls: dict[str, str] = {}
 
     for msg in context:
-        if is_internal_subagent_message(msg):
+        if is_internal_subagent_message(msg) or is_excluded_from_model(msg):
             continue
 
         role = msg.get("role", "").upper()
@@ -553,6 +571,12 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         message_id = msg.get("message_id")
         text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
         metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+
+        agent_text = model_agent_row_text(msg) if role == "USER" else None
+        if agent_text is not None:
+            # Agent-to-agent content: assistant-role (Codex), never the user's goal.
+            base_messages.append(inter_agent_message(_compact_planner_text("ASSISTANT", agent_text)))
+            continue
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -625,7 +649,10 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         for message in repaired
         if not (message.get("role") == "assistant" and not message.get("content") and not message.get("tool_calls"))
     ]
-    return repaired, user_messages
+    # The str marker does not survive the activity boundary, so a trailing
+    # inter-agent message is settled to user role here (RoseClient does the
+    # same for in-activity callers).
+    return settle_trailing_inter_agent_messages(repaired), user_messages
 
 
 async def run_planner_attempt(
@@ -653,7 +680,11 @@ async def run_planner_attempt(
     agent_id = workflow_instance.agent_id
     planner_args = [
         messages,
-        PLANNER_MODEL,
+        (
+            "rose-labs/rose-local"
+            if getattr(workflow_instance, "model", None) == "rose-labs/rose-local"
+            else PLANNER_MODEL
+        ),
         tools_description,
         user_context,
         response_schema,
@@ -669,11 +700,11 @@ async def run_planner_attempt(
         gpt_token_pool_id,
         getattr(workflow_instance, "user_id", None),
         getattr(workflow_instance, "compute_token_lineage_key", None),
-        getattr(workflow_instance, "compute_token_fast_cache_affinity_key", None),
+        getattr(workflow_instance, "compute_token_demo_cache_affinity_key", None),
         getattr(workflow_instance, "fast_mode_cache_enabled", False),
-        # Prefer the durable Agent-row goal (fast_cache_goal) so chat-escalation
+        # Prefer the durable Agent-row goal (demo_cache_goal) so chat-escalation
         # refined workflow input goals do not open a fresh empty cache namespace.
-        getattr(workflow_instance, "fast_cache_goal", None) or getattr(workflow_instance, "goal", None),
+        getattr(workflow_instance, "demo_cache_goal", None) or getattr(workflow_instance, "goal", None),
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
         bool(getattr(workflow_instance, "memory_enabled", False)),  # Planner memory (get_memories fork)
     ]

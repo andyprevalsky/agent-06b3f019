@@ -44,10 +44,14 @@ async def _pipeline(native, origin, *, unknown=False, workflow_root_mode=None):
   from workflows.agent_workflow import AgentWorkflow
   from types import MethodType
   wf.bus_id='test-owned-bus' if workflow_root_mode=='bus' else None
-  wf._cost_limit_reached=False;wf._has_credits=True;wf.tools_in_use=[];wf.subtree_cost_cents=0;wf.output_schema=None;wf.parent_agent_id=None;wf.goal='Read my member number';wf.message_count=1
+  wf._cost_limit_reached=False;wf._has_credits=True;wf.tools_in_use=[];wf.subtree_cost_cents=0;wf.output_schema=None;wf.parent_agent_id=None;wf.depth=0;wf.goal='Read my member number';wf.message_count=1
   wf._update_tree_state=MethodType(AgentWorkflow._update_tree_state,wf)
+  # _update_tree_state's own real helpers (background-task snapshot + send).
+  wf._background_tree_snapshot=MethodType(AgentWorkflow._background_tree_snapshot,wf)
+  wf._send_tree_state=MethodType(AgentWorkflow._send_tree_state,wf)
+  # State AgentWorkflow.__init__ creates (workflows/background_agents.py).
+  wf._background_tasks_write_lock=asyncio.Lock();wf._persisted_background_tasks=[]
   async def persist_tree(_fn,**kwargs):
-   assert wf.bus_id=='test-owned-bus'
    api_row['status']=kwargs['args'][3]['status']
   actual_tree_activity=AsyncMock(side_effect=persist_tree)
  else:actual_tree_activity=AsyncMock()
@@ -65,8 +69,9 @@ async def _pipeline(native, origin, *, unknown=False, workflow_root_mode=None):
    if workflow_root_mode is not None:
     pending=asyncio.create_task(gen.__anext__());await asyncio.wait_for(park_ready.wait(),5)
     assert wf.is_paused is True
-    assert park_status['status']==('PAUSED' if workflow_root_mode=='bus' else 'ACTIVE')
-    assert actual_tree_activity.await_count==(1 if workflow_root_mode=='bus' else 0)
+    # A bus-less root persists its explicit PAUSED transition too (c8422b386).
+    assert park_status['status']=='PAUSED'
+    assert actual_tree_activity.await_count==1
     wf._signal_responses['request-1']='The user signed in';release_wait.set();resume_event=await pending
    else:
     wf._signal_responses['request-1']='The user signed in'

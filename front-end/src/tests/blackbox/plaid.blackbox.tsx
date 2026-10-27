@@ -17,13 +17,8 @@ import type { PlaidItem } from '@/features/integrations/types';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-import {
-  API_BASE,
-  makeItem,
-  makeSync,
-  mockSession,
-  PlaidIntegrationHarness,
-} from './plaid.fixtures';
+import { API_BASE, makeItem, makeSync, mockSession } from './plaid.fixtures';
+import { PlaidIntegrationHarness } from './plaid.harness';
 
 function clickPlaidActionButton(): Promise<void> {
   return userEvent.click(

@@ -37,6 +37,7 @@ export interface AgentChannelHandlers {
  * Typed handlers for bus channel events.
  */
 export interface BusChannelHandlers {
+  onUpdate?: (payload: UpdateAgentPayload) => void;
   onAgentStateChanged?: (payload: AgentStateChangedPayload) => void;
 }
 

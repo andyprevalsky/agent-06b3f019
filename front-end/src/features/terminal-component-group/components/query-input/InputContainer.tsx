@@ -12,10 +12,20 @@
  *       v
  *   [EMPTY]
  *
- * STATE MACHINE (SUBMIT BUTTON):
- *   [SEND]  <-- canSubmit === true
- *   [STOP]  <-- canSubmit === false (renders pause/stop button)
- *   [PAUSING] <-- isPausing === true (spinner, disabled)
+ * STATE MACHINE (SUBMIT BUTTON): owned by SubmitOrStopButton (SubmitButtons.tsx)
+ *   [SEND] <-- canSubmit; [STOP] <-- !canSubmit; [PAUSING] <-- isPausing
+ *
+ * TEXT ONLY (attachable=false, the code-agent direct channel): no paperclip.
+ *
+ * ROSE DESKTOP (roseDesktop): bare paperclip (no background/border) at the
+ * model selector's 26px height, no model info button, short Rose model names
+ * (rose-flash / rose-ultra), the 3-state SpeedToggle
+ * right of the model selector (when `speed` is passed: Fast Mode operators),
+ * and the dark-only glass send/stop button.
+ *
+ * ROSE DARK (roseDark = useRoseTheme().isDark): textarea text #f2f2ef with a
+ * #8c8c86 placeholder and the model chip on #2f2f2c (mock panels/dark.js).
+ * Light renders the exact stock classes.
  *
  * KEYBOARD:
  *   plain Enter                 -> submit
@@ -24,12 +34,13 @@
 
 import { useRef, forwardRef } from 'react';
 import type React from 'react';
-import { ArrowUp, Square, Loader2, Paperclip } from 'lucide-react';
+import { Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import * as analytics from '@/lib/analytics';
-import LiquidWhiteButton from '@/components/ui/liquid-white-button';
+import { SpeedToggle } from '../FastModeToggle';
 import { ModelSelector } from './ModelSelector';
+import { SubmitOrStopButton } from './SubmitButtons';
 import type { Model } from '../../hooks';
 
 interface InputContainerProps {
@@ -48,7 +59,17 @@ interface InputContainerProps {
   onModelChange?: (model: string) => void;
   availableModels: Model[];
   showModelSelector: boolean;
+  hideModelSelector?: boolean;
+  readOnlyModelLabel?: string;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  roseDesktop?: boolean;
+  /** Rose Desktop dark mode: dark textarea + model chip. */
+  roseDark?: boolean;
+  /** Rose Desktop speed toggle wiring; omitted when the account has no Fast Mode. */
+  speed?: { fastMode: boolean; onFastModeChange?: (enabled: boolean) => void };
+  /** false = text only (code-agent direct channel): no paperclip. */
+  attachable?: boolean;
+  sessionControls?: React.ReactNode;
 }
 
 export function InputContainer(props: InputContainerProps) {
@@ -59,19 +80,21 @@ export function InputContainer(props: InputContainerProps) {
     placeholder,
     onSubmit,
     onFilesPicked,
-    agentCompleted,
-    canSubmit,
-    onPause,
-    isPausing,
-    hasUploadingAttachments,
-    selectedModel,
-    onModelChange,
-    availableModels,
-    showModelSelector,
     textareaRef,
+    roseDesktop = false,
+    roseDark = false,
+    speed,
+    attachable = true,
   } = props;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const paperclip = attachable && (
+    <PaperclipButton
+      bare={roseDesktop}
+      disabled={disabled || props.agentCompleted}
+      onClick={() => fileInputRef.current?.click()}
+    />
+  );
   return (
     <>
       <HiddenFileInput ref={fileInputRef} onPicked={onFilesPicked} />
@@ -83,32 +106,60 @@ export function InputContainer(props: InputContainerProps) {
           onSubmit={onSubmit}
           disabled={disabled}
           placeholder={placeholder}
+          roseDark={roseDark}
         />
       </div>
-      <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
-        <div className="flex items-center gap-1.5">
-          <PaperclipButton
-            disabled={disabled || agentCompleted}
-            onClick={() => fileInputRef.current?.click()}
-          />
-          <ModelSelector
-            selectedModel={selectedModel}
-            onModelChange={onModelChange}
-            availableModels={availableModels}
-            showModelSelector={showModelSelector}
-          />
+      <div
+        data-testid="query-input-controls"
+        className={
+          roseDesktop
+            ? 'flex items-end justify-between gap-3 pt-2 w-full'
+            : 'flex items-center justify-between gap-3 px-3 pt-2 w-full'
+        }
+      >
+        <div className={roseDesktop ? 'flex items-end gap-1.5' : 'flex items-center gap-1.5'}>
+          {!roseDesktop && paperclip}
+          {!props.hideModelSelector && (
+            <ModelSelector
+              selectedModel={props.selectedModel}
+              onModelChange={props.onModelChange}
+              availableModels={props.availableModels}
+              showModelSelector={props.showModelSelector}
+              roseDesktop={roseDesktop}
+              roseDark={roseDark}
+            />
+          )}
+          {props.sessionControls}
+          <ReadOnlyModelLabel label={props.readOnlyModelLabel} />
+          {speed && (
+            <SpeedToggle
+              fastMode={speed.fastMode}
+              onFastModeChange={speed.onFastModeChange ?? (() => {})}
+            />
+          )}
+          {roseDesktop && paperclip}
         </div>
         <SubmitOrStopButton
-          canSubmit={canSubmit}
+          canSubmit={props.canSubmit}
           disabled={disabled}
-          hasUploadingAttachments={hasUploadingAttachments}
-          isPausing={isPausing}
+          hasUploadingAttachments={props.hasUploadingAttachments}
+          isPausing={props.isPausing}
           onSubmit={onSubmit}
-          onPause={onPause}
+          onPause={props.onPause}
+          darkGlass={roseDesktop}
+          label={props.readOnlyModelLabel ? 'Send' : undefined}
         />
       </div>
     </>
   );
+}
+
+function ReadOnlyModelLabel({ label }: { label?: string }) {
+  return label ? (
+    <span data-testid="browser-model-label" className="text-xs text-muted-foreground">
+      {label}
+    </span>
+  ) : null;
 }
 
 interface HiddenFileInputProps {
@@ -137,10 +188,14 @@ interface TextareaRowProps {
   onSubmit: () => void;
   disabled: boolean;
   placeholder: string;
+  roseDark: boolean;
 }
 
+/** Rose dark textarea colors; light keeps the stock theme-variable classes. */
+const ROSE_DARK_TEXTAREA_CLASS = 'dark:text-[#f2f2ef] dark:placeholder:text-[#8c8c86]';
+
 const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
-  ({ value, onChange, onSubmit, disabled, placeholder }, ref) => {
+  ({ value, onChange, onSubmit, disabled, placeholder, roseDark }, ref) => {
     const hasTrackedTyping = useRef(false);
     const hasTrackedFocus = useRef(false);
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -176,6 +231,7 @@ const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
           'w-full bg-transparent border-none text-foreground placeholder:text-muted-foreground',
           'resize-none outline-none min-h-[56px] py-3',
           'font-normal text-base leading-6',
+          roseDark && ROSE_DARK_TEXTAREA_CLASS,
         )}
         rows={2}
       />
@@ -184,7 +240,21 @@ const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
 );
 TextareaRow.displayName = 'TextareaRow';
 
-function PaperclipButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
+const STOCK_PAPERCLIP_CLASS =
+  'flex items-center justify-center w-8 h-8 rounded-lg transition-colors border border-gray-300 bg-gray-100 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300';
+/** Rose Desktop: no background, border or shadow; hover darkens the icon only. */
+const BARE_PAPERCLIP_CLASS =
+  'flex items-center justify-center w-[26px] h-[26px] transition-colors bg-transparent text-muted-foreground hover:text-foreground';
+
+function PaperclipButton({
+  bare,
+  disabled,
+  onClick,
+}: {
+  bare: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -192,12 +262,12 @@ function PaperclipButton({ disabled, onClick }: { disabled: boolean; onClick: ()
           type="button"
           onClick={onClick}
           disabled={disabled}
+          aria-label={bare ? 'Attach files' : undefined}
+          data-bare={bare ? 'true' : undefined}
           className={cn(
-            'flex items-center justify-center w-8 h-8 rounded-lg transition-colors',
-            'border border-gray-300 bg-gray-100 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300',
-            disabled
-              ? 'opacity-50 cursor-not-allowed'
-              : 'hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer',
+            bare ? BARE_PAPERCLIP_CLASS : STOCK_PAPERCLIP_CLASS,
+            disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer',
+            !disabled && !bare && 'hover:bg-gray-200 dark:hover:bg-gray-700',
           )}
         >
           <Paperclip className="w-4 h-4" />
@@ -207,102 +277,5 @@ function PaperclipButton({ disabled, onClick }: { disabled: boolean; onClick: ()
         <p className="text-xs">Attach files (drag & drop or paste)</p>
       </TooltipContent>
     </Tooltip>
-  );
-}
-
-interface SubmitOrStopButtonProps {
-  canSubmit: boolean;
-  disabled: boolean;
-  hasUploadingAttachments: boolean;
-  isPausing: boolean;
-  onSubmit: () => void;
-  onPause?: () => void;
-}
-
-function SubmitOrStopButton({
-  canSubmit,
-  disabled,
-  hasUploadingAttachments,
-  isPausing,
-  onSubmit,
-  onPause,
-}: SubmitOrStopButtonProps) {
-  if (canSubmit) {
-    return (
-      <SendButton
-        disabled={disabled}
-        hasUploadingAttachments={hasUploadingAttachments}
-        onSubmit={onSubmit}
-      />
-    );
-  }
-  return <StopButton isPausing={isPausing} onPause={onPause} />;
-}
-
-function SendButton({
-  disabled,
-  hasUploadingAttachments,
-  onSubmit,
-}: {
-  disabled: boolean;
-  hasUploadingAttachments: boolean;
-  onSubmit: () => void;
-}) {
-  return (
-    <Tooltip delayDuration={200}>
-      <TooltipTrigger asChild>
-        <LiquidWhiteButton
-          onClick={onSubmit}
-          disabled={disabled || hasUploadingAttachments}
-          size="md"
-        >
-          {hasUploadingAttachments ? (
-            <Loader2 className="w-5 h-5 animate-spin" strokeWidth={2.5} />
-          ) : (
-            <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-          )}
-        </LiquidWhiteButton>
-      </TooltipTrigger>
-      <TooltipContent side="top" sideOffset={8}>
-        <SubmitTooltipBody hasUploadingAttachments={hasUploadingAttachments} />
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-function StopButton({ isPausing, onPause }: { isPausing: boolean; onPause?: () => void }) {
-  return (
-    <Tooltip delayDuration={200}>
-      <TooltipTrigger asChild>
-        <LiquidWhiteButton onClick={onPause} disabled={isPausing} size="md">
-          {isPausing ? (
-            <Loader2 className="w-5 h-5 animate-spin" />
-          ) : (
-            <Square className="w-4 h-4" fill="currentColor" />
-          )}
-        </LiquidWhiteButton>
-      </TooltipTrigger>
-      <TooltipContent side="top" sideOffset={8}>
-        <p className="text-xs">Stop</p>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-function SubmitTooltipBody({ hasUploadingAttachments }: { hasUploadingAttachments: boolean }) {
-  if (hasUploadingAttachments) {
-    return (
-      <p className="text-xs">
-        <span>Uploading files...</span>
-      </p>
-    );
-  }
-  return (
-    <p className="text-xs flex items-center gap-1">
-      <span>Send</span>
-      <span>(</span>
-      <span>Enter</span>
-      <span>)</span>
-    </p>
   );
 }

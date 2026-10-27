@@ -192,6 +192,7 @@ HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
 STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
+GUEST_DIAGNOSTICS_PID=""
 
 publish_cleanup_ack() {
     local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth cleanup_stack_native_identity cleanup_native_count cleanup_identity_matches=0 cleanup_version cleanup_version_count token_matches=0
@@ -281,6 +282,12 @@ cleanup_stack() {
     trap '' HUP INT TERM
     [ -z "$HEARTBEAT_SLEEP_PID" ] || kill "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
     [ -z "$TAIL_PID" ] || kill "$TAIL_PID" 2>/dev/null || true
+    # Stop the sampler before the stack so its evidence file is final when the
+    # stopped stack is sealed into the runtime evidence manifest.
+    if [ -n "$GUEST_DIAGNOSTICS_PID" ]; then
+        kill -TERM "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+        wait "$GUEST_DIAGNOSTICS_PID" 2>/dev/null || true
+    fi
     declare -F stop_dashboard >/dev/null 2>&1 && stop_dashboard
     if [ -n "$STACK_PID" ] && kill -0 "$STACK_PID" 2>/dev/null; then
         # Signal only run.sh. It owns its worker/backend descendants and waits
@@ -496,30 +503,30 @@ resolve_task_gate() {
         echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
         return 1
     fi
-    "$task_gate_python" "$CATALOG_SCRIPT" requires-gate \
-        "$REPO_DIR/agents/benchmarks/tasks.json" source_connect \
-        "${BENCH_TASK_LIST[@]}"
+    # One per-task worker environment for local and cloud runs: local.py
+    # configure_task_environment applies this same catalog policy. An empty
+    # value is exported as-is so an inherited setting is cleared.
+    local task_env_output entry
+    task_env_output="$("$task_gate_python" "$CATALOG_SCRIPT" task-env \
+        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}")"
     task_gate_status=$?
-    case "$task_gate_status" in
-        0)
-            TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
-            ;;
-        10)
-            ;;
-        *)
-            echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
-            return "$task_gate_status"
-            ;;
-    esac
+    if [ "$task_gate_status" -ne 0 ]; then
+        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+        return "$task_gate_status"
+    fi
+    while IFS= read -r entry; do
+        [ -n "$entry" ] && TASK_WORKER_ENV+=("$entry")
+    done <<< "$task_env_output"
+    return 0
 }
-# Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
+# DEMO cache route. Only demo_cache:on tasks replay the frozen shared
 # cache through the production pooler; every other guest keeps the cache in its
 # isolated local DB (as local isolated stacks already do), so a LIVE fleet holds
 # no production pooler client slots for the cache. Infra probes never run their
 # sampled task and always stay local. The local route also blanks any inherited
 # FAST_MODE_CACHE_DATABASE_URL, which run.sh would otherwise prefer.
 STACK_CACHE_ENV=()
-resolve_fast_cache_route() {
+resolve_demo_cache_route() {
     local cache_python cache_status
     STACK_CACHE_ENV=()
     if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
@@ -528,10 +535,10 @@ resolve_fast_cache_route() {
     fi
     cache_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
     if [ -z "$cache_python" ]; then
-        echo "[cloudbench] FATAL: no Python interpreter is available for Fast Mode cache routing" >&2
+        echo "[cloudbench] FATAL: no Python interpreter is available for DEMO cache routing" >&2
         return 1
     fi
-    "$cache_python" "$CATALOG_SCRIPT" needs-shared-fast-cache \
+    "$cache_python" "$CATALOG_SCRIPT" needs-shared-demo-cache \
         "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
     cache_status=$?
     case "$cache_status" in
@@ -541,12 +548,25 @@ resolve_fast_cache_route() {
             # ~12 ms round trip serves the replay's ~40 reads/s through 4. Clear
             # an inherited local route so run.sh keeps the shared cache.
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=0" "FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
+            # Same write policy as local isolated stacks: a shared-cache miss
+            # fails loudly instead of calling a live model.
+            "$cache_python" "$CATALOG_SCRIPT" shared-demo-cache-read-only \
+                "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
+            cache_status=$?
+            case "$cache_status" in
+                0) STACK_CACHE_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1") ;;
+                10) ;;
+                *)
+                    echo "[cloudbench] FATAL: DEMO cache write policy failed (exit $cache_status)" >&2
+                    return "$cache_status"
+                    ;;
+            esac
             ;;
         10)
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
             ;;
         *)
-            echo "[cloudbench] FATAL: Fast Mode cache routing failed (exit $cache_status)" >&2
+            echo "[cloudbench] FATAL: DEMO cache routing failed (exit $cache_status)" >&2
             return "$cache_status"
             ;;
     esac
@@ -605,7 +625,7 @@ TASK_WORKER_EXPORTS=""
 
 if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
     resolve_task_gate || exit $?
-    resolve_fast_cache_route || exit $?
+    resolve_demo_cache_route || exit $?
     TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
     if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
         for entry in "${TASK_WORKER_ENV[@]}"; do
@@ -844,10 +864,10 @@ task_gate_status=$?
 if [ "$task_gate_status" -ne 0 ]; then
     finish "$task_gate_status"
 fi
-resolve_fast_cache_route
-fast_cache_route_status=$?
-if [ "$fast_cache_route_status" -ne 0 ]; then
-    finish "$fast_cache_route_status"
+resolve_demo_cache_route
+demo_cache_route_status=$?
+if [ "$demo_cache_route_status" -ne 0 ]; then
+    finish "$demo_cache_route_status"
 fi
 TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
 
@@ -894,6 +914,7 @@ cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" b
 cloudbench_require_guest_temporal_namespace "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}" || finish 1
 cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
+cloudbench_apply_compute_token_authority "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
@@ -1372,9 +1393,7 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
-if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
-    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
-    STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
+STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
 import json, sys
 from pathlib import Path
 manifest = json.loads(Path(sys.argv[1]).read_text())
@@ -1387,6 +1406,17 @@ if not url:
 print(url)
 PY
 )"
+# Bounded guest diagnostics (one JSON line per 15 s, at most 12 h): CPU/load,
+# backend client connections vs. its Prisma connection_limit, pg_stat_activity
+# states/wait events/longest query. Exported as guest-diagnostics.jsonl with
+# the runtime evidence so a slow stack can be classified as pool queueing, CPU
+# saturation or Postgres contention. 30 is back-end/src/providers/database.ts
+# LOCAL_POOL_SIZE, the pool a localhost DATABASE_URL gets without an override.
+python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
+    "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
+GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
     if ! gosu "$APP_USER" env \
         DATABASE_URL="$STACK_DB_URL" \
@@ -1542,6 +1572,7 @@ if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
     # evaluation path, including real provider calls when its cache misses.
     BENCH_HARNESS_ENV+=(
         -u FAST_MODE_CACHE_DISABLE_WRITE_THROUGH
+        -u DEMO_CACHE_DISABLE_WRITE_THROUGH
         -u BENCHMARK_DEMO_CACHE_READ_ONLY
         -u CLOUDBENCH_FAST_CACHE_READ_ONLY
     )

@@ -39,7 +39,13 @@ interface RotateIpResponse {
 
 export async function rotateInPlace(taskId: string): Promise<TilionReplacementSession | null> {
   const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
-  if (row.provider !== 'tilion' || row.status !== 'ACTIVE' || !row.wsUrl || !row.debugUrl) {
+  if (
+    row.provider !== 'tilion' ||
+    row.status !== 'ACTIVE' ||
+    row.sessionId === null ||
+    !row.wsUrl ||
+    !row.debugUrl
+  ) {
     return null;
   }
   // rotate-ip keeps the exit class; a datacenter session reaches residential by replacement.

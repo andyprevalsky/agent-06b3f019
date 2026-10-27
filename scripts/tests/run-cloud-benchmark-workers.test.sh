@@ -124,7 +124,7 @@ worker = read("scripts/cloudbench-worker.sh")
 if "export AUTOSCALER_QUEUE_METRICS=0" not in worker or "    AUTOSCALER_QUEUE_METRICS=0 \\\n" not in worker:
     sys.exit("FAIL: worker-only clones must disable unread queue observation in env and exec env")
 if '${WMH_BASE_URL:+${WMH_EXECUTION_POLICY:+WMH_EXECUTION_POLICY="$WMH_EXECUTION_POLICY"}}' not in worker:
-    sys.exit("FAIL: autoscaled workers must run with the primary's WMH execution policy (fast-cache partition)")
+    sys.exit("FAIL: autoscaled workers must run with the primary's WMH execution policy (demo-cache partition)")
 if 'echo "export WMH_EXECUTION_POLICY=$(printf \'%q\' "$WMH_EXECUTION_POLICY")"' not in read("scripts/run-bench-fleet"):
     sys.exit("FAIL: the fleet must hand autoscaled workers its WMH execution policy")
 run = read("scripts/cloudbench-run.sh")

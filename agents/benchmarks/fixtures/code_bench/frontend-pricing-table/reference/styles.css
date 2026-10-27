@@ -1,0 +1,46 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+  color: #1f2328;
+}
+
+.pricing {
+  display: flex;
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.plan {
+  flex: 1;
+  border: 1px solid #d0d7de;
+  border-radius: 12px;
+  padding: 1.5rem;
+  background: #ffffff;
+}
+
+.plan h3 {
+  margin: 0 0 0.5rem;
+}
+
+.price {
+  font-size: 2rem;
+  font-weight: 700;
+  margin: 0 0 1rem;
+}
+
+.featured {
+  border: 2px solid #6639ba;
+  box-shadow: 0 8px 24px rgba(102, 57, 186, 0.2);
+  transform: translateY(-6px);
+}
+
+.badge {
+  display: inline-block;
+  margin-bottom: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: #6639ba;
+  color: #ffffff;
+  font-size: 0.8rem;
+  font-weight: 600;
+}

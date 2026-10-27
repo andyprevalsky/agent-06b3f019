@@ -1,36 +1,46 @@
-import { createElement } from 'react';
+import { createElement, lazy } from 'react';
 import type { RouteEntry } from './types';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
-
-import Index from '@/features/index';
-import Privacy from '@/features/privacy';
-import Terms from '@/features/terms';
-import NotFound from '@/features/not-found';
-import About from '@/features/about';
 import Terminal from '@/features/terminal';
-import ResearchBlog from '@/features/research-blog';
-import ResearchBlogPost from '@/features/research-blog-post';
-import Careers, { CareersRole } from '@/features/careers';
-import Download from '@/features/download';
-import TestPayment from '@/features/test-payment';
-import GatePlayground from '@/features/gate-playground';
-import MobilePreview, { PREVIEW_AGENT_CONTEXT } from '@/features/mobile-preview';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { PlaidOAuthRedirect } from '@/features/integrations';
-import Waitlist from '@/pages/Waitlist';
-import OpenAgentRedirect from '@/features/open-agent-redirect';
 
-function MobilePreviewRoute() {
-  return createElement(
-    AgentContext.Provider,
-    { value: PREVIEW_AGENT_CONTEXT as unknown as AgentContextValue },
-    createElement(MobilePreview),
-  );
-}
+const Index = lazy(() => import('@/features/index'));
+const Privacy = lazy(() => import('@/features/privacy'));
+const Terms = lazy(() => import('@/features/terms'));
+const NotFound = lazy(() => import('@/features/not-found'));
+const About = lazy(() => import('@/features/about'));
+const ResearchBlog = lazy(() => import('@/features/research-blog'));
+const ResearchBlogPost = lazy(() => import('@/features/research-blog-post'));
+const Careers = lazy(() => import('@/features/careers'));
+const CareersRole = lazy(() =>
+  import('@/features/careers').then((m) => ({ default: m.CareersRole })),
+);
+const Download = lazy(() => import('@/features/download'));
+const TestPayment = lazy(() => import('@/features/test-payment'));
+const GatePlayground = lazy(() => import('@/features/gate-playground'));
+const Waitlist = lazy(() => import('@/pages/Waitlist'));
+const OpenAgentRedirect = lazy(() => import('@/features/open-agent-redirect'));
 
-/** Dev-only design harness routes (stripped from production builds). */
+/** Design harness code is never loaded by the production app. */
 const DEV_ROUTES: readonly RouteEntry[] = import.meta.env.DEV
-  ? [{ path: '/mobile-preview', component: MobilePreviewRoute }]
+  ? [
+      {
+        path: '/mobile-preview',
+        component: lazy(async () => {
+          const { default: MobilePreview, PREVIEW_AGENT_CONTEXT } =
+            await import('@/features/mobile-preview');
+          return {
+            default: () =>
+              createElement(
+                AgentContext.Provider,
+                { value: PREVIEW_AGENT_CONTEXT as unknown as AgentContextValue },
+                createElement(MobilePreview),
+              ),
+          };
+        }),
+      },
+    ]
   : [];
 
 /**

@@ -71,6 +71,7 @@ KNOWN_DEPLOY_CATEGORIES: frozenset[str] = frozenset(
         "wait-for",
         "chat",
         "mass-agent",
+        "display",
     }
 )
 
@@ -88,6 +89,7 @@ TAG_TO_CATEGORY: dict[str, str] = {
     "wait-for": "wait-for",
     "chat": "chat",
     "mass-agent": "mass-agent",
+    "display": "display",
     "agentcard-lifecycle-sandbox": "payment",
     "agentcard-lifecycle-production": "payment",
 }
@@ -116,6 +118,11 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         r"(^|/)agents/.*attachment|(^|/)agents/.*file_upload|(^|/)agents/tools/.*vision",
         ("attachment",),
+    ),
+    (
+        r"(^|/)agents/(domains|tools)/(prompts/)?display|(^|/)back-end/src/domains/agent-tools/display"
+        r"|(^|/)back-end/src/providers/agentTools/display|(^|/)agents/benchmarks/display_check",
+        ("display",),
     ),
     (r"claude.?code|claude_code", ("claude-code",)),
     (r"(^|/)agents/(loop|workflows|helpers|activities)/", ("harness",)),

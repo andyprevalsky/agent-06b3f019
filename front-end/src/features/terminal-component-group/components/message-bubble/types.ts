@@ -22,7 +22,7 @@ export interface MessageBubbleProps {
   /** Agent ID for sending messages */
   agentId?: string;
   /** Callback to send a message */
-  onSendMessage?: (message: string) => void;
+  onSendMessage?: (message: string) => void | Promise<void>;
   /** Compact mode - removes left spacers for tighter layouts */
   compact?: boolean;
   /** Callback to open the auth modal (for signup prompts) */

@@ -85,6 +85,28 @@ async def test_assistant_event():
     assert calls[0]["args"][4] is None  # no file_pointer
 
 
+async def test_output_attachment_is_tagged_as_artifact():
+    from tools.base import AssistantEvent
+    from helpers.handle_tool_event import handle_tool_event
+
+    calls = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        calls.append(args)
+
+    pointer = {"mime_type": "image/png", "storage_path": "child/screenshot.png"}
+    await handle_tool_event(
+        event=AssistantEvent(message="", file_pointer=pointer),
+        agent_id="parent-1",
+        tool_call_id="spawn-child-1",
+        tool_name="spawn_browser_agent",
+        execute_activity=mock_execute_activity,
+    )
+    assert calls[0][2] == "ASSISTANT"
+    assert calls[0][3] == {"artifactOnly": True, "sourceToolCallId": "spawn-child-1"}
+    assert calls[0][4] == pointer
+
+
 async def test_no_outbound_http():
     """handle_tool_event makes zero outbound HTTP calls for POST_MESSAGE events."""
     from tools.base import ToolEvent, EventType, MessageStatus
@@ -116,6 +138,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("post_message_event", test_post_message_event)
     await r.record_async("assistant_event", test_assistant_event)
+    await r.record_async("output_attachment_is_tagged_as_artifact", test_output_attachment_is_tagged_as_artifact)
     await r.record_async("no_outbound_http", test_no_outbound_http)
     teardown_mock()
     return r.all_passed

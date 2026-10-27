@@ -705,7 +705,7 @@ class ControllerGateAdmission(ControllerFixture):
     GATE_SOURCE = (Path(__file__).resolve().parents[1] / 'run-cloudbench-controller-gate').read_text()
     RUNNER = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'cloudbench-original600-runner.py'))
 
-    def gate(self, plan):
+    def gate(self, plan, repo_url='https://example.invalid/fixture.git'):
         run = self.root / ('run-%d' % len(list(self.root.glob('run-*'))))
         run.mkdir(mode=0o700)
         export = run / 'export'
@@ -726,7 +726,7 @@ class ControllerGateAdmission(ControllerFixture):
                    FIXTURE_FLYCTL_LOG=str(run / 'flyctl.log'), CLOUDBENCH_GATE_ROOT_DIR=str(self.root),
                    CLOUDBENCH_GATE_REF=self.ref, CLOUDBENCH_GATE_EXPORT_DIR=str(export),
                    CLOUDBENCH_GATE_NO_EFFECT_RECEIPT=str(run / 'gate.preallocation-failure.json'),
-                   CLOUDBENCH_GATE_REPO_URL='https://example.invalid/fixture.git', GITHUB_TOKEN='fixture-github',
+                   CLOUDBENCH_GATE_REPO_URL=repo_url, GITHUB_TOKEN='fixture-github',
                    WARM_IMAGE_REF=IMAGE, CLOUDBENCH_GATE_NODE_VERSION='v24.0.0', FLY_API_TOKEN='fixture-token')
         child = subprocess.Popen(['bash', str(self.root / 'scripts/run-cloudbench-controller-gate'),
                                   '--disposable-controller', str(self.authpath), '--', 'echo', 'fixture'],
@@ -756,6 +756,33 @@ class ControllerGateAdmission(ControllerFixture):
                 self.assertEqual((terminal['status'], terminal['reason'], terminal['allocation_attempted']),
                                  ('FAILED_BEFORE_PROVIDER_DISPATCH', 'controller-admission-refused', False))
                 self.assertIsNone(self.RUNNER['preallocation_terminal'](True, 1, child.pid + 1, self.ref, export, receipt))
+
+    def test_unfetchable_source_ref_ends_the_runner_and_an_advertised_tag_tip_is_admitted(self):
+        # A default-repository gate refused an unpushed source ref without the
+        # typed receipt, so every shard runner waited forever on a dead gate.
+        github = 'https://github.com/Rose-Ai-Labs/rose.git'
+        child, stderr, run, export, calls = self.gate({'GET /machines?summary=true': [200, 200, 200, 403]}, github)
+        self.assertEqual(child.returncode, 1, stderr)
+        self.assertIn('is not on any origin branch or advertised tag', stderr)
+        self.assertFalse(os.path.lexists(export))
+        self.assertFalse((run / 'flyctl.log').exists(), 'no provider CLI effect')
+        receipt = run / 'gate.preallocation-failure.json'
+        self.assertEqual(json.loads(receipt.read_text()), dict(
+            schema='original600-gate-preallocation-failure-v1', reason='source-ref-not-fetchable',
+            source_ref=self.ref, gate_pid=child.pid, allocation_attempted=False))
+        terminal = self.RUNNER['preallocation_terminal'](True, 1, child.pid, self.ref, export, receipt)
+        self.assertEqual((terminal['status'], terminal['reason'], terminal['allocation_attempted']),
+                         ('FAILED_BEFORE_PROVIDER_DISPATCH', 'source-ref-not-fetchable', False))
+        # The guest fetches the exact SHA, so a tip origin advertises only as a
+        # tag (run-bench's own sharded admission rule) passes the containment check.
+        with tempfile.TemporaryDirectory() as origin:
+            subprocess.check_call(['git', 'init', '-q', '--bare', origin])
+            self.git('remote', 'add', 'origin', origin)
+            self.git('push', '-q', 'origin', self.ref + ':refs/tags/bench/fixture')
+            child, stderr, run, export, calls = self.gate({'GET /machines?summary=true': [200, 200, 200, 403]}, github)
+            self.assertNotIn('is not on any origin branch', stderr)
+            self.assertTrue((export / 'workspace-volume.intent.json').is_file(), stderr)
+            self.assertFalse((run / 'gate.preallocation-failure.json').exists())
 
     def test_admission_refusal_after_workspace_intent_never_writes_receipt(self):
         child, stderr, run, export, calls = self.gate({'GET /machines?summary=true': [200, 200, 200, 403]})

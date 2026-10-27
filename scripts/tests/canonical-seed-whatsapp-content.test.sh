@@ -97,6 +97,7 @@ fixture_psql -d "$FIXTURE_DB" <<'SQL'
 CREATE TABLE "Person" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
 CREATE TABLE "MessageRecord" (id TEXT PRIMARY KEY, "personId" TEXT NOT NULL, channel TEXT NOT NULL);
 CREATE TABLE "Integration" ("userId" TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL);
+CREATE TABLE "User" ("userId" TEXT PRIMARY KEY, name TEXT, email TEXT, "addressLine1" TEXT);
 CREATE TABLE "AgentTrajectorySearch" (
   "messageId" TEXT PRIMARY KEY, "userId" TEXT NOT NULL, "rootAgentId" TEXT NOT NULL,
   role TEXT NOT NULL, "archivePath" TEXT
@@ -104,6 +105,7 @@ CREATE TABLE "AgentTrajectorySearch" (
 INSERT INTO "Person" VALUES ('p1', '1f85ff25-6e29-4c1b-8739-f917bd101a30');
 INSERT INTO "MessageRecord" SELECT 'm' || g, 'p1', 'WHATSAPP' FROM generate_series(1, 3825) g;
 INSERT INTO "Integration" VALUES ('1f85ff25-6e29-4c1b-8739-f917bd101a30', 'whatsapp', 'CONNECTED');
+INSERT INTO "User" VALUES ('1f85ff25-6e29-4c1b-8739-f917bd101a30', 'Andy Prevalsky', 'andy@fixture.test', '1 Fixture Street');
 SQL
 assert_exit "WhatsApp rows with an empty trajectory archive (PG15 publication) fail" 1 \
   bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
@@ -137,6 +139,30 @@ SELECT '18ad-' || g, '1f85ff25-6e29-4c1b-8739-f917bd101a30',
 FROM generate_series(1, 178) g;
 SQL
 assert_exit "reviewed WhatsApp rows + all archived trajectory roots pass" 0 \
+  bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+# The revision also promises the bench user's prod profile. The reviewed Aug-5
+# fixture froze an older, blank prod User row (prod replaced it on 2026-09-01),
+# so sign-up tasks had no name to type and asked a human who is not there
+# (RCA 2026-10-23-canonical-bench-user-missing-profile-name-signup-handoff).
+fixture_psql -d "$FIXTURE_DB" -c \
+  "UPDATE \"User\" SET name = NULL, \"addressLine1\" = NULL WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
+assert_exit "a blank bench-user profile (no name, no address) fails" 1 \
+  bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+fixture_psql -d "$FIXTURE_DB" -c \
+  "UPDATE \"User\" SET name = '  ', \"addressLine1\" = '1 Fixture Street' WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
+assert_exit "a whitespace-only bench-user name fails" 1 \
+  bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+fixture_psql -d "$FIXTURE_DB" -c \
+  "UPDATE \"User\" SET name = 'Andy Prevalsky', \"addressLine1\" = NULL WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
+assert_exit "a bench user without a delivery address line fails" 1 \
+  bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+fixture_psql -d "$FIXTURE_DB" -c \
+  "UPDATE \"User\" SET \"addressLine1\" = '1 Fixture Street', email = NULL WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
+assert_exit "a bench user without an email fails" 1 \
+  bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+fixture_psql -d "$FIXTURE_DB" -c \
+  "UPDATE \"User\" SET email = 'andy@fixture.test' WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
+assert_exit "named bench user with an email and address passes again" 0 \
   bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
 stop_fixture_cluster
 trap - EXIT

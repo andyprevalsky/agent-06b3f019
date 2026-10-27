@@ -93,7 +93,8 @@ export {
 const log = createLogger('Tilion');
 
 export type TilionReplacementSession = BrowserProviderResumeSession & {
-  previousSessionId: string;
+  /** Null when the row was an unmaterialized logical browser (no provider session). */
+  previousSessionId: string | null;
   previousProvider: BrowserProviderName;
   /** Present when the exit rotated in place (`POST rotate-ip`); record it in the rotation log. */
   ipRotation?: { rotated: boolean; freshAllocation: boolean; region: string | null };
@@ -480,7 +481,7 @@ type OldRow = Awaited<ReturnType<typeof prisma.browserSession.findUniqueOrThrow>
 
 /** Deploy drain / worker restart: the old Tilion session is still alive, so reattach to it. */
 async function reattachLiveSession(
-  old: OldRow,
+  old: OldRow & { sessionId: string },
   options: { keepValidationConnection?: boolean }
 ): Promise<TilionReplacementSession | null> {
   let status: TilionSessionRecord;
@@ -540,13 +541,15 @@ async function replaceSession(
   const previousProvider = storedProvider(old.provider);
   const live = old.status === 'ACTIVE';
 
+  const oldSessionId = old.sessionId;
   if (
     options.rotateTo === undefined &&
     previousProvider === 'tilion' &&
     live &&
+    oldSessionId !== null &&
     !options.forceFreshProfile
   ) {
-    const reattached = await reattachLiveSession(old, options);
+    const reattached = await reattachLiveSession({ ...old, sessionId: oldSessionId }, options);
     if (reattached !== null) return reattached;
   }
 
@@ -557,20 +560,24 @@ async function replaceSession(
   let carried: StorageState | null = options.forceFreshProfile
     ? null
     : (options.carriedState ?? null);
-  if (carried === null && !options.forceFreshProfile && live) {
+  // An unmaterialized logical browser (no provider session yet) has nothing to carry.
+  if (carried === null && !options.forceFreshProfile && live && oldSessionId !== null) {
     if (previousProvider !== 'tilion') {
       carried = await harvestBrowserState({
         provider: previousProvider,
-        sessionId: old.sessionId,
+        sessionId: oldSessionId,
         wsUrl: old.wsUrl,
       });
-    } else if (await tilionSessionStillLive(old.sessionId)) {
+    } else if (await tilionSessionStillLive(oldSessionId)) {
       // The old browser still holds state nobody handed us: never swap it for a blank one.
-      throw new TilionUncarriedStateError(taskId, old.sessionId);
+      throw new TilionUncarriedStateError(taskId, oldSessionId);
     }
   }
   const state =
-    carried ?? (options.forceFreshProfile ? null : await loadPausedState(taskId, old.sessionId));
+    carried ??
+    (options.forceFreshProfile || oldSessionId === null
+      ? null
+      : await loadPausedState(taskId, oldSessionId));
 
   const baseLocation = await agentLocation(old.agentId);
   // A rotation must land elsewhere; like Kernel, move to another state and drop the city.
