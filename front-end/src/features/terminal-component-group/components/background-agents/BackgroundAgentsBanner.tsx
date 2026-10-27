@@ -1,10 +1,11 @@
 /**
  * STATE MACHINE: BackgroundAgentsBanner (attached to the top of the query box)
  *
- * [HIDDEN]    running === 0 and no finished flash
- *     | running > 0
+ * [HIDDEN]    running === 0, paused === 0 and no finished flash
+ *     | running > 0, or paused > 0 (user-paused, resumable tasks/agents)
  *     v
- * [COLLAPSED] "Running N agents" + chevron right
+ * [COLLAPSED] "Running N agents" (or "N agents paused" when none run, so a
+ *             paused task stays reachable) + chevron right
  *     | click / Enter              ^ click / Escape
  *     v                            |
  * [EXPANDED]  chevron down + scrollable hierarchy rendered with the existing
@@ -28,6 +29,8 @@
  * [COLLAPSED|EXPANDED] -- running drops to 0 --> [FINISHED FLASH]
  *     "All agents finished" for FINISHED_FLASH_MS, then [HIDDEN]
  *     (stays visible while EXPANDED so an open panel never vanishes).
+ *     With paused > 0 it reads "N agents paused" and stays [COLLAPSED]
+ *     after the flash; paused nodes never count as running.
  *
  * Data: useAgentsPanelData (shared per-root bus subscription + the selected
  * agent's own background rows). Remount per selected agent resets all state.
@@ -88,9 +91,11 @@ function useOpenTrajectories(trajectories: ReadonlyMap<string, string>) {
   return { open, toggle };
 }
 
-function headline(running: number): string {
-  if (running === 0) return 'All agents finished';
-  return `Running ${running} agent${running === 1 ? '' : 's'}`;
+function headline({ running, paused }: AgentPanelModel['counts']): string {
+  const agents = (n: number) => `${n} agent${n === 1 ? '' : 's'}`;
+  if (running > 0) return `Running ${agents(running)}`;
+  if (paused > 0) return `${agents(paused)} paused`;
+  return 'All agents finished';
 }
 
 interface PanelBodyProps {
@@ -203,7 +208,8 @@ export function BackgroundAgentsBanner({
     else onNavigate(agentId);
   };
 
-  const visible = counts.running > 0 || flash || (expanded && groups.length > 0);
+  const visible =
+    counts.running > 0 || counts.paused > 0 || flash || (expanded && groups.length > 0);
   if (!visible) return null;
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -231,7 +237,7 @@ export function BackgroundAgentsBanner({
         aria-controls="background-agents-panel"
       >
         <Bot className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span className="flex-1 font-medium">{headline(counts.running)}</span>
+        <span className="flex-1 font-medium">{headline(counts)}</span>
         {counts.total > counts.running && (
           <span className="text-xs text-muted-foreground">{counts.total} total</span>
         )}
