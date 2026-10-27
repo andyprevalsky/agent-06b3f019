@@ -361,22 +361,25 @@ function evaluateBudgets(result, budgets = DEFAULT_BUDGETS) {
       if (stats.p50 < budgets.fpsP50Min) violations.push({ rule: 'fps-p50', message: `${label} p50 ${stats.p50} fps (min ${budgets.fpsP50Min})`, value: stats.p50, limit: budgets.fpsP50Min });
       if (stats.p5 < budgets.fpsP5Min) violations.push({ rule: 'fps-p5', message: `${label} p5 ${stats.p5} fps (min ${budgets.fpsP5Min}); worst frame ${stats.worstFrameMs} ms`, value: stats.p5, limit: budgets.fpsP5Min });
     }
-    // A steady task over budget in CPU time is the page's work. One over budget only in wall
-    // time may be the host stalling the renderer, or the page blocking on a wait (GPU readback,
-    // sync XHR); it fails unless a second window (longTaskRecheck) has no long task at all.
+    // A steady task over budget in CPU time, or in CPU plus time blocked in a call the page made
+    // (pageWait: sync XHR, GPU readback), is the page's work. The rest of a long wall time is the
+    // host (descheduled, page faults, stopped); such a task fails unless a second window
+    // (longTaskRecheck) has no long task at all. Missing evidence is judged as page work.
     const limit = budgets.longTaskMaxMs;
     const steady = (normal.longTasks || []).filter((t) => t.phase === 'steady' && t.duration > limit);
-    const heavy = steady.filter((t) => !(typeof t.cpu === 'number' && t.cpu <= limit));
-    const waits = steady.filter((t) => typeof t.cpu === 'number' && t.cpu <= limit);
+    const pageMs = (t) => (typeof t.cpu === 'number' && typeof t.pageWait === 'number' ? t.cpu + t.pageWait : t.duration);
+    const heavy = steady.filter((t) => pageMs(t) > limit);
+    const stalls = steady.filter((t) => pageMs(t) <= limit);
     const recheck = Array.isArray(normal.longTaskRecheck) ? normal.longTaskRecheck.filter((t) => t.duration > limit) : null;
     if (heavy.length > 0) {
-      const max = Math.max(...heavy.map((t) => (typeof t.cpu === 'number' ? t.cpu : t.duration)));
-      violations.push({ rule: 'long-task', message: `${heavy.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms CPU)`, value: max, limit });
-    } else if (waits.length > 0 && (recheck === null || recheck.length > 0)) {
-      const max = Math.max(...waits.map((t) => t.duration), ...(recheck || []).map((t) => t.duration));
-      violations.push({ rule: 'long-task', message: `${waits.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms), ${recheck === null ? 'not re-measured' : 'again in a second window'}`, value: max, limit });
-    } else if (waits.length > 0) {
-      warnings.push({ rule: 'long-task-stall', message: `${waits.length} task(s) took over ${limit} ms of wall time but under ${limit} ms of CPU (max ${round(Math.max(...waits.map((t) => t.duration)))} ms) and did not recur in a second window: a host stall, not judged` });
+      const max = Math.max(...heavy.map(pageMs));
+      const why = heavy.every((t) => typeof t.cpu === 'number' && typeof t.pageWait === 'number') ? 'of CPU or blocking calls' : 'judged on wall time: no thread-state samples';
+      violations.push({ rule: 'long-task', message: `${heavy.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms ${why})`, value: max, limit });
+    } else if (stalls.length > 0 && (recheck === null || recheck.length > 0)) {
+      const max = Math.max(...stalls.map((t) => t.duration), ...(recheck || []).map((t) => t.duration));
+      violations.push({ rule: 'long-task', message: `${stalls.length} main-thread task(s) over ${limit} ms while running (max ${round(max)} ms), ${recheck === null ? 'not re-measured' : 'again in a second window'}`, value: max, limit });
+    } else if (stalls.length > 0) {
+      warnings.push({ rule: 'long-task-stall', message: `${stalls.length} task(s) took over ${limit} ms of wall time (max ${round(Math.max(...stalls.map((t) => t.duration)))} ms) but under ${limit} ms of CPU and blocking calls, and did not recur in a second window: a host stall, not judged` });
     }
     const loading = (normal.longTasks || []).filter((t) => t.phase === 'load' && t.duration > budgets.longTaskMaxMs);
     if (loading.length > 0) warnings.push({ rule: 'load-long-task', message: `${loading.length} task(s) over ${budgets.longTaskMaxMs} ms during load (max ${round(Math.max(...loading.map((t) => t.duration)))} ms)` });
@@ -840,35 +843,98 @@ async function hostBaseline(browser, preview, viewport) {
   }
 }
 
+/** Trace events that run page script on the main thread, including promise continuations. */
+const SCRIPT_EVENTS = new Set(['FunctionCall', 'EvaluateScript', 'v8.evaluateModule', 'v8.callFunction', 'v8.run', 'RunMicrotasks', 'BlinkScheduler_PerformMicrotaskCheckpoint']);
+
+/**
+ * Samples the scheduler state of every Chromium renderer main thread under this process
+ * (Linux /proc) every ~2 ms, on the trace clock (CLOCK_MONOTONIC, microseconds). Returns
+ * { stop() → samples[] | null }; null where /proc is unavailable.
+ */
+function startThreadSampler() {
+  const children = (pid) => {
+    try {
+      return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').split(/\s+/).filter(Boolean).map(Number);
+    } catch {
+      return [];
+    }
+  };
+  if (process.platform !== 'linux' || !fs.existsSync(`/proc/${process.pid}/task/${process.pid}/children`)) return { stop: () => null };
+  const renderers = [];
+  const stack = [process.pid];
+  while (stack.length) {
+    const pid = stack.pop();
+    stack.push(...children(pid));
+    try {
+      if (fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--type=renderer')) renderers.push(pid);
+    } catch { /* exited */ }
+  }
+  const samples = [];
+  const sample = () => {
+    const t = Number(process.hrtime.bigint() / 1000n);
+    for (const pid of renderers) {
+      try {
+        const stat = fs.readFileSync(`/proc/${pid}/task/${pid}/stat`, 'utf8');
+        samples.push({ pid, t, state: stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) });
+      } catch { /* exited */ }
+    }
+  };
+  sample();
+  const timer = setInterval(sample, 2);
+  return { stop: () => { clearInterval(timer); sample(); return renderers.length ? samples : null; } };
+}
+
 /**
  * Renderer main-thread tasks longer than minMs (wall) in a Chromium trace, with the CPU time
- * the thread spent in each. A task stalled by the host (preempted, page faults, a blocked IPC)
- * has wall time but little CPU; a busy page burns CPU for the whole task.
+ * the thread spent in each and, when thread samples exist, `pageWait`: time the thread slept
+ * voluntarily (state S) while page script was on its stack, i.e. blocked in a call the page
+ * made (sync XHR, GPU readback). A host stall is involuntary: runnable but descheduled (R),
+ * in a page fault (D) or stopped (T). pageWait is null when the samples do not cover the task.
  */
-function traceMainThreadTasks(buf, minMs) {
+function traceMainThreadTasks(buf, minMs, samples = null) {
   const events = JSON.parse(buf.toString('utf8')).traceEvents || [];
   const main = new Set(events.filter((e) => e.ph === 'M' && e.name === 'thread_name' && e.args && e.args.name === 'CrRendererMain').map((e) => `${e.pid}:${e.tid}`));
-  const tasks = events.filter((e) => e.ph === 'X' && e.name === 'ThreadControllerImpl::RunTask' && main.has(`${e.pid}:${e.tid}`));
+  const onMain = (e) => e.ph === 'X' && main.has(`${e.pid}:${e.tid}`);
+  const tasks = events.filter((e) => onMain(e) && e.name === 'ThreadControllerImpl::RunTask');
   if (tasks.length === 0) throw new Error('trace recorded no renderer main-thread tasks');
+  const scripts = events.filter((e) => onMain(e) && SCRIPT_EVENTS.has(e.name));
   return tasks
     .filter((e) => e.dur > minMs * 1000)
     .map((e) => {
       if (typeof e.tdur !== 'number') throw new Error('trace has no thread CPU time for main-thread tasks');
-      return { phase: 'steady', duration: round(e.dur / 1000), cpu: round(e.tdur / 1000) };
+      const end = e.ts + e.dur;
+      const inScript = (t) => scripts.some((x) => x.pid === e.pid && x.tid === e.tid && x.ts <= t && t < x.ts + x.dur && x.ts >= e.ts && x.ts < end);
+      const own = (samples || []).filter((x) => x.pid === e.pid && x.t >= e.ts && x.t <= end).sort((a, b) => a.t - b.t);
+      let pageWait = null;
+      // Covered when samples bracket the task closely (no gap over 10 ms at either end).
+      if (own.length >= 2 && own[0].t - e.ts <= 10000 && end - own[own.length - 1].t <= 10000) {
+        const page = (x) => x.state === 'S' && inScript(x.t);
+        let us = 0;
+        for (let i = 0; i + 1 < own.length; i++) {
+          const gap = own[i + 1].t - own[i].t;
+          // A sampler gap (the host froze the sampler too) is host time unless both ends saw a page wait.
+          if (page(own[i]) && (gap <= 10000 || page(own[i + 1]))) us += gap;
+        }
+        pageWait = round(us / 1000);
+      }
+      return { phase: 'steady', duration: round(e.dur / 1000), cpu: round(e.tdur / 1000), pageWait };
     });
 }
 
 /** measureWindow under a Chromium trace; adds the window's long main-thread tasks with CPU time. */
 async function tracedWindow(browser, page, preview, workers, ms) {
-  await browser.startTracing(undefined, { categories: ['-*', 'toplevel'] });
+  await browser.startTracing(undefined, { categories: ['-*', 'toplevel', 'devtools.timeline', 'v8.execute'] });
+  const sampler = startThreadSampler();
   let win;
   let trace;
+  let samples;
   try {
     win = await measureWindow(page, preview, workers, ms);
   } finally {
+    samples = sampler.stop();
     trace = await browser.stopTracing();
   }
-  return { ...win, tasks: traceMainThreadTasks(trace, DEFAULT_BUDGETS.longTaskMaxMs) };
+  return { ...win, tasks: traceMainThreadTasks(trace, DEFAULT_BUDGETS.longTaskMaxMs, samples) };
 }
 
 /** Normal + hidden + reduced-motion measurements of one route (one user frame). */
@@ -883,7 +949,7 @@ async function measureRoute(browser, preview, route, opts) {
     if (!snap) throw new Error(`no user frame measured on ${route}`);
     let longTaskRecheck;
     const limit = DEFAULT_BUDGETS.longTaskMaxMs;
-    if (opts.recheckLongTasks && normal.tasks.length > 0 && normal.tasks.every((t) => t.cpu <= limit)) {
+    if (opts.recheckLongTasks && normal.tasks.length > 0 && normal.tasks.every((t) => typeof t.pageWait === 'number' && t.cpu + t.pageWait <= limit)) {
       // Long only in wall time: a one-off host stall does not recur, a page's blocking wait does.
       longTaskRecheck = (await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000)).tasks;
     }
