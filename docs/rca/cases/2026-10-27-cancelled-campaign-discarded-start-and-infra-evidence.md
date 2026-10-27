@@ -21,6 +21,8 @@ sources:
   - commit 34ff3f23e6efa9ced9ff75732357df973db14e86
   - benchmark run campaign-20261027-191411-2591810
   - agent ph7bpz2f14pct3j92t0e6nrvmx8h3nep
+  - commit 7b89e7902998fd49773a5b4273acd9e9678f22e1
+  - benchmark run campaign-20261027-211434-473987
 repro: scripts/tests/cloudbench-scorecard.test.py Scorecard.test_cancelled_campaign_keeps_started_lifecycles_and_infra_uncertainty
 status: fixed
 ---
@@ -121,3 +123,44 @@ may manufacture native release evidence from primary absence.
 ## Reusable lesson
 
 Keep logical cancellation, native child failure, controller start, provider release, and complete lifecycle as separate recorded facts when rendering campaign outcomes.
+
+## I14 preallocation recurrence — October 27, 2026
+
+The third Polar k2 campaign scheduled 30 jobs at 7b89e7902 and stopped on its
+original latched 2/30 infrastructure breach. No controller reached guest
+allocation or execution provenance. Unlike I6, no benchmark-child.finished
+could exist because the controllers stopped before spawning task children.
+The first fix therefore left 28 cancellation flags unattributed even though 27
+controllers' summary, report card and lifecycle all recorded signal exit 143.
+This is why the earlier child-only guardrail did not cover the recurrence.
+
+The launch owner supplied 482 immutable files. On those original artifacts the
+baseline already correctly showed Guests released 30/30 from provider seals.
+All 30 full lifecycle receipts really said failed, so Lifecycle verified 0/30
+must remain. Likewise every report card had empty code and no
+execution-provenance.json; the operator's prelaunch checkout observation is not
+executed-source evidence, so src UNRECORDED is correct. No source or lifecycle
+success was synthesized to satisfy the originally reported symptom.
+
+The new captured-data test
+`python3 scripts/tests/cloudbench-scorecard.test.py Scorecard.test_preallocation_controller_cancellation_receipts`
+fails on 7b89e7902 with 28 != 1 unattributed cancellations. It passes unchanged
+after the adapter accepts a controller's 129/130/143 only when its terminal
+summary, report card and lifecycle agree, including exact run/workspace identity.
+The established child-exit route remains first. An ordinary controller exit 1
+never becomes confirmed pre-cancellation infrastructure evidence.
+
+The actual replay now retains two canonical confirmed infra jobs and one
+unattributed cancellation, with 27 positively identified induced cancellations.
+The third raw log contains a snapshot refusal, but its cancelled summary and
+exit 1 alone cannot prove the ordering; it stays unclassified in the CLI.
+The scalar infra total therefore remains unknown with a lower bound of two,
+and the original stop remains breached. No task was scored. Original epochs
+1793135673.9932325 and 1793135908.741813 are unchanged, as are all 482 supplied
+files, 30/30 provider releases, 0/30 full lifecycles, and absent source attribution.
+
+This is a scorecard-only fix with the same read-only status/producer separation
+as the references above. It adds one local lifecycle read per fleet, bounded
+by campaign membership; no provider queries, runtime change, benchmark run or
+deployment. Regression coverage stays in the existing benchmark-scorecard gate,
+now 44 tests, with foreign lifecycle and conflicting exit negative controls.

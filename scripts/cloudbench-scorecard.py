@@ -594,6 +594,7 @@ def load_campaign(run_dir: Path) -> dict:
     releases = {}
     lifecycles = {}
     child_exits = {}
+    controller_exits = {}
     for job in summary.get("jobs") or []:
         if not isinstance(job, dict):
             continue
@@ -613,6 +614,14 @@ def load_campaign(run_dir: Path) -> dict:
                 continue
             cards[card["run_id"]] = card
             releases[card["run_id"]], lifecycles[card["run_id"]] = campaign_receipts(fleet, card)
+            lifecycle = read_json(fleet / "_batch/lifecycle.json") or {}
+            if (lifecycle.get("run_id") == fleet.name
+                    and lifecycle.get("workspace_root") == str(fleet.parents[3])
+                    and lifecycle.get("status") in ("verified", "failed")
+                    and type(lifecycle.get("controller_exit_code")) is int
+                    and lifecycle["controller_exit_code"] == card.get("controller_exit_code")
+                    == attempt.get("controller_exit_code")):
+                controller_exits[card["run_id"]] = lifecycle["controller_exit_code"]
             if Path(job["task"]).name == job["task"]:
                 try:
                     child_exits[card["run_id"]] = int((fleet / job["task"] / "benchmark-child.finished").read_text().strip())
@@ -648,6 +657,11 @@ def load_campaign(run_dir: Path) -> dict:
                 row["infra_attempts"] = max(1, row["infra_attempts"])
                 row["reason"] = "Native child exit 125; " + (row["reason"] or "task result not recorded")
             elif child_exit in (129, 130, 143):
+                row["cancellation_confirmed"] = True
+            elif child_exit is None and controller_exits.get(card["run_id"]) in (129, 130, 143):
+                # A preallocation controller has no child marker. Its matching
+                # terminal summary/card/lifecycle still records forwarded TERM.
+                # Ordinary failure exits alone never prove pre-cancel infra.
                 row["cancellation_confirmed"] = True
         ref = ((card or {}).get("execution_provenance") or {}).get("base_sha")
         if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):

@@ -192,6 +192,45 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_preallocation_controller_cancellation_receipts(self):
+        capture = json.loads((GOLDEN / "preallocation-campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / capture["summary"]["campaign_id"]
+        summary = dict(capture["summary"], jobs=[])
+        fleets = []
+        for record in capture["records"]:
+            job_record = dict(record["job"])
+            fleet = root / ".context/fleet/runs" / record["card"]["run_id"]
+            fleets.append(fleet)
+            job_record["fleet_dir"] = str(fleet)
+            summary["jobs"].append(job_record)
+            write(fleet / "_batch/report-card.json", record["card"])
+            write(fleet / "_batch/lifecycle.json", dict(record["lifecycle"], workspace_root=str(root)))
+            write(fleet / "teardown-ownership/meta", record["meta"].replace("/home/boxes/rose", str(root)))
+            write(fleet / "teardown-ownership/provider-teardown-verified.epoch", record["release_epoch"])
+        write(directory / "summary.json", summary)
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["infra_unattributed_cancelled"], 1, "27 matching controller TERM receipts prove induced cancellations")
+        self.assertEqual(exp["infra_confirmed_jobs"], 2, "only the original latched breach certifies these infra jobs")
+        self.assertEqual(exp["outcomes"]["CANCELLED"], 28)
+        self.assertEqual(exp["scored"], 0)
+        self.assertIsNone(exp["infra_jobs"], "the third refusal has no typed pre-cancel failure receipt")
+        self.assertIsNone(exp["source_ref"], "prelaunch checkout is not executed-source provenance")
+        self.assertEqual(exp["released"], {"yes": 30, "of": 30})
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 30}, "failed full lifecycle stays failed")
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        # A foreign lifecycle cannot lend its exit status to the scheduled job.
+        lifecycle = dict(capture["records"][0]["lifecycle"], workspace_root=str(root), run_id="foreign")
+        write(fleets[0] / "_batch/lifecycle.json", lifecycle)
+        invalid = CARD["load"](directory)
+        self.assertEqual(invalid["infra_unattributed_cancelled"], 2)
+        self.assertEqual(invalid["released"], {"yes": 29, "of": 30})
+        # Matching failure exit 1 alone never proves a pre-cancellation cause.
+        lifecycle["run_id"] = fleets[0].name
+        lifecycle["controller_exit_code"] = 1
+        write(fleets[0] / "_batch/lifecycle.json", lifecycle)
+        self.assertEqual(CARD["load"](directory)["infra_unattributed_cancelled"], 2)
+
     def test_cancelled_campaign_keeps_started_lifecycles_and_infra_uncertainty(self):
         capture = json.loads((GOLDEN / "cancelled-campaign-receipts.json").read_text())
         root = self.tmp / "workspace"
