@@ -104,6 +104,7 @@ export interface TerminalUIState {
   setCurrentView: (view: TerminalView) => void;
   agents: Agent[];
   isLoadingAgents: boolean;
+  hasLoadedAgents: boolean;
   createModalOpen: boolean;
   setCreateModalOpen: (open: boolean) => void;
   loginModalOpen: boolean;
