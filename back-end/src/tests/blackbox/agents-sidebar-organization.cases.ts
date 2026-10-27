@@ -473,8 +473,13 @@ test('archived-agent status backfill settles only archived non-terminal rows, id
   assert(dryRun.pendingBefore >= 1 && dryRun.updated === 0, 'dry run must count but not write');
   const first = await backfillArchivedAgentStatus({ execute: true, batchSize: 1 });
   assert(first.updated >= 1, `backfill must settle the stale row, got ${JSON.stringify(first)}`);
-  const second = await backfillArchivedAgentStatus({ execute: true });
-  assert(second.pendingBefore === 0 && second.updated === 0, 'a second run must find nothing');
+  // Idempotency on this test's own row: a global "nothing left" count races
+  // concurrent domains archiving agents in the shared database.
+  const updatedAt = async () =>
+    (await prisma.agent.findUniqueOrThrow({ where: { id: staleId } })).updatedAt.getTime();
+  const settledAt = await updatedAt();
+  await backfillArchivedAgentStatus({ execute: true });
+  assert((await updatedAt()) === settledAt, 'a second run must not touch an already-settled row');
 
   const rows = await prisma.agent.findMany({
     where: { id: { in: [staleId, liveId, benchmarkId, heldId, skeletonId] } },

@@ -3,7 +3,8 @@
  * list (for the UI's This Mac / Cloud switch) and the worker's target check.
  */
 import type { Server } from 'http';
-import { localDeviceHub } from '../../providers/localDevices/hub';
+import { localDeviceHub, setLocalDeviceHubFactory } from '../../providers/localDevices/hub';
+import { RoutedLocalDeviceHub } from '../../providers/localDevices/routedHub';
 import { resolveLocalTarget } from '../../providers/localDevices/session';
 import { DEFAULT_DEVICE_PLATFORM } from './config';
 import * as repo from './repo';
@@ -11,13 +12,16 @@ import type { AgentTargetView, LocalDeviceView, RegisterDeviceBody } from './typ
 
 export { DeviceOwnedByAnotherUserError } from './repo';
 
-function toView(device: repo.LocalDeviceRecord): LocalDeviceView {
+// More than one backend instance may serve a Mac's sockets: route between them.
+setLocalDeviceHubFactory(() => new RoutedLocalDeviceHub());
+
+async function toView(device: repo.LocalDeviceRecord): Promise<LocalDeviceView> {
   return {
     device_id: device.id,
     name: device.name,
     platform: device.platform,
     app_version: device.appVersion,
-    connected: localDeviceHub().isDeviceConnected(device.id),
+    connected: await localDeviceHub().deviceOnline(device.id),
     last_seen_at: device.lastSeenAt.toISOString(),
   };
 }
@@ -37,7 +41,7 @@ export async function registerDevice(
 }
 
 export async function listDevices(userId: string): Promise<LocalDeviceView[]> {
-  return (await repo.listLocalDevices(userId)).map(toView);
+  return Promise.all((await repo.listLocalDevices(userId)).map(toView));
 }
 
 export async function agentTarget(agentId: string): Promise<AgentTargetView> {

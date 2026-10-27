@@ -63,6 +63,54 @@ async function dropFirstCommitAck(tags: string[]): Promise<{ dropped: () => bool
   return { dropped: () => dropped };
 }
 
+/** A real HTTP server with the production (routed) local-device hub on `port`. */
+async function serveRoutedHub(port: number) {
+  const { createServer } = await import('node:http');
+  const { RoutedLocalDeviceHub } = await import('../../providers/localDevices/routedHub');
+  const hub = new RoutedLocalDeviceHub(
+    {
+      verifyUser: async (token) => (token === 'mi-device-token' ? 'mi-hub-user' : null),
+      findDevice: async (id) => ({
+        id,
+        userId: 'mi-hub-user',
+        name: 'Multi-instance Mac',
+        platform: 'darwin',
+        appVersion: null,
+        lastSeenAt: new Date(),
+      }),
+      // The session row a backend restart or owner move restores from.
+      findActiveSession: async (taskId) =>
+        process.env.MI_HUB_DEVICE === undefined
+          ? null
+          : {
+              id: taskId,
+              agentId: taskId,
+              sandboxId: `mac-${process.env.MI_HUB_DEVICE}-${taskId}`,
+            },
+      touchDevice: async () => undefined,
+      relaySecret: () => 'mi-relay-secret',
+      pingIntervalMs: 1_000,
+    },
+    `http://127.0.0.1:${port}`
+  );
+  const server = createServer((_req, res) => res.end());
+  hub.attach(server);
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+  return {
+    hub,
+    close: async () => {
+      hub.close();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+/** Wait for the next line on stdin (the parent's step signal). */
+const nextLine = () =>
+  new Promise<void>((resolve) => {
+    process.stdin.once('data', () => resolve());
+  });
+
 async function main(): Promise<unknown> {
   const [op, ...args] = process.argv.slice(2);
   switch (op) {
@@ -180,6 +228,91 @@ async function main(): Promise<unknown> {
       await barrier();
       await repo.clearSmsSession(args[0]);
       return { dropped: lostAck.dropped() };
+    }
+    case 'hub-serve': {
+      // Owns the Mac's control channel; serves until the parent's next line.
+      const served = await serveRoutedHub(Number(args[0]));
+      await barrier();
+      await nextLine();
+      await served.close();
+      return { served: true };
+    }
+    case 'hub-start-local': {
+      // Starts a session on a Mac connected HERE, then (after the parent moves
+      // the Mac to another instance) stops it from here.
+      const [port, deviceId, taskId] = args;
+      const served = await serveRoutedHub(Number(port));
+      await barrier();
+      await sleep(1_500);
+      await served.hub.startSession({
+        deviceId,
+        userId: 'mi-hub-user',
+        command: {
+          type: 'start_session',
+          task_id: taskId,
+          agent_id: taskId,
+          provider: 'claude',
+          folder: null,
+          envs: {},
+          relay_path: `/api/local-code-relay/${taskId}/device`,
+          home_files: [],
+        },
+        deadlineMs: 15_000,
+      });
+      process.stdout.write('STARTED\n');
+      await nextLine();
+      await served.hub.stopSession(taskId, deviceId);
+      process.stdout.write('STOPPED\n');
+      await nextLine();
+      await served.close();
+      return { stopped: true };
+    }
+    case 'hub-start': {
+      // Another instance: starts, probes and stops a session on a Mac whose
+      // control channel lives on the 'hub-serve' instance.
+      const [port, deviceId, taskId] = args;
+      const served = await serveRoutedHub(Number(port));
+      await barrier();
+      await sleep(1_500);
+      const online = await served.hub.deviceOnline(deviceId);
+      const home = await served.hub.sessionHome(deviceId, taskId);
+      const { folder } = await served.hub.startSession({
+        deviceId,
+        userId: 'mi-hub-user',
+        command: {
+          type: 'start_session',
+          task_id: taskId,
+          agent_id: taskId,
+          provider: 'claude',
+          folder: null,
+          envs: {},
+          relay_path: `/api/local-code-relay/${taskId}/device`,
+          home_files: [],
+        },
+        deadlineMs: 15_000,
+      });
+      process.stdout.write('STARTED\n');
+      await nextLine();
+      const live = await served.hub.sessionLive(deviceId, taskId);
+      await served.hub.stopSession(taskId, deviceId);
+      await served.close();
+      return { online, home, folder, live };
+    }
+    case 'workspace-exec': {
+      // An E2B code session created on another instance: this instance has no
+      // registered executor, so it must reach the sandbox by the session's id.
+      const workspace = await import('../../providers/projects/workspace');
+      const connected: string[] = [];
+      await barrier();
+      const executor = await workspace.resolveWorkspaceExecutor(args[0], async (sandboxId) => {
+        connected.push(sandboxId);
+        return {
+          files: { write: async () => undefined },
+          commands: { run: async (cmd) => ({ exitCode: 0, stdout: `ran:${cmd}`, stderr: '' }) },
+        };
+      });
+      const run = executor === null ? null : await executor.run('echo hi', { timeoutMs: 1_000 });
+      return { connected, homeDir: executor?.homeDir ?? null, stdout: run?.stdout ?? null };
     }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');
