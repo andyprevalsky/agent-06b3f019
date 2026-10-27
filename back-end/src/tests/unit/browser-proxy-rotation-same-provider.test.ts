@@ -54,20 +54,16 @@ function testLockedLadderNeverSwitchesProvider(): void {
         });
     }
   }
-  // Tilion: positions 3/4 would switch to Kernel/Browser Use; locked they alternate fresh
-  // Tilion exits, so both exit classes (residential, datacenter) are tried in order.
+  // Tilion: positions 3/4 would switch to Kernel/Steel; locked they are Tilion residential replacements.
   const tilionLocked = [1, 2, 3, 4].map((position) =>
     sameProviderRotationStep(
       selectRotationStep(position, 'tilion', false, true, false),
       'tilion',
-      ALL,
-      position
+      ALL
     )!
   );
-  assert.ok(tilionLocked.every((step) => step.provider === 'tilion'));
-  assert.deepStrictEqual(
-    tilionLocked.map((step) => step.proxyType),
-    ['residential', 'direct', 'residential', 'direct']
+  assert.ok(
+    tilionLocked.every((step) => step.provider === 'tilion' && step.proxyType === 'residential')
   );
   // Kernel keeps its residential -> mobile rungs, then fresh Kernel residential instead of Steel.
   assert.deepStrictEqual(
@@ -105,10 +101,7 @@ function testNextRecoveryLabel(): void {
     'knob off: the normal ladder label'
   );
   assert.match(nextRecoveryLabel(3, 'tilion', false, ALL), /^switch_provider_to_/);
-  assert.strictEqual(nextRecoveryLabel(1, 'tilion', true, ALL), 'rotate_tilion_residential_ip');
-  assert.strictEqual(nextRecoveryLabel(2, 'tilion', true, ALL), 'rotate_tilion_datacenter_ip');
   assert.strictEqual(nextRecoveryLabel(3, 'tilion', true, ALL), 'rotate_tilion_residential_ip');
-  assert.strictEqual(nextRecoveryLabel(4, 'tilion', true, ALL), 'rotate_tilion_datacenter_ip');
   assert.strictEqual(
     nextRecoveryLabel(1, 'tilion', true, { browserUse: true, tilion: false }),
     'no_same_provider_rung_left'

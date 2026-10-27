@@ -33,7 +33,8 @@ import {
   resumeKernelSession,
   rotateKernelSession,
 } from './kernel';
-import type { RotationProxyType, RotationRecoveryAction, RotationStep } from './rotation';
+import type { KernelProxyType } from './kernelProxy';
+import type { RotationRecoveryAction, RotationStep } from './rotation';
 import { persistSignedInBrowserState } from './sessionAuthPersist';
 import {
   closeTilionSession,
@@ -389,7 +390,7 @@ export class ProxyRotationUnsupportedError extends Error {
 export interface BrowserProxyRotationResult extends BrowserProviderResumeSession {
   previousProvider: BrowserProviderName;
   recoveryAction: RotationRecoveryAction;
-  proxyType: RotationProxyType;
+  proxyType: KernelProxyType;
 }
 
 /** Execute one server-selected rotate_ip recovery step. */
@@ -417,9 +418,6 @@ export async function rotateProxy(
             select: { sessionId: true },
           })
         : null;
-    if (step.proxyType === 'direct') {
-      throw new Error('Kernel has no datacenter exit rung; the ladder never selects one');
-    }
     const session = await rotateKernelSession(taskId, step.proxyType, providerOptions);
     if (previous !== null) {
       await releaseSupersededBrowser({

@@ -61,22 +61,13 @@ export function registerTilionCarryCases(test: RegisterTest): void {
           rotateBrowserProxy(run.session.id, run.owner.userId, undefined, carry, fake.dependencies);
         const first = await rotate1();
         assert(first.provider === 'tilion', `rotation 1: ${first.provider}`);
-        const datacenter = await rotate1();
-        assert(
-          datacenter.provider === 'tilion' && datacenter.proxy_tier === 'direct',
-          `rotation 2: ${datacenter.provider}/${datacenter.proxy_tier}`
-        );
         // A Tilion replacement consumes the carry inside the Tilion adapter.
         assert(restores.length === 0, 'Tilion replacement restored the carry twice');
         const second = await rotate1();
-        assert(second.provider === 'kernel', `rotation 3: ${second.provider}`);
+        assert(second.provider === 'kernel', `rotation 2: ${second.provider}`);
         const third = await rotate1();
-        assert(third.provider === 'steel', `rotation 4: ${third.provider}`);
-        // A rotation that carries nothing restores nothing (budget reopened for one more).
-        await prisma.browserSession.update({
-          where: { id: run.session.id },
-          data: { proxyRotationCount: 3 },
-        });
+        assert(third.provider === 'steel', `rotation 3: ${third.provider}`);
+        // A rotation that carries nothing restores nothing.
         await rotateBrowserProxy(
           run.session.id,
           run.owner.userId,
@@ -122,9 +113,8 @@ export function registerTilionCarryCases(test: RegisterTest): void {
         const rotate = () =>
           rotateBrowserProxy(run.session.id, run.owner.userId, undefined, {}, fake.dependencies);
         assert((await rotate()).provider === 'tilion', 'rotation 1 stays on Tilion in place');
-        assert((await rotate()).provider === 'tilion', 'rotation 2 is the Tilion datacenter exit');
 
-        // Rotation 3 switches to Kernel while the Tilion browser is still live.
+        // Rotation 2 switches to Kernel while the Tilion browser is still live.
         fake.dependencies.tilionSessionLive = async () => true;
         let refused: unknown = null;
         await rotate().catch((error: unknown) => {
@@ -135,7 +125,7 @@ export function registerTilionCarryCases(test: RegisterTest): void {
           where: { id: run.session.id },
         });
         assert(afterRefusal.provider === 'tilion', 'refused switch replaced the browser');
-        assert(afterRefusal.proxyRotationCount === 2, 'refused switch kept its rotation');
+        assert(afterRefusal.proxyRotationCount === 1, 'refused switch kept its rotation');
 
         // Paused: the durable snapshot is the state source for the Kernel replacement.
         await prisma.browserSession.update({

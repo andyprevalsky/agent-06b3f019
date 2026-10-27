@@ -12,7 +12,6 @@ import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
 import type { TilionReplacementSession } from './tilion';
-import { storedTilionProxyType } from './tilionConfig';
 import { tilionRequest, tilionSessionPath } from './tilionClient';
 
 const log = createLogger('Tilion');
@@ -42,8 +41,6 @@ export async function rotateInPlace(taskId: string): Promise<TilionReplacementSe
   if (row.provider !== 'tilion' || row.status !== 'ACTIVE' || !row.wsUrl || !row.debugUrl) {
     return null;
   }
-  // A datacenter session has no residential exit to rotate: replace it with one.
-  if (storedTilionProxyType(row.proxyTier) === 'direct') return null;
   let response: RotateIpResponse | null;
   try {
     // Not retried: a lost reply may already have moved the exit.
