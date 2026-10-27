@@ -210,21 +210,43 @@ export async function runLiveTilionConcurrency(): Promise<void> {
   );
 }
 
+/** The deploy gate override that holds the live cases needing Tilion residential egress. */
+export const TILION_RESIDENTIAL_LIVE_OVERRIDE = 'browser-provider:tilion-residential-live';
+
+function gateOverridden(gate: string): boolean {
+  return (process.env.DEPLOY_GATE_OVERRIDES ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .includes(gate);
+}
+
 /**
  * The live auth-handoff and Tilion cases of the /deploy-run browser-provider
  * domain, in order. Returns the failure count so the runner keeps going.
+ * Cases that pin a Tilion residential exit are skipped, loudly and never as a
+ * pass, only when a user explicitly overrides them for a deploy (the pilot's
+ * residential allowance can be used up: Tilion answers 402 premium_egress_exhausted).
  */
 export async function runLiveCrossProviderCases(): Promise<number> {
   if (!process.env.TEST_BASE_URL) return 0;
-  const cases: Array<[string, () => Promise<void>]> = [
-    ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel')],
-    ['live Tilion provider parity', runLiveTilionProviderParity],
-    ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion')],
-    ['live Tilion challenge recovery', runLiveTilionChallengeRecovery],
-    ['live Tilion concurrency cap', runLiveTilionConcurrency],
+  const cases: Array<[string, () => Promise<void>, boolean]> = [
+    ['live Kernel/Steel auth persist', () => runLiveKernelSteelAuthPersist('steel'), false],
+    ['live Tilion provider parity', runLiveTilionProviderParity, true],
+    ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion'), true],
+    ['live Tilion challenge recovery', runLiveTilionChallengeRecovery, true],
+    ['live Tilion concurrency cap', runLiveTilionConcurrency, false],
   ];
+  const holdResidential = gateOverridden(TILION_RESIDENTIAL_LIVE_OVERRIDE);
   let failed = 0;
-  for (const [label, run] of cases) {
+  for (const [label, run, needsResidential] of cases) {
+    if (needsResidential && holdResidential) {
+      console.log(
+        `⚠️⚠️ SKIPPED ${label} -- explicitly overridden by DEPLOY_GATE_OVERRIDES=` +
+          `${TILION_RESIDENTIAL_LIVE_OVERRIDE} (Tilion residential egress unavailable); ` +
+          'NOT a pass: rerun once residential usage is confirmed'
+      );
+      continue;
+    }
     try {
       await run();
     } catch (error) {
