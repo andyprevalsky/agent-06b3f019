@@ -610,6 +610,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
 `python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
+`python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -1949,6 +1950,24 @@ a clean completed review. Enforce that invariant rather than trusting prose:
 ```bash
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
+
+**Main moved after a clean final review (sync-only HEAD).** When main must be
+merged after the last clean cycle (for example, the generated
+`docs/rca/INDEX.md` conflicts), merge `origin/main`, regenerate generated files
+(`python3 scripts/rca_archive.py reindex`), commit, re-run the gates the merged
+tree affects, then record the audited inheritance instead of hand-editing the
+ledger:
+
+```bash
+python3 scripts/deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main
+```
+
+It refuses unless the latest real review is clean, every new first-parent
+commit is a merge of history already on the base, the branch-only diff
+(generated files excluded) is byte-identical to the reviewed diff, and every
+file the sync changed was changed on the base or is generated. Its entry does
+not count toward the review-cycle cap. Any refusal means the change needs a
+real review cycle.
 
 ## Step 11: Archive plan (before the final review)
 

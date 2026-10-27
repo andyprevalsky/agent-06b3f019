@@ -104,6 +104,14 @@ def deployment_queue(identity, job_id):
     return f"navi-agent-tasks-pool-{suffix}@{identity['surfaceHash']}"
 
 
+def config_available(machine):
+    # The config itself or a nested section (env/init/metadata) may be null when its host is unreachable.
+    config = machine.get("config")
+    return isinstance(config, dict) and all(
+        isinstance(config.get(section, {}), dict) for section in ("env", "init", "metadata")
+    )
+
+
 class NativePool(WorkerRuntime):
     def __init__(self, identity, ledger):
         self.identity = identity
@@ -171,7 +179,7 @@ class NativePool(WorkerRuntime):
 
     def target(self, machine, draining=False):
         # A Machine on an unreachable host is returned with "config": null.
-        if not isinstance(machine.get("config"), dict):
+        if not config_available(machine):
             return False
         marker = pool.metadata(machine, pool.POOL_KEY)
         env = machine["config"].get("env", {})
@@ -194,7 +202,7 @@ class NativePool(WorkerRuntime):
 
     def prepare(self, expected, previous, start=True):
         machine = self.get(expected["id"])
-        if not isinstance(machine.get("config"), dict):
+        if not config_available(machine):
             raise ValueError("Reserved Machine config is unavailable; its host may be unreachable")
         if not self.target(machine):
             if pool.metadata(machine, pool.CUSTODY_KEY).get("rootfs_disposition") != "stateless":
