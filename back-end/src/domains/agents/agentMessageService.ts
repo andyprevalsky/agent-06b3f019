@@ -12,7 +12,6 @@ import {
   createUserMessageInTransaction,
   createWorkflowMessageGroup,
 } from '../../providers/messages';
-import { prisma } from '../../providers/database';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import {
   generateResponseSchema,
@@ -20,6 +19,7 @@ import {
 } from '../../providers/setResponseSchema';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
+import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
 
 /**
@@ -243,18 +243,13 @@ async function createBrowserTargetedMessage(
   body: PostMessageBody,
   browserTaskId: string
 ) {
-  const message = await prisma.$transaction(async (tx) => {
-    const [session] = await tx.$queryRaw<Array<{ status: string }>>`
-      SELECT status FROM "BrowserSession"
-      WHERE id = ${browserTaskId} AND "agentId" = ${agentId}
-      FOR SHARE`;
-    if (session?.status !== 'ACTIVE') return null;
-    return createUserMessageInTransaction(tx, {
+  const message = await withActiveBrowserSessionShareLock(agentId, browserTaskId, (tx) =>
+    createUserMessageInTransaction(tx, {
       agentId,
       text: body.message,
       metadata: { ...(body.metadata ?? {}), browserTaskId, excludeFromModel: true },
-    });
-  });
+    })
+  );
   if (message !== null) {
     broadcastCreatedMessage({ agentId, text: message.text, role: 'USER' }, message);
   }
