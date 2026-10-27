@@ -26,6 +26,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { isPhoneHarnessExchange, credentialMetadataUrl } from './fetchCapturePrivacy';
+import { responseFromSerialized, type SerializedResponse } from './fetchCaptureResponse';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -71,15 +72,6 @@ export interface CapturedCall {
   error: string | null;
   cached: boolean;
   captureToken: string | null;
-}
-
-interface SerializedResponse {
-  status: number;
-  statusText: string;
-  body: string;
-  headers: Record<string, string>;
-  /** Private capture metadata — never store this in upstream HTTP headers. */
-  bodyEncoding?: 'base64';
 }
 
 /**
@@ -163,24 +155,6 @@ function isCredentialExchange(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Statuses the WHATWG Response constructor rejects with any body, even ''. */
-const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
-
-function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
-  const headers: Record<string, string> = { ...serialized.headers };
-  const body = NULL_BODY_STATUSES.has(serialized.status)
-    ? null
-    : serialized.bodyEncoding === 'base64'
-      ? Buffer.from(serialized.body, 'base64')
-      : serialized.body;
-
-  return new globalThis.Response(body, {
-    status: serialized.status,
-    statusText: serialized.statusText,
-    headers,
-  });
 }
 
 class NonReplayableResponseError extends Error {

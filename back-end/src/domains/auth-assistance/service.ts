@@ -196,28 +196,27 @@ async function liveSameSessionHandoff(
   };
 }
 
+/** A completed or non-live-view request has no browser to refresh: echo its handoff. */
+function unrefreshedHandoff(
+  request: NonNullable<Awaited<ReturnType<typeof repo.findRequestById>>>
+) {
+  if (request.completedAt === null && request.mode === 'live_view') return null;
+  return {
+    request: serializeRequest(request),
+    handoff: handoffForMode(request.mode as AuthAssistanceMode, request.steelSessionId, null),
+    refreshed: false,
+    alreadyCompleted: request.completedAt !== null,
+  };
+}
+
 export async function refreshAuthAssistanceSession(id: string, userId: string) {
   const native = await readNative(id, userId, true);
   if (native !== null) return native;
   const request = await repo.findRequestById(id);
   if (request === null) throw new NotFoundError('Auth assistance request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
-  if (request.completedAt !== null) {
-    return {
-      request: serializeRequest(request),
-      handoff: handoffForMode(request.mode as AuthAssistanceMode, request.steelSessionId, null),
-      refreshed: false,
-      alreadyCompleted: true,
-    };
-  }
-  if (request.mode !== 'live_view') {
-    return {
-      request: serializeRequest(request),
-      handoff: handoffForMode(request.mode as AuthAssistanceMode, request.steelSessionId, null),
-      refreshed: false,
-      alreadyCompleted: false,
-    };
-  }
+  const unrefreshed = unrefreshedHandoff(request);
+  if (unrefreshed !== null) return unrefreshed;
 
   const session =
     request.browserSessionId !== null

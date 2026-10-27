@@ -56,6 +56,38 @@ interface LegacyInitDependencies<Credentials extends LegacyCredentials, Metadata
   ) => Metadata;
 }
 
+/** The credential step: reuses the validation socket and cleans up on failure. */
+async function prepareLegacyCredentials<Credentials extends LegacyCredentials>(
+  session: BrowserProviderSession,
+  userId: string,
+  startUrl: string,
+  prepare: LegacyInitDependencies<Credentials, unknown>['prepare']
+): Promise<Credentials> {
+  // Tilion accepts one CDP client: free the validation socket before the
+  // response (and before close's harvest) so the next attach is not refused with 4409.
+  const releaseTilionValidationSocket = async () => {
+    if (session.provider === 'tilion') {
+      await session.validationBrowser?.close().catch(() => undefined);
+    }
+  };
+  try {
+    return await prepare(session.sessionId, userId, startUrl, {
+      browser: session.validationBrowser ?? undefined,
+    });
+  } catch (error) {
+    await releaseTilionValidationSocket();
+    await closeSession(session.sessionId, false).catch((cleanupError) => {
+      log.error('Failed to clean up browser after credential preparation error', {
+        sessionId: session.sessionId,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    });
+    throw error;
+  } finally {
+    await releaseTilionValidationSocket();
+  }
+}
+
 export async function initLegacySession<Credentials extends LegacyCredentials, Metadata>(
   userId: string,
   agentId: string,
@@ -100,30 +132,12 @@ export async function initLegacySession<Credentials extends LegacyCredentials, M
     ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
-  // Tilion accepts one CDP client: free the validation socket before the
-  // response (and before close's harvest) so the next attach is not refused with 4409.
-  const releaseTilionValidationSocket = async () => {
-    if (session.provider === 'tilion') {
-      await session.validationBrowser?.close().catch(() => undefined);
-    }
-  };
-  let credentials: Credentials;
-  try {
-    credentials = await dependencies.prepare(session.sessionId, userId, startUrl, {
-      browser: session.validationBrowser ?? undefined,
-    });
-  } catch (error) {
-    await releaseTilionValidationSocket();
-    await closeSession(session.sessionId, false).catch((cleanupError) => {
-      log.error('Failed to clean up browser after credential preparation error', {
-        sessionId: session.sessionId,
-        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-      });
-    });
-    throw error;
-  } finally {
-    await releaseTilionValidationSocket();
-  }
+  const credentials = await prepareLegacyCredentials(
+    session,
+    userId,
+    startUrl,
+    dependencies.prepare
+  );
   const userSettings = toUserSettings(user);
 
   log.info('Including passwords in init response', { count: credentials.passwords.length });
