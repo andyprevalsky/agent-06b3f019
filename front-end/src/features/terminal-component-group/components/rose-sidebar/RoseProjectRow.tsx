@@ -1,7 +1,9 @@
 /**
  * STATE MACHINE: RoseProjectRow (Rose left bar project row, UI ledger rows 57/60)
  *
- *   [REST]  folder · name · [+ new agent here] · [⚙ settings]
+ *   [REST]  icon · name · [+ new agent here] · [⚙ settings]
+ *           icon = ProjectIcon: the GitHub repo owner's avatar when repoUrl is a
+ *           GitHub repo, else (or after a load error) the folder (UI item 32)
  *   [REST] --right-click--> [MENU] Rename project | Project settings | Delete project (red)
  *   [MENU] --Rename--> [RENAMING] inline input --Enter (non-empty)--> onRename(name) --> [REST]
  *                                              --Escape | blur--> [REST]
@@ -31,6 +33,7 @@ import {
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
+import ProjectIcon from './ProjectIcon';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const MENU_SURFACE =
@@ -153,7 +156,7 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
           )}
           style={isActive ? { color: ROSE_ACTIVE_COLOR } : undefined}
         >
-          <Folder className="h-5 w-5 flex-none" strokeWidth={1.7} />
+          <ProjectIcon repoUrl={project.repoUrl} />
           {props.isRenaming ? (
             <InlineNameInput
               label={`Rename ${project.name}`}

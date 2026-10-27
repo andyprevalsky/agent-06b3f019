@@ -225,3 +225,69 @@ class RealPasskeyCaptureProbe(ApprovalLifecycleProbe):
                 assert self.events.index("save_reference") < self.events.index("backend_release")
             else:
                 assert not self.saved, self.events
+
+
+class TerminalPasskeyCaptureProbe(RealPasskeyCaptureProbe):
+    """Use real passkey readback while contrasting terminal and approval custody."""
+
+    def __init__(self, provider, mode, scenario):
+        self.terminal_scenario = scenario
+        super().__init__(provider, mode, "completed" if scenario in {"cancelled", "error"} else scenario)
+        self.warnings = []
+        self.result = None
+
+    def install(self, stack, handler):
+        super().install(stack, handler)
+        from helpers import activity_generation_drain
+        from temporalio import activity
+
+        async def queue_pointer(**_kwargs):
+            return {"task_queue": activity.info().task_queue, "surface_hash": None}
+
+        stack.enter_context(patch.object(activity_generation_drain, "_cached_at", None))
+        stack.enter_context(patch.object(activity_generation_drain, "_cached_queue", None))
+        stack.enter_context(patch.object(activity_generation_drain, "read_agent_queue_pointer", queue_pointer))
+        model = handler._call_browser_use_with_rotation
+
+        async def step(**kwargs):
+            self.parking = True
+            return await model(**kwargs)
+
+        stack.enter_context(patch.object(handler, "_call_browser_use_with_rotation", side_effect=step))
+        user_control = handler._wait_for_browser_user_control
+
+        async def wait_for_control(*args, **kwargs):
+            if self.parking:
+                if self.terminal_scenario == "cancelled":
+                    raise asyncio.CancelledError()
+                if self.terminal_scenario == "error":
+                    raise RuntimeError("fixture terminal model failure")
+            return await user_control(*args, **kwargs)
+
+        stack.enter_context(patch.object(handler, "_wait_for_browser_user_control", side_effect=wait_for_control))
+        warning = handler.logger.warning
+
+        def warn(message, **kwargs):
+            self.warnings.append(message)
+            return warning(message, **kwargs)
+
+        stack.enter_context(patch.object(handler.logger, "warning", side_effect=warn))
+
+    async def observe(self, result, handler):
+        self.result = result
+        await handler.drain_background_browser_cleanups(timeout=2)
+
+    async def assert_terminal_cleanup(self, handler):
+        await handler.drain_background_browser_cleanups(timeout=2)
+        assert not self.alive, self.events
+        assert self.events.count("checkpoint") == self.events.count("backend_release") == 1, self.events
+        assert "recording_finalized" in self.events and "reset_cdp" in self.events, self.events
+        assert "sdk_provider_stop" not in self.events, self.events
+        assert "Passkey usage capture incomplete; continuing terminal browser pause" in self.warnings, self.warnings
+        assert self.events.index("backend_release") < self.events.index("reset_cdp"), self.events
+        if self.result is not None:
+            assert self.result["status"] == {
+                "completed": "completed", "max_steps": "max_iterations", "cancelled": "cancelled",
+                "auth": "cancelled",
+            }[self.terminal_scenario], self.result
+            assert "browser_cleanup" not in self.result, self.result

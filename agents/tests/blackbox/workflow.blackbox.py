@@ -4394,6 +4394,28 @@ async def test_workflow_attention_duplicate_physical_rows_in_one_batch_are_one_e
         _restore_workflow(original)
 
 
+async def test_workflow_browser_targeted_row_is_not_owner_schema_feedback():
+    """A Browser-composer row (browserTaskId + excludeFromModel) is that browser's input only."""
+    wf, fake, _replacement = _user_schema_refresh_fixture()
+    goal = {"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-14T17:20:00Z"}
+    row = {
+        "id": "to-browser",
+        "role": "USER",
+        "text": "go to instacart instead",
+        "timestamp": "2026-10-14T17:21:00Z",
+        "metadata": {"browserTaskId": "task-1", "excludeFromModel": True},
+    }
+    wf.context = [goal, row]
+    fake.activity_returns["poll_new_messages"] = [goal, row]
+    original = _patch_workflow(fake)
+    try:
+        requirements = await wf._response_schema_user_messages()
+        assert row["text"] not in requirements, "a browser-addressed row became the owner's schema feedback"
+        assert wf.goal in requirements
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_attention_authored_control_word_is_real_feedback_verbatim():
     wf, fake, _replacement = _user_schema_refresh_fixture()
     wf.context = [{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-14T17:20:00Z"}]
@@ -12517,6 +12539,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "wf_attention_event_ledger_continue_as_new", test_workflow_attention_event_ledger_survives_continue_as_new
+    )
+    await r.record_async(
+        "workflow_browser_targeted_row_not_owner_schema_feedback",
+        test_workflow_browser_targeted_row_is_not_owner_schema_feedback,
     )
     await r.record_async(
         "wf_attention_duplicate_batch_physical_rows",

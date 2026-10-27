@@ -5,7 +5,7 @@
  * We stub those dependencies to drive its state branches deterministically.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import { makeChipMessage as makeMsg } from './terminal-component-chips.fixtures';
@@ -73,6 +73,33 @@ import ClaudeCodeChip from '@/features/terminal-component-group/components/Claud
 // ClaudeCodeChip
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Inert socket: records its URL and never schedules open/error/message events, so a
+ * chip's socket can never fire after the environment tears down. Tests that need
+ * open/messages install their own MockWebSocket and drive it.
+ */
+class InertWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static created: string[] = [];
+  readyState = InertWebSocket.CONNECTING;
+  onopen: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  constructor(readonly url: string) {
+    InertWebSocket.created.push(url);
+  }
+  send() {}
+  close() {
+    this.readyState = InertWebSocket.CLOSED;
+  }
+  addEventListener() {}
+  removeEventListener() {}
+}
+
 describe('ClaudeCodeChip', () => {
   const originalWebSocket = globalThis.WebSocket;
 
@@ -81,10 +108,13 @@ describe('ClaudeCodeChip', () => {
     agentRef.current = null;
     fetchCodeAgentSessionMock.mockReset();
     fetchCodeAgentSessionMock.mockResolvedValue(null);
-    globalThis.WebSocket = originalWebSocket;
+    InertWebSocket.created = [];
+    globalThis.WebSocket = InertWebSocket as unknown as typeof WebSocket;
   });
 
   afterEach(() => {
+    // Unmount (closing every chip socket) before the global socket is restored.
+    cleanup();
     messagesRef.current = [];
     agentRef.current = null;
     fetchCodeAgentSessionMock.mockReset();
@@ -102,8 +132,8 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByAltText('Codex')).toBeInTheDocument();
   });
 
-  it('renders spinning_up with forceShow terminal surface', () => {
-    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
+  it('renders spinning_up with forceShow terminal surface (flag off)', () => {
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />, { roseDesktop: false });
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
     // Turn-count chip temporarily removed (code-agent verifier kill-switch work).
     expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
@@ -517,8 +547,12 @@ describe('ClaudeCodeChip', () => {
         },
       }),
     ];
-    renderWithProviders(<ClaudeCodeChip taskId="task-1" wsUrl="ws://fake/ws" />);
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" wsUrl="ws://fake/ws" />, {
+      roseDesktop: false,
+    });
     expect(screen.getByText('Verifying Result...')).toBeInTheDocument();
+    // The flag-off stock chip still opens its terminal socket (the inert mock's constructor).
+    expect(InertWebSocket.created).toEqual(['ws://fake/ws']);
   });
 
   it('opens fullscreen when maximize clicked in completed collapsed chip', async () => {
@@ -532,7 +566,7 @@ describe('ClaudeCodeChip', () => {
         },
       }),
     ];
-    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />, { roseDesktop: false });
 
     const buttons = screen.getAllByRole('button');
     // first button inside the chip is the Maximize2 trigger (stops propagation)
@@ -540,6 +574,27 @@ describe('ClaudeCodeChip', () => {
 
     // Fullscreen renders status and the close X button (via portal → still in document)
     expect(screen.getAllByText('Claude Code Completed Successfully').length).toBeGreaterThan(0);
+  });
+
+  it('Rose Desktop, no snapshot (older session): status only, no terminal, no Maximize', async () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: { task_id: 'task-1', action_type: 'task_complete', title: 'Task Completed' },
+      }),
+    ];
+    const { container, unmount } = renderWithProviders(<ClaudeCodeChip taskId="task-1" />, {
+      roseDesktop: true,
+    });
+    expect(screen.getByText('Claude Code Completed Successfully')).toBeInTheDocument();
+    expect(container.querySelector('svg.lucide-maximize2, svg.lucide-maximize-2')).toBeNull();
+    await userEvent.setup().click(screen.getByText('Claude Code Completed Successfully'));
+    expect(container.querySelector('.code-agent-terminal-mount')).toBeNull();
+    unmount();
+    messagesRef.current = [];
+    const live = renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />, {
+      roseDesktop: true,
+    });
+    expect(live.container.querySelector('.code-agent-terminal-mount')).toBeNull();
   });
 
   it('hovering the schema chip reveals the output schema tooltip', async () => {

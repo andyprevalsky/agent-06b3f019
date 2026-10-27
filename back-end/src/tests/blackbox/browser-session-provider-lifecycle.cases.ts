@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 export async function runBrowserProviderLifecycleCases(): Promise<void> {
   for (const fixture of [
+    './browser-session-review-regressions.fixture.ts',
     './browser-session-service-worker.fixture.ts',
     './browser-session-native-cleanup.fixture.ts',
     './browser-session-resume-readiness.fixture.ts',

@@ -366,6 +366,12 @@ approval ID and present all seven sections again.
 Every approval request passes this review before it reaches the user. Draft
 the complete packet first; the reviewer reads the packet, not a summary.
 
+Scope: only the hunks inside the mandatory user-approval section, meaning the
+hunks a gate flagged for human approval (deploy Steps 0p/0b/0c, Zod schema
+changes, `/RCA` or `/descend` harness-fix packets). Never ground the rest of
+the diff: ordinary code, tests and UI changes outside that scope need no
+golden citation and are not reviewed here.
+
 1. **Reviewer.** Fire a fresh sub-agent that did not author the change. It
    inherits the parent's model, reasoning effort and speed (CLAUDE.md
    Sub-agent delegation), works read-only in an existing checkout, and is told

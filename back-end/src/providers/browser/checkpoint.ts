@@ -415,6 +415,7 @@ async function detachedTabStorage(page: Page, origins: string[]) {
 /** Read through the initialized frame, not its still-empty CDP URL projection. */
 async function readFrameStorage(frame: Frame, topOrigin: string): Promise<FrameStorage | null> {
   const state = await frame.evaluate<FrameStorage | null>(`(() => {
+    if (globalThis.origin === 'null') return null;
     if (!/^https?:$/.test(location.protocol) || location.origin === ${JSON.stringify(topOrigin)}) return null;
     const entries = storage => Object.entries(storage).map(([name,value]) => ({name,value}));
     return { origin: location.origin, sessionStorage: entries(sessionStorage), localStorage: entries(localStorage) };

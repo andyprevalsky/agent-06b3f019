@@ -9,8 +9,17 @@
  * The browser half lives in rose-ui-cli-browser.test.ts.
  */
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
@@ -43,6 +52,12 @@ interface Cli {
   USERCONTENT_CSP: string;
   DEFAULT_BUDGETS: Record<string, number>;
   evaluateBudgets(result: unknown): Verdict;
+  rendererPids(rootPid: number, proc?: string): number[];
+  traceMainThreadTasks(
+    trace: Buffer,
+    minMs: number,
+    samples?: { pid: number; t: number; state: string }[]
+  ): { phase: string; duration: number; cpu: number; pageWait: number | null }[];
   auditEntryFiles(
     entry: string,
     files: AuditFile[]
@@ -88,7 +103,7 @@ const JANKY = {
   normal: {
     fps: cli.frameStats(jankyFrames),
     workers: [{ fps: cli.frameStats(Array.from({ length: 40 }, (_, i) => i * 50)) }],
-    longTasks: [{ phase: 'steady', duration: 84 }],
+    longTasks: [{ phase: 'steady', duration: 84, cpu: 83 }],
     cls: 0.31,
     errors: ['ReferenceError: x is not defined'],
     animations: [{ name: 'slide', properties: ['left', 'width'] }],
@@ -134,6 +149,223 @@ test('host noise makes missed fps inconclusive but keeps every other violation',
   }
   const quietPass = cli.evaluateBudgets({ ...SMOOTH, host: { loadPerCore: 3.1 } });
   assert.equal(quietPass.warnings.filter((w) => w.rule === 'fps-inconclusive').length, 0);
+});
+
+test('long-task: page CPU or page-made blocking calls fail; host stalls fail unless a second window is clean', () => {
+  const withTasks = (normal: Record<string, unknown>) =>
+    cli.evaluateBudgets({ ...SMOOTH, normal: { ...SMOOTH.normal, ...normal } });
+  // A 134 ms task with 2 ms of CPU and no blocking call (the thread was descheduled or stopped)
+  // that did not recur: the host stalled the renderer.
+  const stalled = withTasks({
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 2, pageWait: 0 }],
+    longTaskRecheck: [],
+  });
+  assert.equal(stalled.pass, true, JSON.stringify(stalled.violations));
+  assert.ok(stalled.warnings.some((w) => w.rule === 'long-task-stall'));
+  // One blocking call the page made (GPU readback, sync XHR) is the page's work even when it does
+  // not recur and uses no CPU.
+  const blocked = withTasks({
+    longTasks: [{ phase: 'steady', duration: 1152, cpu: 0.8, pageWait: 1149 }],
+    longTaskRecheck: [],
+  });
+  assert.deepEqual(rules(blocked), ['long-task']);
+  assert.ok(!blocked.warnings.some((w) => w.rule === 'long-task-stall'));
+  // A host-stalled task that recurs (a busy-wait on a loaded host) fails.
+  const recurring = withTasks({
+    longTasks: [{ phase: 'steady', duration: 84, cpu: 30, pageWait: 0 }],
+    longTaskRecheck: [{ phase: 'steady', duration: 82, cpu: 28, pageWait: 0 }],
+  });
+  assert.deepEqual(rules(recurring), ['long-task']);
+  // Not re-measured, or no CPU time / thread samples: judged on wall time.
+  for (const t of [
+    { duration: 134, cpu: 2, pageWait: 0 },
+    { duration: 134, cpu: 2, pageWait: null },
+    { duration: 134 },
+  ]) {
+    const recheck = 'pageWait' in t && t.pageWait === 0 ? {} : { longTaskRecheck: [] };
+    assert.deepEqual(
+      rules(withTasks({ longTasks: [{ phase: 'steady', ...t }], ...recheck })),
+      ['long-task'],
+      JSON.stringify(t)
+    );
+  }
+  // The same wall time spent computing is the page's own work, whatever the second window shows.
+  const busy = withTasks({
+    longTasks: [{ phase: 'steady', duration: 134, cpu: 131, pageWait: 0 }],
+    longTaskRecheck: [],
+  });
+  assert.deepEqual(rules(busy), ['long-task']);
+
+  // Steady tasks come from a Chromium trace (renderer main-thread RunTask with tdur); pageWait is
+  // the sampled time the thread slept (state S) while page script (FunctionCall) was running.
+  const trace = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 2, args: { name: 'Compositor' } },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 0,
+          dur: 3000,
+          tdur: 2900,
+        },
+        // Stopped by the host (T) inside page script: not the page's wait.
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 10000,
+          dur: 134000,
+          tdur: 1800,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 10500, dur: 133000 },
+        // Sleeping (S) in a page call for 100 ms, then descheduled (R) outside script.
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 200000,
+          dur: 150000,
+          tdur: 900,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 200000, dur: 100000 },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 400000,
+          dur: 81000,
+          tdur: 80500,
+        },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 2,
+          ts: 0,
+          dur: 90000,
+          tdur: 90000,
+        },
+      ],
+    })
+  );
+  const samples = [
+    ...Array.from({ length: 69 }, (_, i) => ({ pid: 1, t: 10000 + i * 2000, state: 'T' })),
+    ...Array.from({ length: 76 }, (_, i) => ({
+      pid: 1,
+      t: 200000 + i * 2000,
+      state: i < 50 ? 'S' : 'R',
+    })),
+  ];
+  assert.deepEqual(cli.traceMainThreadTasks(trace, 50, samples), [
+    { phase: 'steady', duration: 134, cpu: 1.8, pageWait: 0 },
+    { phase: 'steady', duration: 150, cpu: 0.9, pageWait: 100 },
+    { phase: 'steady', duration: 81, cpu: 80.5, pageWait: null },
+  ]);
+  // A promise continuation (await, then a blocking call) runs in the microtask checkpoint, not in
+  // a FunctionCall: still page script. A 120 ms sampler gap after an S sample is host time.
+  const asyncTrace = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 0,
+          dur: 120000,
+          tdur: 600,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 100, dur: 300 },
+        {
+          ph: 'X',
+          name: 'BlinkScheduler_PerformMicrotaskCheckpoint',
+          pid: 1,
+          tid: 1,
+          ts: 500,
+          dur: 119000,
+        },
+        {
+          ph: 'X',
+          name: 'ThreadControllerImpl::RunTask',
+          pid: 1,
+          tid: 1,
+          ts: 200000,
+          dur: 130000,
+          tdur: 500,
+        },
+        { ph: 'X', name: 'FunctionCall', pid: 1, tid: 1, ts: 200000, dur: 130000 },
+      ],
+    })
+  );
+  const asyncSamples = [
+    ...Array.from({ length: 61 }, (_, i) => ({ pid: 1, t: i * 2000, state: 'S' })),
+    { pid: 1, t: 200000, state: 'S' },
+    { pid: 1, t: 202000, state: 'S' },
+    { pid: 1, t: 322000, state: 'R' },
+    { pid: 1, t: 330000, state: 'R' },
+  ];
+  assert.deepEqual(
+    cli.traceMainThreadTasks(asyncTrace, 50, asyncSamples).map((t) => t.pageWait),
+    [118, 2]
+  );
+  assert.deepEqual(
+    cli.traceMainThreadTasks(trace, 50).map((t) => t.pageWait),
+    [null, null, null],
+    'no thread samples (not Linux): no page-wait evidence'
+  );
+  const noCpu = Buffer.from(
+    JSON.stringify({
+      traceEvents: [
+        { ph: 'M', name: 'thread_name', pid: 1, tid: 1, args: { name: 'CrRendererMain' } },
+        { ph: 'X', name: 'ThreadControllerImpl::RunTask', pid: 1, tid: 1, ts: 0, dur: 90000 },
+      ],
+    })
+  );
+  assert.throws(() => cli.traceMainThreadTasks(noCpu, 50), /no thread CPU time/);
+});
+
+test('thread sampler finds renderers forked by any thread (Chromium launches from a launcher thread)', () => {
+  // Fake /proc: node 10 -> browser 20, whose launcher thread 21 forked the zygote 30 and, as with
+  // --no-zygote, renderer 40; the zygote's main thread forked renderer 31.
+  const proc = mkdtempSync(join(tmpdir(), 'rose-ui-proc-'));
+  const mkdirAndReturn = (dir: string) => {
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const pidDir = (pid: number, cmdline: string, kids: Record<number, number[]>) => {
+    writeFileSync(
+      join(mkdirAndReturn(join(proc, String(pid))), 'cmdline'),
+      cmdline.replace(/ /g, '\0')
+    );
+    for (const [tid, children] of Object.entries(kids)) {
+      writeFileSync(
+        join(mkdirAndReturn(join(proc, String(pid), 'task', tid)), 'children'),
+        children.map((c) => `${c} `).join('')
+      );
+    }
+  };
+  try {
+    pidDir(10, 'node rose-ui.cjs check', { 10: [20] });
+    pidDir(20, 'chrome-headless-shell --headless', { 20: [], 21: [30, 40] });
+    pidDir(30, 'chrome-headless-shell --type=zygote', { 30: [31] });
+    pidDir(31, 'chrome-headless-shell --type=renderer', { 31: [] });
+    pidDir(40, 'chrome-headless-shell --type=renderer', { 40: [] });
+    assert.deepEqual(
+      cli.rendererPids(10, proc).sort((x, y) => x - y),
+      [31, 40]
+    );
+    assert.deepEqual(cli.rendererPids(99, proc), [], 'an exited root has no renderers');
+  } finally {
+    rmSync(proc, { recursive: true, force: true });
+  }
 });
 
 test('frame stats and CLS session windows', () => {

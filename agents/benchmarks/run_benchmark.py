@@ -362,6 +362,12 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     "agent-payment-setup-resume",
     "sms-supervisor-fill-form-searches-then-delegates",
 }
+# Trajectory-recall tasks answer from prior agent runs in the canonical base
+# image. A local batch shares one stack DB, so a task that finished earlier in
+# the batch (claude-code-agent's fresh Collatz run) becomes the newest prior
+# trajectory and changes the correct answer. These tasks run in the serial
+# exclusive phase, and each starts from the base image's trajectory index.
+BASE_TRAJECTORY_HISTORY_SOURCE = "feature:agent-trajectories"
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
 MESSAGE_PERSON_AGENT_SMS_TASK_NAME = "message-person-agent-sms"
@@ -7825,6 +7831,69 @@ def _grep_base_snapshot_path() -> Path:
     return REPO_ROOT / ".context" / "benchmarks" / "grep-base-snapshot.sql"
 
 
+def _reads_base_trajectory_history(task: BenchmarkTask) -> bool:
+    return BASE_TRAJECTORY_HISTORY_SOURCE in (getattr(task, "source", None) or [])
+
+
+def _isolated_stack_database_url() -> Optional[str]:
+    """Return the active per-run stack DB, never a workspace, shared or prod DB.
+
+    Isolated means run.sh's per-run database: ``victoria_bench_<run>`` on system
+    Postgres, or a Postgres server container run.sh created and owns for this run.
+    """
+    try:
+        services = json.loads((_benchmark_context_path() / "services.json").read_text())
+        if not isinstance(services, dict) or not _services_manifest_is_active(services):
+            return None
+        database = services.get("database")
+        if not isinstance(database, dict):
+            return None
+        if database.get("use_system_postgres"):
+            isolated = str(database.get("name") or "").startswith("victoria_bench_")
+        else:
+            isolated = database.get("owned_by_run_sh") is True and bool(database.get("container"))
+        return manifest_database_url(services) if isolated else None
+    except (OSError, ValueError):
+        return None
+
+
+def _restore_base_trajectory_history(batch_started_at: datetime) -> Optional[int]:
+    """Drop trajectory-index rows this batch wrote; base-image rows predate it.
+
+    Returns the number of removed rows, or None when no isolated stack DB is
+    active (a reused or remote stack cannot be scoped this way).
+    """
+    database_url = _isolated_stack_database_url()
+    if database_url is None:
+        return None
+    sql = (
+        'WITH removed AS (DELETE FROM "AgentTrajectorySearch" '
+        # createdAt is a UTC TIMESTAMP(3); compare in UTC regardless of server TimeZone.
+        f'WHERE "createdAt" >= ({_sql_literal(batch_started_at.isoformat())}::timestamptz AT TIME ZONE \'UTC\') '
+        "RETURNING 1) "
+        "SELECT COUNT(*) FROM removed;"
+    )
+    result = subprocess.run(
+        ["psql", database_url, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Trajectory history restore failed: {result.stderr.strip()}")
+    return int(result.stdout.strip().splitlines()[-1])
+
+
+def _prepare_base_trajectory_history(task: BenchmarkTask, base_url: str, batch_started_at: datetime) -> None:
+    if not _reads_base_trajectory_history(task) or not _is_local_base_url(base_url):
+        return
+    removed = _restore_base_trajectory_history(batch_started_at)
+    if removed is None:
+        print(f"    ⚠ {task.name}: no isolated stack DB; earlier runs stay visible to trajectory recall")
+    else:
+        print(f"    🧹 {task.name}: restored base trajectory history ({removed} batch row(s) removed)")
+
+
 def _run_local_db_process(args: List[str], *, stdin_path: Optional[Path] = None, timeout: int = 120) -> str:
     container = _local_victoria_db_container()
     if container:
@@ -14782,6 +14851,8 @@ async def run_single_task(
     # Re-check at dispatch so credential loss produces the deploy-approved skip
     # instead of an agent recursively retrying an impossible code session.
     if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
+        if os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() != "1":
+            raise RuntimeError(f"Claude Code credentials unavailable at task dispatch: {task.name}")
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
@@ -16724,7 +16795,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     backend reports it configured and not on cooldown — that is the same funded
     fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
     both are missing; discovering an unfunded key mid-run burns the suite.
+
+    Deploy's explicit credential-skip mode qualifies only user/pool tokens.
+    Only the token route's 404 proves absence; other failures remain errors.
     """
+    allow_credential_skip = os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
@@ -16733,12 +16808,22 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
                 headers=headers,
                 timeout=10.0,
             )
+            if allow_credential_skip:
+                if resp.status_code == 404:
+                    return False
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("accessToken"), str) or not data["accessToken"].strip():
+                    raise RuntimeError("Claude Code credential response is invalid")
+                return True
             if resp.status_code == 200:
                 data = resp.json()
                 if bool(data.get("accessToken")):
                     return True
         return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
+        if allow_credential_skip:
+            raise
         return False
 
 
@@ -17011,6 +17096,8 @@ def _parallel_task_phases(
     root future settles therefore is not isolated: the descendant can recreate
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
+    Trajectory-recall tasks join it for the same reason: no sibling may finish
+    and become a prior run while they search history.
 
     ``browser-biometrics-webdecoy`` stays exclusive even when
     ``BENCHMARK_ISOLATED_BROWSER_PROFILES`` is on: isolation protects saved
@@ -17018,8 +17105,13 @@ def _parallel_task_phases(
     pointer timing and produce the timeout-on-retry class.
     """
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
-    exclusive = [task for task in tasks if task.name in exclusive_names]
-    parallel = [task for task in tasks if task.name not in exclusive_names]
+
+    def is_exclusive(task: BenchmarkTask) -> bool:
+        # A sibling that finishes mid-run would become a newer prior trajectory.
+        return task.name in exclusive_names or _reads_base_trajectory_history(task)
+
+    exclusive = [task for task in tasks if is_exclusive(task)]
+    parallel = [task for task in tasks if not is_exclusive(task)]
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
@@ -17371,6 +17463,9 @@ async def main_async(args):
     _never_admitted_results: list[TaskResult] = []
 
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
+        # Before admission: nothing is created yet if the batch is cancelled here.
+        if _reads_base_trajectory_history(task):
+            await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)
         # The owning task preserves repeated names and retains the evaluated
         # row until the coordinator replaces it with the final cleanup result.
         token = asyncio.current_task()
@@ -17446,6 +17541,7 @@ async def main_async(args):
             pass
 
     owned_batch_cleanup = cloud_batch_cleanup.contract() is not None
+    batch_started_at = datetime.now(timezone.utc)
     if owned_batch_cleanup:
         _begin_interrupt_cleanup()
     _report_ticker_task = asyncio.create_task(_report_ticker())
@@ -17484,7 +17580,7 @@ async def main_async(args):
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Running {len(exclusive_db_tasks)} destructive DB fixture task(s) before the parallel phase: {names}"
+                    f"\n  Running {len(exclusive_db_tasks)} exclusive task(s) before the parallel phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
@@ -17505,7 +17601,7 @@ async def main_async(args):
             pending: set[asyncio.Task] = set()
             try:
                 for task in exclusive_db_tasks:
-                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
+                    print(f"\n  Running exclusive task serially: {task.name}")
                     result = await _run_with_sandbox_payment_lock(
                         task,
                         lambda: _run_reported_task(

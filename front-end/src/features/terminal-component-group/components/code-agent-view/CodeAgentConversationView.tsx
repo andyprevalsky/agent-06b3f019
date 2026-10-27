@@ -1,13 +1,15 @@
 /**
  * Code-agent conversation: existing main-chat messages with one work slot per
- * native turn. Running activity updates in place; terminal history collapses
- * above its answer. User messages, displays and A2A rows stay outside the slot.
+ * native turn. Running activity updates in place; finished work collapses
+ * above its answer. No terminal view (transcript only). User messages,
+ * displays and A2A rows stay outside the slot. Rows share the root transcript's
+ * left edge (no row insets) over the root's blur backdrop (`backdrop`).
  * The existing QueryInput sends directly with attachments and native settings;
  * questions and approvals sit above it without replacing the draft. Read-only
  * views keep the transcript and show a notice instead of the composer.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -19,11 +21,11 @@ import ApprovalChip from '../ApprovalChip';
 import { CodeSessionMessages } from './CodeSessionMessages';
 import { CodeSessionComposer } from './CodeSessionComposer';
 import { useLocalEchoes } from '../../hooks/codeAgentLocalState';
-import { ProviderIcon, TerminalSurface } from '../claudeCodeChip.shared';
+import { ProviderIcon } from '../claudeCodeChip.shared';
 import { FailureBox, PausedNote, SessionLine, Summary } from '../codeAgentChip.desktop';
-import { ChipTabs, type ChipTab } from '../codeAgentChip.steer';
 import { PinnedQuestionMount } from '../PinnedQuestion';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
+import { CodeResourcesIndicator } from '../CodeResourcesIndicator';
 import { useCodeAgentConversation, type CodeAgentConversation } from './useCodeAgentConversation';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
@@ -39,9 +41,9 @@ function useEscapeToClose(onClose: () => void) {
   }, [onClose]);
 }
 
-function Header({ c }: { c: CodeAgentConversation }) {
+function Header({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
   return (
-    <header data-testid="code-agent-view-header" className="flex items-center gap-3 px-3.5 pb-3">
+    <header data-testid="code-agent-view-header" className="flex items-center gap-3 pb-3">
       <ProviderIcon codeProvider={c.provider} className="h-6 w-6 flex-none" />
       <div className="min-w-0 flex-1">
         <h2
@@ -60,6 +62,7 @@ function Header({ c }: { c: CodeAgentConversation }) {
           </p>
         )}
       </div>
+      <CodeResourcesIndicator taskId={taskId} running={c.stateText === 'Running'} />
       <span
         data-testid="code-agent-view-state"
         className={cn(
@@ -74,24 +77,16 @@ function Header({ c }: { c: CodeAgentConversation }) {
 }
 
 function Body({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
-  const [tab, setTab] = useState<ChipTab>('transcript');
   const echoes = useLocalEchoes(taskId);
   const ended = c.chipState === 'completed' || c.chipState === 'failed' || c.chipState === 'paused';
   const session = ended ? c.meta?.code_session : undefined;
   return (
     <>
-      <ChipTabs tab={tab} onChange={setTab} />
-      <div className={tab === 'transcript' ? '' : 'hidden'}>
+      <div className="border-t border-border dark:border-white/[0.07]">
         <CodeSessionMessages c={c} taskId={taskId} echoes={echoes} />
       </div>
-      <div className={tab === 'terminal' ? 'px-3 pt-2' : 'hidden'}>
-        <TerminalSurface
-          terminalContainerRef={c.vm.terminalContainerRef}
-          className="h-[60vh] rounded-lg"
-        />
-      </div>
-      {c.meta && session && <SessionLine session={session} meta={c.meta} />}
-      {c.chipState === 'completed' && c.meta?.summary && <Summary summary={c.meta.summary} />}
+      {c.meta && session && <SessionLine session={session} meta={c.meta} flush />}
+      {c.chipState === 'completed' && c.meta?.summary && <Summary summary={c.meta.summary} flush />}
     </>
   );
 }
@@ -101,11 +96,13 @@ const NOOP = () => {};
 export function CodeAgentConversationView({
   codeAgent,
   readOnlyMessage,
+  backdrop,
 }: {
   codeAgent: OpenCodeAgent;
   /** Shared recording / inspection / loading: a notice replaces the query box. */
   readOnlyMessage: string | null;
-  opaqueSurface?: boolean;
+  /** The root transcript's blur overlay (AgentChatArea passes BlurOverlay). */
+  backdrop?: ReactNode;
 }) {
   const c = useCodeAgentConversation(codeAgent);
   const { messages } = useAgentContext();
@@ -118,19 +115,20 @@ export function CodeAgentConversationView({
   return (
     <>
       <ScrollArea className="relative flex-1 px-2 md:px-6">
+        {backdrop}
         <div className="h-[var(--mobile-terminal-header-height)] md:h-24" />
         <section
           data-testid="code-agent-view"
           data-code-agent-id={codeAgent.taskId}
           data-code-agent-state={c.chipState}
           aria-label={`${c.label}: ${c.title}`}
-          className="mx-auto max-w-4xl pb-6 text-foreground dark:text-[#ecece8]"
+          className="relative z-20 mx-auto max-w-4xl pb-6 text-foreground dark:text-[#ecece8]"
         >
-          <Header c={c} />
+          <Header c={c} taskId={codeAgent.taskId} />
           {c.meta && c.chipState === 'failed' && (
-            <FailureBox meta={c.meta} fallback={c.vm.failureMessage} />
+            <FailureBox meta={c.meta} fallback={c.vm.failureMessage} flush />
           )}
-          {c.meta && <PausedNote meta={c.meta} className="-mt-1 px-3.5 pb-3" />}
+          {c.meta && <PausedNote meta={c.meta} className="-mt-1 pb-3" />}
           <Body c={c} taskId={codeAgent.taskId} />
         </section>
       </ScrollArea>

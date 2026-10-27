@@ -2,6 +2,8 @@
  * STATE MACHINE: CodeAgentAttribution (Rose Desktop, row 46)
  *
  *   [row has metadata.requestingAgent of kind 'code_agent'] → "<agent> · via <tool>" line
+ *   [that code agent's own view is open (useCodeAgentView)] → not rendered: its
+ *       messages read like normal assistant messages there
  *   [otherwise] → not rendered (stock rendering continues)
  *
  * Stateless: everything derives from the message metadata. Scorecards and
@@ -11,6 +13,7 @@
 
 import type { RequestingAgent } from '../hooks/codeAgentContract';
 import { ProviderIcon } from './claudeCodeChip.shared';
+import { useCodeAgentView } from './code-agent-view/codeAgentViewState';
 
 export function CodeAgentAttribution({
   requester,
@@ -19,6 +22,8 @@ export function CodeAgentAttribution({
   requester: RequestingAgent;
   via?: string;
 }) {
+  const openTaskId = useCodeAgentView()?.openCodeAgent?.taskId;
+  if (openTaskId !== undefined && openTaskId === requester.task_id) return null;
   return (
     <div
       data-testid="code-agent-attribution"

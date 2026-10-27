@@ -2376,6 +2376,143 @@ def test_payment_setup_resume_stays_exclusive_beside_event_ticket():
     ]
 
 
+def test_trajectory_recall_tasks_run_exclusive_beside_their_producers():
+    """A producer that finishes mid-recall must not become the newest prior run.
+
+    PR #1570 smoke: claude-code-agent finished its Collatz run before
+    grep-agent-trajectories-code-tool-status searched history, which then
+    answered SUCCESS from that fresh run instead of the base image's FAILED one.
+    """
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    names = [
+        "claude-code-agent",
+        "grep-agent-trajectories-code-tool-status",
+        "chat-mode",
+        "grep-agent-trajectories-cross-surface",
+    ]
+    phases = bench._parallel_task_phases([by_name[name] for name in names])
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["grep-agent-trajectories-code-tool-status", "grep-agent-trajectories-cross-surface"]),
+        ("parallel", ["claude-code-agent", "chat-mode"]),
+    ]
+    recall = sorted(task.name for task in by_name.values() if bench._reads_base_trajectory_history(task))
+    assert recall == sorted(name for name in by_name if name.startswith("grep-agent-trajectories-")), recall
+
+
+def test_trajectory_recall_starts_from_base_history_on_isolated_stack(tmp_path):
+    """Each recall task sees only base-image trajectories, never rows this batch wrote.
+
+    Uses a real Postgres whose session TimeZone is not UTC: createdAt is a UTC
+    TIMESTAMP(3), so a naive timestamptz comparison would shift the boundary.
+    """
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import urlparse
+
+    from benchmarks import benchmark_tasks
+    from benchmarks import run_benchmark as bench
+
+    admin = os.environ.get("BENCHMARK_TEST_PG_ADMIN_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+    db_name = f"victoria_bench_traj_{uuid.uuid4().hex[:10]}"
+    db_url = admin.rsplit("/", 1)[0] + "/" + db_name
+    port = urlparse(admin).port or 5432
+
+    def psql(url: str, sql: str) -> str:
+        result = subprocess.run(["psql", url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                                capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    by_name = {task.name: task for task in benchmark_tasks.all_tasks()}
+    recall = by_name["grep-agent-trajectories-code-tool-status"]
+    producer = by_name["claude-code-agent"]
+    batch_started_at = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def utc(moment: datetime) -> str:
+        return moment.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    rows = {
+        "base-failed-tool": utc(datetime(2026, 7, 1, 12, tzinfo=timezone.utc)),
+        "before-batch": utc(batch_started_at - timedelta(milliseconds=1)),
+        "batch-success-tool": utc(batch_started_at + timedelta(seconds=5)),
+    }
+
+    psql(admin, f'CREATE DATABASE "{db_name}"')
+    try:
+        psql(admin, f"ALTER DATABASE \"{db_name}\" SET timezone TO 'America/Los_Angeles'")
+        psql(db_url, (
+            'CREATE TABLE "AgentTrajectorySearch" ("messageId" text primary key, "createdAt" TIMESTAMP(3) NOT NULL)'
+        ))
+        values = ", ".join(f"('{message}', '{created}')" for message, created in rows.items())
+        psql(db_url, f'INSERT INTO "AgentTrajectorySearch" VALUES {values}')
+
+        def remaining() -> list[str]:
+            return psql(db_url, 'SELECT "messageId" FROM "AgentTrajectorySearch" ORDER BY 1').splitlines()
+
+        context = tmp_path / "context"
+        context.mkdir()
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": str(context)}):
+            # No active isolated stack: never fall back to a workspace or prod DB.
+            bench._prepare_base_trajectory_history(recall, "http://localhost:3001", batch_started_at)
+            assert len(remaining()) == 3
+
+            def manifest(**database) -> None:
+                (context / "services.json").write_text(json.dumps({
+                    "status": "running",
+                    "ports": {"backend": 3001, "health": 3003},
+                    "database": {"name": db_name, "port": port, **database},
+                }))
+
+            # Only run.sh's per-run database is isolated: a workspace or shared
+            # victoria DB on the same server, or an unowned container, is not.
+            for not_isolated in (
+                {"use_system_postgres": True, "name": "victoria"},
+                {"use_system_postgres": True, "name": "victoria_stack_gate_gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": False, "container": "victoria-db-gate-gk"},
+                {"use_system_postgres": False, "owned_by_run_sh": True, "container": ""},
+            ):
+                manifest(**not_isolated)
+                assert bench._isolated_stack_database_url() is None, not_isolated
+            manifest(use_system_postgres=False, owned_by_run_sh=True, container="victoria-db-run-1")
+            assert bench._isolated_stack_database_url() is not None
+            manifest(use_system_postgres=True)
+            bench._prepare_base_trajectory_history(producer, "http://localhost:3001", batch_started_at)
+            bench._prepare_base_trajectory_history(recall, "https://navi-j9a9.onrender.com", batch_started_at)
+            assert len(remaining()) == 3
+
+            bench._prepare_base_trajectory_history(recall, "http://localhost:3001", batch_started_at)
+            assert remaining() == ["base-failed-tool", "before-batch"]
+
+            (context / "services.json").write_text(json.dumps({
+                "status": "stopped",
+                "ports": {"backend": 3001, "health": 3003},
+                "database": {"name": "victoria", "port": port},
+            }))
+            assert bench._restore_base_trajectory_history(batch_started_at) is None
+    finally:
+        psql(admin, f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+
+
+def test_trajectory_recall_restores_base_history_before_each_task():
+    """The batch coordinator restores history inside every admitted task, before it runs."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+
+    source = inspect.getsource(bench.main_async)
+    run_block = source[source.index("async def _run_reported_task"):source.index("async def _report_ticker")]
+    prepare = run_block.index(
+        "await asyncio.to_thread(_prepare_base_trajectory_history, task, base_url, batch_started_at)"
+    )
+    # Before admission, so a cancelled waiter is still provably never admitted.
+    assert prepare < run_block.index("_admitted_tasks[token] = task") < run_block.index("await run_single_task(")
+    assert "batch_started_at = datetime.now(timezone.utc)" in source
+
+
 def test_biometrics_fixture_stays_exclusive_beside_shared_auth_task():
     """A saved-auth benchmark must not observe WebDecoy's temporary DB clearing."""
     from benchmarks import run_benchmark as bench
@@ -15934,6 +16071,105 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
     ]
 
 
+async def test_deploy_claude_preflight_excludes_shared_fallbacks():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    requests = []
+    def missing(request):
+        requests.append(request)
+        return httpx.Response(404, json={'error': 'NoTokensAvailable'})
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_has_usable_anthropic_api_key_fallback', new=AsyncMock(return_value=True)) as fallback, \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing), **kw)):
+        assert await bench._check_claude_code_credentials('http://fixture.invalid') is False
+        fallback.assert_not_awaited()
+    assert len(requests) == 1 and requests[0].url.path == '/api/integrations/claude-code/credentials/token'
+
+
+async def test_deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    current = {'status': 200, 'body': {'accessToken': 'fixture-token', 'source': 'pool'}}
+    def respond(request):
+        if current.get('network_error'):
+            raise httpx.ConnectError('offline', request=request)
+        return httpx.Response(current['status'], json=current['body'])
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_has_usable_anthropic_api_key_fallback', new=AsyncMock(return_value=True)) as fallback, \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for source in ('user', 'pool'):
+            current['body']['source'] = source
+            assert await bench._check_claude_code_credentials('http://fixture.invalid') is True
+        for case in [
+            {'status': 401, 'body': {}}, {'status': 500, 'body': {}},
+            {'status': 200, 'body': {}}, {'status': 200, 'body': []},
+            {'status': 200, 'body': {'accessToken': ''}},
+            {'status': 200, 'body': {'accessToken': True}},
+            {'status': 200, 'body': {}, 'network_error': True},
+        ]:
+            current.clear()
+            current.update(case)
+            try:
+                await bench._check_claude_code_credentials('http://fixture.invalid')
+            except (RuntimeError, httpx.HTTPError):
+                pass
+            else:
+                raise AssertionError(f'Unknown credential availability became skip/pass: {case}')
+        fallback.assert_not_awaited()
+
+
+async def test_normal_code_preflight_preserves_shared_fallback():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    config = {}
+    requests = []
+    def respond(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith('/credentials/token'):
+            return httpx.Response(404, json={})
+        return httpx.Response(200, json=config)
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '0'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for funded in [
+            {'configured': True, 'onCooldown': False, 'openrouterConfigured': False},
+            {'configured': True, 'onCooldown': True, 'openrouterConfigured': True},
+        ]:
+            config.clear()
+            config.update(funded)
+            requests.clear()
+            assert await bench._check_claude_code_credentials('http://fixture.invalid') is True
+            assert requests == ['/api/integrations/claude-code/credentials/token',
+                                '/api/integrations/compute-code/anthropic-key/cooldown']
+
+
+async def test_code_dispatch_skip_remains_opt_in():
+    import benchmarks.run_benchmark as bench
+    from unittest.mock import patch
+    task = bench.get_task_by_name('claude-code-agent')
+    with patch.object(bench, '_check_claude_code_credentials', new=AsyncMock(return_value=False)), \
+         patch.object(bench, '_run_single_task_as_run_user', new=AsyncMock(side_effect=AssertionError('task must not launch'))) as launch:
+        with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}):
+            result = await bench.run_single_task('http://fixture.invalid', task)
+            assert result.status == 'SKIPPED' and not result.passed and result.agent_id == ''
+        with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '0'}):
+            try:
+                await bench.run_single_task('http://fixture.invalid', task)
+            except RuntimeError as exc:
+                assert 'credentials unavailable at task dispatch' in str(exc)
+            else:
+                raise AssertionError('Unapproved credential skip masked a required task')
+        launch.assert_not_awaited()
+
+
 async def test_claude_code_preflight_uses_runtime_credential_route():
     """Claude Code smoke gating must use the same credential route as session creation."""
     import benchmarks.run_benchmark as bench
@@ -26192,6 +26428,10 @@ async def run_all_tests():
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
     )
+    await r.record_async("deploy_claude_preflight_excludes_shared_fallbacks", test_deploy_claude_preflight_excludes_shared_fallbacks)
+    await r.record_async("deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence", test_deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence)
+    await r.record_async("normal_code_preflight_preserves_shared_fallback", test_normal_code_preflight_preserves_shared_fallback)
+    await r.record_async("code_dispatch_skip_remains_opt_in", test_code_dispatch_skip_remains_opt_in)
     await r.record_async(
         "claude_code_preflight_uses_runtime_credential_route",
         test_claude_code_preflight_uses_runtime_credential_route,
@@ -27567,6 +27807,18 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "trajectory_recall_tasks_run_exclusive_beside_their_producers",
+        test_trajectory_recall_tasks_run_exclusive_beside_their_producers,
+    )
+    r.record(
+        "trajectory_recall_starts_from_base_history_on_isolated_stack",
+        _with_tmp_path(test_trajectory_recall_starts_from_base_history_on_isolated_stack),
+    )
+    r.record(
+        "trajectory_recall_restores_base_history_before_each_task",
+        test_trajectory_recall_restores_base_history_before_each_task,
     )
     r.record("browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part)
     await r.record_async(

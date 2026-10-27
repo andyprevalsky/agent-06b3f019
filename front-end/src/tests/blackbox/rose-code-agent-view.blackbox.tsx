@@ -9,8 +9,8 @@
  *   POST /api/claude-code-session/:taskId/turns {client_message_id, text, tool_call_id}
  *        → 200 {status:'delivered'} | 409 {error:'This code session has finished…'}
  *
- * Row click → the code agent's view replaces the chat column (header, transcript,
- * Terminal tab, the query box as its direct channel); Escape, the owner row,
+ * Row click → the code agent's view replaces the chat column (header, transcript
+ * with no terminal view, the query box as its direct channel); Escape, the owner row,
  * another row or Home return. Deep link ?agent-id=<owner>&code-agent=<task>.
  * 10k agents: opening reads nothing new (the owner's loaded messages); the
  * stock account never opens it.
@@ -27,6 +27,7 @@ import { ROSE_DESKTOP_USER_IDS } from '@/lib/roseDesktop';
 import * as roseDesktopFlag from '@/lib/roseDesktop';
 import Terminal from '@/pages/Terminal';
 
+import { btcRows } from './code-agent-steering.fixtures';
 import { chipMessage, eventsMessage, LIVE_EVENTS, msg } from './code-agent-steering.fixtures';
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
@@ -237,22 +238,16 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const transcript = within(page).getByTestId('code-agent-transcript');
     expect(within(transcript).getAllByTestId('code-work-slot')).toHaveLength(1);
     expect(transcript).toHaveTextContent('Explored 1 file, edited 1 file, ran 1 command');
-    expect(transcript.querySelectorAll('[data-message-id]')).toHaveLength(1);
+    // Running: a compact Working fold; its steps show only once expanded.
+    expect(transcript.querySelectorAll('[data-message-id]')).toHaveLength(0);
     await user.click(within(transcript).getByRole('button', { name: /Working/ }));
     expect(transcript).toHaveTextContent('widen the existing toggle to three states');
     // The page transcript grows with the column (no 300px chip cap).
     expect(transcript.className).not.toContain('max-h-[300px]');
-    // Transcript / Terminal tabs as in the chip.
-    expect(within(page).getByRole('tab', { name: 'Transcript' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    await user.click(within(page).getByRole('tab', { name: 'Terminal' }));
-    expect(within(page).getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(transcript.parentElement).toHaveClass('hidden');
+    // No terminal view: no Transcript / Terminal tabs and no terminal surface.
+    expect(within(page).queryByRole('tablist')).toBeNull();
+    expect(page.querySelector('.code-agent-terminal-mount')).toBeNull();
+    expect(transcript.closest('.hidden')).toBeNull();
 
     // The owner's chat is replaced (its chip and composer are gone).
     expect(screen.queryByTestId('code-agent-chip')).toBeNull();
@@ -458,11 +453,12 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
         ]),
       });
       const user = await renderOnOwner();
-      await openFromRow(user);
+      const page = await openFromRow(user);
       const indicator = screen.getByTestId('thinking-indicator');
       expect(indicator).toHaveTextContent('Streaming');
       expect(indicator).toHaveTextContent(provider === 'claude' ? '120 tokens' : '20 tokens');
       expect(indicator).toHaveTextContent('10.0 tok/s');
+      await user.click(within(page).getByRole('button', { name: /Working/ }));
       expect(
         screen.getByText('Live native answer').closest('[data-message-state]'),
       ).toHaveAttribute('data-message-state', 'streaming');
@@ -505,6 +501,34 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     const indicator = screen.getByTestId('thinking-indicator');
     expect(indicator).toHaveTextContent('Thinking');
     expect(indicator).not.toHaveTextContent(/tokens|tok\/s/);
+  });
+
+  it('Andy 2026-10-26: blur backdrop, root left edge, goal as user prompt, coordination folded, no attribution', async () => {
+    serveBackend({ ownerMessages: ownerChat(btcRows(OWNER, TASK)) });
+    const user = await renderOnOwner();
+    const page = await openFromRow(user);
+
+    // 21: the root transcript's blur backdrop sits behind the view's rows.
+    expect(screen.getByTestId('chat-blur-overlay').parentElement?.contains(page)).toBe(true);
+
+    // 22: every row shares the root transcript's left edge (no row insets),
+    // including the Finished section (branch line and commit summary).
+    expect(within(page).getAllByTestId(/^code-agent-(session|summary)$/)).toHaveLength(2);
+    expect(page.querySelectorAll('.px-3\\.5, .pl-11, .mx-3, [class*="pl-"]')).toHaveLength(0);
+
+    // 23: Codex's own message reads like a normal assistant message here.
+    expect(within(page).getByText('Chart is ready')).toBeInTheDocument();
+    expect(within(page).queryByTestId('code-agent-attribution')).toBeNull();
+
+    // 24: the goal renders as the user's prompt; no "Agents coordinating" row;
+    // later coordination lives inside the Worked-for slot.
+    expect(within(page).queryByTestId('agent-exchange-group')).toBeNull();
+    const goal = within(page).getByText('Chart BTC for 24h');
+    expect(goal.closest('[data-message-role="USER"]')).not.toBeNull();
+    await user.click(within(page).getByRole('button', { name: /Worked/ }));
+    expect(within(page).getByTestId('code-work-slot')).toHaveTextContent('Use UTC labels');
+    // Ended session: nothing shows terminal output, so nothing reads it.
+    expect(requests('GET', `/api/codex-code-session/${TASK}`)).toHaveLength(0);
   });
 
   it('a completed session stays open; a send shows the backend error as one plain line', async () => {

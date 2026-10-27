@@ -8,30 +8,24 @@
  * [OPEN] --Copy ›--> [COPY SUBMENU OPEN] --Copy link | Copy agent ID--> [CLOSED]
  *
  * Order (boxes.dev thread-menu style: icon + label rows, dividers, destructive red):
- *   New agent in this branch · Archive agent · Mark unread · Mute notifications ·
- *   Pin/Unpin agent · Rename agent · Share agent · Delete agent ·
- *   Schedule a prompt… · Copy ›
+ *   Archive agent | Pin/Unpin agent · Rename agent | Copy ›
+ * (UI #26 removed New agent in this branch, Mark unread, Mute notifications,
+ * Share agent, Delete agent and Schedule a prompt…; Delete Agent stays in the
+ * Agent Settings panel.)
  */
 
 import * as ContextMenuPrimitive from '@radix-ui/react-context-menu';
 import {
   Archive,
-  BellOff,
-  CalendarClock,
   ChevronRight,
   Copy,
-  GitBranch,
   Hash,
   Link2,
-  Mail,
   Pencil,
   Pin,
   PinOff,
-  Share,
-  Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import type { ReactNode } from 'react';
 
 import {
   ContextMenuContent,
@@ -41,15 +35,9 @@ import {
 import { cn } from '@/lib/utils';
 
 export interface RoseAgentMenuActions {
-  onNewAgentInBranch: () => void;
   onArchive: () => void;
-  onMarkUnread: () => void;
-  onMute: () => void;
   onTogglePin: () => void;
   onRename: () => void;
-  onShare: () => void;
-  onDelete: () => void;
-  onSchedulePrompt: () => void;
   onCopyLink: () => void;
   onCopyId: () => void;
 }
@@ -66,13 +54,11 @@ function Row({
   label,
   onSelect,
   destructive = false,
-  trailing,
 }: {
   icon: LucideIcon;
   label: string;
   onSelect: () => void;
   destructive?: boolean;
-  trailing?: ReactNode;
 }) {
   return (
     <ContextMenuItem onSelect={onSelect} className={cn(ROW, destructive && DESTRUCTIVE)}>
@@ -84,7 +70,6 @@ function Row({
         strokeWidth={1.7}
       />
       <span>{label}</span>
-      {trailing}
     </ContextMenuItem>
   );
 }
@@ -132,31 +117,14 @@ export default function RoseAgentRowMenu({
 }) {
   return (
     <ContextMenuContent data-testid="rose-agent-menu" className={MENU_SURFACE} style={NO_BLUR}>
-      <Row
-        icon={GitBranch}
-        label="New agent in this branch"
-        onSelect={actions.onNewAgentInBranch}
-        trailing={
-          <span className="ml-auto pl-3 text-[11.5px] text-[hsl(240_6%_58%)] dark:text-[#a3a39d]">
-            same E2B session
-          </span>
-        }
-      />
-      <Divider />
       <Row icon={Archive} label="Archive agent" onSelect={actions.onArchive} destructive />
       <Divider />
-      <Row icon={Mail} label="Mark unread" onSelect={actions.onMarkUnread} />
-      <Row icon={BellOff} label="Mute notifications" onSelect={actions.onMute} />
       <Row
         icon={isPinned ? PinOff : Pin}
         label={isPinned ? 'Unpin agent' : 'Pin agent'}
         onSelect={actions.onTogglePin}
       />
       <Row icon={Pencil} label="Rename agent" onSelect={actions.onRename} />
-      <Row icon={Share} label="Share agent" onSelect={actions.onShare} />
-      <Divider />
-      <Row icon={Trash2} label="Delete agent" onSelect={actions.onDelete} destructive />
-      <Row icon={CalendarClock} label="Schedule a prompt…" onSelect={actions.onSchedulePrompt} />
       <Divider />
       <CopySubmenu onCopyLink={actions.onCopyLink} onCopyId={actions.onCopyId} />
     </ContextMenuContent>

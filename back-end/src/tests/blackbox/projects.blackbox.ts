@@ -17,13 +17,16 @@
  *   - agents: POST /api/agents accepts project_id, sub-agents inherit it,
  *     GET /api/agents returns project_id; deleting a project returns its
  *     agents to Home (null)
+ *   - Rose out of the box (PJ4): a Rose repo owner's project list carries a
+ *     configured "Rose" project (repo, branch, startup script, six declared env
+ *     files, GitHub grant only when the repo is reachable) — created or filled
+ *     in once, idempotent, never overwriting later edits; other accounts are
+ *     untouched. Runs on a synthetic owner; never on a real account's rows
+ *   - the harness refuses a non-local DATABASE_URL before any query
  *
  * Usage: bash scripts/run-blackbox-tests.sh projects
  */
-import { randomBytes } from 'crypto';
-import { after, test } from 'node:test';
-import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
-import { prisma } from '../../providers/database';
+// First import: refuses a non-local DATABASE_URL before any module can query.
 import {
   anonymousSession,
   apiKeyHeaders,
@@ -32,6 +35,20 @@ import {
   expectStatus,
   type Session,
 } from './projects-harness';
+import { randomBytes } from 'crypto';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { after, test } from 'node:test';
+import { deleteEnvFile, listEnvFiles } from '../../domains/projects/envFileService';
+import {
+  applyRoseProjectSetup,
+  planRoseProjectSetup,
+  type RoseSetupDeps,
+} from '../../domains/projects/roseProject';
+import { listProjects, updateProject } from '../../domains/projects/service';
+import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
+import { prisma } from '../../providers/database';
 
 const SECRET = `pj-secret-${randomBytes(12).toString('hex')}`;
 const SECRET2 = `pj-rotated-${randomBytes(12).toString('hex')}`;
@@ -49,6 +66,7 @@ interface Project {
   lifecycle: { autoWake: boolean };
   envFileCount: number;
   githubConnected: boolean;
+  updatedAt: string;
 }
 
 interface EnvFile {
@@ -399,4 +417,206 @@ test('agents: project_id on create, inherited by sub-agents, listed, cleared on 
     where: { userId: s.userId },
     data: { deletedAt: new Date() },
   });
+});
+
+const ROSE_REPO = 'https://github.com/Rose-Ai-Labs/rose';
+const ROSE_ENV_PATHS = [
+  'agents/.env',
+  'agents/.env.benchmark-temporal',
+  'back-end/.env',
+  'front-end/.env',
+  'mac-app/.env',
+  'research/.env',
+];
+const ROSE_STARTUP = readFileSync(
+  resolve(__dirname, '../../../../agents/benchmarks/fixtures/projects/rose-startup.sh'),
+  'utf8'
+);
+
+/**
+ * A synthetic repo owner (never a real account): the real owner list stays
+ * Andy-only, so the planner/applier get this owner and a mocked GitHub read.
+ * Cleanup deletes only this user's rows.
+ */
+async function roseOwner(reachable = true) {
+  const userId = `rose-owner-${randomBytes(6).toString('hex')}`;
+  await prisma.user.create({ data: { userId, name: 'Rose repo owner (projects blackbox)' } });
+  const githubReads: string[] = [];
+  const deps: RoseSetupDeps = {
+    isOwner: (id) => id === userId,
+    repoReachable: async () => {
+      githubReads.push('GET /repos/Rose-Ai-Labs/rose');
+      return reachable;
+    },
+  };
+  const list = async () => (await listProjects(userId, deps)).projects;
+  const rose = async () => {
+    const roses = (await list()).filter((p) => p.repoUrl === ROSE_REPO || p.name === 'Rose');
+    assert(roses.length === 1, `exactly one Rose project, got ${roses.length}`);
+    return roses[0];
+  };
+  const cleanup = async () => {
+    await prisma.githubRepoAccess.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } }); // cascades to its projects
+  };
+  return { userId, deps, githubReads, list, rose, cleanup };
+}
+
+test('harness refuses a non-local DATABASE_URL before any query', () => {
+  const harness = resolve(__dirname, 'projects-harness.ts');
+  const run = spawnSync(process.execPath, [...process.execArgv, harness], {
+    env: {
+      ...process.env,
+      DATABASE_URL: 'postgresql://postgres:pw@db.prod.example.invalid:6543/postgres',
+    },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert(run.status !== 0, `non-local DATABASE_URL must exit non-zero, got ${run.status}`);
+  assert(
+    /Refusing to run projects black-box tests against a non-local DATABASE_URL \(host db\.prod\.example\.invalid\)/.test(
+      run.stderr
+    ),
+    `refusal message, got: ${run.stderr.slice(0, 400)}`
+  );
+  const local = spawnSync(process.execPath, [...process.execArgv, harness], {
+    env: { ...process.env, DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/x' },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert(local.status === 0, `local DATABASE_URL is accepted: ${local.stderr.slice(0, 400)}`);
+});
+
+test('Rose out of the box: a name-only Rose project is configured on the next list (PJ4)', async () => {
+  const owner = await roseOwner();
+  try {
+    // Andy's prod state on 2026-10-26: "Rose" created by name only.
+    const created = await prisma.project.create({
+      data: { userId: owner.userId, name: 'Rose', syncSalt: 'blackbox-salt' },
+    });
+    const rose = await owner.rose();
+    assert(rose.id === created.id, 'configures the existing row');
+    assert(rose.repoUrl === ROSE_REPO, `repo ${rose.repoUrl}`);
+    assert(rose.defaultBranch === 'main', `branch ${rose.defaultBranch}`);
+    assert(rose.startupScript === ROSE_STARTUP, 'startup script = PJ4 fixture');
+    assert(rose.startupTimeoutS === 120, `timeout ${rose.startupTimeoutS}`);
+    assert(rose.githubConnected === true, 'GitHub connected via a repo grant');
+    assert(rose.envFileCount === 6, `env files ${rose.envFileCount}`);
+    assert(owner.githubReads.length === 1, `one GitHub read, got ${owner.githubReads.length}`);
+    const { envFiles: files } = await listEnvFiles(owner.userId, rose.id);
+    assert(
+      JSON.stringify(files.map((f) => f.path)) === JSON.stringify(ROSE_ENV_PATHS),
+      `env paths ${files.map((f) => f.path)}`
+    );
+    assert(
+      files.every((f) => f.source === 'declared' && !f.hasContent),
+      'declared, no values (values arrive only through codebase sync)'
+    );
+
+    // Idempotent: listing again changes nothing, duplicates nothing, reads GitHub no more.
+    const again = await owner.rose();
+    assert(again.id === rose.id && again.updatedAt === rose.updatedAt, 'no rewrite on re-list');
+    assert(again.envFileCount === 6, 'no duplicate env files');
+    assert(owner.githubReads.length === 1, 'steady state makes no GitHub read');
+    const grants = await prisma.githubRepoAccess.count({ where: { userId: owner.userId } });
+    assert(grants === 1, `one grant, got ${grants}`);
+
+    // Later edits stick: clearing the script or removing a file is not undone.
+    await updateProject(owner.userId, rose.id, { startupScript: '' });
+    await deleteEnvFile(owner.userId, rose.id, files[0].id);
+    const edited = await owner.rose();
+    assert(edited.startupScript === null, 'cleared script stays cleared');
+    assert(edited.envFileCount === 5, `removed file stays removed (${edited.envFileCount})`);
+
+    // Renaming it keeps it the Rose project (by repo): no second "Rose" appears.
+    await updateProject(owner.userId, rose.id, { name: 'Rose app' });
+    const names = (await owner.list()).map((p) => p.name);
+    assert(JSON.stringify(names) === JSON.stringify(['Rose app']), `projects ${names}`);
+  } finally {
+    await owner.cleanup();
+  }
+});
+
+test('Rose out of the box: a stale pristine plan never fills a project that gained an env file or a sync', async () => {
+  // The planner read a pristine "Rose"; before the setup write, the user added
+  // an env file (or a codebase sync landed). The conditional fill must lose.
+  const changes = {
+    'env file': (projectId: string) =>
+      prisma.projectEnvFile.create({
+        data: { projectId, path: 'custom/.env', kind: 'env', source: 'managed' },
+      }),
+    sync: (projectId: string) =>
+      prisma.project.update({ where: { id: projectId }, data: { syncRevision: 1 } }),
+  };
+  for (const [change, apply] of Object.entries(changes)) {
+    const owner = await roseOwner();
+    try {
+      const created = await prisma.project.create({
+        data: { userId: owner.userId, name: 'Rose', syncSalt: 'blackbox-salt' },
+      });
+      const rows = await prisma.project.findMany({
+        where: { userId: owner.userId },
+        include: { _count: { select: { envFiles: true } } },
+      });
+      const plan = planRoseProjectSetup(owner.userId, rows, new Set(), owner.deps.isOwner);
+      assert(plan?.fillProjectId === created.id, `${change}: planned to fill the pristine row`);
+      await apply(created.id);
+      await applyRoseProjectSetup(owner.userId, plan, owner.deps);
+      const row = await prisma.project.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { envFiles: { select: { path: true } } },
+      });
+      assert(row.repoUrl === null, `${change}: repo stays unset, got ${row.repoUrl}`);
+      assert(row.startupScript === null, `${change}: startup script stays unset`);
+      const paths = row.envFiles.map((f) => f.path);
+      const expected = change === 'env file' ? ['custom/.env'] : [];
+      assert(
+        JSON.stringify(paths) === JSON.stringify(expected),
+        `${change}: no declared Rose env files, got ${paths}`
+      );
+    } finally {
+      await owner.cleanup();
+    }
+  }
+});
+
+test('Rose out of the box: an owner without a Rose project gets one; concurrent lists create one', async () => {
+  const owner = await roseOwner();
+  try {
+    await Promise.all([owner.list(), owner.list()]);
+    const rows = await prisma.project.findMany({ where: { userId: owner.userId, name: 'Rose' } });
+    assert(rows.length === 1, `one Rose row, got ${rows.length}`);
+    const rose = await owner.rose();
+    assert(rose.repoUrl === ROSE_REPO && rose.startupScript === ROSE_STARTUP, 'configured');
+    assert(rose.githubConnected === true && rose.envFileCount === 6, 'connected, six files');
+  } finally {
+    await owner.cleanup();
+  }
+});
+
+test('Rose out of the box: no clone grant when the backend GitHub token cannot reach the repo', async () => {
+  const owner = await roseOwner(false);
+  try {
+    const rose = await owner.rose();
+    assert(rose.repoUrl === ROSE_REPO && rose.envFileCount === 6, 'project still configured');
+    assert(rose.githubConnected === false, 'not connected without a reachable repo');
+    const grants = await prisma.githubRepoAccess.count({ where: { userId: owner.userId } });
+    assert(grants === 0, `no grant, got ${grants}`);
+    assert(owner.githubReads.length >= 1, 'reachability was checked');
+  } finally {
+    await owner.cleanup();
+  }
+});
+
+test('Rose out of the box: other accounts keep a name-only Rose project untouched', async () => {
+  const s = await anonymousSession();
+  const created = await createProject(s, { name: 'Rose' });
+  const list = await call('/api/projects', { auth: s.token });
+  expectStatus(list, 200, 'list');
+  const [rose] = list.data.projects as (Project & { repoUrl: string | null })[];
+  assert(rose.id === created.id && rose.repoUrl === null, 'no repo');
+  assert(rose.startupScript === null && rose.envFileCount === 0, 'no script, no files');
+  assert(rose.githubConnected === false, 'not connected');
+  const grants = await prisma.githubRepoAccess.count({ where: { userId: s.userId } });
+  assert(grants === 0, 'no grant');
 });

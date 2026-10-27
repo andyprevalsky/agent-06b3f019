@@ -36,7 +36,7 @@
  * Usage: bash scripts/run-blackbox-tests.sh agent-graph
  */
 import { spawn, type ChildProcess } from 'child_process';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { createServer } from 'net';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -601,6 +601,12 @@ async function testRootMessagesRunningCodeAgentOnce(): Promise<void> {
     });
     assert(chips.length === 1, `one received chip on the owner (got ${chips.length})`);
     assert((chips[0].metadata as Record<string, unknown>).subAgentId === ids.S4, 'child-scoped');
+    // The CLI turn id it was delivered as: the UI folds the session's own copy (code_turn_id).
+    const turnId = `a2a-${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
+    assert(
+      (chips[0].metadata as Record<string, unknown>).code_turn_id === turnId,
+      `received chip names its CLI turn: ${JSON.stringify(chips[0].metadata)}`
+    );
 
     const late = await call('/api/agent-graph/messages', {
       agentId: ids.R,

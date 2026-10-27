@@ -574,6 +574,7 @@ async function recreateSessionWithinClaim(
               uncommittedSessionId,
               'RELEASED'
             );
+            await browserResumeScope()?.settleCreate(uncommittedSessionId);
             await unregisterInFlightSteelSession(uncommittedSessionId);
             createdSessionId = null;
           } catch (releaseError) {

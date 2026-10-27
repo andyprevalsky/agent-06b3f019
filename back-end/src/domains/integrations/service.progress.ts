@@ -141,6 +141,28 @@ export async function reportProgressBestEffort(params: ReportProgressParams): Pr
   }
 }
 
+/**
+ * The providers among `providers` whose legacy (`''`) row last finished
+ * `synced`. Best-effort like every pipeline progress call: a failed read is
+ * logged and answers none, so the upload simply shows its bar.
+ */
+export async function providersLastSynced(
+  userId: string,
+  providers: string[]
+): Promise<Set<string>> {
+  try {
+    const rows = await repo.listProgressStates(userId, providers, toStorageAccountId(''));
+    return new Set(rows.filter((row) => row.state === 'synced').map((row) => row.provider));
+  } catch (error: unknown) {
+    log.warn('Progress state read failed (sync unaffected)', {
+      userId,
+      providers,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Set();
+  }
+}
+
 /** Drop one row's progress (after the row is gone). Returns rows removed. */
 export async function clearAccountProgress(userId: string, provider: string, accountId: string) {
   return repo.deleteProgress({ userId, provider, accountId: toStorageAccountId(accountId) });

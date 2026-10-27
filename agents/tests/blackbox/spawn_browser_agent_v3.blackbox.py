@@ -7292,7 +7292,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
-                     current_model="fixture-actual-browser-model",
+                     current_model="fixture-actual-browser-model", browser_pool="rose-1-flash",
                      MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
                      MAX_ITERATIONS=250, coords_for_cursor=None)
     model_assignments = [node for node in ast.walk(tree)
@@ -7316,6 +7316,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     assert body["message"] == "Browser state captured."
     assert body["metadata"]["auxiliary"].get("current_url") == "https://example.com/login"
     assert body["metadata"]["auxiliary"].get("actual_model") == "fixture-actual-browser-model"
+    assert body["metadata"]["auxiliary"].get("pool_name") == "rose-1-flash", "label the composer with its own pool"
     for private_part in ("private-user", "private-password", "private-token", "private-fragment"):
         assert private_part not in json.dumps(body)
     row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}
@@ -22771,6 +22772,55 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
                 assert actor.activity_result["task_id"] == "task-1"
 
 
+async def test_browser_empty_completion_preserves_verified_denial_for_parent():
+    """A no-argument completion must carry the accepted verdict to its parent."""
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.background_agents import build_agent_notification_text
+
+    reason = (
+        "The Rose Shop welcome page requires sign-in. All three saved credentials were rejected, "
+        "and the user declined authentication assistance. No member number was retrieved."
+    )
+    turns = []
+    h._append_browser_turn_messages(
+        turns,
+        unified_action={"action": "request_user_assistance_for_authentication", "params": {}},
+        result={"success": True, "request_id": "denied-auth-request"},
+        tool_call_id="denied-auth-call",
+    )
+    actor, verifier = await _exercise_browser_resume_user_input(
+        task_goal="Retrieve the member number",
+        output_schema_override={"fields": [
+            {"name": "member_number", "type": "str", "required": True},
+            {"name": "evidence", "type": "str", "required": True},
+        ]},
+        approval_type=h.AUTH_ASSISTANCE_DECLINED,
+        actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+        verifier_response_override={
+            "score": 1.0, "reasoning": reason,
+            "structured_response": {"member_number": "", "evidence": ""}, "usage": {},
+        },
+        resume_overrides={
+            "browser_turn_messages": turns,
+            "rejected_action": {"tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
+                                "request_id": "denied-auth-request", "url": "https://example.com/login"},
+        },
+    )
+    denied = [m for m in actor.captured_turns[0] if m.get("tool_call_id") == "denied-auth-call"]
+    assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
+    actor.assert_awaited_once()
+    verifier.assert_awaited_once()
+    result = actor.activity_result
+    assert result["status"] == "completed" and result["success"] is True
+    assert result["structured_response"] == {"member_number": "", "evidence": ""}
+    notification = build_agent_notification_text(
+        recipient="/root", sender="/root/member_number", agent_type="browser",
+        status="completed", summary=result["message"], structured_response=result["structured_response"],
+    )
+    assert f"**Outcome**: {reason}" in result["message"], "accepted verifier explanation lost at browser completion"
+    assert reason in notification, "parent notification lost the verified denial"
+
+
 @_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session(await_owner_cleanup=False):
     """A handoff refresh may replace the provider session while keeping the browser task stable."""
@@ -23308,7 +23358,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -23433,6 +23483,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             "usage": {},
         }
     )
+    if verifier_response_override is not None:
+        judge_call.return_value = verifier_response_override
     schema_generator = AsyncMock(
         return_value=(
             generated_schema or {"fields": [{"name": "result", "type": "string"}]},
@@ -23572,7 +23624,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             tool_call_id="tool-1",
             task_id="task-1",
             is_resume=True,
-            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            output_schema=output_schema_override or {"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
             gpt_token=selected_gpt_token,
             **({"approved_message_intent": approved_message_intent} if approved_message_intent else {}),
@@ -25541,7 +25593,7 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
     assert result["status"] == "completed"
     expected_prefix = (
         "**Goal**: Open example.com and report the main heading. Use the visible page text."
-        "\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
+        "\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading confirmed"
     )
     assert result["message"].startswith(expected_prefix), result["message"]
     completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
@@ -25600,6 +25652,64 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
     assert completions[0]["message"].startswith(
         "**Goal**: Buy socks\n\n**Status**: \u274c FAILED\n\n**Outcome**: No CDP URL provided"
     ), completions[0]["message"]
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner():
+    """A Browser-composer message sent before the first step still reaches the owner.
+
+    The run fails during session setup, before the step loop builds its input state;
+    the post-close read must still find the message addressed to the allocated task.
+    """
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": None,
+        "passwords": [],
+    }
+    direct = {
+        "id": "direct",
+        "timestamp": "2026-10-26T15:59:40Z",
+        "role": "USER",
+        "text": "go to instacart instead",
+        "metadata": {"browserTaskId": "task-1", "excludeFromModel": True},
+    }
+    poll = AsyncMock(return_value=[await native_browser_start_source("2026-10-26T15:59:09+00:00"), direct])
+    save_mock = AsyncMock()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", poll),
+    ):
+        with pytest.raises(RuntimeError, match="No CDP URL provided"):
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+    assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
+    failed = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
+    assert len(failed) == 1, _completion_messages(save_mock)
+    assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
 
 
 async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
@@ -25779,6 +25889,51 @@ async def test_approval_parking_verifies_real_passkey_capture():
                 await test_private_browser_pause_urls_use_protected_continuity(probe)
             except Exception as error:
                 failures.append((provider, "auth-" + mode, type(error).__name__, str(error)))
+    assert not failures, failures
+
+
+async def test_terminal_passkey_failure_still_pauses_without_weakening_approval():
+    from browser_approval_lifecycle_support import TerminalPasskeyCaptureProbe
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+
+    failures = []
+    for provider in ("browser-use", "kernel"):
+        for mode in ("acquire_failure", "command_failure", "missing_credential", "save_failure", "save_exception", "cancel_read"):
+            for scenario in ("completed", "max_steps", "cancelled", "error", "write", "payment", "auth"):
+                probe = TerminalPasskeyCaptureProbe(provider, mode, scenario)
+                try:
+                    if scenario in {"write", "payment"}:
+                        with pytest.raises(BrowserSessionCloseError):
+                            await test_private_browser_pause_urls_use_protected_continuity(probe)
+                        await handler.drain_background_browser_cleanups(timeout=2)
+                        assert probe.alive and "checkpoint" not in probe.events and "backend_release" not in probe.events, probe.events
+                        assert "recording_finalized" in probe.events and "reset_cdp" in probe.events, probe.events
+                    elif scenario == "auth":
+                        # Existing auth observation propagates persistence exceptions
+                        # and cancellation; those are terminal paths, not live handoff.
+                        if mode == "save_exception":
+                            with pytest.raises(RuntimeError, match="fixture persistence unavailable"):
+                                await test_private_browser_pause_urls_use_protected_continuity(probe)
+                            await probe.assert_terminal_cleanup(handler)
+                        elif mode == "cancel_read":
+                            await test_private_browser_pause_urls_use_protected_continuity(probe)
+                            await probe.assert_terminal_cleanup(handler)
+                        else:
+                            await test_private_browser_pause_urls_use_protected_continuity(probe)
+                            assert probe.result["status"] == "awaiting_auth_assistance", probe.result
+                            assert probe.alive and "checkpoint" not in probe.events, probe.events
+                    else:
+                        if scenario == "error":
+                            with pytest.raises(RuntimeError, match="fixture terminal model failure"):
+                                await test_private_browser_pause_urls_use_protected_continuity(probe)
+                        else:
+                            await test_private_browser_pause_urls_use_protected_continuity(probe)
+                        await probe.assert_terminal_cleanup(handler)
+                except BaseException as error:
+                    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    failures.append((provider, mode, scenario, type(error).__name__, str(error)))
     assert not failures, failures
 
 
@@ -35222,6 +35377,10 @@ async def run_all_tests():
         test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance,
     )
     await r.record_async(
+        "browser_empty_completion_preserves_verified_denial_for_parent",
+        test_browser_empty_completion_preserves_verified_denial_for_parent,
+    )
+    await r.record_async(
         "activity_auth_assistance_resume_reuses_backend_refreshed",
         test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session,
     )
@@ -35290,6 +35449,10 @@ async def run_all_tests():
         test_spawn_browser_activity_failure_completion_message_leads_with_goal,
     )
     await r.record_async(
+        "activity_setup_failure_hands_unread_input_to_owner",
+        test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner,
+    )
+    await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
@@ -35308,6 +35471,10 @@ async def run_all_tests():
     await r.record_async(
         "approval_parking_verifies_real_passkey_capture",
         test_approval_parking_verifies_real_passkey_capture,
+    )
+    await r.record_async(
+        "terminal_passkey_failure_still_pauses_without_weakening_approval",
+        test_terminal_passkey_failure_still_pauses_without_weakening_approval,
     )
     await r.record_async(
         "reused_session_yields_before_provider_releases_it",

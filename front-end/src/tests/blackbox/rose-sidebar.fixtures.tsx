@@ -14,8 +14,9 @@
  * `mockProjectsApi` keeps in-memory lists so every call round-trips; envFileCount
  * is derived from the env-file list exactly like the server.
  */
-import { act, fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
+import { expect } from 'vitest';
 import type { User } from '@supabase/supabase-js';
 
 import type { Project, ProjectEnvFile } from '@/lib/api/projects';
@@ -226,4 +227,34 @@ export function collapseBar(): void {
 export async function openContextMenu(target: HTMLElement, testId: string): Promise<HTMLElement> {
   fireEvent.contextMenu(target);
   return await screen.findByTestId(testId);
+}
+
+/** Agent menu entries Andy removed (UI #26); none may render on any surface. */
+const REMOVED_AGENT_MENU_LABELS = [
+  /New agent in this branch/,
+  /same E2B session/,
+  /Mark unread/,
+  /Mute notifications/,
+  /Share agent/,
+  /Delete agent/,
+  /Schedule a prompt/,
+];
+
+/**
+ * The agent row menu is exactly: Archive agent | Pin agent, Rename agent | Copy ›.
+ * Separators sit only between groups: never first, last or doubled.
+ */
+export function expectAgentMenuEntries(menu: HTMLElement) {
+  const children = Array.from(menu.children).map((el) =>
+    el.getAttribute('role') === 'separator' ? '—' : el.textContent,
+  );
+  expect(children).toEqual(['Archive agent', '—', 'Pin agent', 'Rename agent', '—', 'Copy']);
+  expect(
+    within(menu)
+      .getAllByRole('menuitem')
+      .map((i) => i.textContent),
+  ).toEqual(['Archive agent', 'Pin agent', 'Rename agent', 'Copy']);
+  for (const label of REMOVED_AGENT_MENU_LABELS) {
+    expect(within(menu).queryByText(label)).toBeNull();
+  }
 }
