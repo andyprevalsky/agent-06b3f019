@@ -3568,15 +3568,15 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
 
 
 @contextlib.contextmanager
-def _no_outer_fast_cache_context():
-    """Run with no outer fast-cache context, restoring the caller's afterwards.
+def _no_outer_demo_cache_context():
+    """run with no outer DEMO cache context, restoring the caller's afterwards.
 
     The WMH provider installs its DEMO cache context only when no outer one is
     active. Every test in this domain shares one task, so a context left by an
     earlier test keyed these calls with generic semantics (T56: seen only in
-    full-suite runs, reproduced by pre-setting an active FastCacheContext).
+    full-suite runs, reproduced by pre-setting an active DEMO cache context).
     """
-    from providers.fast_cache.context import reset_context, set_context
+    from providers.demo_cache.context import reset_context, set_context
 
     token = set_context(None)
     try:
@@ -3603,7 +3603,7 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     goal = get_task_by_name("raise-5m-rose-labs-brex").prompt
     assert demo_cache_allowed(goal), "The fundraiser catalog prompt must stay a DEMO cache goal"
     from benchmarks.wmh_rose_provider import _wmh_cache_key_material
-    from providers.fast_cache.normalize import canonical_messages
+    from providers.demo_cache.normalize import canonical_messages
 
     keys = []
     key_inputs = []
@@ -3635,7 +3635,7 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     async def no_auth():
         return None, None
 
-    with _no_outer_fast_cache_context(), patch.object(provider, "_lease_auth", no_auth):
+    with _no_outer_demo_cache_context(), patch.object(provider, "_lease_auth", no_auth):
         for root_id, tool_id, timestamp_ms, phase in (
             ("5ef8d350-deab-46b7-9077-5ebe64c94c41", "call_abcdefghijklmnop", 1790596437171, "plan"),
             ("944a1e33-c63a-4e2f-a896-0fcdde85b526", "call_qrstuvwxyzabcdef", 1790601558171, "plan"),

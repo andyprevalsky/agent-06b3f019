@@ -10647,7 +10647,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         action_history=action_history, dom_service=dom_service,
                         unified_action=unified_action, browser_turn_messages=browser_turn_messages,
                         continuity_state=_pause_continuity_state,
-                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": browser_url,
+                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": redact_url_secrets(browser_url),
                                  "step_count": iteration},
                     )
                     if native_pause.get("status") != "awaiting_auth_assistance":

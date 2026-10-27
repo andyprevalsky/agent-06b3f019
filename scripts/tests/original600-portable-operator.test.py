@@ -3366,7 +3366,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
             (root/'back-end').mkdir()
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
-                private(root/env_file, 'FIXTURE=1\n')
+                # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
+                private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n')
             subprocess.run(git[:3] + ['init', '-q'], check=True)
             subprocess.run(git + ['add', '-A'], check=True)
