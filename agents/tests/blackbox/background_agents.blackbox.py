@@ -2341,6 +2341,49 @@ async def test_browser_composer_message_reaches_its_browser_not_the_root():
     assert _real_user_requirement_keys([direct]) == set()
 
 
+def test_browser_acted_input_is_counted_only_at_the_model_request():
+    """CodeRabbit PR #1592: a step that exits before its browser-model decision
+    (observe failure, realm reload, write-lock replay) must not mark synced input
+    as acted on, or the post-close read never hands it to the owner.
+
+    The real activity sets ``acted_user_instruction_count`` exactly once, as the
+    statement right before the decision's ``BrowserThinkingStream`` request.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(h._spawn_browser_agent_activity_v3_real)))
+
+    def sets_acted(node):
+        return isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Subscript)
+            and isinstance(t.slice, ast.Constant)
+            and t.slice.value == "acted_user_instruction_count"
+            for t in node.targets
+        )
+
+    def builds_stream(node):
+        return (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "BrowserThinkingStream"
+        )
+
+    sites = []
+    for block in ast.walk(tree):
+        body = getattr(block, "body", None)
+        if not isinstance(body, list):
+            continue
+        for index, node in enumerate(body):
+            if sets_acted(node):
+                following = body[index + 1] if index + 1 < len(body) else None
+                sites.append(bool(following is not None and builds_stream(following)))
+    assert sites == [True], f"acted count must be set once, right before the model request: {sites}"
+
+
 async def run_all_tests():
     print("background_agents blackbox tests:")
     r = BlackboxResult()
@@ -2350,6 +2393,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_composer_message_reaches_browser_not_root",
         test_browser_composer_message_reaches_its_browser_not_the_root,
+    )
+    r.record(
+        "browser_acted_input_counted_only_at_model_request",
+        test_browser_acted_input_is_counted_only_at_the_model_request,
     )
     await r.record_async(
         "bg_notification_keeps_run_during_wake",

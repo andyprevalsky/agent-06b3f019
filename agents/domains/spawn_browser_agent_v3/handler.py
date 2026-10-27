@@ -1610,8 +1610,8 @@ def _append_browser_user_instructions(
 def _unread_user_instructions(instruction_state: Dict[str, Any], latest_state: Dict[str, Any]) -> List[str]:
     """User input the final read found that no browser-model decision acted on.
 
-    ``acted_user_instruction_count`` is captured at each step-start sync, the
-    point a browser-model decision follows. Later syncs (completion/max-steps
+    ``acted_user_instruction_count`` is captured immediately before each
+    browser-model request (after the step's observe succeeds). Later syncs (completion/max-steps
     verifiers) advance ``delivered_user_instruction_count`` without a decision,
     so they must not hide input from the owner.
     """
@@ -9558,10 +9558,6 @@ async def _spawn_browser_agent_activity_v3_real(
 
             if not await sync_user_instructions():
                 await sync_user_instructions(require_confirmed_read=True)
-            # This step's browser-model decision sees everything delivered so far.
-            instruction_state["acted_user_instruction_count"] = int(
-                instruction_state.get("delivered_user_instruction_count") or 0
-            )
             agent_message_rows = instruction_state.pop("_agent_message_rows", None) or []
             if agent_inbox is not None:
                 # Same read as the user instructions: rows addressed to this task only, once each.
@@ -9847,6 +9843,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
+                # The browser-model decision below sees everything delivered so far;
+                # earlier exits this step (observe failure, realm reload, write-lock
+                # replay) never reach a decision, so they must not count as acted on.
+                instruction_state["acted_user_instruction_count"] = int(
+                    instruction_state.get("delivered_user_instruction_count") or 0
+                )
                 browser_stream = BrowserThinkingStream(
                     agent_id=agent_id,
                     task_id=task_id,
