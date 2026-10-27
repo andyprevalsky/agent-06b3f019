@@ -64,10 +64,12 @@ export interface UpdateAgentPayload {
 }
 
 /**
- * INSERT_DEFERRED event payload - a committed message that could not be streamed
- * live (its frame was refused, e.g. by an edge WAF rule, or it was too large).
- * It carries no message content: `reason` is shown in place of the body until
- * the client reads the row by ID from the API.
+ * INSERT_DEFERRED event payload - a committed message that is not streamed in
+ * full: its frame was refused (e.g. by an edge WAF rule), or it is larger than
+ * the backend's 8 KB live cap. It never carries the full `text`. `reason` (plus
+ * `preview`, the opening characters of an oversized row) stands in for the body
+ * until the client reads the row by ID from the API. Oversized notices keep the
+ * small metadata fields; refused ones keep only the tool lifecycle.
  */
 export interface InsertDeferredPayload {
   agentId: string;
@@ -75,9 +77,8 @@ export interface InsertDeferredPayload {
   timestamp: string;
   role: MessageRole;
   reason: string;
-  metadata?: Pick<MessageMetadata, 'toolName' | 'toolStatus' | 'toolCallId'> & {
-    success?: boolean;
-  };
+  preview?: string;
+  metadata?: MessageMetadata;
 }
 
 // -----------------------------------------------------------------------------
