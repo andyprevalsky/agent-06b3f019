@@ -555,7 +555,7 @@ export async function testWritableSteelProfileHandoffRetainsRecoveryCustody(): P
       pending.length === 1 && candidates.get(pending[0].externalId) === 'live',
       'revoked candidate lost durable custody'
     );
-    unregisterInFlightSteelSession(pending[0].externalId); // Simulate process exit.
+    await unregisterInFlightSteelSession(pending[0].externalId); // Simulate process exit.
     successor.status = 'RELEASED'; // The successor, not the stale callback, relinquishes ownership.
     const reconciled = await reconcileSteelCandidateCleanup({
       inFlight: () => new Set(),

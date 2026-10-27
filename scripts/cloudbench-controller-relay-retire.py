@@ -12,6 +12,29 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
+# A uv/python-build-standalone interpreter (agents/venv) can lack the pidfd
+# wrappers although the Linux kernel provides them. Bind the same syscalls so
+# exact-owner signals stay pinned to a pidfd and never fall back to a raw PID.
+if not hasattr(os, "pidfd_open") or not hasattr(__import__("signal"), "pidfd_send_signal"):
+    import ctypes as _pidfd_ctypes
+    import signal as _pidfd_signal
+
+    def _pidfd_syscall(number, *args):
+        libc = _pidfd_ctypes.CDLL(None, use_errno=True)
+        result = libc.syscall(_pidfd_ctypes.c_long(number), *args)
+        if result < 0:
+            error = _pidfd_ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return result
+
+    if not hasattr(os, "pidfd_open"):
+        # Syscall numbers are shared by every Linux architecture (>= 5.1).
+        os.pidfd_open = lambda pid, flags=0: _pidfd_syscall(434, _pidfd_ctypes.c_int(pid), _pidfd_ctypes.c_uint(flags))
+    if not hasattr(_pidfd_signal, "pidfd_send_signal"):
+        def _pidfd_send_signal(fd, sig, siginfo=None, flags=0):
+            _pidfd_syscall(424, _pidfd_ctypes.c_int(fd), _pidfd_ctypes.c_int(int(sig)), None, _pidfd_ctypes.c_uint(flags))
+
+        _pidfd_signal.pidfd_send_signal = _pidfd_send_signal
 
 HERE = Path(__file__).resolve().parent
 D = runpy.run_path(str(HERE / "cloudbench-controller-orphan-drain.py"))
