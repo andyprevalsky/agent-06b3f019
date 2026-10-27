@@ -576,6 +576,7 @@ The concurrent runner executes exactly these independent suites, without changin
 their assertions or test counts:
 
 `bash scripts/tests/workspace-env.test.sh`,
+`python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,

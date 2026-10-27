@@ -1431,7 +1431,9 @@ def test_native_service_owner_joins_child_on_shutdown(tmp_path):
                         response = http.get(f"http://127.0.0.1:{port}/healthz")
                         if response.status_code == 200:
                             break
-                    except httpx.ConnectError:
+                    except httpx.TransportError:
+                        # Not ready yet: refused, reset or garbled while the
+                        # service is still starting (seen under deploy load).
                         pass
                     time.sleep(0.1)
                 else:
