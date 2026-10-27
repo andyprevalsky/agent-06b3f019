@@ -69,6 +69,13 @@ export function rendererCliCases(): BlackboxTest[] {
           write('work/notes-private.txt', 'not referenced, never uploaded');
           write('models/chair.glb', cubeGlb([0.2, 0.6, 1, 1], `cli-${RUN}`));
           write('empty-folder/readme.txt', 'no entry');
+          // A script: the CLI bundles a .js with the relative modules it imports.
+          write(
+            'scenes/scene.js',
+            `import * as THREE from 'three'; import { spin } from './lib/spin.js'; spin(THREE); // ${RUN}`
+          );
+          write('scenes/lib/spin.js', 'export const spin = (T) => T;');
+          write('scenes/notes-private.txt', 'not imported, never uploaded');
 
           const run = (...args: string[]) =>
             execFileAsync('node', [cli, 'display', ...args], { env });
@@ -128,6 +135,31 @@ export function rendererCliCases(): BlackboxTest[] {
           assert(
             (await fetch(`${siteBase}node_modules/x/index.js`)).status === 404,
             'node_modules skipped'
+          );
+
+          const script = await run(join(home, 'scenes', 'scene.js'));
+          assert(
+            /displayed text\/javascript as bundle \(3 files\) at \S+\/index\.html/.test(
+              script.stdout
+            ),
+            `script + imports: ${script.stdout}`
+          );
+          const scriptRows = (await displayMessages(otherA)).filter(
+            (r) =>
+              (r.metadata as { task_id?: string }).task_id === `cli-render-${RUN}` &&
+              (r.filePointer as { bundle?: { source?: string } }).bundle?.source === 'scene.js'
+          );
+          assert(scriptRows.length === 1, `one script row: ${scriptRows.length}`);
+          const scriptPointer = scriptRows[0].filePointer as { usercontent_url: string };
+          const scriptUrl = new URL(scriptPointer.usercontent_url);
+          const scriptBase = `${BASE_URL}${scriptUrl.pathname.slice(0, scriptUrl.pathname.lastIndexOf('/') + 1)}`;
+          assert(
+            (await fetch(`${scriptBase}lib/spin.js`)).status === 200,
+            'imported module served'
+          );
+          assert(
+            (await fetch(`${scriptBase}notes-private.txt`)).status === 404,
+            'unreferenced file never uploaded'
           );
 
           const empty = await run(join(home, 'empty-folder')).then(

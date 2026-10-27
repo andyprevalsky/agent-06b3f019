@@ -16,6 +16,7 @@
 
 import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
+import { withSerializedLock } from '../sharedState';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
 import { processInboundAttachments, type InboundMediaAttachment } from './inboundMedia';
 import {
@@ -74,34 +75,14 @@ export const SUPERVISOR_FALLBACK_MESSAGE =
 /**
  * Per-user commit lock. Held while a run flushes pendingWrites + sends SMS +
  * persists transcript so two near-simultaneous attempt_completions cannot
- * interleave their side effects.
+ * interleave their side effects, even when the two inbound messages are
+ * handled by different backend instances (Postgres advisory lock per user).
  *
  * The seq gate (inside the locked region) is what actually decides whether to
  * commit — the lock just serializes ordering.
  */
-const commitLocksByUser = new Map<string, Promise<void>>();
-async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = commitLocksByUser.get(userId) ?? Promise.resolve();
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  // Anyone arriving after us awaits BOTH the previous holder AND our own
-  // release. Storing the chained promise (prev → released) is what keeps
-  // the queue strictly ordered.
-  const myTurn = prev.then(() => released);
-  commitLocksByUser.set(userId, myTurn);
-  try {
-    await prev;
-    return await fn();
-  } finally {
-    release();
-    // If no one queued behind us, clear the slot. Otherwise leave the latest
-    // entry in place so the next holder's queue remains intact.
-    if (commitLocksByUser.get(userId) === myTurn) {
-      commitLocksByUser.delete(userId);
-    }
-  }
+export async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  return withSerializedLock(`sms-commit:${userId}`, fn);
 }
 
 export interface SmsSupervisorResult {

@@ -1136,7 +1136,7 @@ def read_collector_source(path):
             stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
             and before.st_nlink == 1 and not before.st_mode & 0o022
             and 0 < before.st_size < 16 * 1024 * 1024,
-            "safe current-owner collector source required",
+            "regular current-owner collector source required",
         )
         def identity(info):
             return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
@@ -1148,6 +1148,10 @@ def read_collector_source(path):
             "collector source changed while reading",
         )
     return raw
+
+
+# Keep the checked-in-source API with the stronger single-link/stable-read policy.
+read_source = read_collector_source
 
 
 def verify_stage(value, stage):

@@ -37,6 +37,8 @@ const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.6-terra";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
+// Backend-provided Mobbin MCP bearer (design references); unset = no Mobbin server.
+const MOBBIN_MCP_TOKEN = process.env.MOBBIN_MCP_TOKEN || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const CODEX_FAST_MODE_PROXY_URL = process.env.CODEX_FAST_MODE_PROXY_URL;
@@ -981,6 +983,20 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
       `mcp_servers.rose.args=[${JSON.stringify(roseCli)},"mcp"]`,
       "-c",
       "mcp_servers.rose.tool_timeout_sec=31536000",
+    );
+  }
+  // Mobbin design references when the backend supplied its token. The token is
+  // one Mobbin account's, so only the catalog search tools are enabled.
+  if (MOBBIN_MCP_TOKEN) {
+    args.splice(
+      1,
+      0,
+      "-c",
+      'mcp_servers.mobbin.url="https://api.mobbin.com/mcp"',
+      "-c",
+      'mcp_servers.mobbin.bearer_token_env_var="MOBBIN_MCP_TOKEN"',
+      "-c",
+      'mcp_servers.mobbin.enabled_tools=["search_screens","search_flows","search_sections"]',
     );
   }
   if (useFastModeProxy && codexFastModeProxy) {

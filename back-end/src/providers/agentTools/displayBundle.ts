@@ -4,6 +4,8 @@
  *
  *   files (path → bytes) + entry ─► buildDisplayBundle
  *     │  model / pdf entry  → + generated index.html viewer (assets/display/*.html)
+ *     │  .js / .mjs entry   → + generated index.html that runs it as a module
+ *     │                       (three.js import map; assets/display/script-viewer.html)
  *     │  caps: ≤ DISPLAY_BUNDLE_MAX_FILES files, ≤ DISPLAY_BUNDLE_MAX_BYTES total,
  *     │        ≤ DISPLAY_MAX_FILE_BYTES per file, safe relative paths only
  *     ▼
@@ -16,7 +18,7 @@
  *
  * collectDisplayBundleFiles follows relative references (HTML attributes, CSS
  * url()/@import, JS imports/fetch/new URL, glTF buffers/images, OBJ mtllib and
- * MTL maps) from the entry through a caller-supplied resolver: local files
+ * MTL maps) from the entry (a page, model or script) through a caller-supplied resolver: local files
  * for the `rose` CLI (rose.cjs mirrors this walk) and the agent tree's files
  * for Rose agents.
  *
@@ -35,14 +37,14 @@ export const DISPLAY_BUNDLE_FILE_MAX_BYTES = 20 * 1024 * 1024;
 /** Generated viewer page of a model / PDF bundle. */
 export const DISPLAY_VIEWER_ENTRY = 'index.html';
 
-export type DisplayBundleKind = 'bundle' | 'model' | 'pdf';
+export type DisplayBundleKind = 'bundle' | 'model' | 'pdf' | 'script';
 
 export interface DisplayBundleManifest {
   v: 1;
   kind: DisplayBundleKind;
   /** Path the UI frames: the site's page, or the generated viewer. */
   entry: string;
-  /** The displayed source file (model / PDF) or the site's entry page. */
+  /** The displayed source file (model / PDF / script) or the site's entry page. */
   source: string;
   files: Record<string, { sha256: string; size: number }>;
 }
@@ -59,6 +61,7 @@ const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).di
 const ext = (path: string) => path.slice(path.lastIndexOf('.') + 1).toLowerCase();
 
 export const DISPLAY_MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl', 'usdz']);
+export const DISPLAY_SCRIPT_EXTENSIONS = new Set(['js', 'mjs']);
 
 const DISPLAY_CONTENT_TYPES: Record<string, string> = {
   glb: 'model/gltf-binary',
@@ -117,6 +120,12 @@ export function modelViewerHtml(src: string): Buffer {
   return Buffer.from(template('model-viewer.html').replace('__ROSE_CONFIG__', scriptJson(config)));
 }
 
+/** The page that runs script `src` as an ES module (three.js import map, full-bleed body). */
+export function scriptViewerHtml(src: string): Buffer {
+  const config = { src, title: posix.basename(src) };
+  return Buffer.from(template('script-viewer.html').replace('__ROSE_CONFIG__', scriptJson(config)));
+}
+
 /** The built-in pdf.js viewer page for `src` (works inside the sandboxed frame). */
 export function pdfViewerHtml(src: string): Buffer {
   const config = { src, title: posix.basename(src) };
@@ -127,8 +136,8 @@ export function pdfViewerHtml(src: string): Buffer {
 
 /**
  * Validate files + entry and produce the content-addressed bundle. `source`
- * is the entry file the caller asked for; a model / PDF source gets the
- * generated viewer at DISPLAY_VIEWER_ENTRY. Throws DisplayFetchError (400).
+ * is the entry file the caller asked for; a model / PDF / script source gets
+ * the generated viewer at DISPLAY_VIEWER_ENTRY. Throws DisplayFetchError (400).
  */
 export function buildDisplayBundle(
   source: string,
@@ -144,10 +153,8 @@ export function buildDisplayBundle(
         `a ${kind} bundle cannot contain ${DISPLAY_VIEWER_ENTRY} (display the page instead)`
       );
     }
-    all.set(
-      DISPLAY_VIEWER_ENTRY,
-      kind === 'model' ? modelViewerHtml(source) : pdfViewerHtml(source)
-    );
+    const viewer = { model: modelViewerHtml, pdf: pdfViewerHtml, script: scriptViewerHtml }[kind];
+    all.set(DISPLAY_VIEWER_ENTRY, viewer(source));
   }
   if (all.size > DISPLAY_BUNDLE_MAX_FILES) {
     errors.push(`bundle has ${all.size} files (max ${DISPLAY_BUNDLE_MAX_FILES})`);

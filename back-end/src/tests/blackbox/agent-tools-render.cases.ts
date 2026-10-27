@@ -92,7 +92,7 @@ const hostHtml = (src: string) =>
   `</body></html>`;
 
 /** The URL this test's backend serves for a display usercontent URL. */
-const local = (url: string) => {
+export const local = (url: string) => {
   const parsed = new URL(url);
   return `${BASE_URL}${parsed.pathname}`;
 };
@@ -102,7 +102,7 @@ interface Hosts {
   foreign: string;
 }
 
-async function withBrowser(
+export async function withBrowser(
   fn: (page: Page, logs: string[], hosts: Hosts) => Promise<void>
 ): Promise<void> {
   const server = createServer((req, res) => {
@@ -151,7 +151,7 @@ async function withBrowser(
   }
 }
 
-async function displayFrame(page: Page, url: string, host: string): Promise<Frame> {
+export async function displayFrame(page: Page, url: string, host: string): Promise<Frame> {
   await page.goto(`${host}?src=${encodeURIComponent(url)}`);
   for (let i = 0; i < 100; i += 1) {
     const frame = page.frames().find((f) => f !== page.mainFrame());
@@ -161,7 +161,7 @@ async function displayFrame(page: Page, url: string, host: string): Promise<Fram
   throw new Error('display iframe never attached');
 }
 
-async function waitReady(frame: Frame, logs: string[], label: string) {
+export async function waitReady(frame: Frame, logs: string[], label: string) {
   await frame
     .waitForFunction(
       () => ['ready', 'error'].includes(document.documentElement.dataset.state ?? ''),
@@ -180,7 +180,7 @@ async function waitReady(frame: Frame, logs: string[], label: string) {
 }
 
 /** Fraction of pixels matching `test` in a PNG screenshot. */
-function fraction(png: Buffer, test: (r: number, g: number, b: number) => boolean): number {
+export function fraction(png: Buffer, test: (r: number, g: number, b: number) => boolean): number {
   const img = cli.decodePng(png);
   let hits = 0;
   for (let i = 0; i < img.width * img.height; i += 1) {
@@ -190,7 +190,7 @@ function fraction(png: Buffer, test: (r: number, g: number, b: number) => boolea
   return hits / (img.width * img.height);
 }
 
-const reddish = (r: number, g: number, b: number) => r > 110 && r > g * 1.8 && r > b * 1.8;
+export const reddish = (r: number, g: number, b: number) => r > 110 && r > g * 1.8 && r > b * 1.8;
 
 /**
  * Runs inside the display frame. A string, not a function: tsx's keepNames
@@ -206,7 +206,7 @@ const ISOLATION_PROBE = `(() => {
   };
 })()`;
 
-function isolationProbe(frame: Frame) {
+export function isolationProbe(frame: Frame) {
   return frame.evaluate<{ origin: string; cookie: string; storage: string; parent: string }>(
     ISOLATION_PROBE
   );
