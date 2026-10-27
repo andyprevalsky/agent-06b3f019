@@ -687,3 +687,152 @@ test("open-object schemas cannot be strict: no outputSchema, no written handoff"
   assert.deepEqual(plain(handoffWrites), []);
   assert.equal(handoffFromFinalMessage("not json", HANDOFF_SCHEMA), null);
 });
+
+// 2026-10-27: the ChatGPT OAuth account hit its usage limit and every app-server
+// session ended failed, although a funded OPENAI_API_KEY was injected. Only the
+// legacy exec transport retried with the key. The app-server transport must do
+// the same: report the OAuth error, log in with the key and resume the thread
+// with the same turn input, so the run completes on the funded key.
+test("app-server falls back to the funded OPENAI_API_KEY when ChatGPT OAuth hits its usage limit", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rose-native-codex-fallback-"));
+  const fixturePath = join(directory, "codex");
+  const journal = join(directory, "journal.jsonl");
+  writeFileSync(
+    fixturePath,
+    `#!/usr/bin/env node
+const fs=require('node:fs');const path=require('node:path');
+const home=process.env.CODEX_HOME;const marker=path.join(home,'api-key-login');
+const note=x=>fs.appendFileSync(${JSON.stringify(journal)},JSON.stringify(x)+'\\n');
+if(process.argv[2]==='login'){let key='';process.stdin.on('data',d=>key+=d);process.stdin.on('end',()=>{fs.writeFileSync(marker,key.trim());note({login:key.trim()});process.exit(0);});return;}
+const apiKey=fs.existsSync(marker);
+const readline=require('node:readline');let turn=0;const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);if(m.id===undefined)return;let result={};
+ if(m.method==='model/list')result={data:[{id:'model',model:'model',supportedReasoningEfforts:[],serviceTiers:[]}]};
+ if(m.method==='thread/start'||m.method==='thread/resume'){note({method:m.method,threadId:m.params.threadId,apiKey});result={thread:{id:'thread'},model:'model',reasoningEffort:null,serviceTier:null};}
+ if(m.method==='turn/start'){note({method:m.method,input:m.params.input,apiKey,auth:fs.existsSync(path.join(home,'auth.json'))});result={turn:{id:(apiKey?'key-':'oauth-')+(++turn)}};}
+ send({id:m.id,result});
+ if(m.method!=='turn/start')return;
+ const id=result.turn.id;send({method:'turn/started',params:{threadId:'thread',turn:{id}}});
+ if(!apiKey){const error={message:'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 2nd, 2026 7:25 AM.',codexErrorInfo:'usageLimitExceeded'};
+  send({method:'error',params:{threadId:'thread',turnId:id,error}});
+  send({method:'turn/completed',params:{threadId:'thread',turn:{id,status:'failed',error}}});return;}
+ send({method:'item/agentMessage/delta',params:{threadId:'thread',turnId:id,itemId:'answer',delta:'CODEX_E2B_OK'}});
+ send({method:'turn/completed',params:{threadId:'thread',turn:{id,status:'completed'}}});
+});
+`,
+  );
+  chmodSync(fixturePath, 0o755);
+  const port = 43000 + Math.floor(Math.random() * 10000);
+  const child = spawn(
+    process.execPath,
+    [new URL("./ws-server.mjs", import.meta.url).pathname],
+    {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        HOME: directory,
+        CODEX_AUTH_JSON: JSON.stringify({ auth_mode: "chatgpt", tokens: {} }),
+        OPENAI_API_KEY: "sk-funded-fixture",
+        CODEX_GOAL: "write the sentinel",
+        CODEX_MODEL: "model",
+        CODE_SESSION_TURN_TOKEN: "native-token",
+        PORT: String(port),
+        GITHUB_REPO_URL: "",
+        ROSE_PROJECT_WORKDIR: "",
+        CODEX_FAST_MODE_PROXY_URL: "",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let logs = "";
+  child.stdout.on("data", (d) => (logs += d));
+  child.stderr.on("data", (d) => (logs += d));
+  let ws;
+  const messages = [];
+  try {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        ws = new WebSocket(`ws://127.0.0.1:${port}?cursor=0`);
+        // Replayed events can arrive with the upgrade; listen before awaiting open.
+        ws.on("message", (d) => messages.push(JSON.parse(d)));
+        await new Promise((resolve, reject) => {
+          ws.once("open", resolve);
+          ws.once("error", reject);
+        });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    const events = () =>
+      messages.flatMap((m) =>
+        m.type === "code_agent_event"
+          ? [m.data]
+          : m.type === "code_agent_events"
+            ? m.data
+            : [],
+      );
+    for (let i = 0; i < 500; i++) {
+      if (
+        events().some(
+          (e) => e.type === "turn_ended" && e.status === "completed",
+        )
+      )
+        break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const seen = events();
+    const ended = seen.filter((e) => e.type === "turn_ended");
+    assert.deepEqual(
+      ended.map((e) => e.status),
+      ["completed"],
+      `the OAuth failure must not end the run before the funded retry\n${logs}\n${JSON.stringify(seen)}`,
+    );
+    assert.ok(
+      seen.some(
+        (e) =>
+          e.type === "error" && /hit your usage limit/.test(e.message ?? ""),
+      ),
+      "the OAuth usage-limit error is still reported",
+    );
+    const fallback = seen.find((e) => e.type === "auth_fallback");
+    assert.equal(fallback?.to, "openai_api_key");
+    assert.equal(fallback?.reason, "usage_limit_reached");
+    const calls = readFileSync(journal, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    assert.deepEqual(
+      calls.map((c) => c.login ?? c.method),
+      [
+        "thread/start",
+        "turn/start",
+        "sk-funded-fixture",
+        "thread/resume",
+        "turn/start",
+      ],
+    );
+    assert.equal(
+      calls[3].threadId,
+      "thread",
+      "the funded retry resumes the same thread",
+    );
+    assert.deepEqual(
+      calls[4].input,
+      calls[1].input,
+      "the funded retry re-sends the same turn input",
+    );
+    assert.equal(calls[4].apiKey, true);
+    assert.equal(
+      calls[4].auth,
+      false,
+      "the ChatGPT auth.json is removed before the retry",
+    );
+  } finally {
+    ws?.terminate();
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("close", resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -121,12 +121,29 @@ class DeployLiveProbeTests(unittest.TestCase):
         commands = {command.name: command for command in module.deploy_commands()}
 
         self.assertEqual(
-            set(commands), {"credential-health", "amplitude-live", "chat-router-failover-live"}
+            set(commands),
+            {
+                "credential-health",
+                "amplitude-live",
+                "chat-router-failover-live",
+                "migration-preflight",
+            },
         )
         probe = commands["chat-router-failover-live"]
         self.assertEqual(probe.after, "amplitude-live")
         self.assertIn("CHAT_ROUTER_FAILOVER_LIVE=1", probe.argv)
         self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", "chat-router-failover"))
+        self.assertEqual(probe.cwd, ROOT / "back-end")
+
+    def test_migration_preflight_checks_branch_migrations_against_production(self) -> None:
+        module = _load_module()
+        commands = {command.name: command for command in module.deploy_commands()}
+        probe = commands["migration-preflight"]
+        self.assertIsNone(probe.after)
+        self.assertEqual(
+            probe.argv[-2:],
+            (module.workspace_tsx(), "scripts/migration-preflight.ts"),
+        )
         self.assertEqual(probe.cwd, ROOT / "back-end")
 
     def test_credential_health_uses_workspace_tsx_not_npx(self) -> None:

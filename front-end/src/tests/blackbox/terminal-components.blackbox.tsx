@@ -2133,7 +2133,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       ),
     );
 
-    await user.click(screen.getByLabelText('Next browser'));
+    await user.click(screen.getAllByRole('button', { name: 'Show browser: Browser task' })[1]);
     await user.click(screen.getByText('Second browser'));
     await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
     const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;

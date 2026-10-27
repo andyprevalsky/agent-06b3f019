@@ -427,6 +427,19 @@ FORMAT JSONEachRow
         return [f"[clickhouse] Error: {e}"]
 
 
+async def _close_subprocess_transport(process: asyncio.subprocess.Process) -> None:
+    """Close an exited subprocess's pipes while its event loop is still running.
+
+    A cancelled reader leaves a full StreamReader paused, so the pipe never reads
+    EOF and the transport stays open; garbage collection after ``asyncio.run``
+    then closes it on a closed loop ("RuntimeError: Event loop is closed").
+    """
+    transport = getattr(process, "_transport", None)
+    if transport is not None and not transport.is_closing():
+        transport.close()
+        await asyncio.sleep(0)
+
+
 class FlyLogCollector:
     """
     Streams flyctl logs as a background process, captures all output.
@@ -560,11 +573,7 @@ class FlyLogCollector:
                     self._process.kill()
                 except ProcessLookupError:
                     pass
-            # Drain pipes to prevent ResourceWarning on GC
-            if self._process.stdout:
-                self._process.stdout.feed_eof()
-            if self._process.stderr:
-                self._process.stderr.feed_eof()
+            await _close_subprocess_transport(self._process)
             self._process = None
 
     @property
@@ -612,7 +621,16 @@ async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+            await _close_subprocess_transport(proc)
         lines = stdout.decode().strip().splitlines()
         filtered = []
         for raw_line in lines:

@@ -77,6 +77,7 @@ it.each(['other-owner', 'other-task', 'root'])(
       browserComposerSlot: slot,
       selectedAgentId: 'owner',
       browserTabAgentId: scenario === 'root' ? null : 'owner',
+      browserTabTaskId: scenario === 'root' ? null : 'task',
       tabs: [{ agentId: 'owner', taskId: 'task', live: true }],
     } as unknown as RoseAppsValue;
     try {
@@ -114,6 +115,7 @@ it('fences an old owner slot during A to B selection, then restores the normal c
       browserComposerSlot: target,
       selectedAgentId: selected,
       browserTabAgentId: selected,
+      browserTabTaskId: selected,
       tabs: [{ agentId: selected, taskId: selected, live: true }],
     }) as unknown as RoseAppsValue;
   const tree = (state: RoseAppsValue) => (

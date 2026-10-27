@@ -132,7 +132,8 @@ export async function upsertPersonAndMessageRecords(
   contacts: ContactToUpsert[],
   jobId: string,
   googleAccountEmail?: string,
-  googleCredentialId?: string
+  googleCredentialId?: string,
+  options: { throwOnChunkError?: boolean } = {}
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   log.info('Processing messages', {
@@ -144,6 +145,8 @@ export async function upsertPersonAndMessageRecords(
 
   let messagesProcessed = 0;
   let contactsProcessed = 0;
+  let failedChunks = 0;
+  let firstChunkError: string | undefined;
 
   // Process contacts in chunks
   for (let i = 0; i < contacts.length; i += PERSON_CHUNK_SIZE) {
@@ -204,78 +207,78 @@ export async function upsertPersonAndMessageRecords(
       if (p.linkedinUrl) personMap.set(p.linkedinUrl, p.id);
     });
 
-    // Process each contact's messages
-    for (const contact of chunk) {
-      try {
-        const personId = personMap.get(contact.identifier);
-
-        if (!personId) {
-          log.warn('Person not found for contact, skipping messages', {
-            jobId,
-          });
-          continue;
-        }
-
-        if (!contact.messages?.length) {
-          log.warn('No messages for contact, skipping', {
-            jobId,
-          });
-          continue;
-        }
-
-        // Insert messages in batches
-        for (
-          let batchIndex = 0;
-          batchIndex < contact.messages.length;
-          batchIndex += MESSAGE_BATCH_SIZE
-        ) {
-          const batch = contact.messages.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE);
-
-          await createMessageBatch(
-            batch.map((msg) => ({
-              personId,
-              userId,
-              channel: msg.channel,
-              from: msg.from,
-              to: msg.to,
-              timestamp: msg.timestamp,
-              message: msg.message,
-              externalId: msg.externalId,
-              googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
-            })),
-            userId,
-            googleAccountEmail,
-            googleCredentialId
-          );
-        }
-
-        // Calculate communication frequency and update person stats
-        const frequency = calculateCommunicationFrequency(contact.messages);
-
-        await prisma.person.update({
-          where: { id: personId },
-          data: {
-            messagesExchanged: contact.messages.length,
-            communicationFrequency: frequency,
-          },
-        });
-
-        contactsProcessed++;
-        messagesProcessed += contact.messages.length;
-
-        log.info('Processed contact', {
-          jobId,
-          messagesInContact: contact.messages.length,
-          messagesProcessed,
-          totalMessages,
-        });
-      } catch (error) {
-        if (error instanceof DisconnectedGoogleCredentialError) throw error;
-        log.error('Error processing contact', {
-          jobId,
-        });
+    // Insert every message of the chunk together, then refresh the chunk's
+    // person stats in one statement: O(chunks) round trips, not O(contacts).
+    const resolved: Array<{ personId: string; contact: ContactToUpsert; index: number }> = [];
+    for (const [offset, contact] of chunk.entries()) {
+      const personId = personMap.get(contact.identifier);
+      if (!personId) {
+        log.warn('Person not found for contact, skipping messages', { jobId });
+        continue;
       }
+      if (!contact.messages?.length) {
+        log.warn('No messages for contact, skipping', { jobId });
+        continue;
+      }
+      resolved.push({ personId, contact, index: i + offset });
     }
+    if (resolved.length === 0) continue;
+
+    try {
+      const rows = resolved.flatMap(({ personId, contact, index }) =>
+        contact.messages.map((msg, position) => ({
+          personId,
+          userId,
+          channel: msg.channel,
+          from: msg.from,
+          to: msg.to,
+          timestamp: msg.timestamp,
+          message: msg.message,
+          // NULL never deduplicates, so a retried durable part would store an
+          // ID-less message twice. Its job id and payload position are stable.
+          externalId:
+            msg.externalId ??
+            (options.throwOnChunkError === true ? `${jobId}:${index}:${position}` : undefined),
+          googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
+        }))
+      );
+      for (let batchIndex = 0; batchIndex < rows.length; batchIndex += MESSAGE_BATCH_SIZE) {
+        await createMessageBatch(
+          rows.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE),
+          userId,
+          googleAccountEmail,
+          googleCredentialId
+        );
+      }
+      await updatePersonMessageStats(resolved.map((r) => r.personId));
+      contactsProcessed += resolved.length;
+      messagesProcessed += rows.length;
+      log.info('Processed contact chunk', {
+        jobId,
+        contactsInChunk: resolved.length,
+        messagesProcessed,
+        totalMessages,
+      });
+    } catch (error) {
+      if (error instanceof DisconnectedGoogleCredentialError) throw error;
+      failedChunks++;
+      // Prisma messages start with a newline; keep the cause on one readable line.
+      firstChunkError ??= (error instanceof Error ? error.message : String(error))
+        .replace(/\s+/g, ' ')
+        .trim();
+      log.error('Error processing contact chunk', {
+        jobId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // Durable callers (the messaging upload queue) retry the whole part; inserts
+  // deduplicate, so a retry only fills what this run failed to store.
+  if (options.throwOnChunkError === true && failedChunks > 0) {
+    throw new Error(
+      `${failedChunks} contact chunk(s) failed to store (job ${jobId}): ${firstChunkError}`
+    );
   }
 
   log.info('Stored messages', {
@@ -284,6 +287,42 @@ export async function upsertPersonAndMessageRecords(
     contactsProcessed,
   });
   return { contacts: contactsProcessed, messages: messagesProcessed };
+}
+
+/**
+ * Refresh messagesExchanged and communicationFrequency from the stored
+ * messages, so a history split across upload parts counts in full. Frequency
+ * reads only distinct message days inside its 360-day window (at most ~361
+ * rows per person via the personId+timestamp index), and the stats are written
+ * for the whole chunk in one UPDATE.
+ */
+async function updatePersonMessageStats(personIds: string[]): Promise<void> {
+  const ids = Array.from(new Set(personIds));
+  const days = await prisma.$queryRaw<Array<{ personId: string; day: Date }>>`
+    SELECT DISTINCT m."personId", date_trunc('day', m."timestamp") AS day
+    FROM "MessageRecord" m
+    WHERE m."personId" = ANY(${ids}::text[])
+      AND m."timestamp" >= NOW() - INTERVAL '361 days'`;
+  const daysByPerson = new Map<string, Array<{ timestamp: Date }>>();
+  for (const { personId, day } of days) {
+    const list = daysByPerson.get(personId) ?? [];
+    list.push({ timestamp: day });
+    daysByPerson.set(personId, list);
+  }
+  // Every id here has stored messages; none in the window reads as 'rarely'.
+  const values = ids.map((id) => {
+    const recent = daysByPerson.get(id) ?? [];
+    return recent.length === 0 ? 'rarely' : calculateCommunicationFrequency(recent);
+  });
+  await prisma.$executeRaw`
+    UPDATE "Person" AS p
+    SET "messagesExchanged" = (
+          SELECT COUNT(*)::int FROM "MessageRecord" m WHERE m."personId" = p."id"
+        ),
+        "communicationFrequency" = v.frequency,
+        "updatedAt" = NOW()
+    FROM unnest(${ids}::text[], ${values}::text[]) AS v(id, frequency)
+    WHERE p."id" = v.id`;
 }
 
 /**

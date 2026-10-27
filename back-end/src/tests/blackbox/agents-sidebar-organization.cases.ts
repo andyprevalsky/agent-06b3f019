@@ -39,6 +39,7 @@ import {
   ARCHIVED_AGENTS_DEFAULT_LIMIT,
   ARCHIVED_AGENTS_MAX_LIMIT,
 } from '../../domains/agents/types';
+import { backfillArchivedAgentStatus } from '../../providers/archivedAgentStatusBackfill';
 
 type AgentListRow = z.infer<typeof AgentListItem>;
 
@@ -55,6 +56,10 @@ interface AgentRowOverrides {
   pinnedAt?: Date | null;
   deletedAt?: Date | null;
   createdAt?: Date;
+  status?: 'ACTIVE' | 'PAUSED' | 'COMPLETED';
+  isBenchmark?: boolean;
+  statusMessage?: string;
+  parentAgentId?: string;
 }
 
 /**
@@ -384,6 +389,112 @@ test('DELETE /:id — archives out of GET / and into GET /archived', async () =>
   assert(row!.archived_at !== null, 'Archived row must expose a non-null archived_at');
   assert(row!.title === title, `Archiving must preserve the title, got "${row!.title}"`);
   assert(row!.goal === goal, 'Archiving must preserve the goal');
+});
+
+test('DELETE /:id — archived running agents and their children become terminal', async () => {
+  const session = await createAnonymousSession('archive-terminal');
+  const parentId = await createAgentRow(session.user.id, `Archive terminal parent ${RUN_ID}`);
+  const childId = await createAgentRow(session.user.id, `Archive terminal child ${RUN_ID}`, {
+    status: 'PAUSED',
+    parentAgentId: parentId,
+  });
+  const doneId = await createAgentRow(session.user.id, `Archive terminal done ${RUN_ID}`, {
+    status: 'COMPLETED',
+    statusMessage: 'finished',
+  });
+
+  for (const agentId of [parentId, doneId]) {
+    const del = await request(`${BASE_URL}/api/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: apiKeyHeaders(session.user.id),
+    });
+    assertStatus(del.status, 204, del.data);
+  }
+
+  const rows = await prisma.agent.findMany({
+    where: { id: { in: [parentId, childId, doneId] } },
+    select: { id: true, status: true, statusMessage: true, deletedAt: true },
+  });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const agentId of [parentId, childId]) {
+    const row = byId.get(agentId);
+    assert(row?.deletedAt !== null, `${agentId} must be archived`);
+    assert(
+      row?.status === 'FAILED' && row.statusMessage === 'Archived by user',
+      `an archived running agent must become FAILED/"Archived by user", got ${row?.status}/${row?.statusMessage}`
+    );
+  }
+  const done = byId.get(doneId);
+  assert(
+    done?.status === 'COMPLETED' && done.statusMessage === 'finished',
+    `archiving must keep an already-terminal status, got ${done?.status}/${done?.statusMessage}`
+  );
+
+  const archived = await waitForArchivedList(session.user.id, 'archived terminal rows', (list) =>
+    list.some((a) => a.agent_id === parentId)
+  );
+  assert(
+    archived.some((a) => a.agent_id === parentId),
+    'Archived parent must stay listed in GET /archived'
+  );
+});
+
+test('archived-agent status backfill settles only archived non-terminal rows, idempotently', async () => {
+  const session = await createAnonymousSession('archive-backfill');
+  const staleId = await createAgentRow(session.user.id, `Archive backfill stale ${RUN_ID}`, {
+    deletedAt: new Date(),
+  });
+  const liveId = await createAgentRow(session.user.id, `Archive backfill live ${RUN_ID}`);
+  const benchmarkId = await createAgentRow(session.user.id, `Archive backfill bench ${RUN_ID}`, {
+    deletedAt: new Date(),
+    isBenchmark: true,
+  });
+  const heldId = await createAgentRow(session.user.id, `Archive backfill held ${RUN_ID}`, {
+    deletedAt: new Date(),
+  });
+  await prisma.purchaseSpend.create({
+    data: {
+      userId: session.user.id,
+      agentId: heldId,
+      status: 'HELD',
+      fingerprint: `archive-backfill-${randomUUID()}`,
+      merchant: 'backfill fixture',
+      lineItemsJson: [],
+      totalCents: 100,
+    },
+  });
+  const skeletonId = await createAgentRow(
+    'benchmark-hub-ancestors',
+    `Archive backfill skeleton ${RUN_ID}`,
+    { deletedAt: new Date() }
+  );
+
+  const dryRun = await backfillArchivedAgentStatus({ execute: false });
+  assert(dryRun.pendingBefore >= 1 && dryRun.updated === 0, 'dry run must count but not write');
+  const first = await backfillArchivedAgentStatus({ execute: true, batchSize: 1 });
+  assert(first.updated >= 1, `backfill must settle the stale row, got ${JSON.stringify(first)}`);
+  const second = await backfillArchivedAgentStatus({ execute: true });
+  assert(second.pendingBefore === 0 && second.updated === 0, 'a second run must find nothing');
+
+  const rows = await prisma.agent.findMany({
+    where: { id: { in: [staleId, liveId, benchmarkId, heldId, skeletonId] } },
+    select: { id: true, status: true, statusMessage: true },
+  });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert(
+    byId.get(staleId)?.status === 'FAILED' &&
+      byId.get(staleId)?.statusMessage === 'Archived by user',
+    'the archived ACTIVE row must become FAILED/"Archived by user"'
+  );
+  assert(byId.get(liveId)?.status === 'ACTIVE', 'a non-archived ACTIVE row must be untouched');
+  for (const [agentId, why] of [
+    [benchmarkId, 'an isBenchmark agent (benchmark cleanup has its own owner)'],
+    [heldId, 'an agent holding a HELD purchase spend (no money may move)'],
+    [skeletonId, 'a benchmark-hub ancestor skeleton (breadcrumb mirror)'],
+  ] as const) {
+    assert(byId.get(agentId)?.status === 'ACTIVE', `the backfill must skip ${why}`);
+  }
+  await prisma.purchaseSpend.deleteMany({ where: { agentId: heldId } });
 });
 
 // ========================= POST /:id/unarchive =============================

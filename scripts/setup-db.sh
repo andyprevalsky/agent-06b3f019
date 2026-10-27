@@ -503,6 +503,11 @@ setup_db_run_interruptible() {
 }
 
 echo "🐘 Syncing Prisma schema..."
+# Duplicate or blank User.phone rows (a restored DB can carry a later-merged
+# account) would make push refuse the unique User.phone index.
+setup_db_run_interruptible bash -c \
+    'cd back-end && bash scripts/normalize-local-user-phones.sh "$0" >/dev/null' \
+    "$LOCAL_DB_URL"
 setup_db_run_interruptible bash -c \
     'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3' \
     "$LOCAL_DB_URL"

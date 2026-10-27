@@ -278,12 +278,16 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
-    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-      method: 'POST',
-      headers: apiKeyHeaders(),
-      body: JSON.stringify({ output }),
-    });
-    assertStatus(outputRes.status, 200, outputRes.data);
+    // The app-server transport reports a failed turn only as events, so the
+    // transcript can be empty; the classification below still has to run.
+    if (output !== '') {
+      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ output }),
+      });
+      assertStatus(outputRes.status, 200, outputRes.data);
+    }
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
