@@ -124,6 +124,43 @@ async function main(): Promise<unknown> {
       });
       return { released };
     }
+    case 'wa-dedupe-lost-ack': {
+      // The dedupe claim commits, then the connection drops before Postgres's
+      // reply reaches this instance (Supavisor closing a client: P1017). The
+      // query layer retries the INSERT; it must still see its own claim.
+      const net = await import('node:net');
+      const upstream = new URL(process.env.DATABASE_URL ?? '');
+      let dropped = false;
+      const proxy = net.createServer((client) => {
+        const server = net.connect(Number(upstream.port || 5432), upstream.hostname);
+        client.on('data', (chunk) => server.write(chunk));
+        server.on('data', (chunk: Buffer) => {
+          if (!dropped && chunk.includes('INSERT 0 1')) {
+            dropped = true;
+            client.destroy();
+            server.destroy();
+            return;
+          }
+          client.write(chunk);
+        });
+        client.on('error', () => server.destroy());
+        server.on('error', () => client.destroy());
+        client.on('close', () => server.destroy());
+        server.on('close', () => client.destroy());
+      });
+      await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', () => resolve()));
+      const proxied = new URL(upstream.toString());
+      proxied.hostname = '127.0.0.1';
+      proxied.port = String((proxy.address() as { port: number }).port);
+      // Plaintext, so the proxy can see the INSERT's CommandComplete.
+      proxied.searchParams.set('sslmode', 'disable');
+      process.env.DATABASE_URL = proxied.toString();
+      process.env.DIRECT_URL = proxied.toString();
+      const wa = await import('../../domains/whatsapp-webhook/service');
+      await barrier();
+      const duplicate = await wa.alreadyProcessedMessage(args[0]);
+      return { duplicate, dropped };
+    }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');
       await barrier();

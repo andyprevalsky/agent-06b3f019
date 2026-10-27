@@ -95,6 +95,11 @@ export async function takeEphemeral<T>(namespace: string, key: string): Promise<
  * Claim `key` until `ttlMs` elapses, unless another live claim holds it.
  * Returns an owner token on success, null when another instance holds it.
  * An expired claim is taken over, so a crashed holder never wedges the key.
+ *
+ * The token is minted before the statement, so the query layer's retry on a
+ * dropped connection (P1001/P1017) replays the same token: an INSERT that
+ * committed before its reply was lost then matches its own claim instead of
+ * reporting it as another instance's.
  */
 export async function acquireLease(
   namespace: string,
@@ -109,6 +114,7 @@ export async function acquireLease(
     ON CONFLICT (namespace, key) DO UPDATE
       SET value = EXCLUDED.value, "expiresAt" = EXCLUDED."expiresAt", "createdAt" = now()
       WHERE "SharedEphemeralState"."expiresAt" <= now()
+        OR "SharedEphemeralState".value->>'token' = ${token}
     RETURNING key
   `;
   return rows.length === 1 ? token : null;

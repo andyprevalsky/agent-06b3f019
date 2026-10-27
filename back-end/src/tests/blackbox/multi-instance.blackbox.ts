@@ -14,6 +14,7 @@
  *  - a revoked compute grant seen on two instances is re-minted once
  *  - B's Steel reaper skips a session A is still setting up
  *  - a WhatsApp redelivery that lands on the other instance is a duplicate
+ *  - a WhatsApp claim whose commit ack was lost is not its own duplicate
  *  - two instances' Gmail sync ticks claim one integration once
  *  - a Plaid item sync runs on one instance at a time
  *  - concurrent AgentCard token refreshes rotate the refresh token once
@@ -240,6 +241,15 @@ async function main(): Promise<void> {
       ]);
       const duplicates = results.filter((r) => r.duplicate === true).length;
       assert(duplicates === 1, `exactly one delivery must be a duplicate, got ${duplicates}`);
+    });
+
+    await test('a WhatsApp claim whose commit ack was lost is not its own duplicate', async () => {
+      const wamid = `wamid.mi-${randomUUID()}`;
+      const [first] = await concurrently([['wa-dedupe-lost-ack', [wamid]]]);
+      assert(first.dropped === true, `the proxy must drop the commit ack: ${JSON.stringify(first)}`);
+      assert(first.duplicate === false, 'a fresh message must not be skipped as a duplicate');
+      const [redelivery] = await concurrently([['wa-dedupe', [wamid]]]);
+      assert(redelivery.duplicate === true, "Meta's redelivery must still be a duplicate");
     });
 
     await test("two instances' Gmail sync ticks claim one integration once", async () => {
