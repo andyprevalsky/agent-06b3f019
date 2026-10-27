@@ -195,7 +195,10 @@ for (const provider of ['claude', 'codex'] as const) {
     const history = slot.getByTestId('code-work-activities');
     await expect(slot).toHaveCount(1);
     await expect(slot).toHaveAttribute('data-state', 'running');
-    await expect(history.locator('[data-message-id]')).toHaveCount(1);
+    // A running turn is the compact Working fold: its steps (thoughts included)
+    // appear only once the fold is expanded.
+    await expect(slot.getByRole('button', { expanded: false })).toContainText('Working');
+    await expect(history.locator('[data-message-id]')).toHaveCount(0);
     await expect(page.getByTestId('query-input-layer').locator('textarea')).toBeVisible();
     await slot.getByRole('button', { expanded: false }).click();
     await expect(history.locator('[data-message-id]')).toHaveCount(30);
