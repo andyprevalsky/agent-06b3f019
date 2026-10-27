@@ -121,7 +121,8 @@ test('cache writes are last-write-wins', () => {
   const upsert = repo.slice(repo.indexOf('demoCachePrisma.fastModeCacheEntry.upsert'));
   assert.ok(!/update:\s*\{\s*\}/.test(upsert), 'cache upsert must not keep the first value');
   assert.ok(
-    /update:\s*\{[\s\S]*value:\s*\(value \?\? null\) as object/.test(upsert),
+    /update:\s*\{[\s\S]*value:\s*\(stored \?\? null\) as object/.test(upsert) &&
+      /const stored = prepared \? prepared\.marker : value;/.test(repo),
     'cache upsert must replace value'
   );
   assert.ok(/update:\s*\{[\s\S]*blobPath/.test(upsert), 'cache upsert must replace blobPath');

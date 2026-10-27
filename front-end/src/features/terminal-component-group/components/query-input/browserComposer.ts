@@ -13,7 +13,8 @@ export function browserComposerTarget(apps: RoseAppsValue | null, agentId?: stri
       (tab) =>
         tab.agentId === apps.browserTabAgentId &&
         tab.agentId === target.dataset.agentId &&
-        tab.taskId === target.dataset.taskId,
+        tab.taskId === target.dataset.taskId &&
+        tab.taskId === apps.browserTabTaskId,
     )
   )
     return null;

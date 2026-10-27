@@ -9,13 +9,13 @@
  *   [ANY] --another trigger--> that app
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
- *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id)]
- *   [AGENT(id)] --click Root tab--> [ROOT]
+ *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
+ *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes --> [AGENT(selected)] if it has a browser tab, else [ROOT]
  *   Clicking an agent tab also selects that agent, so its chat (and the
  *   BrowserStatusBar that owns its live session state) mounts.
  *
- * AGENT TABS (registry fed by mounted BrowserStatusBar instances):
+ * BROWSER TASK TABS (registry fed by mounted BrowserStatusBar instances):
  *   register(agentId, taskId, live) --> tab exists / updated
  *   unregister while that agent is still selected (browser task ended) --> tab removed
  *   unregister after switching agents --> tab kept (session still running)
@@ -95,12 +95,11 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
 
   const registerAgentBrowser = useCallback((tab: AgentBrowserTab) => {
     setTabs((prev) => {
-      const existing = prev.find((t) => t.agentId === tab.agentId);
+      const existing = prev.find((t) => t.agentId === tab.agentId && t.taskId === tab.taskId);
       if (existing === undefined) return [...prev, tab];
-      // Another browser of the same agent owns the tab; keep the focused task.
-      if (existing.taskId !== tab.taskId) return prev;
       if (
         existing.live === tab.live &&
+        existing.taskLabel === tab.taskLabel &&
         (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
         (existing.actualModel ?? null) === (tab.actualModel ?? null) &&
         (existing.rosePool ?? null) === (tab.rosePool ?? null) &&
@@ -109,7 +108,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       ) {
         return prev;
       }
-      return prev.map((t) => (t.agentId === tab.agentId ? tab : t));
+      return prev.map((t) => (t.agentId === tab.agentId && t.taskId === tab.taskId ? tab : t));
     });
   }, []);
 
@@ -120,10 +119,8 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
 
   const focusTask = useCallback((agentId: string, taskId: string) => {
     setTabs((prev) => {
-      const existing = prev.find((t) => t.agentId === agentId);
-      if (existing === undefined) return [...prev, { agentId, taskId, live: true }];
-      if (existing.taskId === taskId) return prev;
-      return prev.map((t) => (t.agentId === agentId ? { agentId, taskId, live: true } : t));
+      if (prev.some((t) => t.agentId === agentId && t.taskId === taskId)) return prev;
+      return [...prev, { agentId, taskId, live: true }];
     });
   }, []);
 
@@ -174,7 +171,10 @@ export function RoseAppsProvider({
   const [openApp, setOpenApp] = useState<RoseApp | null>(
     publishLayout && localLink ? 'browser' : null,
   );
-  const [browserTabAgentId, setBrowserTabAgentId] = useState<string | null>(null);
+  const [browserSelection, setBrowserSelection] = useState<{
+    agentId: string;
+    taskId: string;
+  } | null>(null);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [browserComposerSlot, setBrowserComposerSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
@@ -185,6 +185,17 @@ export function RoseAppsProvider({
     agents,
     selectedAgentId,
   );
+
+  // Derive removal fallback without an effect that could race initial registration.
+  const selectedBrowserTab =
+    browserSelection === null
+      ? undefined
+      : (tabs.find(
+          (tab) =>
+            tab.agentId === browserSelection.agentId && tab.taskId === browserSelection.taskId,
+        ) ?? tabs.find((tab) => tab.agentId === browserSelection.agentId));
+  const browserTabAgentId = selectedBrowserTab?.agentId ?? null;
+  const browserTabTaskId = selectedBrowserTab?.taskId ?? null;
 
   // Selecting an agent in the agent list switches to its tab. Its status bar
   // may register after the selection, so a pending switch completes on register.
@@ -197,16 +208,23 @@ export function RoseAppsProvider({
       isFirstSelectionRef.current = false;
       return;
     }
-    const hasTab = tabsRef.current.some((t) => t.agentId === selectedAgentId);
-    pendingSwitchRef.current = hasTab ? null : selectedAgentId;
-    setBrowserTabAgentId(hasTab ? selectedAgentId : null);
+    const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+    pendingSwitchRef.current = tab ? null : selectedAgentId;
+    setBrowserSelection((current) => {
+      if (
+        current?.agentId === selectedAgentId &&
+        tabsRef.current.some((t) => t.agentId === current.agentId && t.taskId === current.taskId)
+      )
+        return current;
+      return tab ? { agentId: tab.agentId, taskId: tab.taskId } : null;
+    });
   }, [selectedAgentId]);
   const registerAndSwitch = useCallback(
     (tab: AgentBrowserTab) => {
       registerAgentBrowser(tab);
       if (pendingSwitchRef.current === tab.agentId) {
         pendingSwitchRef.current = null;
-        setBrowserTabAgentId(tab.agentId);
+        setBrowserSelection({ agentId: tab.agentId, taskId: tab.taskId });
       }
     },
     [registerAgentBrowser],
@@ -216,8 +234,17 @@ export function RoseAppsProvider({
     (app: RoseApp) => {
       // Opening Browser lands on the selected agent's tab when it has one.
       if (app === 'browser' && openApp !== 'browser') {
-        const hasTab = tabsRef.current.some((t) => t.agentId === selectedAgentId);
-        if (hasTab) setBrowserTabAgentId(selectedAgentId);
+        const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+        setBrowserSelection((current) => {
+          if (
+            current &&
+            tabsRef.current.some(
+              (t) => t.agentId === current.agentId && t.taskId === current.taskId,
+            )
+          )
+            return current;
+          return tab ? { agentId: tab.agentId, taskId: tab.taskId } : null;
+        });
       }
       setOpenApp((prev) => (prev === app ? null : app));
     },
@@ -237,15 +264,18 @@ export function RoseAppsProvider({
     (agentId: string, taskId: string) => {
       setBrowserMode('remote');
       focusTask(agentId, taskId);
-      setBrowserTabAgentId(agentId);
+      setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },
     [focusTask],
   );
 
   const selectBrowserTab = useCallback(
-    (agentId: string | null) => {
-      setBrowserTabAgentId(agentId);
+    (agentId: string | null, taskId?: string) => {
+      const tab = tabsRef.current.find(
+        (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
+      );
+      setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },
     [onSelectAgent, selectedAgentId],
@@ -268,8 +298,9 @@ export function RoseAppsProvider({
       browserMode === 'remote' &&
       agentId !== null &&
       browserTabAgentId === agentId &&
+      browserTabTaskId === taskId &&
       tabs.some((t) => t.agentId === agentId && t.taskId === taskId),
-    [browserTabAgentId, browserMode, openApp, tabs],
+    [browserTabAgentId, browserTabTaskId, browserMode, openApp, tabs],
   );
 
   const value = useMemo<RoseAppsValue>(
@@ -280,6 +311,7 @@ export function RoseAppsProvider({
       ...displays,
       openAgentDisplay,
       browserTabAgentId,
+      browserTabTaskId,
       tabs,
       agents,
       selectedAgentId,
@@ -310,6 +342,7 @@ export function RoseAppsProvider({
       displays,
       openAgentDisplay,
       browserTabAgentId,
+      browserTabTaskId,
       tabs,
       agents,
       selectedAgentId,
