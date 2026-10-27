@@ -17,7 +17,10 @@ import { config } from 'dotenv';
 config();
 
 import { prisma } from '../../providers/database';
-import { deleteAgentRecursive } from '../../providers/agentKill';
+import {
+  deleteAgentRecursive,
+  waitForScheduledRootArchiveFinalizations,
+} from '../../providers/agentKill';
 import { listArchivedObjectsStrict } from '../../providers/traceArchive';
 import { inspectFinalizedManifest } from '../../providers/traceArchiveManifest';
 import {
@@ -202,6 +205,7 @@ async function main(): Promise<void> {
       assert.equal(before, 2);
 
       await deleteAgentRecursive(parentId, { terminateReason: 'unit-test' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const after = await prisma.agentAttentionRequest.count({
         where: { agentId: { in: [parentId, childId] } },
@@ -268,6 +272,7 @@ async function main(): Promise<void> {
 
     try {
       await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const retained = await prisma.traceArchiveFinalization.findUnique({
         where: { rootAgentId: rootId },
@@ -282,6 +287,7 @@ async function main(): Promise<void> {
 
       process.env.TRACE_ARCHIVE_LOCAL_DIR = recoveredArchiveRoot;
       await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+      await waitForScheduledRootArchiveFinalizations();
 
       const stillRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
         where: { rootAgentId: rootId },
@@ -554,6 +560,7 @@ async function main(): Promise<void> {
           },
         }
       );
+      await waitForScheduledRootArchiveFinalizations();
 
       const obligation = await prisma.traceArchiveFinalization.findUnique({
         where: { rootAgentId: rootId },
