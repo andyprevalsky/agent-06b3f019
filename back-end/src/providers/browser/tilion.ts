@@ -1,6 +1,6 @@
 /**
  * Tilion Cloud browser sessions, exposed through the same CDP contract as
- * Steel, Kernel and Browser Use. See docs/plans/active/tilion-browser-provider.md.
+ * Steel, Kernel and Browser Use. See docs/plans/completed/tilion-browser-provider.md.
  *
  * create:  POST /v1/session (residential, geo city→state→country, Idempotency-Key)
  *            → CDP validation on connect_url → view-token live view → BrowserSession row

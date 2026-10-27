@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Every browser-provider-name dispatcher in back-end/src must handle `tilion`
- * (plan criterion A4, docs/plans/active/tilion-browser-provider.md).
+ * (plan criterion A4, docs/plans/completed/tilion-browser-provider.md).
  *
  * A dispatcher is a source file that compares a provider value against two or
  * more provider names ('kernel' | 'steel' | 'browser-use'). Such a file without

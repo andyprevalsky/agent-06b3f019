@@ -1,6 +1,6 @@
 /**
  * Live Tilion provider parity through the real backend routes (lane E,
- * docs/plans/active/tilion-browser-provider.md criteria B, C, D, G, I, K).
+ * docs/plans/completed/tilion-browser-provider.md criteria B, C, D, G, I, K).
  *
  *   vendor contract ─ POST /v1/session ─ 2nd CDP → 4409 ─ REST while CDP → 409 ─ DELETE 204/204/410
  *   backend parity  ─ /init (Tilion pinned) ─ live view ─ CDP ─ 4409 ─ geo ─ rotate ×2 ─ files

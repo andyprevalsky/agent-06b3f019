@@ -73,7 +73,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,
   ],
-  // Tilion became the default for new sessions (docs/plans/active/tilion-browser-provider.md).
+  // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
   ...tilionWiringCases,
   ...steelAuthShareCases,
   [

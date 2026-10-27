@@ -1,6 +1,6 @@
 /**
  * Live Tilion Cloud probe: measures the real API behaviour the Tilion browser
- * provider depends on (see docs/plans/active/tilion-browser-provider.md, lane E).
+ * provider depends on (see docs/plans/completed/tilion-browser-provider.md, lane E).
  *
  * Usage (from back-end/, reads TILION_API_KEY / TILION_BASE_URL from .env):
  *   npx tsx scripts/tilion-probe.ts                       # every check
