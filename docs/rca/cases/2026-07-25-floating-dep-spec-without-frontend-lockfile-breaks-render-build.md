@@ -103,6 +103,12 @@ lockfile is byte-identical (`npm ci` also fails on a stale lock), and
 Fail-before: the same test with Render's current `npm install` command exits on
 `edgesOut`. Five consecutive passes.
 
+The gate proved itself before merge. After a main sync the backend imported
+`ServiceBusyError` from `e2b`, but `back-end/package-lock.json` still pinned
+2.33.0. Every workspace install resolved 2.53.1, so nothing had noticed. The
+clean lock-pinned build failed tsc (TS2614), and the lock now pins the tested
+2.53.1 (floor `^2.53.1`).
+
 Scale: the build installs 757 locked packages once per deploy. It is
 independent of agent count.
 
