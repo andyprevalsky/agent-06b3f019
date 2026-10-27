@@ -152,6 +152,15 @@ this command are superseded by this policy.
    `scheduled_total > 0 && 20 * infra_failed_jobs >= scheduled_total`
    (**>=5% of the original scheduled total; 30 of 600**), immediately stop that exact owned run through its normal controller.
    Preserve the first breach, original clocks, every attempt and its evidence.
+   For an ordinary campaign, use its native job/child receipts to identify the
+   confirmed pre-stop infrastructure failure. A forwarded termination can mark
+   every remaining job `INFRA_ERROR` after the stop; record those jobs as
+   induced cancellations, with no scored task result, rather than counting
+   each as an independent infrastructure failure. If the receipts cannot
+   distinguish the causes, mark the infra count unclassified and preserve the
+   original evidence. A stopped batch with no scored copies cannot qualify for
+   the success-rate ramp or green-task credit; rerun its original task set after
+   the critical repair.
    Explicit user thresholds override this default; no minimum sample is added.
 2. **Triage every error and delegate independent causes in parallel.** Start as
    evidence arrives and reconcile after each completed or stopped experiment.
