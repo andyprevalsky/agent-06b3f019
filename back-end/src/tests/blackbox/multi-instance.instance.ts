@@ -25,6 +25,44 @@ async function barrier(): Promise<void> {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Route this process's database traffic through a proxy that drops the
+ * connection on the first reply carrying one of `tags` (a CommandComplete):
+ * the statement commits but its acknowledgement never arrives. Call before
+ * anything imports the Prisma client.
+ */
+async function dropFirstCommitAck(tags: string[]): Promise<{ dropped: () => boolean }> {
+  const net = await import('node:net');
+  const upstream = new URL(process.env.DATABASE_URL ?? '');
+  let dropped = false;
+  const proxy = net.createServer((client) => {
+    const server = net.connect(Number(upstream.port || 5432), upstream.hostname);
+    client.on('data', (chunk) => server.write(chunk));
+    server.on('data', (chunk: Buffer) => {
+      if (!dropped && tags.some((tag) => chunk.includes(tag))) {
+        dropped = true;
+        client.destroy();
+        server.destroy();
+        return;
+      }
+      client.write(chunk);
+    });
+    client.on('error', () => server.destroy());
+    server.on('error', () => client.destroy());
+    client.on('close', () => server.destroy());
+    server.on('close', () => client.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', () => resolve()));
+  const proxied = new URL(upstream.toString());
+  proxied.hostname = '127.0.0.1';
+  proxied.port = String((proxy.address() as { port: number }).port);
+  // Plaintext, so the proxy can see the CommandComplete tag.
+  proxied.searchParams.set('sslmode', 'disable');
+  process.env.DATABASE_URL = proxied.toString();
+  process.env.DIRECT_URL = proxied.toString();
+  return { dropped: () => dropped };
+}
+
 async function main(): Promise<unknown> {
   const [op, ...args] = process.argv.slice(2);
   switch (op) {
@@ -48,6 +86,100 @@ async function main(): Promise<unknown> {
         await sleep(Number(args[1]));
         return { enteredAt, leftAt: Date.now() };
       });
+    }
+    case 'sms-run': {
+      // A supervisor run on this instance: captures its inbound seq, then asks
+      // the commit gate whether it may still reply after a peer's /clear.
+      const store = await import('../../providers/smsSupervisor/sessionStore');
+      const gate = await import('../../providers/smsSupervisor/supervisorHandler');
+      const mySeq = await store.recordInboundSms(args[0], 'multi-instance inbound');
+      await barrier();
+      await sleep(Number(args[1]));
+      return { mySeq, ownsReply: await gate.inboundSeqStillCurrent(args[0], mySeq) };
+    }
+    case 'sms-clear': {
+      const repo = await import('../../domains/sms-webhook/repo');
+      await barrier();
+      await repo.clearSmsSession(args[0]);
+      return { cleared: true };
+    }
+    case 'auth-mint': {
+      // Asks for auth options on a realm with no saved login, which mints the
+      // agent identity when the stored one is outdated.
+      const { getAuthOptions } = await import('../../providers/authOptions');
+      await barrier();
+      const options = await getAuthOptions(args[0], 'https://multi-instance.example');
+      return { email: options.minted?.email ?? null };
+    }
+    case 'grant-remint': {
+      // A completion on this instance hits a revoked grant and asks for recovery.
+      const [userId, accountId, grantId] = args;
+      const { installGrantRecovery } = await import('../../domains/compute-grants/service');
+      const hook = installGrantRecovery({
+        minter: {
+          async mint() {
+            await sleep(1_500);
+            return { accessToken: `sk-ant-oat01-mi-${process.pid}` };
+          },
+        },
+      });
+      await barrier();
+      const outcome = await hook({
+        userId,
+        provider: 'claude',
+        accountId,
+        grantId,
+        status: 401,
+        body: '{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}',
+      });
+      return { status: outcome.status, accessToken: outcome.accessToken ?? null };
+    }
+    case 'steel-setup': {
+      // Instance A is still setting up a Steel session (no BrowserSession row yet).
+      const identity = await import('../../providers/steel/sessionIdentity');
+      await identity.registerInFlightSteelSession(args[0]);
+      await barrier();
+      await sleep(Number(args[1]));
+      await identity.unregisterInFlightSteelSession(args[0]);
+      return { registered: true };
+    }
+    case 'steel-reap': {
+      // Instance B's reaper sweeps the shared Steel account while A sets up.
+      const { reconcileOrphanedSteelSessions } =
+        await import('../../providers/steel/sessionReaper');
+      await barrier();
+      await sleep(Number(args[1]));
+      const released: string[] = [];
+      await reconcileOrphanedSteelSessions({
+        identity: () => 'render:multi-instance',
+        isOwned: () => true,
+        listLiveSessions: async () => [
+          { id: args[0], createdAt: new Date(Date.now() - 11 * 60_000).toISOString() },
+        ],
+        heldSessionIds: async () => new Set(),
+        release: async (id) => {
+          released.push(id);
+        },
+      });
+      return { released };
+    }
+    case 'wa-dedupe-lost-ack': {
+      // The dedupe claim commits, then the connection drops before Postgres's
+      // reply reaches this instance (Supavisor closing a client: P1017). The
+      // query layer retries the INSERT; it must still see its own claim.
+      const lostAck = await dropFirstCommitAck(['INSERT 0 1']);
+      const wa = await import('../../domains/whatsapp-webhook/service');
+      await barrier();
+      const duplicate = await wa.alreadyProcessedMessage(args[0]);
+      return { duplicate, dropped: lostAck.dropped() };
+    }
+    case 'sms-clear-lost-ack': {
+      // Same lost ack on /clear: the replayed write must not clear again.
+      const lostAck = await dropFirstCommitAck(['UPDATE 1', 'INSERT 0 1']);
+      const repo = await import('../../domains/sms-webhook/repo');
+      await barrier();
+      await repo.clearSmsSession(args[0]);
+      return { dropped: lostAck.dropped() };
     }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');

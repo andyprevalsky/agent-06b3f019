@@ -85,6 +85,20 @@ export async function withCommitLock<T>(userId: string, fn: () => Promise<T>): P
   return withSerializedLock(`sms-commit:${userId}`, fn);
 }
 
+/**
+ * True while no newer inbound SMS (or /clear, which also advances the
+ * sequence) has arrived since the run captured `mySeq`. This is the
+ * cross-instance supersede signal: the in-process AbortController only
+ * reaches runs on the instance that received the newer message.
+ */
+export async function inboundSeqStillCurrent(userId: string, mySeq: number): Promise<boolean> {
+  const current = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { lastInboundSeq: true },
+  });
+  return (current?.lastInboundSeq ?? 0) <= mySeq;
+}
+
 export interface SmsSupervisorResult {
   responseText: string;
   toolsExecuted: string[];
@@ -225,11 +239,7 @@ export async function handleSmsSupervisorMessage(config: {
 
   const runStillOwnsReply = async (): Promise<boolean> => {
     if (abortSignal?.aborted) return false;
-    const current = await prisma.smsSession.findUnique({
-      where: { userId },
-      select: { lastInboundSeq: true },
-    });
-    if ((current?.lastInboundSeq ?? 0) > mySeq) return false;
+    if (!(await inboundSeqStillCurrent(userId, mySeq))) return false;
     return commitGuard === undefined || (await commitGuard());
   };
 

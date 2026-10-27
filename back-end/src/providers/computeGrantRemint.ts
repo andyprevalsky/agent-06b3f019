@@ -69,9 +69,30 @@ export interface GrantMinter {
   mint(userId: string, provider: string, accountId: string): Promise<{ accessToken: string }>;
 }
 
+/** Cross-instance coordination; in-process defaults keep tests DB-free. */
+export interface RemintCoordination {
+  /** Run `fn` while no other instance re-mints the same account. */
+  serialize<T>(key: string, fn: () => Promise<T>): Promise<T>;
+  /** Epoch ms until which the account must not be re-minted, if cooling down. */
+  cooldownUntil(key: string): Promise<number | undefined>;
+  startCooldown(key: string, until: number, ttlMs: number): Promise<void>;
+}
+
+function inProcessCoordination(): RemintCoordination {
+  const until = new Map<string, number>();
+  return {
+    serialize: (_key, fn) => fn(),
+    cooldownUntil: async (key) => until.get(key),
+    startCooldown: async (key, value) => {
+      until.set(key, value);
+    },
+  };
+}
+
 export interface RemintDeps {
   store: GrantStore;
   minter: GrantMinter;
+  coordination?: RemintCoordination;
   /** Injectable for tests; never call Date.now() directly here. */
   now?: () => number;
   /** How long to refuse further mints for an account after a mint failure. */
@@ -94,7 +115,7 @@ const CONNECTION_DEAD = /session|cookie|login|consent screen never rendered|not 
 
 export class ComputeGrantReminter {
   private readonly inflight = new Map<string, Promise<RemintOutcome>>();
-  private readonly cooldownUntil = new Map<string, number>();
+  private readonly coordination: RemintCoordination;
   private readonly now: () => number;
   private readonly cooldownMs: number;
   private readonly log: (event: string, fields: Record<string, unknown>) => void;
@@ -103,6 +124,7 @@ export class ComputeGrantReminter {
     this.now = deps.now ?? Date.now;
     this.cooldownMs = deps.cooldownMs ?? DEFAULT_COOLDOWN_MS;
     this.log = deps.log ?? (() => {});
+    this.coordination = deps.coordination ?? inProcessCoordination();
   }
 
   /** Keyed per account: unrelated users must never serialise behind each other. */
@@ -131,13 +153,8 @@ export class ComputeGrantReminter {
 
     const key = this.key(params.userId, params.provider, params.accountId);
 
-    const until = this.cooldownUntil.get(key);
-    if (until !== undefined && this.now() < until) {
-      return {
-        status: 'cooldown',
-        reason: `re-mint cooling down for ${Math.ceil((until - this.now()) / 1000)}s after a failed attempt`,
-      };
-    }
+    const cooling = await this.cooldownOutcome(key);
+    if (cooling !== null) return cooling;
 
     // Single-flight: every agent that fell over on this grant awaits ONE mint.
     const existing = this.inflight.get(key);
@@ -148,13 +165,57 @@ export class ComputeGrantReminter {
         : shared;
     }
 
-    const run = this.performRemint(params, key, verdict.reason);
+    const run = this.coordination.serialize(`compute-grant-remint:${key}`, () =>
+      this.remintUnlessDone(params, key, verdict.reason)
+    );
     this.inflight.set(key, run);
     try {
       return await run;
     } finally {
       this.inflight.delete(key);
     }
+  }
+
+  /** A failed cooldown read means "not cooling": the per-account lock still single-flights. */
+  private async cooldownOutcome(key: string): Promise<RemintOutcome | null> {
+    const until = await this.coordination.cooldownUntil(key).catch((error: unknown) => {
+      this.log('compute_grant.cooldown_read_failed', { key, error: String(error) });
+      return undefined;
+    });
+    if (until === undefined || this.now() >= until) return null;
+    return {
+      status: 'cooldown',
+      reason: `re-mint cooling down for ${Math.ceil((until - this.now()) / 1000)}s after a failed attempt`,
+    };
+  }
+
+  /**
+   * Runs inside the per-account lock. A peer instance that held the lock first
+   * may already have replaced the dead grant (or failed and cooled the account
+   * down); re-check both before minting again.
+   */
+  private async remintUnlessDone(
+    params: { userId: string; provider: 'claude' | 'codex'; accountId: string; grantId?: string },
+    key: string,
+    deathReason: string
+  ): Promise<RemintOutcome> {
+    const cooling = await this.cooldownOutcome(key);
+    if (cooling !== null) return cooling;
+    if (params.grantId !== undefined) {
+      const active = await this.deps.store.getActiveGrant(
+        params.userId,
+        params.provider,
+        params.accountId
+      );
+      if (active !== null && active.grantId !== params.grantId) {
+        return {
+          accessToken: active.accessToken,
+          status: 'coalesced',
+          reason: 'another instance already re-minted this account',
+        };
+      }
+    }
+    return this.performRemint(params, key, deathReason);
   }
 
   private async performRemint(
@@ -192,7 +253,12 @@ export class ComputeGrantReminter {
       const message = err instanceof Error ? err.message : String(err);
       // Cool down regardless of cause: without this, a permanently broken
       // connection turns every agent failure into another mint attempt.
-      this.cooldownUntil.set(key, this.now() + this.cooldownMs);
+      // Never let the cooldown write replace the mint outcome or skip needs_reconnect.
+      await this.coordination
+        .startCooldown(key, this.now() + this.cooldownMs, this.cooldownMs)
+        .catch((cooldownError: unknown) =>
+          this.log('compute_grant.cooldown_write_failed', { key, error: String(cooldownError) })
+        );
 
       if (CONNECTION_DEAD.test(message)) {
         await this.deps.store.setConnectionState(
