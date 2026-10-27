@@ -46,7 +46,7 @@ export interface LiveSteelSession {
 export interface SteelReaperDependencies {
   listLiveSessions: () => Promise<LiveSteelSession[]>;
   heldSessionIds: (candidates: string[]) => Promise<Set<string>>;
-  inFlightSessionIds: () => ReadonlySet<string>;
+  inFlightSessionIds: (candidates: string[]) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
   isOwned: (sessionId: string) => boolean;
   identity: () => string;
   release: (sessionId: string) => Promise<void>;
@@ -128,8 +128,9 @@ export async function reconcileOrphanedSteelSessions(
   // Read the in-flight set before the held-row query: a session whose row
   // commits (and is unregistered) between the two reads is then still seen by
   // the later DB query, so it is never in neither set.
-  const inFlight = deps.inFlightSessionIds();
-  const held = await deps.heldSessionIds(oldEnough.map((session) => session.id));
+  const candidates = oldEnough.map((session) => session.id);
+  const inFlight = await deps.inFlightSessionIds(candidates);
+  const held = await deps.heldSessionIds(candidates);
   for (const session of oldEnough) {
     if (held.has(session.id) || inFlight.has(session.id)) {
       summary.skippedHeld += 1;
