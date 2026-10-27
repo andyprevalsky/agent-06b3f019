@@ -41,7 +41,11 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { deleteEnvFile, listEnvFiles } from '../../domains/projects/envFileService';
-import type { RoseSetupDeps } from '../../domains/projects/roseProject';
+import {
+  applyRoseProjectSetup,
+  planRoseProjectSetup,
+  type RoseSetupDeps,
+} from '../../domains/projects/roseProject';
 import { listProjects, updateProject } from '../../domains/projects/service';
 import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
 import { prisma } from '../../providers/database';
@@ -530,6 +534,49 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     assert(JSON.stringify(names) === JSON.stringify(['Rose app']), `projects ${names}`);
   } finally {
     await owner.cleanup();
+  }
+});
+
+test('Rose out of the box: a stale pristine plan never fills a project that gained an env file or a sync', async () => {
+  // The planner read a pristine "Rose"; before the setup write, the user added
+  // an env file (or a codebase sync landed). The conditional fill must lose.
+  const changes = {
+    'env file': (projectId: string) =>
+      prisma.projectEnvFile.create({
+        data: { projectId, path: 'custom/.env', kind: 'env', source: 'managed' },
+      }),
+    sync: (projectId: string) =>
+      prisma.project.update({ where: { id: projectId }, data: { syncRevision: 1 } }),
+  };
+  for (const [change, apply] of Object.entries(changes)) {
+    const owner = await roseOwner();
+    try {
+      const created = await prisma.project.create({
+        data: { userId: owner.userId, name: 'Rose', syncSalt: 'blackbox-salt' },
+      });
+      const rows = await prisma.project.findMany({
+        where: { userId: owner.userId },
+        include: { _count: { select: { envFiles: true } } },
+      });
+      const plan = planRoseProjectSetup(owner.userId, rows, new Set(), owner.deps.isOwner);
+      assert(plan?.fillProjectId === created.id, `${change}: planned to fill the pristine row`);
+      await apply(created.id);
+      await applyRoseProjectSetup(owner.userId, plan, owner.deps);
+      const row = await prisma.project.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { envFiles: { select: { path: true } } },
+      });
+      assert(row.repoUrl === null, `${change}: repo stays unset, got ${row.repoUrl}`);
+      assert(row.startupScript === null, `${change}: startup script stays unset`);
+      const paths = row.envFiles.map((f) => f.path);
+      const expected = change === 'env file' ? ['custom/.env'] : [];
+      assert(
+        JSON.stringify(paths) === JSON.stringify(expected),
+        `${change}: no declared Rose env files, got ${paths}`
+      );
+    } finally {
+      await owner.cleanup();
+    }
   }
 });
 

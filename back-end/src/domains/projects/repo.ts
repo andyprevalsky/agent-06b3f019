@@ -75,9 +75,18 @@ export async function writeRoseProjectSetup(
       if (project.repoUrl === write.repoUrl) await declareEnvFiles(tx, project.id, write.envPaths);
     }
     if (write.fillProjectId !== null) {
-      // Conditional: a concurrent edit after the list read wins over the defaults.
+      // Conditional on the planner's whole pristine predicate (roseProject.ts
+      // isPristine): an edit, env file or accepted sync after the list read
+      // wins over the defaults.
       const filled = await tx.project.updateMany({
-        where: { id: write.fillProjectId, userId, repoUrl: null, startupScript: null },
+        where: {
+          id: write.fillProjectId,
+          userId,
+          repoUrl: null,
+          startupScript: null,
+          syncRevision: 0,
+          envFiles: { none: {} },
+        },
         data: settings,
       });
       if (filled.count === 1) await declareEnvFiles(tx, write.fillProjectId, write.envPaths);
