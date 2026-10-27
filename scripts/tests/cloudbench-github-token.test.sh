@@ -292,6 +292,9 @@ assert not failures, "; ".join(failures)
 PY
 pass "concurrent controller exports preserve complete dotenvs, sibling updates, token handoff, mode and cancellation"
 
+python3 "$ROOT_DIR/scripts/tests/cloudbench-github-token-probes.test.py"
+pass "controller resolver validates each distinct candidate once per resolution"
+
 # ── 4. Live resolver when the Cloud Agent supplies DISPATCH ──────────────────
 unset CLOUDBENCH_GITHUB_REPO_API
 if [ -n "$LIVE_DISPATCH" ]; then

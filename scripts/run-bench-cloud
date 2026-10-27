@@ -1366,7 +1366,8 @@ github_token_can_fetch_repo() {
 # Try candidates in priority order until one passes Contents validation so an
 # invalid DISPATCH value cannot block a later valid GITHUB_TOKEN.
 resolve_durable_github_token() {
-    local candidates=() t
+    # Optional arguments were already checked by this resolution only.
+    local candidates=() checked=("$@") t previous
     t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
     [ -n "$t" ] && candidates+=("$t")
     t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
@@ -1376,6 +1377,10 @@ resolve_durable_github_token() {
     t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
     [ -n "$t" ] && candidates+=("$t")
     for t in "${candidates[@]}"; do
+        for previous in "${checked[@]}"; do
+            [ "$t" != "$previous" ] || continue 2
+        done
+        checked+=("$t")
         if github_token_can_fetch_repo "$t"; then
             printf '%s' "$t"
             return 0
@@ -1391,7 +1396,7 @@ resolve_durable_github_token() {
 # resolve_durable_github_token (DISPATCH first). Validate Contents access before
 # accepting any candidate. Never print the value.
 resolve_github_token() {
-    local candidates=() t decoded gh_tok
+    local candidates=() checked=() t previous decoded gh_tok
     if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
@@ -1402,16 +1407,19 @@ resolve_github_token() {
     [ -n "$gh_tok" ] && candidates+=("$gh_tok")
     t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
     [ -n "$t" ] && candidates+=("$t")
-    t="$(resolve_durable_github_token)"
-    [ -n "$t" ] && candidates+=("$t")
-
     for t in "${candidates[@]}"; do
+        for previous in "${checked[@]}"; do
+            [ "$t" != "$previous" ] || continue 2
+        done
+        checked+=("$t")
         if github_token_can_fetch_repo "$t"; then
             printf '%s' "$t"
             return 0
         fi
     done
-    return 1
+    # Resolve the lower-priority durable tier only after earlier candidates fail.
+    # It already validates Contents access; do not probe its result again.
+    resolve_durable_github_token "${checked[@]}"
 }
 
 # Resolve the CONTROLLER GitHub token into an Authorization Basic header value.
