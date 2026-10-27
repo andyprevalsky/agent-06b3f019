@@ -369,8 +369,8 @@ function integrationNameFor(provider: 'claude' | 'codex'): string {
  * Build the credential JSON in the exact shape the reader expects.
  *
  * A Claude setup-token has NO refresh token, so `refreshToken` is empty. Codex
- * is the opposite: its sandbox reader consumes a complete auth.json and needs
- * the id/access/refresh trio to refresh normally. `expiresAt` is the real
+ * stores the id/access/refresh trio of auth.json; the sandbox reader
+ * (gptCredentials.ts) serves it with the refresh token stripped. `expiresAt` is the real
  * far-future Claude expiry rather than 0, so nothing mistakes a healthy grant
  * for one needing refresh.
  */

@@ -118,9 +118,10 @@ export class IMessageWatcher extends EventEmitter {
         console.log(`[IMessageWatcher] Detected ${newMessages.length} new message(s)`);
 
         // Update lastMessageRowId from the highest ID in new messages
-        const maxId = Math.max(...newMessages.map((m: NormalizedMessage) => parseInt(m.id, 10)));
-        if (maxId > this.lastMessageRowId) {
-          this.lastMessageRowId = maxId;
+        // A loop, not Math.max(...ids): spreading a large batch overflows the stack.
+        for (const m of newMessages as NormalizedMessage[]) {
+          const id = parseInt(m.id, 10);
+          if (id > this.lastMessageRowId) this.lastMessageRowId = id;
         }
 
         this.emit('sync', {

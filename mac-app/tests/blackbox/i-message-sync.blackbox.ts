@@ -392,6 +392,39 @@ describe('i-message-sync blackbox', () => {
     expect(closed.runId).toBe(opened.runId);
   });
 
+  it('heavy full sync: 300k messages upload in bounded chunks, each message once, run ends synced', async () => {
+    const { IMessageReader } = await import('../../main/services/iMessageReader');
+    const { IMessageSync } = await import('../../main/services/iMessageSync');
+    const total = 300_000;
+    // Synthetic heavy user: 20k contacts, one of them with 30k messages on its own.
+    const messages = Array.from({ length: total }, (_, i) =>
+      makeMessage({
+        id: i + 1,
+        text: `synthetic message ${i}`,
+        contact_id: i < 30_000 ? '+15550000000' : `+1556${String(i % 20_000).padStart(7, '0')}`,
+      })
+    );
+    vi.mocked(IMessageReader.readMessages).mockResolvedValue(messages);
+
+    await IMessageSync.sync();
+
+    const calls = uploadCalls();
+    expect(calls.length).toBeGreaterThan(1);
+    const seen = new Set<number>();
+    for (const call of calls) {
+      // Far below the backend JSON limit, so no single request can 413 or pin
+      // a large buffer in the web process.
+      expect((call.body ?? '').length).toBeLessThan(8 * 1024 * 1024);
+      const body = JSON.parse(call.body ?? '{}') as {
+        contacts: Array<{ messages: Array<{ id: number }> }>;
+      };
+      for (const contact of body.contacts) for (const m of contact.messages) seen.add(m.id);
+    }
+    expect(seen.size).toBe(total);
+    const states = progressCalls().map((w) => JSON.parse(w.body ?? '{}').state);
+    expect(states[states.length - 1]).toBe('synced');
+  });
+
   it('sync progress: a failed upload ends the run failed with its error', async () => {
     if (restoreFetch) restoreFetch();
     restoreFetch = installFetchCapture({
