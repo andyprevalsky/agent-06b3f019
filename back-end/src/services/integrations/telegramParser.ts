@@ -110,7 +110,16 @@ export async function parseTelegramData(
 
   // Transform to shared format and call the manager
   const contactsToUpsert = sanitizedContacts.map(transformToContactToUpsert);
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
+  // Parsed from the durable upload queue: a failed chunk must fail the part
+  // so it is retried, not marked processed with messages missing.
+  const result = await upsertPersonAndMessageRecords(
+    userId,
+    contactsToUpsert,
+    jobId,
+    undefined,
+    undefined,
+    { throwOnChunkError: true }
+  );
 
   // Update Integration metadata
   const existingConfig =

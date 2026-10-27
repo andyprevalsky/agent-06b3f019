@@ -11,7 +11,7 @@
 
 import type { BrowserWindow } from 'electron';
 import { uploadBatchViaUploader } from './repo';
-import type { UploadResult } from './types';
+import type { MessagingUploadOptions, UploadResult } from './types';
 
 const LOG_COMPONENT = 'BatchUploader';
 
@@ -24,12 +24,13 @@ export async function uploadInBatches(
   integrationType: string,
   data: unknown,
   accessToken: string,
-  window: BrowserWindow | null
+  window: BrowserWindow | null,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadResult> {
   const itemCount = Array.isArray(data) ? data.length : 1;
   console.log(`[${LOG_COMPONENT}] 🚀 Uploading ${itemCount} item(s) for ${integrationType}`);
 
-  const result = await uploadBatchViaUploader(integrationType, data, accessToken, window);
+  const result = await uploadBatchViaUploader(integrationType, data, accessToken, window, options);
 
   if (!result.success) {
     console.error(`[${LOG_COMPONENT}] ❌ Upload failed for ${integrationType}:`, result.message);

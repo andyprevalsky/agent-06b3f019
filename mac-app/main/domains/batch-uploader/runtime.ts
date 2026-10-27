@@ -12,7 +12,7 @@
 
 import type { BrowserWindow } from 'electron';
 import { uploadInBatches } from './service';
-import type { UploadResult } from './types';
+import type { MessagingUploadOptions, UploadResult } from './types';
 
 /**
  * Batch upload façade. Delegates 1:1 to the service layer, which logs and
@@ -26,8 +26,9 @@ export class BatchUploader {
     integrationType: string,
     data: unknown,
     accessToken: string,
-    window: BrowserWindow | null
+    window: BrowserWindow | null,
+    options: MessagingUploadOptions = {}
   ): Promise<UploadResult> {
-    return uploadInBatches(integrationType, data, accessToken, window);
+    return uploadInBatches(integrationType, data, accessToken, window, options);
   }
 }
