@@ -3,7 +3,6 @@ import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
 import type {
-  QuickQueryAttachment,
   QuickQueryHeldSubmit,
   QuickQueryPayload,
   QuickQueryToggleState,
@@ -11,7 +10,6 @@ import type {
 import { HeldQuickQuerySubmits } from './quickQueryHeldSubmits';
 import { normalizeQuickQueryPayload } from './quickQueryPayload';
 import { scheduleQuickQueryFocusAttempts } from './quickQueryFocus';
-import { QuickQueryScreenshots } from './quickQueryScreenshot';
 import {
   LAUNCHER_WINDOW_HEIGHT,
   LAUNCHER_WINDOW_MAX_HEIGHT,
@@ -48,7 +46,6 @@ export class QuickQueryController {
   private focusTimeouts: NodeJS.Timeout[] = [];
   private shortcutsEnabled = false;
   private readonly heldSubmits = new HeldQuickQuerySubmits();
-  private readonly screenshots = new QuickQueryScreenshots();
 
   constructor(private readonly options: QuickQueryControllerOptions) {}
 
@@ -159,8 +156,7 @@ export class QuickQueryController {
       if (quickWindow.isVisible()) {
         this.hideWindow({ focusMain: true });
       } else if (this.canShowWindow()) {
-        // Capture while the launcher is still hidden so the pill is not in the shot.
-        void this.screenshots.captureThen((screenshot) => this.showWindow(screenshot));
+        this.showWindow();
       }
     };
 
@@ -314,7 +310,7 @@ export class QuickQueryController {
     return Date.now() - this.lastHiddenAt >= 2000;
   }
 
-  private showWindow(screenshot: QuickQueryAttachment | null): void {
+  private showWindow(): void {
     const quickWindow = this.quickQueryWindow;
     if (quickWindow === null || !this.canShowWindow()) return;
 
@@ -330,7 +326,7 @@ export class QuickQueryController {
     quickWindow.focusOnWebView();
     this.clearFocusTimeouts();
     scheduleQuickQueryFocusAttempts(quickWindow, this.focusTimeouts);
-    this.emitToggle(screenshot === null ? { open: true } : { open: true, screenshot });
+    this.emitToggle({ open: true });
 
     setTimeout(() => {
       this.blurEnabled = true;

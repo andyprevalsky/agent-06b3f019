@@ -6,11 +6,10 @@
  * socket per live local session, one channel per relay client. Routing is a
  * Map lookup by device id / task id / channel; nothing fans in per user.
  *
- * Connectivity is in-process: a device is "connected" when its control socket
- * is open on THIS backend instance. Render runs BACKEND_INSTANCES=1 (two only
- * during a rolling-deploy overlap, when a Mac reconnects to the new instance
- * within its reconnect backoff). Multi-instance routing needs a shared bus and
- * is a documented gap, not silently assumed.
+ * This class is the single-instance hub: a device is "connected" when its
+ * control socket is open on THIS process. The protected hooks let
+ * RoutedLocalDeviceHub (./routedHub.ts) — the production hub — forward to the
+ * instance that owns a device when Render runs more than one instance.
  */
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { IncomingMessage, Server } from 'http';
@@ -162,10 +161,10 @@ function headerValue(request: IncomingMessage, name: string): string | null {
 }
 
 export class LocalDeviceHub {
-  private readonly devices = new Map<string, DeviceConnection>();
-  private readonly sessions = new Map<string, RelaySession>();
-  private readonly wss = new WebSocketServer({ noServer: true });
-  private readonly deps: LocalDeviceHubDeps;
+  protected readonly devices = new Map<string, DeviceConnection>();
+  protected readonly sessions = new Map<string, RelaySession>();
+  protected readonly wss = new WebSocketServer({ noServer: true });
+  protected readonly deps: LocalDeviceHubDeps;
 
   constructor(deps: Partial<LocalDeviceHubDeps> = {}) {
     this.deps = { ...DEFAULT_DEPS, ...deps };
@@ -187,6 +186,20 @@ export class LocalDeviceHub {
   isSessionTunnelConnected(taskId: string): boolean {
     const session = this.sessions.get(taskId);
     return session?.tunnel !== null && session?.tunnel !== undefined;
+  }
+
+  /** Is the Mac connected to ANY backend instance? (this one, in the base hub) */
+  async deviceOnline(deviceId: string): Promise<boolean> {
+    return this.isDeviceConnected(deviceId);
+  }
+
+  async sessionHome(deviceId: string, taskId: string): Promise<string | null> {
+    return this.deviceSessionHome(deviceId, taskId);
+  }
+
+  /** Mac connected and the session's tunnel up, wherever they are served. */
+  async sessionLive(deviceId: string, taskId: string): Promise<boolean> {
+    return this.isDeviceConnected(deviceId) && this.isSessionTunnelConnected(taskId);
   }
 
   relayToken(taskId: string): string {
@@ -257,7 +270,11 @@ export class LocalDeviceHub {
   }
 
   /** Stop a local session: tell the Mac (if connected) and drop its relay. */
-  stopSession(taskId: string, deviceId: string | null): void {
+  async stopSession(taskId: string, deviceId: string | null): Promise<void> {
+    this.stopSessionHere(taskId, deviceId);
+  }
+
+  protected stopSessionHere(taskId: string, deviceId: string | null): void {
     const session = this.sessions.get(taskId);
     const owner = session?.deviceId ?? deviceId;
     if (owner !== null) this.sendToDevice(owner, { type: 'stop_session', task_id: taskId });
@@ -273,7 +290,11 @@ export class LocalDeviceHub {
     server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
       const url = new URL(request.url ?? '/', 'http://localhost');
       const pathname = url.pathname;
-      if (pathname !== LOCAL_DEVICE_CONTROL_PATH && !pathname.startsWith(LOCAL_CODE_RELAY_PREFIX)) {
+      if (
+        pathname !== LOCAL_DEVICE_CONTROL_PATH &&
+        !pathname.startsWith(LOCAL_CODE_RELAY_PREFIX) &&
+        !this.ownsUpgradePath(pathname)
+      ) {
         if (!otherUpgradePaths.includes(pathname)) socket.destroy();
         return;
       }
@@ -295,9 +316,38 @@ export class LocalDeviceHub {
     this.wss.close();
   }
 
+  // ── hooks for the cross-instance hub ────────────────────────────────────
+
+  protected ownsUpgradePath(_pathname: string): boolean {
+    return false;
+  }
+
+  /** Serve an upgrade this class does not route (the internal path). */
+  protected async routeExtraUpgrade(
+    _request: IncomingMessage,
+    socket: Duplex,
+    _head: Buffer
+  ): Promise<void> {
+    this.reject(socket, 404, 'Not Found');
+  }
+
+  /** Accept and forward an upgrade to the owning instance; false = serve it here. */
+  protected async forwardUpgrade(
+    _request: IncomingMessage,
+    _socket: Duplex,
+    _head: Buffer,
+    _target: { deviceId: string } | { taskId: string }
+  ): Promise<boolean> {
+    return false;
+  }
+
+  protected onControlOpened(_deviceId: string, _userId: string, _ws: WebSocket): void {}
+  protected onControlHello(_deviceId: string, _sessionsRoot: string | null): void {}
+  protected onControlClosed(_deviceId: string): void {}
+
   // ── upgrade routing ─────────────────────────────────────────────────────
 
-  private reject(socket: Duplex, status: number, reason: string): void {
+  protected reject(socket: Duplex, status: number, reason: string): void {
     socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
     socket.destroy();
   }
@@ -321,6 +371,10 @@ export class LocalDeviceHub {
     head: Buffer,
     url: URL
   ): Promise<void> {
+    if (this.ownsUpgradePath(url.pathname)) {
+      await this.routeExtraUpgrade(request, socket, head);
+      return;
+    }
     if (url.pathname === LOCAL_DEVICE_CONTROL_PATH) {
       const auth = await this.authenticateDevice(request);
       if (auth === null) return this.reject(socket, 401, 'Unauthorized');
@@ -333,6 +387,7 @@ export class LocalDeviceHub {
     if (rest.length === 2 && rest[1] === 'device') {
       const auth = await this.authenticateDevice(request);
       if (auth === null) return this.reject(socket, 401, 'Unauthorized');
+      if (await this.forwardUpgrade(request, socket, head, { deviceId: auth.device.id })) return;
       const session = await this.sessionForDevice(taskId, auth.device.id, auth.userId);
       if (session === null) return this.reject(socket, 403, 'Forbidden');
       this.wss.handleUpgrade(request, socket, head, (ws) => this.acceptTunnel(ws, session));
@@ -342,6 +397,7 @@ export class LocalDeviceHub {
     if (!this.tokenMatches(taskId, url.searchParams.get('token'))) {
       return this.reject(socket, 401, 'Unauthorized');
     }
+    if (await this.forwardUpgrade(request, socket, head, { taskId })) return;
     this.wss.handleUpgrade(request, socket, head, (ws) => this.acceptClient(ws, taskId));
   }
 
@@ -392,12 +448,14 @@ export class LocalDeviceHub {
     this.devices.set(deviceId, { deviceId, userId: auth.userId, socket: ws, sessionsRoot: null });
     void this.deps.touchDevice(deviceId).catch(() => undefined);
     log.info('Mac app control channel connected', { device_id: deviceId });
+    this.onControlOpened(deviceId, auth.userId, ws);
     const stopPing = this.keepAlive(ws);
     ws.on('message', (raw) => this.onControlMessage(deviceId, rawToString(raw)));
     ws.on('close', () => {
       stopPing();
       if (this.devices.get(deviceId)?.socket === ws) {
         this.devices.delete(deviceId);
+        this.onControlClosed(deviceId);
         void this.deps.touchDevice(deviceId).catch(() => undefined);
         log.info('Mac app control channel closed', { device_id: deviceId });
         for (const session of this.sessions.values()) {
@@ -420,6 +478,7 @@ export class LocalDeviceHub {
     if (message.type === 'hello') {
       const connection = this.devices.get(deviceId);
       if (connection !== undefined) connection.sessionsRoot = message.sessions_root ?? null;
+      this.onControlHello(deviceId, message.sessions_root ?? null);
       log.info('Mac app hello', { device_id: deviceId, live_sessions: message.sessions.length });
       return;
     }
@@ -547,9 +606,15 @@ export class LocalDeviceHub {
 }
 
 let defaultHub: LocalDeviceHub | null = null;
+let hubFactory: () => LocalDeviceHub = () => new LocalDeviceHub();
+
+/** Production installs the cross-instance hub at bootstrap (./routedHub.ts). */
+export function setLocalDeviceHubFactory(factory: () => LocalDeviceHub): void {
+  hubFactory = factory;
+}
 
 /** The process-wide hub (one per backend instance). */
 export function localDeviceHub(): LocalDeviceHub {
-  defaultHub ??= new LocalDeviceHub();
+  defaultHub ??= hubFactory();
   return defaultHub;
 }
