@@ -1,3 +1,4 @@
+import type { IncomingMessage } from 'node:http';
 import assert from 'node:assert/strict';
 /**
  * Fixtures for code-preview.blackbox.ts: a code-session HOME whose
@@ -69,4 +70,25 @@ export function assertPublicationPolicy(text: string): void {
   assert.match(text, /Publishing a Rose change to the agent network uses the existing `\/deploy`/);
   assert.match(text, /open pull request is not yet publication/);
   assert.match(text, /Preserve its checks and approvals/);
+}
+
+/** Arm the native DOM mutation observer for the next exact marker. */
+export async function armMarkerWatch(
+  page: import('playwright').Page,
+  marker: string
+): Promise<void> {
+  // String evaluates: tsx's keepNames transform would inject __name into closures.
+  await page.evaluate(
+    `(() => { const m = ${JSON.stringify(marker)}; window.__roseSeenAt = 0;` +
+      ' const obs = new MutationObserver(() => { if (document.body.innerText.includes(m)) {' +
+      ' window.__roseSeenAt = performance.timeOrigin + performance.now(); obs.disconnect(); } });' +
+      ' obs.observe(document.body, { subtree: true, childList: true, characterData: true }); })()'
+  );
+}
+
+export async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  const text = Buffer.concat(chunks).toString('utf8');
+  return text ? (JSON.parse(text) as Record<string, unknown>) : null;
 }

@@ -151,8 +151,12 @@ afterEach(() => {
 describe('light mode is unchanged (markup frozen before dark mode existed)', () => {
   it('desktop background renders the stock markup byte-for-byte', async () => {
     renderWithProviders(themed(backgroundElement()));
-    await screen.findByTestId('terminal-small-tile-animation-canvas', {}, { timeout: 15000 });
-    expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop'));
+    await waitFor(
+      () => {
+        expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop'));
+      },
+      { timeout: 15000 },
+    );
     expect(htmlIsDark()).toBe(false);
   }, 20000);
 

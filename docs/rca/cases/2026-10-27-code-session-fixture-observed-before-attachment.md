@@ -69,3 +69,7 @@ The first-keepalive V2 passed the identical-command full16-case native coverage 
 ## Human feedback
 
 No additional user feedback was recorded for this fixture. The coordinator rejected waiting for five keepalives before the measured interval, then accepted readiness on the first keepalive only after zero/single-keepalive fault controls preserved the count assertion.
+
+## Combined-run observation on October 27
+
+Batch 3 at e8e8cff1 passed this corrected first test and the following case; the domain then failed a distinct synthetic resize readiness case. The first-case count and cancellation/join correction remain covered. Full combined acceptance is still pending. The resize first-bad boundary is recorded separately in 2026-10-27-resize-fixture-request-preceded-cli-conversation.

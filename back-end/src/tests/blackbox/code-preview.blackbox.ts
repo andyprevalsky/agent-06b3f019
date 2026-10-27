@@ -18,10 +18,11 @@
  * Usage: bash scripts/run-blackbox-tests.sh code-preview
  */
 import assert from 'node:assert/strict';
+import { hmrObserver } from './code-preview.trace';
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -51,6 +52,8 @@ import { rootPreviewCases } from './root-preview.cases';
 import { previewWorkspaceCases } from './code-preview-workspace.cases';
 import {
   assertPublicationPolicy,
+  armMarkerWatch,
+  readBody,
   HMR_EDIT_FILE,
   HMR_EDIT_ROUTE,
   HMR_EDIT_TEXT,
@@ -285,16 +288,6 @@ previewHandoffCases({
   taskRow,
 });
 
-/** Wait until the page shows `marker`; returns the page wall-clock time it appeared. */
-async function armMarkerWatch(page: import('playwright').Page, marker: string): Promise<void> {
-  // String evaluates: tsx's keepNames transform would inject __name into closures.
-  await page.evaluate(
-    `(() => { const m = ${JSON.stringify(marker)}; window.__roseSeenAt = 0;` +
-      ' const obs = new MutationObserver(() => { if (document.body.innerText.includes(m)) {' +
-      ' window.__roseSeenAt = performance.timeOrigin + performance.now(); obs.disconnect(); } });' +
-      ' obs.observe(document.body, { subtree: true, childList: true, characterData: true }); })()'
-  );
-}
 
 test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ≤ 3 s', async () => {
   const agentId = await agentFor(DEV_USER);
@@ -312,6 +305,7 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
     codeSessionId: session.id,
   });
   const frontEnd = makeRoseFrontEndHome(home);
+  const observer = hmrObserver(frontEnd, home);
   // The CLI exactly as a dev session installs it.
   const [cli] = codePreviewToolFiles();
   const cliPath = join(home, cli.path);
@@ -392,6 +386,7 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
 
     browser = await chromium.launch();
     const page = await browser.newPage();
+    observer.attach(page);
     const loadAt = Date.now();
     await page.goto(new URL(HMR_EDIT_ROUTE, previewUrl).toString(), {
       waitUntil: 'domcontentloaded',
@@ -410,13 +405,18 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
     assert.ok(original.includes(`>${HMR_EDIT_TEXT}<`), `${HMR_EDIT_FILE} renders ${HMR_EDIT_TEXT}`);
     const fs = localSandboxFs(home);
     const latencies: number[] = [];
+    if (observer.enabled) await observer.clock(page, -1);
     for (let i = 0; i < HMR_EDITS; i++) {
       const marker = `Rose in Rose ${i} ${randomUUID().slice(0, 8)}`;
       await armMarkerWatch(page, marker);
       const wroteAt = Date.now();
+      observer.record('write-start', { edit: i, wroteAt });
       await fs.writeFile(file, Buffer.from(original.replace(`>${HMR_EDIT_TEXT}<`, `>${marker}<`)));
+      observer.record('write-end', { edit: i });
       await page.waitForFunction('window.__roseSeenAt > 0', undefined, { timeout: 10_000 });
-      latencies.push(Math.round(Number(await page.evaluate('window.__roseSeenAt')) - wroteAt));
+      const browserSeenAt = Number(await page.evaluate('window.__roseSeenAt'));
+      latencies.push(Math.round(browserSeenAt - wroteAt));
+      observer.record('dom-receipt', { edit: i, browserSeenAt, latencyMs: latencies.at(-1) });
       assert.equal(await page.evaluate('window.__roseNoReload'), 1, 'hot update, not a reload');
     }
     console.log(
@@ -426,6 +426,7 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
       assert.ok(latency <= HMR_BUDGET_MS, `HMR took ${latency} ms (budget ${HMR_BUDGET_MS} ms)`);
     }
   } finally {
+    observer.save();
     await browser?.close();
     // The local-session close path: signal exactly the preview's process group.
     const stoppedByClose = stopLocalCodePreview(home);
@@ -511,13 +512,6 @@ interface GithubCall {
   method: string;
   path: string;
   body: Record<string, unknown> | null;
-}
-
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString('utf8');
-  return text ? (JSON.parse(text) as Record<string, unknown>) : null;
 }
 
 test('publish pushes the work branch and opens one PR against the merge target; never merges', async () => {
