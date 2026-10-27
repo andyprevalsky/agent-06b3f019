@@ -19,7 +19,7 @@ import aiohttp
 from benchmarks.benchmark_tasks import BenchmarkTask
 from benchmarks.results import TaskResult
 
-CODEX_SESSION_PATH = "/api/codex-session"
+CODEX_SESSION_PATH = "/api/codex-code-session"
 WORK_AGENT_ID_PATTERN = re.compile(
     r"ROSE_WORK_AGENT_ID\s*=\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.IGNORECASE,
@@ -33,6 +33,8 @@ class CodexRunnerDeps:
     """Primitives injected by run_benchmark."""
 
     api_headers: Callable[[], Any]
+    # Code-session create/close are internal-only: they take the API key, never a user JWT.
+    internal_api_headers: Callable[[str], dict[str, str]]
     benchmark_user_id: Callable[[], str]
     rose_api_url_for_harness: Callable[[str], str]
     is_local_base_url: Callable[[str], bool]
@@ -194,10 +196,11 @@ async def run_codex_task(
                 task.effective_price_limit_cents(),
             )
             print(f"    🧪 Codex anchor agent: {anchor_agent_id[:12]}...")
+            internal_headers = deps.internal_api_headers(user_id)
             session_data = await _create_codex_session(
                 session,
                 base_url,
-                headers,
+                internal_headers,
                 anchor_agent_id,
                 user_id,
                 codex_goal,
@@ -216,7 +219,7 @@ async def run_codex_task(
             elif exit_code not in (0, None):
                 failure_reason = f"Codex process exited with code {exit_code}"
 
-            await _close_codex_session(session, base_url, headers, codex_task_id, anchor_agent_id, user_id)
+            await _close_codex_session(session, base_url, internal_headers, codex_task_id, anchor_agent_id, user_id)
     except Exception as exc:  # noqa: BLE001
         execution_error = True
         failure_reason = f"Codex runner error: {exc}"
@@ -298,6 +301,7 @@ async def run_codex_task(
 def build_deps_from_module(module: Any) -> CodexRunnerDeps:
     return CodexRunnerDeps(
         api_headers=module._api_headers,
+        internal_api_headers=module._internal_api_headers,
         benchmark_user_id=module._current_benchmark_user_id,
         rose_api_url_for_harness=module._rose_api_url_for_codex_harness,
         is_local_base_url=module._is_local_base_url,

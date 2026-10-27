@@ -153,12 +153,16 @@ export async function searchAgentTrajectories(
   const take = query.useKeyset ? query.limit + 1 : query.limit + query.offset;
   return prisma.$queryRaw<AgentTrajectoryRow[]>`
     SELECT s."messageId", s."rootAgentId", s."agentId", s.role,
-      s.surface, s."createdAt", s."searchText", s."agentGoal",
-      s."agentTitle", s."archivePath", s."traceKind",
+      s.surface, s."createdAt", s."searchText",
+      COALESCE(NULLIF(s."agentGoal", ''), g."agentGoal", '') AS "agentGoal",
+      COALESCE(s."agentTitle", g."agentTitle") AS "agentTitle",
+      s."archivePath", s."traceKind",
       CASE WHEN a.id IS NULL THEN NULL WHEN a."taskPath" IS NOT NULL THEN a."taskPath"
         WHEN a."parentAgentId" IS NULL THEN '/root' END AS "agentPath"
     FROM "AgentTrajectorySearch" s
     LEFT JOIN "Agent" a ON a.id = s."agentId"
+    -- Goal/title are stored once per agent; legacy rows still carry a copy.
+    LEFT JOIN "AgentTrajectoryAgent" g ON g."agentId" = s."agentId" AND g."userId" = s."userId"
     WHERE ${predicate} ${pagePredicate}
     ORDER BY ${ordering}
     LIMIT ${take}

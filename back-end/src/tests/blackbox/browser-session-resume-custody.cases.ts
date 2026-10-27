@@ -6,6 +6,7 @@ import { retryWithBackoff } from '../../providers/retry';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { prisma } from '../../providers/database';
 
 type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
@@ -68,6 +69,10 @@ export async function runBrowserResumeCustodyCases() {
               startedAt: new Date().toISOString(),
               timeoutAt: new Date(Date.now() + 60000).toISOString(),
             };
+      let settleIncompatibleSecond = () => {};
+      const incompatibleSecondSettled = new Promise<void>((resolve) => {
+        settleIncompatibleSecond = resolve;
+      });
       const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) body += chunk;
@@ -89,10 +94,15 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          setTimeout(
-            () => res.end(JSON.stringify(native())),
-            scenario === 'incompatible' ? 1000 : 100
-          );
+          if (scenario === 'incompatible') {
+            // Hold the first create until the competing resume has answered, so
+            // the second always meets in-progress custody however slowly its
+            // child process boots (a fixed 1s hold raced fork startup under load).
+            await Promise.race([incompatibleSecondSettled, delay(8000, undefined, { ref: false })]);
+            res.end(JSON.stringify(native()));
+            return;
+          }
+          setTimeout(() => res.end(JSON.stringify(native())), 100);
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
           res.end(
@@ -239,7 +249,7 @@ export async function runBrowserResumeCustodyCases() {
             fixedDelays: Array.from({ length: 999 }, () => 10),
             shouldRetryResult: (created) => !created,
           });
-          const second = run();
+          const second = run().finally(settleIncompatibleSecond);
           results = await Promise.all([first, second]);
         } else {
           results = [await run()];
