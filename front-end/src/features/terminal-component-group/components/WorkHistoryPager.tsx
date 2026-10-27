@@ -17,11 +17,11 @@ export function WorkHistoryPager({
 }: Pick<ReturnType<typeof useWorkHistoryPage>, 'activePage' | 'lastPage' | 'setPage'>) {
   if (lastPage === 0) return null;
   return (
-    <div className="flex gap-3 text-xs text-muted-foreground">
+    <nav aria-label="Work history pages" className="flex gap-3 text-xs text-muted-foreground">
       <button type="button" disabled={activePage === 0} onClick={() => setPage(activePage - 1)}>
         Previous activities
       </button>
-      <span>
+      <span role="status" aria-live="polite">
         {activePage + 1} / {lastPage + 1}
       </span>
       <button
@@ -31,6 +31,6 @@ export function WorkHistoryPager({
       >
         Next activities
       </button>
-    </div>
+    </nav>
   );
 }

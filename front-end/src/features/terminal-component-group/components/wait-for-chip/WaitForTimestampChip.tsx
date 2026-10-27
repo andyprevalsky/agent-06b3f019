@@ -1,6 +1,6 @@
 import { CheckCircle, XCircle } from 'lucide-react';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
-import { formatLocalDateTime } from '@/lib/localDateTime';
+import { formatLocalDateTime, toDate } from '@/lib/localDateTime';
 import { formatDuration } from './helpers';
 
 interface WaitForTimestampChipProps {
@@ -16,7 +16,8 @@ export function WaitForTimestampChip({
   untilTimestamp,
   durationSeconds,
 }: WaitForTimestampChipProps) {
-  const targetDate = untilTimestamp ? new Date(untilTimestamp) : null;
+  // The same instant the label shows (a zone-less timestamp is UTC).
+  const targetDate = untilTimestamp ? toDate(untilTimestamp) : null;
   const formattedTarget = untilTimestamp ? formatLocalDateTime(untilTimestamp) : null;
 
   let countdown = '';

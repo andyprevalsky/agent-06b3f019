@@ -77,12 +77,13 @@ export default function ClaudeCodeChip({
   const roseDesktop = useRoseDesktop();
   const desktop = useDesktopCodeAgent(taskId, toolCallId);
   const desktopMeta = desktop.meta;
-  // A Rose Desktop snapshot drives the chip and shows no terminal output: no terminal
-  // WebSocket (an unbounded byte sink per live chip) and no saved-output read.
+  // A Rose Desktop snapshot drives the chip: no terminal WebSocket, no saved-output read.
+  // Without one (status chip) the socket only carries lifecycle: no output is kept.
   const socket = desktopMeta === null ? wsUrl : undefined;
-  const savedOutput = desktopMeta === null && !roseDesktop;
+  const terminalOutput = !roseDesktop;
   const provider = desktopMeta?.provider ?? codeProvider;
-  const vm = useClaudeCodeChip(taskId, socket, forceShow, provider, { savedOutput });
+  const options = { savedOutput: desktopMeta === null && terminalOutput, terminalOutput };
+  const vm = useClaudeCodeChip(taskId, socket, forceShow, provider, options);
 
   if (vm.isFullscreen) {
     return (

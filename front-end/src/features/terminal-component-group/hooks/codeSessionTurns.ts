@@ -546,7 +546,12 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   const delivered = deliveredAgentTurnIds(input.messages, input.taskId);
   const canonicalByTurn = new Map<string, Message>();
   for (const message of input.messages) {
-    const id = message.metadata?.code_turn_id;
+    // Only this session's a2a rows: codeTurnId hashes sender + message_id (no target),
+    // so another session's row can carry the same id.
+    const metadata = message.metadata;
+    const id = metadata?.code_turn_id;
+    if (metadata?.task_id !== input.taskId) continue;
+    if ((metadata.action_type as string) !== 'agent_message') continue;
     if (typeof id === 'string' && delivered.has(id)) canonicalByTurn.set(id, message);
   }
   const placedTurns = new Set(

@@ -462,6 +462,25 @@ describe("wait times render in the viewer's local time zone", () => {
   const originalTz = process.env.TZ;
   afterEach(() => {
     process.env.TZ = originalTz;
+    vi.useRealTimers();
+  });
+  it('the countdown and the label read a zone-less timestamp as the same (UTC) instant', () => {
+    process.env.TZ = 'America/Los_Angeles';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-27T17:00:00Z'));
+    render(
+      <WaitForChip
+        title="Waiting"
+        message=""
+        status="IN_PROGRESS"
+        checks={[]}
+        metadata={{ waitForMode: 'timestamp', untilTimestamp: '2026-10-27T19:00:00' }}
+      />,
+    );
+    // 19:00 UTC = 12:00pm PDT, two hours away (a local parse would say 9h).
+    expect(screen.getByText(/October 27th, 12:00pm PDT/)).toBeInTheDocument();
+    expect(screen.getByText(/2h left/)).toBeInTheDocument();
+    expect(screen.queryByText(/9h left/)).toBeNull();
   });
   const RAW_ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
   it.each([
