@@ -14,49 +14,68 @@ const TOUCH_ANCHOR_INSET_PX = 8;
  * Touch / pen long-press opens the menu from the trigger's left edge at the
  * touch height instead of under the finger. Radix anchors at the pointer and
  * only shifts menus vertically, so on a phone a wide menu pressed mid-row had
- * room on neither side and hung off the screen. Mouse right-click is unchanged.
+ * room on neither side and hung off the screen. The click that follows the
+ * finger lifting is swallowed so the long-press never also activates the
+ * trigger (opening the pressed row). Mouse right-click is unchanged.
  */
 const ContextMenuTrigger = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Trigger>
->(({ onPointerDown, onPointerMove, onPointerUp, onPointerCancel, ...props }, ref) => {
-  const timer = React.useRef<number | undefined>(undefined);
-  const cancel = () => window.clearTimeout(timer.current);
-  React.useEffect(() => cancel, []);
-  return (
-    <ContextMenuPrimitive.Trigger
-      ref={ref}
-      {...props}
-      onPointerDown={(event) => {
-        onPointerDown?.(event);
-        if (event.defaultPrevented || event.pointerType === 'mouse') return;
-        // Skips Radix's finger-anchored long-press; ours re-dispatches the open.
-        event.preventDefault();
-        const target = event.currentTarget;
-        const clientX = target.getBoundingClientRect().left + TOUCH_ANCHOR_INSET_PX;
-        const { clientY } = event;
-        cancel();
-        timer.current = window.setTimeout(() => {
-          target.dispatchEvent(
-            new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX, clientY }),
-          );
-        }, LONG_PRESS_MS);
-      }}
-      onPointerMove={(event) => {
-        onPointerMove?.(event);
-        cancel();
-      }}
-      onPointerUp={(event) => {
-        onPointerUp?.(event);
-        cancel();
-      }}
-      onPointerCancel={(event) => {
-        onPointerCancel?.(event);
-        cancel();
-      }}
-    />
-  );
-});
+>(
+  (
+    { onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClickCapture, ...props },
+    ref,
+  ) => {
+    const timer = React.useRef<number | undefined>(undefined);
+    const longPressOpened = React.useRef(false);
+    const cancel = () => window.clearTimeout(timer.current);
+    React.useEffect(() => cancel, []);
+    return (
+      <ContextMenuPrimitive.Trigger
+        ref={ref}
+        {...props}
+        onClickCapture={(event) => {
+          if (longPressOpened.current) {
+            longPressOpened.current = false;
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          onClickCapture?.(event);
+        }}
+        onPointerDown={(event) => {
+          longPressOpened.current = false;
+          onPointerDown?.(event);
+          if (event.defaultPrevented || event.pointerType === 'mouse') return;
+          // Skips Radix's finger-anchored long-press; ours re-dispatches the open.
+          event.preventDefault();
+          const target = event.currentTarget;
+          const clientX = target.getBoundingClientRect().left + TOUCH_ANCHOR_INSET_PX;
+          const { clientY } = event;
+          cancel();
+          timer.current = window.setTimeout(() => {
+            longPressOpened.current = true;
+            target.dispatchEvent(
+              new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX, clientY }),
+            );
+          }, LONG_PRESS_MS);
+        }}
+        onPointerMove={(event) => {
+          onPointerMove?.(event);
+          cancel();
+        }}
+        onPointerUp={(event) => {
+          onPointerUp?.(event);
+          cancel();
+        }}
+        onPointerCancel={(event) => {
+          onPointerCancel?.(event);
+          cancel();
+        }}
+      />
+    );
+  },
+);
 ContextMenuTrigger.displayName = ContextMenuPrimitive.Trigger.displayName;
 
 const ContextMenuPortal = ContextMenuPrimitive.Portal;

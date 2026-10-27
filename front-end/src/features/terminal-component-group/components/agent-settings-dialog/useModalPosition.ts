@@ -2,7 +2,8 @@
  * Anchors the non-modal settings dialog above-and-right of its trigger button,
  * kept inside the viewport.
  *
- * Recomputes whenever `open` flips to true, reading the trigger's client rect.
+ * Recomputes whenever `open` flips to true and on every window resize while
+ * open (phone rotation), reading the trigger's client rect.
  * The panel's right edge follows the trigger's but is clamped so the whole
  * panel stays on screen (on a phone the query-box gear sits mid-screen, and a
  * right-anchored 420px panel would hang off the left edge). Its height is
@@ -46,13 +47,20 @@ export function useModalPosition(
   const [position, setPosition] = useState<ModalPosition>(DEFAULT_POSITION);
 
   useEffect(() => {
-    if (!open || !triggerRef.current) return;
-    setPosition(
-      computeModalPosition(triggerRef.current.getBoundingClientRect(), {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      }),
-    );
+    if (!open) return undefined;
+    const fit = () => {
+      if (!triggerRef.current) return;
+      setPosition(
+        computeModalPosition(triggerRef.current.getBoundingClientRect(), {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }),
+      );
+    };
+    fit();
+    // Rotation / window resize while open: re-fit from the moved trigger.
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
   }, [open, triggerRef]);
 
   return position;

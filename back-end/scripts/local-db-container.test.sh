@@ -148,8 +148,14 @@ done
 # A workspace-owned Docker container also hosts the dev stack's seeded
 # `victoria` (run.sh): the standalone runners select the workspace database in
 # that container too. Only an existing-backend run may use the stack database.
-[[ "$(grep -c 'workspace_system_db_name "$WORKSPACE_HINT"' "$SCRIPT_DIR/run-blackbox-tests.sh")" -ge 2 ]] || {
-  echo "Expected run-blackbox-tests.sh's Docker branch to select the workspace database" >&2
+DOCKER_BRANCH="$(sed -n '/^# Try Docker container first/,/^# Fall back to system Postgres/p' "$SCRIPT_DIR/run-blackbox-tests.sh")"
+grep -q 'ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"' <<<"$DOCKER_BRANCH" &&
+  grep -q 'SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"' <<<"$DOCKER_BRANCH" || {
+  echo "Expected run-blackbox-tests.sh's Docker branch to select the victoria_<workspace> database URL" >&2
+  exit 1
+}
+grep -q 'LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"' "$SCRIPT_DIR/run-coverage.sh" || {
+  echo "Expected run-coverage.sh's container helper to select the victoria_<workspace> database URL" >&2
   exit 1
 }
 [[ "$(grep -c 'use_workspace_container_db$' "$SCRIPT_DIR/run-coverage.sh")" -eq 2 ]] || {

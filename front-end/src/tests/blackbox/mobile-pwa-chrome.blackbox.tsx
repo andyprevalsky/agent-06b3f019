@@ -7,14 +7,16 @@
  * screen and clear of the status bar, and an open agent must be closable:
  *   - the header is an opaque bar (chat content never shows through it)
  *   - an open agent has a Back control (sub-agent -> parent, root -> home)
- *   - Agent Settings stays on screen, opaque, below the mobile header
+ *   - Agent Settings stays on screen, opaque, below the mobile header, and
+ *     re-fits when the phone rotates
  *   - the bell's notification popover spans the screen below the header
  *   - the agents drawer's close X sits below the status bar, clear of the tabs
  *   - the sub-agent breadcrumb starts below the mobile header
  *   - the drawer's Logout row stays above the home indicator
  *   - an agent row's long-press menu stacks above the drawer (menus 220 > sheet 210)
  *     and opens from the row's left edge, not under the finger (a 345px menu
- *     anchored mid-row has room on neither side of a 430px screen)
+ *     anchored mid-row has room on neither side of a 430px screen); lifting the
+ *     finger does not also open the agent
  *   - Rename chosen from that menu opens above the drawer (dialogs and sheets
  *     share one modal layer, so the later-opened one is on top)
  *   - toasts drop below the status bar
@@ -265,6 +267,23 @@ describe('Long-press row menus on a phone', () => {
   });
 });
 
+describe('Long-press release on a phone', () => {
+  it('does not also open the agent the finger lifts off', async () => {
+    const user = userEvent.setup();
+    const agent = { ...makeAgent({ agent_id: 'row-1', goal: 'Halloween costume' }) } as Agent;
+    const props = renderHeader({ agents: [agent] });
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    const drawer = await screen.findByRole('dialog');
+    const row = await within(drawer).findByTestId('rose-agent-row-row-1');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    await screen.findByTestId('rose-agent-menu', {}, { timeout: 2000 });
+    fireEvent.pointerUp(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    fireEvent.click(row);
+    expect(props.onSelectAgent).not.toHaveBeenCalled();
+    expect(screen.getByTestId('rose-agent-menu')).toBeInTheDocument();
+  });
+});
+
 describe('Rename from the mobile drawer', () => {
   it('opens its dialog above the still-open drawer', async () => {
     const user = userEvent.setup();
@@ -326,6 +345,49 @@ describe('Agent Settings on a 430px phone', () => {
     expect(dialog.style.maxHeight).toContain('var(--mobile-terminal-header-height)');
     expect(dialog.style.backgroundColor).not.toBe('transparent');
     expect(dialog.className).toMatch(/(^|\s)bg-\[#EEEFF2\](\s|$)/);
+  });
+
+  it('re-fits the open panel when the phone rotates', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AgentSettingsDialog variant="nub" agent={makeAgent()} />, {
+      roseDesktop: true,
+    });
+    const trigger = screen.getByRole('button', { name: 'Agent settings' });
+    const rect = vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 142,
+      right: 154,
+      top: 730,
+      bottom: 748,
+      width: 12,
+      height: 18,
+      x: 142,
+      y: 730,
+      toJSON: () => ({}),
+    });
+    await user.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(dialog.style.width).toBe(`${PHONE.width - 2 * EDGE}px`));
+
+    // Landscape: 932x430, the gear moves with the query box.
+    setViewport(PHONE.height, PHONE.width);
+    rect.mockReturnValue({
+      left: 142,
+      right: 154,
+      top: 330,
+      bottom: 348,
+      width: 12,
+      height: 18,
+      x: 142,
+      y: 330,
+      toJSON: () => ({}),
+    });
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    await waitFor(() => expect(dialog.style.width).toBe('420px'));
+    const right = Number.parseFloat(dialog.style.right);
+    expect(PHONE.height - right - inlineWidth(dialog)).toBeGreaterThanOrEqual(EDGE);
+    expect(dialog.style.bottom).toBe(`${PHONE.width - 330 + EDGE}px`);
   });
 });
 
