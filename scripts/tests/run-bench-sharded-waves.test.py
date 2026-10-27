@@ -37,7 +37,7 @@ if mode == 'check':
                           wave=dict(scheduled_total=int(value('--scheduled-total')), prior_infra=int(value('--prior-infra'))),
                           controllers=1, copies=len(tasks) * runs)))
     sys.exit(0)
-admission = Path(value('--state-dir')) / ('admission-%02d' % index)
+admission = Path(value('--state-dir')) / ('admission-%02d-%d' % (index, os.getpid()))
 admission.mkdir()
 print(json.dumps(dict(directory=str(admission), status='SHARDED_ADMISSION_STARTED', copies=len(tasks) * runs)), flush=True)
 if step.get('no_result'):
@@ -46,7 +46,8 @@ copies = len(tasks) * runs
 missing = step.get('missing', 0)
 (admission / 'result.json').write_text(json.dumps(dict(
     scheduled_total=copies, observed_jobs=copies - missing, missing_jobs=missing, infra_failures=step.get('infra', 0),
-    task_status={'PASS': copies - missing}, coordination=dict(abort_reason=step.get('abort'), terminate_reason=step.get('terminate')))))
+    task_status={'PASS': copies - missing}, shards_without_summary=step.get('no_summary', []),
+    coordination=dict(abort_reason=step.get('abort'), terminate_reason=step.get('terminate'), infra_true=step.get('infra_true', 0)))))
 if step.get('released', True):
     (admission / 'native-release-audit.json').write_text(json.dumps(dict(released=True, observed_at=time.time())))
 sys.exit(step.get('rc', 0))
@@ -125,6 +126,26 @@ class Waves(unittest.TestCase):
         self.assertEqual([w['state'] for w in batch['waves']], ['JOINED', 'NOT_LAUNCHED'])
         self.assertIn('release not verified', batch['stop_reason'])
         self.assertEqual(len([c for c in calls if c['mode'] == 'run']), 1)
+
+    def test_incomplete_wave_stops_the_batch_and_keeps_live_confirmed_infra(self):
+        # A released wave that lost jobs or a shard export stops the batch; the coordinator's
+        # live confirmed infra count (4) outranks the exported count (1) for the next denominator.
+        done, batch, calls = self.run_driver(TASKS70, plan=[dict(missing=3, rc=1, infra=1, infra_true=4)])
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual([w['state'] for w in batch['waves']], ['RELEASED'] + ['NOT_LAUNCHED'] * 3)
+        self.assertIn('wave 0 incomplete: 3 missing jobs', batch['stop_reason'])
+        self.assertEqual(batch['infra_confirmed'], 4)
+        self.assertEqual(len([c for c in calls if c['mode'] == 'run']), 1)
+        self.calls.unlink()
+        done, batch, _ = self.run_driver(TASKS70, plan=[dict(no_summary=[1])])
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('shards without summary [1]', batch['stop_reason'])
+        self.assertEqual(batch['unlaunched_copies'], 69 * 2 + 3)
+        # A live count below the exported one never lowers it.
+        self.calls.unlink()
+        done, batch, calls = self.run_driver(TASKS70[:30], plan=[dict(infra=2, infra_true=1), dict()])
+        self.assertEqual((done.returncode, batch['infra_confirmed']), (0, 2))
+        self.assertEqual([c['prior_infra'] for c in calls if c['mode'] == 'run'], [0, 2])
 
     def test_wave_pass_never_makes_an_incomplete_batch_green(self):
         # Wave 0 passes everything; wave 1 loses jobs. The batch stays incomplete and exits 1.

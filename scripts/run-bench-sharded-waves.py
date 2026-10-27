@@ -131,9 +131,12 @@ class Batch:
         save(self.directory / 'batch.json', self.record)
 
     def request_stop(self, number, _frame):
+        first = self.stop is None
         self.stop = self.stop or signal.Signals(number).name
-        if self.child is not None and self.child.poll() is None:
-            self.child.send_signal(signal.SIGTERM)  # exact owned operator; its own traps clean up
+        if first and self.child is not None and self.child.poll() is None:
+            # One TERM to the exact owned operator; its own traps clean up. Repeated signals
+            # never re-signal it (a second TERM can strand cleanup).
+            self.child.send_signal(signal.SIGTERM)
 
     def operator_call(self, wave, mode):
         argv = [*self.operator, *self.operator_args, '--tasks', wave['manifest'],
@@ -192,11 +195,15 @@ class Batch:
         coordination = result.get('coordination') or {}
         wave.update(observed_jobs=result.get('observed_jobs'), missing_jobs=result.get('missing_jobs'),
                     infra_failures=result.get('infra_failures'), task_status=result.get('task_status'),
+                    shards_without_summary=result.get('shards_without_summary') or [],
                     abort_reason=coordination.get('abort_reason'), terminate_reason=coordination.get('terminate_reason'))
-        infra = result.get('infra_failures')
-        if type(infra) is not int or infra < 0:
+        exported, live = result.get('infra_failures'), coordination.get('infra_true', 0)
+        if type(exported) is not int or exported < 0 or type(live) is not int or live < 0:
             wave['state'] = 'FAILED_NO_RESULT'
             return 'wave %d result has no confirmed infra count' % wave['index']
+        # Both count confirmed infra jobs of this wave only: a shard whose export is missing
+        # still keeps the coordinator's live confirmed count, never an undercount.
+        infra = wave['infra_confirmed'] = max(exported, live)
         self.record['infra_confirmed'] += infra
         self.record['infra_stop_reached'] = infra_stop_reached(self.record['infra_confirmed'], self.scheduled_total)
         wave['state'] = 'JOINED'
@@ -207,6 +214,9 @@ class Batch:
             return 'infra %d/%d reached the 5%% threshold' % (self.record['infra_confirmed'], self.scheduled_total)
         if wave['abort_reason'] or wave['terminate_reason']:
             return 'wave %d stopped: %s' % (wave['index'], wave['abort_reason'] or wave['terminate_reason'])
+        if wave['missing_jobs'] != 0 or wave['shards_without_summary']:
+            return 'wave %d incomplete: %s missing jobs, shards without summary %s' % (
+                wave['index'], wave['missing_jobs'], wave['shards_without_summary'])
         if self.stop:
             return 'operator ' + self.stop
         return None
