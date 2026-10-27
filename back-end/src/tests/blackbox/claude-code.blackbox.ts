@@ -803,7 +803,7 @@ async function testCreate_emptyBody() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({}),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'POST /create empty body');
 }
 
@@ -813,7 +813,7 @@ async function testCreate_missingGoal() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ agent_id: FAKE_UUID }),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'POST /create missing goal');
 }
 
@@ -823,7 +823,7 @@ async function testCreate_missingAgentId() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ goal: 'test' }),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'POST /create missing agent_id');
 }
 
@@ -833,7 +833,7 @@ async function testCreate_nonUuidAgentId() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ agent_id: 'not-a-uuid', goal: 'test' }),
   });
-  assertStatus(res.status, 500, res.data);
+  assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'POST /create non-uuid agent_id');
 }
 
@@ -872,6 +872,21 @@ async function testCreate_githubAccessDenied() {
     body.code === 'GITHUB_ACCESS_DENIED',
     `Expected code GITHUB_ACCESS_DENIED, got ${body.code}`
   );
+}
+
+async function testCreate_nonUuidCodeSessionIdIs400() {
+  // RCA 942d8562: code_session_id "null" (a string a model sent for an omitted
+  // optional) failed the uuid schema and returned 500, which the agent tool
+  // reported as a transient sandbox capacity error.
+  const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ agent_id: FAKE_UUID, goal: 'test', code_session_id: 'null' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string; code?: string };
+  assert(body.code === 'INVALID_REQUEST', `Expected INVALID_REQUEST, got ${body.code}`);
+  assert(body.error.includes('code_session_id'), `Expected path in error, got ${body.error}`);
 }
 
 async function testCreate_validBodyE2bBoundary() {
@@ -1743,6 +1758,7 @@ async function runAll() {
     { name: 'POST /create -- github without user_id -> 400', fn: testCreate_githubWithoutUserId },
     { name: 'POST /create -- github access denied -> 403', fn: testCreate_githubAccessDenied },
     { name: 'POST /create -- invalid github URL -> 403', fn: testCreate_invalidGithubUrl },
+    { name: 'POST /create -- non-uuid code_session_id -> 400', fn: testCreate_nonUuidCodeSessionIdIs400 },
     {
       name: 'POST /create -- valid body hits E2B boundary -> 500 or 200',
       fn: testCreate_validBodyE2bBoundary,

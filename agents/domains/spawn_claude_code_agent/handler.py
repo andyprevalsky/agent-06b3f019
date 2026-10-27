@@ -7,6 +7,7 @@ dispatches to the activity, and yields ToolEvents for the workflow.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -104,7 +105,6 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         "FAILED TO RUN RESERVE SCRIPT",
         "THE SANDBOX WAS NOT FOUND",
         "SANDBOX TIMEOUT",
-        "FAILED TO CREATE CODE SESSION",
         # Proxy/gateway capacity (cuda-kernel k=3 r10 agent1 @ ~30m): HTTP 500
         # wrapping ``503: no healthy upstream`` — soft-fail after Temporal
         # retries so no_tool_failures stays green while the agent can re-spawn.
@@ -114,7 +114,11 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         "CONNECTTIMEOUT",
         "POOLTIMEOUT",
     )
-    return any(m in text for m in markers)
+    if any(m in text for m in markers):
+        return True
+    # A bare session-create failure is a capacity flake only when the backend
+    # failed (HTTP 5xx). A 4xx rejected our request; retrying cannot heal it.
+    return "FAILED TO CREATE CODE SESSION" in text and "HTTP 5" in text
 
 
 def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
@@ -315,6 +319,26 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         # Resume a specific persistent code session; omitted, the backend resumes
         # this agent's latest session for the repo (or starts its own branch).
         requested_code_session_id = tool_call.get("code_session_id")
+        if isinstance(requested_code_session_id, str) and requested_code_session_id:
+            try:
+                uuid.UUID(requested_code_session_id)
+            except ValueError:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Task Incomplete",
+                    message=(
+                        f"code_session_id {requested_code_session_id!r} is not a code session id. Pass the "
+                        "code_session_id (a UUID) that a previous code-agent result reported, or omit "
+                        "code_session_id to start or resume your own latest session."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "action_type": "task_complete",
+                        "success": False,
+                    },
+                )
+                return
         code_session_request = (
             {"code_session_id": requested_code_session_id}
             if isinstance(requested_code_session_id, str) and requested_code_session_id
