@@ -3426,6 +3426,25 @@ class RunBenchShardedRouting(unittest.TestCase):
     def option(self, argv, flag):
         return argv[argv.index(flag) + 1] if flag in argv else None
 
+    def test_wide_check_retains_explicit_image_receipt_exports_without_launch(self):
+        with self.checkout() as fx:
+            receipt = private(fx.root.parent/'image-build.json', {'schema':'cloudbench-image-build-v1'})
+            captured = fx.root.parent/'image-env.json'
+            operator = Path(fx.env['RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST'])
+            code = operator.read_text().replace('import json,os,sys\n',
+                'import json,os,sys\n' + 'open(os.environ["I20_CAPTURE"],"w").write(json.dumps({k:os.environ.get(k) for k in ("CLOUDBENCH_IMAGE_BUILD_RECEIPT","CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256")}))\n')
+            operator.write_text(code)
+            checksum = CLI.digest(receipt.read_bytes())
+            fx.env.update(CLOUDBENCH_IMAGE_BUILD_RECEIPT=str(receipt),
+                          CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=checksum, I20_CAPTURE=str(captured))
+            result, operators, fleets = fx.run(*polar_names(20), '-k', '2', '--concurrency', '40', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(operators), 1)
+            self.assertNotIn('--run', operators[0])
+            self.assertEqual(fleets, [])
+            self.assertEqual(json.loads(captured.read_bytes()), dict(CLOUDBENCH_IMAGE_BUILD_RECEIPT=str(receipt),
+                                                                  CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=checksum))
+
     def test_wide_runs_route_check_then_run_with_manifest_repetitions_timeout_and_pushed_head(self):
         names = polar_names(40)
         with self.checkout() as fx:
@@ -3595,6 +3614,168 @@ class TaskRefPins(unittest.TestCase):
         for name in ('cloudbench-original600-supervisor.py', 'cloudbench-controller-orphan-drain.py', 'original600-status.py'):
             pins = set(re.findall(assignment, (ROOT/'scripts'/name).read_text()))
             self.assertEqual(pins, {ref}, name)
+
+
+class ImageProofTransport(unittest.TestCase):
+    IMAGE = 'sha256:' + 'a' * 64
+    NODE = 'b' * 64
+    PYTHON = 'c' * 64
+
+    def receipt(self, root, **changes):
+        value = dict(schema='cloudbench-image-build-v1', publication_verified=True,
+                     image_ref='registry.fly.io/fixture:build@' + self.IMAGE,
+                     published_image_ref='registry.fly.io/fixture:build@' + self.IMAGE,
+                     published_digest=self.IMAGE, node_dependency_fingerprint=self.NODE,
+                     python_dependency_fingerprint=self.PYTHON)
+        value.update(changes)
+        return private(root/'image-build.json', value)
+
+    def prepared(self, root, receipt=None, sharded=False, **overrides):
+        helper = Sharded()
+        options = dict(image_build_receipt=receipt,
+                       image_build_receipt_sha256=CLI.digest(receipt.read_bytes()) if receipt else None)
+        options.update(overrides)
+        args = helper.args(root, **options)
+        args.warm_deps.write_text(self.NODE + ' ' + self.PYTHON + ' 1000 vs_fixture\n')
+        shard = None
+        if sharded:
+            names = polar_names(20)
+            args.tasks.write_text(json.dumps(names))
+            shard = dict(index=0, count=2, tasks=names[::2], task_indexes=list(range(0,20,2)),
+                         runs=2, group_run_id='i20-fixture', group_total=40, group_started_at=time.time(),
+                         tasks_sha256=CLI.digest(('\n'.join(names[::2])+'\n').encode()),
+                         manifest_sha256=RUNNER['manifest_sha'](names))
+        directory = root/'prepared'
+        directory.mkdir(mode=0o700)
+        config = CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER,
+                             directory, helper.capacity(root),
+                             guest_env=dict(temporal_namespace=None, override=False), shard=shard,
+                             runtime_env=dict(CLOUDBENCH_APP_MACHINE_CEILING='1000', CLOUDBENCH_SHARED_CPU_GOVERNOR='200'),
+                             scheduled_total=40 if sharded else 600)
+        return args, config
+
+    def test_image_proof_is_in_admission_and_staged_environment(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); receipt = self.receipt(root)
+            args, config = self.prepared(root, receipt)
+            binding = CLI.admission_binding(args, RUNNER)
+            self.assertEqual(binding['inputs']['image_build_receipt'],
+                             dict(path=str(receipt), sha256=CLI.digest(receipt.read_bytes())))
+            value = json.loads(config.read_bytes())
+            row = next(x for x in value['remote_files'] if x['relative_path'] == '.git/cloudbench-image-build-receipt.json')
+            self.assertEqual(row['source_path'], str(receipt))
+            self.assertEqual(value['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT'],
+                             '/tmp/gate/repo/.git/cloudbench-image-build-receipt.json')
+            self.assertEqual(value['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'], row['sha256'])
+            receipt.write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                CLI.admission_binding(args, RUNNER)
+
+    def test_invalid_or_unowned_image_inputs_are_refused(self):
+        for fault in ('missing-hash', 'missing-path', 'checksum', 'symlink', 'mode', 'schema'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                root = Path(name); receipt = self.receipt(root)
+                checksum = CLI.digest(receipt.read_bytes())
+                path = receipt
+                if fault == 'missing-hash': checksum = None
+                if fault == 'missing-path': path = None
+                if fault == 'checksum': checksum = '0'*64
+                if fault == 'symlink':
+                    path = root/'link'; path.symlink_to(receipt)
+                if fault == 'mode': receipt.chmod(0o644)
+                if fault == 'schema':
+                    receipt.write_text('{"schema":"not-an-image-build"}')
+                    checksum = CLI.digest(receipt.read_bytes())
+                args = argparse.Namespace(image_build_receipt=path, image_build_receipt_sha256=checksum)
+                with self.assertRaises((ValueError, OSError)):
+                    CLI.image_build_receipt_input(args, RUNNER)
+
+    def test_legacy_unconfigured_transport_remains_unchanged(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); args, config = self.prepared(root)
+            self.assertNotIn('image_build_receipt', CLI.admission_binding(args, RUNNER)['inputs'])
+            value = json.loads(config.read_bytes())
+            self.assertFalse(any('IMAGE_BUILD_RECEIPT' in key for key in value['remote_env']))
+            self.assertEqual(len(value['remote_files']), 2)
+            RUNNER['pin_image_build_receipt']({}, {})
+            with self.assertRaisesRegex(ValueError, 'not staged'):
+                RUNNER['pin_image_build_receipt']({'CLOUDBENCH_IMAGE_BUILD_RECEIPT': '/host/unavailable'}, {})
+            staged = {'.git/cloudbench-image-build-receipt.json': b'raw-receipt'}
+            for wrong in ({'CLOUDBENCH_IMAGE_BUILD_RECEIPT': '/host/old'},
+                          {'CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256': '0'*64}):
+                with self.assertRaisesRegex(ValueError, 'binding differs'):
+                    RUNNER['pin_image_build_receipt'](wrong, staged)
+
+    def test_actual_payload_and_remote_consumer_do_not_need_host_receipt(self):
+        for fault in ('none', 'wrong-image', 'wrong-node', 'unverified', 'wire-hash', 'host-changed'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                root = Path(name); changes = {}
+                if fault == 'wrong-image': changes['published_digest'] = 'sha256:' + 'd'*64
+                if fault == 'wrong-node': changes['node_dependency_fingerprint'] = 'e'*64
+                if fault == 'unverified': changes['publication_verified'] = False
+                receipt = self.receipt(root, **changes)
+                args, config = self.prepared(root, receipt, sharded=True)
+                value = json.loads(config.read_bytes())
+                guest = root/'guest'; (guest/'scripts/lib').mkdir(parents=True)
+                shutil.copyfile(ROOT/'scripts/lib/cloudbench-env.sh', guest/'scripts/lib/cloudbench-env.sh')
+                (guest/'agents/benchmarks').mkdir(parents=True)
+                for catalog in ('tasks.json', 'polar_tasks.json'):
+                    shutil.copyfile(ROOT/'agents/benchmarks'/catalog, guest/'agents/benchmarks'/catalog)
+                shutil.copyfile(ROOT/'scripts/cloudbench_catalog.py', guest/'scripts/cloudbench_catalog.py')
+                supervisor = guest/'scripts/cloudbench-original600-supervisor.py'
+                supervisor.write_text('''import json, os, subprocess
+from pathlib import Path
+root=Path.cwd()
+prefix=Path('/tmp/gate/repo')
+path=Path(os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT'])
+assert path==prefix/'.git/cloudbench-image-build-receipt.json'
+local=root/path.relative_to(prefix)
+result=subprocess.run(['bash','-c','source "$1"; shift; cloudbench_verify_image_dependency_receipt "$@"','fixture',str(root/'scripts/lib/cloudbench-env.sh'),str(local),os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'],'warm',"''' + self.NODE + '''","''' + self.PYTHON + '''"],input=json.dumps([{'id':'warm','image_ref':{'digest':"''' + self.IMAGE + '''"},'config':{}}]),text=True,capture_output=True)
+if result.returncode: raise SystemExit(result.stderr)
+(root/'accepted.json').write_text(json.dumps({'sha256':os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256']}))
+''')
+                subprocess.run(['git','init','-q',str(guest)],check=True)
+                subprocess.run(['git','-C',str(guest),'add','.'],check=True)
+                subprocess.run(['git','-C',str(guest),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','consumer'],check=True)
+                ref=subprocess.check_output(['git','-C',str(guest),'rev-parse','HEAD'],text=True).strip()
+                value['source_root']=str(guest);value['source_ref']=ref;value['shard']['task_ref']=ref
+                value['source_files']={'cloudbench-original600-supervisor.py':CLI.digest(supervisor.read_bytes())}
+                authority=Path(value['authority_template']);auth=json.loads(authority.read_bytes());auth['source_ref']=ref;authority.write_text(json.dumps(auth))
+                config.write_text(json.dumps(value))
+                captured=[]
+                class AtPayload(Exception): pass
+                def capture(out, remote):
+                    captured.append(remote);raise AtPayload()
+                if fault == 'host-changed':
+                    receipt.write_text('{}')
+                with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *a:None,launch_handoff=capture):
+                    if fault == 'host-changed':
+                        with self.assertRaisesRegex(ValueError, 'remote metadata source changed'):
+                            RUNNER['run'](config,CLI.digest(config.read_bytes()),root/'run')
+                        self.assertEqual(captured, [])
+                        continue
+                    with self.assertRaises(AtPayload):
+                        RUNNER['run'](config,CLI.digest(config.read_bytes()),root/'run')
+                self.assertEqual(len(captured),1)
+                remote=captured[0]
+                self.assertEqual(remote['shard']['group_total'], 40)
+                self.assertEqual(remote['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT'], '/tmp/gate/repo/.git/cloudbench-image-build-receipt.json')
+                if fault=='wire-hash':
+                    next(x for x in remote['remote_files'] if 'image-build' in x['relative_path'])['sha256']='0'*64
+                # Match the existing runner fixture's relocated controller namespace.
+                remote['remote_env']['RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER'] = str(
+                    guest/'.context'/(Path(remote['identity_name']).stem + '.barrier'))
+                payload_dir=root/'payload';payload_dir.mkdir(mode=0o700)
+                payload,_,command=RUNNER['launch_handoff'](payload_dir,remote)
+                receipt.unlink()  # The remote controller cannot access the original host file.
+                command[2]=command[2].replace("Path('/tmp/controller-launch-payload.json.gz')",'Path('+repr(str(payload))+')').replace("root=Path('/tmp/gate/repo')",'root=Path('+repr(str(guest))+')')
+                command[3]=str(payload)
+                result=subprocess.run(command,capture_output=True,text=True,timeout=10,env=dict(os.environ,FLY_MACHINE_ID='1'*14))
+                self.assertEqual(result.returncode==0,fault=='none',result.stderr)
+                self.assertEqual((guest/'accepted.json').exists(),fault=='none')
+                if fault=='none':
+                    staged=guest/'.git/cloudbench-image-build-receipt.json'
+                    self.assertEqual(CLI.digest(staged.read_bytes()),remote['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'])
 
 
 if __name__ == '__main__':

@@ -28,6 +28,23 @@ JSON containing `app`, digest-pinned `image_ref`, `protected_machines` and
 `protected_volumes`. The app is fixed to `navi-whisper-lux-bench`. Preserve the
 existing protected resource cohort; never invent IDs to satisfy admission.
 
+Fresh REAL storage also requires the verified image-build receipt documented by
+`/benchmark`. Keep `CLOUDBENCH_IMAGE_BUILD_RECEIPT` set to its absolute private
+host path and `CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256` to the exact file hash when
+running the ordinary `scripts/run-bench` command. The wide route inherits these
+exports; the operator also accepts `--image-build-receipt` and
+`--image-build-receipt-sha256` explicitly. A partial pair, changed checksum,
+non-private file or wrong receipt schema refuses before provider reads.
+
+The operator binds the receipt in its admission inputs and carries its exact
+bytes through the existing hash-checked controller payload. Each remote
+controller receives its own `.git/cloudbench-image-build-receipt.json` and a
+controller-local path, not the launching host's path. `--check` reports the
+bound input without allocating; actual fresh-storage admission still validates
+the original receipt against the native image digest and Node/Python dependency
+identities. This transport neither builds nor activates an image, fabricates a
+receipt, changes task definitions, nor grants benchmark outcome credit.
+
 The exact original ordered200 task manifest is committed at
 `scripts/tests/fixtures/original600-tasks.json`. Copy its exact bytes to a private
 input file, e.g. `install -m600 scripts/tests/fixtures/original600-tasks.json "$TASKS"`.

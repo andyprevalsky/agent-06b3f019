@@ -17,6 +17,7 @@ WARM_VOLUME_NAME='cloudbench_t10_ord_85a7e2c'
 WARM_REGION='ord'
 WARM_DEPS_RELATIVE='.git/cloudbench-warm-deps.'+WARM_MACHINE_NAME+'.fp'
 WARM_INVENTORY_RELATIVE='.git/cloudbench-warm-snapshot-inventory.'+WARM_MACHINE_NAME+'.json'
+IMAGE_BUILD_RECEIPT_RELATIVE='.git/cloudbench-image-build-receipt.json'
 class Deadline(BaseException):pass
 
 def need(v,m):
@@ -100,6 +101,16 @@ def pin_warm_snapshot(remote_env,staged):
  need(remote_env.get('CLOUDBENCH_SNAPSHOT_ID',snapshot)==snapshot,'original warm/launch option changed: CLOUDBENCH_SNAPSHOT_ID')
  remote_env['CLOUDBENCH_SNAPSHOT_ID']=snapshot
  return snapshot
+def pin_image_build_receipt(remote_env, staged):
+ """Only transported, hash-bound bytes may name a controller image proof."""
+ path_key='CLOUDBENCH_IMAGE_BUILD_RECEIPT'; hash_key=path_key+'_SHA256'
+ if IMAGE_BUILD_RECEIPT_RELATIVE not in staged:
+  need(path_key not in remote_env and hash_key not in remote_env,'image-build receipt is not staged')
+  return
+ checksum=sha(staged[IMAGE_BUILD_RECEIPT_RELATIVE]);path='/tmp/gate/repo/'+IMAGE_BUILD_RECEIPT_RELATIVE
+ need(remote_env.get(path_key,path)==path and remote_env.get(hash_key,checksum)==checksum,'image-build receipt binding differs')
+ remote_env[path_key]=path;remote_env[hash_key]=checksum
+
 def shard_task_ref(shard):
  """The guest task source: the shard's bound pushed task_ref, or the historical pin when absent."""
  if shard is None or 'task_ref' not in shard:return TASK_REF
@@ -721,6 +732,7 @@ def run(config_path,config_sha,out,*,github_token=None):
   staged[item['relative_path']]=data
   files.append(encode_remote_file(item,data))
  pin_warm_snapshot(remote_env,staged)
+ pin_image_build_receipt(remote_env,staged)
  snapshot_name=WARM_INVENTORY_RELATIVE
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']

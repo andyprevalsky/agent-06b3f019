@@ -898,12 +898,35 @@ def capacity_from_snapshot(proof, directory, reuse_runs, harness_ref, excluded,
     return proof
 
 
+def image_build_receipt_input(args, runner):
+    """Bind the explicit image proof; never forward its host-local path to a shard."""
+    path = getattr(args, 'image_build_receipt', None)
+    checksum = getattr(args, 'image_build_receipt_sha256', None)
+    if path is None and checksum is None:
+        return None
+    if path is None or not isinstance(checksum, str) or not re.fullmatch('[0-9a-f]{64}', checksum):
+        raise ValueError('image-build receipt path and SHA256 must be supplied together')
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError('image-build receipt requires an absolute private path')
+    raw = runner['read'](path)
+    if digest(raw) != checksum:
+        raise ValueError('image-build receipt checksum differs')
+    value = json.loads(raw)
+    if not isinstance(value, dict) or value.get('schema') != 'cloudbench-image-build-v1':
+        raise ValueError('image-build receipt schema required')
+    return dict(path=str(path), sha256=checksum)
+
+
 def admission_binding(args, runner):
     names=('facts','agents_env','backend_env','tasks','snapshot_inventory','warm_deps')
     binding = dict(source_ref=args.source_ref, org=args.org, extra=args.extra_destroying_count,
                 inputs={name:dict(path=str(getattr(args,name)),sha256=digest(runner['read'](getattr(args,name)))) for name in names},
                 archive_runs=[str(path.absolute()) for path in (args.archive_run or [])],
                 excluded_machines=sorted(set(args.reuse_exclude_machine)))
+    image_receipt = image_build_receipt_input(args, runner)
+    if image_receipt is not None:
+        binding['inputs']['image_build_receipt'] = image_receipt
     policy = getattr(args, 'infra_early_stop', 'enabled')
     if policy not in ('enabled', 'disabled'):
         raise ValueError('invalid infrastructure early-stop policy')
@@ -1085,6 +1108,14 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     for path, relative in [(args.snapshot_inventory, runner['WARM_INVENTORY_RELATIVE']),
                            (args.warm_deps, runner['WARM_DEPS_RELATIVE'])]:
         files.append(dict(source_path=str(path), relative_path=relative, sha256=digest(read(path))))
+    image_env = {}
+    image_receipt = image_build_receipt_input(args, runner)
+    if image_receipt is not None:
+        relative = runner['IMAGE_BUILD_RECEIPT_RELATIVE']
+        files.append(dict(source_path=image_receipt['path'], relative_path=relative,
+                          sha256=image_receipt['sha256']))
+        image_env = dict(CLOUDBENCH_IMAGE_BUILD_RECEIPT='/tmp/gate/repo/' + relative,
+                         CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=image_receipt['sha256'])
     reuse_env = {}
     if cap.get('qualified_reuse_count'):
         reuse_path=directory/'archived-reuse-request.private.json';reuse_raw=read(reuse_path);reuse_sha=digest(reuse_raw)
@@ -1109,7 +1140,7 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
-                                  **guest_namespace_env),
+                                  **guest_namespace_env, **image_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S=str(runner['gate_watchdog_seconds'](bound_timeouts(args, runner)[1])), PYTHONDONTWRITEBYTECODE='1'))
     if host_operator_provenance is not None:
@@ -2436,6 +2467,8 @@ def main():
     for name in ['facts', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--task-ref', help='pushed guest task source commit (default: the historical original600 pin)')
+    parser.add_argument('--image-build-receipt', type=Path, default=os.environ.get('CLOUDBENCH_IMAGE_BUILD_RECEIPT') or None, help='verified private image-build receipt to stage on every controller (default: CLOUDBENCH_IMAGE_BUILD_RECEIPT)')
+    parser.add_argument('--image-build-receipt-sha256', default=os.environ.get('CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256') or None, help='exact receipt byte SHA256 (default: CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256)')
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--unused-reservation-run', action='append', default=[], type=Path, help='Closed admission whose fully archived, never-assigned reservations may pass to this new cohort')
     parser.add_argument('--parked-reservation-run', action='append', default=[], type=Path, help='Closed admission: validate untouched and positively proven parked claims for a new cohort')
@@ -2476,6 +2509,7 @@ def main():
     pins = source(root, args.source_ref)
     runner = runpy.run_path(str(root/'scripts/cloudbench-original600-runner.py'))
     runner['validate_source_members'](root, args.source_ref, pins)
+    image_receipt = image_build_receipt_input(args, runner)  # validate before any provider read
     preflight = runpy.run_path(str(root/'scripts/cloudbench-operator-preflight.py'))
     explicit = [name for name in ('facts', 'snapshot_inventory', 'warm_deps') if getattr(args, name) is not None]
     if explicit and len(explicit) != 3:
@@ -2591,6 +2625,8 @@ def main():
             # --check never refreshes: it reports the path --run takes (reuse or refresh) and why.
             check['input_discovery'] = {k: v for k, v in discovery.items() if k not in ('warm_snapshot', 'provider_calls')}
         check.update(manifest=manifest)
+        if image_receipt is not None:
+            check['image_build_receipt'] = image_receipt
         if args.scheduled_total is not None or args.prior_infra:
             wave_total, prior_infra = wave_denominator(args, simultaneous_copies(args, runner))
             check.update(wave=dict(scheduled_total=wave_total, prior_infra=prior_infra))
