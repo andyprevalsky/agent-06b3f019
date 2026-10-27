@@ -19,7 +19,6 @@ import {
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
-import { isRoseDesktopUser } from '../utils/roseDesktop';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
@@ -46,7 +45,7 @@ import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { waitForSandboxWsServer } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
-import { prepareCodeSessionWorkspace } from './codeSessionWorkspace';
+import { prepareCodeSessionWorkspace, promptFlagsForUser } from './codeSessionWorkspace';
 import { applyPreviewUrlEnv, autostartRosePreview } from './codePreview/sandbox';
 import { isRoseRepoUrl } from './codePreview/preview';
 import {
@@ -195,7 +194,7 @@ async function createClaudeCodeSessionUnlocked(
     workDir,
     branch: codeSession?.branch,
     mergeTarget: codeSession?.mergeTarget,
-    roseDesktop: isRoseDesktopUser(userId),
+    ...promptFlagsForUser(userId),
     roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
   });
 
@@ -525,7 +524,7 @@ export async function createCodexCodeSession(
           workDir,
           branch: codeSession?.branch,
           mergeTarget: codeSession?.mergeTarget,
-          roseDesktop: isRoseDesktopUser(userId),
+          ...promptFlagsForUser(userId),
         });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =

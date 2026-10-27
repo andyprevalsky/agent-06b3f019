@@ -41,6 +41,13 @@ async function main(): Promise<void> {
       },
     },
   });
+  // Cross-instance locking is covered by multi-instance.blackbox.ts; here the
+  // commit lock only needs to run its critical section.
+  await mock.module('../../providers/sharedState', {
+    namedExports: {
+      withSerializedLock: async <T>(_key: string, fn: () => Promise<T>) => fn(),
+    },
+  });
   await mock.module('../../providers/rose', {
     namedExports: {
       markCacheable: (content: string) => ({ role: 'system', content }),

@@ -15,6 +15,7 @@
  * table of contents lists (codeAgentPrompt, same installedRoseSkills()).
  */
 import { withAgentGraphWorkspace } from './agentGraph/workspace';
+import { mobbinAvailableFor } from './agentTools/mobbin';
 import { withAgentTools } from './agentTools/workspace';
 import {
   CODE_PREVIEW_CLI_PATH,
@@ -90,6 +91,15 @@ export function withRoseSkills(
     });
     return workspace;
   }
+}
+
+/**
+ * The account-dependent code-agent prompt switches, from the same gates that
+ * decide what prepareCodeSessionWorkspace installs: Rose Desktop skills and the
+ * Mobbin server. The prompt never names a tool the session lacks.
+ */
+export function promptFlagsForUser(userId: string | undefined) {
+  return { roseDesktop: isRoseDesktopUser(userId), mobbin: mobbinAvailableFor(userId) };
 }
 
 export async function prepareCodeSessionWorkspace(

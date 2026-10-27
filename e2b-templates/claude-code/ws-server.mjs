@@ -1517,6 +1517,28 @@ function projectStartupNote(report) {
   return `Project startup${name} ${what}${logRef}\nLast output:\n${tail}\n\n`;
 }
 
+// Mobbin MCP tools that read or change the token owner's account
+// (https://docs.mobbin.com/mcp/features); code agents get catalog search only.
+const MOBBIN_ACCOUNT_TOOLS = [
+  "list_collections",
+  "get_collection_contents",
+  "create_collection",
+  "save_content",
+  "add_comment",
+];
+
+/** Whether the backend-written MCP config lists `server`. */
+function mcpConfigLists(path, server) {
+  try {
+    return Boolean(
+      JSON.parse(readFileSync(path, "utf8"))?.mcpServers?.[server],
+    );
+  } catch (err) {
+    log("warn", "Unreadable MCP config", { path, error: String(err) });
+    return false;
+  }
+}
+
 async function runClaudeCli(startupReport = null) {
   const sanitizedGoal = GOAL.replace(/\0/g, "");
   // Direct-chat stream-json user message; the project startup note leads the task.
@@ -1570,6 +1592,14 @@ async function runClaudeCli(startupReport = null) {
   if (existsSync(roseMcpConfig)) {
     args.push("--mcp-config", roseMcpConfig);
     args[args.indexOf("--allowedTools") + 1] += ",mcp__rose";
+    if (mcpConfigLists(roseMcpConfig, "mobbin")) {
+      // Mobbin design references (backend-provided token, one Mobbin account):
+      // catalog search only, never that account's collections, saves or comments.
+      args[args.indexOf("--allowedTools") + 1] += ",mcp__mobbin";
+      args[args.indexOf("--disallowedTools") + 1] += MOBBIN_ACCOUNT_TOOLS.map(
+        (tool) => `,mcp__mobbin__${tool}`,
+      ).join("");
+    }
   }
   const resumeSessionId = resolveResumeSessionId();
   if (resumeSessionId) {

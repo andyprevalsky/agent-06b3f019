@@ -212,6 +212,11 @@ test('code-agent prompt: a byte-stable skills table of contents per account grou
   // Size: the table of contents is a few lines, and the prompt stays compact.
   assert.ok(flaggedToc.split('\n').length <= 12, 'table of contents is a few lines');
   assert.ok(stock.length < 3_500, `stock prompt is ${stock.length} chars`);
+  // The optional Mobbin line (only for sessions that have the server) gets its own allowance.
+  const withMobbin = buildCodeAgentSystemPrompt({ ...args, mobbin: true });
+  assert.ok(withMobbin.includes('search the mobbin MCP tools'), 'Mobbin line present when on');
+  assert.ok(!stock.includes('mobbin'), 'Mobbin line absent by default');
+  assert.ok(withMobbin.length < 3_700, `stock prompt with Mobbin is ${withMobbin.length} chars`);
   assert.ok(flagged.length < 4_000, `flagged prompt is ${flagged.length} chars`);
 
   // The template CLAUDE.md ships in every account's image, so it lists the stock skills.

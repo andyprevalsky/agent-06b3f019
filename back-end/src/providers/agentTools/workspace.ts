@@ -7,6 +7,7 @@
  *          {url, token} ────────────────► ~/.rose/tools.json        (MCP servers may not inherit env)
  *          Claude Code MCP config ──────► ~/.rose/mcp.json          (ws-server passes --mcp-config;
  *                                                                   Codex gets the same server via -c)
+ *          MOBBIN_MCP_TOKEN (if set) ───► mobbin in ~/.rose/mcp.json + session env (./mobbin.ts)
  *          change-environment-size ─────► ~/.rose/skills/change-environment-size/SKILL.md (C16)
  *          token scoped to THIS agent ──► ROSE_TOOLS_URL / ROSE_TOOLS_TOKEN env
  *
@@ -22,6 +23,12 @@ import {
   userUiPublishBaseUrl,
   type UserUiWorkspace,
 } from '../userUi/workspace';
+import {
+  MOBBIN_MCP_SERVER_NAME,
+  MOBBIN_MCP_TOKEN_ENV,
+  mobbinMcpServerConfig,
+  mobbinMcpToken,
+} from './mobbin';
 import { mintAgentToolsToken, type AgentToolsProvider } from './token';
 
 const log = createLogger('AgentToolsWorkspace');
@@ -66,11 +73,15 @@ export function localAgentToolsUrl(publicUrl: string): string {
   return `http://127.0.0.1:${process.env.PORT || 3001}${pathname}`;
 }
 
-function mcpConfig(homeDir: string): string {
+/** Mobbin is listed only with its token in the session env (Claude Code drops a config with an unset ${VAR}). */
+function mcpConfig(homeDir: string, envs: Record<string, string>): string {
   return JSON.stringify(
     {
       mcpServers: {
         rose: { command: 'node', args: [`${homeDir}/${AGENT_TOOLS_CLI_PATH}`, 'mcp'] },
+        ...(envs[MOBBIN_MCP_TOKEN_ENV]
+          ? { [MOBBIN_MCP_SERVER_NAME]: mobbinMcpServerConfig() }
+          : {}),
       },
     },
     null,
@@ -114,7 +125,10 @@ export function relocateAgentToolsWorkspace(
         };
       }
       if (file.path === AGENT_TOOLS_MCP_CONFIG_PATH) {
-        return { path: file.path, content: Buffer.from(mcpConfig(homeDir), 'utf8') };
+        return {
+          path: file.path,
+          content: Buffer.from(mcpConfig(homeDir, workspace.envs), 'utf8'),
+        };
       }
       return file;
     }),
@@ -164,7 +178,12 @@ export function withAgentTools(
       (session.roseDesktop ?? isRoseDesktopUser(session.userId))
         ? { [AGENT_TOOLS_ENV_ROSE_DESKTOP]: '1' }
         : {};
-    const envs = { ...base.envs, ...featureEnvs };
+    const mobbinToken = mobbinMcpToken();
+    const envs = {
+      ...base.envs,
+      ...featureEnvs,
+      ...(mobbinToken ? { [MOBBIN_MCP_TOKEN_ENV]: mobbinToken } : {}),
+    };
     const owned = new Set([
       AGENT_TOOLS_CLI_PATH,
       AGENT_TOOLS_CONFIG_PATH,
@@ -180,7 +199,10 @@ export function withAgentTools(
           path: AGENT_TOOLS_CONFIG_PATH,
           content: Buffer.from(toolsConfig(url, token, envs), 'utf8'),
         },
-        { path: AGENT_TOOLS_MCP_CONFIG_PATH, content: Buffer.from(mcpConfig(homeDir), 'utf8') },
+        {
+          path: AGENT_TOOLS_MCP_CONFIG_PATH,
+          content: Buffer.from(mcpConfig(homeDir, envs), 'utf8'),
+        },
         { path: ENV_SIZE_SKILL_PATH, content: envSizeSkillFile() },
       ],
       envs: { ...envs, [AGENT_TOOLS_ENV_URL]: url, [AGENT_TOOLS_ENV_TOKEN]: token },

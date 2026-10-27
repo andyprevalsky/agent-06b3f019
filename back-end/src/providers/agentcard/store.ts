@@ -3,17 +3,19 @@
  *
  *  - Per-user tokens are persisted via repo.ts (Integration row, name="agentcard"),
  *    keyed by the stable Supabase userId. This module owns (de)serialization.
- *  - The transient state -> {userId, verifier} map is in-memory (short-lived; a
- *    connect flow completes within minutes).
+ *  - The transient state -> {userId, verifier} map lives in SharedEphemeralState
+ *    (10-minute TTL) so any instance can complete a connect another started.
  */
 
 import type { Prisma } from '@prisma/client';
 import type { TokenSet } from './oauth';
 import type { StoredTokenConfig } from './types';
 import * as repo from './repo';
+import { putEphemeral, takeEphemeral } from '../sharedState';
 
 // ---------------------------------------------------------------------------
-// In-memory PKCE state map (state -> { userId, verifier })
+// PKCE state (state -> { userId, verifier }), shared by every backend instance:
+// the OAuth callback can land on a different instance than the connect start.
 // ---------------------------------------------------------------------------
 
 interface PendingAuth {
@@ -23,26 +25,24 @@ interface PendingAuth {
 }
 
 const PENDING_TTL_MS = 10 * 60 * 1000;
-const pending = new Map<string, PendingAuth>();
+const PKCE_NAMESPACE = 'agentcard-pkce';
 
-function prunePending(): void {
-  const cutoff = Date.now() - PENDING_TTL_MS;
-  for (const [state, entry] of pending) {
-    if (entry.createdAt < cutoff) pending.delete(state);
-  }
+export async function putPendingAuth(
+  state: string,
+  userId: string,
+  verifier: string
+): Promise<void> {
+  await putEphemeral(
+    PKCE_NAMESPACE,
+    state,
+    { userId, verifier, createdAt: Date.now() },
+    PENDING_TTL_MS
+  );
 }
 
-export function putPendingAuth(state: string, userId: string, verifier: string): void {
-  prunePending();
-  pending.set(state, { userId, verifier, createdAt: Date.now() });
-}
-
-/** Consumes (single-use) the pending auth for a given state. */
-export function takePendingAuth(state: string): PendingAuth | undefined {
-  prunePending();
-  const entry = pending.get(state);
-  if (entry !== undefined) pending.delete(state);
-  return entry;
+/** Consumes (single-use, across instances) the pending auth for a given state. */
+export async function takePendingAuth(state: string): Promise<PendingAuth | undefined> {
+  return takeEphemeral<PendingAuth>(PKCE_NAMESPACE, state);
 }
 
 // ---------------------------------------------------------------------------

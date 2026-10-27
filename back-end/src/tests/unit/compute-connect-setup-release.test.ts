@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     assert.equal(releaseFailed.extra?.error, 'provider release failed');
     assert.equal(releaseFailed.extra?.connect_id, handle.connectId);
 
-    const polled = pollConnectSession('user-1', handle.connectId);
+    const polled = await pollConnectSession('user-1', handle.connectId);
     assert.equal(polled.state, 'unknown');
     assert.equal(polled.reason, 'cdp attach failed', 'the release error replaced the setup error');
   } finally {

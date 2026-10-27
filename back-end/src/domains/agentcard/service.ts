@@ -31,11 +31,11 @@ function maskId(value: string): string {
 }
 
 /** Part 2 start: build "Connect with AgentCard" URL and stash the PKCE verifier. */
-export function startConnect(userId: string): { authUrl: string; state: string } {
+export async function startConnect(userId: string): Promise<{ authUrl: string; state: string }> {
   const { clientId, redirectUri } = loadOAuthConfig();
   const { verifier, challenge } = generatePkce();
   const state = generateState();
-  putPendingAuth(state, userId, verifier);
+  await putPendingAuth(state, userId, verifier);
   const authUrl = buildAuthorizeUrl({ clientId, redirectUri, challenge, state });
   log.info('AgentCard connect started', { user_id: maskId(userId) });
   return { authUrl, state };
@@ -43,7 +43,7 @@ export function startConnect(userId: string): { authUrl: string; state: string }
 
 /** Part 2 finish: exchange the code for tokens and persist them for the user. */
 export async function handleCallback(code: string, state: string): Promise<{ userId: string }> {
-  const pendingAuth = takePendingAuth(state);
+  const pendingAuth = await takePendingAuth(state);
   if (pendingAuth === undefined) {
     throw new Error('Unknown or expired OAuth state');
   }
