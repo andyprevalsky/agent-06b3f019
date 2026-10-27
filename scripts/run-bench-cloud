@@ -2660,6 +2660,60 @@ except Exception: pass' 2>/dev/null); do
     exit 0
 fi
 
+# A fresh REAL volume otherwise fetches its whole tree from GitHub with nothing
+# to negotiate from. Stage a depth-1 bare repository of the build commit in the
+# context; `COPY . /app` bakes it read-only into the image once, and
+# cloudbench-fetch-ref.sh offers it as the fetch's only negotiation tip. It is
+# git-ignored, removed after the build, and only an optimization: a context
+# that is not a Git checkout builds without it.
+IMAGE_GIT_SEED_NAME=.cloudbench-git-seed
+IMAGE_GIT_SEED_OWNER_TOKEN=""
+IMAGE_GIT_SEED_CLEANUP_PID=""
+prepare_image_git_seed_owner() {
+    [ -z "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    IMAGE_GIT_SEED_OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    IMAGE_GIT_SEED_CLEANUP_PID="$BASHPID"
+}
+remove_image_git_seed() {
+    # Only the invocation's cleanup parent may retire this context guard,
+    # after joining its publisher. Failed entrants never own another seed.
+    [ "${IMAGE_GIT_SEED_CLEANUP_PID:-}" = "$BASHPID" ] || return 0
+    [ -n "${IMAGE_BUILD_CONTEXT:-}" ] && [ -n "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    local seed="$IMAGE_BUILD_CONTEXT/$IMAGE_GIT_SEED_NAME"
+    [ -d "$seed" ] && [ ! -L "$seed" ] || return 0
+    [ "$(cat "$seed/.cloudbench-seed-owner" 2>/dev/null)" = "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    rm -rf "$seed"
+}
+stage_image_git_seed() {
+    local seed="$IMAGE_BUILD_CONTEXT/$IMAGE_GIT_SEED_NAME" commit
+    prepare_image_git_seed_owner || return 1
+    if ! commit="$(git -C "$IMAGE_BUILD_CONTEXT" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)"; then
+        echo "ℹ️  image git seed skipped: build context has no Git HEAD"
+        return 0
+    fi
+    # The fixed directory is also an atomic context-scoped guard. Refuse
+    # existing custody, including unproven leftovers; never replace it.
+    mkdir "$seed" || { echo "❌ image git seed context is occupied: $seed" >&2; return 1; }
+    printf '%s\n' "$IMAGE_GIT_SEED_OWNER_TOKEN" > "$seed/.cloudbench-seed-owner" || {
+        rmdir "$seed" 2>/dev/null || true
+        return 1
+    }
+    git init -q --bare "$seed" \
+        && git -C "$seed" fetch -q --no-tags --depth=1 \
+            --upload-pack="git -c uploadpack.allowAnySHA1InWant=true upload-pack" \
+            "file://$IMAGE_BUILD_CONTEXT" "$commit" \
+        && git -C "$seed" update-ref refs/cloudbench/seed "$commit" \
+        && git -C "$seed" repack -q -a -d \
+        && [ "$(cat "$seed/shallow" 2>/dev/null)" = "$commit" ] \
+        && printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$commit" \
+            > "$seed/cloudbench-seed.json" || {
+        echo "❌ could not stage the image git seed for $commit" >&2
+        remove_image_git_seed
+        return 1
+    }
+    echo "🌱 image git seed: $commit ($(du -sh "$seed" 2>/dev/null | cut -f1))"
+}
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CLI image-build → native uncached build/push → exact image receipt.
 # Setup consumes that same image builder before donor activation; ordinary
@@ -2695,6 +2749,7 @@ build_warm_image() {
     fi
     local attempt build_ok=0 build_status=0 used_labels=" " build_args=()
     local completion_file="$OUT_DIR/cloudbench-image-publication.json"
+    stage_image_git_seed || return 1
     echo "🏗️  Building dependency image (layer_cache_bypassed=$IMAGE_BUILD_NO_CACHE)..."
     for attempt in 1 2 3; do
         # A failed attempt's remote builder can still publish after its local
@@ -2730,10 +2785,11 @@ build_warm_image() {
             build_status=$?
             # Registry continuation reuses the same built manifest. A failed
             # handoff must not restart dependency installation or hide evidence.
-            [ "$build_status" != 74 ] || return "$build_status"
+            [ "$build_status" != 74 ] || { remove_image_git_seed; return "$build_status"; }
         fi
         [ "$attempt" = 3 ] || sleep 15
     done
+    remove_image_git_seed
     [ "$build_ok" = 1 ] || { echo "Image build failed after 3 attempts" >&2; return 1; }
     IMAGE_REF="$(python3 - "$IMAGE_BUILD_COMPLETION" "registry.fly.io/$APP:$IMAGE_LABEL" <<'PY_IMAGE_REF'
 import json,sys
@@ -2792,14 +2848,20 @@ if [ "$MODE" = build-image ]; then
         trap '' HUP INT TERM
         # $! also covers a signal between asynchronous launch and PID assignment.
         # Capture native births before signaling; never touch the shared builder.
-        cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
-            "${image_build_pid:-${!:-}}" || status=70
+        if cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
+            "${image_build_pid:-${!:-}}"; then
+            remove_image_git_seed || status=70
+        else
+            status=70
+            echo "❌ publisher drain unverified; image git seed custody retained" >&2
+        fi
         exit "$status"
     }
     trap image_build_exit EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    prepare_image_git_seed_owner || exit 1
     (
         # Parent owns cancellation and joining; the publisher owns no CLI traps.
         trap - EXIT HUP INT TERM
@@ -2838,6 +2900,7 @@ PY_RECEIPT
     else
         image_build_status=$?
     fi
+    remove_image_git_seed || image_build_status=70
     trap - EXIT HUP INT TERM
     exit "$image_build_status"
 fi
@@ -2859,6 +2922,7 @@ if [ "$MODE" = "setup" ]; then
     [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
     ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    # Setup has no publisher-tree join owner; interrupted seed custody stays retained.
     trap 'release_app_environment_lock' EXIT
     trap 'release_app_environment_lock; exit 130' INT
     trap 'release_app_environment_lock; exit 143' TERM

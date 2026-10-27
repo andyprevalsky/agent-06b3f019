@@ -123,3 +123,6 @@ prompt-review/.cache/
 
 # FCaptcha upstream source (reference only, not committed)
 agents/tests/e2e/fcaptcha_src/
+
+# Image-build git seed staged in the build context (scripts/run-bench-cloud)
+.cloudbench-git-seed/

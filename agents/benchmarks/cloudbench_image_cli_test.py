@@ -409,8 +409,9 @@ def test_cold_image_registry_main_keeps_repeated_output_observations_private(tmp
 @pytest.mark.parametrize("receipt_state", ["unavailable", "missing", "false", "malformed", "wrong-tag"])
 def test_cold_image_unavailable_handoff_stops_the_normal_build_retry(tmp_path, receipt_state):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
-    end = source.index("\n}\n", start) + 3
+    start = source.index("IMAGE_GIT_SEED_NAME=")
+    build_start = source.index("build_warm_image() {")
+    end = source.index("\n}\n", build_start) + 3
     calls = tmp_path / "builds"
     verifier = tmp_path / "verify.py"
     verifier.write_text(
@@ -843,8 +844,9 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
 @pytest.mark.parametrize("builder", [None, "depot"])
 def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, builder):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
-    end = source.index("\n}\n", start) + 3
+    start = source.index("IMAGE_GIT_SEED_NAME=")
+    build_start = source.index("build_warm_image() {")
+    end = source.index("\n}\n", build_start) + 3
     helper = source[start:end]
     context = tmp_path / "selected checkout"
     context.mkdir()
@@ -896,7 +898,7 @@ def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, buil
 @pytest.mark.parametrize("builder", [None, "depot"])
 def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_path, builder):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
@@ -986,7 +988,7 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
     tmp_path, scenario, builder, successful, resolve_calls
 ):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
@@ -1148,7 +1150,7 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
     the registry still returned attempt 1's manifest, so the handoff failed with 74.
     """
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
