@@ -1,4 +1,4 @@
-import { RateLimitError, Sandbox } from 'e2b';
+import { RateLimitError, Sandbox, ServiceBusyError } from 'e2b';
 import { alertError } from './errorAlert';
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from './logger';
@@ -35,6 +35,9 @@ export function isTransientSandboxCreateError(error: unknown): boolean {
   // An inconclusive orphan lookup must keep the retry loop alive so the lookup
   // can settle; it must never fall through to a second create.
   if (error instanceof SandboxOrphanLookupError) return true;
+  // A busy 503 is an E2B blip, not our plan limit; retry it here because the
+  // SDK's own retry loop is off (see SANDBOX_CREATE_SDK_RETRIES).
+  if (error instanceof ServiceBusyError) return true;
   const parts: string[] = [];
   let cursor: unknown = error;
   for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
@@ -120,6 +123,14 @@ export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
  * be running even though its response was lost. All attempts carry one metadata tag, and each
  * retry plus the terminal failure path adopts a sandbox already created for that logical request.
  */
+/**
+ * The e2b SDK retries a 429 that carries Retry-After for up to the request
+ * timeout before surfacing RateLimitError. That is a hidden wait on the
+ * concurrent-sandbox refusal, which must fail at once; transport retries are
+ * owned by `createSandboxAttempts` instead.
+ */
+export const SANDBOX_CREATE_SDK_RETRIES = 0;
+
 /** Floor for E2B control-plane requestTimeoutMs on sandbox create. */
 export const SANDBOX_CREATE_REQUEST_TIMEOUT_MS = 120_000;
 
@@ -174,6 +185,7 @@ async function createSandboxAttempts(
     ...options,
     // Never inherit the SDK's 60s default when a keep-alive socket is half-dead —
     // give the control plane enough room, and still classify abort as transient.
+    retries: SANDBOX_CREATE_SDK_RETRIES,
     requestTimeoutMs: Math.max(callerRequestTimeoutMs ?? 0, SANDBOX_CREATE_REQUEST_TIMEOUT_MS),
     metadata: { ...(options?.metadata ?? {}), createRequestId },
   } as Parameters<typeof Sandbox.create>[1];

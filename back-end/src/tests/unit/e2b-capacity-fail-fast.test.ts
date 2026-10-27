@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, test } from 'node:test';
-import { AuthenticationError, RateLimitError, Sandbox } from 'e2b';
+import { AuthenticationError, RateLimitError, Sandbox, ServiceBusyError } from 'e2b';
 import { codeSessionHttpError } from '../../providers/codeSessions/spawn';
 import { createSandboxWithRetry, E2BSandboxCapacityError } from '../../providers/e2bSandboxCreate';
 import { __resetAlertThrottleForTests } from '../../providers/errorAlert';
@@ -20,15 +20,20 @@ const CAPACITY_MESSAGE =
   'is in use, so no new sandbox can start. Scale the E2B plan to run more code agents.';
 
 type CreateFn = typeof Sandbox.create;
+type ListFn = typeof Sandbox.list;
 const realCreate = Sandbox.create;
+const realList = Sandbox.list;
 const alerts: string[] = [];
 let server: Server;
 
-function stubCreate(error: Error): { calls: number } {
-  const state = { calls: 0 };
-  (Sandbox as unknown as { create: unknown }).create = async () => {
+function stubCreate(...results: Array<Error | 'ok'>): { calls: number; options: unknown[] } {
+  const state = { calls: 0, options: [] as unknown[] };
+  (Sandbox as unknown as { create: unknown }).create = async (_tpl: string, options: unknown) => {
+    const next = results[Math.min(state.calls, results.length - 1)];
     state.calls += 1;
-    throw error;
+    state.options.push(options);
+    if (next instanceof Error) throw next;
+    return { sandboxId: 'sbx-ok' };
   };
   return state;
 }
@@ -56,6 +61,7 @@ before(async () => {
 
 after(async () => {
   (Sandbox as unknown as { create: CreateFn }).create = realCreate;
+  (Sandbox as unknown as { list: ListFn }).list = realList;
   delete process.env.SLACK_ERROR_WEBHOOK_URL;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
@@ -78,6 +84,8 @@ test('an E2B 429 fails fast with the typed capacity error and fires the alert', 
     return true;
   });
   assert.equal(state.calls, 1, 'no retry and no wait after a capacity refusal');
+  // The SDK's own Retry-After loop is off too, so a 429 surfaces at once.
+  assert.equal((state.options[0] as { retries?: number }).retries, 0);
   await settleAlerts();
   assert.equal(alerts.length, 1);
   assert.match(alerts[0], /E2B concurrent-sandbox limit reached/);
@@ -103,6 +111,17 @@ test('other create rejections are unchanged and do not alert as capacity', async
   const state = stubCreate(new AuthenticationError('bad key'));
   await assert.rejects(createSandboxWithRetry('tpl', {}, 'Claude Code'), AuthenticationError);
   assert.equal(state.calls, 1);
+  await settleAlerts();
+  assert.equal(alerts.length, 0);
+});
+
+test('a busy 503 is still retried as a transient blip, not reported as capacity', async () => {
+  // The retry first checks for an orphan from attempt 1: none exists.
+  (Sandbox as unknown as { list: unknown }).list = () => ({ nextItems: async () => [] });
+  const state = stubCreate(new ServiceBusyError('Service temporarily unavailable'), 'ok');
+  const sandbox = await createSandboxWithRetry('tpl', {}, 'Claude Code');
+  assert.equal(sandbox.sandboxId, 'sbx-ok');
+  assert.equal(state.calls, 2);
   await settleAlerts();
   assert.equal(alerts.length, 0);
 });
