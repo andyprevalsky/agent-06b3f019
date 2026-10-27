@@ -126,6 +126,20 @@ describe('Agent Display destination', () => {
     expect(within(chatRow()).getByTitle('game.html')).toBeInTheDocument();
   });
 
+  it('the panel frame fills the panel height (not a fixed 480px box); the chat copy keeps its size', () => {
+    renderWithProviders(<Scene messages={[output()]} />, { selectedAgentId: 'root' });
+    expect(within(chatRow()).getByTitle('game.html')).toHaveStyle({ height: '480px' });
+    fireEvent.click(screen.getByRole('button', { name: 'Agent Display' }));
+    const frame = within(panel()).getByTitle('game.html');
+    // A page that never reports its height takes the panel's full content height.
+    expect(frame.style.height).toBe('');
+    expect(frame).toHaveClass('flex-1');
+    const group = within(panel()).getByTestId('display-media');
+    expect(group).toHaveClass('flex-1', 'min-h-0');
+    const content = within(panel()).getByTestId('agent-display-content');
+    expect(content).toHaveClass('flex', 'flex-col', 'min-h-0', 'flex-1');
+  });
+
   it('preserves the existing inline renderer for non-app callers', () => {
     renderWithProviders(<Scene messages={[output()]} />);
     expect(screen.getByTitle('game.html')).toBeInTheDocument();
