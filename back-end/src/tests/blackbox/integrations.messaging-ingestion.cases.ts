@@ -501,3 +501,43 @@ export async function testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk() 
     await prisma.integration.deleteMany({ where: { userId } });
   }
 }
+
+/**
+ * A finalization that read the sync's parts before a newer request arrived
+ * must not then mark the integration CONNECTED over that newer request.
+ */
+export async function testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload() {
+  const { userId } = await createAnonSession();
+  const syncStart = '2026-06-01T00:00:00.000Z';
+  const delegate = prisma.messagingUploadJob as unknown as Record<string, unknown>;
+  const findMany = delegate.findMany as (...args: unknown[]) => Promise<unknown>;
+  let interleaved = false;
+  delegate.findMany = async (...args: unknown[]) => {
+    const result = await findMany.apply(prisma.messagingUploadJob, args);
+    const where = (args[0] as { where?: { accessedAt?: unknown } } | undefined)?.where;
+    if (!interleaved && where?.accessedAt === syncStart) {
+      // The final request lands after finalization read the earlier parts.
+      interleaved = true;
+      await processIMessageUpload(userId, syntheticContacts('5563', [2]) as never, syncStart);
+    }
+    return result;
+  };
+  try {
+    await processIMessageUpload(userId, syntheticContacts('5562', [3]) as never, syncStart, false);
+    for (let i = 0; i < 3; i++) await runMessagingUploadJobs();
+  } finally {
+    delegate.findMany = findMany;
+  }
+  try {
+    assert(interleaved, 'the final request arrived during a finalization');
+    for (let i = 0; i < 3; i++) await runMessagingUploadJobs();
+    const done = await imessageIntegration(userId);
+    assert(
+      cursorOf(done) === syncStart && done?.status === 'CONNECTED',
+      `newer upload finalized after a stale finalization (status ${done?.status}, cursor ${String(cursorOf(done))})`
+    );
+  } finally {
+    await cleanupUser(userId);
+    await prisma.integration.deleteMany({ where: { userId } });
+  }
+}

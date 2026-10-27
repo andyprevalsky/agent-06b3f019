@@ -20,7 +20,7 @@ tags:
   - flake
 sources:
   - PR #1583 (introduced the durable queue; flake reported by lane S18 under coverage)
-repro: back-end/src/tests/blackbox/integrations.messaging-ingestion.cases.ts testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk
+repro: back-end/src/tests/blackbox/integrations.messaging-ingestion.cases.ts testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk + testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload
 status: fixed
 ---
 
@@ -34,13 +34,15 @@ Under backend coverage concurrency, the integrations case "messaging upload -- n
 
 Deterministic repro: the new case runs a full drain from a spy at the instant the final parts are written. Before the fix: `FAIL ... final chunk finalized after an interleaved drain (status CONNECTED, cursor undefined)`, integrations 286/287.
 
-Deepest owned cause: the SYNCING flag (finalization's work list) and the parts (its input) are two writes. They were ordered so the flag could become visible before its input.
+A second interleaving (found by CodeRabbit on PR #1609, reproduced by `testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload`) has the same effect. A finalization reads the sync's processed parts; the final request then inserts its parts and re-marks SYNCING; the finalization then writes CONNECTED from its stale view. Before the compare-and-set: `FAIL ... (status CONNECTED, cursor undefined)`, 287/288.
+
+Deepest owned cause: finalization was a read-then-write over two independently written facts, the SYNCING flag (its work list) and the parts (its input), with nothing tying the write to the state it read. Ordering the writes alone cannot close a read-then-write gap.
 
 ## Solution
 
-`acceptMessagingUpload` now writes the parts first, re-marks the integration SYNCING afterwards, and only then kicks the drain. `enqueueMessagingUpload` no longer kicks the drain itself. A first-ever upload still creates the row before its parts, since the parts need its id; a finalize in that gap finds no parts and leaves it alone. A drain that runs mid-accept now sees either no SYNCING flag or every part, and any drain after the re-mark finalizes the full sync. After the fix, integrations passes 287/287 with the identical command (`bash scripts/run-blackbox-tests.sh integrations`).
+`acceptMessagingUpload` now writes the parts first, re-marks the integration SYNCING afterwards, and only then kicks the drain. `enqueueMessagingUpload` no longer kicks the drain itself. A first-ever upload still creates the row before its parts, since the parts need its id; a finalize in that gap finds no parts and leaves it alone. Finalization is now a compare-and-set (`finalizeMessagingIntegrationIfCurrent`): one UPDATE sets CONNECTED and the cursor only while the integration is still SYNCING and no part newer than the one finalization read exists. Accept still writes parts before re-marking SYNCING, so a newer request is always visible to that guard. After both changes, integrations passes 288/288 with the identical command (`bash scripts/run-blackbox-tests.sh integrations`).
 
-10k-agent behaviour: no extra queries per upload, just one reordered upsert, and nothing changes in the drain.
+10k-agent behaviour: accept does no extra queries (one reordered upsert). Finalization replaces its Prisma update with one UPDATE that carries a correlated NOT EXISTS on the integration's parts. It is bounded per integration and has no new fan-in, but there is still no index on `MessagingUploadJob.integrationId` (an open S6 follow-up).
 
 Open sibling (not fixed here): `findSyncingMessagingIntegrations(..., 100)` has no ordering or paging. Prod has 17 legacy iMessage integrations stuck SYNCING with no parts. They are rescanned on every drain, and past 100 such rows newer syncs would starve.
 
@@ -50,4 +52,4 @@ None recorded.
 
 ## Reusable lesson
 
-When a status flag is a worker's work list, publish the flag only after the work it points to is durable, never before.
+When a status flag is a worker's work list, publish it only after its work is durable, and make the worker's completing write conditional on the state it read.

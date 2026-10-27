@@ -198,22 +198,16 @@ async function finalizeIntegration(integration: { id: string; config: unknown })
   if (parts.some((part) => part.processedAt === null)) return;
   const complete = parts.some((part) => part.syncComplete);
   const config = (integration.config as Record<string, unknown> | null) ?? {};
-  await repo.updateIntegration(integration.id, {
-    status: IntegrationStatus.CONNECTED,
-    isActive: true,
-    lastSyncAt: new Date(),
-    lastSuccessfulSyncAt: new Date(),
-    config: {
-      ...config,
-      contacts: latest.contacts,
-      messages: latest.messages,
-      lastJobId: latest.uploadId,
-      lastUploadedAt: new Date().toISOString(),
-      ...(complete
-        ? { lastFrontendAccessAt: latest.accessedAt ?? latest.createdAt.toISOString() }
-        : {}),
-    } as Prisma.InputJsonValue,
-  });
+  await jobsRepo.finalizeMessagingIntegrationIfCurrent(integration.id, latest.createdAt, {
+    ...config,
+    contacts: latest.contacts,
+    messages: latest.messages,
+    lastJobId: latest.uploadId,
+    lastUploadedAt: new Date().toISOString(),
+    ...(complete
+      ? { lastFrontendAccessAt: latest.accessedAt ?? latest.createdAt.toISOString() }
+      : {}),
+  } as Prisma.InputJsonValue);
 }
 
 async function finalizeSyncedIntegrations(): Promise<void> {
