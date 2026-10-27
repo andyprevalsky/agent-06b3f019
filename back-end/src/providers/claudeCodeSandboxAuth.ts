@@ -301,6 +301,39 @@ export function shouldIgnoreAnthropicApiKeyCooldownForSandbox(params: {
 }
 
 /**
+ * Whether a Claude Code sandbox with no user/pool login can run on a funded key
+ * now. Same transport `createE2BSession` resolves (dedicated key, OpenRouter
+ * gateway, else the shared key); the shared-org cooldown only blocks it when the
+ * sandbox would send that shared key to api.anthropic.com. Credential
+ * availability (C15) must answer from this, or a spawn falls over to Codex while
+ * Claude Code could still run.
+ */
+export function canRunClaudeCodeOnFundedKey(params: {
+  claudeCodeAnthropicApiKey: string | undefined;
+  anthropicApiKey: string | undefined;
+  anthropicBaseUrl: string | undefined;
+  openrouterApiKey: string | undefined;
+  sharedKeyOnCooldown: boolean;
+}): boolean {
+  const transport = resolveClaudeCodeSandboxApiKey(
+    params.claudeCodeAnthropicApiKey,
+    params.anthropicApiKey,
+    {
+      anthropicBaseUrl: params.anthropicBaseUrl,
+      openrouterApiKey: params.openrouterApiKey,
+      sharedKeyOnCooldown: params.sharedKeyOnCooldown,
+    }
+  );
+  if (!transport.apiKey?.trim()) return false;
+  if (!params.sharedKeyOnCooldown) return true;
+  return shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey: transport.apiKey,
+    sharedAnthropicApiKey: params.anthropicApiKey,
+    sandboxBaseUrl: transport.baseUrl,
+  });
+}
+
+/**
  * True when credential lookup returned only a refreshable OAuth envelope
  * (no access token) — the post-auth_error path that hopes the CLI will refresh.
  */

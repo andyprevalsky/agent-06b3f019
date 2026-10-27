@@ -324,6 +324,33 @@ export async function tilionRequestWithMeta<T>(
   const attemptOnce = async (): Promise<TilionResponse<T>> => {
     attempt += 1;
     const startedAt = Date.now();
+    // The timeout signal also aborts the body stream, so a stalled body read is
+    // typed (and retried) exactly like a request that never answered. The log
+    // messages are exact-cleanup evidence (cloudbench-exact-session-cleanup.py
+    // counts "Tilion request failed before a response" as a possible create).
+    const transportFailure = (error: unknown, stage: 'network error' | 'body read failed') => {
+      const timedOut =
+        error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      const failure = timedOut
+        ? new TilionTimeoutError(method, loggedPath, timeoutMs)
+        : new TilionNetworkError(
+            redactTilionSecrets(
+              `Tilion ${method} ${loggedPath} ${stage}: ${error instanceof Error ? error.message : String(error)}`
+            )
+          );
+      const message =
+        stage === 'network error'
+          ? 'Tilion request failed before a response'
+          : 'Tilion response body read failed';
+      log.warn(message, {
+        method,
+        path: loggedPath,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        error: failure.message,
+      });
+      return failure;
+    };
     let response: Response;
     try {
       response = await fetch(`${tilionBaseUrl()}${path}`, {
@@ -333,23 +360,7 @@ export async function tilionRequestWithMeta<T>(
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      const timedOut =
-        error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-      const failure = timedOut
-        ? new TilionTimeoutError(method, loggedPath, timeoutMs)
-        : new TilionNetworkError(
-            redactTilionSecrets(
-              `Tilion ${method} ${loggedPath} network error: ${error instanceof Error ? error.message : String(error)}`
-            )
-          );
-      log.warn('Tilion request failed before a response', {
-        method,
-        path: loggedPath,
-        attempt,
-        durationMs: Date.now() - startedAt,
-        error: failure.message,
-      });
-      throw failure;
+      throw transportFailure(error, 'network error');
     }
     const requestId = response.headers.get('x-request-id');
     log.info('Tilion request', {
@@ -360,11 +371,16 @@ export async function tilionRequestWithMeta<T>(
       requestId,
       attempt,
     });
-    if (response.ok || options.acceptStatuses?.includes(response.status)) {
-      const data = (response.status === 204 ? null : await readBody(response)) as T;
-      return { status: response.status, data, requestId };
+    let body: unknown;
+    try {
+      body = response.status === 204 ? null : await readBody(response);
+    } catch (error) {
+      throw transportFailure(error, 'body read failed');
     }
-    throw tilionErrorFromResponse(response.status, await readBody(response), {
+    if (response.ok || options.acceptStatuses?.includes(response.status)) {
+      return { status: response.status, data: body as T, requestId };
+    }
+    throw tilionErrorFromResponse(response.status, body, {
       requestId,
       retryAfterHeaderMs: retryAfterHeaderMs(response),
       method,

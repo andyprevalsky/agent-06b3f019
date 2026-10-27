@@ -11,6 +11,7 @@ import {
   closeSession,
 } from '../../providers/browser';
 import { resolveExitGeoLocale } from '../../providers/browser/exitGeoLocale';
+import { tilionExitCountry } from '../../providers/browser/tilionConfig';
 import {
   findRequiredSteelProfileForStart,
   steelProfileForSelectedProvider,
@@ -167,7 +168,12 @@ export async function initLegacySession<Credentials extends LegacyCredentials, M
       ? (({ fingerprint, exitGeoLocale }) => ({
           fingerprint_injection: fingerprint,
           exit_geo_locale: exitGeoLocale,
-        }))(resolveExitGeoLocale(fingerprintInjection, proxyGeo.country))
+        }))(
+          resolveExitGeoLocale(
+            fingerprintInjection,
+            tilionExitCountry(session.proxySource, proxyGeo.country)
+          )
+        )
       : { fingerprint_injection: fingerprintInjection }),
     passwords: credentials.passwords,
     passkeys: credentials.passkeys,

@@ -29,7 +29,7 @@ import {
 } from './browser/rotation';
 import type { TilionCarriedState } from './browser/tilion';
 import { clearPausedState, restoreTilionBrowserState } from './browser/tilionState';
-import { carryForTilionSwitch } from './browserSwitchCarry';
+import { carryForTilionSwitch, withTilionSwitchCarry } from './browserSwitchCarry';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
@@ -164,15 +164,20 @@ export async function resumeBrowserSession(
       current.controlState !== 'AGENT' &&
       (current.controlLeaseExpiresAt === null ||
         current.controlLeaseExpiresAt.getTime() > Date.now())
-    ) {
+    )
       throw new Error('Browser resume cannot replace a session under user control');
-    }
     const forceFreshProfile = current.logicalOwnerKey ? true : options.forceFreshProfile;
-    const result = await dependencies.resumeSession(taskId, {
-      ...replacementOptions(options),
-      ...(forceFreshProfile !== undefined ? { forceFreshProfile } : {}),
-    });
-    return assembleResumeResponse(taskId, result, dependencies, options.carriedState);
+    const replaceWith = async (carry: BrowserStateCarry) => {
+      const result = await dependencies.resumeSession(taskId, {
+        ...replacementOptions(carry),
+        ...(forceFreshProfile !== undefined ? { forceFreshProfile } : {}),
+      });
+      return assembleResumeResponse(taskId, result, dependencies, carry.carriedState);
+    };
+    // Tilion kill switch off: the row resumes on Kernel, carrying its state like a rotation.
+    return current.provider === 'tilion' && !tilionRotationAvailable()
+      ? withTilionSwitchCarry(taskId, options, dependencies.tilionSessionLive, replaceWith)
+      : replaceWith(options);
   };
   if (initial.provider !== 'kernel' && initial.provider !== 'browser-use') return resume();
   let sourceEnded = false;

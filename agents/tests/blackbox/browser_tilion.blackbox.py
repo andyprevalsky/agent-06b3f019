@@ -632,6 +632,63 @@ async def test_tilion_worker_apply_contract_sets_cookies_and_local_storage():
         assert await agent_page.evaluate("localStorage.getItem('token')") == "xyz"
         assert gateway.rejected_4409 == 0
 
+        # PR #1604 review: restoring saved state is best-effort per origin. An origin
+        # whose navigation fails (refused, interstitial, DNS) is skipped; the others
+        # still apply and the activity is not failed.
+        import socket
+
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            refused_origin = f"http://127.0.0.1:{closed.getsockname()[1]}"
+        await agent_page.goto("about:blank")
+        partial = {
+            **block,
+            "local_storage": [
+                {"origin": refused_origin, "entries": [{"key": "lost", "value": "1"}]},
+                {"origin": base, "entries": [{"key": "second", "value": "kept"}]},
+            ],
+        }
+        applied = await apply_worker_state(pw_browser, partial)
+        assert applied == {"cookies": 1, "local_storage_entries": 1}, applied
+        assert len(pw_browser.contexts[0].pages) == pages_before, "the failed origin's apply page must be closed"
+        await agent_page.goto(base + "/")
+        assert await agent_page.evaluate("localStorage.getItem('second')") == "kept"
+
+
+async def test_geo_locale_live_check_deletes_session_when_connection_setup_fails():
+    """PR #1604 review: the live check creates a paid residential session, so a refused
+    gateway or handshake timeout while opening the worker's CDP connection must still
+    delete it, not leave it live until its idle timeout or TTL."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "scripts/tilion_geo_locale_live_check.py"
+    spec = importlib.util.spec_from_file_location("tilion_geo_locale_live_check_fixture", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # importing must not run the live cases
+    calls = []
+
+    def rest(method, rest_path, body=None):
+        calls.append((method, rest_path))
+        if method == "POST":
+            return 201, {
+                "session_id": "sess_fixture",
+                "connect_url": "wss://tilion.invalid/v1/session/sess_fixture/cdp",
+            }
+        return 204, None
+
+    async def refused(*_args, **_kwargs):
+        raise ConnectionRefusedError("gateway refused the CDP connection")
+
+    with patch.object(module, "rest", rest), patch.object(module, "open_browser_cdp_connection", refused):
+        try:
+            await module.run_case("gb-exit")
+        except ConnectionRefusedError:
+            pass
+        else:
+            raise AssertionError("the setup failure must still reach main()")
+    assert calls == [("POST", "/v1/session"), ("DELETE", "/v1/session/sess_fixture")], calls
+
 
 # ----- screenshots, key presses, cost, recording, cancel set ----------------
 
@@ -725,7 +782,11 @@ async def test_tilion_cost_row_is_12_cents_per_hour_plus_create():
     assert _tilion_egress_class({"proxy_source": "tilion_mobile_city"}) == "premium"
     assert _tilion_egress_class({"proxy_source": "tilion_direct"}) == "direct"
     assert _tilion_egress_class({}) == "premium", "unknown errs toward the higher rate"
-    assert handler_source.count("_tilion_leave_session()\n") == 2
+    # Banked at both rebinds (rotation, recovery) and before each of the five
+    # cost-row exits clears dom_service (drain, parked completion, verified
+    # completion, max iterations, error); behavior in spawn-browser-agent-v3's
+    # activity_tilion_cost_row_bills_live_bytes_not_resume_create.
+    assert handler_source.count("_tilion_leave_session()\n") == 7
     fast = build_usage_items(1000, 100, pricing, 3_600_000, provider="tilion", fast_mode_cache_enabled=True)
     assert next(i for i in fast if i["type"] == "service")["cost_cents"] == 0.0
 
@@ -2130,6 +2191,66 @@ async def test_click_path_cdp_awaits_are_bounded_when_replies_are_withheld():
     assert result["success"] is False and "no coordinates" in result["error"], result
     assert time.monotonic() - started < 2
 
+    # PR #1604 review: a CDP call that holds its cancellation (the busy renderer of
+    # T83) must not hold the click step either; asyncio.wait_for waits for the
+    # cancellation to finish, so the bound returns without awaiting it.
+    release = asyncio.Event()
+    held_calls = []
+
+    class _HoldsCancellationDom:
+        async def get_click_coordinates(self, _index):
+            held_calls.append(asyncio.current_task())
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                await asyncio.wait_for(release.wait(), timeout=5)
+                raise
+
+    try:
+        with patch.object(service_actions, "_CLICK_COORDINATES_TIMEOUT_SECONDS", 0.5):
+            started = time.monotonic()
+            result = await service_actions._execute_click(
+                session=_Session(),
+                dom_service=_HoldsCancellationDom(),
+                action_history=_History(),
+                element=SimpleNamespace(node_name="BUTTON", tag_name="button", attributes={}),
+                index=4,
+                coords=None,
+                thinking="",
+                humanizer=_Humanizer(),
+                write_lock_enabled=False,
+                write_lock_approvals=None,
+                current_url="https://example.com",
+                system_name="rose",
+            )
+        assert result["success"] is False and "no coordinates" in result["error"], result
+        assert time.monotonic() - started < 2, "a call holding its cancellation held the click step"
+    finally:
+        release.set()
+    assert held_calls and not held_calls[0].done(), "the held call is cancelled, not awaited"
+    await asyncio.wait(held_calls, timeout=2)
+    assert all(call.cancelled() for call in held_calls)
+
+    # Cancelling the step still cancels the CDP call it is waiting on.
+    call_started = asyncio.Event()
+
+    async def never_answers():
+        call_started.set()
+        await asyncio.sleep(3600)
+
+    call = asyncio.ensure_future(never_answers())
+    step = asyncio.create_task(service_actions._bounded_cdp(call, cdp_method="Runtime.evaluate", timeout=30))
+    await asyncio.wait_for(call_started.wait(), timeout=2)
+    step.cancel()
+    try:
+        await step
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("the step's cancellation must propagate")
+    await asyncio.wait({call}, timeout=2)
+    assert call.cancelled(), "a cancelled step left its CDP call running"
+
 
 async def test_tilion_upload_verified_when_page_resets_input_on_change():
     """Lane F tinypng (agent ea613f83): the site's onchange read the file and
@@ -2406,6 +2527,31 @@ async def test_supervisor_cap_logs_blocked_stack_and_classifies_action_timeouts(
     assert await _await_browser_action_within_cap(asyncio.create_task(succeeds()), timeout=5, log_context=context) == {
         "success": True
     }
+
+    # PR #1604 review: cancelling the waiter (user pause, Temporal cancellation)
+    # cancels the in-flight action; it must not keep driving the browser after
+    # the cancel path has closed the session.
+    action_started = asyncio.Event()
+
+    async def in_flight_click():
+        action_started.set()
+        await asyncio.get_running_loop().create_future()
+
+    in_flight = asyncio.create_task(in_flight_click())
+    try:
+        waiter = asyncio.create_task(_await_browser_action_within_cap(in_flight, timeout=30, log_context=context))
+        await asyncio.wait_for(action_started.wait(), timeout=2)
+        waiter.cancel()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the waiter's cancellation must propagate")
+        await asyncio.wait({in_flight}, timeout=2)
+        assert in_flight.cancelled(), "the cancelled activity left its browser action running"
+    finally:
+        in_flight.cancel()
 
     from pathlib import Path
 
@@ -3100,6 +3246,10 @@ async def run_all_tests():
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),
         ("tilion_upload_sets_worker_bytes_on_file_input", test_tilion_upload_sets_worker_bytes_on_file_input),
         ("tilion_worker_apply_contract", test_tilion_worker_apply_contract_sets_cookies_and_local_storage),
+        (
+            "geo_locale_live_check_deletes_session",
+            test_geo_locale_live_check_deletes_session_when_connection_setup_fails,
+        ),
         ("tilion_screenshot_action_uses_worker_socket", test_tilion_screenshot_action_uses_worker_socket_not_rest),
         ("tilion_cost_row", test_tilion_cost_row_is_12_cents_per_hour_plus_create),
         ("tilion_recording_screenshot_replay", test_tilion_recording_uses_provider_neutral_screenshot_replay),

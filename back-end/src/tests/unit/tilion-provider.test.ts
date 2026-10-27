@@ -503,10 +503,9 @@ async function main(): Promise<void> {
       'backend opened CDP on a live Tilion session'
     );
     assert.equal((restored.cookies[0] as { value: string }).value, 'from-worker');
-    const mobileCreate = server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body as Record<
-      string,
-      unknown
-    >;
+    const lastCreate = () =>
+      server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body as Record<string, unknown>;
+    const mobileCreate = lastCreate();
     assert.equal(mobileCreate.proxy_type, 'mobile');
     assert.equal(
       (mobileCreate.geo as { city?: string }).city,
@@ -519,8 +518,6 @@ async function main(): Promise<void> {
     await assert.rejects(tilion.rotateTilionSession('task-a', 'isp'), /no isp exit/);
 
     // ── default exit is direct (datacenter); residential only when asked ────
-    const lastCreate = () =>
-      server.callsTo('POST', /^\/v1\/session$/).at(-1)!.body as Record<string, unknown>;
     const direct = await tilion.createTilionSessionWithContext(
       'ctx-1',
       'agent-1',
@@ -537,6 +534,12 @@ async function main(): Promise<void> {
     assert.equal(direct.geoTargeting.geoApplied, null);
     assert.equal(rows.get('task-direct')?.proxyTier, 'direct');
     assert.equal(rows.get('task-direct')?.kernelProxySource, 'tilion_direct_country');
+    // No Tilion region for GB: the exit lands in Tilion's nearest region, reported unplaced.
+    const gb = await tilion.createTilionRecoverySession({ country: 'GB' }, { proxyType: 'direct' });
+    const placement = [gb.proxySource, gb.proxyLocation, 'region' in lastCreate()];
+    assert.deepEqual(placement, ['tilion_direct_unplaced', { country: '' }, false]);
+    assert.equal(tilion.tilionExitCountry(gb.proxySource, 'GB'), null);
+    await tilion.releaseTilionRemoteSession(gb.sessionId);
     const directCandidate = await tilion.createTilionRecoverySession(
       { country: 'US' },
       { proxyType: 'direct' }

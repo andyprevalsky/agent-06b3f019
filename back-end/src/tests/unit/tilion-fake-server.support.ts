@@ -24,6 +24,8 @@ export interface FakeTilionReply {
   body?: unknown;
   headers?: Record<string, string>;
   delayMs?: number;
+  /** Send status and headers at once, then hold the body this long (a stalled body read). */
+  bodyDelayMs?: number;
 }
 
 type Handler = (request: FakeTilionRequest) => FakeTilionReply | null | undefined;
@@ -86,11 +88,16 @@ export class FakeTilionServer {
               : { 'Content-Type': 'application/json' }),
             ...final.headers,
           });
-          res.end(
+          const payload =
             final.body === undefined || final.status === 204
               ? undefined
-              : JSON.stringify(final.body)
-          );
+              : JSON.stringify(final.body);
+          if (!final.bodyDelayMs) {
+            res.end(payload);
+            return;
+          }
+          res.flushHeaders();
+          setTimeout(() => res.end(payload), final.bodyDelayMs);
         };
         if (final.delayMs) setTimeout(send, final.delayMs);
         else send();

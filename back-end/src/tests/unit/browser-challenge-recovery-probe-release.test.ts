@@ -12,6 +12,7 @@ import {
   abortRecoverySearchesFor,
   liveRecoveryProbeSessionCount,
   releaseAllRecoveryProbeSessions,
+  reopenRecoveryAdmissionsForTests,
   runLaneConfigSearch,
   type ConfigSearchDependencies,
 } from '../../providers/browser/challengeRecoveryLaneSearch';
@@ -143,11 +144,38 @@ async function testPromotedWinnerSurvivesShutdown(): Promise<void> {
   assert.deepStrictEqual(fake.live(), []);
 }
 
+/** The listener stays open during shutdown: a search admitted after cleanup began rents nothing. */
+async function testShutdownRefusesNewSearches(): Promise<void> {
+  const inFlight = fakeProvider({ createMs: 200, probeMs: 400 });
+  const running = runLaneConfigSearch(CONFIGS, LANES, inFlight.dependencies).catch(() => null);
+  await sleep(20); // the first search's creates are in flight
+  const shutdown = releaseAllRecoveryProbeSessions(2_000);
+  const late = fakeProvider({ createMs: 10, probeMs: 400 });
+  const during = await runLaneConfigSearch(CONFIGS, LANES, late.dependencies).catch((e) => e);
+  await shutdown;
+  await running;
+  const after = await runLaneConfigSearch(CONFIGS, LANES, late.dependencies).catch((e) => e);
+  await sleep(500);
+  for (const refused of [during, after]) {
+    assert.ok(refused instanceof Error && /shutting down/.test(refused.message), String(refused));
+  }
+  assert.deepStrictEqual(late.created, [], `admitted after shutdown: ${late.created.join(',')}`);
+  assert.deepStrictEqual(inFlight.live(), []);
+  assert.strictEqual(liveRecoveryProbeSessionCount(), 0);
+}
+
 async function main(): Promise<void> {
-  await testShutdownReleasesProbingCandidates();
-  await testShutdownReleasesCandidateCreatedMeanwhile();
-  await testAgentCleanupAbortsOnlyItsSearch();
-  await testPromotedWinnerSurvivesShutdown();
+  // Each case simulates a backend shutdown; reopen admissions between them.
+  for (const run of [
+    testShutdownReleasesProbingCandidates,
+    testShutdownReleasesCandidateCreatedMeanwhile,
+    testAgentCleanupAbortsOnlyItsSearch,
+    testPromotedWinnerSurvivesShutdown,
+    testShutdownRefusesNewSearches,
+  ]) {
+    await run();
+    reopenRecoveryAdmissionsForTests();
+  }
   process.stdout.write(
     'PASS recovery probe release: shutdown and agent stop release every candidate\n'
   );

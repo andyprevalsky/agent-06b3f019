@@ -6,7 +6,7 @@ import {
   TilionUncarriedStateError,
   type TilionCarriedState,
 } from './browser/tilion';
-import { loadPausedState } from './browser/tilionState';
+import { clearPausedState, loadPausedState } from './browser/tilionState';
 
 export async function tilionSessionLive(sessionId: string): Promise<boolean> {
   try {
@@ -44,4 +44,21 @@ export async function carryForTilionSwitch(
     throw new TilionUncarriedStateError(taskId, row.sessionId);
   }
   return { carry, fromPausedState: false };
+}
+
+/**
+ * Run a replacement that moves a Tilion row off Tilion (e.g. a resume while the
+ * Tilion kill switch is off) with that row's carry, then consume the paused
+ * snapshot it used: it belonged to the replaced Tilion session.
+ */
+export async function withTilionSwitchCarry<T>(
+  taskId: string,
+  carry: { carriedState?: TilionCarriedState },
+  isLive: ((sessionId: string) => Promise<boolean>) | undefined,
+  replace: (carry: { carriedState?: TilionCarriedState }) => Promise<T>
+): Promise<T> {
+  const prepared = await carryForTilionSwitch(taskId, carry, isLive);
+  const result = await replace(prepared.carry);
+  if (prepared.fromPausedState) await clearPausedState({ taskId });
+  return result;
 }

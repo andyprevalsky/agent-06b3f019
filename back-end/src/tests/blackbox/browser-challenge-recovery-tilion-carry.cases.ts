@@ -6,7 +6,7 @@
  * the carried Tilion localStorage"). Registered by browser-challenge-recovery.blackbox.ts.
  */
 import { prisma } from '../../providers/database';
-import { rotateBrowserProxy } from '../../providers/browserSessionResume';
+import { resumeBrowserSession, rotateBrowserProxy } from '../../providers/browserSessionResume';
 import { TilionUncarriedStateError, type TilionCarriedState } from '../../providers/browser/tilion';
 import {
   assert,
@@ -154,5 +154,59 @@ export function registerTilionCarryCases(test: RegisterTest): void {
   test(
     'switching off Tilion fails closed while live and carries the paused snapshot',
     testSwitchOffTilionFailsClosedLiveAndCarriesPausedSnapshot
+  );
+
+  /** Kill switch off: resume lands a Tilion row on Kernel; it must carry that row's state. */
+  async function testKillSwitchResumeCarriesPausedTilionState(): Promise<void> {
+    const run = await seedRun('tilion', 'direct');
+    const fake = fakeProviderOperations();
+    const restored: TilionCarriedState[] = [];
+    fake.dependencies.restoreCarriedState = async (_browser, state) => {
+      restored.push(state);
+      return { cookies: state.cookies.length, origins: 0 };
+    };
+    // index.ts resumeSession: a Tilion row with Tilion disabled resumes on Kernel.
+    const resumeOnTilionRow = fake.dependencies.resumeSession;
+    fake.dependencies.resumeSession = async (taskId, options) => {
+      await prisma.browserSession.update({ where: { id: taskId }, data: { provider: 'kernel' } });
+      return resumeOnTilionRow(taskId, options);
+    };
+    try {
+      await withEnv({ ...TILION_DEFAULT_ENV, BROWSER_AGENT_TILION_ENABLED: 'false' }, async () => {
+        // Still live without a capture: fail closed instead of a blank Kernel browser.
+        fake.dependencies.tilionSessionLive = async () => true;
+        const refused = await resumeBrowserSession(run.session.id, {}, fake.dependencies).catch(
+          (error: unknown) => error
+        );
+        assert(refused instanceof TilionUncarriedStateError, `live resume: ${String(refused)}`);
+        assert(fake.resumedFrom.length === 0, 'a refused resume replaced the browser');
+
+        await prisma.browserSession.update({
+          where: { id: run.session.id },
+          data: { status: 'PAUSED', pausedBrowserState: WORKER_STATE as unknown as object },
+        });
+        fake.dependencies.tilionSessionLive = async () => false;
+        const resumed = await resumeBrowserSession(run.session.id, {}, fake.dependencies);
+        assert(
+          resumed.browser_session_metadata.provider === 'kernel',
+          'resume did not land on Kernel'
+        );
+        assert(
+          restored.length === 1 && restored[0]!.cookies[0]?.value === 'three-items',
+          `paused Tilion state not carried into Kernel: ${JSON.stringify(restored)}`
+        );
+        const after = await prisma.browserSession.findUniqueOrThrow({
+          where: { id: run.session.id },
+        });
+        assert(after.pausedBrowserState === null, 'consumed paused snapshot was not cleared');
+      });
+    } finally {
+      await run.cleanup();
+    }
+  }
+
+  test(
+    'a kill-switch resume of a Tilion row onto Kernel carries its paused snapshot',
+    testKillSwitchResumeCarriesPausedTilionState
   );
 }

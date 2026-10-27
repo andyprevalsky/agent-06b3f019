@@ -2638,7 +2638,13 @@ async def _await_browser_action_within_cap(
     """
     from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
 
-    done, _ = await asyncio.wait({action_task}, timeout=timeout)
+    try:
+        done, _ = await asyncio.wait({action_task}, timeout=timeout)
+    except BaseException:
+        # Outer cancellation (user pause, Temporal cancel): asyncio.wait leaves the
+        # action running, so cancel it rather than let it keep driving the browser.
+        action_task.cancel()
+        raise
     if not done:
         stack = io.StringIO()
         action_task.print_stack(file=stack)
@@ -8445,11 +8451,14 @@ async def _spawn_browser_agent_activity_v3_real(
         # CDP bytes Tilion relayed to this worker, by egress rate class, for
         # sessions this activity has already left (rotation/recovery).
         tilion_left_cdp_bytes = {"premium": 0, "direct": 0}
+        # The DOMService last banked, so a service is counted once even if it is
+        # still bound when the cost row is built (e.g. its disconnect failed).
+        tilion_banked_dom: Dict[str, Any] = {"service": None}
 
         def _tilion_usage_kwargs() -> Dict[str, Any]:
             """Cost-row inputs Tilion bills: creates and CDP bytes per rate class."""
             totals = dict(tilion_left_cdp_bytes)
-            if browser_session_metadata.get("provider") == "tilion":
+            if browser_session_metadata.get("provider") == "tilion" and dom_service is not tilion_banked_dom["service"]:
                 current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
                 totals[_tilion_egress_class(browser_session_metadata)] += current
             return {
@@ -8459,10 +8468,16 @@ async def _spawn_browser_agent_activity_v3_real(
             }
 
         def _tilion_leave_session() -> None:
-            """Bank the outgoing Tilion session's CDP bytes before a rebind replaces it."""
-            if browser_session_metadata.get("provider") == "tilion":
+            """Bank the outgoing Tilion session's CDP bytes before a rebind replaces
+            dom_service or an exit clears it ahead of the cost row."""
+            if (
+                browser_session_metadata.get("provider") == "tilion"
+                and dom_service is not None
+                and dom_service is not tilion_banked_dom["service"]
+            ):
                 current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
                 tilion_left_cdp_bytes[_tilion_egress_class(browser_session_metadata)] += current
+                tilion_banked_dom["service"] = dom_service
 
         fingerprint_injection = None
         user_profile = {}
@@ -8582,8 +8597,12 @@ async def _spawn_browser_agent_activity_v3_real(
             session_exit_geo_locale = session_info.get("exit_geo_locale")
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
-            if browser_session_metadata.get("provider") == "tilion" and bool(session_info.get("resume_mode")):
-                # A replacement session was created; a same-session resume was not.
+            if (
+                browser_session_metadata.get("provider") == "tilion"
+                and session_info.get("resume_mode") == "new_steel_session_after_unavailable"
+            ):
+                # A replacement session was created; a same-session (or backend-refreshed)
+                # auth-assistance resume reconnects without this activity creating one.
                 tilion_creates["count"] += 1
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
             browser_activity_checkpoint(f"Resuming task {task_id}")
@@ -9882,6 +9901,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                             except Exception as e:
                                 logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                            _tilion_leave_session()
                             dom_service = None
                         browser_task_paused_for_resume = True
                         step_timer.finish()
@@ -10817,6 +10837,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         "tool_call_id": tool_call_id,
                     },
                 )
+                _tilion_leave_session()
                 dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
@@ -11685,6 +11706,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
 
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                        _tilion_leave_session()
                         dom_service = None
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
@@ -12751,6 +12773,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+        _tilion_leave_session()
         dom_service = None
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
@@ -12931,6 +12954,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                _tilion_leave_session()
                 dom_service = None
 
         if session_id and cleanup_failure is None:

@@ -47,6 +47,12 @@ const liveProbeSessions = new Map<RecoveryCandidateSession, () => Promise<void>>
 const inFlightProbeCreates = new Set<Promise<unknown>>();
 const inFlightProbeReleases = new Set<Promise<void>>();
 const liveSearchAborts = new Map<AbortController, string | undefined>();
+/**
+ * Set once backend shutdown begins. The HTTP listener stays open while the
+ * cleanup awaits, so a search or create admitted after its snapshot would rent
+ * a browser nothing releases before process.exit.
+ */
+let recoveryAdmissionsClosed = false;
 
 function withProbeSessionRegistry(
   dependencies: ConfigSearchDependencies
@@ -61,6 +67,7 @@ function withProbeSessionRegistry(
   return {
     ...dependencies,
     create: async (config, signal) => {
+      if (recoveryAdmissionsClosed) throw new Error('lane_aborted');
       const creating = dependencies.create(config, signal);
       inFlightProbeCreates.add(creating);
       try {
@@ -110,10 +117,12 @@ export function liveRecoveryProbeSessionCount(): number {
 
 /**
  * Backend shutdown: abort every live recovery search and release each candidate
- * session it still owns, including ones whose create lands meanwhile. Bounded
- * best-effort; returns how many sessions were released.
+ * session it still owns, including ones whose create lands meanwhile. New
+ * searches and creates are refused from here on. Bounded best-effort; returns
+ * how many sessions were released.
  */
 export async function releaseAllRecoveryProbeSessions(timeoutMs = 8_000): Promise<number> {
+  recoveryAdmissionsClosed = true;
   const deadline = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref());
   const owned = liveProbeSessions.size + inFlightProbeCreates.size;
   for (const controller of [...liveSearchAborts.keys()]) controller.abort();
@@ -130,6 +139,11 @@ export async function releaseAllRecoveryProbeSessions(timeoutMs = 8_000): Promis
     });
   }
   return released;
+}
+
+/** Tests only: reopen admissions after a simulated shutdown in the same process. */
+export function reopenRecoveryAdmissionsForTests(): void {
+  recoveryAdmissionsClosed = false;
 }
 
 /**
@@ -182,6 +196,9 @@ export async function runLaneConfigSearch(
 ): Promise<SuccessfulRecoveryCandidate> {
   if (lanes.length === 0) {
     throw new Error('Challenge recovery requires at least one cookie storage lane');
+  }
+  if (recoveryAdmissionsClosed) {
+    throw new Error('Challenge recovery unavailable: backend is shutting down');
   }
   dependencies = withProbeSessionRegistry(dependencies);
   const avoidConfigKey = options.avoidConfigKey;

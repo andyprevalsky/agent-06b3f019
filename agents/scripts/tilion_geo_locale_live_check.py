@@ -20,10 +20,6 @@ from playwright.async_api import async_playwright
 from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
 from domains.spawn_browser_agent_v3.tilion_worker import tilion_emulation
 
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
-for noisy in ("websockets", "asyncio"):
-    logging.getLogger(noisy).setLevel(logging.WARNING)
-
 BASE = os.environ.get("TILION_BASE_URL", "https://back.tilion.dev").rstrip("/")
 FIRST = """(() => { if (window.__roseFirst) return; window.__roseFirst = {
   tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -99,10 +95,13 @@ async def run_case(name):
         return
     sid = s["session_id"]
     print(f"== {name} session {sid}", flush=True)
-    emulation = tilion_emulation(fi, exit_geo)
-    print("   emulation:", emulation, flush=True)
-    url, mux = await open_browser_cdp_connection(s["connect_url"], label=f"a1-g3:{name}", emulation=emulation)
+    mux = None
     try:
+        # Inside the try: a refused gateway or handshake timeout still deletes the
+        # paid residential session instead of leaving it live until its TTL.
+        emulation = tilion_emulation(fi, exit_geo)
+        print("   emulation:", emulation, flush=True)
+        url, mux = await open_browser_cdp_connection(s["connect_url"], label=f"a1-g3:{name}", emulation=emulation)
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(url, timeout=60000)
             context = browser.contexts[0]
@@ -173,7 +172,8 @@ async def run_case(name):
             print(f"   mux emulation_failures={getattr(mux, 'emulation_failures', None)}", flush=True)
             await browser2.close()
     finally:
-        await mux.close()
+        if mux is not None:
+            await mux.close()
         print(f"   delete {sid}: {rest('DELETE', f'/v1/session/{sid}')[0]}", flush=True)
 
 
@@ -188,4 +188,8 @@ async def main():
     print(f"SUMMARY pass={len(results) - len(failed)} fail={len(failed)}", flush=True)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+    for noisy in ("websockets", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    asyncio.run(main())

@@ -19,6 +19,7 @@ needs the browser mid-run happens over it:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -386,6 +387,7 @@ async def apply_worker_state(playwright_browser: Any, worker_apply: Dict[str, An
     if cookies:
         await asyncio.wait_for(context.add_cookies(cookies), timeout=_APPLY_TIMEOUT_SECONDS)
     applied_entries = 0
+    failed_origins = 0
     for origin_state in worker_apply.get("local_storage") or []:
         origin = str((origin_state or {}).get("origin") or "")
         entries = [
@@ -405,12 +407,23 @@ async def apply_worker_state(playwright_browser: Any, worker_apply: Dict[str, An
                 ),
                 timeout=_APPLY_TIMEOUT_SECONDS,
             )
+        except Exception as error:
+            # Best-effort per origin: one unreachable or slow origin (interstitial,
+            # DNS, residential exit) must not skip the rest or fail the activity.
+            failed_origins += 1
+            logger.warning(
+                "[TilionFiles] localStorage origin not applied",
+                origin=origin,
+                error=f"{type(error).__name__}: {error}"[:200],
+            )
         finally:
-            await page.close()
+            with contextlib.suppress(Exception):
+                await page.close()
     logger.info(
         "[TilionFiles] Applied worker-side browser state",
         cookies=len(cookies),
         local_storage_entries=applied_entries,
+        local_storage_failed_origins=failed_origins,
     )
     return {"cookies": len(cookies), "local_storage_entries": applied_entries}
 

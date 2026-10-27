@@ -25,6 +25,7 @@
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
+import { canRunClaudeCodeOnFundedKey } from '../claudeCodeSandboxAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
 import {
   isGptApiKeyOnCooldown,
@@ -106,6 +107,18 @@ export async function markCodeTaskUsageLimited(
   return { marked: 'anthropic_api_key' };
 }
 
+/** The funded key path `createE2BSession` takes when no Claude login is leasable. */
+async function hasFundedClaudeCodeKey(): Promise<boolean> {
+  const shared = process.env.ANTHROPIC_API_KEY;
+  return canRunClaudeCodeOnFundedKey({
+    claudeCodeAnthropicApiKey: process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+    anthropicApiKey: shared,
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
+    sharedKeyOnCooldown: shared ? await isAnthropicApiKeyOnCooldown() : false,
+  });
+}
+
 async function hasLeasableIntegration(
   userId: string,
   name: string,
@@ -136,7 +149,7 @@ export async function codeCredentialAvailability(
   const ownOnly = options.ownOnly === true;
   const claude =
     (await hasLeasableIntegration(userId, 'claude_code', now, ownOnly)) ||
-    (!ownOnly && Boolean(process.env.ANTHROPIC_API_KEY) && !(await isAnthropicApiKeyOnCooldown()));
+    (!ownOnly && (await hasFundedClaudeCodeKey()));
   const codex =
     (await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly)) ||
     (!ownOnly && Boolean(process.env.GPT_API_KEY) && !(await isGptApiKeyOnCooldown()));

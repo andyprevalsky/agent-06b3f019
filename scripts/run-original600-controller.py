@@ -2491,8 +2491,11 @@ def main():
     copies = simultaneous_copies(args, runner)
     capacity = runpy.run_path(str(root/'scripts/cloudbench-provider-capacity.py'))
     # Provider-scoped limits (the Tilion pilot) bind only fleets on that provider;
-    # the selected backend env names it. A missing or unknown value binds all rows.
-    browser_provider = capacity['dotenv_value'](Path(args.backend_env), 'BROWSER_PROVIDER')
+    # the selected backend env names it. A missing or unknown value binds all rows:
+    # a nonempty unknown value makes resolve_browser_provider return None instead of
+    # falling through to CLOUDBENCH_BROWSER_PROVIDER or the repo back-end/.env.
+    browser_provider = (capacity['dotenv_value'](Path(args.backend_env), 'BROWSER_PROVIDER')
+                        or 'unset-in-backend-env')
     try:
         refused = capacity['check'](copies, browser_provider=browser_provider)
         registry = capacity['for_browser_provider'](

@@ -194,6 +194,34 @@ async function main(): Promise<void> {
     const keys = server.callsTo('POST', /^\/v1\/session$/).map((r) => r.headers['idempotency-key']);
     assert.deepEqual(keys, ['rose-key-1', 'rose-key-1']);
 
+    // ── a body that stalls after the headers is the same typed, retried timeout ──
+    server.reset();
+    let stalledCreates = 0;
+    server.route('POST', /^\/v1\/session$/, () =>
+      ++stalledCreates === 1
+        ? { status: 201, body: { session_id: 'sess_stalled' }, bodyDelayMs: 400 }
+        : { status: 201, body: { session_id: 'sess_stalled' } }
+    );
+    const recovered = await tilionRequest<{ session_id: string }>('/v1/session', {
+      method: 'POST',
+      body: {},
+      idempotencyKey: 'rose-key-2',
+      retryOnTimeout: true,
+      timeoutMs: 150,
+    });
+    assert.equal(recovered.session_id, 'sess_stalled');
+    assert.deepEqual(
+      server.callsTo('POST', /^\/v1\/session$/).map((r) => r.headers['idempotency-key']),
+      ['rose-key-2', 'rose-key-2']
+    );
+    server.reset();
+    server.route('GET', /^\/v1\/sessions$/, () => ({ status: 200, body: [], bodyDelayMs: 400 }));
+    const stalledRead = await tilionRequest('/v1/sessions', {
+      timeoutMs: 150,
+      maxAttempts: 1,
+    }).catch((e) => e);
+    assert(stalledRead instanceof TilionTimeoutError, `stalled body: ${String(stalledRead)}`);
+
     server.reset();
     server.route('POST', /\/act$/, () => ({ status: 200, body: { ok: true }, delayMs: 400 }));
     const slowAct = await tilionRequest('/v1/session/s/act', {

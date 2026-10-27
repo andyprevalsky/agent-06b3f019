@@ -258,13 +258,20 @@ function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
   captures.push({ ...entry, id: nextId++ });
 }
 
-/** Tilion's API host, including a TILION_BASE_URL override (staging, local fake). */
-function isTilionHost(hostname: string): boolean {
-  if (hostname === 'back.tilion.dev') return true;
+/**
+ * Tilion's API, including a TILION_BASE_URL override (staging, local fake). The
+ * override matches its whole authority (host and port): a local fake on
+ * 127.0.0.1:<port> must not exempt every other local service from replay.
+ */
+function isTilionApi(target: URL): boolean {
+  if (target.hostname.toLowerCase() === 'back.tilion.dev') return true;
   const configured = process.env.TILION_BASE_URL?.trim();
   if (!configured) return false;
   try {
-    return new URL(configured).hostname.toLowerCase() === hostname;
+    const base = new URL(configured);
+    return (
+      base.protocol === target.protocol && base.host.toLowerCase() === target.host.toLowerCase()
+    );
   } catch {
     return false;
   }
@@ -274,13 +281,14 @@ function isTilionHost(hostname: string): boolean {
 export function shouldBypassOutboundReplay(url: string): boolean {
   if (isCredentialExchange(url)) return true;
   try {
-    const hostname = new URL(url).hostname.toLowerCase();
+    const target = new URL(url);
+    const hostname = target.hostname.toLowerCase();
     return (
       hostname === 'e2b.app' ||
       hostname.endsWith('.e2b.app') ||
       hostname === 'api.onkernel.com' ||
       hostname === 'api.browser-use.com' ||
-      isTilionHost(hostname) ||
+      isTilionApi(target) ||
       hostname === 'amplitude.com' ||
       hostname === 'analytics.eu.amplitude.com'
     );

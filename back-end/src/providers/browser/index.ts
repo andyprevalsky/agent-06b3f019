@@ -363,6 +363,7 @@ export async function resumeSession(
   }
   if (provider === 'browser-use' || provider === 'tilion') {
     // A disabled rollout provider resumes on Kernel and releases its old session.
+    // A Tilion row's state (paused snapshot) is carried by resumeBrowserSession.
     if (provider === 'tilion' || !browserUseEnabled()) {
       const previous = await prisma.browserSession.findUniqueOrThrow({
         where: { id: taskId },

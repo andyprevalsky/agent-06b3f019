@@ -2157,6 +2157,14 @@ class Portable(unittest.TestCase):
             self.assertIn('maximum 16.', tilion.stderr)
             self.assertIn('  - Tilion browser sessions: 20 concurrent browsers, pilot plan', tilion.stderr)
             self.assertEqual(json.loads(tilion.stdout)['max_concurrent_benches'], 16)
+            # No BROWSER_PROVIDER in the selected env binds every row (Tilion is the code
+            # default); an unrelated ambient provider must not drop the Tilion pilot.
+            (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nGITHUB_TOKEN=fixture_github\n')
+            unset = subprocess.run(fx.args, cwd='/', env={**fx.env, 'CLOUDBENCH_BROWSER_PROVIDER': 'kernel'},
+                                   capture_output=True, text=True, timeout=10)
+            self.assertEqual(unset.returncode, 78, unset.stderr)
+            self.assertIn('maximum 16.', unset.stderr)
+            self.assertEqual(json.loads(unset.stdout)['max_concurrent_benches'], 16)
             (fx.inputs/'backend-env').write_text('COMPLETE=fixture\nBROWSER_PROVIDER=kernel\nGITHUB_TOKEN=fixture_github\n')
             # No Fly API read, no flyctl invocation (not even version), no GitHub read, no state.
             self.assertEqual(requests, [])

@@ -55,10 +55,10 @@ import {
   geoForSpecificity,
   geoSpecificities,
   type GeoSpecificity,
-  landedLocation,
   regionForCountry,
   storedTilionProxyType,
   TILION_DEFAULT_PROXY_TYPE,
+  tilionExitPlacement,
   tilionProxyType,
   type TilionProxyType,
   tilionSessionLifetime,
@@ -80,6 +80,7 @@ export { restoreTilionBrowserState, type StorageState as TilionCarriedState } fr
 export {
   resetTilionRegionCacheForTests,
   TILION_MIN_TTL_SECONDS,
+  tilionExitCountry,
   tilionSessionLifetime,
 } from './tilionConfig';
 export {
@@ -116,6 +117,8 @@ interface TilionSessionRecord {
   exit_id?: string | null;
   geo_applied?: boolean | null;
   geo_unsupported?: string[] | null;
+  /** Set locally by postSession: false when a direct exit had no region to place it. */
+  placed?: boolean;
 }
 
 interface RemoteTilionSession {
@@ -204,7 +207,8 @@ async function postSession(
     idempotencyKey,
     proxyType,
   });
-  return record;
+  // Residential geo pins the exit country; a direct exit has only its region.
+  return { ...record, placed: proxyType !== 'direct' || region !== undefined };
 }
 
 /**
@@ -273,8 +277,7 @@ async function createRemote(
         sessionId,
         wsUrl: record.connect_url,
         debugUrl,
-        proxySource: `tilion_${proxyType}_country`,
-        proxyLocation: landedLocation(location, 'country'),
+        ...tilionExitPlacement(proxyType, record.placed === true, location),
         proxyType,
         browser,
         geoTargeting,

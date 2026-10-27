@@ -3455,18 +3455,29 @@ _CLICK_COORDINATES_TIMEOUT_SECONDS = 10.0
 
 
 async def _bounded_cdp(awaitable: Any, *, cdp_method: str, timeout: float) -> Any:
-    """Await one CDP-backed call within ``timeout``; log the method and elapsed time on expiry."""
+    """Await one CDP-backed call within ``timeout``; log the method and elapsed time on expiry.
+
+    Returns by ``timeout`` even if the call holds its cancellation (a busy renderer):
+    the expired call is cancelled but not awaited, like ``_gather_within``.
+    """
     started = time_module.monotonic()
+    task = asyncio.ensure_future(awaitable)
     try:
-        return await asyncio.wait_for(awaitable, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Browser CDP call timed out",
-            cdp_method=cdp_method,
-            elapsed_ms=round((time_module.monotonic() - started) * 1000),
-            timeout_s=timeout,
-        )
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
         raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+    logger.warning(
+        "Browser CDP call timed out",
+        cdp_method=cdp_method,
+        elapsed_ms=round((time_module.monotonic() - started) * 1000),
+        timeout_s=timeout,
+    )
+    raise asyncio.TimeoutError(f"{cdp_method} did not answer within {timeout:g}s")
 
 
 async def _arm_click_receipt(session: Any, coords: Dict[str, int]) -> Optional[tuple[Any, str]]:

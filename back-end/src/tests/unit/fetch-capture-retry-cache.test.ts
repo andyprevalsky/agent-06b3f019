@@ -283,6 +283,11 @@ async function run(): Promise<void> {
       shouldBypassOutboundReplay('https://tilion-staging.example.test/v1/sessions'),
       true
     );
+    // A local fake exempts only its own authority, never other services on the host.
+    process.env.TILION_BASE_URL = 'http://127.0.0.1:4555';
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1:4555/v1/session'), true);
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1:3001/api/agents'), false);
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1/v1/session'), false);
   } finally {
     if (previousTilionBase === undefined) delete process.env.TILION_BASE_URL;
     else process.env.TILION_BASE_URL = previousTilionBase;

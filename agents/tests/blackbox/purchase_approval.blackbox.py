@@ -198,6 +198,40 @@ def test_resized_cdn_derivative_is_the_same_image_as_its_origin():
         raise AssertionError(f"never-rendered image accepted: {not_rendered!r}")
 
 
+def test_foreign_host_cdn_derivative_does_not_inherit_a_rendered_asset():
+    """PR #1604 review: the approval loads image_url as submitted, so another host's
+    /cdn-cgi/image/ wrapper around a rendered origin must not pass as that image (the
+    foreign host serves whatever it likes). Only the resizer the page used, or the
+    origin's own host, may serve a derivative of a rendered asset."""
+    page = "https://shop.example/checkout"
+    origin = "https://shop.example/img/p1.jpg"
+    s3_origin = "https://doordash-static.s3.amazonaws.com/media/photosV2/09f09e4f-shakerato.png"
+    resized_s3 = f"https://img.cdn4dd.com/cdn-cgi/image/fit=contain,width=1920/{s3_origin}"
+    rendered = [origin, resized_s3]
+
+    for foreign in (
+        f"https://attacker.example/cdn-cgi/image/w=1/{origin}",
+        f"https://attacker.example/cdn-cgi/image/fit=contain,width=1920/{s3_origin}",
+        f"https://attacker.example/cdn-cgi/image/w=1/{s3_origin.replace('https://', 'https:/')}",
+        f"https://img.cdn4dd.com/cdn-cgi/image/w=1/{origin}",  # the page's resizer never served this origin
+    ):
+        try:
+            validate_image_url_for_page(foreign, rendered, page)
+        except ValueError:
+            continue
+        raise AssertionError(f"foreign-host derivative accepted as a rendered image: {foreign!r}")
+
+    # The origin's own host resizing its rendered asset is still that image, and so is
+    # the page's resizer at another size or the bare origin it embeds.
+    same_host = f"https://shop.example/cdn-cgi/image/width=600/{origin}"
+    assert validate_image_url_for_page(same_host, rendered, page) == same_host
+    resized_again = f"https://img.cdn4dd.com/cdn-cgi/image/fit=contain,width=600/{s3_origin}"
+    assert validate_image_url_for_page(resized_again, rendered, page) == resized_again
+    assert validate_image_url_for_page(s3_origin, rendered, page) == s3_origin
+    s3_self = f"https://doordash-static.s3.amazonaws.com/cdn-cgi/image/width=600/{s3_origin}"
+    assert validate_image_url_for_page(s3_self, rendered, page) == s3_self
+
+
 async def run_all_tests():
     print("purchase-approval blackbox tests:")
     r = BlackboxResult()
@@ -209,6 +243,10 @@ async def run_all_tests():
     r.record("wrappers_reject_non_urls", test_page_context_helpers_still_reject_non_urls)
     r.record("image_url_must_be_rendered_on_page", test_image_url_must_be_an_image_the_page_renders)
     r.record("resized_cdn_derivative_is_same_image", test_resized_cdn_derivative_is_the_same_image_as_its_origin)
+    r.record(
+        "foreign_host_cdn_derivative_rejected",
+        test_foreign_host_cdn_derivative_does_not_inherit_a_rendered_asset,
+    )
     return r.all_passed
 
 

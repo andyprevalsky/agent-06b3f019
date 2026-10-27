@@ -25823,6 +25823,141 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
     assert completions[0]["message"] == result["message"]
 
 
+class _TilionBilledDomService(_FakeDomService):
+    # CDP bytes Tilion relayed to this worker; DOMService keeps them after disconnect.
+    cdp_bytes_received = 3 * 1_048_576
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_not_a_resume_create():
+    """PR #1604 review: an exit that clears dom_service before building the cost row
+    must still bill the live Tilion session's CDP bytes, and a same-session
+    auth-assistance resume reconnects without creating (billing) a new session."""
+    import copy
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://tilion.example/live",
+        "ws_url": "ws://session-1",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "tilion", "proxy_source": "tilion_direct"},
+        "same_session_available": True,
+    }
+    cost_rows = []
+
+    def recording_build_usage_items(*args, **kwargs):
+        cost_rows.append(kwargs)
+        return build_usage_items(*args, **kwargs)
+
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+            AsyncMock(side_effect=lambda *_args, **_kwargs: copy.deepcopy(session_info)),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.resume_browser_session",
+            AsyncMock(side_effect=AssertionError("a same-session resume must not create a session")),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                return_value={
+                    "action": {
+                        "action": "attempt_completion",
+                        "thinking": "The heading is visible.",
+                        "params": {"reasoning": "Heading reads Example Domain"},
+                    },
+                    "usage": {},
+                    "mode": "waterfall",
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "Heading confirmed",
+                    "structured_response": {"result": "Example Domain"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.build_usage_items", recording_build_usage_items),
+        patch("browser_tools.dom_service.DOMService", _TilionBilledDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser)),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    # The verified-completion exit, then the max-iterations exit.
+    for max_iterations, expected_status in ((handler.MAX_ITERATIONS, "completed"), (0, "max_iterations")):
+        cost_rows.clear()
+        with ExitStack() as stack:
+            for patch_target in patch_targets:
+                stack.enter_context(patch_target)
+            stack.enter_context(patch.object(handler, "MAX_ITERATIONS", max_iterations))
+            result = await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Open example.com and report the main heading.",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "auth_assistance",
+                    "task_id": "task-1",
+                    "session_id": "session-1",
+                    "cdp_url": "ws://session-1",
+                },
+            )
+            await handler.drain_background_browser_cleanups()
+
+        assert result["status"] == expected_status, result
+        tilion_rows = [row for row in cost_rows if row.get("provider") == "tilion"]
+        assert len(tilion_rows) == 1, cost_rows
+        assert tilion_rows[0]["session_creates"] == 0, "a same-session auth resume was billed as a session create"
+        assert tilion_rows[0]["tilion_direct_bytes"] == _TilionBilledDomService.cdp_bytes_received, (
+            f"{expected_status}: the live session's CDP bytes were dropped when dom_service was cleared"
+        )
+        assert tilion_rows[0]["tilion_premium_bytes"] == 0
+
+
 @_in_browser_activity_context
 async def test_spawn_browser_activity_failure_completion_message_leads_with_goal():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -35425,6 +35560,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_verified_completion_message_leads_with_goal",
         test_spawn_browser_activity_verified_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_tilion_cost_row_bills_live_bytes_not_resume_create",
+        test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_not_a_resume_create,
     )
     await r.record_async(
         "activity_failure_completion_message_leads_with_goal",

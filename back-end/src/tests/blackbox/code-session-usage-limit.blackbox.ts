@@ -43,6 +43,11 @@ import {
 } from '../../providers/codeSessions/usageLimit';
 import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
+import {
+  isAnthropicApiKeyOnCooldown,
+  markAnthropicApiKeyOnCooldown,
+} from '../../providers/computeCredentials';
+import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
 import { buildLocalSessionEnvs } from '../../providers/localDevices/session';
 
@@ -58,6 +63,8 @@ const saved = {
   backend: process.env.CODE_SESSION_STORAGE_BACKEND,
   dir: process.env.CODE_SESSION_STORAGE_LOCAL_DIR,
   anthropic: process.env.ANTHROPIC_API_KEY,
+  claudeCodeAnthropic: process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+  openrouter: process.env.OPENROUTER_API_KEY,
   gpt: process.env.GPT_API_KEY,
   decryptionKey: process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY,
 };
@@ -108,8 +115,11 @@ async function otherLeasable(name: string): Promise<number> {
 before(async () => {
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(fixtureDir, 'storage');
-  // Shared funded keys would make every availability answer true.
+  // Shared funded keys (and the Claude Code gateway keys a sandbox runs on)
+  // would make every availability answer true.
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.CLAUDE_CODE_ANTHROPIC_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   delete process.env.GPT_API_KEY;
   await prisma.user.create({ data: { userId, name: 'Usage Limit' } });
   await prisma.agent.create({ data: { id: agentId, userId, goal: 'Ship the parser' } });
@@ -120,6 +130,8 @@ after(async () => {
     ['CODE_SESSION_STORAGE_BACKEND', saved.backend],
     ['CODE_SESSION_STORAGE_LOCAL_DIR', saved.dir],
     ['ANTHROPIC_API_KEY', saved.anthropic],
+    ['CLAUDE_CODE_ANTHROPIC_API_KEY', saved.claudeCodeAnthropic],
+    ['OPENROUTER_API_KEY', saved.openrouter],
     ['GPT_API_KEY', saved.gpt],
     ['CLAUDE_CREDENTIAL_DECRYPTION_KEY', saved.decryptionKey],
   ] as const) {
@@ -192,6 +204,64 @@ test('a usage limit rate-limits exactly the task’s token until the reset; avai
     (codexRow.rateLimitedUntil?.getTime() ?? 0) > Date.now(),
     'default cooldown without a reset'
   );
+});
+
+test('a funded Claude Code gateway keeps Claude available while the shared Anthropic key is cooled', async () => {
+  // createE2BSession runs Claude Code on the OpenRouter gateway (or a dedicated
+  // CLAUDE_CODE_ANTHROPIC_API_KEY) when the shared key is on its out-of-credits
+  // cooldown. Availability must answer from that same transport; otherwise a
+  // spawn with no Claude login silently switches to Codex even though Claude
+  // Code can run (Pre-Deploy claude-code-agent, 2026-10-27).
+  const noLogin = `code-usage-no-login-${randomUUID()}`;
+  const pooled = (await otherLeasable('claude_code')) > 0;
+  const envNames = [
+    'ANTHROPIC_API_KEY',
+    'OPENROUTER_API_KEY',
+    'CLAUDE_CODE_ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+  ] as const;
+  const savedEnv = new Map(envNames.map((name) => [name, process.env[name]]));
+  try {
+    await withIsolatedFundedKeyCooldowns(async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-blackbox-shared';
+      delete process.env.CLAUDE_CODE_ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_BASE_URL;
+      await markAnthropicApiKeyOnCooldown('blackbox_out_of_credits');
+      assert.equal(await isAnthropicApiKeyOnCooldown(), true, 'the shared key is cooled');
+
+      process.env.OPENROUTER_API_KEY = 'sk-or-blackbox-gateway';
+      assert.equal(
+        (await codeCredentialAvailability(noLogin)).claude,
+        true,
+        'the OpenRouter gateway still runs Claude Code'
+      );
+      assert.equal(
+        (await codeCredentialAvailability(noLogin, new Date(), { ownOnly: true })).claude,
+        false,
+        'a Mac run never takes a funded key'
+      );
+
+      delete process.env.OPENROUTER_API_KEY;
+      process.env.CLAUDE_CODE_ANTHROPIC_API_KEY = 'sk-ant-blackbox-dedicated';
+      assert.equal(
+        (await codeCredentialAvailability(noLogin)).claude,
+        true,
+        'a dedicated Claude Code key is not gated by the shared-org cooldown'
+      );
+
+      delete process.env.CLAUDE_CODE_ANTHROPIC_API_KEY;
+      assert.equal(
+        (await codeCredentialAvailability(noLogin)).claude,
+        pooled,
+        'the cooled shared key alone cannot run Claude Code'
+      );
+    });
+  } finally {
+    for (const [name, value] of savedEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 test('a retry on the other provider continues the same session from its checkpoint with a handoff', async () => {

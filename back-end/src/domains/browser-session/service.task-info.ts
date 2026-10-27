@@ -8,7 +8,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionLifetime';
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
-import { refreshTilionConnectUrl } from '../../providers/browser/tilion';
+import { refreshTilionConnectUrl, tilionExitCountry } from '../../providers/browser/tilion';
 import { resolveExitGeoLocale, type ExitGeoLocale } from '../../providers/browser/exitGeoLocale';
 
 type GeoFingerprintPayload = {
@@ -272,9 +272,12 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
     const country = agent?.proxyCountry;
     const resolved = resolveExitGeoLocale(
       response.fingerprint_injection as GeoFingerprintPayload | null,
-      country !== null && country !== undefined && country !== ''
-        ? country
-        : DEFAULT_GEOLOCATION.country
+      tilionExitCountry(
+        session.kernelProxySource,
+        country !== null && country !== undefined && country !== ''
+          ? country
+          : DEFAULT_GEOLOCATION.country
+      )
     );
     response.exit_geo_locale = resolved.exitGeoLocale;
     response.fingerprint_injection = resolved.fingerprint;

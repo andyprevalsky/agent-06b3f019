@@ -24,6 +24,7 @@ import { createOriginPayloadWriter } from '../steel/injectionOriginPage';
 import { steelCdpConnectionUrl } from '../steel/urls';
 import { BrowserStateInjectionTimeout, withTimeout } from '../steel/injectionTimeouts';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
+import { mintTilionConnectUrl } from './tilionClient';
 import { storedBrowserProvider } from './types';
 
 const log = createLogger('BrowserSessionAuthPersist');
@@ -428,9 +429,16 @@ export async function persistSignedInBrowserState(
   try {
     if (browser === undefined) {
       const { chromium } = await import('playwright');
-      const connecting = chromium.connectOverCDP(steelCdpConnectionUrl(session.wsUrl ?? ''), {
-        timeout: remainingMs(),
-      });
+      // Tilion connect tokens last 1800 s, far shorter than a session: mint a fresh one.
+      const wsUrl =
+        browserSource === 'tilion'
+          ? await withTimeout(
+              mintTilionConnectUrl(sessionId),
+              remainingMs(),
+              'Timed out minting a Tilion connect URL to harvest signed-in browser state'
+            )
+          : steelCdpConnectionUrl(session.wsUrl ?? '');
+      const connecting = chromium.connectOverCDP(wsUrl, { timeout: remainingMs() });
       browser = await withTimeout(
         connecting,
         remainingMs(),

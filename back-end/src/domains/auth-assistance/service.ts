@@ -9,7 +9,11 @@ import { createLogger } from '../../providers/logger';
 import { notifyAuthAssistance } from '../../providers/smsSupervisor/outboundEvents';
 import { getBrowserSessionHealth } from '../../providers/browser';
 import { resumeBrowserSession } from '../../providers/browserSessionResume';
-import { getTilionLiveViewUrl, TilionUncarriedStateError } from '../../providers/browser/tilion';
+import {
+  getTilionLiveViewUrl,
+  isTilionSessionEndedError,
+  TilionUncarriedStateError,
+} from '../../providers/browser/tilion';
 import * as repo from './repo';
 import type {
   AuthAssistanceHandoff,
@@ -78,7 +82,29 @@ function handoffForMode(
 
 function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
-  return ['live', 'active', 'running'].includes(status.toLowerCase());
+  // Tilion reports a drivable session as `ready` (same set as service.task-info.ts).
+  return ['live', 'active', 'running', 'ready'].includes(status.toLowerCase());
+}
+
+/**
+ * Tilion view tokens expire after 1800 s, so each handoff mints a fresh one. A
+ * failed mint keeps the stored URL (as the live-view read does); only an ended
+ * session (404/410) fails the handoff, since there is no browser to hand off.
+ */
+async function freshTilionViewUrl(
+  sessionId: string,
+  storedUrl: string | null | undefined
+): Promise<string | null | undefined> {
+  try {
+    return await getTilionLiveViewUrl(sessionId);
+  } catch (error) {
+    if (isTilionSessionEndedError(error)) throw error;
+    log.warn('Tilion live-view token mint failed; using the stored URL', {
+      session_id: sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return storedUrl;
+  }
 }
 
 export async function createAuthAssistanceRequest(
@@ -121,12 +147,12 @@ export async function createAuthAssistanceRequest(
   // redacted browserUrl, and the stored debugUrl expires after 1800 s.
   const tilionViewUrl =
     session?.provider === 'tilion' && session.sessionId !== null
-      ? await getTilionLiveViewUrl(session.sessionId)
+      ? await freshTilionViewUrl(session.sessionId, session.debugUrl)
       : undefined;
   const handoff = handoffForMode(input.mode, steelSessionId, tilionViewUrl ?? session?.debugUrl);
   const request = await repo.createRequest({
     ...input,
-    ...(tilionViewUrl !== undefined ? { browserUrl: tilionViewUrl } : {}),
+    ...(tilionViewUrl !== undefined && tilionViewUrl !== null ? { browserUrl: tilionViewUrl } : {}),
     userId,
     authRealm,
     ...(browserSessionId !== null ? { browserSessionId } : {}),
@@ -185,7 +211,7 @@ async function liveSameSessionHandoff(
 ) {
   const debugUrl =
     session.provider === 'tilion'
-      ? await getTilionLiveViewUrl(session.sessionId)
+      ? await freshTilionViewUrl(session.sessionId, session.debugUrl)
       : session.debugUrl;
   return {
     request: serializeRequest(request),

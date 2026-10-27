@@ -21,6 +21,35 @@ export type TilionProxyType = 'residential' | 'mobile' | 'direct';
  * cheaper exit); residential is reached through the normal rotation/recovery.
  */
 export const TILION_DEFAULT_PROXY_TYPE: TilionProxyType = 'direct';
+
+/**
+ * A direct exit is placed only by its region. When the requested country has no
+ * Tilion region (or /v1/regions failed) Tilion picks its nearest region, so the
+ * exit country is unknown: it is never reported or localized as the request.
+ */
+export const TILION_UNPLACED_PROXY_SOURCE = 'tilion_direct_unplaced';
+
+/** A create's reported exit: an unplaced direct exit reports no country. */
+export function tilionExitPlacement(
+  proxyType: TilionProxyType,
+  placed: boolean,
+  location: ProxyGeoLocation
+): { proxySource: string; proxyLocation: ProxyGeoLocation } {
+  return placed
+    ? {
+        proxySource: `tilion_${proxyType}_country`,
+        proxyLocation: landedLocation(location, 'country'),
+      }
+    : { proxySource: TILION_UNPLACED_PROXY_SOURCE, proxyLocation: { country: '' } };
+}
+
+/** The country a Tilion row's exit landed in, or null when it is unknown. */
+export function tilionExitCountry(
+  proxySource: string | null | undefined,
+  requestedCountry: string
+): string | null {
+  return proxySource === TILION_UNPLACED_PROXY_SOURCE ? null : requestedCountry;
+}
 export type GeoSpecificity = 'city' | 'state' | 'country';
 
 /** The browser activity budget (30 min) plus the 5 min margin the plan requires. */
