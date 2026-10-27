@@ -19,7 +19,7 @@ tags:
 sources:
   - commit 6230916b01
   - commit 68769c08d3
-  - deploy 20261027-181818-842551
+  - commit 68c20779a
 repro: agents/tests/blackbox/workflow.blackbox.py
 status: fixed
 ---
