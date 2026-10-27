@@ -4747,7 +4747,7 @@ async def test_simulated_browser_preserves_user_input_queued_before_activity_exe
     await _exercise_simulated_browser_policy(startup_feedback=True)
 
 
-async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False):
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False, denied=False):
     import copy
     from domains.spawn_browser_agent_v3 import handler as browser_handler
     from datetime import datetime, timedelta, timezone
@@ -4817,9 +4817,12 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
             assert messages[0] == original_call
             resolved = json.loads(messages[1]["content"])
             assert messages[1]["tool_call_id"] == "place-order"
-            assert resolved["status"] == "write_permission_granted"
-            assert resolved["action_executed"] is False
-            if not user_feedback:
+            assert resolved["status"] == ("rejected" if denied else "write_permission_granted")
+            if denied:
+                assert resolved["success"] is False and resolved["error"] == "User rejected this action"
+            else:
+                assert resolved["action_executed"] is False
+            if not user_feedback and not denied:
                 assert len(messages) == 2, "approval added a separate synthetic message"
                 return {
                     "action": copy.deepcopy(resume_state["pending_action"]),
@@ -4880,6 +4883,13 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
     )
     original_call = copy.deepcopy(resume_state["simulated_turn_messages"][0])
     original_grants = copy.deepcopy(resume_state["write_lock_approvals"])
+    if denied:
+        resume_state["approval_type"] = "rejected"
+        resume_state["rejected_action"] = {
+            "tool_call_id": "place-order", "history_step": 6,
+            "approval_type": "purchase", "url": checkout_state["url"],
+        }
+        resume_state["simulated_action_entries"][0]["result"]["status"] = "needs_write_approval"
     correction = "Do not place this order. Inspect the checkout instead."
     now = datetime.now(timezone.utc)
     if not legacy_resume:
@@ -4955,6 +4965,10 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
 
     assert result["status"] == "completed"
     assert resume_state["write_lock_approvals"] == original_grants
+    if denied:
+        assert executed_actions == [], "denied simulated action executed before actor continuation"
+        assert result["current_url"] == checkout_state["url"], "denial invented a successful transition"
+        assert resume_state["simulated_action_entries"][0]["result"]["status"] == "rejected"
     if user_feedback:
         assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
         assert [message for message in policy.await_args.kwargs["turn_messages"] if message.get("role") == "user"] == [
@@ -4964,6 +4978,8 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
         generation.assert_awaited_once()
         return
+    if denied:
+        return
     assert executed_actions == ["evaluate"], "ordinary actor retry did not execute exactly once"
     generation.assert_not_awaited()
     assert result["current_url"] == confirmation_url
@@ -4971,6 +4987,11 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
     retry_event = next(call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "policy-retry")
     assert retry_event.kwargs["steps_taken"] == 7
     assert not any(str(call.kwargs.get("tool_call_id")).endswith(":approved") for call in saved_actions.await_args_list)
+
+
+async def test_simulated_browser_denial_continues_original_result_without_execution():
+    await _exercise_simulated_browser_pending_approval(denied=True)
+    await _exercise_simulated_browser_pending_approval(denied=True, user_feedback=True)
 
 
 async def test_simulated_browser_persists_post_approval_confirmation_state():
@@ -6522,6 +6543,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_runs_five_policy_steps_then_verified_completion",
         test_simulated_browser_runs_five_policy_steps_then_verified_completion,
+    )
+    await r.record_async(
+        "simulated_browser_denial_continues_original_result_without_execution",
+        test_simulated_browser_denial_continues_original_result_without_execution,
     )
     await r.record_async(
         "simulated_browser_persists_post_approval_confirmation_state",

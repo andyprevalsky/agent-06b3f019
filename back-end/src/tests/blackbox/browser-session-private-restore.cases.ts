@@ -11,6 +11,7 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
   const resumePath = new URL('../../providers/browserSessionResume.ts', import.meta.url).pathname;
   const checkpointPath = new URL('../../providers/browser/checkpoint.ts', import.meta.url).pathname;
   const indexPath = new URL('../../providers/browser/index.ts', import.meta.url).pathname;
+  const pausePath = new URL('../../providers/browser/logicalPause.ts', import.meta.url).pathname;
   const loader = Module as unknown as {
     _load: (id: string, parent: { filename?: string } | undefined, isMain: boolean) => unknown;
   };
@@ -19,6 +20,7 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     require.cache[resumePath],
     require.cache[checkpointPath],
     require.cache[indexPath],
+    require.cache[pausePath],
   ];
   const env = {
     CLAUDE_CREDENTIAL_DECRYPTION_KEY: process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY,
@@ -76,11 +78,16 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
   const navigated: string[] = [];
   const frame = {
     url: () => row.currentUrl,
-    evaluate: async () => [{ name: 'checkout', value: 'held' }],
+    evaluate: async () => null,
   };
   const page = {
     ...frame,
+    evaluate: async () => [{ name: 'checkout', value: 'held' }],
     frames: () => [frame],
+    context: () => browser.contexts()[0],
+    route: async () => {},
+    unroute: async () => {},
+    close: async () => {},
     goto: async (url: string) => {
       navigated.push(url);
     },
@@ -125,6 +132,27 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     $queryRaw: async () => [],
   };
   loader._load = function (id, parent, isMain) {
+    if (id === './browser/initialization')
+      return { assertBrowserInitializationReady: async () => {} };
+    if (id === './browser/sessionPersist') return { isConfirmedBrowserEnd: () => false };
+    if (id === '../steel/lifecycleClaim' || id === './steel/lifecycleClaim')
+      return {
+        browserResumeScope: () => undefined,
+        withSteelLifecycleClaim: async (_id: string, run: (...args: unknown[]) => unknown) =>
+          run(
+            async () => {},
+            undefined,
+            (mutate: (db: unknown) => unknown) => mutate(database)
+          ),
+        withBrowserResumeClaim: async (_id: string, run: (...args: unknown[]) => unknown) =>
+          run(
+            async () => {},
+            undefined,
+            (mutate: (db: unknown) => unknown) => mutate(database)
+          ),
+        withBrowserResumeLifecycle: async (_id: string, deps: { resume: () => unknown }) =>
+          deps.resume(),
+      };
     if ([resumePath, checkpointPath, indexPath].includes(parent?.filename ?? '')) {
       if (id === './database' || id === '../database') return { prisma: database };
       if (id === './logger') return { createLogger: () => ({ info() {}, warn() {}, error() {} }) };
@@ -163,6 +191,7 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
         };
       if (id === './browser')
         return {
+          getBrowserSessionHealth: async (sessionId: string) => ({ sessionId, status: 'live' }),
           resumeSession: async (_id: string, options: { forceFreshProfile: boolean }) => {
             creates += 1;
             if (row.logicalOwnerKey) assert.equal(options.forceFreshProfile, true);
@@ -192,17 +221,21 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     delete require.cache[resumePath];
     delete require.cache[checkpointPath];
     delete require.cache[indexPath];
+    delete require.cache[pausePath];
     const { resumeBrowserSession } = require(
       resumePath
     ) as typeof import('../../providers/browserSessionResume');
     const { closeSession } = require(indexPath) as typeof import('../../providers/browser');
-    // Original incident mechanism: conversation-only parking leaves no private state.
+    // A first materialization has no source; its empty baseline is valid.
+    row.sessionId = null;
     await resumeBrowserSession(row.id);
     assert.deepEqual(restored, { cookies: [], origins: [] });
     assert.throws(() => assert.deepEqual(restored, authenticatedStorage));
-    console.log(
-      'OBSERVED missing-capture failure: replacement restored empty baseline, not authenticated checkout'
-    );
+    console.log('OBSERVED empty first materialization differs from authenticated checkout');
+    row.status = 'PAUSED';
+    await assert.rejects(resumeBrowserSession(row.id), /saved checkpoint is missing/);
+    assert.equal(creates, 1, 'missing source checkpoint must not allocate another browser');
+    row.status = 'ACTIVE';
 
     // The existing pause capture supplies the state needed by the exact same resume path.
     captureFails = true;
@@ -221,11 +254,15 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
       authenticatedStorage,
       'private auth and cart survive provider replacement'
     );
-    assert.deepEqual(navigated, [row.currentUrl]);
+    assert.deepEqual(
+      navigated.filter((url) => !url.includes('/.rose-')),
+      [row.currentUrl]
+    );
     assert.equal(injections, 0, 'private restore must not inject shared credentials');
 
     row.sessionId = null;
     row.checkpointRef = null;
+    row.checkpointRevision = 0;
     row.status = 'PAUSED';
     await resumeBrowserSession(row.id);
     assert.deepEqual(
@@ -245,9 +282,11 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     delete require.cache[resumePath];
     delete require.cache[checkpointPath];
     delete require.cache[indexPath];
+    delete require.cache[pausePath];
     if (previous[0]) require.cache[resumePath] = previous[0];
     if (previous[1]) require.cache[checkpointPath] = previous[1];
     if (previous[2]) require.cache[indexPath] = previous[2];
+    if (previous[3]) require.cache[pausePath] = previous[3];
     await rm(directory, { recursive: true, force: true });
     for (const [key, value] of Object.entries(env)) {
       if (value === undefined) delete process.env[key];

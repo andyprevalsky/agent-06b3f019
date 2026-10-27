@@ -274,6 +274,7 @@ async function main() {
         ...(actual as object),
         getKernelSessionHealth: async (id: string) => ({
           provider: 'kernel',
+          sessionId: id,
           status: natives.get(id)?.alive ? 'active' : 'stopped',
           ttlMs: natives.get(id)?.alive ? 900_000 : 0,
         }),

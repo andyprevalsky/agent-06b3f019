@@ -8,14 +8,7 @@ export interface BrowserPanelData {
 
 // ── Browser panels ────────────────────────────────────────────────────────
 
-const TERMINAL_BROWSER_ACTION_TYPES = new Set([
-  'task_complete',
-  'session_paused',
-  // User rejected a write-lock approval — the browser task ends without
-  // task_complete (handler returns immediately). Prod agent c27b4f28
-  // (2026-08-22): chip stayed visible after Aman rejected a 1-item checkout.
-  'write_lock_rejected',
-]);
+const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
 
 const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
@@ -96,6 +89,7 @@ interface BrowserPanelState extends BrowserPanelData {
  *
  * [ABSENT] --browser/session_started/session_init (legacy system)--> [VISIBLE]
  * [VISIBLE] --current task/call terminal--> [HIDDEN]
+ * [VISIBLE] --write-lock rejection feedback--> [VISIBLE]
  * [HIDDEN] --explicit session start or new invocation on same task--> [VISIBLE]
  * [HIDDEN] --verifier system / recording / diagnostics--> [HIDDEN]
  *

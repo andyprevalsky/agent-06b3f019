@@ -42,6 +42,7 @@ import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
 import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
 import {
   runBrowserRootTeardownSavesStateCases,
   runBrowserTerminalPauseCases,
@@ -568,15 +569,14 @@ async function testReproducibility_threeSequential() {
     });
     statuses.push(res.status);
   }
-  if (new Set(statuses).size !== 1) {
-    throw new Error(`Three sequential: ${statuses.join(', ')}`);
-  }
+  if (new Set(statuses).size !== 1) throw new Error(`Three sequential: ${statuses.join(', ')}`);
 }
 
 // ==================== RUN ====================
 
 async function runAll() {
   const focusedCases = [
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
     ['--approval-e2e-only', runBrowserApprovalE2ECases],
     ['--private-restore-only', runBrowserPrivateRestoreCases],
     ['--logical-browser-only', runLogicalBrowserCases],
@@ -605,6 +605,7 @@ async function runAll() {
   await runBrowserPrivateRestoreCases();
   await runBrowserApprovalE2ECases();
   await runBrowserTerminalPauseCases();
+  await runBrowserProviderLifecycleCases();
   await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();

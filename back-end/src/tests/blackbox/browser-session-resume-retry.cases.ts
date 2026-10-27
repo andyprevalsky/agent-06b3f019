@@ -15,6 +15,7 @@ import {
   resumeNativeCreate,
   withBrowserResumeLifecycle,
 } from '../../providers/steel/lifecycleClaim';
+import { steelEnvironmentIdentity } from '../../providers/steel/sessionIdentity';
 
 async function resumeWithFirstCreateFailure(firstFailure: Error): Promise<string> {
   const taskId = randomUUID();
@@ -23,6 +24,19 @@ async function resumeWithFirstCreateFailure(firstFailure: Error): Promise<string
     sessionId: `old-${taskId}`,
     status: 'PAUSED',
   };
+  const context = await prisma.browserContext.create({
+    data: { userId: `resume-retry-${taskId}` },
+  });
+  await prisma.browserSession.create({
+    data: {
+      id: taskId,
+      contextId: context.id,
+      agentId: taskId,
+      provider: 'kernel',
+      sessionId: binding.sessionId,
+      status: 'PAUSED',
+    },
+  });
   const attempt = async (create: () => Promise<string>) => {
     const scope = browserResumeScope()!;
     await scope.beforeCreate('kernel');
@@ -35,6 +49,10 @@ async function resumeWithFirstCreateFailure(firstFailure: Error): Promise<string
         await attempt(() => Promise.reject(firstFailure)).catch(() => undefined);
         const created = await attempt(async () => nativeId);
         binding = { sessionId: created, status: 'ACTIVE' };
+        await prisma.browserSession.update({
+          where: { id: taskId },
+          data: { sessionId: created, status: 'ACTIVE' },
+        });
         await browserResumeScope()!.beforeHydration(created);
         return created;
       },
@@ -51,6 +69,7 @@ async function resumeWithFirstCreateFailure(firstFailure: Error): Promise<string
     await prisma.toolSideEffect.deleteMany({
       where: { operationKey: `steel-browser-task-lifecycle:${taskId}` },
     });
+    await prisma.browserContext.delete({ where: { id: context.id } });
   }
 }
 
@@ -67,6 +86,57 @@ export async function runBrowserResumeRetryAfterRejectedCreateCase(): Promise<vo
       /requires reconciliation before retry/,
       'an uncertain create must still block a second native create'
     );
+    const taskId = randomUUID();
+    const operationKey = `steel-browser-task-lifecycle:${taskId}`;
+    const source = `old-${taskId}`;
+    const candidate = randomUUID();
+    await prisma.toolSideEffect.create({
+      data: {
+        operationKey,
+        operationType: 'browser_task_resume',
+        status: 'STARTED',
+        externalId: randomUUID(),
+        request: {
+          source,
+          provider: 'steel',
+          requestId: candidate,
+          ownershipIdentity: steelEnvironmentIdentity(),
+          expiresAt: new Date(0).toISOString(),
+          phase: 'creating',
+          nativeOutstanding: true,
+          compatibility: 'default',
+        },
+      },
+    });
+    try {
+      await assert.rejects(
+        withBrowserResumeLifecycle(taskId, {
+          readBinding: async () => ({ sessionId: source, status: 'PAUSED' }),
+          compatibility: 'default',
+          reuseCompleted: true,
+          sourceEnded: () => true,
+          canFollow: async () => false,
+          inspect: async () => ({ id: candidate, status: 'active' }),
+          follow: async () => {
+            throw new Error('must not follow');
+          },
+          resume: async () => {
+            await browserResumeScope()!.beforeCreate('steel');
+            return resumeNativeCreate(async () => {
+              throw Object.assign(new Error('recovery GET failed'), { status: 404 });
+            });
+          },
+        }),
+        /recovery GET failed/
+      );
+      assert.equal(
+        (await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey } })).status,
+        'STARTED',
+        'a failed recovery GET is not a rejected native create'
+      );
+    } finally {
+      await prisma.toolSideEffect.delete({ where: { operationKey } });
+    }
     console.log('PASS resume retries a definitely rejected provider create within one resume');
   } finally {
     if (previousWorkspace === undefined) delete process.env.CONDUCTOR_WORKSPACE_NAME;

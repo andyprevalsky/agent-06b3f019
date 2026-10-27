@@ -1,13 +1,20 @@
 /** Private browser checkpoints use the existing encrypted artifact store. */
-import { createHash } from 'node:crypto';
-import type { Browser } from 'playwright';
+import { createHash, randomUUID } from 'node:crypto';
+import type { Browser, CDPSession, Frame, Page } from 'playwright';
 import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets';
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
-import { createOriginPayloadWriter } from '../steel/injectionOriginPage';
+import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
+import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
 
 type Storage = Awaited<ReturnType<ReturnType<Browser['contexts']>[number]['storageState']>>;
+type FrameStorage = {
+  origin: string;
+  sessionStorage: Array<{ name: string; value: string }>;
+  localStorage?: Array<{ name: string; value: string }>;
+  indexedDB?: string;
+};
 export type BrowserCheckpoint = {
   version: 1;
   userId: string;
@@ -17,6 +24,7 @@ export type BrowserCheckpoint = {
   tabs: Array<{
     url: string;
     sessionStorage: Array<{ name: string; value: string; origin?: string }>;
+    frames?: FrameStorage[];
   }>;
   limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'];
 };
@@ -24,10 +32,21 @@ const digest = (value: string | Buffer) => createHash('sha256').update(value).di
 export const EMPTY_BROWSER_BASELINE = 'browser-checkpoint:empty:v1';
 const userPrefix = (userId: string) => `user/${digest(userId)}/browser-checkpoints/`;
 
-async function assertLogicalBinding(taskId: string, nativeId: string | null): Promise<void> {
+async function assertLogicalBinding(
+  taskId: string,
+  expected: {
+    contextId: string;
+    sessionId: string | null;
+    checkpointRef: string | null;
+    checkpointRevision: number;
+  }
+): Promise<void> {
   const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
   if (
-    row.sessionId !== nativeId ||
+    row.contextId !== expected.contextId ||
+    row.sessionId !== expected.sessionId ||
+    row.checkpointRef !== expected.checkpointRef ||
+    row.checkpointRevision !== expected.checkpointRevision ||
     (row.controlState !== 'AGENT' &&
       (row.controlLeaseExpiresAt === null || row.controlLeaseExpiresAt.getTime() > Date.now()))
   )
@@ -76,12 +95,37 @@ export async function readBrowserCheckpoint(
   return value;
 }
 
+/** Validate saved state before native allocation, and again under the same owner before hydration. */
+export async function loadLogicalBrowserCheckpoint(taskId: string, requireSaved = false) {
+  const row = await prisma.browserSession.findUniqueOrThrow({
+    where: { id: taskId },
+    include: { context: true },
+  });
+  if (!row.logicalOwnerKey) throw new Error('Browser checkpoint requires a logical owner');
+  if ((requireSaved || row.checkpointRevision > 0) && !row.checkpointRef)
+    throw new Error('Logical browser saved checkpoint is missing');
+  const ref = row.checkpointRef ?? row.baselineCheckpointRef;
+  if (!ref) throw new Error('Logical browser checkpoint baseline is missing');
+  const checkpoint = await readBrowserCheckpoint(row.context.userId, ref);
+  if (
+    row.checkpointRef &&
+    ref !== EMPTY_BROWSER_BASELINE &&
+    (checkpoint.sourceLogicalId !== row.id || checkpoint.sourceRevision !== row.checkpointRevision)
+  )
+    throw new Error('Logical browser checkpoint revision or owner changed');
+  await assertLogicalBinding(taskId, row);
+  return { row, checkpoint };
+}
+
 export async function emptyBrowserCheckpoint(_userId: string): Promise<string> {
   return EMPTY_BROWSER_BASELINE;
 }
 
 /** Called before provider release; failure must prevent a successful pause. */
-export async function checkpointLogicalBrowser(nativeId: string): Promise<void> {
+export async function checkpointLogicalBrowser(
+  nativeId: string,
+  mutateOwned?: SteelLifecycleMutation
+): Promise<void> {
   const row = await prisma.browserSession.findUnique({
     where: { sessionId: nativeId },
     include: { context: true },
@@ -98,44 +142,89 @@ export async function checkpointLogicalBrowser(nativeId: string): Promise<void> 
   try {
     const context = browser.contexts()[0];
     if (!context) throw new Error('Browser checkpoint context missing');
-    const frameOrigins = new Set<string>();
-    const tabs = await Promise.all(
+    const previous = row.checkpointRef
+      ? (await loadLogicalBrowserCheckpoint(row.id)).checkpoint
+      : null;
+    const knownOrigins = new Set(
+      previous?.tabs.flatMap((tab) => [
+        new URL(tab.url).origin,
+        ...(tab.frames ?? []).map((frame) => frame.origin),
+        ...tab.sessionStorage.flatMap((entry) => (entry.origin ? [entry.origin] : [])),
+      ]) ?? []
+    );
+    const capturedTabs = await Promise.allSettled(
       context
         .pages()
         .filter((page) => /^https?:/.test(page.url()))
         .map(async (page) => {
-          const tabOrigin = new URL(page.url()).origin;
-          const sessionStorage: BrowserCheckpoint['tabs'][number]['sessionStorage'] = [];
-          const seenOrigins = new Set<string>();
+          const frames = new Map<string, FrameStorage>();
+          const origin = new URL(page.url()).origin;
           for (const frame of page.frames()) {
-            if (!/^https?:/.test(frame.url())) continue;
-            const origin = new URL(frame.url()).origin;
-            frameOrigins.add(origin);
-            if (seenOrigins.has(origin)) continue;
-            seenOrigins.add(origin);
-            const entries = await frame.evaluate<Array<{ name: string; value: string }>>(
-              'Object.entries(sessionStorage).map(([name,value]) => ({name,value}))'
-            );
-            sessionStorage.push(
-              ...entries.map((entry) => (origin === tabOrigin ? entry : { ...entry, origin }))
-            );
+            const captured = await readFrameStorage(frame, origin);
+            if (captured && captured.origin !== origin) frames.set(captured.origin, captured);
           }
-          return { url: page.url(), sessionStorage };
+          const missing = [...knownOrigins].filter(
+            (value) => value !== origin && !frames.has(value)
+          );
+          for (const [key, values] of await detachedTabStorage(page, missing)) {
+            if (values.sessionStorage.length || values.localStorage?.length || values.indexedDB)
+              frames.set(key, values);
+          }
+          return {
+            url: page.url(),
+            sessionStorage: [
+              ...(await page.evaluate<Array<{ name: string; value: string }>>(
+                'Object.entries(sessionStorage).map(([name,value]) => ({name,value}))'
+              )),
+              ...[...frames.values()].flatMap((frame) =>
+                frame.sessionStorage.map((entry) => ({ ...entry, origin: frame.origin }))
+              ),
+            ],
+            frames: [...frames.values()],
+          };
         })
     );
-    let storage = await context.storageState({ indexedDB: true });
-    // A fresh CDP connection does not know origins visited by earlier clients.
-    // Reuse the existing exact-origin synthetic reader to register live frame
-    // origins without reloading the merchant or making a site request.
-    const capturedOrigins = new Set(storage.origins.map(({ origin }) => origin));
-    const missingOrigins = [...frameOrigins].filter((origin) => !capturedOrigins.has(origin));
-    if (missingOrigins.length) {
-      const reader = createOriginPayloadWriter(context);
+    // Join every capture's exact cleanup before disconnecting, including when
+    // one concurrent tab failed preparation.
+    const failedCapture = capturedTabs.find((capture) => capture.status === 'rejected');
+    if (failedCapture?.status === 'rejected') throw failedCapture.reason;
+    const tabs = capturedTabs.map((capture) => {
+      if (capture.status === 'rejected') throw capture.reason;
+      return capture.value;
+    });
+    // A fresh CDP connection has no visited-origin history. Register the
+    // existing origins on a private, locally fulfilled page for first-party
+    // localStorage/IndexedDB. Frame DOM storage is captured in its partition above.
+    // Existing tabs must not navigate merely to take a checkpoint.
+    const origins = new Set(
+      tabs.flatMap((tab) => [new URL(tab.url).origin, ...tab.frames.map((frame) => frame.origin)])
+    );
+    for (const origin of knownOrigins) origins.add(origin);
+    const capturePage = origins.size ? await context.newPage() : null;
+    let captureCdp: Awaited<ReturnType<typeof context.newCDPSession>> | null = null;
+    let storage: Storage;
+    try {
+      if (capturePage) {
+        captureCdp = await context.newCDPSession(capturePage);
+        // Routing does not intercept service-worker responses. Scope bypass to
+        // this disposable target so capture cannot execute the site's worker.
+        await captureCdp!.send('Network.enable');
+        await captureCdp!.send('Network.setBypassServiceWorker', { bypass: true });
+        await capturePage.route('**/*', (route) => route.fulfill({ body: '<!doctype html>' }));
+        for (const origin of origins) {
+          await assertLogicalBinding(row.id, row);
+          await capturePage.goto(`${origin}/.rose-checkpoint-${randomUUID()}`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30_000,
+          });
+        }
+      }
+      storage = await context.storageState({ indexedDB: true });
+    } finally {
       try {
-        for (const origin of missingOrigins) await reader.writeOriginScript(origin, 'void 0');
-        storage = await context.storageState({ indexedDB: true });
+        await captureCdp?.detach();
       } finally {
-        await reader.close();
+        await capturePage?.close();
       }
     }
     const empty = storage.cookies.length === 0 && storage.origins.length === 0 && tabs.length === 0;
@@ -150,15 +239,19 @@ export async function checkpointLogicalBrowser(nativeId: string): Promise<void> 
           tabs,
           limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'],
         });
-    const changed = await prisma.browserSession.updateMany({
-      where: {
-        id: row.id,
-        sessionId: nativeId,
-        checkpointRevision: row.checkpointRevision,
-        OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
-      },
-      data: { checkpointRef: ref, checkpointRevision: { increment: 1 } },
-    });
+    const publish = (database: typeof prisma | import('@prisma/client').Prisma.TransactionClient) =>
+      database.browserSession.updateMany({
+        where: {
+          id: row.id,
+          contextId: row.contextId,
+          context: { userId: row.context.userId },
+          sessionId: nativeId,
+          checkpointRevision: row.checkpointRevision,
+          OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
+        },
+        data: { checkpointRef: ref, checkpointRevision: { increment: 1 } },
+      });
+    const changed = mutateOwned ? await mutateOwned(publish) : await publish(prisma);
     if (changed.count !== 1) throw new Error('Browser checkpoint binding changed');
   } finally {
     await browser.close();
@@ -170,45 +263,181 @@ export async function restoreLogicalBrowserCheckpoint(
   taskId: string,
   browser: Browser
 ): Promise<void> {
-  const row = await prisma.browserSession.findUniqueOrThrow({
-    where: { id: taskId },
-    include: { context: true },
-  });
-  if (!row.logicalOwnerKey) return;
-  const ref = row.checkpointRef ?? row.baselineCheckpointRef;
-  if (!ref) throw new Error('Logical browser has no baseline');
-  const checkpoint = await readBrowserCheckpoint(row.context.userId, ref);
+  const { row, checkpoint } = await loadLogicalBrowserCheckpoint(taskId);
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser checkpoint restore context missing');
-  await assertLogicalBinding(taskId, row.sessionId);
+  await assertLogicalBinding(taskId, row);
   await context.setStorageState(checkpoint.storage);
   const targets = checkpoint.tabs.length
     ? checkpoint.tabs
     : [row.currentUrl ?? row.startUrl]
         .filter((value): value is string => value !== null)
         .map((url) => ({ url, sessionStorage: [] }));
-  await assertLogicalBinding(taskId, row.sessionId);
+  await assertLogicalBinding(taskId, row);
   const blank = context.pages().find((page) => page.url() === 'about:blank');
+  const prepared: Array<{ page: Page; url: string }> = [];
   for (let index = 0; index < targets.length; index++) {
-    await assertLogicalBinding(taskId, row.sessionId);
+    await assertLogicalBinding(taskId, row);
     const target = targets[index]!;
-    const origin = new URL(target.url).origin;
     const page = index === 0 && blank ? blank : await context.newPage();
-    const cdp = target.sessionStorage.length ? await context.newCDPSession(page) : null;
-    if (cdp) await cdp.send('Page.enable');
-    const script = cdp
-      ? await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-          source: `for (const entry of ${JSON.stringify(target.sessionStorage)}) { if (location.origin === (entry.origin ?? ${JSON.stringify(origin)})) sessionStorage.setItem(entry.name,entry.value); }`,
-        })
-      : null;
-    try {
-      await page.goto(target.url, { waitUntil: 'load', timeout: 30_000 });
-    } finally {
-      if (cdp && script)
-        await cdp.send('Page.removeScriptToEvaluateOnNewDocument', {
-          identifier: script.identifier,
-        });
-      await cdp?.detach();
+    await seedTabSessionStorage(page, target);
+    prepared.push({ page, url: target.url });
+  }
+  for (const { page, url } of prepared) {
+    await assertLogicalBinding(taskId, row);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  }
+}
+
+/** Seed each origin in the destination tab's storage namespace, including late-created frames. */
+async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs'][number]) {
+  // Both version-1 layouts exist: older callers put child entries in this
+  // array with an origin; partition-aware checkpoints also carry frames.
+  const origin = new URL(target.url).origin;
+  const framesByOrigin = new Map(
+    (target.frames ?? []).map((frame) => [
+      frame.origin,
+      { ...frame, sessionStorage: [...frame.sessionStorage] },
+    ])
+  );
+  const mainEntries = target.sessionStorage.filter(
+    (entry) => !entry.origin || entry.origin === origin
+  );
+  for (const entry of target.sessionStorage) {
+    if (!entry.origin || entry.origin === origin) continue;
+    const frame = framesByOrigin.get(entry.origin) ?? { origin: entry.origin, sessionStorage: [] };
+    if (!frame.sessionStorage.some((saved) => saved.name === entry.name))
+      frame.sessionStorage.push({ name: entry.name, value: entry.value });
+    framesByOrigin.set(entry.origin, frame);
+  }
+  const frames = [...framesByOrigin.values()];
+  if (
+    !target.sessionStorage.length &&
+    !frames.some(
+      (frame) => frame.sessionStorage.length || frame.localStorage?.length || frame.indexedDB
+    )
+  )
+    return;
+  const cdp = await page.context().newCDPSession(page);
+  const fulfill = (route: import('playwright').Route) => route.fulfill({ body: '<!doctype html>' });
+  try {
+    await cdp.send('Page.enable');
+    await cdp.send('Network.enable');
+    await cdp.send('Network.setBypassServiceWorker', { bypass: true });
+    await page.route('**/*', fulfill);
+    await page.goto(`${new URL(target.url).origin}/.rose-session-restore-${randomUUID()}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    await page.evaluate((entries) => {
+      for (const { name, value } of entries) sessionStorage.setItem(name, value);
+    }, mainEntries);
+    for (const saved of frames) {
+      await withOriginFrame(page, saved.origin, async (frame) => {
+        await frame.evaluate((saved) => {
+          for (const { name, value } of saved.sessionStorage) sessionStorage.setItem(name, value);
+          for (const { name, value } of saved.localStorage ?? []) localStorage.setItem(name, value);
+        }, saved);
+        if (saved.indexedDB) await restoreFrameIndexedDB(frame, saved.indexedDB);
+      });
     }
+  } finally {
+    try {
+      await page.unroute('**/*', fulfill);
+    } finally {
+      try {
+        await cdp.send('Network.setBypassServiceWorker', { bypass: false });
+      } finally {
+        await cdp.detach();
+      }
+    }
+  }
+}
+
+/** A popup clones its opener's whole session namespace, including currently unloaded origins. */
+async function detachedTabStorage(page: Page, origins: string[]) {
+  const result = new Map<string, FrameStorage>();
+  if (!origins.length) return result;
+  const topOrigin = new URL(page.url()).origin;
+  const cdp = await page.context().newCDPSession(page);
+  let popup: Page | undefined;
+  let popupPending: Promise<Page> | undefined;
+  let popupCdp: CDPSession | undefined;
+  try {
+    const { frameTree } = await cdp.send('Page.getFrameTree');
+    const { executionContextId } = await cdp.send('Page.createIsolatedWorld', {
+      frameId: frameTree.frame.id,
+      worldName: 'rose-checkpoint',
+    });
+    // Isolated-world builtins avoid any merchant override of window.open.
+    const marker = `about:blank#rose-checkpoint-${randomUUID()}`;
+    popupPending = page.waitForEvent('popup', {
+      timeout: 30_000,
+      predicate: async (candidate) =>
+        candidate.url() === marker && (await candidate.opener()) === page,
+    });
+    await cdp.send('Runtime.evaluate', {
+      expression: `window.open(${JSON.stringify(marker)}, "_blank")`,
+      contextId: executionContextId,
+      userGesture: true,
+    });
+    popup = await popupPending;
+    popupCdp = await page.context().newCDPSession(popup);
+    await popupCdp.send('Network.enable');
+    await popupCdp.send('Network.setBypassServiceWorker', { bypass: true });
+    await popup.route('**/*', (route) => route.fulfill({ body: '<!doctype html>' }));
+    // Keep the opener's top-level site: navigating the clone to each child
+    // origin would select its first-party storage instead of the saved partition.
+    await popup.goto(`${topOrigin}/.rose-checkpoint-${randomUUID()}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    for (const origin of origins) {
+      const saved = await withOriginFrame(popup, origin, (frame) =>
+        readFrameStorage(frame, topOrigin)
+      );
+      if (saved) result.set(origin, saved);
+    }
+    return result;
+  } finally {
+    try {
+      await popupCdp?.detach();
+    } finally {
+      try {
+        await (popup ?? (await popupPending?.catch(() => undefined)))?.close();
+      } finally {
+        await cdp.detach();
+      }
+    }
+  }
+}
+
+/** Read through the initialized frame, not its still-empty CDP URL projection. */
+async function readFrameStorage(frame: Frame, topOrigin: string): Promise<FrameStorage | null> {
+  const state = await frame.evaluate<FrameStorage | null>(`(() => {
+    if (!/^https?:$/.test(location.protocol) || location.origin === ${JSON.stringify(topOrigin)}) return null;
+    const entries = storage => Object.entries(storage).map(([name,value]) => ({name,value}));
+    return { origin: location.origin, sessionStorage: entries(sessionStorage), localStorage: entries(localStorage) };
+  })()`);
+  if (state) state.indexedDB = await captureFrameIndexedDB(frame);
+  return state;
+}
+
+/** Local route fulfillment on the caller-owned page keeps the top-level storage partition. */
+async function withOriginFrame<T>(page: Page, origin: string, use: (frame: Frame) => Promise<T>) {
+  const url = `${origin}/.rose-checkpoint-${randomUUID()}`;
+  const element = await page.evaluateHandle(`(() => {
+    const iframe = document.createElement('iframe');
+    iframe.src = ${JSON.stringify(url)};
+    document.body.append(iframe);
+    return iframe;
+  })()`);
+  try {
+    const frame = await element.asElement()?.contentFrame();
+    if (!frame) throw new Error('Browser checkpoint frame storage target missing');
+    await frame.waitForURL(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    return await use(frame);
+  } finally {
+    await element.dispose();
   }
 }

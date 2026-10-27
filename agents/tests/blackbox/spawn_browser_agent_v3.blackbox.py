@@ -22731,57 +22731,44 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
 
 
 async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance():
-    """A declined sign-in-help request releases the kept-alive browser and ends the task.
-
-    The decline used to be read as "the user signed in": the task reconnected to a
-    signed-out page and asked the user again. Now it must not touch the session
-    except to release it, and must report the decline as its (non-error) result.
-    The handoff may have replaced the provider session while the task was paused,
-    so the task's current session is what gets released, not the saved id.
-    """
-    from domains.spawn_browser_agent_v3.handler import AUTH_ASSISTANCE_DECLINED, spawn_browser_agent_activity_v3
-
-    close_mock = AsyncMock()
-    fetch_mock = AsyncMock(return_value={"session_id": "session-refreshed-by-auth-page"})
-    resume_mock = AsyncMock()
-    schema_mock = AsyncMock(side_effect=AssertionError("refusal must not call a model"))
-    with (
-        patch("helpers.llm._generate_response_schema_with_rose", schema_mock),
-        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
-        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
-        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
-        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
-        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
-    ):
-        result = await spawn_browser_agent_activity_v3(
-            user_id="user-1",
-            agent_id="agent-1",
-            goal="Tell me my member number",
-            tool_call_id="tool-1",
-            task_id="task-1",
-            is_resume=True,
-            output_schema={"fields": [{"name": "result", "type": "string"}]},
-            use_claude_mode=False,
-            write_lock_resume_state={
-                "approval_type": AUTH_ASSISTANCE_DECLINED,
-                "user_instruction_messages": [{"role": "user", "content": "Include account notes."}],
-                "task_id": "task-1",
-                "session_id": "session-1",
-                "cdp_url": "ws://old",
-                "auth_realm": "shop.example",
-            },
-        )
-
-    assert result["status"] == "completed" and result["success"] is False, result
-    assert result["user_declined_auth"] is True and result["task_id"] == "task-1", result
-    assert result["message"] == "User declined to sign in to shop.example.", result
-    assert close_mock.await_count == 1
-    assert close_mock.await_args.args[1] == "session-refreshed-by-auth-page", close_mock.await_args
-    assert close_mock.await_args.kwargs == {"pause": True}
-    assert fetch_mock.await_count == 1 and fetch_mock.await_args.args[1] == "task-1"
-    resume_mock.assert_not_awaited()
-    schema_mock.assert_not_awaited()
+    """A sign-in-help denial is a native result, not task completion or sign-in."""
+    import logging
+    from domains.spawn_browser_agent_v3 import handler as h
+    from workflows.agent_workflow import AgentWorkflow
+    for provider in ("steel", "kernel"):
+        for feedback in ("Continue without signing in.", ""):
+            for target in (None, {"kind": "iphone"}):
+                turns = []
+                h._append_browser_turn_messages(turns,
+                    unified_action={"action": "request_user_assistance_for_authentication", "params": {}},
+                    result={"success": True, "request_id": "auth-request", **({"target": target} if target else {})},
+                    tool_call_id="denied-auth-call")
+                rows = ([{"id": "auth-feedback", "role": "USER", "text": feedback,
+                          "timestamp": "2026-10-14T17:28:33.341Z"}] if feedback else [])
+                workflow_instance = AgentWorkflow()
+                workflow_instance.agent_id, workflow_instance.user_id = "agent-1", "user-1"
+                async def poll_auth_feedback(*_args):
+                    workflow_instance.context = rows
+                workflow_instance._poll_messages = poll_auth_feedback
+                workflow_instance._handle_tool_event = AsyncMock()
+                with patch.object(h.workflow, "logger", logging.getLogger("auth-decline-intake")):
+                    await workflow_instance.receive_user_response(json.dumps({
+                        "request_id": "auth-request", "response": "__REJECTED__", "user_message": feedback}))
+                assert workflow_instance._signal_responses["auth-request"] == "__REJECTED__"
+                actor, judge = await _exercise_browser_resume_user_input(rows, provider=provider,
+                    approval_type=h.AUTH_ASSISTANCE_DECLINED,
+                    actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+                    resume_overrides={"browser_turn_messages": turns, "rejected_action": {
+                        "tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
+                        "request_id": "auth-request", "url": "https://example.com"}})
+                denied = [m for m in actor.captured_turns[0] if m.get("tool_call_id") == "denied-auth-call"]
+                assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
+                assert json.loads(denied[0]["content"])["success"] is False
+                assert [m["content"] for m in actor.captured_turns[0] if m.get("role") == "user"] == ([feedback] if feedback else [])
+                if feedback:
+                    assert sum(m.get("text") == feedback for m in judge.await_args.kwargs["args"][0]) == 1
+                    actor.schema_generator.assert_awaited_once()
+                assert actor.activity_result["task_id"] == "task-1"
 
 
 @_in_browser_activity_context
@@ -23321,7 +23308,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -23338,7 +23325,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         "fingerprint_injection": None,
         "passwords": [],
         "auth_options": {"realm": "example.com"},
-        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "browser_session_metadata": {"provider": provider, "profile_id": "profile-1"},
         "credential_ref": {"kind": "steel_session", "id": "steel-auth-1"},
         "same_session_available": True,
     }
@@ -23422,6 +23409,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         }
     if off_phone_action:
         actor_responses[0] = {"action": {"action": "phone", "params": {"mode": "status"}}, "tool_call_id": "stale-phone", "_phone_snapshot": {"enabled": True}, "usage": {}}
+    if actor_responses_override is not None:
+        actor_responses = actor_responses_override
     captured_turns = []
     captured_system_context = []
     decision_order = []
@@ -23594,6 +23583,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
                 "task_id": "task-1",
                 "user_message_cursor": "2026-10-14T17:21:35.438+00:00",
                 "pending_action": pending_action,
+                **(resume_overrides or {}),
             },
         )
 
@@ -23603,9 +23593,21 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     if approved_message_intent:
         message_binding.assert_awaited_once()
+    if actor_responses_override is not None:
+        assert actor_call.await_count, "auth denial terminalized the browser before its next model decision"
+        assert result["status"] == "completed" and result["success"]
+        assert result["session_id"] == "session-1"
+        restart_mock.assert_not_awaited()
+        reconnect_mock.assert_not_awaited()
+        create_auth_mock.assert_not_awaited()
+        assert auth_boundary_calls == []
+        actor_call.activity_result = result
+        return actor_call, judge_call
     if browser_auth_pause:
         assert result["status"] == "awaiting_auth_assistance"
         assert result["request_id"] == "browser-attention"
+        assert result["pending_tool_call_id"]
+        assert any(m.get("tool_call_id") == result["pending_tool_call_id"] for m in result["browser_turn_messages"])
         assert auth_boundary_calls == ["restart", "create_assistance"]
         return result
     if off_phone_action:
@@ -23668,6 +23670,235 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     actor_call.activity_result = result
     return actor_call, judge_call
+
+
+async def test_received_rejection_keeps_authored_feedback_in_browser():
+    import logging
+    from workflows.agent_workflow import AgentWorkflow
+    from domains.request_user_approval import service as approvals
+    from domains.request_user_approval.types import UserRejectedError
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    wf = AgentWorkflow()
+    wf.agent_id, wf.user_id = "agent-1", "user-1"
+    row = {"id": "native-denial-row", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER",
+           "text": "i want it iced", "metadata": {"source": "attention_response", "attentionRequestId": "request-1"}}
+    async def poll(*args):
+        wf.context = [row]
+    wf._poll_messages = poll
+    wf._handle_tool_event = AsyncMock()
+    with (patch.object(approvals.workflow, "logger", logging.getLogger("rejection-intake-test")),
+          patch.object(approvals, "wait_condition_or_generation_handoff", AsyncMock())):
+        await wf.receive_user_response(json.dumps({"request_id": "request-1", "response": "__REJECTED__",
+                                                  "user_message": row["text"]}))
+        with pytest.raises(UserRejectedError) as rejected:
+            await approvals.request_user_approval_direct(
+                wf, "Approve checkout?", resume_request={"attention_request_id": "request-1", "tool_call_id": "approval-1"})
+    assert rejected.value.rejection_message == row["text"]
+    assert "request-1" not in wf._signal_responses
+    history = []
+    _append_browser_turn_messages(history, unified_action={"action": "click", "params": {"index": 4}},
+        result={"status": "needs_write_approval", "success": False}, tool_call_id="original-denied-call")
+    actor, judge = await _exercise_browser_resume_user_input([row, row], approval_type="rejected",
+        resume_overrides={"browser_turn_messages": history,
+                          "rejected_action": {"tool_call_id": "original-denied-call", "approval_type": "purchase", "url": "https://example.com"}})
+    users = [m["content"] for m in actor.captured_turns[0] if m.get("role") == "user"]
+    assert users == [row["text"]], "actual authored input lost, duplicated or synthesized"
+    assert sum(m.get("text") == row["text"] for m in judge.await_args.kwargs["args"][0]) == 1
+
+
+async def test_browser_rejection_reaches_actor_and_verifier_as_native_outcome():
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    action = {"action": "click", "params": {"index": 4}, "thinking": "Submit checkout"}
+    for provider in ("steel", "kernel"):
+        for feedback in ("i want it iced", ""):
+            history = []
+            _append_browser_turn_messages(history, unified_action=action,
+                result={"status": "needs_write_approval", "success": False}, tool_call_id="denied-native-call")
+            rows = [{"id": "actual-feedback", "timestamp": "2026-10-14T17:28:33.341Z",
+                     "role": "USER", "text": feedback}] if feedback else []
+            actor, judge = await _exercise_browser_resume_user_input(rows, pending_action=action, provider=provider,
+                resume_overrides={"approval_type": "rejected", "browser_turn_messages": history,
+                                  "rejected_action": {"tool_call_id": "denied-native-call", "approval_type": "purchase", "url": "https://example.com"}})
+            actor.pending_execution.assert_not_awaited()
+            assert actor.decision_order[0] == "model", "denial replayed the pending protected action"
+            turns = actor.captured_turns[0]
+            denied = [m for m in turns if m.get("tool_call_id") == "denied-native-call"]
+            assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
+            users = [m["content"] for m in turns if m.get("role") == "user"]
+            assert users == ([feedback] if feedback else []), "denial fabricated or lost actual user input"
+            evidence = judge.await_args.kwargs["args"][0]
+            if feedback:
+                assert sum(m.get("text") == feedback for m in evidence) == 1
+            assert "denied-native-call" in json.dumps(turns)
+
+
+def test_denial_resolves_exact_call_and_revokes_site_consent():
+    from domains.spawn_browser_agent_v3.handler import _finalize_rejected_browser_approval, _append_browser_turn_messages
+    from domains.spawn_browser_agent_v3.service_actions import is_approval_valid, _evaluate_element_text_write_lock
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS
+    pending = {"status": "needs_payment_card_approval", "success": False}
+    grants = {"site": {"domain": "example.com", "approved_at": time_module.time(), "persistent": True},
+              "purchase": {"domain": "checkout.example.com", "approved_at": time_module.time()},
+              "email_send": {"domain": "other.test", "approved_at": time_module.time()}}
+    state = {
+        "pending_action": {"action": "click", "params": {"index": 4}},
+        "rejected_action": {"tool_call_id": "denied-call", "history_step": 7,
+                            "approval_type": "purchase", "url": "https://checkout.example.com"},
+        "browser_turn_messages": [
+            {"role": "tool", "tool_call_id": "denied-call", "content": json.dumps(pending)},
+            {"role": "tool", "tool_call_id": "unrelated-call", "content": json.dumps(pending)}],
+        "action_history": [{"step": 7, "action": "request_payment_card", "result": dict(pending)},
+                           {"step": 8, "action": "request_payment_card", "result": dict(pending)}],
+        "write_lock_approvals": copy.deepcopy(grants),
+        "payment_card_refs": {ref: f"owned-{ref}" for ref in PAYMENT_CARD_SECRET_REFS},
+        "payment_card_last4": "1234",
+        "private_browser_runtime": {"write_lock_approvals": copy.deepcopy(grants)},
+    }
+    state["browser_turn_messages"] = []
+    for call_id in ("denied-call", "unrelated-call"):
+        _append_browser_turn_messages(state["browser_turn_messages"],
+            unified_action={"action": "request_payment_card", "params": {}}, result=dict(pending), tool_call_id=call_id)
+    _finalize_rejected_browser_approval(state)
+    once = copy.deepcopy(state)
+    _finalize_rejected_browser_approval(state)
+    assert state == once, "duplicate denial changed already resolved state"
+    rows = [m for m in state["browser_turn_messages"] if m.get("role") == "tool"]
+    assert json.loads(rows[0]["content"])["status"] == "rejected", "denied native call was not resolved"
+    assert json.loads(rows[1]["content"]) == pending, "denial changed an unrelated pending call"
+    assert state["action_history"][0]["result"]["status"] == "rejected"
+    assert state["action_history"][1]["result"] == pending
+    for approval_state in (state, state["private_browser_runtime"]):
+        assert not is_approval_valid(approval_state["write_lock_approvals"], "purchase", "https://checkout.example.com")
+        assert is_approval_valid(approval_state["write_lock_approvals"], "email_send", "https://other.test")
+    assert state["payment_card_last4"] == "1234", "denial erased historical card evidence"
+    blocked = _evaluate_element_text_write_lock(
+        element_text="Place order", element_text_for_question="Place order", action_label="click",
+        write_lock_approvals=state["write_lock_approvals"], secret_refs=state.get("payment_card_refs"),
+        current_url="https://checkout.example.com", system_name="Rose")
+    assert blocked is not None, "retained card capability silently authorized a denied purchase"
+    return_grant = {"return": {"domain": "shop.example.com", "approved_at": time_module.time()},
+                    "site": {"domain": "example.com", "approved_at": time_module.time(), "persistent": True},
+                    "email_send": {"domain": "other.test", "approved_at": time_module.time()}}
+    return_state = {
+        "rejected_action": {"tool_call_id": "denied-return", "approval_type": "return",
+                            "url": "https://shop.example.com/orders"},
+        "browser_turn_messages": [{"role": "tool", "tool_call_id": "denied-return",
+                                   "content": json.dumps({"status": "needs_write_approval"})}],
+        "write_lock_approvals": copy.deepcopy(return_grant),
+        "private_browser_runtime": {"write_lock_approvals": copy.deepcopy(return_grant)},
+    }
+    return_state["browser_turn_messages"] = []
+    _append_browser_turn_messages(return_state["browser_turn_messages"],
+        unified_action={"action": "click", "params": {"index": 4}},
+        result={"status": "needs_write_approval"}, tool_call_id="denied-return")
+    _finalize_rejected_browser_approval(return_state)
+    for approvals in (return_state["write_lock_approvals"], return_state["private_browser_runtime"]["write_lock_approvals"]):
+        blocked = _evaluate_element_text_write_lock(
+            element_text="Confirm return", element_text_for_question="Confirm return", action_label="click",
+            write_lock_approvals=approvals, current_url="https://shop.example.com/orders", system_name="Rose")
+        assert blocked is not None, "denied return remains authorized by prior typed consent"
+        assert is_approval_valid(approvals, "email_send", "https://other.test")
+        assert is_approval_valid(approvals, "purchase", "https://shop.example.com"), "return denial removed unrelated purchase consent"
+
+
+async def test_legacy_rejection_recovers_existing_native_call_and_history():
+    """Old parked payloads need no new call-id/step fields to reach the actor."""
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    for provider in ("steel", "kernel"):
+        for kind in ("purchase", "payment", "auth_assistance"):
+            action = {
+                "action": "request_user_assistance_for_authentication" if kind == "auth_assistance"
+                else "request_payment_card" if kind == "payment" else "click",
+                "params": {"index": 24513} if kind == "purchase" else {},
+            }
+            result = ({"success": True, "request_id": "legacy-auth-request"}
+                      if kind == "auth_assistance" else
+                      {"status": "awaiting_payment_card_approval" if kind == "payment" else "needs_write_approval",
+                       "approval_type": kind, "success": False})
+            turns = []
+            h._append_browser_turn_messages(turns, unified_action=action, result=result, tool_call_id="legacy-native-call")
+            original_call = copy.deepcopy(turns[0])
+            state = {
+                "approval_type": h.AUTH_ASSISTANCE_DECLINED if kind == "auth_assistance" else "rejected",
+                "browser_turn_messages": turns,
+                "action_history": [{"step": 7, "action": action["action"], "params": action["params"], "result": result}],
+            }
+            if kind != "auth_assistance":
+                state["rejected_action"] = {"approval_type": kind, "url": "https://example.com"}
+            # Mirror the deployed payload: no pending_tool_call_id/history_step,
+            # and old auth-decline state did not have rejected_action at all.
+            assert not state.get("pending_tool_call_id") and not state.get("pending_action_history_step")
+            finalized = copy.deepcopy(state)
+            h._finalize_rejected_browser_approval(finalized)
+            assert finalized["rejected_action"]["tool_call_id"] == "legacy-native-call"
+            assert finalized["rejected_action"]["history_step"] == 7
+            assert finalized["action_history"][0]["result"]["status"] == "rejected"
+            assert finalized["action_history"][0]["params"] == action["params"]
+            actor, judge = await _exercise_browser_resume_user_input(
+                provider=provider, approval_type=state["approval_type"], resume_overrides=state,
+                actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+            )
+            observed = actor.captured_turns[0]
+            assert observed[0] == original_call
+            denied = [m for m in observed if m.get("tool_call_id") == "legacy-native-call"]
+            assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
+            assert len(observed) == 2, "legacy rejection injected a synthetic message"
+            assert actor.activity_result["task_id"] == "task-1" and judge.await_count == 1
+
+
+async def test_manager_rejected_action_continues_same_browser():
+    """Actual gate denial resumes its owner, without granting or replaying the action."""
+    from domains.spawn_browser_agent_v3 import handler as h
+    from tools.request_user_approval import UserRejectedError
+
+    for provider in ("steel", "kernel"):
+        for payment in (False, True):
+            parked = copy.deepcopy(_AWAITING_PAYMENT_CARD_APPROVAL if payment else _AWAITING_PURCHASE_WRITE_APPROVAL)
+            parked.update({
+                "provider": provider,
+                "browser_resume_context_ref": {"path": "private-existing-checkpoint"},
+                "agent_inbox_state": {"last_message_id": "already-delivered"},
+                "user_instruction_message_ids": ["original-user-source"],
+                "browser_output_schema": {"type": "object", "properties": {"receipt": {"type": "string"}}},
+            })
+            calls, events = [], []
+            wf = SimpleNamespace(user_id="user-1", agent_id="22222222-2222-4222-8222-222222222222",
+                                 is_paused=False, write_lock_enabled=True, system_name="Rose")
+
+            def start(*args, **kwargs):
+                activity_args = kwargs["args"]
+                calls.append(copy.deepcopy(activity_args))
+                if len(calls) > 1:
+                    assert not _browser_manager_terminal_events(events), "denial terminated the browser before continuation"
+                    state = activity_args[12]
+                    assert activity_args[4] == parked["task_id"] and activity_args[5] == parked["session_id"]
+                    assert activity_args[7] is True and activity_args[-2] == calls[0][-2]
+                    assert state.get("pending_action") is None, "denied action was scheduled for execution"
+                    assert not state.get("write_lock_approved_at"), "denial granted approval"
+                    assert state.get("write_lock_approvals") == {}, "denial unlocked a protected action"
+                    for key in ("browser_resume_context_ref", "agent_inbox_state", "user_instruction_message_ids", "browser_output_schema"):
+                        assert state[key] == parked[key], f"denial lost {key}"
+                outcome = parked if len(calls) <= 2 else {**parked, "status": "completed", "success": True, "message": "fixture completion"}
+                return _TerminalBoundaryHandle(copy.deepcopy(outcome))
+
+            async def execute(name, *args, **kwargs):
+                assert name == "lookup_purchase_activity", f"denial executed a payment side effect: {name}"
+                return {"found": False, "reusable": False, "purchase": None}
+
+            with (
+                patch.object(h.workflow, "start_activity", side_effect=start),
+                patch.object(h.workflow, "execute_activity", side_effect=execute),
+                patch.object(h.workflow, "wait_condition", AsyncMock(return_value=None)),
+                patch.object(h.workflow, "now", return_value=datetime(2026, 10, 26, tzinfo=timezone.utc)),
+                patch("tools.request_user_approval.request_user_approval_direct",
+                      AsyncMock(side_effect=[UserRejectedError(rejection_message="i want it iced"), UserRejectedError()])),
+            ):
+                async for event in h.SpawnBrowserAgentManagerV3().execute_tool(wf, {"goal": "Complete the user's purchase"}, "same-browser-inbox"):
+                    events.append(event)
+            assert len(calls) == 3, f"{provider}: rejection returned to root instead of continuing the same browser"
+            terminals = _browser_manager_terminal_events(events)
+            assert len(terminals) == 1 and terminals[0].title == "Browser automation complete"
 
 
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
@@ -25830,7 +26061,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             else "request_payment_card"
             if pause == "payment"
             else "attempt_completion"
-            if pause == "completed"
+            if pause in {"completed", "declined"}
             else "scroll"
         )
         session_info = {
@@ -25959,6 +26190,17 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
         }
         if getattr(_lifecycle_probe, "resume_state", None):
             resume_state = copy.deepcopy(_lifecycle_probe.resume_state)
+        if pause == "declined":
+            handler._append_browser_turn_messages(
+                resume_state["browser_turn_messages"],
+                unified_action={"action": "request_user_assistance_for_authentication", "params": {}},
+                result={"success": True, "request_id": "denied-auth-234"},
+                tool_call_id="denied-auth-call-234",
+            )
+            resume_state["rejected_action"] = {
+                "tool_call_id": "denied-auth-call-234", "approval_type": "auth_assistance",
+                "request_id": "denied-auth-234", "url": raw_url,
+            }
         if pause == "max_steps":
             # Exercise the native terminal branch with a single fixture step.
             patches.append(patch(prefix + "MAX_ITERATIONS", 1))
@@ -26171,7 +26413,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 "label": "{{secret:pwd:url}}",
             }
             assert finished[-1]["message"] == "{{secret:pwd:url}}"
-        if pause in {"completed", "max_steps"}:
+        if pause in {"completed", "declined", "max_steps"}:
             assert judge.await_count == 1
             verifier_args = judge.await_args.kwargs["args"]
             assert verifier_args[5] == ("verifier_browser_max_steps" if pause == "max_steps" else "verifier_browser")
@@ -26201,7 +26443,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                     "text": "[image omitted from Temporal resume]",
                 }, "untrusted verifier media reached the provider"
             assert secret not in str(context)
-        if pause in {"completed", "max_steps"}:
+        if pause in {"completed", "declined", "max_steps"}:
             assert result["browser_output_schema"]["fields"][0] == {
                 **output_schema["fields"][0],
                 "description": visible_url,
@@ -27036,18 +27278,6 @@ async def test_manager_failure_before_activity_start_names_no_task():
     assert events[-1].metadata == {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
 
 
-async def test_manager_write_lock_rejection_terminal_is_task_scoped():
-    from tools.request_user_approval import UserRejectedError
-
-    _, events, raised = await _run_manager_with_parked_activity(
-        _AWAITING_PURCHASE_WRITE_APPROVAL,
-        approval_error=UserRejectedError(rejection_message="not now"),
-    )
-
-    assert raised is None
-    terminal = events[-1]
-    assert terminal.title == "Action blocked by user"
-    assert terminal.metadata == {**_TASK_SCOPED_TERMINAL, "code": "write_lock_rejected"}
 
 
 async def test_manager_auth_assistance_failure_terminal_is_task_scoped():
@@ -27426,7 +27656,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
 
 
 async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assistance():
-    """A decline is passed to the browser activity as a decline, and ends as a clean result."""
+    """Declining assistance continues its exact owner; only actual completion ends it."""
     from domains.spawn_browser_agent_v3.handler import AUTH_ASSISTANCE_DECLINED, SpawnBrowserAgentManagerV3
     from tools.base import MessageStatus
     from utils.attention_requests import REJECTION_SENTINEL
@@ -27468,15 +27698,17 @@ async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assista
             "browser_url": "https://steel/debug",
             "cdp_url": "ws://old",
             "step_count": 3,
+            "pending_tool_call_id": "auth-call",
+            "pending_action_history_step": 3,
+            "browser_resume_context_ref": {"path": "saved-auth-context"},
         }
     )
-    declined_message = "User declined to sign in to example.com."
+    completed_message = "Fixture verifier accepted the continued task."
     second = _FakeActivityHandle(
         {
             "status": "completed",
-            "success": False,
-            "user_declined_auth": True,
-            "message": declined_message,
+            "success": True,
+            "message": completed_message,
             "task_id": "task-1",
             "output_files": [],
         }
@@ -27487,6 +27719,8 @@ async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assista
         workflow_instance._signal_responses["uar1"] = REJECTION_SENTINEL
 
     def fake_start_activity(*args, **kwargs):
+        if start_calls:
+            assert not _browser_manager_terminal_events(events), "assistance denial terminalized before continuation"
         start_calls.append((args, kwargs))
         return [first, second][len(start_calls) - 1]
 
@@ -27501,13 +27735,20 @@ async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assista
 
     titles = [getattr(event, "title", "") for event in events]
     assert "User Declined To Sign In" in titles and "User Assistance Received" not in titles, titles
-    assert len(start_calls) == 2, "the declined browser task must be ended by one more activity call, not respawned"
+    assert len(start_calls) == 2
     resume_states = [arg for arg in start_calls[1][1]["args"] if isinstance(arg, dict) and "approval_type" in arg]
     assert [state["approval_type"] for state in resume_states] == [AUTH_ASSISTANCE_DECLINED], resume_states
     assert resume_states[0]["session_id"] == "session-1"
-    assert events[-1].status == MessageStatus.FINISHED, "a decline is a clean end, not a tool error"
-    assert events[-1].message == declined_message
-    assert events[-1].metadata["authAssistanceDeclined"] is True
+    assert resume_states[0]["pending_action"] is None
+    assert resume_states[0]["rejected_action"] == {
+        "tool_call_id": "auth-call", "history_step": 3, "approval_type": "auth_assistance",
+        "request_id": "uar1", "url": ""}
+    assert resume_states[0]["browser_resume_context_ref"] == {"path": "saved-auth-context"}
+    assert start_calls[0][1]["args"][-2] == start_calls[1][1]["args"][-2]
+    assert len(_browser_manager_terminal_events(events)) == 1
+    assert events[-1].status == MessageStatus.FINISHED
+    assert events[-1].message == completed_message
+    assert "authAssistanceDeclined" not in events[-1].metadata
     assert events[-1].metadata["action_type"] == "task_complete"
     assert workflow_instance.is_paused is False
 
@@ -34940,6 +35181,11 @@ async def run_all_tests():
         "activity_auth_assistance_resume_reuses_live",
         test_spawn_browser_activity_auth_assistance_resume_reuses_live_session,
     )
+    await r.record_async("received_rejection_keeps_authored_feedback_in_browser", test_received_rejection_keeps_authored_feedback_in_browser)
+    await r.record_async("browser_rejection_reaches_actor_and_verifier_as_native_outcome", test_browser_rejection_reaches_actor_and_verifier_as_native_outcome)
+    r.record("denial_resolves_exact_call_and_revokes_site_consent", test_denial_resolves_exact_call_and_revokes_site_consent)
+    await r.record_async("legacy_rejection_recovers_existing_native_call_and_history", test_legacy_rejection_recovers_existing_native_call_and_history)
+    await r.record_async("manager_rejected_action_continues_same_browser", test_manager_rejected_action_continues_same_browser)
     await r.record_async(
         "manager_ends_the_browser_task_when_the_user_declines_auth_assistance",
         test_manager_ends_the_browser_task_when_the_user_declines_auth_assistance,
@@ -35096,10 +35342,7 @@ async def run_all_tests():
         "manager_failure_before_activity_start_names_no_task",
         test_manager_failure_before_activity_start_names_no_task,
     )
-    await r.record_async(
-        "manager_write_lock_rejection_terminal_is_task_scoped",
-        test_manager_write_lock_rejection_terminal_is_task_scoped,
-    )
+
     await r.record_async(
         "manager_auth_assistance_failure_terminal_is_task_scoped",
         test_manager_auth_assistance_failure_terminal_is_task_scoped,
