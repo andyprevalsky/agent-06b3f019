@@ -20,7 +20,14 @@ const srcDir = path.resolve(__dirname, '../..');
  * Reviewed files whose provider comparisons only special-case other providers
  * while Tilion takes a correct provider-generic path. Each needs a reason.
  */
-const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map<string, string>([]);
+const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map<string, string>([
+  [
+    'providers/browser/resumeRecovery.ts',
+    'Native locator lookup for the resume-custody lifecycle, which resumeBrowserSession ' +
+      'enters only for Kernel and Browser Use rows; Tilion resumes outside it and never ' +
+      'reaches this inspector (an unknown provider returns null).',
+  ],
+]);
 
 const COMPARISON =
   /[pP]rovider\)?\s*[!=]==\s*'(browser-use|kernel|steel)'|'(browser-use|kernel|steel)'\s*[!=]==\s*[\w.]*[pP]rovider\b/g;
