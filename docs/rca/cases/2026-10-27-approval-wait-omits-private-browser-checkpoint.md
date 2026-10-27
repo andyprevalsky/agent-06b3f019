@@ -19,7 +19,7 @@ sources:
   - agent 3392bb69-807b-4ef9-a671-2e5eeb92efa7
   - commit 31d769b908da654b419f68e2a3cefd914703ef0e
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
-status: open
+status: fixed
 ---
 
 ## Problem
