@@ -17,8 +17,8 @@ tags:
   - 10k-agents
   - agent-trajectory-agent
 sources:
-  - deploy/polar-stack-integration backend coverage 2026-10-27 (unit phase, browser-user-pause-race.test.ts)
-  - 2026-10-26-trajectory-search-copied-agent-goal-onto-every-row
+  - commit 47cbbe0b1
+  - commit 738841676
 repro: back-end/src/tests/unit/agent-trajectory-agent-lock.test.ts
 status: fixed
 ---
@@ -38,5 +38,13 @@ Repro: two `psql` sessions on a local DB with main's trigger. Session 1 updates 
 Migration `20261027020000_agent_trajectory_agent_skip_unchanged_lock` replaces the function. It first runs a non-locking `NOT EXISTS` check for a row with the same owner and an identical goal/title, and runs the unchanged upsert only when that check fails. Results are the same as before: a missing row is inserted, a changed goal/title is updated, and a different owner is never overwritten. The difference is that the steady state takes no row lock. Two first writers racing still meet `ON CONFLICT` exactly as before. The local runtime SQL hook applies the new migration after `20261026210002`.
 
 Verification: `agent-trajectory-agent-lock.test.ts` failed before the fix and passes after it, 5 consecutive passes. The SQL two-session repro passes. `browser-user-pause-race.test.ts` (B3) passes. `coverage-script.test.ts` asserts the hook order.
+
+## Human feedback
+
+None during this fix. Andy's standing deploy instruction (ship every approved Polar change through `/deploy`) required the main sync that exposed it, and the deploy rules require every surfaced test failure to be fixed rather than skipped.
+
+## Reusable lesson
+
+`INSERT ... ON CONFLICT DO UPDATE ... WHERE <changed>` is not a cheap no-op. PostgreSQL locks the conflicting row even when the `WHERE` skips the update. Inside a per-row trigger on a hot table, this turns a shared parent row into a per-key write lock held until commit. Guard idempotent upserts with a non-locking existence check, and test them with two sessions and a bounded `lock_timeout`.
 
 At 10,000 agents: no per-agent row lock or page write on ordinary message writes. The lock and write happen only when an agent's goal or title actually changes.
