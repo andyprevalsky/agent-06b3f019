@@ -25460,6 +25460,7 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.activity_drain_reason", AsyncMock(return_value=None)),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
             AsyncMock(return_value=session_info),
@@ -31734,6 +31735,7 @@ async def _run_browser_durable_user_feedback_replay(
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.activity_drain_reason", AsyncMock(return_value=None)),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(side_effect=fetch_agent_snapshot)),
         patch("helpers.llm._generate_response_schema_with_rose", generator),
         patch("helpers.llm.set_response_schema_activity", root_schema_persistence),
