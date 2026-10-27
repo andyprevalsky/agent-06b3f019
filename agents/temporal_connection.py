@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from temporalio.client import TLSConfig
@@ -59,3 +63,25 @@ def production_namespace_refusal(namespace: str, task_queue: str) -> str | None:
         "agents/.env.benchmark-temporal), or export TEMPORAL_ADDRESS/TEMPORAL_NAMESPACE/"
         "TEMPORAL_API_KEY for a non-production namespace."
     )
+
+
+def apply_stack_temporal_namespace(repo_root: Path | None = None) -> None:
+    """Point this process at the stack's Temporal namespace, as scripts/run.sh does.
+
+    run.sh moves dev/benchmark stacks onto the benchmark namespace; any helper
+    that reaches the stack's queue (stale-workflow cleanup) must look there too.
+    """
+    root = repo_root or Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", "-c", ". scripts/lib/cloudbench-env.sh && stack_bench_temporal_exports agents/.env"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "stack Temporal namespace routing failed")
+    for line in result.stdout.splitlines():
+        name, _, value = line.removeprefix("export ").partition("=")
+        if name in {"TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"}:
+            os.environ[name] = shlex.split(value)[0] if value else ""

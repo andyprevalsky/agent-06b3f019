@@ -147,8 +147,9 @@ export async function retryOnTransientTransactionStart<T>(
 // invariant can never regress.
 const POOLER_MAX_CLIENT_CONN = intEnv('POOLER_MAX_CLIENT_CONN', 1000);
 const BACKEND_INSTANCES = intEnv('BACKEND_INSTANCES', 1);
-const RESERVED_CLIENT_CONN = intEnv('POOLER_RESERVED_CLIENT_CONN', 40);
-const NONPROD_CLIENT_BUDGET = intEnv('POOLER_NONPROD_CLIENT_BUDGET', 300);
+const RESERVED_CLIENT_CONN = nonNegativeIntEnv('POOLER_RESERVED_CLIENT_CONN', 40);
+// 0 hands the whole slice back to production in an emergency.
+const NONPROD_CLIENT_BUDGET = nonNegativeIntEnv('POOLER_NONPROD_CLIENT_BUDGET', 300);
 const DEPLOY_OVERLAP = 2; // rolling deploy transiently doubles instance count
 const LOCAL_POOL_SIZE = 30; // direct Docker Postgres: each conn ~10MB, cap to avoid OOM
 
@@ -159,6 +160,13 @@ export const DEMO_CACHE_POOL_LIMIT = intEnvValue(demoCacheEnv('DEMO_CACHE_DB_POO
 
 function intEnv(name: string, fallback: number): number {
   return intEnvValue(process.env[name], fallback);
+}
+
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 function intEnvValue(raw: string | undefined, fallback: number): number {

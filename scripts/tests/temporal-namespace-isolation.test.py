@@ -93,6 +93,17 @@ def test_run_sh_applies_routing() -> None:
     assert queue < route < services, "run.sh must route the stack's namespace before starting services"
 
 
+def test_stack_queue_consumers_route_namespace() -> None:
+    # Every helper that reaches a stack's private queue must use the stack's
+    # namespace, or stale-workflow cleanup silently looks in production's.
+    cleanup = (ROOT / "agents" / "benchmarks" / "run_benchmark.py").read_text()
+    body = cleanup[cleanup.index("async def _terminate_stale_workflows"):]
+    body = body[: body.index("\nasync def ", 1) if "\nasync def " in body[1:] else len(body)]
+    assert body.index("apply_stack_temporal_namespace()") < body.index("load_config()"), "cleanup must route first"
+    local = (ROOT / "agents" / "benchmarks" / "local.py").read_text()
+    assert "apply_stack_temporal_namespace(REPO_ROOT)" in local
+
+
 def test_queue_predicate() -> None:
     from temporal_connection import is_production_task_queue, production_namespace_refusal
 
@@ -154,6 +165,7 @@ def main() -> None:
     for test in (
         test_routing_helper,
         test_run_sh_applies_routing,
+        test_stack_queue_consumers_route_namespace,
         test_queue_predicate,
         test_worker_refuses_dev_queue_in_production_namespace,
         test_sweep_abandonment_rule,
