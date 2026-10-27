@@ -25560,12 +25560,75 @@ async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     assert len(calls) == 1 and sleeps == [], (calls, sleeps)
 
 
+def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
+    """The prod runner printed "RuntimeError: Event loop is closed" after its result.
+
+    A cancelled stream reader left the flyctl pipe paused with unread output, so the
+    subprocess transport outlived ``asyncio.run`` and closed itself on a closed loop.
+    A timed-out ``--no-tail`` snapshot also orphaned its flyctl child.
+    """
+    agents = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory() as name:
+        fake, marker = Path(name) / "flyctl", Path(name) / "snapshot-child-alive"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "if '--no-tail' in sys.argv:\n"
+            "    time.sleep(3); open(os.environ['MARKER'], 'w').write('alive')\n"
+            "line = ('x' * 200 + '\\n') * 1000\n"
+            "while True:\n"
+            "    sys.stdout.write(line); sys.stdout.flush()\n"
+        )
+        fake.chmod(0o700)
+        script = (
+            "import asyncio, gc, sys\n"
+            f"sys.path.insert(0, {str(agents)!r})\n"
+            "from benchmarks import logs\n"
+            "logs.FLY_API_TOKEN = 'fixture'\n"
+            "logs.DISABLE_FLY_LOG_STREAM = False\n"
+            f"logs._find_flyctl = lambda: {str(fake)!r}\n"
+            "real_wait_for = asyncio.wait_for\n"
+            "async def short_wait_for(awaitable, timeout):\n"
+            "    return await real_wait_for(awaitable, min(timeout, 0.5))\n"
+            "async def main():\n"
+            "    collector = logs.FlyLogCollector()\n"
+            "    assert (await collector.start()) == 'fly.io log streaming started'\n"
+            "    await asyncio.sleep(1)\n"
+            "    await collector.stop()\n"
+            "    assert collector.total_lines > 0\n"
+            "    logs.asyncio.wait_for = short_wait_for\n"
+            "    try:\n"
+            "        assert (await logs.fetch_flyio_logs_snapshot('agent')) == []\n"
+            "    finally:\n"
+            "        logs.asyncio.wait_for = real_wait_for\n"
+            "asyncio.run(main())\n"
+            "gc.collect()\n"
+            "print('CLOSED-CLEANLY')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "MARKER": str(marker), "PYTHONWARNINGS": "default"},
+        )
+        assert result.returncode == 0 and "CLOSED-CLEANLY" in result.stdout, result
+        assert "Event loop is closed" not in result.stderr, result.stderr
+        assert "Exception ignored" not in result.stderr, result.stderr
+        time.sleep(3.5)
+        assert not marker.exists(), "a timed-out flyctl snapshot child outlived the runner"
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
+    r.record(
+        "fly_log_subprocesses_close_their_transports_before_loop_shutdown",
+        test_fly_log_subprocesses_close_their_transports_before_loop_shutdown,
+    )
     r.record(
         "mass_agent_completion_outputs_must_satisfy_their_response_schema",
         test_mass_agent_completion_outputs_must_satisfy_their_response_schema,

@@ -29,6 +29,7 @@ import type {
   IMessageData,
   IMessageUploadContact,
   IMessageUploadPayload,
+  MessagingUploadOptions,
   UploadStrategy,
 } from './types';
 
@@ -181,11 +182,12 @@ export async function dispatchUpload(
   strategy: UploadStrategy,
   integrationType: string,
   data: unknown,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadHttpResult> {
   if (strategy === 'imessage') {
     const payload = buildIMessagePayload(data as IMessageData[] | IMessageUploadContact[]);
-    return postIMessagePayload(payload, accessToken);
+    return postIMessagePayload(payload, accessToken, options);
   }
 
   if (strategy === 'whatsapp') {
@@ -222,10 +224,11 @@ export async function dispatchUploadWithTransportRetry(
   strategy: UploadStrategy,
   integrationType: string,
   data: unknown,
-  accessToken: string
+  accessToken: string,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadHttpResult> {
   if (strategy !== 'browserCookies') {
-    return dispatchUpload(strategy, integrationType, data, accessToken);
+    return dispatchUpload(strategy, integrationType, data, accessToken, options);
   }
 
   // Encryption belongs before the transport boundary: programming/data-shaping
