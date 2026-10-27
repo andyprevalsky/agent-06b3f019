@@ -67,6 +67,10 @@ def test_v39_cleanup_all_uid_writers():
             if self.value.endswith('/task'): return [self / self.value.split('/')[2]]
             if self.value.endswith('/fd'): return []
             raise AssertionError(self.value)
+        def exists(self):
+            # Every fixture process stays alive, so a persistent PermissionError must fail closed.
+            assert self.value.count('/') == 2, self.value
+            return int(self.name) in rows
         def read_text(self):
             assert self.value.endswith('/maps')
             return ''
