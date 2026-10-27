@@ -23,6 +23,28 @@ import {
   renderStockSidebar,
 } from './app-sidebar.fixtures';
 
+/** Fixed light surface/text colours that are unreadable under html.dark text. */
+const LIGHT_ONLY_COLOUR =
+  /^((?:[\w-]+:)*)(bg|text)-(white|navi-white[\w-]*|(?:gray|neutral|zinc|slate|stone)-[12]\d\d)$/;
+
+/**
+ * Every fixed light colour on `el` must carry a `dark:` override of the same
+ * state and property (e.g. `hover:bg-navi-white-dark` needs `dark:hover:bg-*`),
+ * so a highlighted row is never near-white under the dark theme's light text.
+ */
+function expectDarkOverrideForLightColours(el: Element) {
+  const tokens = el.className.toString().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    const match = LIGHT_ONLY_COLOUR.exec(token);
+    if (match === null) continue;
+    const [, states, property] = match;
+    expect(
+      tokens.some((t) => t.startsWith(`dark:${states}${property}-`)),
+      `${token} has no dark:${states}${property}-* override`,
+    ).toBe(true);
+  }
+}
+
 describe('AppSidebar rows', () => {
   beforeEach(() => {
     mockSession();
@@ -122,6 +144,13 @@ describe('AppSidebar rows', () => {
     // Selection keeps a persistent fill so the current agent stays identifiable
     // once the pointer moves away.
     expect(row('Selected row').className).toMatch(/(^|\s)bg-navi-white-dark/);
+
+    // Dark mode swaps both fills to the theme's accent hover token; the fixed
+    // light grey under dark-theme text was unreadable.
+    expect(idle).toMatch(/(^|\s)dark:hover:bg-accent(\s|$)/);
+    expect(row('Selected row').className).toMatch(/(^|\s)dark:bg-accent(\s|$)/);
+    expectDarkOverrideForLightColours(row('Unselected row'));
+    expectDarkOverrideForLightColours(row('Selected row'));
   });
 
   it('keeps expanded agent rows compact', async () => {
@@ -576,6 +605,52 @@ describe('AppSidebar rows', () => {
     await u.click(screen.getByLabelText('Restore Archived row'));
 
     await waitFor(() => expect(unarchivedId).toBe('gone'));
+  });
+
+  it('keeps a long archived title inside the dialog, ellipsized, with its full goal on hover', async () => {
+    const u = userEvent.setup();
+    const longGoal =
+      'im trying to use herdr, i ran the cli and ran my codex session in it, i thought the whole ' +
+      'point is the agents continue working, but when I closed the terminal everything stopped';
+    server.use(
+      http.get('*/api/agents/archived', () =>
+        HttpResponse.json({
+          agents: [
+            makeAgent({ agent_id: 'long', goal: longGoal, archived_at: '2026-02-02T00:00:00Z' }),
+          ],
+        }),
+      ),
+    );
+    renderStockSidebar(<AppSidebar {...defaultProps()} />);
+
+    await u.click(screen.getByLabelText('Show archived agents'));
+    const dialog = await screen.findByRole('dialog');
+    const title = await within(dialog).findByText(longGoal);
+    const row = title.closest('div[class*="group/row"]') as HTMLElement;
+
+    // DialogContent is a CSS grid: its list item must opt out of min-width:auto,
+    // or a nowrap title widens the track and the row paints past the dialog.
+    const gridItem = [...dialog.children].find((child) => child.contains(row)) as HTMLElement;
+    expect(gridItem.className).toMatch(/(^|\s)min-w-0(\s|$)/);
+    // Nothing between the dialog and the title sizes to its content's width.
+    for (let el: Element | null = title; el !== null && el !== dialog; el = el.parentElement) {
+      expect(el.className.toString()).not.toMatch(/(^|\s)(min-)?w-(max|fit)(\s|$)/);
+    }
+    // The title ellipsizes at the row's real edge inside a shrinkable flex line.
+    expect(title.className).toMatch(/(^|\s)min-w-0(\s|$)/);
+    expect(title.className).toMatch(/(^|\s)truncate(\s|$)/);
+    expect((title.parentElement as HTMLElement).className).toMatch(/(^|\s)min-w-0(\s|$)/);
+
+    // Not over-truncated: the complete goal is rendered and offered as a tooltip.
+    expect(title.textContent).toBe(longGoal);
+    expect(title).toHaveAttribute('title', longGoal);
+
+    // The hovered row and its action overlay stay readable in dark mode.
+    expect(row.className).toMatch(/(^|\s)dark:hover:bg-accent(\s|$)/);
+    expectDarkOverrideForLightColours(row);
+    const restore = within(dialog).getByLabelText(`Restore ${longGoal}`);
+    expectDarkOverrideForLightColours(restore);
+    expectDarkOverrideForLightColours(restore.closest('span[class*="absolute"]') as HTMLElement);
   });
 
   it('shows an empty state when nothing is archived', async () => {

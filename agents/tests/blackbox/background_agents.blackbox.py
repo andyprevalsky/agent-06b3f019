@@ -2288,11 +2288,115 @@ def test_browser_and_code_background_waits_use_the_pause_check():
         assert "or tool_stop_requested(workflow_instance, tool_call_id)" in source, module.__name__
 
 
+async def test_browser_composer_message_reaches_its_browser_not_the_root():
+    """A Browser-composer row (browserTaskId + excludeFromModel) is that browser's next-step input only."""
+    from unittest.mock import AsyncMock
+
+    from _test_utils import native_browser_start_source
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.context_compaction import is_excluded_from_model
+    from loop.dag_executor import is_dag_interrupt_message
+    from loop.run_agent import _real_user_requirement_keys
+
+    start = await native_browser_start_source("2026-10-26T15:59:09+00:00")
+    direct = {
+        "id": "direct",
+        "timestamp": "2026-10-26T15:59:40Z",
+        "role": "USER",
+        "text": "go to instacart instead",
+        "metadata": {"browserTaskId": "task-1", "excludeFromModel": True},
+    }
+    executor_row = {
+        "id": "executor",
+        "timestamp": "2026-10-26T15:59:41Z",
+        "role": "USER",
+        "text": "UI-only background executor row",
+        "metadata": {"excludeFromModel": True},
+    }
+    task = {"tool_call_id": "tool-1"}
+    poll = AsyncMock(return_value=[start, direct, executor_row])
+    with patch.object(h, "poll_new_messages", poll):
+        state = await h._load_browser_resume_user_instructions("agent-1", {**task, "task_id": "task-1"})
+    assert poll.await_args.kwargs == {"browser_tool_call_id": "tool-1", "browser_task_id": "task-1"}
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "go to instacart instead"}], state
+    assert state["user_instruction_message_ids"] == ["direct"]
+    # Race: a message lands after the browser's last step read, before its pause-close.
+    # The final post-close read finds it and the owner gets it in the browser result.
+    state["delivered_user_instruction_count"] = len(state["user_instruction_messages"])
+    late = {**direct, "id": "late", "timestamp": "2026-10-26T16:01:00Z", "text": "use the oat milk instead"}
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[start, direct, late])):
+        latest = await h._load_browser_resume_user_instructions("agent-1", state)
+    unread = h._unread_user_instructions(state, latest)
+    assert unread == ["use the oat milk instead"], unread
+    owner_text = h._with_unread_user_messages("Order placed.", unread)
+    assert owner_text.startswith("Order placed.") and "- use the oat milk instead" in owner_text, owner_text
+    assert h._with_unread_user_messages("Order placed.", []) == "Order placed."
+    # A verifier-time sync (completion / max steps) delivers input with no browser-model
+    # decision after it: only the step-start count says what the browser acted on.
+    verifier_synced = {**latest, "delivered_user_instruction_count": 2, "acted_user_instruction_count": 1}
+    assert h._unread_user_instructions(verifier_synced, latest) == ["use the oat milk instead"]
+    # The owner: hidden from its model, no DAG interrupt (no new root turn), no new requirement.
+    assert is_excluded_from_model(direct)
+    assert is_dag_interrupt_message(direct) is False
+    assert _real_user_requirement_keys([direct]) == set()
+
+
+def test_browser_acted_input_is_counted_only_at_the_model_request():
+    """CodeRabbit PR #1592: a step that exits before its browser-model decision
+    (observe failure, realm reload, write-lock replay) must not mark synced input
+    as acted on, or the post-close read never hands it to the owner.
+
+    The real activity sets ``acted_user_instruction_count`` exactly once, as the
+    statement right before the decision's ``BrowserThinkingStream`` request.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(h._spawn_browser_agent_activity_v3_real)))
+
+    def sets_acted(node):
+        return isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Subscript)
+            and isinstance(t.slice, ast.Constant)
+            and t.slice.value == "acted_user_instruction_count"
+            for t in node.targets
+        )
+
+    def builds_stream(node):
+        return (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "BrowserThinkingStream"
+        )
+
+    sites = []
+    for block in ast.walk(tree):
+        body = getattr(block, "body", None)
+        if not isinstance(body, list):
+            continue
+        for index, node in enumerate(body):
+            if sets_acted(node):
+                following = body[index + 1] if index + 1 < len(body) else None
+                sites.append(bool(following is not None and builds_stream(following)))
+    assert sites == [True], f"acted count must be set once, right before the model request: {sites}"
+
+
 async def run_all_tests():
     print("background_agents blackbox tests:")
     r = BlackboxResult()
     await r.record_async(
         "bg_spawn_returns_immediately_notifies_once", test_background_spawn_returns_immediately_and_notifies_once
+    )
+    await r.record_async(
+        "browser_composer_message_reaches_browser_not_root",
+        test_browser_composer_message_reaches_its_browser_not_the_root,
+    )
+    r.record(
+        "browser_acted_input_counted_only_at_model_request",
+        test_browser_acted_input_is_counted_only_at_the_model_request,
     )
     await r.record_async(
         "bg_notification_keeps_run_during_wake",

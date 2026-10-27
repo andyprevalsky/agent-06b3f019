@@ -37,7 +37,7 @@ from domains.web_fetch.service import (
 )
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
-from helpers.summarize import summarize_and_filter_links
+from helpers.summarize import select_page_metadata, summarize_and_filter_links
 from helpers.tracing import traced
 from helpers.world_model_runtime import (
     WorldModelToolExecutionAdapter,
@@ -214,6 +214,9 @@ class WebFetchManager(ToolManager):
                     agent_id,
                     f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
                     compute_token_lineage_key,
+                    # Allowlisted head-only facts (title and one publication
+                    # date) that main-content markdown can drop.
+                    select_page_metadata(scrape_metadata),
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -454,9 +457,7 @@ async def web_fetch_activity(
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Firecrawl /
             # Parallel Extract. Restricted to exact-match demo_cache:on benches.
-            if not await demo_cache_client.soft_complete_allowed_for_agent(
-                agent_id, fast_mode_goal
-            ):
+            if not await demo_cache_client.soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
                 logger.info(
                     "demo_cache.web_fetch_miss_live",
                     key=cache_key,
@@ -466,10 +467,7 @@ async def web_fetch_activity(
             else:
                 logger.info("demo_cache.web_fetch_soft_complete", key=cache_key, url=url[:120])
                 return {
-                    "markdown": (
-                        "Fast Mode cache miss for this web fetch. Returning without a "
-                        "live scrape."
-                    ),
+                    "markdown": ("Fast Mode cache miss for this web fetch. Returning without a live scrape."),
                     "links": [],
                     "metadata": {"provider": "fast-mode-soft-complete"},
                     DEMO_CACHE_HIT_FIELD: True,

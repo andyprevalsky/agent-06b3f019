@@ -301,6 +301,38 @@ export function shouldIgnoreAnthropicApiKeyCooldownForSandbox(params: {
 }
 
 /**
+ * Whether a Claude Code sandbox without an OAuth login can still authenticate:
+ * the same key choice and cooldown gate `createClaudeCodeSession` (e2b.ts)
+ * applies. OpenRouter or a dedicated key backs the CLI while the shared
+ * Anthropic org is on cooldown, so that cooldown alone does not make Claude
+ * Code unavailable.
+ */
+export function claudeCodeSandboxKeyUsable(params: {
+  claudeCodeAnthropicApiKey: string | undefined;
+  anthropicApiKey: string | undefined;
+  anthropicBaseUrl: string | undefined;
+  openrouterApiKey: string | undefined;
+  sharedKeyOnCooldown: boolean;
+}): boolean {
+  const transport = resolveClaudeCodeSandboxApiKey(
+    params.claudeCodeAnthropicApiKey,
+    params.anthropicApiKey,
+    {
+      anthropicBaseUrl: params.anthropicBaseUrl,
+      openrouterApiKey: params.openrouterApiKey,
+      sharedKeyOnCooldown: params.sharedKeyOnCooldown,
+    }
+  );
+  if (!transport.apiKey?.trim()) return false;
+  if (!params.sharedKeyOnCooldown) return true;
+  return shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey: transport.apiKey,
+    sharedAnthropicApiKey: params.anthropicApiKey,
+    sandboxBaseUrl: transport.baseUrl,
+  });
+}
+
+/**
  * True when credential lookup returned only a refreshable OAuth envelope
  * (no access token) — the post-auth_error path that hopes the CLI will refresh.
  */

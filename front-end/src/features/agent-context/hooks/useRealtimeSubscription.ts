@@ -24,6 +24,7 @@ import {
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
+import { publishCodeResources } from '@/lib/codeResources';
 import { notifyOpenAgentActivity, userUiActiveChangedHandler } from '@/lib/openAgentActivity';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
@@ -145,6 +146,9 @@ function createRealtimeHandlers(
     // Live views follow the backend binding, not the lagging transcript URL.
     onBrowserSession: (binding) => {
       if (active()) publishBrowserSessionBinding(binding);
+    },
+    onCodeResources: ({ taskId, resources }) => {
+      if (active()) publishCodeResources(taskId, resources);
     },
     onDisconnect: () => {
       if (!active()) return;

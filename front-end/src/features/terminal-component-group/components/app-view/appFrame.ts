@@ -37,8 +37,3 @@ export function withPreviewHandoff(previewUrl: string, code: string): string {
   const base = previewUrl.split('#')[0];
   return `${base}#${PREVIEW_HANDOFF_PARAM}=${encodeURIComponent(code)}`;
 }
-
-/** Fixed desktop viewport the trajectory card scales down. */
-export const PREVIEW_CARD_VIEWPORT = { width: 1280, height: 800 } as const;
-export const PREVIEW_CARD_WIDTH = 240;
-export const PREVIEW_CARD_SCALE = PREVIEW_CARD_WIDTH / PREVIEW_CARD_VIEWPORT.width;

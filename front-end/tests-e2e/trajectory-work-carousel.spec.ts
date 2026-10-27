@@ -139,7 +139,7 @@ test('comms → work → comms → work stays one live line, then expands in ord
       timeout: 20000,
     });
     await expect(row).toHaveCount(1);
-    await expect(row.getByRole('button')).toBeDisabled();
+    await expect(row.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByTestId('trajectory-work-history')).toHaveCount(0);
     const current = await row.boundingBox();
     expect(current!.height).toBeLessThanOrEqual(48);

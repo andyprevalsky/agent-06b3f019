@@ -29,6 +29,8 @@ interface SelectionOptions {
  *
  *   [EMPTY/SELECTED] -- stage optimistic create --> [PENDING PROJECTION]
  *   [PENDING PROJECTION] -- canonical fetch succeeds --> [SELECTED CANONICAL]
+ *     (a background refresh: isLoadingAgent stays false, so the composer and
+ *     projected transcript stay mounted while the created agent's detail loads)
  *   [PENDING PROJECTION] -- create fails/rollback --> [EMPTY]
  *   [ANY SELECTION] -- select another id --> [LOADING] --> [SELECTED | EMPTY on failure]
  *
@@ -94,9 +96,16 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     ],
   );
   const loadAgentDetail = useCallback(
-    async (agentId: string, clearSelectionOnFailure: boolean): Promise<boolean> => {
+    async (
+      agentId: string,
+      clearSelectionOnFailure: boolean,
+      refreshesStagedAgent = false,
+    ): Promise<boolean> => {
+      // A staged creation already shows its projection: refresh it in the
+      // background instead of flipping the view to "loading agent details".
+      const showsLoading = !refreshesStagedAgent;
       try {
-        setIsLoadingAgent(true);
+        if (showsLoading) setIsLoadingAgent(true);
         const data = await fetchAgentDetail(agentId);
         if (!applyAgentDetail(agentId, data)) return false;
         initialLoadDoneRef.current = agentId;
@@ -109,7 +118,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
         }
         return false;
       } finally {
-        if (selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
+        if (showsLoading && selectedAgentIdRef.current === agentId) setIsLoadingAgent(false);
       }
     },
     [initialLoadDoneRef, applyAgentDetail, selectedAgentIdRef, setIsLoadingAgent, stateRef],
@@ -160,7 +169,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       ) {
         return;
       }
-      const reconciled = await loadAgentDetail(agentId, false);
+      const reconciled = await loadAgentDetail(agentId, false, true);
       if (reconciled && state.pendingCreationRef.current?.agentId === agentId) {
         state.pendingCreationRef.current = null;
       }
