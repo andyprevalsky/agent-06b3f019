@@ -32,6 +32,13 @@ async function main() {
   const cases: Array<{ source: string; generation: Generation; signal: unknown[] }> = [];
   let source = '';
   let generation: Generation = 'current';
+  // Fleet fixture: per-agent probe latency, in-flight probe count and recorded pauses.
+  let activeAgents = [{ id: 'fixture-agent', temporalWorkflowId: 'fixture-workflow' }];
+  let probeDelayMs = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const pausedAgentIds: string[] = [];
+  const rejectedWorkflow = 'fleet-workflow-3';
   await mock.module('../../providers/stripe', {
     namedExports: {
       stripe: {},
@@ -65,13 +72,22 @@ async function main() {
       getTemporalClient: async () => ({
         withDeadline: async (_deadline: unknown, fn: () => Promise<unknown>) => fn(),
         workflow: {
-          getHandle: () => ({
+          getHandle: (workflowId: string) => ({
+            workflowId,
             query: async (name: string) => {
               assert.equal(name, 'parent_state_query');
-              if (generation === 'unreachable') throw new Error('query deadline exceeded');
-              return PARENT_STATE[generation];
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              try {
+                await new Promise((resolveDelay) => setTimeout(resolveDelay, probeDelayMs));
+                if (generation === 'unreachable') throw new Error('query deadline exceeded');
+                return PARENT_STATE[generation];
+              } finally {
+                inFlight -= 1;
+              }
             },
             signal: async (...signal: unknown[]) => {
+              if (workflowId === rejectedWorkflow) throw new Error('signal rejected');
               cases.push({ source, generation, signal });
             },
           }),
@@ -85,10 +101,10 @@ async function main() {
   await mock.module('../../domains/webhooks/repo', {
     namedExports: {
       findSubscriptionByStripeSubscriptionId: async () => ({ userId: 'fixture-user' }),
-      findActiveAgents: async () => [
-        { id: 'fixture-agent', temporalWorkflowId: 'fixture-workflow' },
-      ],
-      updateAgentStatus: async () => {},
+      findActiveAgents: async () => activeAgents,
+      updateAgentStatus: async (agentId: string) => {
+        pausedAgentIds.push(agentId);
+      },
       deleteSubscriptionByUserId: async () => {},
       upsertSubscription: async () => {},
     },
@@ -164,6 +180,35 @@ async function main() {
   );
   assert.match(output, /B1_PASS: 4/);
   report(output.trim());
+
+  // A slow fleet must not hold the Stripe webhook open one probe deadline per agent.
+  const { SUBSCRIPTION_PAUSE_CONCURRENCY } =
+    await import('../../domains/webhooks/pauseSignalService');
+  generation = 'current';
+  source = 'fleet';
+  probeDelayMs = 20;
+  maxInFlight = 0;
+  pausedAgentIds.length = 0;
+  activeAgents = Array.from({ length: 3 * SUBSCRIPTION_PAUSE_CONCURRENCY }, (_, index) => ({
+    id: `fleet-agent-${index}`,
+    temporalWorkflowId: `fleet-workflow-${index}`,
+  }));
+  await webhook.handleSubscriptionDeleted({ id: 'subscription' } as never);
+  assert.equal(
+    maxInFlight,
+    SUBSCRIPTION_PAUSE_CONCURRENCY,
+    'cause probes run concurrently, never beyond the cap'
+  );
+  const accepted = activeAgents.filter((agent) => agent.temporalWorkflowId !== rejectedWorkflow);
+  assert.deepEqual(
+    pausedAgentIds.slice().sort(),
+    accepted.map((agent) => agent.id).sort(),
+    'one rejected signal does not stop or duplicate the other pauses'
+  );
+  const fleetSignals = cases.filter((entry) => entry.source === 'fleet');
+  assert.equal(fleetSignals.length, accepted.length);
+  assert.ok(fleetSignals.every((entry) => entry.signal.join() === 'pause,subscription'));
+  report('FLEET_PAUSE_PASS:', String(accepted.length), 'agents paused at bounded concurrency');
 }
 main().catch((error) => {
   reportError(error);

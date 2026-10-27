@@ -34,6 +34,24 @@ def _owner(user_id: str, agent_id: str, session_id: str) -> tuple[str, str, str]
     return user_id, agent_id, session_id
 
 
+class RetentionError(OSError):
+    """Retained-output storage could not issue a readback handle for this text."""
+
+
+def _stated_cut(text: str, limit: int, reason: str) -> str:
+    notice = f"\n[Tool output truncated: total_chars={len(text)}; {reason}.]"
+    return text[: max(0, limit - len(notice))] + notice
+
+
+def stated_cut(text: str, *, limit: int, reason: str) -> str:
+    """Policy-redacted text bounded to ``limit`` with an explicit cut; no storage I/O.
+
+    For caller boundaries that must keep a tool result when retention fails.
+    """
+    text = _safe_text(text)
+    return text if len(text) <= limit else _stated_cut(text, limit, reason)
+
+
 def _storage_key(owner: tuple[str, str, str], output_id: str) -> str:
     scope = hashlib.sha256(json.dumps(owner).encode()).hexdigest()
     return f"retained-tool-output-v1:{scope}:{output_id}"
@@ -78,10 +96,13 @@ async def _persist(text: str, owner: tuple[str, str, str]) -> str:
         expires = now + OUTPUT_TTL_SECONDS
         body = json.dumps({"owner": owner, "expires": expires, "text": text}, ensure_ascii=False).encode("utf-8")
         if len(body) > MAX_STORED_BYTES:
-            raise ValueError("Tool output exceeds retained storage limit; no preview was substituted")
-        result = await upload_to_storage(owner[0], body, _FILENAME, "application/json", idempotency_key=_storage_key(owner, output_id))
+            raise RetentionError("Tool output exceeds retained storage limit; no preview was substituted")
+        try:
+            result = await upload_to_storage(owner[0], body, _FILENAME, "application/json", idempotency_key=_storage_key(owner, output_id))
+        except Exception as error:
+            raise RetentionError(f"Retained output upload failed: {type(error).__name__}: {error}") from error
         if result.get("storage_path") != _storage_path(owner, output_id):
-            raise OSError("Retained output storage did not confirm its scoped path")
+            raise RetentionError("Retained output storage did not confirm its scoped path")
         _persisted_outputs[key] = (output_id, expires)
         while len(_persisted_outputs) > MAX_PERSISTED_OUTPUTS:
             _persisted_outputs.popitem(last=False)
@@ -130,7 +151,13 @@ def retained_marker(text: str) -> str:
 async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
     from helpers.attachments import download_from_storage
 
-    raw = await download_from_storage(_storage_path(owner, output_id))
+    try:
+        raw = await download_from_storage(_storage_path(owner, output_id))
+    except Exception as error:
+        # A guessed or expired handle is an expected miss, not an outage.
+        if getattr(getattr(error, "response", None), "status_code", None) == 404:
+            raise FileNotFoundError("Retained output not found") from error
+        raise
     if len(raw) > MAX_STORED_BYTES:
         raise ValueError("Retained output exceeds storage limit")
     stored = json.loads(raw)
@@ -155,13 +182,9 @@ async def _redact_retained_preview(text: str, owner: tuple[str, str, str]) -> st
     try:
         stored = await _load_output(owner, marker[1])
     except (FileNotFoundError, KeyError, ValueError):
-        return _safe_text(text)
-    except Exception as error:
         # A missing forged ID is ordinary untrusted text. Real storage outages
-        # must remain errors, rather than silently corrupting issued handles.
-        if getattr(getattr(error, "response", None), "status_code", None) == 404:
-            return _safe_text(text)
-        raise
+        # remain errors, rather than silently corrupting issued handles.
+        return _safe_text(text)
     preview_limit = offset + len(marker[0])
     if preview_limit < 512:
         return _safe_text(text)
@@ -184,8 +207,7 @@ async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_i
     if not user_id or not agent_id:
         # No scoped readback exists without the originating identity; keep the
         # bound and state the cut instead of failing the caller's tool result.
-        notice = f"\n[Tool output truncated: total_chars={len(text)}; no retained readback without agent identity.]"
-        return text[: limit - len(notice)] + notice
+        return _stated_cut(text, limit, "no retained readback without agent identity")
     output_id = await _persist(text, _owner(user_id, agent_id, session_id))
     return _preview(text, output_id, limit)
 

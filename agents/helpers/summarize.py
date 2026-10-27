@@ -709,6 +709,17 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
         return {"context": None, "usage": {}, "success": False, "error": str(e)}
 
 
+async def _retained_or_stated_cut(text: str, *, user_id: str, agent_id: str, session_id: str, limit: int, tool_name: str) -> str:
+    """Bounded summarizer input; a retention storage failure keeps the hard-cap fallback."""
+    from helpers.tool_output import RetentionError, preview_tool_text, stated_cut
+
+    try:
+        return await preview_tool_text(text, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit)
+    except RetentionError as error:
+        logger.warning("Tool-result retention failed; summarizing a stated cut", tool_name=tool_name, error=str(error))
+        return stated_cut(text, limit=limit, reason="retained readback unavailable after a storage failure")
+
+
 @activity.defn
 async def summarize_tool_result(
     tool_name: str,
@@ -742,10 +753,12 @@ async def summarize_tool_result(
         On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
         with a marker, and summarized=False.
     """
-    from helpers.tool_output import preview_tool_text, retained_marker
+    from helpers.tool_output import retained_marker
 
-    retained = await preview_tool_text(tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "",
-                                       agent_id=agent_id or "", session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS)
+    retained = await _retained_or_stated_cut(
+        tool_result_text, user_id=claude_token_user_id or gpt_token_user_id or "", agent_id=agent_id or "",
+        session_id=session_id, limit=TOOL_RESULT_HARD_CAP_CHARS, tool_name=tool_name,
+    )
     marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing {tool_name} result ({len(tool_result_text)} chars)")
@@ -861,10 +874,12 @@ async def summarize_and_filter_links(
     """
     import json
 
-    from helpers.tool_output import preview_tool_text, retained_marker
+    from helpers.tool_output import retained_marker
 
-    retained = await preview_tool_text(markdown, user_id=claude_token_user_id or gpt_token_user_id or "",
-                                       agent_id=agent_id or "", session_id=session_id, limit=max_markdown_length)
+    retained = await _retained_or_stated_cut(
+        markdown, user_id=claude_token_user_id or gpt_token_user_id or "", agent_id=agent_id or "",
+        session_id=session_id, limit=max_markdown_length, tool_name="web_fetch",
+    )
     marker = retained_marker(retained)
     try:
         activity.heartbeat(f"Summarizing web_fetch result ({len(markdown)} chars, {len(links)} links)")

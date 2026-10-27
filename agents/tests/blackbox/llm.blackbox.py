@@ -95,16 +95,18 @@ async def test_tool_output_preview_and_readback_at_model_boundary():
         attachment_page = await read_tool_output_activity("u", "a", "", {"output_id": attached_id, "query": "blob.bin"})
         assert "blob.bin" in attachment_page["content"]
         assert attached[1]["file_pointer"]["storage_path"] == "u/blob.bin"
-        # Fail closed on persistence failure, retaining the original context.
+        # A persistence failure never claims a readable preview: the request
+        # keeps a bounded, explicitly stated cut and the original context.
         failed_context = copy.deepcopy(context)
         failed_context[1]["text"] += " new uncached content"
+        failed_canonical = copy.deepcopy(failed_context)
         with patch("helpers.attachments.upload_to_storage", side_effect=OSError("storage failed")):
-            try:
-                await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
-            except OSError:
-                pass
-            else:
-                raise AssertionError("A lost tail was reported as a successful preview")
+            failed_messages = await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
+        failed_preview = next(m["content"] for m in failed_messages if m["role"] == "tool")
+        assert len(failed_preview) <= 100000 and tail not in failed_preview
+        assert "[Retained tool output:" not in failed_preview, "A lost tail was reported as a successful preview"
+        assert "retained readback unavailable after a storage failure" in failed_preview
+        assert failed_context == failed_canonical
         small = copy.deepcopy(context)
         small[1]["text"] = "short result"
         small[1]["metadata"].pop("structured_response")

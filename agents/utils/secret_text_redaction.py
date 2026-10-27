@@ -2,13 +2,19 @@
 
 import re
 
-_KEY = r"(?:api[_-]?key|(?:access|refresh|id|auth)[_-]?token|token|authorization|passwd|password|(?:client[_-]?)?secret)"
+# Includes env-style suffixes such as SECRET_KEY, SECRET_ACCESS_KEY and PRIVATE_KEY.
+_KEY = (
+    r"(?:api[_-]?key|(?:access|refresh|id|auth)[_-]?token|token|authorization|passwd|password"
+    r"|private[_-]?key|(?:client[_-]?)?secret(?:[_-]?(?:access[_-]?)?key)?)"
+)
 
 SECRET_PATTERNS = [
     # Optional quotes around the key (JSON), an optional auth scheme word
-    # (``Authorization: Bearer <token>``), then a quoted or bare value.
+    # (``Authorization: Bearer <token>``), then a quoted value (escaped quotes
+    # stay inside it) or a bare value.
     re.compile(
-        rf"(?i)(['\"]?{_KEY}['\"]?\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+        rf"(?i)(['\"]?{_KEY}['\"]?\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?"
+        r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s,;]+)"
     ),
     re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
 ]

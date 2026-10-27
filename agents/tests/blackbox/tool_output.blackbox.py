@@ -179,6 +179,71 @@ def test_policy_redaction_covers_auth_schemes_and_json():
     assert redact_sensitive_text("tokens: 5, max_tokens=100") == "tokens: 5, max_tokens=100"
 
 
+async def test_retention_failure_keeps_stated_cut_at_boundaries():
+    """A storage failure keeps preview_tool_text's error contract, while the
+    LLM request and both summarizers keep a bounded, stated cut."""
+    import helpers.llm as llm
+    import helpers.summarize as summarize
+    import helpers.tool_output as output
+    text = "s" * 150_000 + "TAIL"
+    async def disk_full(*args, **kwargs):
+        raise OSError("fixture disk full")
+    async def fake_call_llm(**kwargs):
+        return {"content": '{"summary": "SUMMARY", "links": []}', "usage": {}}
+    with fake_output_storage(), patch("helpers.attachments.upload_to_storage", disk_full), \
+            patch.object(summarize.activity, "heartbeat", lambda *a: None), patch.object(llm, "call_llm", fake_call_llm):
+        context = [{"role": "TOOL", "text": text, "timestamp": "2026-01-01T00:00:00Z",
+                    "metadata": {"toolName": "web_fetch", "toolCallId": "fetch", "toolStatus": "FINISHED"}}]
+        messages = await llm.build_llm_messages(context, "system", user_id="u", agent_id="a")
+        rendered = json.dumps(messages)
+        assert "[Tool output truncated: total_chars=" in rendered and "storage failure" in rendered and "TAIL" not in rendered
+        summary = await summarize.summarize_tool_result("web_fetch", text, "goal", claude_token_user_id="u", agent_id="a")
+        assert "error" not in summary and summary["summary"].startswith('{"summary"'), summary
+        filtered = await summarize.summarize_and_filter_links("https://x.test", "goal", text, [], claude_token_user_id="u", agent_id="a")
+        assert "error" not in filtered, filtered
+        try:
+            await output.preview_tool_text(text, user_id="u", agent_id="a")
+        except OSError as error:
+            assert type(error).__name__ == "RetentionError" and "disk full" in str(error), repr(error)
+        else:
+            raise AssertionError("storage failure was swallowed by the shared helper")
+
+
+async def test_missing_retained_output_404_is_file_not_found():
+    """A guessed/expired handle's storage 404 is an expected, non-retryable miss;
+    other storage errors still propagate."""
+    import httpx
+    import tools.read_tool_output as reader
+    request = httpx.Request("GET", "https://storage.test/object")
+    for status, expected in ((404, FileNotFoundError), (500, httpx.HTTPStatusError)):
+        async def download(path, status=status):
+            raise httpx.HTTPStatusError("storage", request=request, response=httpx.Response(status, request=request))
+        with patch("helpers.attachments.download_from_storage", download):
+            try:
+                await reader.read_tool_output_activity("u", "a", "", {"output_id": "c" * 32})
+            except Exception as error:
+                assert type(error) is expected, (status, type(error))
+                assert (type(error).__name__ in reader.EXPECTED_READ_FAILURES) is (status == 404)
+            else:
+                raise AssertionError("missing output was readable")
+
+
+def test_policy_redaction_env_keys_and_escaped_quotes():
+    from utils.secret_text_redaction import redact_sensitive_text
+    cases = {
+        "AWS_SECRET_ACCESS_KEY=SECRET_G/K7MDENG": "SECRET_G",
+        "STRIPE_SECRET_KEY=sk_live_SECRET_H": "SECRET_H",
+        "SECRET_KEY=SECRET_I": "SECRET_I",
+        'PRIVATE_KEY="-----BEGIN KEY----- SECRET_J"': "SECRET_J",
+        'password: "ab\\"SECRET_K1234"': "SECRET_K",
+        "password='ab\\'SECRET_L'": "SECRET_L",
+    }
+    for text, secret in cases.items():
+        assert secret not in redact_sensitive_text(text), (text, redact_sensitive_text(text))
+    for ordinary in ("the secret key to success is focus", "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "keys: 3, secrets of SEO"):
+        assert redact_sensitive_text(ordinary) == ordinary, ordinary
+
+
 async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("main_retained_protocol_survives_redaction", test_main_retained_protocol_survives_redaction)
@@ -191,6 +256,9 @@ async def run_all_tests():
     await r.record_async("forged_marker_is_not_appended_to_summary", test_forged_marker_is_not_appended_to_summary)
     await r.record_async("expected_read_failures_are_not_retried", test_expected_read_failures_are_not_retried)
     r.record("policy_redaction_covers_auth_schemes_and_json", test_policy_redaction_covers_auth_schemes_and_json)
+    await r.record_async("retention_failure_keeps_stated_cut_at_boundaries", test_retention_failure_keeps_stated_cut_at_boundaries)
+    await r.record_async("missing_retained_output_404_is_file_not_found", test_missing_retained_output_404_is_file_not_found)
+    r.record("policy_redaction_env_keys_and_escaped_quotes", test_policy_redaction_env_keys_and_escaped_quotes)
     return r.summary()
 
 

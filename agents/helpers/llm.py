@@ -2251,7 +2251,7 @@ async def _render_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
-    from helpers.tool_output import DEFAULT_INLINE_CHARS, preview_tool_text
+    from helpers.tool_output import DEFAULT_INLINE_CHARS, RetentionError, preview_tool_text, stated_cut
 
     async def bounded_tool_text(value: str, attachment_labels: List[str]) -> str:
         suffix = "\n\n" + "\n\n".join(attachment_labels) if attachment_labels else ""
@@ -2259,10 +2259,15 @@ async def _render_llm_messages(
         # readback. Callers without it (DAG reasoning) have no read_tool_output
         # tool, so they keep the complete redacted result.
         retain = bool(user_id and agent_id)
-        preview = await preview_tool_text(
-            value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id,
-            limit=DEFAULT_INLINE_CHARS - len(suffix) if retain else sys.maxsize,
-        )
+        limit = DEFAULT_INLINE_CHARS - len(suffix) if retain else sys.maxsize
+        try:
+            preview = await preview_tool_text(
+                value, user_id=user_id or "", agent_id=agent_id or "", session_id=session_id, limit=limit,
+            )
+        except RetentionError as error:
+            # A storage failure must not fail the model request; state the cut.
+            logger.warning("[LLM] Tool output retention failed; sending a stated cut", agent_id=agent_id, error=str(error))
+            preview = stated_cut(value, limit=limit, reason="retained readback unavailable after a storage failure")
         if suffix and any(label not in preview for label in attachment_labels):
             preview += suffix
         return preview

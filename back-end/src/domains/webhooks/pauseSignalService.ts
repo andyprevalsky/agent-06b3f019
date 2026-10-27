@@ -17,6 +17,9 @@ const log = createLogger('Webhooks');
 /** Bound for the cause-capability probe; a slow or absent worker gets the legacy pause. */
 const PAUSE_CAUSE_PROBE_TIMEOUT_MS = 5_000;
 
+/** Agents probed and signalled at once, so a lapse costs ~one probe deadline per batch. */
+export const SUBSCRIPTION_PAUSE_CONCURRENCY = 8;
+
 /**
  * Pause-signal arguments the workflow's own code accepts. An older generation
  * still draining on its queue defines `pause(self)`; Temporal calls it with every

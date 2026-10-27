@@ -3,10 +3,11 @@ import { getUserUsage } from '../../providers/credits';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { createLogger } from '../../providers/logger';
 import { getTemporalClient } from '../../providers/temporal';
+import { mapWithConcurrency } from '../../providers/concurrency';
 import { resolvePendingGateByKey } from '../../providers/gateResolution';
 import { ensureRoseApiKeyForUser } from '../../providers/supabaseApiKeys';
 import * as repo from './repo';
-import { subscriptionPauseArgs } from './pauseSignalService';
+import { SUBSCRIPTION_PAUSE_CONCURRENCY, subscriptionPauseArgs } from './pauseSignalService';
 import { STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_LIVE } from './config';
 
 const log = createLogger('Webhooks');
@@ -250,26 +251,26 @@ async function pauseUserAgents(userId: string): Promise<void> {
     return;
   }
 
-  for (const agent of activeAgents) {
-    if (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== '') {
-      try {
-        const client = await getTemporalClient();
-        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-        await handle.signal('pause', ...(await subscriptionPauseArgs(client, handle, agent.id)));
-        await repo.updateAgentStatus(agent.id, 'PAUSED');
-        log.info('Paused agent (subscription lapsed)', {
-          workflow_id: agent.temporalWorkflowId,
-          agent_id: agent.id,
-        });
-      } catch (error) {
-        log.warn('Failed to send pause signal, skipping agent', {
-          workflow_id: agent.temporalWorkflowId,
-          agent_id: agent.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+  // Bounded fan-out: each agent's probe may wait its full deadline; failures stay per agent.
+  await mapWithConcurrency(activeAgents, SUBSCRIPTION_PAUSE_CONCURRENCY, async (agent) => {
+    if (agent.temporalWorkflowId === null || agent.temporalWorkflowId === '') return;
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('pause', ...(await subscriptionPauseArgs(client, handle, agent.id)));
+      await repo.updateAgentStatus(agent.id, 'PAUSED');
+      log.info('Paused agent (subscription lapsed)', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agent.id,
+      });
+    } catch (error) {
+      log.warn('Failed to send pause signal, skipping agent', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agent.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
-  }
+  });
 
   log.info('Paused agents for user (subscription lapsed)', {
     user_id: userId,

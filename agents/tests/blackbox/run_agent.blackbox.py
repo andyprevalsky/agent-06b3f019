@@ -2627,6 +2627,31 @@ async def test_workflow_output_retention_uses_activity():
         assert "preview_tool_output_activity" in calls
 
 
+async def test_activity_preview_retention_failure_keeps_stated_cut():
+    """A retained-output storage failure must leave a bounded tool result in
+    context instead of failing the loop iteration."""
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+
+    huge = "STORAGE_DOWN_RESULT " * 20_000 + "EXACT_TAIL_SENTINEL"
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    async def disk_full(*args, **kwargs):
+        raise OSError("fixture disk full")
+
+    with retained_tool_output_fixture(), patch("helpers.attachments.upload_to_storage", side_effect=disk_full):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-storage-down", 1.0)],
+            skip_verification=True, execute_tool_override=mock_execute_tool, max_iterations=1,
+            is_inside_temporal_activity=True, poll_messages_override=None,
+        )
+    assert result.get("status") != "error", result.get("status")
+    text = [m for m in result["context"] if m["role"] == "TOOL"][-1]["text"]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "storage failure" in text and "EXACT_TAIL_SENTINEL" not in text
+
+
 async def test_workflow_marker_verification_uses_activity():
     """A short receipt carrying a retained marker is verified against storage;
     that download must run in an activity, never in workflow code."""
@@ -4024,6 +4049,7 @@ async def run_all_tests():
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
     await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
     await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)
+    await r.record_async("activity_preview_retention_failure_stated_cut", test_activity_preview_retention_failure_keeps_stated_cut)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "poll_inbox_rows_reach_next_llm_call_once",
