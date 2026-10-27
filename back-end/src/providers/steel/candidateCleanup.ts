@@ -120,7 +120,11 @@ export async function reconcileSteelCandidateCleanup(
   for (const intent of await deps.listPending(identity)) {
     if (intent.ownershipIdentity !== identity || !deps.isOwned(intent.sessionId, identity))
       continue;
-    if ((await deps.inFlight([intent.sessionId])).has(intent.sessionId) || (await deps.held(intent.sessionId))) continue;
+    if (
+      (await deps.inFlight([intent.sessionId])).has(intent.sessionId) ||
+      (await deps.held(intent.sessionId))
+    )
+      continue;
     try {
       await deps.claim(intent.taskId, async (assertTaskOwned, runTaskNative) => {
         const cleanup = async (
@@ -129,7 +133,11 @@ export async function reconcileSteelCandidateCleanup(
         ): Promise<void> => {
           await assertTaskOwned();
           await assertProfileOwned?.();
-          if ((await deps.inFlight([intent.sessionId])).has(intent.sessionId) || (await deps.held(intent.sessionId))) return;
+          if (
+            (await deps.inFlight([intent.sessionId])).has(intent.sessionId) ||
+            (await deps.held(intent.sessionId))
+          )
+            return;
           await assertTaskOwned();
           await assertProfileOwned?.();
           const release = () => deps.release(intent.sessionId);

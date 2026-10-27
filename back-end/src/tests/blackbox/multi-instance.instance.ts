@@ -107,7 +107,8 @@ async function main(): Promise<unknown> {
     }
     case 'steel-reap': {
       // Instance B's reaper sweeps the shared Steel account while A sets up.
-      const { reconcileOrphanedSteelSessions } = await import('../../providers/steel/sessionReaper');
+      const { reconcileOrphanedSteelSessions } =
+        await import('../../providers/steel/sessionReaper');
       await barrier();
       await sleep(Number(args[1]));
       const released: string[] = [];

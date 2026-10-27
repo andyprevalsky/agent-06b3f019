@@ -246,7 +246,10 @@ async function main(): Promise<void> {
     await test('a WhatsApp claim whose commit ack was lost is not its own duplicate', async () => {
       const wamid = `wamid.mi-${randomUUID()}`;
       const [first] = await concurrently([['wa-dedupe-lost-ack', [wamid]]]);
-      assert(first.dropped === true, `the proxy must drop the commit ack: ${JSON.stringify(first)}`);
+      assert(
+        first.dropped === true,
+        `the proxy must drop the commit ack: ${JSON.stringify(first)}`
+      );
       assert(first.duplicate === false, 'a fresh message must not be skipped as a duplicate');
       const [redelivery] = await concurrently([['wa-dedupe', [wamid]]]);
       assert(redelivery.duplicate === true, "Meta's redelivery must still be a duplicate");
