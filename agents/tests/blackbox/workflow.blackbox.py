@@ -715,7 +715,9 @@ async def mock_call_llm_activity(
         }
     return {
         "response": "Task complete.",
-        "tool_calls": [
+        # Poll-retry scenarios deliberately exercise loop exhaustion; their
+        # model stays in progress instead of emitting a malformed completion.
+        "tool_calls": [] if activity_agent_id in POLL_TRANSIENT_BURST else [
             {
                 "tool": "attempt_completion",
                 "result": "All done",
