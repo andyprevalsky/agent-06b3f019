@@ -20,27 +20,35 @@
  *  - a Plaid item sync runs on one instance at a time
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
+ *  - a Mac on A serves a session that B starts, relays to and stops
+ *  - a session started on A follows its Mac to B for relay and stop
+ *  - a connected Mac's owner row is re-claimed after it is lost
+ *  - an E2B code session created on A runs project commands from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
  *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
  *
  * Usage: npx tsx src/tests/blackbox/multi-instance.blackbox.ts
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { createHmac, randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import {
+  concurrently,
+  frames,
+  freePorts,
+  startInstance,
+  waitFor,
+  waitForAsync,
+} from './multi-instance.harness';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
 import { createPrismaGrantStore, upsertAccountConnection } from '../../domains/compute-grants/repo';
 
 config();
-
-const INSTANCE_SCRIPT = join(__dirname, 'multi-instance.instance.ts');
 
 let passed = 0;
 const failures: string[] = [];
@@ -57,54 +65,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg);
-}
-
-interface Instance {
-  child: ChildProcessWithoutNullStreams;
-  ready: Promise<void>;
-  result: Promise<Record<string, unknown>>;
-}
-
-function startInstance(op: string, args: string[], env: Record<string, string> = {}): Instance {
-  const child = spawn(process.execPath, ['--import', 'tsx', INSTANCE_SCRIPT, op, ...args], {
-    cwd: join(__dirname, '..', '..', '..'),
-    env: { ...process.env, ...env },
-  });
-  let out = '';
-  let err = '';
-  let markReady!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    markReady = resolve;
-  });
-  child.stdout.on('data', (chunk: Buffer) => {
-    out += chunk.toString();
-    if (out.includes('READY\n')) markReady();
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    err += chunk.toString();
-  });
-  const result = new Promise<Record<string, unknown>>((resolve, reject) => {
-    child.on('exit', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('RESULT '));
-      if (line === undefined) {
-        reject(new Error(`instance ${op} exited ${code} without a result: ${err.slice(-400)}`));
-        return;
-      }
-      resolve(JSON.parse(line.slice('RESULT '.length)) as Record<string, unknown>);
-    });
-  });
-  return { child, ready, result };
-}
-
-/** Run one operation per instance with their critical sections released together. */
-async function concurrently(
-  ops: Array<[string, string[]]>,
-  env: Record<string, string> = {}
-): Promise<Array<Record<string, unknown>>> {
-  const instances = ops.map(([op, args]) => startInstance(op, args, env));
-  await Promise.all(instances.map((i) => i.ready));
-  for (const i of instances) i.child.stdin.write('GO\n');
-  return Promise.all(instances.map((i) => i.result));
 }
 
 async function main(): Promise<void> {
@@ -390,6 +350,221 @@ async function main(): Promise<void> {
       assert(foreign.state === 'unknown', "another user must not read the session's snapshot");
       assert(host.released === true, "B's cancel must release the browser A owns");
     });
+    await test('a Mac on instance A serves a session started, relayed and stopped from B', async () => {
+      const deviceId = randomUUID();
+      const taskId = randomUUID();
+      const [portA, portB] = await freePorts(2);
+      const a = startInstance('hub-serve', [String(portA)]);
+      const b = startInstance('hub-start', [String(portB), deviceId, taskId]);
+      try {
+        await Promise.all([a.ready, b.ready]);
+        const deviceHeaders = {
+          authorization: 'Bearer mi-device-token',
+          'x-rose-device-id': deviceId,
+        };
+        // The Mac's control channel lands on A; its tunnel and the worker land on B.
+        const control = await frames(
+          `ws://127.0.0.1:${portA}/api/local-devices/control`,
+          deviceHeaders
+        );
+        control.ws.send(
+          JSON.stringify({ type: 'hello', sessions: [], sessions_root: '/Users/mi/rs' })
+        );
+        a.child.stdin.write('GO\n');
+        b.child.stdin.write('GO\n');
+        await control.next(
+          (f) => typeof f === 'object' && f.type === 'start_session',
+          'start_session on A'
+        );
+        control.ws.send(
+          JSON.stringify({ type: 'session_started', task_id: taskId, folder: '~/mi' })
+        );
+        const tunnel = await frames(
+          `ws://127.0.0.1:${portB}/api/local-code-relay/${taskId}/device`,
+          deviceHeaders
+        );
+        await waitFor(() => b.output().includes('STARTED\n'), "B's start to resolve");
+        const token = createHmac('sha256', 'mi-relay-secret')
+          .update(`local-code-relay:${taskId}`)
+          .digest('hex');
+        const worker = await frames(
+          `ws://127.0.0.1:${portB}/api/local-code-relay/${taskId}?token=${token}`
+        );
+        const open = await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'open',
+          'channel open'
+        );
+        worker.ws.send('ping-from-worker');
+        await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'data' && f.data === 'ping-from-worker',
+          'worker frame at the Mac'
+        );
+        tunnel.ws.send(JSON.stringify({ op: 'data', ch: open.ch, data: 'pong-from-mac' }));
+        await worker.next((f) => f === 'pong-from-mac', 'Mac frame at the worker');
+        b.child.stdin.write('CHECK\n');
+        await control.next(
+          (f) => typeof f === 'object' && f.type === 'stop_session' && f.task_id === taskId,
+          'stop_session on A'
+        );
+        const result = await b.result;
+        assert(result.online === true, `B must see the Mac online: ${JSON.stringify(result)}`);
+        assert(
+          result.home === `/Users/mi/rs/${taskId}`,
+          `B must see the session HOME: ${result.home}`
+        );
+        assert(result.folder === '~/mi', `B must get the started folder: ${result.folder}`);
+        assert(result.live === true, 'B must see the session live');
+        for (const ws of [control.ws, tunnel.ws, worker.ws]) ws.close();
+        a.child.stdin.write('DONE\n');
+        await a.result;
+      } finally {
+        // A failed case kills its instances; their pending results are moot.
+        a.result.catch(() => undefined);
+        b.result.catch(() => undefined);
+        a.child.kill();
+        b.child.kill();
+      }
+    });
+
+    await test('a session started on A follows its Mac to B for relay and stop', async () => {
+      const deviceId = randomUUID();
+      const taskId = randomUUID();
+      const [portA, portB] = await freePorts(2);
+      const env = { MI_HUB_DEVICE: deviceId };
+      const a = startInstance('hub-start-local', [String(portA), deviceId, taskId], env);
+      const b = startInstance('hub-serve', [String(portB)], env);
+      try {
+        await Promise.all([a.ready, b.ready]);
+        const headers = { authorization: 'Bearer mi-device-token', 'x-rose-device-id': deviceId };
+        const controlA = await frames(`ws://127.0.0.1:${portA}/api/local-devices/control`, headers);
+        a.child.stdin.write('GO\n');
+        b.child.stdin.write('GO\n');
+        await controlA.next(
+          (f) => typeof f === 'object' && f.type === 'start_session',
+          'start on A'
+        );
+        controlA.ws.send(
+          JSON.stringify({ type: 'session_started', task_id: taskId, folder: '~/mi' })
+        );
+        const tunnelA = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}/device`,
+          headers
+        );
+        await waitFor(() => a.output().includes('STARTED\n'), "A's local start");
+        // The Mac's sockets drop and its control channel reconnects to B.
+        tunnelA.ws.close();
+        controlA.ws.close();
+        const controlB = await frames(`ws://127.0.0.1:${portB}/api/local-devices/control`, headers);
+        await waitForAsync(async () => {
+          const rows = await prisma.$queryRaw<Array<{ instance: string }>>`
+            SELECT value->>'instance' AS instance FROM "SharedEphemeralState"
+            WHERE namespace = 'local-device-owner' AND key = ${deviceId} AND "expiresAt" > now()`;
+          return rows[0]?.instance === `http://127.0.0.1:${portB}`;
+        }, 'B to own the device');
+        // The tunnel and a worker reconnect through A, which still holds a stale session.
+        const tunnel = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}/device`,
+          headers
+        );
+        const token = createHmac('sha256', 'mi-relay-secret')
+          .update(`local-code-relay:${taskId}`)
+          .digest('hex');
+        const worker = await frames(
+          `ws://127.0.0.1:${portA}/api/local-code-relay/${taskId}?token=${token}`
+        );
+        const open = await tunnel.next((f) => typeof f === 'object' && f.op === 'open', 'channel');
+        worker.ws.send('ping-via-a');
+        await tunnel.next(
+          (f) => typeof f === 'object' && f.op === 'data' && f.data === 'ping-via-a',
+          'the worker frame at the Mac'
+        );
+        tunnel.ws.send(JSON.stringify({ op: 'data', ch: open.ch, data: 'pong-via-b' }));
+        await worker.next((f) => f === 'pong-via-b', 'the Mac frame at the worker');
+        a.child.stdin.write('STOP\n');
+        await controlB.next(
+          (f) => typeof f === 'object' && f.type === 'stop_session' && f.task_id === taskId,
+          'stop_session on B'
+        );
+        for (const ws of [controlB.ws, tunnel.ws, worker.ws]) ws.close();
+        a.child.stdin.write('DONE\n');
+        b.child.stdin.write('DONE\n');
+        await Promise.all([a.result, b.result]);
+      } finally {
+        a.result.catch(() => undefined);
+        b.result.catch(() => undefined);
+        a.child.kill();
+        b.child.kill();
+      }
+    });
+
+    await test("a connected Mac's owner row is re-claimed after it is lost", async () => {
+      const deviceId = randomUUID();
+      const [port] = await freePorts(1);
+      const owner = startInstance('hub-serve', [String(port)]);
+      try {
+        await owner.ready;
+        const control = await frames(`ws://127.0.0.1:${port}/api/local-devices/control`, {
+          authorization: 'Bearer mi-device-token',
+          'x-rose-device-id': deviceId,
+        });
+        owner.child.stdin.write('GO\n');
+        const ownerRow = () =>
+          prisma.$queryRaw<Array<{ token: string }>>`
+            SELECT value->>'token' AS token FROM "SharedEphemeralState"
+            WHERE namespace = 'local-device-owner' AND key = ${deviceId} AND "expiresAt" > now()`;
+        await waitForAsync(async () => (await ownerRow()).length === 1, 'the owner row');
+        const [first] = await ownerRow();
+        // A database outage longer than the TTL lets the reaper drop the row.
+        await prisma.$executeRaw`
+          DELETE FROM "SharedEphemeralState" WHERE namespace = 'local-device-owner' AND key = ${deviceId}`;
+        await waitForAsync(async () => (await ownerRow()).length === 1, 'the re-claimed row');
+        const [again] = await ownerRow();
+        assert(again.token !== first.token, 'the row must be a fresh claim');
+        control.ws.close();
+        owner.child.stdin.write('DONE\n');
+        await owner.result;
+      } finally {
+        owner.result.catch(() => undefined);
+        owner.child.kill();
+      }
+    });
+
+    await test('an E2B code session created on A runs project commands from B', async () => {
+      const session = await prisma.claudeCodeSession.create({
+        data: {
+          agentId: randomUUID(),
+          sandboxId: `mi-sbx-${randomUUID()}`,
+          goal: 'multi-instance',
+        },
+      });
+      try {
+        const [remote] = await concurrently([['workspace-exec', [session.id]]]);
+        const connected = remote.connected as string[] | undefined;
+        assert(
+          Array.isArray(connected) && connected[0] === session.sandboxId,
+          `B must reach the session's sandbox: ${JSON.stringify(remote)}`
+        );
+        assert(remote.homeDir === '/home/user', `unexpected HOME ${String(remote.homeDir)}`);
+        assert(
+          remote.stdout === 'ran:echo hi',
+          `B's command must run there: ${String(remote.stdout)}`
+        );
+        const [local] = await concurrently([['workspace-exec', [randomUUID()]]]);
+        assert(local.homeDir === null, 'an unknown session must not resolve an executor');
+        await prisma.claudeCodeSession.update({
+          where: { id: session.id },
+          data: { status: 'CLOSED' },
+        });
+        const [closed] = await concurrently([['workspace-exec', [session.id]]]);
+        assert(
+          closed.homeDir === null && (closed.connected as string[]).length === 0,
+          `a closed session must not be reconnected: ${JSON.stringify(closed)}`
+        );
+      } finally {
+        await prisma.claudeCodeSession.deleteMany({ where: { id: session.id } });
+      }
+    });
+
     await test('a held lease is renewed past its TTL, so no instance takes it over', async () => {
       const key = `mi-${randomUUID()}`;
       const [holder, peer] = await concurrently([
