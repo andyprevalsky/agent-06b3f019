@@ -16,7 +16,10 @@
 # or SIGKILLed holder never strands the lock and no stale-owner sweep is needed.
 #
 # Tunables (env, optional):
-#   ROSE_TEST_DB_LOCK_DIR  shared lock directory (default $TMPDIR/rose-test-db-locks)
+#   ROSE_TEST_DB_LOCK_DIR  shared lock directory (default /tmp/rose-test-db-locks)
+#
+# The default does not follow TMPDIR: runners with different TMPDIR values
+# (/var/tmp vs /tmp) must still contend for the same database's lock file.
 
 TEST_DB_RUN_LOCK_KEEPER_PID=""
 TEST_DB_RUN_LOCK_FILE=""
@@ -54,7 +57,7 @@ test_db_run_lock_key() {  # <postgres-url>
 test_db_run_lock_file() {  # <lock-key>
   local fs_key
   fs_key="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
-  printf '%s/%s.lock\n' "${ROSE_TEST_DB_LOCK_DIR:-${TMPDIR:-/tmp}/rose-test-db-locks}" "$fs_key"
+  printf '%s/%s.lock\n' "${ROSE_TEST_DB_LOCK_DIR:-/tmp/rose-test-db-locks}" "$fs_key"
 }
 
 # A coverage parent that already holds the lock hands its skip-sync blackbox
