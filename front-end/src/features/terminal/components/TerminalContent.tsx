@@ -34,6 +34,9 @@
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
  *   calm dark background. Stock accounts and shared views never leave light.
+ * DOCUMENT SCROLL: mounted → html.rose-app-shell locks page scroll/overscroll
+ *   (panes scroll internally; the mobile query box stays put); unmounted →
+ *   class removed so other routes scroll normally.
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -63,6 +66,7 @@ import { UserUiProvider, UserUiShell } from '@/features/user-ui';
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
 import { useDrippiness } from '../hooks/useDrippiness';
+import { useLockedDocumentScroll } from '../hooks/useLockedDocumentScroll';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
 import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
@@ -96,6 +100,7 @@ export function TerminalContent() {
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
   const derived = useTerminalDerivedState(agents);
+  useLockedDocumentScroll();
 
   return (
     <TerminalLayout
