@@ -67,8 +67,8 @@ LLM activity. Clear this case's existing per-agent activity counter before launc
 and assert that the scripted completion reaches verification after one LLM call.
 Preserve the schema assertions, runtime code, loop limits and verifier wait.
 The full-domain check also exposed poll-retry scenarios that intentionally
-require loop exhaustion: those fixtures now explicitly return an empty tool-call
-list while in progress, instead of depending on the same malformed completion.
+require loop exhaustion: those fixtures now explicitly return a valid, already-elapsed wait
+while in progress, instead of depending on the same malformed completion.
 Their original loop-exhaustion assertions remain unchanged.
 The existing workflow blackbox domain is registered in the normal agents
 coverage runner and /deploy Step 4g. Full-domain and full-coverage results are

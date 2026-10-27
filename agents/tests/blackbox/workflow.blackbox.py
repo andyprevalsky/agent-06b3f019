@@ -715,9 +715,10 @@ async def mock_call_llm_activity(
         }
     return {
         "response": "Task complete.",
-        # Poll-retry scenarios deliberately exercise loop exhaustion; their
-        # model stays in progress instead of emitting a malformed completion.
-        "tool_calls": [] if activity_agent_id in POLL_TRANSIENT_BURST else [
+        # Poll-retry scenarios deliberately exercise loop exhaustion. A valid
+        # already-elapsed wait keeps polling without completing or sleeping.
+        "tool_calls": [{"tool": "wait_for", "until_timestamp": "2000-01-01T00:00:00Z"}]
+        if activity_agent_id in POLL_TRANSIENT_BURST else [
             {
                 "tool": "attempt_completion",
                 "result": "All done",
