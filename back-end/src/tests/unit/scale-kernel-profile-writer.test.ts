@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { prisma } from '../../providers/database';
 import {
+  abandonKernelProfileWriterClaim,
   bindKernelProfileWriter,
   claimKernelProfileWriter,
   releaseKernelProfileWriter,
@@ -25,6 +26,8 @@ const profiles: string[] = [];
 const sessions: string[] = [];
 const alive = new Set<string>();
 const exists = async (sessionId: string) => alive.has(sessionId);
+const validationBrowser = { close: async () => {} };
+const noRelease = async () => {};
 
 function newProfile(): string {
   const id = `s19-profile-${randomUUID()}`;
@@ -37,7 +40,7 @@ async function createBrowser(profileId: string, replacing?: string) {
   const sessionId = `s19-session-${randomUUID()}`;
   sessions.push(sessionId);
   alive.add(sessionId);
-  await bindKernelProfileWriter(claim, sessionId);
+  await bindKernelProfileWriter(claim, { sessionId, validationBrowser }, noRelease);
   return { sessionId, writer: claim.writer };
 }
 
@@ -82,6 +85,43 @@ async function main() {
       // replacement's claim.
       await deleteBrowser(old.sessionId);
       assert.equal((await createBrowser(profileId)).writer, false);
+    });
+
+    await test('a replacement that never got created leaves the old writer in place', async () => {
+      const profileId = newProfile();
+      const old = await createBrowser(profileId);
+      const claim = await claimKernelProfileWriter(profileId, old.sessionId, exists);
+      assert.equal(claim.writer, true);
+      await abandonKernelProfileWriterClaim(claim); // create threw before bind
+      assert.equal((await createBrowser(profileId)).writer, false);
+      await deleteBrowser(old.sessionId);
+      assert.equal((await createBrowser(profileId)).writer, true);
+    });
+
+    await test('a failed swap returns the writer role to the still-live old browser', async () => {
+      const profileId = newProfile();
+      const old = await createBrowser(profileId);
+      const replacement = await createBrowser(profileId, old.sessionId);
+      assert.equal(replacement.writer, true);
+      // The row update lost a race, so the replacement is deleted and the old stays.
+      await deleteBrowser(replacement.sessionId);
+      assert.equal((await createBrowser(profileId)).writer, false);
+      await deleteBrowser(old.sessionId);
+      assert.equal((await createBrowser(profileId)).writer, true);
+    });
+
+    await test('a failed bind deletes the just-created writer browser', async () => {
+      const released: string[] = [];
+      await assert.rejects(
+        bindKernelProfileWriter(
+          { profileId: newProfile(), writer: true, token: 'not-json-safe\u0000' },
+          { sessionId: 's19-unbindable', validationBrowser },
+          async (id) => {
+            released.push(id);
+          }
+        )
+      );
+      assert.deepEqual(released, ['s19-unbindable']);
     });
 
     await test('a writer that vanished without release is taken over', async () => {

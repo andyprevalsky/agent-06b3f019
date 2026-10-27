@@ -61,27 +61,38 @@ Local repros (local Postgres, never prod):
 
 1. `scale-e2b-capacity-wait.test.ts`: `Sandbox.create` refuses twice with
    `RateLimitError`, then succeeds. Buggy revision: `not ok 1` (first refusal
-   thrown). Fixed revision: 3/3 pass.
+   thrown). Fixed revision: pass. Non-opted-in callers still fail fast.
 2. `scale-kernel-profile-writer.test.ts`: the buggy `kernel.ts` hard-codes
    `save_changes: true` (assertion failed). With the fix, 10 concurrent creates
-   on one profile produce exactly one writer. Release, handoff and
-   dead-writer takeover are also covered.
+   on one profile produce exactly one writer. Release, handoff, failed-swap
+   restore, failed-bind cleanup and dead-writer takeover are also covered.
 
 ## Solution
 
-- `e2bSandboxCreate.ts`: the typed SDK classes `RateLimitError` and
-  `ServiceBusyError` now wait for a slot, backing off from 2 s up to 30 s,
-  within `E2B_CAPACITY_WAIT_MS` (default 300 s). A refusal creates no sandbox,
-  so the wait cannot orphan one. Other rejections still fail at once.
+- `e2bSandboxCreate.ts`: callers opt in to waiting for E2B capacity. The
+  typed SDK classes `RateLimitError` and `ServiceBusyError` then wait for a
+  slot, backing off from 2 s up to 10 s. Only the code-agent create
+  (`e2bCodeSessionSandbox.ts`) opts in, within `E2B_CAPACITY_WAIT_MS` (default
+  30 s, inside the agent's 60 s create request). The caller therefore never
+  gives up and retries while the backend is still waiting. Synchronous user
+  paths (user tools, code inspections) keep failing fast. A refusal creates no
+  sandbox, so waiting cannot orphan one.
 - `browser/kernelProfileWriter.ts`: before a create, the browser claims the
   per-profile writer row in `SharedEphemeralState`. The winner gets
   `save_changes: true`. Other concurrent browsers load the profile without
-  saving, and `BrowserSession.providerProfilePersist` records their role.
-  A rotate/resume replacement inherits the writer role from the session it
-  supersedes. `releaseKernelRemoteSession` frees the claim only after the
-  DELETE, which is when Kernel saves. If a writer vanished without a release,
-  one Kernel GET detects it, and that GET runs only on the contended path.
-  The 72 h TTL (Kernel's maximum session lifetime) is a backstop.
+  saving, and `BrowserSession.providerProfilePersist` records which role each
+  browser has.
+  - A rotate/resume replacement inherits the writer role. The row moves only
+    when the replacement binds. If the swap fails, the role returns to the
+    still-live replaced browser.
+  - If recording the bind fails, the new browser is deleted, so an untracked
+    writer cannot remain.
+  - `releaseKernelRemoteSession` frees the claim only after the DELETE, which
+    is when Kernel saves. A bookkeeping error never turns a successful delete
+    into a failure.
+  - If a writer vanished without a release, one Kernel GET detects it, and that
+    GET runs only on the contended path. The 72 h TTL (Kernel's maximum
+    session lifetime) is a backstop.
 
 Scale (10k agents): each writer browser uses 2 primary-key rows. A reader uses
 one failed insert and one read. The E2B wait holds no shared state. Nothing

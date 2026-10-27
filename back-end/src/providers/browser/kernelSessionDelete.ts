@@ -1,6 +1,9 @@
 import https from 'node:https';
+import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { releaseKernelProfileWriter } from './kernelProfileWriter';
+
+const log = createLogger('KernelSessionDelete');
 
 /**
  * Per-attempt budget for DELETE /browsers/:id. Matches the Kernel SDK's own
@@ -47,5 +50,12 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
     }
   );
   // Kernel saved the profile during the DELETE above; only now may another browser write it.
-  await releaseKernelProfileWriter(sessionId);
+  // The browser is gone either way: a bookkeeping failure must not report the delete as
+  // failed (the next claim's liveness check takes over a row left behind).
+  await releaseKernelProfileWriter(sessionId).catch((error: unknown) =>
+    log.warn('Kernel profile writer release failed after delete', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  );
 }

@@ -123,18 +123,22 @@ export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
 export const SANDBOX_CREATE_REQUEST_TIMEOUT_MS = 120_000;
 
 /**
- * How long a create waits for E2B capacity. E2B caps concurrently running
- * sandboxes per team (Hobby 20, Pro 100, add-ons 600/1,100) and answers a
- * create over the cap with HTTP 429 (`RateLimitError`) or a busy 503
- * (`ServiceBusyError`). Neither creates a sandbox, so waiting for a slot is
- * safe; failing the code agent on the first refusal was not.
+ * How long a code-agent sandbox create waits for E2B capacity. E2B caps
+ * concurrently running sandboxes per team (Hobby 20, Pro 100, add-ons
+ * 600/1,100) and answers a create over the cap with HTTP 429
+ * (`RateLimitError`) or a busy 503 (`ServiceBusyError`). Neither creates a
+ * sandbox, so waiting for a slot is safe; failing the code agent on the first
+ * refusal was not. The default stays inside the agent's 60s create request
+ * (spawn_claude_code_agent/repo.py), so the caller never gives up and retries
+ * while the backend is still waiting. Synchronous user paths (user tools,
+ * inspections) opt out and fail fast.
  */
 export function e2bCapacityWaitMs(): number {
-  const parsed = Number.parseInt(process.env.E2B_CAPACITY_WAIT_MS ?? '300000', 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300_000;
+  const parsed = Number.parseInt(process.env.E2B_CAPACITY_WAIT_MS ?? '30000', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 30_000;
 }
 const E2B_CAPACITY_POLL_INITIAL_MS = 2_000;
-const E2B_CAPACITY_POLL_MAX_MS = 30_000;
+const E2B_CAPACITY_POLL_MAX_MS = 10_000;
 
 export function isSandboxCapacityError(error: unknown): boolean {
   return error instanceof RateLimitError || error instanceof ServiceBusyError;
@@ -144,9 +148,11 @@ export async function createSandboxWithRetry(
   templateId: string,
   options: Parameters<typeof Sandbox.create>[1],
   label: string,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  capacity: { waitMs?: number; sleep?: (ms: number) => Promise<void> } = {}
 ): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
-  const deadline = Date.now() + e2bCapacityWaitMs();
+  const sleep =
+    capacity.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + (capacity.waitMs ?? 0);
   for (let refusal = 1; ; refusal += 1) {
     try {
       return await createSandboxAttempts(templateId, options, label);

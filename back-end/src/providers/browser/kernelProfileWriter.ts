@@ -10,7 +10,8 @@
  *   create(profile P)
  *     ├─ claim writer row (P) ── won ──► save_changes: true ─► bind row to sessionId
  *     │        │                                                  │
- *     │        └─ held by S ── S is the session being replaced ──►┤ (handoff)
+ *     │        └─ held by S ── S is the session being replaced ──►┤ (handoff: row moves
+ *     │                    │                       only on bind; a failed swap restores S)
  *     │                    ├─ S no longer exists on Kernel ──────►┤ (take over)
  *     │                    └─ S live / create pending ──► save_changes: false (reads P)
  *     └─ release(sessionId) after its DELETE (Kernel saves on delete) frees the row
@@ -47,6 +48,14 @@ export interface KernelProfileWriterClaim {
   /** True when this browser must be created with save_changes: true. */
   writer: boolean;
   token: string | null;
+  /** Set on a rotate/resume handoff: the replaced writer, which still owns the row until bind. */
+  handoffFrom?: string;
+}
+
+interface SessionIndexValue {
+  profileId: string;
+  token: string;
+  handoffFrom?: string;
 }
 
 /** Whether a Kernel browser session still exists; false only on a definite not-found. */
@@ -129,9 +138,12 @@ export async function claimKernelProfileWriter(
   let takeOver = false;
   let reason = '';
   if (heldBy !== null && heldBy === replacingSessionId) {
-    takeOver = true;
-    reason = 'handoff_from_replaced_session';
-  } else if (heldBy === null) {
+    // Leave the row with the replaced writer until the replacement binds, so a
+    // failed swap leaves the still-live old browser as the tracked writer.
+    log.info('Kernel profile writer handed off to replacement', { profileId, from: heldBy });
+    return { profileId, writer: true, token: holder.value.token, handoffFrom: heldBy };
+  }
+  if (heldBy === null) {
     takeOver = holder.ageMs > PENDING_CREATE_STALE_MS;
     reason = 'abandoned_pending_create';
   } else if (!(await sessionExists(heldBy))) {
@@ -150,11 +162,25 @@ export async function claimKernelProfileWriter(
   return { profileId, writer: false, token: null };
 }
 
-/** Record which Kernel session holds the writer claim, so its release frees the profile. */
+/**
+ * Record which Kernel session holds the writer claim, so its release frees the
+ * profile. If recording fails, the just-created browser is deleted: an
+ * untracked writer would let a second browser write the same profile.
+ */
 export async function bindKernelProfileWriter(
   claim: KernelProfileWriterClaim,
-  sessionId: string
+  remote: { sessionId: string; validationBrowser: { close(): Promise<void> } },
+  releaseRemote: (sessionId: string) => Promise<void>
 ): Promise<void> {
+  try {
+    await bindWriterRows(claim, remote.sessionId);
+  } catch (error) {
+    await Promise.allSettled([releaseRemote(remote.sessionId), remote.validationBrowser.close()]);
+    throw error;
+  }
+}
+
+async function bindWriterRows(claim: KernelProfileWriterClaim, sessionId: string): Promise<void> {
   if (!claim.writer || claim.token === null) return;
   const value: WriterValue = { token: claim.token, sessionId };
   const bound = await prisma.$executeRaw`
@@ -172,18 +198,27 @@ export async function bindKernelProfileWriter(
   await prisma.$executeRaw`
     INSERT INTO "SharedEphemeralState" (namespace, key, value, "expiresAt")
     VALUES (${SESSION_NAMESPACE}, ${sessionId},
-            ${JSON.stringify({ profileId: claim.profileId, token: claim.token })}::jsonb,
+            ${JSON.stringify(sessionIndexValue(claim))}::jsonb,
             now() + ${WRITER_TTL_MS} * interval '1 millisecond')
     ON CONFLICT (namespace, key) DO UPDATE
       SET value = EXCLUDED.value, "expiresAt" = EXCLUDED."expiresAt"
   `;
 }
 
+function sessionIndexValue(claim: KernelProfileWriterClaim): SessionIndexValue {
+  return {
+    profileId: claim.profileId,
+    token: claim.token ?? '',
+    ...(claim.handoffFrom !== undefined ? { handoffFrom: claim.handoffFrom } : {}),
+  };
+}
+
 /** Give up a claim whose browser was never created (best effort: the claim also goes stale). */
 export async function abandonKernelProfileWriterClaim(
   claim: KernelProfileWriterClaim
 ): Promise<void> {
-  if (!claim.writer || claim.token === null) return;
+  // A handoff never moved the row before bind: the replaced writer still owns it.
+  if (!claim.writer || claim.token === null || claim.handoffFrom !== undefined) return;
   await prisma.$executeRaw`
     DELETE FROM "SharedEphemeralState"
     WHERE namespace = ${WRITER_NAMESPACE} AND key = ${claim.profileId}
@@ -204,19 +239,41 @@ async function dropSessionIndex(sessionId: string): Promise<void> {
 
 /**
  * Free the profile after `sessionId` was deleted (Kernel persists the writer's
- * state on delete). A no-op for reader sessions and for writers already handed off.
+ * state on delete). A no-op for reader sessions and for writers already handed
+ * off. If this was a replacement whose swap failed while the browser it replaced
+ * is still tracked, the writer role returns to that browser instead.
  */
 export async function releaseKernelProfileWriter(sessionId: string): Promise<void> {
-  const rows = await prisma.$queryRaw<Array<{ value: { profileId: string; token: string } }>>`
+  const rows = await prisma.$queryRaw<Array<{ value: SessionIndexValue }>>`
     DELETE FROM "SharedEphemeralState"
     WHERE namespace = ${SESSION_NAMESPACE} AND key = ${sessionId}
     RETURNING value
   `;
   const entry = rows[0]?.value;
   if (entry === undefined) return;
+  const previous = entry.handoffFrom;
+  if (previous !== undefined) {
+    const restored = await prisma.$executeRaw`
+      UPDATE "SharedEphemeralState"
+      SET value = ${JSON.stringify({ token: entry.token, sessionId: previous })}::jsonb
+      WHERE namespace = ${WRITER_NAMESPACE} AND key = ${entry.profileId}
+        AND value->>'token' = ${entry.token} AND value->>'sessionId' = ${sessionId}
+        AND EXISTS (
+          SELECT 1 FROM "SharedEphemeralState" idx
+          WHERE idx.namespace = ${SESSION_NAMESPACE} AND idx.key = ${previous}
+        )
+    `;
+    if (restored === 1) {
+      log.warn('Kernel profile writer returned to the browser a failed swap replaced', {
+        profileId: entry.profileId,
+        sessionId: previous,
+      });
+      return;
+    }
+  }
   await prisma.$executeRaw`
     DELETE FROM "SharedEphemeralState"
     WHERE namespace = ${WRITER_NAMESPACE} AND key = ${entry.profileId}
-      AND value->>'token' = ${entry.token}
+      AND value->>'token' = ${entry.token} AND value->>'sessionId' = ${sessionId}
   `;
 }

@@ -372,7 +372,7 @@ async function createRemoteSession(
     // recreate row update) may still fail and release the remote session. A
     // premature bind would label the next retry user_persistent instead of
     // new_user_persistent (breaks webdecoy isolation metadata proofs).
-    await bindKernelProfileWriter(writerClaim, remote.sessionId);
+    await bindKernelProfileWriter(writerClaim, remote, releaseKernelRemoteSession);
     return remote;
   } catch (error) {
     await abandonKernelProfileWriterClaim(writerClaim);
