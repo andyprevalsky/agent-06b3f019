@@ -288,7 +288,6 @@ previewHandoffCases({
   taskRow,
 });
 
-
 test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ≤ 3 s', async () => {
   const agentId = await agentFor(DEV_USER);
   const session = await codeSessionRow(DEV_USER, agentId, {

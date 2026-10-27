@@ -2,7 +2,7 @@
 id: 2026-10-27-code-session-fixture-observed-before-attachment
 date: 2026-10-27
 title: Code-session fixture measured keepalives before attachment and leaked its failed activity into the next case
-status: open
+status: fixed
 surface: agents
 component: code-sessions native blackbox fixture
 classification: test-bug
@@ -73,3 +73,7 @@ No additional user feedback was recorded for this fixture. The coordinator rejec
 ## Combined-run observation on October 27
 
 Batch 3 at e8e8cff1 passed this corrected first test and the following case; the domain then failed a distinct synthetic resize readiness case. The first-case count and cancellation/join correction remain covered. Full combined acceptance is still pending. The resize first-bad boundary is recorded separately in 2026-10-27-resize-fixture-request-preceded-cli-conversation.
+
+## Combined native verification
+
+At af4cde045 the complete agents coverage command passed with84% aggregate coverage in679.9s, including the original and permanent delayed resize cases. The coordinator joined its actual exit0 receipt. This verifies the owning corrections on that combined source; later source changes and deployment have separate acceptance. The original scheduling delay remains unmeasured.

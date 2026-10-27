@@ -2,7 +2,7 @@
 id: 2026-10-27-resize-fixture-request-preceded-cli-conversation
 date: 2026-10-27
 title: Resize fixture reported a CLI request before the initial CLI conversation existed
-status: open
+status: fixed
 surface: agents
 component: code-sessions native blackbox fixture
 classification: test-bug
@@ -74,3 +74,7 @@ No additional user feedback was recorded. The standing constraints preserve Free
 ## Reusable lesson
 
 Inject a CLI-originated lifecycle request only after observing that CLI conversation and its in-flight tool; retain a delayed-start regression and the original completion assertions.
+
+## Combined native verification
+
+At af4cde045 the complete agents coverage command passed with84% aggregate coverage in679.9s, including the original and permanent delayed resize cases. The coordinator joined its actual exit0 receipt. This verifies the owning corrections on that combined source; later source changes and deployment have separate acceptance. The original scheduling delay remains unmeasured.
