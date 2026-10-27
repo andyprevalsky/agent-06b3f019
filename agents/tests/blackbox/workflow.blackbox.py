@@ -2019,6 +2019,234 @@ def _clear_cutover_test_state(agent_id: str, workflow_id: str) -> None:
     CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
 
 
+async def _capture_cutover_failure(client, handle, name: str, agent_id: str, error: Exception) -> None:
+    """Optional bounded evidence; five seconds bounds RPC work, not local I/O."""
+    directory = os.environ.get("ROSE_CUTOVER_FAILURE_DIR")
+    if not directory:
+        return
+    observed_at = datetime.now(timezone.utc).isoformat()
+    observed_monotonic = asyncio.get_running_loop().time()
+    stage = "prepare"
+    try:
+        from collections import deque
+        from datetime import timedelta
+        from pathlib import Path
+        import tempfile
+        import math
+        from temporalio.client import WorkflowHistoryEventFilterType
+
+        losses = {}
+        nodes = 0
+
+        def bounded_text(value):
+            prefix = value[:1024].encode("utf-8")[:1024].decode("utf-8", "ignore")
+            if len(prefix) != len(value):
+                losses["strings_truncated"] = losses.get("strings_truncated", 0) + 1
+            return prefix
+
+        def project(value, depth=0):
+            nonlocal nodes
+            nodes += 1
+            if nodes > 2048 or depth > 5:
+                losses["projection_budget_drops"] = losses.get("projection_budget_drops", 0) + 1
+                return {"omitted": "projection_budget"}
+            if value is None or isinstance(value, bool):
+                return value
+            if isinstance(value, float):
+                if math.isfinite(value):
+                    return value
+                losses["non_finite_floats"] = losses.get("non_finite_floats", 0) + 1
+                return {"omitted": "non_finite_float"}
+            if isinstance(value, int):
+                return value if value.bit_length() <= 64 else {"omitted": "large_integer"}
+            if isinstance(value, str):
+                return bounded_text(value)
+            if isinstance(value, dict):
+                result = {}
+                for index, (key, child) in enumerate(value.items()):
+                    if index == 32:
+                        break
+                    if isinstance(key, str):
+                        bounded_key = key[:128].encode("utf-8")[:128].decode("utf-8", "ignore")
+                        if bounded_key != key:
+                            losses["keys_truncated"] = losses.get("keys_truncated", 0) + 1
+                        if bounded_key in result:
+                            losses["key_collisions_dropped"] = losses.get("key_collisions_dropped", 0) + 1
+                            continue
+                        result[bounded_key] = project(child, depth + 1)
+                    else:
+                        losses["non_string_keys_dropped"] = losses.get("non_string_keys_dropped", 0) + 1
+                if len(value) > 32:
+                    losses["collection_items_dropped"] = losses.get("collection_items_dropped", 0) + len(value) - 32
+                return result
+            if isinstance(value, (list, tuple)):
+                if len(value) > 32:
+                    losses["collection_items_dropped"] = losses.get("collection_items_dropped", 0) + len(value) - 32
+                return [project(child, depth + 1) for child in value[-32:]]
+            return {"unrepresented_type": type(value).__name__[:128]}
+
+        def write_once(path, receipt, cap):
+            raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            if len(raw) > cap and isinstance(receipt.get("events"), list) and receipt["events"]:
+                # Trim only the remote event prefix; preserve the newest tail and pending state.
+                receipt = {**receipt, "losses": dict(receipt.get("losses", {}))}
+                original_events = receipt["events"]
+                previous_dropped = receipt.get("events_dropped", 0)
+                low, high = 1, len(original_events)
+                while low < high:
+                    middle = (low + high) // 2
+                    receipt["events"] = original_events[middle:]
+                    receipt["events_dropped"] = previous_dropped + middle
+                    receipt["history_complete"] = False
+                    receipt["losses"]["byte_cap_events_trimmed"] = middle
+                    trial = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+                    if len(trial) <= cap:
+                        high = middle
+                    else:
+                        low = middle + 1
+                receipt["events"] = original_events[low:]
+                receipt["events_dropped"] = previous_dropped + low
+                receipt["history_complete"] = False
+                receipt["losses"]["byte_cap_events_trimmed"] = low
+                raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            if len(raw) > cap:
+                raw = json.dumps({
+                    "capture_gap": "byte_cap", "projected_bytes": len(raw), "byte_cap": cap,
+                    "name": bounded_text(name), "failure_observed_at": observed_at,
+                    "failure_observed_monotonic": observed_monotonic,
+                    "native_outcome": "failed", "error_type": type(error).__name__[:128],
+                    "losses": dict(losses), "details_omitted": True,
+                    "remote_summary": {key: receipt[key] for key in (
+                        "workflow_id", "run_id", "status", "history_length", "events_scanned",
+                        "events_dropped", "missing_tail", "history_complete", "history_scan_complete",
+                        "capture_gap", "close_events", "pending_activities", "pending_activities_dropped", "pending_workflow_task",
+                    ) if key in receipt},
+                }).encode("utf-8")
+            if len(raw) > cap:
+                raw = b'{"capture_gap":"metadata_byte_cap","details_omitted":true}'
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(raw)
+
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        owned = Path(tempfile.mkdtemp(prefix="cutover-", dir=root))
+        # mkdtemp creates a unique directory with mode 0700.
+        trace, walked, cursor = deque(maxlen=32), 0, error.__traceback__
+        while cursor is not None and walked < 128:
+            trace.append({"file": project(cursor.tb_frame.f_code.co_filename),
+                          "function": project(cursor.tb_frame.f_code.co_name), "line": cursor.tb_lineno})
+            walked += 1
+            cursor = cursor.tb_next
+        state = project({
+            "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
+            "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+            "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
+            "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
+            "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
+            "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
+            "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
+            "browser": CUTOVER_BROWSER.get(agent_id), "code": CUTOVER_CODE.get(agent_id),
+            "messages": CUTOVER_MESSAGES.get(agent_id),
+            "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
+            "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
+            "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
+            "usage": CUTOVER_USAGE.get(agent_id), "sms": CUTOVER_SMS.get(agent_id),
+        })
+        initial = {"name": bounded_text(name), "agent_id": bounded_text(agent_id), "native_outcome": "failed",
+                   "workflow_id": bounded_text(getattr(handle, "id", "")),
+                   "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
+                   "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
+                   "failure_observed_at": observed_at, "failure_observed_monotonic": observed_monotonic,
+                   "error_type": type(error).__name__[:128], "error_args": project(error.args),
+                   "traceback": list(trace), "traceback_frames_dropped": max(0, walked - 32),
+                   "traceback_tail_unknown": cursor is not None, "state": state, "losses": dict(losses)}
+        # New primitives only; write ONCE before any await. Later state cannot overwrite it.
+        stage = "initial_write"
+        write_once(owned / "failure.json", initial, 65536)
+        remote = {"rpc_budget_seconds": 5, "rpc_started_at": datetime.now(timezone.utc).isoformat(),
+                  "failure_observed_at": observed_at, "history_complete": False, "missing_tail": True}
+        rpc_started_monotonic = asyncio.get_running_loop().time()
+        events, scanned = deque(maxlen=256), 0
+
+        def timestamp(value):
+            return value.ToJsonString()[:64] if hasattr(value, "ToJsonString") else None
+
+        def event_metadata(event):
+            row = {"event_id": event.event_id, "event_type": int(event.event_type),
+                   "timestamp": timestamp(event.event_time)}
+            attribute = event.WhichOneof("attributes")
+            row["event_type_name"] = attribute
+            if attribute:
+                value = getattr(event, attribute)
+                for key in ("activity_id", "scheduled_event_id", "started_event_id", "timer_id", "new_execution_run_id"):
+                    field = getattr(value, key, None)
+                    if field is not None:
+                        row[key] = bounded_text(field) if isinstance(field, str) else field
+                for key in ("activity_type", "task_queue"):
+                    field = getattr(value, key, None)
+                    if field is not None:
+                        row[key] = bounded_text(field.name)
+            return row
+
+        async def observe():
+            nonlocal scanned
+            if handle is None:
+                remote["capture_gap"] = "no_handle"
+                return
+            remote["rpc_phase"] = "describe"
+            description = await handle.describe(rpc_timeout=timedelta(seconds=5))
+            remote.update({"workflow_id": bounded_text(description.id), "run_id": bounded_text(description.run_id),
+                           "status": int(description.status), "history_length": description.history_length})
+            if description.id != handle.id or not isinstance(description.run_id, str) or not description.run_id:
+                remote["capture_gap"] = "unresolved_execution_identity"
+                return
+            raw = description.raw_description
+            pending = raw.pending_activities
+            remote["pending_activities"] = [{"activity_id": bounded_text(item.activity_id),
+                "activity_type": bounded_text(item.activity_type.name), "state": int(item.state)} for item in pending[:16]]
+            remote["pending_activities_dropped"] = max(0, len(pending) - 16)
+            task = raw.pending_workflow_task
+            remote["pending_workflow_task"] = {"present": raw.HasField("pending_workflow_task"),
+                "state": int(task.state), "attempt": task.attempt,
+                "scheduled_time": timestamp(task.scheduled_time), "started_time": timestamp(task.started_time)}
+            pinned = client.get_workflow_handle(description.id, run_id=description.run_id)
+            remote["rpc_phase"] = "close_event"
+            close = await pinned.fetch_history(event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT,
+                                               rpc_timeout=timedelta(seconds=5))
+            remote["close_events"] = [event_metadata(event) for event in close.events[:4]]
+            remote["close_events_dropped"] = max(0, len(close.events) - 4)
+            remote["rpc_phase"] = "history"
+            async for event in pinned.fetch_history_events(page_size=64, wait_new_event=False,
+                                                          rpc_timeout=timedelta(seconds=5)):
+                events.append(event_metadata(event))
+                scanned += 1
+                if scanned == 1024:
+                    remote["capture_gap"] = "history_scan_cap"
+                    break
+            else:
+                remote["history_scan_complete"] = True
+                remote["history_complete"] = scanned <= 256
+                remote["missing_tail"] = False
+                remote["rpc_phase"] = "done"
+
+        try:
+            await asyncio.wait_for(observe(), timeout=5)
+        except (Exception, asyncio.CancelledError) as capture_error:
+            remote["capture_gap"] = type(capture_error).__name__[:128]
+        remote.update({"rpc_finished_at": datetime.now(timezone.utc).isoformat(),
+                       "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
+                       "events_scanned": scanned, "events_dropped": max(0, scanned - len(events)),
+                       "events": list(events), "losses": dict(losses)})
+        stage = "remote_write"
+        write_once(owned / "remote.json", remote, 32768)
+    except (Exception, asyncio.CancelledError) as capture_error:
+        try:
+            os.write(2, ("cutover_capture_gap:" + stage + ":" + type(capture_error).__name__[:128] + "\n").encode())
+        except Exception:
+            pass
+
+
 async def _run_parked_tool_cutover_tests() -> List[tuple]:
     """Real AgentWorkflow crossing a deploy cutover while a browser/code task is in flight.
 
@@ -2083,6 +2311,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 )
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
@@ -2161,6 +2390,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 _assert_single_browser_chip_completed(agent_id, first["tool_call_id"])
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
@@ -2182,6 +2412,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 _assert_code_agent_reattached_on_new_generation(agent_id)
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))
@@ -2248,6 +2479,7 @@ async def _run_parked_tool_cutover_tests() -> List[tuple]:
                 assert not completion_rejections, "the agent waited instead of completing early"
                 results.append((name, None))
             except Exception as e:
+                await _capture_cutover_failure(env.client, handle, name, agent_id, e)
                 if handle is not None:
                     await _cancel_workflow(handle)
                 results.append((name, e))

@@ -47,3 +47,8 @@ None recorded for this failure. Repository guidance requires preserving acceptan
 ## Reusable lesson
 
 Retain per-await phase and child identity before timeout cleanup rather than assigning a last-observed SQL operation as the stalled boundary.
+
+
+## Related batch6 observation
+
+The next full run failed a different ordinary Kernel fresh-concurrent scenario. Its enabled phase capture identifies real Playwright module evaluation after a completed old-session DELETE. The separate CJS/ESM fixture-seam case records that causal repair. This does not prove the older incompatible scenario waited at the same operation, so this historical case remains open.

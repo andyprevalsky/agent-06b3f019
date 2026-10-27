@@ -181,6 +181,7 @@ export async function runBrowserResumeCustodyCases() {
             [session.id],
             {
               execArgv: [
+                '--experimental-test-module-mocks',
                 '--import',
                 'tsx',
                 // Force contender startup past the old one-second response window.

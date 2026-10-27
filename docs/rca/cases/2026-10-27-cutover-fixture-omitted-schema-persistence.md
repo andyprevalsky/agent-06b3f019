@@ -53,3 +53,17 @@ None recorded for this failure. Repository and coordinator requirements preserve
 ## Reusable lesson
 
 Model the fixture's persisted output contract and intended completion phase explicitly while retaining every generation, custody and once-only acceptance assertion.
+
+
+## Batch6 recurrence — unresolved completion wait
+
+On04333dbb the full foreground case again exceeded its unchanged60-second handle.result wait, now with a typed traceback at line2063. Background, approval and code siblings passed. Replayed verifier100 does not prove accepted completion or a terminal workflow event. Neither absent completion INFO logs (also absent for passing siblings) nor cancellation after timeout identifies causal direction. The prior null-schema diagnosis is not established for this recurrence.
+
+Current foreground alone passes47.767s; the original pure/async and13 Temporal-case prefix followed by foreground passes148.874s. These observations reproduce neither the surrounding concurrent failure nor a repair. Source-backed pre-cleanup capture is being reviewed to preserve immutable fixture state and bounded pinned-run activity/terminal metadata before cancellation and map clearing. The cause remains OPEN; no clock, model, acceptance or production workflow change is proposed.
+
+
+## Reviewed next-occurrence capture
+
+The unbounded initial capture proposal was rejected because its mutable references could overwrite failure state after awaited RPCs, and whole history JSON lacked a byte cap. The replacement writes an immutable failure projection once, then a separately timestamped pinned-run receipt. It limits failure/remote files to65536/32768 UTF8bytes, lists/strings/nodes before encoding, scans at most1024 event metadata records with page size64 and keeps at most256, trims oldest metadata to fit while recording dropped counts, and omits protobuf payloads. Unique directories are0700 and exclusive files0600. It records incomplete tails and gaps explicitly. The five-second asynchronous RPC budget does not claim a whole-helper I/O or cancellation-drain bound.
+
+Ten focused fake-handle controls preserve the original failure and cleanup despite disabled capture, mutation during await, RPC/cancellation/write errors, large inputs and byte caps. A root-owned local Temporal toy-workflow qualification verified real running and completed describe/pinned-handle/CLOSE_EVENT APIs, recording status1 with no close event and status2 with WorkflowExecutionCompleted. Native SDK receipt is `.context/deploy-fresh-20261027/workflow-observer-amended/sdk-qualification.json`. This validates diagnostic compatibility, not the foreground cause or full workflow acceptance. Capture is opt-in and occurs only after the original case fails, before cancellation/map clearing; acceptance remains unchanged.
