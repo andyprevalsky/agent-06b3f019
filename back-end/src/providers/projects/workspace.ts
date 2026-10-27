@@ -22,7 +22,7 @@ import { Sandbox } from 'e2b';
 import { createLogger } from '../logger';
 import { normalizeProjectPath } from './paths';
 import { STARTUP_RUNNER_SCRIPT } from './startupRunner';
-import { findSessionProject, findSessionSandboxId, prepareProjectWorkspace } from './store';
+import { findActiveSessionSandboxId, findSessionProject, prepareProjectWorkspace } from './store';
 import type { ProjectRestoreReport, ProjectStartupReport, ProjectWorkspace } from './types';
 import {
   e2bWorkspaceExecutor,
@@ -479,9 +479,19 @@ export async function resolveWorkspaceExecutor(
 ): Promise<WorkspaceExecutor | null> {
   const registered = workspaceExecutorFor(sessionId);
   if (registered) return registered;
-  const sandboxId = await findSessionSandboxId(sessionId);
+  const sandboxId = await findActiveSessionSandboxId(sessionId);
   if (sandboxId === null || /^(local|mac)-/.test(sandboxId)) return null;
-  return e2bWorkspaceExecutor(await connect(sandboxId), E2B_HOME);
+  try {
+    return e2bWorkspaceExecutor(await connect(sandboxId), E2B_HOME);
+  } catch (error) {
+    // A sandbox that is gone is "not running here", exactly like before.
+    log.warn('Could not reach the session sandbox for project startup', {
+      sessionId,
+      sandboxId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 async function connectE2bSandbox(sandboxId: string): Promise<E2bSandboxLike> {

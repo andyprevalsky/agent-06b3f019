@@ -20,13 +20,17 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import WebSocket, { type RawData } from 'ws';
+import { createLogger } from '../logger';
 import {
   deleteEphemeral,
   getEphemeral,
   putEphemeral,
   releaseLease,
   renewLease,
+  replaceLeaseValue,
 } from '../sharedState';
+
+const log = createLogger('LocalDevicesRouting');
 
 export const LOCAL_DEVICE_INTERNAL_PATH = '/api/local-devices/internal';
 /** Set on a proxied upgrade so the receiving instance never forwards it again. */
@@ -36,7 +40,8 @@ const INTERNAL_AUTH_HEADER = 'x-rose-hub-auth';
 const OWNER_NAMESPACE = 'local-device-owner';
 const RELAY_NAMESPACE = 'local-relay-device';
 const RELAY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const INTERNAL_CALL_TIMEOUT_MS = 45_000;
+export const INTERNAL_CALL_TIMEOUT_MS = 45_000;
+const PROXY_PING_INTERVAL_MS = 25_000;
 
 export interface DeviceOwnerRow {
   token: string;
@@ -57,17 +62,37 @@ export function thisInstanceUrl(env: NodeJS.ProcessEnv = process.env): string {
   const address = Object.values(networkInterfaces())
     .flat()
     .find((entry) => entry !== undefined && entry.family === 'IPv4' && !entry.internal)?.address;
-  return `http://${address ?? '127.0.0.1'}:${port}`;
+  if (address === undefined) {
+    // Every instance would claim the same loopback identity and routing would
+    // silently degrade to single-instance behaviour.
+    log.error('No private IPv4 address on Render; set BACKEND_INSTANCE_INTERNAL_URL per instance');
+    return `http://127.0.0.1:${port}`;
+  }
+  return `http://${address}:${port}`;
 }
 
-function internalAuth(secret: string): string {
-  return createHmac('sha256', secret).update('local-device-hub-internal').digest('hex');
+/** Peer requests carry `<unix ms>.<hmac>`; a captured header expires within a minute. */
+const INTERNAL_AUTH_WINDOW_MS = 60_000;
+
+function internalAuth(secret: string, at: number = Date.now()): string {
+  const signature = createHmac('sha256', secret)
+    .update(`local-device-hub-internal:${at}`)
+    .digest('hex');
+  return `${at}.${signature}`;
 }
 
+/**
+ * Peers call each other directly on the private network. A request that came
+ * through the public load balancer carries X-Forwarded-For and is refused even
+ * with a valid signature.
+ */
 export function internalAuthMatches(request: IncomingMessage, secret: string): boolean {
+  if (request.headers['x-forwarded-for'] !== undefined) return false;
   const presented = request.headers[INTERNAL_AUTH_HEADER];
   if (typeof presented !== 'string') return false;
-  const expected = Buffer.from(internalAuth(secret), 'utf8');
+  const at = Number(presented.split('.')[0]);
+  if (!Number.isFinite(at) || Math.abs(Date.now() - at) > INTERNAL_AUTH_WINDOW_MS) return false;
+  const expected = Buffer.from(internalAuth(secret, at), 'utf8');
   const actual = Buffer.from(presented, 'utf8');
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
@@ -88,15 +113,9 @@ export async function claimDeviceOwner(
   return token;
 }
 
-export async function updateDeviceOwner(
-  deviceId: string,
-  row: DeviceOwnerRow,
-  ttlMs: number
-): Promise<void> {
-  const current = await getEphemeral<DeviceOwnerRow>(OWNER_NAMESPACE, deviceId);
-  if (current?.token !== row.token) return;
-  await putEphemeral(OWNER_NAMESPACE, deviceId, { ...row }, ttlMs);
-}
+/** Rewrite this instance's owner row (e.g. the hello's sessions root) if it still owns it. */
+export const updateDeviceOwner = (deviceId: string, row: DeviceOwnerRow, ttlMs: number) =>
+  replaceLeaseValue(OWNER_NAMESPACE, deviceId, row.token, { ...row }, ttlMs);
 
 export const renewDeviceOwner = (deviceId: string, token: string, ttlMs: number) =>
   renewLease(OWNER_NAMESPACE, deviceId, token, ttlMs);
@@ -159,7 +178,23 @@ export function proxySocket(
     downstream.close(response.statusCode === 401 ? 4401 : 1011, 'owner instance refused');
   });
   upstream.on('error', () => downstream.close(1011, 'owner instance unreachable'));
+  // The owner pings its upstream leg, which this process answers; a half-open
+  // downstream (a Mac that dropped off the network) is detected here.
+  let alive = true;
+  downstream.on('pong', () => {
+    alive = true;
+  });
+  const keepAlive = setInterval(() => {
+    if (!alive) {
+      downstream.terminate();
+      return;
+    }
+    alive = false;
+    downstream.ping();
+  }, PROXY_PING_INTERVAL_MS);
+  keepAlive.unref();
   downstream.on('close', () => {
+    clearInterval(keepAlive);
     if (upstream.readyState === WebSocket.OPEN) upstream.close(1000, 'client closed');
     else upstream.terminate();
   });

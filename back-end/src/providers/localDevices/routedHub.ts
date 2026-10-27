@@ -14,12 +14,14 @@ import type { Duplex } from 'stream';
 import type { WebSocket } from 'ws';
 import { createLogger } from '../logger';
 import {
+  LOCAL_SESSION_START_DEADLINE_MS,
   LocalDeviceHub,
   LocalSessionStartError,
   parseLocalDeviceSandboxId,
   type LocalDeviceHubDeps,
 } from './hub';
 import {
+  INTERNAL_CALL_TIMEOUT_MS,
   LOCAL_DEVICE_INTERNAL_PATH,
   callOwner,
   claimDeviceOwner,
@@ -111,7 +113,12 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
       deviceId: params.deviceId,
       userId: params.userId,
       command: params.command,
-      deadlineMs: params.deadlineMs,
+      // The owner must answer before this call's own timeout, or a late start
+      // would leave a session running that the caller already gave up on.
+      deadlineMs: Math.min(
+        params.deadlineMs ?? LOCAL_SESSION_START_DEADLINE_MS,
+        INTERNAL_CALL_TIMEOUT_MS - 10_000
+      ),
     });
     if (response.ok && typeof response.folder === 'string') return { folder: response.folder };
     if (response.ok) throw new LocalSessionStartError('spawn_failed', 'owner returned no folder');
@@ -147,28 +154,52 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
   // ── owner registry, driven by the control channel ───────────────────────
 
   protected override onControlOpened(deviceId: string, userId: string, _ws: WebSocket): void {
-    const previous = this.owned.get(deviceId);
-    if (previous !== undefined) clearInterval(previous.timer);
+    this.claimOwner(deviceId, userId);
+  }
+
+  /**
+   * Claim (or re-claim) the owner row for a device whose control channel is
+   * open here, and keep it renewed. A renewal that finds the row gone (expired
+   * through a database outage, or replaced) re-claims it while the socket is
+   * still here, so the device never stays invisible to other instances.
+   */
+  private claimOwner(deviceId: string, userId: string): void {
     const ttl = this.ownerTtlMs;
-    void claimDeviceOwner(deviceId, { instance: this.instance, userId, sessionsRoot: null }, ttl)
+    const sessionsRoot = this.devices.get(deviceId)?.sessionsRoot ?? null;
+    void claimDeviceOwner(deviceId, { instance: this.instance, userId, sessionsRoot }, ttl)
       .then((token) => {
+        const previous = this.owned.get(deviceId);
+        if (previous !== undefined) clearInterval(previous.timer);
         if (!this.devices.has(deviceId)) {
+          this.owned.delete(deviceId);
           void releaseDeviceOwner(deviceId, token);
           return;
         }
-        const row: DeviceOwnerRow = { token, instance: this.instance, userId, sessionsRoot: null };
-        const timer = setInterval(() => {
-          void renewDeviceOwner(deviceId, token, ttl).catch((error: unknown) =>
-            log.warn('Device owner renew failed', { device_id: deviceId, error: errorText(error) })
-          );
-        }, this.deps.pingIntervalMs);
+        const row: DeviceOwnerRow = { token, instance: this.instance, userId, sessionsRoot };
+        const timer = setInterval(
+          () => this.renewOwner(deviceId, userId, token),
+          this.deps.pingIntervalMs
+        );
         timer.unref();
         this.owned.set(deviceId, { row, timer });
         const root = this.devices.get(deviceId)?.sessionsRoot ?? null;
-        if (root !== null) this.onControlHello(deviceId, root);
+        if (root !== sessionsRoot) this.onControlHello(deviceId, root);
       })
       .catch((error: unknown) =>
         log.warn('Device owner claim failed', { device_id: deviceId, error: errorText(error) })
+      );
+  }
+
+  private renewOwner(deviceId: string, userId: string, token: string): void {
+    void renewDeviceOwner(deviceId, token, this.ownerTtlMs)
+      .then((renewed) => {
+        if (renewed || this.owned.get(deviceId)?.row.token !== token) return;
+        if (!this.devices.has(deviceId)) return;
+        log.warn('Device owner row lost while connected; re-claiming', { device_id: deviceId });
+        this.claimOwner(deviceId, userId);
+      })
+      .catch((error: unknown) =>
+        log.warn('Device owner renew failed', { device_id: deviceId, error: errorText(error) })
       );
   }
 
@@ -246,6 +277,7 @@ export class RoutedLocalDeviceHub extends LocalDeviceHub {
       return;
     }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
+      ws.on('error', () => ws.terminate());
       ws.once('message', (raw) => {
         void this.answerInternal(raw.toString())
           .then((response) => ws.send(JSON.stringify(response)))

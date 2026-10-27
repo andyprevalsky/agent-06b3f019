@@ -21,6 +21,7 @@
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
  *  - a Mac on A serves a session that B starts, relays to and stops
+ *  - a connected Mac's owner row is re-claimed after it is lost
  *  - an E2B code session created on A runs project commands from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
  *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
@@ -28,23 +29,25 @@
  * Usage: npx tsx src/tests/blackbox/multi-instance.blackbox.ts
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer } from 'node:http';
-import { createServer as createNetServer, type AddressInfo } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { createHmac, randomUUID } from 'node:crypto';
-import WebSocket from 'ws';
-import { join } from 'node:path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
-import { retryWithBackoff } from '../../providers/retry';
+import {
+  concurrently,
+  frames,
+  freePorts,
+  startInstance,
+  waitFor,
+  waitForAsync,
+} from './multi-instance.harness';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
 import { createPrismaGrantStore, upsertAccountConnection } from '../../domains/compute-grants/repo';
 
 config();
-
-const INSTANCE_SCRIPT = join(__dirname, 'multi-instance.instance.ts');
 
 let passed = 0;
 const failures: string[] = [];
@@ -61,115 +64,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg);
-}
-
-interface Instance {
-  child: ChildProcessWithoutNullStreams;
-  output: () => string;
-  ready: Promise<void>;
-  result: Promise<Record<string, unknown>>;
-}
-
-function startInstance(op: string, args: string[], env: Record<string, string> = {}): Instance {
-  const child = spawn(process.execPath, ['--import', 'tsx', INSTANCE_SCRIPT, op, ...args], {
-    cwd: join(__dirname, '..', '..', '..'),
-    env: { ...process.env, ...env },
-  });
-  let out = '';
-  let err = '';
-  let markReady!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    markReady = resolve;
-  });
-  child.stdout.on('data', (chunk: Buffer) => {
-    out += chunk.toString();
-    if (out.includes('READY\n')) markReady();
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    err += chunk.toString();
-  });
-  const result = new Promise<Record<string, unknown>>((resolve, reject) => {
-    child.on('exit', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('RESULT '));
-      if (line === undefined) {
-        reject(new Error(`instance ${op} exited ${code} without a result: ${err.slice(-400)}`));
-        return;
-      }
-      resolve(JSON.parse(line.slice('RESULT '.length)) as Record<string, unknown>);
-    });
-  });
-  return { child, output: () => out, ready, result };
-}
-
-async function freePorts(count: number): Promise<number[]> {
-  const servers = await Promise.all(
-    Array.from({ length: count }, async () => {
-      const server = createNetServer();
-      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-      return server;
-    })
-  );
-  const ports = servers.map((server) => (server.address() as AddressInfo).port);
-  await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
-  return ports;
-}
-
-async function waitFor(cond: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
-  const polls = Math.ceil(timeoutMs / 50);
-  const met = await retryWithBackoff(async () => cond(), {
-    maxRetries: polls,
-    fixedDelays: Array<number>(polls).fill(50),
-    shouldRetryResult: (ok) => !ok,
-    component: 'MultiInstanceWait',
-  });
-  if (!met) throw new Error(`timed out waiting for ${what}`);
-}
-
-/** A WebSocket that records text frames, with a promise for the next matching one. */
-async function frames(url: string, headers: Record<string, string> = {}) {
-  const ws = new WebSocket(url, { headers });
-  const seen: string[] = [];
-  ws.on('message', (raw) => seen.push(raw.toString()));
-  await new Promise<void>((resolve, reject) => {
-    ws.once('open', () => resolve());
-    ws.once('error', reject);
-  });
-  const next = async (
-    match: (frame: Record<string, unknown> | string) => boolean,
-    what: string
-  ) => {
-    let found: string | undefined;
-    await waitFor(() => {
-      found = seen.find((text) => {
-        let parsed: Record<string, unknown> | string = text;
-        try {
-          parsed = JSON.parse(text) as Record<string, unknown>;
-        } catch {
-          // plain text frame
-        }
-        return match(parsed);
-      });
-      return found !== undefined;
-    }, what);
-    seen.splice(seen.indexOf(found as string), 1);
-    try {
-      return JSON.parse(found as string) as Record<string, unknown>;
-    } catch {
-      return { text: found };
-    }
-  };
-  return { ws, next };
-}
-
-/** Run one operation per instance with their critical sections released together. */
-async function concurrently(
-  ops: Array<[string, string[]]>,
-  env: Record<string, string> = {}
-): Promise<Array<Record<string, unknown>>> {
-  const instances = ops.map(([op, args]) => startInstance(op, args, env));
-  await Promise.all(instances.map((i) => i.ready));
-  for (const i of instances) i.child.stdin.write('GO\n');
-  return Promise.all(instances.map((i) => i.result));
 }
 
 async function main(): Promise<void> {
@@ -531,6 +425,38 @@ async function main(): Promise<void> {
       }
     });
 
+    await test("a connected Mac's owner row is re-claimed after it is lost", async () => {
+      const deviceId = randomUUID();
+      const [port] = await freePorts(1);
+      const owner = startInstance('hub-serve', [String(port)]);
+      try {
+        await owner.ready;
+        const control = await frames(`ws://127.0.0.1:${port}/api/local-devices/control`, {
+          authorization: 'Bearer mi-device-token',
+          'x-rose-device-id': deviceId,
+        });
+        owner.child.stdin.write('GO\n');
+        const ownerRow = () =>
+          prisma.$queryRaw<Array<{ token: string }>>`
+            SELECT value->>'token' AS token FROM "SharedEphemeralState"
+            WHERE namespace = 'local-device-owner' AND key = ${deviceId} AND "expiresAt" > now()`;
+        await waitForAsync(async () => (await ownerRow()).length === 1, 'the owner row');
+        const [first] = await ownerRow();
+        // A database outage longer than the TTL lets the reaper drop the row.
+        await prisma.$executeRaw`
+          DELETE FROM "SharedEphemeralState" WHERE namespace = 'local-device-owner' AND key = ${deviceId}`;
+        await waitForAsync(async () => (await ownerRow()).length === 1, 'the re-claimed row');
+        const [again] = await ownerRow();
+        assert(again.token !== first.token, 'the row must be a fresh claim');
+        control.ws.close();
+        owner.child.stdin.write('DONE\n');
+        await owner.result;
+      } finally {
+        owner.result.catch(() => undefined);
+        owner.child.kill();
+      }
+    });
+
     await test('an E2B code session created on A runs project commands from B', async () => {
       const session = await prisma.claudeCodeSession.create({
         data: {
@@ -553,6 +479,15 @@ async function main(): Promise<void> {
         );
         const [local] = await concurrently([['workspace-exec', [randomUUID()]]]);
         assert(local.homeDir === null, 'an unknown session must not resolve an executor');
+        await prisma.claudeCodeSession.update({
+          where: { id: session.id },
+          data: { status: 'CLOSED' },
+        });
+        const [closed] = await concurrently([['workspace-exec', [session.id]]]);
+        assert(
+          closed.homeDir === null && (closed.connected as string[]).length === 0,
+          `a closed session must not be reconnected: ${JSON.stringify(closed)}`
+        );
       } finally {
         await prisma.claudeCodeSession.deleteMany({ where: { id: session.id } });
       }
