@@ -281,6 +281,12 @@ GATES = (
         "blackbox-archive-env",
         ("bash", "scripts/tests/blackbox-archive-env.test.sh"),
     ),
+    # Render runs back-end/scripts/render-build.sh; it must build a clean checkout
+    # from back-end/package-lock.json alone, never the unlocked root workspace.
+    Gate(
+        "render-backend-build",
+        ("bash", "scripts/tests/render-backend-build.test.sh"),
+    ),
     # Agents blackbox files are not auto-discovered: an unregistered test_* never
     # runs while its domain still reports green, and no other /deploy lane runs
     # the agents structural suites.
