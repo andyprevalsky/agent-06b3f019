@@ -48,10 +48,26 @@ function parseModels(source: string): Model[] {
 /** Postgres truncates identifiers to NAMEDATALEN - 1 = 63 bytes. */
 const pgName = (name: string) => Buffer.from(name).subarray(0, 63).toString();
 
+/**
+ * Current Prisma shortens an over-long default name's base and keeps its
+ * `_idx`/`_key` suffix; indexes from the pg_dump baseline were cut at 63 bytes
+ * instead. Both spellings name the same declared index.
+ */
+const prismaDefaultName = (base: string, suffix: string) =>
+  pgName(
+    `${Buffer.from(base)
+      .subarray(0, 63 - suffix.length - 1)
+      .toString()}_${suffix}`
+  );
+
 /** Names Prisma gives the indexes schema.prisma declares (explicit map or default). */
 function declaredIndexNames(models: Model[]): Set<string> {
   const names = new Set<string>();
   const add = (name: string) => names.add(pgName(name));
+  const addDefault = (base: string, suffix: string) => {
+    names.add(prismaDefaultName(base, suffix));
+    add(`${base}_${suffix}`);
+  };
   for (const model of models) {
     for (const line of model.body.split('\n')) {
       const trimmed = line.trim();
@@ -65,15 +81,13 @@ function declaredIndexNames(models: Model[]): Set<string> {
           .filter(Boolean)
           .map((field) => model.columns.get(field) ?? field);
         const suffix = block[1] === 'index' ? 'idx' : block[1] === 'unique' ? 'key' : 'pkey';
-        add(
-          block[1] === 'id' ? `${model.table}_pkey` : `${model.table}_${cols.join('_')}_${suffix}`
-        );
+        addDefault(block[1] === 'id' ? model.table : `${model.table}_${cols.join('_')}`, suffix);
       }
       const field = /^(\w+)\s/.exec(trimmed);
       if (field && !trimmed.startsWith('@@')) {
         const column = model.columns.get(field[1]) ?? field[1];
-        if (/@unique\b(?!\([^)]*map:)/.test(trimmed)) add(`${model.table}_${column}_key`);
-        if (/@id\b(?!\([^)]*map:)/.test(trimmed)) add(`${model.table}_pkey`);
+        if (/@unique\b(?!\([^)]*map:)/.test(trimmed)) addDefault(`${model.table}_${column}`, 'key');
+        if (/@id\b(?!\([^)]*map:)/.test(trimmed)) addDefault(model.table, 'pkey');
       }
     }
   }
