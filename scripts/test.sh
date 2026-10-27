@@ -365,6 +365,7 @@ run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
 run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
+run_suite "Cloud Benchmark Recovery Descriptor Custody" python3 scripts/tests/cloudbench-recovery-fd.test.py
 run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
 run_suite "Cloud Benchmark Poll Stdlib Startup" python3 scripts/tests/cloudbench-poll-site-startup.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py

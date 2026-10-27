@@ -1736,8 +1736,13 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
     printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
       "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
       >> "$log_file"
-    flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
-      >> "$log_file" 2>&1 &
+    # Exec in this background child so $! still identifies native Fly.
+    (
+      if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        exec {REGISTRY_RECOVERY_GUARD_FD}<&- || exit 1
+      fi
+      exec flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q
+    ) >> "$log_file" 2>&1 &
     pid=$!
     # flyctl resolves the remote host lazily on the first client connection.
     # Trigger lazy DNS, but classify a local bind collision before waiting.

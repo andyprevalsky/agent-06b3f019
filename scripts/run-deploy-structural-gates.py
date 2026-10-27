@@ -241,6 +241,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
     ),
     Gate(
+        "cloudbench-recovery-fd",
+        ("python3", "scripts/tests/cloudbench-recovery-fd.test.py"),
+    ),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
     ),

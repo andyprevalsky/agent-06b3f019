@@ -1832,6 +1832,15 @@ if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
         echo "❌ flyctl not found on PATH." >&2; exit 1; fi
 fi
+# Exclude recovery custody from foreground native Fly calls. Bash restores
+# this temporary redirection in the controller after the command returns.
+flyctl() {
+    if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        command flyctl "$@" {REGISTRY_RECOVERY_GUARD_FD}<&-
+    else
+        command flyctl "$@"
+    fi
+}
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"
@@ -18483,9 +18492,13 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 metrics_url="http://127.0.0.1:$metrics_port"
                 return 0
             fi
-            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
-                -a "$APP" --bind-addr 127.0.0.1 -q \
-                >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
+            (
+                if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+                    exec {REGISTRY_RECOVERY_GUARD_FD}<&- || exit 1
+                fi
+                exec flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
+                    -a "$APP" --bind-addr 127.0.0.1 -q
+            ) >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
             metrics_proxy_pid=$!
             # Force flyctl's lazy DNS resolution, then accept the tunnel only if
             # the process survives that first real data-plane connection.

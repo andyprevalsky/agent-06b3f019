@@ -1503,10 +1503,17 @@ eval "$proxy_lifecycle_function_source"
 eval "$proxy_function_source"
 APP="cloudbench-proxy-regression"
 CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
-flyctl() {
-  echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
-  return 1
-}
+# The production proxy launch execs native Fly to preserve $! ownership.
+# Use an executable fixture so it crosses that same native exec boundary.
+proxy_fixture_old_path="$PATH"
+mkdir -p "$TMP_ROOT/proxy-bin"
+export PATH="$TMP_ROOT/proxy-bin:$PATH"
+cat > "$TMP_ROOT/proxy-bin/flyctl" <<'FAKE_PROXY_BIND'
+#!/usr/bin/env bash
+echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+exit 1
+FAKE_PROXY_BIND
+chmod +x "$TMP_ROOT/proxy-bin/flyctl"
 curl() { return 1; }
 proxy_log="$TMP_ROOT/proxy-bind-collision.log"
 proxy_pid=""
@@ -1547,17 +1554,16 @@ PORT_LEASE_NONCE="proxy-regression-$$"
 PORT_LEASES=()
 OUT_DIR="$TMP_ROOT/proxy-output"
 mkdir -p "$OUT_DIR"
-flyctl() {
-  case "$2" in
-    61944:*)
-      echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
-      return 1
-      ;;
-    *)
-      while :; do command sleep 1; done
-      ;;
-  esac
-}
+cat > "$TMP_ROOT/proxy-bin/flyctl" <<'FAKE_PROXY_ROTATE'
+#!/usr/bin/env bash
+case "$2" in
+  61944:*)
+    echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+    exit 1
+    ;;
+  *) exec sleep 3600 ;;
+esac
+FAKE_PROXY_ROTATE
 rotated_port=""
 rotated_pid=""
 # The replacement tunnel is a background child. On a shared CI host its shell
@@ -1685,6 +1691,7 @@ claim_local_port "$overflow_preferred" overflow_port ||
 release_local_port_leases
 [ ! -d "$PORT_LEASE_ROOT/$overflow_port" ] ||
   fail "overflow-regression dashboard lease survived cleanup"
+export PATH="$proxy_fixture_old_path"
 unset -f flyctl curl status_proxy_lifecycle_response_accepted \
   start_data_plane_proxy start_leased_data_plane_proxy \
   local_port_is_bindable claim_exact_local_port claim_local_port \

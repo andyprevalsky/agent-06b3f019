@@ -472,11 +472,16 @@ printf 'three roles released without a shared PID sentinel\n'
             env=dict(os.environ,ENVLIB=str(ROOT/'scripts/lib/cloudbench-env.sh'),CASE=str(root),CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS='0')
             for key in tuple(env):
                 if key.startswith('CLOUDBENCH_SHARED_RELAY'):env.pop(key)
+            # Native exec preserves proxy PID ownership; shell functions are
+            # not executable transport fixtures.
+            fake = root / 'flyctl'
+            fake.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" > "$CASE/fly-args"\nexec sleep 30\n')
+            fake.chmod(0o700)
+            env['PATH'] = str(root) + os.pathsep + env['PATH']
             script=r'''set -euo pipefail
 [ "${RELAY_TRACE:-0}" != 1 ] || set -x
 source "$ENVLIB"
 APP=fixture
-flyctl(){ printf '%s\n' "$*" > "$CASE/fly-args";exec sleep 30; }
 curl(){ return 0; }
 legacy_proxy_pid=""
 cloudbench_start_data_plane_proxy 19001 3001 fd00::1234 "$CASE/proxy.log" legacy_proxy_pid backend 3

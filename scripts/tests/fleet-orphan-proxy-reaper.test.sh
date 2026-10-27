@@ -31,7 +31,7 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # 1) The reaper is defined AND wired into the startup path (before provisioning).
 grep -q 'reap_orphaned_fleet_proxies()' "$FLEET" || fail "reaper function is missing"
-grep -qE '^reap_orphaned_fleet_proxies$' "$FLEET" || fail "reaper is not called at fleet startup"
+grep -qE '^[[:space:]]*reap_orphaned_fleet_proxies$' "$FLEET" || fail "reaper is not called at fleet startup"
 
 # 2) Real-process behavior. A fake 'flyctl' whose ps line matches the reaper's
 #    selector (contains 'flyctl proxy' and '-a <APP>'). It must NOT exec — exec
