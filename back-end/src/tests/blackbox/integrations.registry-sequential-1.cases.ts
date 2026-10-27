@@ -9,6 +9,8 @@ import {
   testMessagingUpload_splitContactFrequencyUsesFullHistory,
   testMessagingUpload_idlessMessageRetryStoresOnce,
   testIntegrationDelete_removesQueuedUploadParts,
+  testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk,
+  testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
 } from './integrations.messaging-ingestion.cases';
 import { testGoogleRevocationFailures_doNotStarveLaterPurge } from './integrations.email-credentials-2.cases';
 import { testStateTransition_fullLifecycle } from './integrations.lifecycle-boundaries-1.cases';
@@ -77,6 +79,14 @@ export function sequentialTestsPart1() {
     {
       name: 'integration delete -- removes queued messaging upload parts',
       fn: testIntegrationDelete_removesQueuedUploadParts,
+    },
+    {
+      name: 'messaging upload -- drain during accept keeps the final chunk',
+      fn: testMessagingUpload_finalizeDuringAcceptKeepsFinalChunk,
+    },
+    {
+      name: 'messaging upload -- stale finalization does not strand a newer upload',
+      fn: testMessagingUpload_staleFinalizeDoesNotStrandNewerUpload,
     },
   ];
 }
