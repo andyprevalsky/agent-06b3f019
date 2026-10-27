@@ -31,7 +31,12 @@ const LANES = [
 ];
 
 /** Fake Tilion: every candidate stays challenged unless `winnerKey` matches. */
-function fakeProvider(options: { createMs: number; probeMs: number; winnerKey?: string }) {
+function fakeProvider(options: {
+  createMs: number;
+  probeMs: number;
+  winnerKey?: string;
+  releaseMs?: number;
+}) {
   const created: string[] = [];
   const released: string[] = [];
   const promoted: string[] = [];
@@ -67,7 +72,7 @@ function fakeProvider(options: { createMs: number; probeMs: number; winnerKey?: 
       promoted.push(winner.session.sessionId);
     },
     release: async (_config, session) => {
-      await sleep(5);
+      await sleep(options.releaseMs ?? 5);
       released.push(session.sessionId);
     },
   };
@@ -108,6 +113,25 @@ async function testShutdownReleasesCandidateCreatedMeanwhile(): Promise<void> {
     [],
     `late-created candidates leaked: ${fake.live().join(',')}`
   );
+}
+
+/**
+ * CodeRabbit (#1604): creates that use up the shutdown budget left the releases
+ * they triggered racing an already-expired deadline, so shutdown returned and
+ * process.exit cut the provider DELETE. Releases get their own budget.
+ */
+async function testShutdownWaitsForReleasesAfterSlowCreates(): Promise<void> {
+  const fake = fakeProvider({ createMs: 160, probeMs: 400, releaseMs: 150 });
+  const search = runLaneConfigSearch(CONFIGS, LANES, fake.dependencies).catch(() => null);
+  await sleep(20); // creates are in flight and land just inside the budget
+  await releaseAllRecoveryProbeSessions(200);
+  assert.ok(fake.created.length > 0, 'the in-flight creates landed');
+  assert.deepStrictEqual(
+    fake.live(),
+    [],
+    `shutdown returned with releases in flight: ${fake.live().join(',')}`
+  );
+  await search;
 }
 
 async function testAgentCleanupAbortsOnlyItsSearch(): Promise<void> {
@@ -169,6 +193,7 @@ async function main(): Promise<void> {
   for (const run of [
     testShutdownReleasesProbingCandidates,
     testShutdownReleasesCandidateCreatedMeanwhile,
+    testShutdownWaitsForReleasesAfterSlowCreates,
     testAgentCleanupAbortsOnlyItsSearch,
     testPromotedWinnerSurvivesShutdown,
     testShutdownRefusesNewSearches,

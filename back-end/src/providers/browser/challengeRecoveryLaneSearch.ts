@@ -118,18 +118,20 @@ export function liveRecoveryProbeSessionCount(): number {
 /**
  * Backend shutdown: abort every live recovery search and release each candidate
  * session it still owns, including ones whose create lands meanwhile. New
- * searches and creates are refused from here on. Bounded best-effort; returns
- * how many sessions were released.
+ * searches and creates are refused from here on. Bounded best-effort: waiting
+ * for creates and waiting for releases each get `timeoutMs`, so creates that use
+ * up their budget cannot leave a started DELETE racing process.exit. Returns how
+ * many sessions were released.
  */
 export async function releaseAllRecoveryProbeSessions(timeoutMs = 8_000): Promise<number> {
   recoveryAdmissionsClosed = true;
-  const deadline = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref());
+  const budget = () => new Promise<null>((resolve) => setTimeout(resolve, timeoutMs, null).unref());
   const owned = liveProbeSessions.size + inFlightProbeCreates.size;
   for (const controller of [...liveSearchAborts.keys()]) controller.abort();
-  await Promise.race([Promise.allSettled([...inFlightProbeCreates]), deadline]);
+  await Promise.race([Promise.allSettled([...inFlightProbeCreates]), budget()]);
   for (const release of [...liveProbeSessions.values()]) void release();
   const releases = [...inFlightProbeReleases];
-  const settled = await Promise.race([Promise.allSettled(releases), deadline.then(() => null)]);
+  const settled = await Promise.race([Promise.allSettled(releases), budget()]);
   const released = settled ? settled.filter((result) => result.status === 'fulfilled').length : 0;
   if (owned > 0 || releases.length > 0) {
     log.info('Challenge recovery probe sessions released on shutdown', {
