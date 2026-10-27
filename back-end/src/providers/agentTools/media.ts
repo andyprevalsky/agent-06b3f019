@@ -3,7 +3,7 @@
  * SSRF-guarded URL fetch, and the object store the displayed bytes live in.
  *
  *   bytes ─► classifyDisplayMedia ─► image/* | video/* | application/pdf | model/* |
- *                                    text/html | null (rejected)
+ *                                    text/html | text/javascript | null (rejected)
  *   url   ─► fetchDisplayMedia (http(s) only, public addresses only — checked
  *            again at connect time — ≤ maxBytes, ≤ 5 redirects, timeout)
  *
@@ -11,9 +11,11 @@
  * a filename or a remote Content-Type header, so an HTML/SVG payload renamed
  * to .png is refused. text/html is accepted only when the caller declared HTML
  * (a .html / .htm name or a text/html response) AND the bytes are UTF-8
- * markup; text model formats (.gltf JSON, .obj, ASCII .stl) and .usdz need
- * their extension plus a structural check. HTML and models are only ever
- * served from the sandboxed user-content origin (displayBundle.ts).
+ * markup; JavaScript likewise needs a declared .js / .mjs name (or a
+ * JavaScript response) AND UTF-8 text that is not markup; text model formats
+ * (.gltf JSON, .obj, ASCII .stl) and .usdz need their extension plus a
+ * structural check. HTML, scripts and models are only ever served from the
+ * sandboxed user-content origin (displayBundle.ts).
  *
  * Storage: Supabase Storage (providers/storage.ts) by default; with
  * DISPLAY_STORAGE_BACKEND=local (+ DISPLAY_STORAGE_LOCAL_DIR) objects go to
@@ -67,9 +69,29 @@ export function looksLikeHtml(bytes: Buffer): boolean {
   return HTML_START.test(text.replace(/^\uFEFF/, '').slice(0, 4096));
 }
 
+const DECLARED_SCRIPT_NAME = /\.m?js$/i;
+const DECLARED_SCRIPT_TYPE = /^(text|application)\/(javascript|ecmascript|x-javascript)\b/i;
+
+/**
+ * True when `bytes` are non-empty UTF-8 text without NULs that is not markup (a script).
+ * JavaScript never starts with `<`, so any markup opener (`<span>`, not only the HTML_START
+ * tags) means the file is renamed markup, not a module.
+ */
+function looksLikeScript(bytes: Buffer): boolean {
+  if (sniffDisplayMediaType(bytes) !== null || looksLikeHtml(bytes)) return false;
+  const text = utf8(bytes);
+  return (
+    text !== null &&
+    !text.includes('\u0000') &&
+    text.trim().length > 0 &&
+    !text.trimStart().startsWith('<')
+  );
+}
+
 /**
  * Allowed type for one display item, or null. `hint` is the declared name or
- * Content-Type; it can only ever unlock text/html, never relabel binary bytes.
+ * Content-Type; it can only ever unlock text/html or text/javascript, never
+ * relabel binary bytes.
  */
 export function classifyDisplayMedia(
   bytes: Buffer,
@@ -83,7 +105,11 @@ export function classifyDisplayMedia(
   if (model !== null) return model;
   const declaredHtml =
     /\.html?$/i.test(hint.filename ?? '') || /^text\/html\b/i.test(hint.contentType ?? '');
-  return declaredHtml && looksLikeHtml(bytes) ? 'text/html' : null;
+  if (declaredHtml) return looksLikeHtml(bytes) ? 'text/html' : null;
+  const declaredScript =
+    DECLARED_SCRIPT_NAME.test(hint.filename ?? '') ||
+    DECLARED_SCRIPT_TYPE.test(hint.contentType ?? '');
+  return declaredScript && looksLikeScript(bytes) ? 'text/javascript' : null;
 }
 
 function utf8(bytes: Buffer): string | null {
@@ -119,6 +145,7 @@ function declaredModelType(bytes: Buffer, filename: string): string | null {
 export type DisplayKind = 'page' | 'bundle' | 'model' | 'image' | 'video' | 'pdf';
 
 export function displayKindForType(mimeType: string): DisplayKind {
+  if (mimeType === 'text/javascript') return 'bundle';
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.startsWith('video/')) return 'video';
   if (mimeType === 'application/pdf') return 'pdf';
@@ -128,6 +155,7 @@ export function displayKindForType(mimeType: string): DisplayKind {
 
 export const DISPLAY_EXTENSIONS: Record<string, string> = {
   'text/html': 'html',
+  'text/javascript': 'js',
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/gif': 'gif',

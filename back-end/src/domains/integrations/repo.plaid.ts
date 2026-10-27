@@ -364,11 +364,27 @@ export async function markPlaidItemSyncing(itemRowId: string): Promise<void> {
   });
 }
 
+/**
+ * Record a finished sync. With `fence`, the cursor is written only while that
+ * sync still holds the item's lease (one statement), so a sync that lost its
+ * lease cannot overwrite a newer holder's cursor. Returns false when fenced out.
+ */
 export async function markPlaidItemSyncSucceeded(
   itemRowId: string,
   cursor: string | null,
-  lastWebhookAt?: Date
-): Promise<void> {
+  lastWebhookAt?: Date,
+  fence?: Prisma.Sql
+): Promise<boolean> {
+  if (fence !== undefined) {
+    const updated = await prisma.$executeRaw`
+      UPDATE "PlaidItem"
+      SET cursor = ${cursor}, status = 'ACTIVE'::"PlaidItemStatus", "lastSyncAt" = now(),
+          "lastWebhookAt" = COALESCE(${lastWebhookAt ?? null}::timestamp, "lastWebhookAt"),
+          "errorCode" = NULL, "errorMessage" = NULL, "updatedAt" = now()
+      WHERE id = ${itemRowId} AND ${fence}
+    `;
+    return updated === 1;
+  }
   await prisma.plaidItem.update({
     where: { id: itemRowId },
     data: {
@@ -380,6 +396,7 @@ export async function markPlaidItemSyncSucceeded(
       errorMessage: null,
     },
   });
+  return true;
 }
 
 export async function markPlaidItemSyncFailed(

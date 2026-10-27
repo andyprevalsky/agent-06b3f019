@@ -498,9 +498,10 @@ async function syncGmailForUser(
   await prisma.integration.update({
     where: { id: integration.id },
     data: {
+      // Status stays SYNCING (the job's claim) until every credential is done;
+      // runGmailSyncJob sets CONNECTED once, so no instance re-claims mid-run.
       lastSyncAt: new Date(),
       lastSuccessfulSyncAt: new Date(),
-      status: IntegrationStatus.CONNECTED,
       config: {
         ...config,
         historyIds: updatedHistoryIds,
@@ -541,6 +542,30 @@ function reportGmailProgress(
 /**
  * Run the Gmail sync job - finds all integrations due for sync and processes them
  */
+/**
+ * Atomically claim an integration for this sync: flip it to SYNCING only while
+ * it is still due (CONNECTED / SYNC_FAILED, or a SYNCING row abandoned for
+ * longer than the sync interval). Exactly one caller wins across overlapping
+ * ticks and backend instances; lastSyncAt then fences crash recovery.
+ */
+export async function claimGmailIntegrationForSync(integrationId: string): Promise<boolean> {
+  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
+  const claimed = await prisma.integration.updateMany({
+    where: {
+      id: integrationId,
+      OR: [
+        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
+        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
+      ],
+    },
+    data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    log.info('Integration already claimed by another sync; skipping', { integrationId });
+  }
+  return claimed.count === 1;
+}
+
 export async function runGmailSyncJob(): Promise<void> {
   log.info('Starting sync job...');
 
@@ -591,12 +616,7 @@ export async function runGmailSyncJob(): Promise<void> {
       continue;
     }
 
-    // Mark as syncing with timestamp to prevent duplicate pickup.
-    // lastSyncAt acts as a lock — the query won't re-pick this for 30 min (crash recovery).
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
-    });
+    if (!(await claimGmailIntegrationForSync(integration.id))) continue;
 
     // Sync progress: messages saved / the mailboxes' messagesTotal (null until
     // every synced address reported one, e.g. an incremental history sync).
@@ -653,6 +673,10 @@ export async function runGmailSyncJob(): Promise<void> {
 
     if (allSucceeded) {
       successCount++;
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: { status: IntegrationStatus.CONNECTED },
+      });
     } else {
       failCount++;
       await prisma.integration.update({

@@ -111,7 +111,7 @@ export function assertDisplayCsp(csp: string | null, label: string, { sandbox = 
   assert(!csp.includes('allow-same-origin'), `${label}: never allow-same-origin`);
 }
 
-async function served(url: string, label: string, type: string) {
+export async function served(url: string, label: string, type: string) {
   const res = await usercontentFetch(url);
   assert(res.status === 200, `${label}: ${url} → ${res.status}`);
   assert(
@@ -127,13 +127,13 @@ async function served(url: string, label: string, type: string) {
   return res;
 }
 
-const bundleBase = (item: DisplayItem) => {
+export const bundleBase = (item: DisplayItem) => {
   const url = item.file_pointer.usercontent_url ?? '';
   return url.slice(0, url.lastIndexOf('/') + 1);
 };
 
 /** Put a file in the agent tree the way a code agent's output attachment lands. */
-async function treeFile(agentId: string, name: string, content: Buffer, mime: string) {
+export async function treeFile(agentId: string, name: string, content: Buffer, mime: string) {
   const storagePath = `${userA}/outputs/${randomUUID()}/${name.split('/').pop()}`;
   const dir = process.env.DISPLAY_STORAGE_LOCAL_DIR;
   assert(dir, 'DISPLAY_STORAGE_LOCAL_DIR is set by run-blackbox-tests.sh');

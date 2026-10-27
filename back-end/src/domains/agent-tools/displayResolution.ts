@@ -30,7 +30,7 @@ function basename(value: string): string {
   return last.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'media';
 }
 
-const isBundleRoot = (name: string) => /\.(html?|gltf|obj)$/i.test(name);
+const isBundleRoot = (name: string) => /\.(html?|gltf|obj|m?js)$/i.test(name);
 
 function decodeBase64(raw: string, label: string): Buffer {
   if (raw.length % 4 !== 0 || !BASE64_RE.test(raw)) {
