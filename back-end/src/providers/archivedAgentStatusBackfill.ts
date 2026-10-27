@@ -9,7 +9,7 @@
  * lock_timeout/statement_timeout, touches at most `batchSize` rows selected by
  * primary key, and only rows that are archived AND non-terminal.
  */
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import { ARCHIVED_AGENT_STATUS_MESSAGE } from './agentKill';
 
 const PREDICATE = `"deletedAt" IS NOT NULL AND status IN ('STARTING_UP', 'ACTIVE', 'PAUSED')`;
@@ -49,7 +49,7 @@ export async function backfillArchivedAgentStatus(
   let updated = 0;
   let batches = 0;
   while (batches < maxBatches) {
-    const changed = await prisma.$transaction(
+    const changed = await runTransactionWithRetry(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
