@@ -24,9 +24,11 @@ SHARD_OPTIONAL = {'infra_threshold', 'manifest_sha256', 'task_timeout', 'e2e_tim
 ORIGINAL_TASK_REF = '1387ae608e7cfb8e3f0a876daae92093f503b465'
 DEFAULT_TASK_TIMEOUT = 1200
 RUN_DEADLINE = 5400
-STARTUP_ALLOWANCE = 2100
+# The runner's E2E_ALLOWANCE: startup to barrier release (720+900), one copy's
+# post-window tail (720) and evidence/full release (480).
+E2E_ALLOWANCE = 720+900+720+480
 MAX_TASK_TIMEOUT = 7200  # the runner's MAX_TASK_TIMEOUT
-MAX_RUN_DEADLINE = MAX_TASK_TIMEOUT+STARTUP_ALLOWANCE
+MAX_RUN_DEADLINE = MAX_TASK_TIMEOUT+E2E_ALLOWANCE
 
 def names_sha256(tasks):
     return hashlib.sha256(('\n'.join(tasks)+'\n').encode()).hexdigest()
@@ -38,7 +40,7 @@ def shard_timeouts(shard):
     task, e2e = shard.get('task_timeout', DEFAULT_TASK_TIMEOUT), shard.get('e2e_timeout', RUN_DEADLINE)
     if type(task) is not int or not 60 <= task <= MAX_TASK_TIMEOUT:
         raise ValueError('invalid bound task timeout')
-    if type(e2e) is not int or not task+STARTUP_ALLOWANCE <= e2e <= MAX_RUN_DEADLINE:
+    if type(e2e) is not int or not task+E2E_ALLOWANCE <= e2e <= MAX_RUN_DEADLINE:
         raise ValueError('invalid bound e2e timeout')
     return task, e2e
 

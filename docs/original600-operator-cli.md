@@ -587,6 +587,10 @@ into private staging and verifies every original archive member. It publishes
 the canonical verified-export marker only after all remote helpers have joined.
 An uncertain export dispatch never authorizes repeating that export.
 
+Dead-owner export recovery binds the shard's own deadline. That is the epoch
+plus the shard's bound e2e timeout, for example 10020 s for `--timeout 7200`, or
+5400 s when unbound.
+
 If a host or service restart killed the operator, a shard's runner and its gate
 while the controller was still running, nothing remains to verify the export
 or run controller cleanup: the run's pinned disposable helper refuses every

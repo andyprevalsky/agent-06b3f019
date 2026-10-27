@@ -57,13 +57,33 @@ DEFAULT_TASK_TIMEOUT=1200
 # Default operator deadline. A shard's host TERM fence is epoch plus its bound
 # --e2e-timeout (RUN_DEADLINE when absent); setup transfers keep this bound.
 RUN_DEADLINE=5400
-# Controller boot, canary/preflight release, fleet readiness and final evidence/release
-# (Eval Suite stage targets 720+900+480) outside the per-task execution window.
-STARTUP_ALLOWANCE=2100
+# The e2e clock starts at admission, but a copy's execution window starts only after
+# the strict start barrier releases and its grade lands after that window. A bound
+# e2e must therefore cover three separate allowances (Eval Suite stage targets):
+# Admission to barrier release: canary/preflight through full release (720) plus fleet
+# readiness (900). Polar batch 1 (2026-10-20) measured 1350.6 s.
+STARTUP_ALLOWANCE=720+900
+# One copy's work outside its own window after release: agent creation, backstop pause,
+# terminal evidence and judge. Bounded by the single-copy canary create-to-release target
+# (720); Polar batch 1 r003-j0054 measured 704 s from release to rc beyond its 7200 s window.
+COPY_TAIL_ALLOWANCE=720
+# Evidence and full native release after the last execution (480 target).
+RELEASE_ALLOWANCE=480
+POST_TASK_ALLOWANCE=COPY_TAIL_ALLOWANCE+RELEASE_ALLOWANCE
+E2E_ALLOWANCE=STARTUP_ALLOWANCE+POST_TASK_ALLOWANCE
 # Longest per-task execution window the sharded operator accepts (2 hours). A
-# bound --e2e-timeout may extend the operator deadline up to this plus startup.
+# bound --e2e-timeout may extend the operator deadline up to this plus the allowances.
 MAX_TASK_TIMEOUT=7200
-MAX_RUN_DEADLINE=MAX_TASK_TIMEOUT+STARTUP_ALLOWANCE
+MAX_RUN_DEADLINE=MAX_TASK_TIMEOUT+E2E_ALLOWANCE
+# The host gate watchdog outlives the shard's TERM fence by the original 7200-5400 s
+# cleanup margin, so the runner's own TERM and cleanup always run first.
+GATE_WATCHDOG_MARGIN=1800
+def gate_watchdog_seconds(e2e_timeout):
+ """CLOUDBENCH_GATE_TIMEOUT_S for a shard whose host TERM fence is epoch+e2e_timeout."""
+ return max(RUN_DEADLINE+GATE_WATCHDOG_MARGIN,e2e_timeout+GATE_WATCHDOG_MARGIN)
+def default_e2e_timeout(task_timeout):
+ """The operator deadline, widened so a full task window still gets graded and released."""
+ return max(RUN_DEADLINE,task_timeout+E2E_ALLOWANCE)if type(task_timeout)is int else RUN_DEADLINE
 TASK_TIMEOUT_REFUSAL=('--task-timeout must be 60..%d seconds (%d hours; run-bench --timeout): ask the user to choose a lower execution timeout '
  'or to change the CLI setting MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py')%(MAX_TASK_TIMEOUT,MAX_TASK_TIMEOUT//3600)
 def manifest_sha(tasks):return sha(('\n'.join(tasks)+'\n').encode())
@@ -106,7 +126,7 @@ def shard_placement_env(root,shard):
 def campaign_timeouts(task_timeout=DEFAULT_TASK_TIMEOUT,e2e_timeout=RUN_DEADLINE):
  """The bound per-task execution window and whole-campaign budget, in seconds."""
  need(type(task_timeout)is int and 60<=task_timeout<=MAX_TASK_TIMEOUT,TASK_TIMEOUT_REFUSAL)
- need(type(e2e_timeout)is int and task_timeout+STARTUP_ALLOWANCE<=e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup/release and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,MAX_RUN_DEADLINE))
+ need(type(e2e_timeout)is int and task_timeout+E2E_ALLOWANCE<=e2e_timeout<=MAX_RUN_DEADLINE,'--e2e-timeout must cover the task timeout plus %ds startup to barrier release and %ds grading/release, and fit the %ds operator deadline'%(STARTUP_ALLOWANCE,POST_TASK_ALLOWANCE,MAX_RUN_DEADLINE))
  return task_timeout,e2e_timeout
 def shard_timeouts(shard):
  # One canonical encoding: a bound field is present only when it differs from the original value.
@@ -722,7 +742,7 @@ def run(config_path,config_sha,out,*,github_token=None):
  env['CLOUDBENCH_GATE_NO_EFFECT_RECEIPT']=str(out/'gate.preallocation-failure.json')
  env.update(CLOUDBENCH_GATE_ROOT_DIR=str(root),CLOUDBENCH_GATE_PAYLOAD_FILE=str(payload),CLOUDBENCH_GATE_PAYLOAD_SHA256=payload_sha)
  env.update(CLOUDBENCH_GATE_REF=ref,CLOUDBENCH_GATE_EXPORT_DIR=str(export),CLOUDBENCH_GATE_RETAIN_HOST='1',CLOUDBENCH_GATE_EXPORT_HOST='1',CLOUDBENCH_GATE_VM_SIZE='performance-8x',CLOUDBENCH_GATE_VM_MEMORY='32768',CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB='256')
- need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>deadline_s,'explicit host watchdog must outlive benchmark cleanup')
+ need(int(env.get('CLOUDBENCH_GATE_TIMEOUT_S','0'))>=gate_watchdog_seconds(deadline_s),'explicit host watchdog must outlive the TERM fence plus benchmark cleanup')
  capture=root/'scripts/cloudbench-original-volume-capture.py';scope={'__file__':str(capture),'__name__':'bound_external_controller'};exec(compile(capture.read_bytes(),str(capture),'exec'),scope)
  token=scope['resolve_token']({'workspace':str(root)});api=scope['Fly'](APP,token)
  stop=[False];old_handlers={s:signal.getsignal(s)for s in(signal.SIGTERM,signal.SIGINT)}
@@ -952,7 +972,7 @@ def self_test():
    argv=campaign_argv(tasks,epoch,shard)
    self.assertEqual(argv,['bash','scripts/run-bench','--strict-barrier','--concurrency','23','-k','1','--retry-infra','1','--timeout','480','--e2e-timeout','5400',
                           '--e2e-started-at',str(epoch),'--ref',TASK_REF,*names])
-   self.assertEqual(campaign_argv(tasks,epoch,dict(shard,e2e_timeout=3000))[9:13],['--timeout','480','--e2e-timeout','3000'])
+   self.assertEqual(campaign_argv(tasks,epoch,dict(shard,e2e_timeout=3300))[9:13],['--timeout','480','--e2e-timeout','3300'])
    self.assertEqual(validate_shard(shard,tasks),23)
    with self.assertRaisesRegex(ValueError,'original ordered task manifest required'):campaign_argv(tasks,epoch)
    other=list(reversed(tasks));unbound={k:v for k,v in shard.items() if k!='manifest_sha256'}
@@ -961,10 +981,11 @@ def self_test():
                                   (self.manifest(),dict(shard,manifest_sha256=TASK_NAMES_SHA),'invalid bound manifest hash'),(tasks,dict(shard,manifest_sha256='A'*64),'invalid bound manifest hash'),
                                   (tasks,dict(shard,task_timeout=1200),'encoded by absence'),(tasks,dict(shard,e2e_timeout=5400),'encoded by absence'),
                                   (tasks,dict(shard,task_timeout=59),'task-timeout'),(tasks,dict(shard,task_timeout=7201),'task-timeout'),(tasks,dict(shard,task_timeout=480.0),'task-timeout'),
-                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=2579),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=9301),'e2e-timeout'),(tasks,dict(shard,task_timeout=7201,e2e_timeout=9300),'ask the user'),
+                                  (tasks,dict(shard,task_timeout=True),'task-timeout'),(tasks,dict(shard,e2e_timeout=3299),'e2e-timeout'),(tasks,dict(shard,e2e_timeout=10021),'e2e-timeout'),(tasks,dict(shard,task_timeout=7200,e2e_timeout=9300),'e2e-timeout must cover'),(tasks,dict(shard,task_timeout=7201,e2e_timeout=9300),'ask the user'),
                                   (tasks,dict(shard,group_total=71),'group total exceeds the bound manifest'),(tasks,dict(shard,task_indexes=list(range(2,70,3))),'ordered subset of the bound manifest')]:
     with self.subTest(message=message,value={k:value[k] for k in SHARD_OPTIONAL&set(value)}),self.assertRaisesRegex(ValueError,message):campaign_argv(manifest,epoch,value)
-   self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(3300,5400),(3300,5400));self.assertEqual(campaign_timeouts(7200,9300),(7200,9300))
+   self.assertEqual(campaign_timeouts(),(1200,5400));self.assertEqual(campaign_timeouts(2580,5400),(2580,5400));self.assertEqual(campaign_timeouts(7200,10020),(7200,10020))
+   self.assertEqual([default_e2e_timeout(t)for t in(480,1200,2580,3300,7200)],[5400,5400,5400,6120,10020]);self.assertEqual(gate_watchdog_seconds(10020),11820);self.assertEqual(gate_watchdog_seconds(5400),7200)
    # The original-manifest shard encodes neither field: its bytes and argv are the historical ones.
    original=self.shard(self.manifest());self.assertFalse(SHARD_OPTIONAL&set(original))
    self.assertEqual(campaign_argv(self.manifest(),epoch,original)[9:13],['--timeout','1200','--e2e-timeout','5400'])
