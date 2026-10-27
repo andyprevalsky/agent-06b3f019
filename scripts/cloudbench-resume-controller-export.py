@@ -1115,6 +1115,9 @@ def read_source(path):
     The private-input reader (owner-only mode, single link) is for private
     receipts; a collector checked out under umask 022 is 0644 and is instead
     bound by the physical path and the launch record's collector SHA-256.
+    Group- or world-writable files are refused: another writer could swap the
+    bytes between the hash check and use. Callers execute the returned bytes,
+    never the path.
     """
     path = Path(path).absolute()
     need(path.resolve(strict=True) == path, "physical collector source required")
@@ -1123,7 +1126,7 @@ def read_source(path):
         need(
             stat.S_ISREG(info.st_mode)
             and info.st_uid == os.geteuid()
-            and not info.st_mode & 0o002
+            and not info.st_mode & 0o022
             and info.st_size < 16 * 1024 * 1024,
             "regular current-owner collector source required",
         )
@@ -1142,7 +1145,7 @@ def verify_stage(value, stage):
         sha(raw) == value["record"]["collector_sha256"],
         "original verify collector differs",
     )
-    namespace = runpy.run_path(value["collector_path"], init_globals=namespace)
+    exec(compile(raw, value["collector_path"], "exec"), namespace)  # the hashed bytes, never a re-read
     need(
         read_source(value["collector_path"]) == raw,
         "collector changed during verification setup",

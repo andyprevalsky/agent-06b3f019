@@ -1355,14 +1355,33 @@ class ExportResume(unittest.TestCase):
             (stage / name).chmod(0o600)
         self.assertEqual(self.collector.stat().st_mode & 0o777, 0o644)
         self.assertEqual(M["read_source"](self.collector), self.collector.read_bytes())
-        self.collector.chmod(0o666)
-        with self.assertRaisesRegex(ValueError, "regular current-owner collector source required"):
-            M["verify_stage"](self.value, stage)
+        for mode in (0o666, 0o664, 0o620):
+            self.collector.chmod(mode)
+            with self.assertRaisesRegex(ValueError, "regular current-owner collector source required"):
+                M["verify_stage"](self.value, stage)
         self.collector.chmod(0o644)
         alias = self.root / "alias.py"
         alias.symlink_to(self.collector)
         with self.assertRaisesRegex(ValueError, "physical collector source required"):
             M["read_source"](alias)
+
+    def test_verify_executes_the_hashed_collector_bytes_not_the_path(self):
+        stage = self.root / "stage"
+        stage.mkdir(mode=0o700)
+        for name, raw in self.payloads.items():
+            (stage / name).write_bytes(raw)
+            (stage / name).chmod(0o600)
+        real_run_path = M["runpy"].run_path
+        collector = str(self.value["collector_path"])
+
+        def run_path(path, *args, **kwargs):
+            if str(path) == collector:
+                raise AssertionError("collector path re-read for execution")
+            return real_run_path(path, *args, **kwargs)
+
+        with mock.patch.object(M["runpy"], "run_path", side_effect=run_path):
+            hashes = M["verify_stage"](self.value, stage)
+        self.assertEqual(hashes["launch.json"], self.binding["launch_sha256"])
 
     def test_all_remote_children_join_before_canonical_marker_and_no_replay(self):
         api = self.api()

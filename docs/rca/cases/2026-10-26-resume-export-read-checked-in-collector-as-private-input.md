@@ -56,14 +56,18 @@ CPython 3.11.9 build also lacks `os.pidfd_open`.
 ## Solution
 
 - Product: add `read_source()` to the resume export. It requires a physical
-  path without a symlink, a regular file owned by the current user, no
-  world-write permission and a 16 MiB size bound. `verify_stage` uses it for
-  the collector on both reads. The bytes are still bound by the launch
-  record's `collector_sha256`, the git-show equality check and the re-read
-  equality check.
+  path without a symlink, a regular file owned by the current user, no group
+  or world write permission and a 16 MiB size bound. `verify_stage` uses it
+  for the collector on both reads, and it executes the hashed bytes
+  (`exec(compile(raw, ...))`) instead of `runpy.run_path`. Before this, the
+  path was re-opened after the hash check, so a writer could swap the bytes
+  in between; CodeRabbit raised this on PR #1593. The bytes stay bound by the
+  launch record's `collector_sha256`, the git-show equality check and the
+  re-read equality check.
 - Test: the fixture copies the collector to a private 0644 file. A new case
-  accepts that checkout mode and refuses a world-writable (0666) or symlinked
-  collector. The pidfd case patches with `create=True`; when `os.pidfd_open`
+  accepts that checkout mode and refuses a group- or world-writable (0666,
+  0664, 0620) or symlinked collector. Another case fails if verification
+  re-reads the collector path for execution. The pidfd case patches with `create=True`; when `os.pidfd_open`
   is missing, it uses an owned `/proc/<pid>` directory fd that must still be
   closed exactly once. The stream test uses a private temp root.
 - Registered `cloudbench-resume-controller-export` in
