@@ -248,8 +248,7 @@ def build_polar_trajectory(
             if tool_status:
                 action_bits.append(f"status={tool_status}")
             if text:
-                clipped = text if len(text) <= 4000 else text[:4000] + "…"
-                action_bits.append(clipped)
+                action_bits.append(text)
             if action_bits:
                 parts.append("Action: " + " | ".join(action_bits))
         elif role == "USER" and text:

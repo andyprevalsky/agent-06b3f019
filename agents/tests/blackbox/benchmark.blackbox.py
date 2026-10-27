@@ -22811,6 +22811,42 @@ def test_browser_min_steps_ignores_init_timeout_retry_before_session():
     assert _validate_agent_class_min_steps({"browser": 5}, counts) is None
 
 
+async def test_polar_judge_preserves_full_tool_evidence():
+    """Captured command success after a long install log must reach every rubric.
+
+    Campaign A polar-bu-002 r3: Playwright succeeded; a trailing diagnostic
+    exited 127. The SDK event holding the successful page state lay beyond
+    the evaluator's former 4,000-character per-message cutoff.
+    """
+    from benchmarks.polar_evaluator import run_polar_evaluator
+
+    fixture = Path(__file__).parent / "fixtures" / "polar-code-events.json"
+    message = json.loads(fixture.read_text())
+    raw = message["text"]
+    events = json.loads(raw[raw.index("{"):])["code_agent_events"]
+    completed = next(event for event in events if event.get("seq") == 62)
+    assert completed["exit_code"] == 127
+    assert '"taskClass": "task completed"' in completed["output"]
+    assert raw.index('exec-016cfcff') > 4000
+    calls = []
+
+    async def capture_judge(messages, **kwargs):
+        user_text = messages[1]["content"][0]["text"]
+        calls.append(user_text)
+        return 'Thoughts: evidence transport checked, not task graded.\nStatus: failure'
+
+    result = await run_polar_evaluator(
+        task_prompt="Inspect the recorded task evidence.",
+        evaluator={"criteria": ["Task completed", "Output correct", "No fabrication"]},
+        data={"messages": [message]},
+        judge_llm=capture_judge,
+    )
+    assert len(calls) == 3
+    assert all(raw in user_text for user_text in calls), "Polar judge lost captured tool evidence"
+    assert result["perfect"] is False
+    assert result["score"] == 0.0
+
+
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
     """Non-orchestration code-agent evidence chips must produce step_count > 0.
 
@@ -27591,6 +27627,10 @@ async def run_all_tests():
     r.record(
         "local_workspace_derived_base_skips_reported_ephemeral_window",
         test_local_workspace_derived_base_skips_reported_ephemeral_window,
+    )
+    await r.record_async(
+        "polar_judge_preserves_full_tool_evidence",
+        test_polar_judge_preserves_full_tool_evidence,
     )
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",
