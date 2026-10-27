@@ -65,6 +65,7 @@ interface TerminalHeaderProps {
   clientSource: string;
   agents: Agent[];
   isLoadingAgents: boolean;
+  hasLoadedAgents: boolean;
   selectedAgentId: string | null;
   onRefreshAgents: () => void | Promise<void>;
   dripStyles: DripStyles;
@@ -266,6 +267,7 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
         <MobileAgentDrawer
           agents={agents}
           isLoadingAgents={isLoadingAgents}
+          hasLoadedAgents={props.hasLoadedAgents}
           selectedAgentId={selectedAgentId}
           onSelectAgent={onSelectAgent}
           onCreateAgent={onCreateNewAgent}
@@ -298,6 +300,7 @@ function RoseMobileHeaderBar(props: TerminalHeaderProps) {
           roseHeader
           agents={props.agents}
           isLoadingAgents={props.isLoadingAgents}
+          hasLoadedAgents={props.hasLoadedAgents}
           selectedAgentId={props.selectedAgentId}
           onSelectAgent={onSelectAgent}
           onCreateAgent={onCreateNewAgent}

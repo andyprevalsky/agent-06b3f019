@@ -32,6 +32,11 @@ import {
   trackSeededRootAgent,
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
+import {
+  testFinalizeDeleteSeeksByRoot,
+  testFixtureExcludesUserLifetimeHistory,
+  testLateLlmArtifactIndexesOnlyItself,
+} from './archive-run-cost.helper';
 
 config();
 
@@ -115,6 +120,7 @@ async function seedRun(): Promise<SeededRun> {
   await prisma.messageRecord.create({
     data: {
       personId,
+      userId,
       channel: 'IMESSAGE',
       from: '+10000000000',
       to: '+10000000001',
@@ -177,9 +183,13 @@ async function testFixtureScopeAndRestore(): Promise<void> {
     );
     assert(ids(fixture.rows.Agent).includes(seed.rootAgentId));
     assert(ids(fixture.rows.Agent).includes(seed.childAgentId));
-    assert(ids(fixture.rows.Person).includes(seed.personId));
-    assert(!ids(fixture.rows.Person).includes(seed.otherPersonId));
-    assert.strictEqual(fixture.rows.Cookie.length, 1);
+    // Lifetime user history (Person, Cookie, ...) belongs to the base image;
+    // see testFixtureExcludesUserLifetimeHistory.
+    assert.strictEqual(fixture.user_id, seed.userId);
+    assert.deepStrictEqual(
+      fixture.rows.User.map((row) => (row as { userId?: unknown }).userId),
+      [seed.userId]
+    );
 
     await prisma.agent.update({ where: { id: seed.rootAgentId }, data: { goal: 'stale goal' } });
     await prisma.message.create({
@@ -202,6 +212,16 @@ async function testFixtureScopeAndRestore(): Promise<void> {
     );
     assert(otherPerson !== null, 'restore must not delete unrelated user rows');
   } finally {
+    await cleanup(seed);
+  }
+}
+
+async function withSeededRun(fn: (seed: SeededRun) => Promise<void>): Promise<void> {
+  const seed = await seedRun();
+  try {
+    await fn(seed);
+  } finally {
+    await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: seed.rootAgentId } });
     await cleanup(seed);
   }
 }
@@ -563,6 +583,19 @@ async function runAll(): Promise<void> {
       fn: runCurationPoolControls,
     },
     { name: 'fixture scope and restore replacement', fn: testFixtureScopeAndRestore },
+    {
+      name: "run fixture excludes the user's lifetime history",
+      fn: () => withSeededRun(testFixtureExcludesUserLifetimeHistory),
+    },
+    {
+      name: 'finalize search-index delete seeks by root',
+      fn: () => withSeededRun(testFinalizeDeleteSeeksByRoot),
+    },
+    {
+      name: 'late llm artifact indexes only itself',
+      fn: () =>
+        withSeededRun((seed) => testLateLlmArtifactIndexesOnlyItself(BASE_URL, API_KEY, seed)),
+    },
     {
       name: 'start fixture snapshot excludes post-ready writes',
       fn: testStartFixtureSnapshotExcludesPostReadyWrites,

@@ -22,7 +22,7 @@ export async function isConnectorConnected(userId: string, connector: string): P
  */
 export async function countAllMessages(userId: string): Promise<number> {
   return prisma.messageRecord.count({
-    where: { person: { userId } },
+    where: { userId },
   });
 }
 
@@ -59,7 +59,7 @@ export async function getThreadsWithStats(userId: string) {
 export async function getChannelCounts(userId: string) {
   return prisma.messageRecord.groupBy({
     by: ['channel'],
-    where: { person: { userId } },
+    where: { userId },
     _count: true,
   });
 }
@@ -69,7 +69,7 @@ export async function getChannelCounts(userId: string) {
  */
 export async function getOldestMessage(userId: string) {
   return prisma.messageRecord.findFirst({
-    where: { person: { userId } },
+    where: { userId },
     orderBy: { timestamp: 'asc' },
     select: { timestamp: true },
   });
@@ -80,7 +80,7 @@ export async function getOldestMessage(userId: string) {
  */
 export async function getNewestMessage(userId: string) {
   return prisma.messageRecord.findFirst({
-    where: { person: { userId } },
+    where: { userId },
     orderBy: { timestamp: 'desc' },
     select: {
       timestamp: true,

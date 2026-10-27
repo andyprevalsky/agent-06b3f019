@@ -17,6 +17,7 @@ The decision core here is pure + unit-testable; the Playwright wiring is a thin 
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -89,12 +90,46 @@ def _strip_headers(headers: Dict[str, str]) -> Dict[str, str]:
 class BrowserHttpCache:
     """Record/replay for one browser run."""
 
-    def __init__(self, goal: str, *, read_enabled: bool = True, write_enabled: bool = True):
+    def __init__(
+        self,
+        goal: str,
+        *,
+        read_enabled: bool = True,
+        write_enabled: bool = True,
+        agent_id: Optional[str] = None,
+    ):
         self.goal = goal
         self.goal_hash = normalize.goal_hash(goal)
         self.read_enabled = read_enabled
         self.write_enabled = write_enabled
+        self.agent_id = agent_id
+        # Resolved once per run, shared by every concurrent response record: a
+        # non-DEMO child under a DEMO tree root must not write the shared
+        # namespace other users' replays read.
+        self._tree_write_check: Optional[asyncio.Future[Optional[bool]]] = None
         self._fulfilled_keys: set[str] = set()
+
+    async def _resolve_tree_write_allowed(self) -> Optional[bool]:
+        """True/False once the tree root resolved; None while it could not be resolved."""
+        allowed = await cache_client.cache_write_decision_for_agent(self.agent_id, self.goal)
+        if allowed is False:
+            logger.info("demo_cache.browser_http_write_skipped", agent_id=self.agent_id, reason="demo_tree_root")
+        return allowed
+
+    async def _write_allowed(self) -> bool:
+        check = self._tree_write_check
+        if check is None:
+            check = asyncio.ensure_future(self._resolve_tree_write_allowed())
+            self._tree_write_check = check
+        # Shield: one cancelled record must not cancel the check the others share.
+        allowed = await asyncio.shield(check)
+        if allowed is None:
+            # Unresolved (e.g. a transient backend failure): deny this write, but
+            # let a later record retry instead of caching the fallback denial.
+            if self._tree_write_check is check:
+                self._tree_write_check = None
+            return False
+        return allowed
 
     async def lookup(
         self,
@@ -145,13 +180,15 @@ class BrowserHttpCache:
         if key in self._fulfilled_keys:
             self._fulfilled_keys.discard(key)
             return False
+        if not await self._write_allowed():
+            return False
         value = {
             "status": status,
             "headers": _strip_headers(headers),
             "content_type": headers.get("content-type", ""),
             "body_b64": base64.b64encode(body).decode("ascii"),
         }
-        ok = await cache_client.cache_set(key, "browser_http", self.goal_hash, value)
+        ok = await cache_client.cache_set(key, "browser_http", self.goal_hash, value, goal=self.goal)
         if ok:
             logger.info("demo_cache.browser_http_stored", url=url, key=key, bytes=len(body))
         return ok
