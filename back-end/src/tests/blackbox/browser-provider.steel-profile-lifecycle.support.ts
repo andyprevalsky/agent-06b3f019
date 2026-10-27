@@ -387,8 +387,8 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
       if (failure === 'validation') assert.equal(releases.filter((id) => id !== oldId).length, 4);
       if (failure === 'cas') assert(releases.some((id) => id !== oldId));
       if (failure === 'cleanup') {
-        assert(inFlightSteelSessionIds().has(lastCandidateId));
-        unregisterInFlightSteelSession(lastCandidateId);
+        assert((await inFlightSteelSessionIds([lastCandidateId])).has(lastCandidateId));
+        await unregisterInFlightSteelSession(lastCandidateId);
         assert.equal(
           candidates.get(`steel-candidate-cleanup:${lastCandidateId}`)?.status,
           'PENDING'
@@ -468,7 +468,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     const ambiguousId = lastCandidateId;
     assert.equal(candidates.get(`steel-candidate-cleanup:${ambiguousId}`)?.status, 'PENDING');
     assert(!releases.includes(ambiguousId), 'ambiguous create must not settle through release404');
-    unregisterInFlightSteelSession(ambiguousId);
+    await unregisterInFlightSteelSession(ambiguousId);
     clockOffset = steelSessionTimeoutMs() + 1;
     const absentRecovery = await reconcileSteelCandidateCleanup({
       inFlight: () => new Set(),
@@ -563,7 +563,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
         'stale owner must not overwrite the winner'
       );
       assert.equal(candidates.get(`steel-candidate-cleanup:${pendingId}`)?.status, 'PENDING');
-      unregisterInFlightSteelSession(pendingId);
+      await unregisterInFlightSteelSession(pendingId);
       phase = 'restart';
       const restart = await reconcileSteelCandidateCleanup({
         inFlight: () => new Set(),
@@ -606,7 +606,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     prisma.integration.findUnique = originals.integration;
     prisma.browserProviderProfile.upsert = originals.profile;
     prisma.browserContext.update = originals.context;
-    unregisterInFlightSteelSession(lastCandidateId);
+    await unregisterInFlightSteelSession(lastCandidateId);
     assert.equal(externalFetches, 0, 'lifecycle fixture must make no external calls');
   }
 }

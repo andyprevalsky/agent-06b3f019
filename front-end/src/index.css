@@ -256,6 +256,16 @@ html {
   scroll-snap-type: y proximity;
 }
 
+/* Terminal app shell (useLockedDocumentScroll): only its panes scroll. Locking
+ * the document stops mobile Safari from chaining chat scroll/bounce to the page,
+ * which moved the query box and resized 100dvh with the toolbar. */
+html.rose-app-shell,
+html.rose-app-shell body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 @layer components {
   .code-agent-terminal-shell {
     background:

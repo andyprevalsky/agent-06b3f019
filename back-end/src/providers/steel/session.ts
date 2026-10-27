@@ -246,7 +246,7 @@ export async function createSessionWithContext(
           height: 891, // 800 + 91 for browser chrome → 800 viewport
         },
       })) as SteelSessionResult;
-      registerInFlightSteelSession(session.id);
+      await registerInFlightSteelSession(session.id);
 
       if (
         options?.requiredSteelProfileId !== undefined &&
@@ -371,7 +371,7 @@ export async function createSessionWithContext(
       });
       // The row now protects the session from the reaper; the in-flight entry
       // would otherwise shield an orphan whose cleanup skipped the release.
-      unregisterInFlightSteelSession(session.id);
+      await unregisterInFlightSteelSession(session.id);
 
       log.info(`✓ Created Steel session: ${session.id}`);
       log.info(`  Context (DB): ${dbContextId}`);
@@ -564,7 +564,7 @@ export async function releaseSteelRemoteSession(sessionId: string): Promise<void
   // Treating their synthetic IDs as remote turns a successful local close into
   // a permanent retry obligation.
   if (sessionId.startsWith('local-')) return;
-  unregisterInFlightSteelSession(sessionId);
+  await unregisterInFlightSteelSession(sessionId);
   await retryWithBackoff(
     async () => {
       try {

@@ -15,6 +15,11 @@ import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import {
+  abandonKernelProfileWriterClaim,
+  bindKernelProfileWriter,
+  claimKernelProfileWriter,
+} from './kernelProfileWriter';
+import {
   createSessionOnKernelProxyLadder,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
@@ -96,6 +101,19 @@ interface KernelRemoteSessionOptions {
   omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
+  /** The session a recreate supersedes; its profile-writer role moves to the new browser. */
+  replacingSessionId?: string | null;
+}
+
+/** A plan without profile support runs ephemeral only when profiles are optional. */
+function profilesUnavailable(error: unknown): { profileId: null; profileSource: string } {
+  if (!(error instanceof PermissionDeniedError)) throw error;
+  const message = `Kernel profiles are required but unavailable: ${error.message}`;
+  if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
+    throw new Error(message, { cause: error });
+  }
+  log.warn(`${message}; using an ephemeral browser`);
+  return { profileId: null, profileSource: 'unavailable_plan' };
 }
 
 async function createProfile(
@@ -120,15 +138,7 @@ async function createProfile(
       // benchmark agent because BrowserContext is unique per user.
       return await getOrCreateBenchmarkKernelProfile(client, agentId);
     } catch (error) {
-      if (error instanceof PermissionDeniedError) {
-        const message = `Kernel profiles are required but unavailable: ${error.message}`;
-        if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
-          throw new Error(message, { cause: error });
-        }
-        log.warn(`${message}; using an ephemeral browser`);
-        return { profileId: null, profileSource: 'unavailable_plan' };
-      }
-      throw error;
+      return profilesUnavailable(error);
     }
   }
   const existing = await getProviderProfile(contextId, 'kernel');
@@ -140,15 +150,7 @@ async function createProfile(
   try {
     profile = await client.profiles.create({});
   } catch (error) {
-    if (error instanceof PermissionDeniedError) {
-      const message = `Kernel profiles are required but unavailable: ${error.message}`;
-      if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
-        throw new Error(message, { cause: error });
-      }
-      log.warn(`${message}; using an ephemeral browser`);
-      return { profileId: null, profileSource: 'unavailable_plan' };
-    }
-    throw error;
+    return profilesUnavailable(error);
   }
   try {
     await rememberProviderProfile(contextId, 'kernel', profile.id);
@@ -180,6 +182,7 @@ async function createRemoteSession(
   proxyLocation: ProxyGeoLocation;
   profileId: string | null;
   profileSource: string;
+  profilePersist: boolean;
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
@@ -192,6 +195,7 @@ async function createRemoteSession(
     profileSource: profile.profileSource,
     durationMs: Date.now() - profileStartedAt,
   });
+  const writerClaim = await claimKernelProfileWriter(profile.profileId, options.replacingSessionId);
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
@@ -219,7 +223,7 @@ async function createRemoteSession(
                   timeout_seconds: kernelTimeoutSeconds(),
                   viewport: { width: 1280, height: 800, refresh_rate: 60 },
                   ...(profile.profileId !== null
-                    ? { profile: { id: profile.profileId, save_changes: true } }
+                    ? { profile: { id: profile.profileId, save_changes: writerClaim.writer } }
                     : {}),
                   ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
                   tags: kernelResumeTags(agentId, intent),
@@ -267,6 +271,7 @@ async function createRemoteSession(
               proxyLocation: proxy.proxyLocation,
               profileId: session.profile?.id ?? profile.profileId,
               profileSource: profile.profileSource,
+              profilePersist: writerClaim.writer,
               validationBrowser,
             };
           } catch (error) {
@@ -367,8 +372,10 @@ async function createRemoteSession(
     // recreate row update) may still fail and release the remote session. A
     // premature bind would label the next retry user_persistent instead of
     // new_user_persistent (breaks webdecoy isolation metadata proofs).
+    await bindKernelProfileWriter(writerClaim, remote, releaseKernelRemoteSession);
     return remote;
   } catch (error) {
+    await abandonKernelProfileWriterClaim(writerClaim);
     if (error instanceof RateLimitError) {
       throw new BrowserProviderRateLimitError('kernel', error.message);
     }
@@ -407,7 +414,7 @@ export async function createKernelSessionWithContext(
       startUrl: _startUrl || undefined,
       provider: 'kernel',
       kernelProxySource: remote.proxySource,
-      ...providerProfileData(remote.profileId, remote.profileSource, true),
+      ...providerProfileData(remote.profileId, remote.profileSource, remote.profilePersist),
       releaseRemoteSession: releaseKernelRemoteSession,
     });
   } catch (error) {
@@ -564,6 +571,7 @@ async function recreateKernelSession(
       // must use its Kernel profile, never the Browser Use profile ID.
       boundProfile:
         oldSession.provider === 'kernel' ? recordedProviderProfileBinding(oldSession) : undefined,
+      replacingSessionId: oldSession.provider === 'kernel' ? previousSessionId : null,
     }
   );
   let handedOff = false;
@@ -581,7 +589,7 @@ async function recreateKernelSession(
         closedAt: null,
         provider: 'kernel',
         kernelProxySource: remote.proxySource,
-        ...providerProfileData(remote.profileId, remote.profileSource, true),
+        ...providerProfileData(remote.profileId, remote.profileSource, remote.profilePersist),
         ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
       },
     });
