@@ -576,6 +576,7 @@ The concurrent runner executes exactly these independent suites, without changin
 their assertions or test counts:
 
 `bash scripts/tests/workspace-env.test.sh`,
+`python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
@@ -645,7 +646,8 @@ their assertions or test counts:
 `bash scripts/tests/setup-db-concurrency.test.sh`,
 `bash scripts/tests/run-port-collision.test.sh`,
 `bash scripts/tests/run-cloud-benchmark-workers.test.sh`,
-`bash scripts/tests/blackbox-archive-env.test.sh`, and
+`bash scripts/tests/blackbox-archive-env.test.sh`,
+`bash scripts/tests/render-backend-build.test.sh`, and
 `python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these
@@ -936,8 +938,22 @@ runner's db push and trigger hooks:
 python3 scripts/run_deploy_live_probes.py
 ```
 
-All three stage records must pass before closing the `runtime-blackbox`
+All four stage records must pass before closing the `runtime-blackbox`
 boundary.
+
+`migration-preflight` runs `back-end/scripts/migration-preflight.ts` read-only
+against production for every migration in `back-end/prisma/migrations` that
+production has not applied, the set `prisma migrate deploy` will run. It fails on a
+statement whose plan scans more than 100,000 rows of an existing table, and on
+existing rows that a VALIDATE, CHECK, foreign key, SET NOT NULL or unique key
+would reject (it simulates pending ADD COLUMN plus backfill UPDATEs). It warns
+on locks that block reads or writes of large tables. Each failure prints the
+statement and the query that measured it. Fix the migration: move the backfill
+to a batched script, or repair the rows in the migration first. A measured risk
+is accepted only by a `-- migration-preflight: allow whole-table|unverified
+<reason>` line in that migration. Regressions: the `migration-preflight`
+backend blackbox reproduces the 2026-10-02 whole-table timeout and the
+2026-10-26 orphan-row VALIDATE failure.
 
 `chat-router-failover-live` replays the e8f2279b address-correction follow-up
 on its exact 30-message router context during a simulated Cerebras-wide
