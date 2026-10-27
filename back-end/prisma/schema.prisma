@@ -365,6 +365,7 @@ model ToolSideEffect {
   @@index([operationType])
   @@index([status])
   @@index([externalId])
+  @@index([operationKey(ops: raw("gin_trgm_ops"))], map: "ToolSideEffect_operationKey_trgm_idx", type: Gin)
 }
 
 /// One outbound phone call that the backend owns on Twilio. Each Vapi
