@@ -759,10 +759,13 @@ async def mock_call_llm_activity(
         }
     return {
         "response": "Task complete.",
-        "tool_calls": [
+        # Poll-retry scenarios deliberately exercise loop exhaustion. A valid
+        # already-elapsed wait keeps polling without completing or sleeping.
+        "tool_calls": [{"tool": "wait_for", "until_timestamp": "2000-01-01T00:00:00Z"}]
+        if activity_agent_id in POLL_TRANSIENT_BURST else [
             {
-                "tool_name": "attempt_completion",
-                "params": {"result": "All done"},
+                "tool": "attempt_completion",
+                "result": "All done",
             }
         ],
         "usage": {
@@ -1822,6 +1825,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 ]
                 SCHEMA_GENERATION_CAPTURE[woken_id] = []
                 VERIFIER_SCHEMA_CAPTURE[woken_id] = []
+                WORKFLOW_ENV_ACTIVITY_COUNTS.pop(woken_id, None)
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
@@ -1847,6 +1851,10 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     await asyncio.sleep(0.5)
                 judged = VERIFIER_SCHEMA_CAPTURE[woken_id]
                 assert judged, "woken sub-agent never reached its verifier"
+                # The scripted completion must reach the verifier directly;
+                # exhausting the loop also verifies and would be a false pass.
+                llm_calls = WORKFLOW_ENV_ACTIVITY_COUNTS.get(woken_id, {}).get("call_llm_activity", 0)
+                assert llm_calls == 1, f"scripted completion must finish in one call, got {llm_calls}"
                 assert judged[0] == WOKEN_SCHEMA, (
                     f"woken sub-agent verifier judged without the new task's schema: {judged[0]!r}"
                 )

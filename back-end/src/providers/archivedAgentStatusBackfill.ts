@@ -5,14 +5,37 @@
  * stayed STARTING_UP/ACTIVE/PAUSED forever (~16k rows in prod). This applies
  * the same FAILED/"Archived by user" status the delete path now writes.
  *
+ * Excluded: benchmark-hub ancestor skeletons (breadcrumb mirrors with no
+ * workflow), isBenchmark agents (benchmark workflow cleanup has its own owner),
+ * and agents holding a spend that cleanup would close or reclaim.
+ *
  * Idempotent and bounded: each batch is its own short transaction with
  * lock_timeout/statement_timeout, touches at most `batchSize` rows selected by
  * primary key, and only rows that are archived AND non-terminal.
  */
 import { prisma, runTransactionWithRetry } from './database';
 import { ARCHIVED_AGENT_STATUS_MESSAGE } from './agentKill';
+import { HUB_ANCESTOR_SKELETON_USER_ID } from './benchmarkHubAncestors';
 
-const PREDICATE = `"deletedAt" IS NOT NULL AND status IN ('STARTING_UP', 'ACTIVE', 'PAUSED')`;
+// Spend states that terminal-status purchase cleanup acts on (card close +
+// funding reclaim), plus money still in flight. Their agents are left alone so
+// the backfill never moves money; humans decide those separately.
+const MONEY_IN_FLIGHT_SPEND_STATUSES = [
+  'HELD',
+  'FUNDING_PENDING',
+  'FUNDING_ABANDONED',
+  'CHARGING',
+  'PENDING_APPROVAL',
+];
+const PREDICATE = `"deletedAt" IS NOT NULL
+  AND status IN ('STARTING_UP', 'ACTIVE', 'PAUSED')
+  AND "userId" <> '${HUB_ANCESTOR_SKELETON_USER_ID}'
+  AND "isBenchmark" = false
+  AND NOT EXISTS (
+    SELECT 1 FROM "PurchaseSpend" ps
+    WHERE ps."agentId" = "Agent".id
+      AND ps.status::text IN (${MONEY_IN_FLIGHT_SPEND_STATUSES.map((value) => `'${value}'`).join(', ')})
+  )`;
 
 export interface ArchivedStatusBackfillOptions {
   execute: boolean;

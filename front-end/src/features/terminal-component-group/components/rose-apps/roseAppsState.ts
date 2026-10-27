@@ -29,6 +29,7 @@ export type RoseApp =
 export interface AgentBrowserTab {
   agentId: string;
   taskId: string;
+  taskLabel?: string;
   live: boolean;
   /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
   pageUrl?: string | null;
@@ -48,6 +49,7 @@ export interface RoseAppsValue {
   openAgentDisplay: (agentId: string, id: string) => void;
   /** null = Root tab. */
   browserTabAgentId: string | null;
+  browserTabTaskId: string | null;
   tabs: AgentBrowserTab[];
   agents: Agent[];
   selectedAgentId: string | null;
@@ -62,7 +64,7 @@ export interface RoseAppsValue {
   toggleApp: (app: RoseApp) => void;
   closeApp: () => void;
   openAgentBrowser: (agentId: string, taskId: string) => void;
-  selectBrowserTab: (agentId: string | null) => void;
+  selectBrowserTab: (agentId: string | null, taskId?: string) => void;
   /** Open an agent in the main chat (Benchmarks panel rows). */
   openAgent: (agentId: string) => void;
   /** Sign out (Settings panel); undefined when the host has no session. */

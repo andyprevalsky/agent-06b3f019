@@ -138,3 +138,26 @@ with `dvb-onbox visuals publish --title "Weekly business review · <Mon D–D>"`
 (see the `boxes-inline-visualizations` skill). Put the printed link alone in
 its own paragraph of the final answer with at most two short sentences around
 it. Do not send screenshots or a markdown re-rendering of the card.
+
+## Meeting reminders for Tamy
+
+After the card link, list these prompts in the final answer as a simple reminder
+for Andy to ask Tamy. Keep them separate from the fixed card layout; do not
+answer them or turn them into new metrics.
+
+- What are our goals this week across our key objectives?
+- What are our goals this month?
+- What are our goals this year?
+- Which goals are need-to-have versus nice-to-have?
+- What are the 90/10 solutions for our immediate goals?
+
+Use Elon's five-step algorithm to discuss the goals:
+
+1. **Question every requirement.** Who specifically owns it, and does it make
+   sense, regardless of who proposed it?
+2. **Delete.** Which parts, processes, or features can we remove? If we never
+   have to add anything back, are we deleting enough?
+3. **Simplify and optimize.** How can we improve only what remains after
+   deletion?
+4. **Accelerate cycle time.** How can we speed up the necessary process?
+5. **Automate.** What should we automate after the first four steps?

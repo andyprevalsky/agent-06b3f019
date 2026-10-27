@@ -306,12 +306,16 @@ async function testSmoke_codexCompletesE2bTask() {
       succeeded,
       `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
-    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-      method: 'POST',
-      headers: apiKeyHeaders(),
-      body: JSON.stringify({ output }),
-    });
-    assertStatus(outputRes.status, 200, outputRes.data);
+    // App-server can complete a turn with an empty transcript; persist only
+    // populated output after the outcome has been classified.
+    if (output !== '') {
+      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ output }),
+      });
+      assertStatus(outputRes.status, 200, outputRes.data);
+    }
     assert(
       events.some((event) => {
         const typed = event as { type?: string; provider?: string };
