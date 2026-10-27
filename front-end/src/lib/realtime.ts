@@ -1,6 +1,7 @@
 import { supabase, getSession, ensureFreshRealtimeAuth } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { USE_PRIVATE_REALTIME_CHANNELS } from './realtimeConfig';
+import { parseCodeResourcesEvent, rec, type CodeResourceSample } from './codeResources';
 
 // Import and re-export all types from realtime-types.ts
 export {
@@ -235,6 +236,8 @@ export interface AgentHandlers {
   onToolStream?: (payload: ToolStreamPayload) => void;
   onAgentModeStarted?: (payload: AgentModeStartedPayload) => void;
   onBrowserSession?: (payload: BrowserSessionBindingPayload) => void;
+  /** Latest CPU / memory / disk sample of a code agent's sandbox (lib/codeResources). */
+  onCodeResources?: (event: { taskId: string; resources: CodeResourceSample }) => void;
   /** A code agent in this tree activated a new Rose UI version (rose-ui publish). */
   onUserUiActiveChanged?: (payload: UserUiActiveChangedPayload) => void;
   onDisconnect?: () => void;
@@ -321,6 +324,12 @@ export async function subscribeToAgent(
     eventHandlers['BROWSER_SESSION'] = (wrapper: unknown) => {
       const record = extractBrowserSessionBindingPayload(wrapper);
       if (record) handlers.onBrowserSession!(record);
+    };
+  }
+  if (handlers.onCodeResources) {
+    eventHandlers['CODE_RESOURCES'] = (wrapper: unknown) => {
+      const record = parseCodeResourcesEvent(rec(rec(wrapper)?.payload)?.record);
+      if (record) handlers.onCodeResources!(record);
     };
   }
   if (handlers.onUserUiActiveChanged) {

@@ -43,3 +43,34 @@ None recorded for this failure. Managed machine instructions require checking th
 ## Reusable lesson
 
 Retain wrapper and native-child outcomes separately and collect signal provenance before attributing an outer termination to a passing test command.
+
+
+## Later Group4 recurrence on 138f2ccc
+
+Two later interruptions lacked native exit0 receipts. The payment run completed
+three PASS verdicts and its exact standing AgentCard release-stall SKIP, then
+its outer invocation returned143 during resource cleanup. Three roots already
+had sealed-tree/provider/payment receipts. The fourth's canonical DELETE,
+exact provider verification and isolated-stack teardown were resumed without
+creating another task or card. Original failed cleanup/run/owner records are
+retained beside the continuation receipt. The closed card's transfer still has
+4,396 sandbox cents consumed and0 released: purchaseHELD/fundingRECLAIMING and
+any pending refund remain warning-skip liabilities, not financial cleanup.
+Evidence: plan:.context/deploy-fresh-20261027/payment-cleanup-recovery/receipt.json.
+
+The full latency invocation also returned143. Three completed path tests
+remained valid, but agent_execute stopped after four partial samples with
+Playwright Error: Channel closed; its native runner was absent on inspection.
+This is not merely a late outer exit and the partial path is not a pass.
+Its exact last fixture agent was confirmed deleted. The existing native
+CHAT_LIFECYCLE_PATH=agent_execute selector then ran the unchanged clock guard
+and complete five-sample execution test: bothPASS, maximum2076ms. Original
+screenshots, partial measurements and interruption remain retained. This
+completes the missing acceptance case without proving the interruption's cause.
+Evidence: plan:.context/deploy-fresh-20261027/semantic-interruption/receipt.json
+and plan:.context/deploy-fresh-20261027/semantic-agent-execute-recovery.log.
+
+The managed memory-termination ledger was absent on both observations. No signal
+sender, scheduler or memory cause was established, and no runtime repair is
+claimed. Later intentional teardown of the exact owned shared stack is separate
+from these unexpected interruptions and preserved its pre-existing database.

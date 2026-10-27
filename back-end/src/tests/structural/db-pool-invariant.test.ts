@@ -26,6 +26,9 @@ const DEPLOY_OVERLAP = 2;
 // read DEMO_CACHE_POOL_LIMIT / process.env here — cloud shells inject
 // FAST_CACHE_DB_POOL=150 which would poison these hardcoded 400-cap scenarios.
 const CANONICAL_DEMO_CACHE_POOL = 75;
+// The 400-cap scenarios model a pooler tier with no room for non-production
+// clients; they pin the production-only arithmetic.
+const NO_NONPROD_SLICE = 0;
 
 function totalFootprint(maxClientConn: number, backendInstances: number, reserved: number): number {
   const limit = computeProdConnectionLimit({
@@ -34,6 +37,7 @@ function totalFootprint(maxClientConn: number, backendInstances: number, reserve
     reserved,
     deployOverlap: DEPLOY_OVERLAP,
     demoCachePool: CANONICAL_DEMO_CACHE_POOL,
+    nonProdBudget: NO_NONPROD_SLICE,
   });
   return backendInstances * DEPLOY_OVERLAP * (limit + CANONICAL_DEMO_CACHE_POOL) + reserved;
 }
@@ -69,6 +73,7 @@ function testCurrentProdTopologySurvivesDeployOverlap() {
     reserved,
     deployOverlap: DEPLOY_OVERLAP,
     demoCachePool: CANONICAL_DEMO_CACHE_POOL,
+    nonProdBudget: NO_NONPROD_SLICE,
   });
   assert(limit >= 40, `Single-instance limit should leave real request headroom, got ${limit}`);
   assert(
@@ -91,6 +96,7 @@ function testThrowsWhenFleetCannotFitUnderCap() {
         reserved: 40,
         deployOverlap: DEPLOY_OVERLAP,
         demoCachePool: 75,
+        nonProdBudget: NO_NONPROD_SLICE,
       }),
     /pool budget violation/i,
     '10 instances with a 75-conn demo-cache pool cannot fit under a 400 cap — must throw'
@@ -131,12 +137,43 @@ function testDefaultProdLimitIsDeploySafe() {
     reserved: 40,
     deployOverlap: DEPLOY_OVERLAP,
     demoCachePool: CANONICAL_DEMO_CACHE_POOL,
+    nonProdBudget: NO_NONPROD_SLICE,
   });
   assert(limit > 10, `Default prod limit should be well above the floor, got ${limit}`);
   assert(
     2 * (limit + CANONICAL_DEMO_CACHE_POOL) <= 400,
     `Default prod limit ${limit} + demo-cache ${CANONICAL_DEMO_CACHE_POOL} must survive a 2x deploy overlap under a 400 cap`
   );
+}
+
+// Production shares the Supavisor client cap with every dev and benchmark stack
+// (same pooler, same `postgres` user). Production's live Render settings
+// (POOLER_MAX_CLIENT_CONN=1000, FAST_CACHE_DB_POOL=150, one instance) must leave
+// the documented non-production worst case free even during a rolling deploy:
+// a 50-guest DEMO fleet at 4 clients (cloudbench-run.sh) plus five dev or
+// benchmark stacks at 20 (fast-mode-cache-schema.sh). Before 2026-10-27 the
+// derivation budgeted 2 x (330 + 150) + 40 = 1000 of 1000 for production alone,
+// so any non-production client during a deploy overlap could cause EMAXCONN.
+const NONPROD_WORST_CASE_CLIENTS = 50 * 4 + 5 * 20;
+function testProdLeavesNonProdSliceAtLiveSettings() {
+  const maxClientConn = 1000;
+  const demoCachePool = 150;
+  const reserved = 40;
+  const limit = computeProdConnectionLimit({
+    maxClientConn,
+    backendInstances: 1,
+    reserved,
+    deployOverlap: DEPLOY_OVERLAP,
+    demoCachePool,
+  });
+  const prodWorstCase = DEPLOY_OVERLAP * (limit + demoCachePool) + reserved;
+  assert(
+    prodWorstCase + NONPROD_WORST_CASE_CLIENTS <= maxClientConn,
+    `Production budgets ${prodWorstCase} of ${maxClientConn} pooler clients during a deploy ` +
+      `overlap, leaving ${maxClientConn - prodWorstCase} for the ${NONPROD_WORST_CASE_CLIENTS}-client ` +
+      'non-production worst case'
+  );
+  assert(limit >= 100, `Production main pool must keep real request headroom, got ${limit}`);
 }
 
 // demoCacheStore.ts must size its pool from the shared DEMO_CACHE_POOL_LIMIT
@@ -164,6 +201,7 @@ function main() {
   testThrowsWhenFleetCannotFitUnderCap();
   testDefaultProdLimitIsDeploySafe();
   testDemoCachePoolUsesSharedConstant();
+  testProdLeavesNonProdSliceAtLiveSettings();
 }
 
 try {

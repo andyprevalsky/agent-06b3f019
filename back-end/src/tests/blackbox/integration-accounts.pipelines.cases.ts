@@ -11,7 +11,9 @@
  *   gmail               messages      messages saved / the mailbox messagesTotal
  *   linkedin            bytes→records archive bytes received, then parsed records
  *   contacts            contacts      VCF contacts imported / parsed
- *   <browser>           cookies       cookies stored / uploaded (100-cookie batches)
+ *   <browser>           cookies       cookies stored / uploaded (100-cookie batches);
+ *                                     the Mac app's 5-minute re-upload of an already
+ *                                     synced browser keeps reading synced (no 0-of-N bar)
  *   <source>_passwords  passwords     passwords stored / uploaded, per source row
  *   (plaid: integration-accounts.plaid.cases.ts; Mac pipelines: mac-app blackboxes)
  *
@@ -24,6 +26,7 @@ import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import AdmZip from 'adm-zip';
 import { prisma } from '../../providers/database';
+import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import { processCookiesUpload } from '../../domains/integrations/uploadService.browser';
 import {
@@ -330,6 +333,152 @@ async function cookiesUploadReportsCookies(user: User): Promise<void> {
   await expectSynced(session, 'chrome', 'cookies', 150);
 }
 
+function cookieSnapshot(count: number, tag: string) {
+  return Array.from({ length: count }, (_, i) => ({
+    host_key: `.s${i}.${tag}.example.com`,
+    name: `sid${i}`,
+    value: `value-${i}`,
+    path: '/',
+  }));
+}
+
+/** Resolves once `probe` is truthy; throws after `timeoutMs`. */
+async function waitUntil(label: string, probe: () => Promise<boolean>, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  const poll = async (): Promise<void> => {
+    if (await probe()) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return poll();
+  };
+  return poll();
+}
+
+/**
+ * Hold the CookieBundle row of `browser`'s first realm (inserted uncommitted on
+ * a first sync) so a running upload parks in its snapshot pre-phase, the step
+ * where Andy's unchanged 13,548-cookie re-upload sat for 117 s in prod. Returns
+ * once the upload is parked on the row; `release()` lets it finish.
+ */
+async function parkUploadInPreface(userId: string, browser: string, domain: string) {
+  const authRealm = authRealmFromCookieDomain(domain);
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let held: (holderPid: number) => void = () => undefined;
+  const holding = new Promise<number>((resolve) => (held = resolve));
+  const tx = prisma.$transaction(
+    async (t) => {
+      await t.$executeRaw`
+        INSERT INTO "CookieBundle" (id, "userId", "authRealm", "browserSource", "browserProfile", "createdAt", "updatedAt")
+        VALUES (gen_random_uuid(), ${userId}, ${authRealm}, ${browser}, '', NOW(), NOW())
+        ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET "updatedAt" = NOW()`;
+      const [{ pid }] = await t.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      held(pid);
+      await released;
+    },
+    { maxWait: 10_000, timeout: 60_000 }
+  );
+  const holderPid = await holding;
+  return {
+    /** The upload's CookieBundle write is blocked by this holder (its pre-phase is running). */
+    parked: () =>
+      waitUntil(`${browser} upload parked on its CookieBundle row`, async () => {
+        const waiting = await prisma.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*) AS n FROM pg_stat_activity
+          WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))
+            AND query LIKE '%INSERT INTO "CookieBundle"%'`;
+        return Number(waiting[0].n) > 0;
+      }),
+    release: async () => {
+      release();
+      await tx;
+    },
+  };
+}
+
+/** The account Rose shows while `upload` is parked mid-run, then the upload's outcome. */
+async function accountWhileParked(
+  session: Session,
+  browser: string,
+  cookies: Record<string, unknown>[]
+): Promise<{ during: Account; outcome: PromiseSettledResult<unknown> }> {
+  const hold = await parkUploadInPreface(session.userId, browser, String(cookies[0].host_key));
+  const settled = Promise.allSettled([processCookiesUpload(session.userId, cookies, browser)]);
+  const observe = async () => {
+    await hold.parked();
+    return bar(session, browser);
+  };
+  try {
+    const during = await observe().finally(() => hold.release());
+    const [outcome] = await settled;
+    return { during, outcome };
+  } finally {
+    // A failed observation still releases the row; let the upload finish before cleanup.
+    await settled;
+  }
+}
+
+/**
+ * Prod 2026-10-26: the Mac app re-uploads every connected browser's full cookie
+ * set every 5 minutes (Andy's Chrome: 13,548 cookies, 0 new, 130 s per upload,
+ * the first 117 s before any batch). Each re-upload reopened the bar at
+ * "0 of 13,548 cookies" / 0%, which read as the synced cookies resetting to 0.
+ */
+async function cookieRefreshKeepsSyncedCount(user: User): Promise<void> {
+  const session = user();
+  const cookies = cookieSnapshot(120, 'refresh');
+  await processCookiesUpload(session.userId, cookies, 'edge');
+  await expectSynced(session, 'edge', 'cookies', 120);
+  const first = await progressRow(session.userId, 'edge');
+
+  const { during, outcome } = await accountWhileParked(session, 'edge', cookies);
+  assert(outcome.status === 'fulfilled', 'edge: the unchanged re-upload succeeds');
+  assert(
+    during.state === 'synced' && during.progress?.pct === 100 && during.progress.done === 120,
+    'edge: while an unchanged re-upload of a synced browser runs, it keeps reading synced ' +
+      `120 of 120 cookies, got ${during.state} ${during.progress?.done ?? null} of ` +
+      `${during.progress?.total ?? null} (${during.progress?.pct ?? null}%)`
+  );
+  await expectSynced(session, 'edge', 'cookies', 120);
+  const after = await progressRow(session.userId, 'edge');
+  assert(after.runId !== first.runId, 'edge: the re-upload records its own finished run');
+}
+
+/** A browser's first upload still shows its bar while it runs. */
+async function firstCookieUploadShowsBar(user: User): Promise<void> {
+  const session = user();
+  const { during, outcome } = await accountWhileParked(
+    session,
+    'brave',
+    cookieSnapshot(120, 'first')
+  );
+  assert(outcome.status === 'fulfilled', 'brave: the first upload succeeds');
+  assert(
+    during.state === 'syncing' && during.progress?.total === 120 && during.progress.done === 0,
+    `brave: a first upload reads syncing 0 of 120 cookies while it runs, got ${during.state} ` +
+      `${during.progress?.done ?? null} of ${during.progress?.total ?? null}`
+  );
+  await expectSynced(session, 'brave', 'cookies', 120);
+}
+
+/** A re-upload of a synced browser that fails still ends the account sync_failed. */
+async function failedCookieRefreshEndsFailed(user: User): Promise<void> {
+  const session = user();
+  const cookies = cookieSnapshot(30, 'refail');
+  await processCookiesUpload(session.userId, cookies, 'vivaldi');
+  await expectSynced(session, 'vivaldi', 'cookies', 30);
+  const broken = [...cookies.slice(1), { ...cookies[0], expires_utc: 'not-a-number' }];
+  const [outcome] = await Promise.allSettled([
+    processCookiesUpload(session.userId, broken, 'vivaldi'),
+  ]);
+  assert(outcome.status === 'rejected', 'vivaldi: an unstorable cookie fails the re-upload');
+  const row = await progressRow(session.userId, 'vivaldi');
+  assert(row.state === 'failed', `vivaldi: the failed re-upload is stored, got ${row.state}`);
+  const account = await bar(session, 'vivaldi');
+  assert(account.state === 'sync_failed', `vivaldi: reads sync_failed, got ${account.state}`);
+  assert(account.lastError !== null, 'vivaldi: the failure reason is shown');
+}
+
 async function passwordUploadsReportPerSourceRow(user: User): Promise<void> {
   const session = user();
   const entry = (origin: string, browserSource: string) => ({
@@ -382,6 +531,18 @@ export function cases(user: User): Array<{ name: string; fn: () => Promise<void>
     {
       name: 'cookie upload: cookies stored of uploaded, ends synced',
       fn: () => cookiesUploadReportsCookies(user),
+    },
+    {
+      name: 'cookie re-upload of a synced browser keeps reading synced (no 0-of-N bar)',
+      fn: () => cookieRefreshKeepsSyncedCount(user),
+    },
+    {
+      name: 'cookie first upload: the bar reads syncing 0 of N while it runs',
+      fn: () => firstCookieUploadShowsBar(user),
+    },
+    {
+      name: 'cookie re-upload of a synced browser that fails ends sync_failed',
+      fn: () => failedCookieRefreshEndsFailed(user),
     },
     {
       name: 'password uploads: one run per source row, ends synced',

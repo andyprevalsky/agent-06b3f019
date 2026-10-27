@@ -1,0 +1,41 @@
+<!doctype html>
+<!--
+  Fixture for `rose-ui check` (must FAIL long-task): one blocking GPU readback inside the
+  measured window. gl.readPixels waits for the GPU process to finish a heavy draw, so the
+  renderer main thread sleeps for hundreds of ms with almost no CPU, once. A host stall
+  looks the same in wall and CPU time; only the thread state tells them apart.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>blocking</title>
+<style>body { margin: 0; background: #111; } canvas { width: 256px; height: 256px; }</style>
+</head>
+<body>
+<canvas id="c" width="2048" height="2048"></canvas>
+<script>
+  const gl = document.getElementById('c').getContext('webgl', { preserveDrawingBuffer: true });
+  const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, 'attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }'));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, 'precision highp float; uniform float k; void main() { vec2 z = gl_FragCoord.xy / 2048.0; float a = 0.0; for (int i = 0; i < 400; i++) { a += sin(z.x * float(i) + k) * cos(z.y * float(i)); } gl_FragColor = vec4(fract(a), 0.2, 0.4, 1.0); }'));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  // check settles, waits 1 s, then measures 2 s: 2.2 s after load is inside that window. The
+  // readback runs after an await (a promise continuation in the microtask checkpoint), like most
+  // async UI code; a plain callback is the simpler case.
+  setTimeout(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    gl.uniform1f(gl.getUniformLocation(prog, 'k'), 1.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  }, 2200);
+  parent.postMessage({ type: 'rose:ready' }, '*');
+</script>
+</body>
+</html>

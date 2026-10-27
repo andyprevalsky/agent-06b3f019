@@ -13,6 +13,9 @@
  *
  * State:
  * - isOpen: boolean (popover open state)
+ * - the popover keeps ui/popover's ROSE_LAYER.popover z: it opens from the
+ *   floating query box (ROSE_LAYER.composer) and must cover the
+ *   agents-running header attached to that box
  * - trigger is icon-only; text remains in title/aria-label for accessibility
  * - variant 'pinned' (Rose Desktop: pinned top-left inside the query box) =
  *   the same chip with the light border fixed to rgb(222,222,227), so it
@@ -162,7 +165,7 @@ export default function RoseToolSetChip({ variant = 'chip' }: { variant?: 'chip'
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4 z-50"
+        className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}

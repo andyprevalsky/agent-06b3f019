@@ -14,22 +14,21 @@
  *                   backend has no user-callable retry/resume route).
  *
  * TARGET (code_agent.target): 'local' → "This Mac · <folder>" (device_name tooltip),
- *   else "Cloud". Mac app only (window.api.localCode) + local + running →
- *   "Open in Terminal" → window.api.localCode.openTerminal(taskId); hidden on web.
+ *   else "Cloud". No terminal affordances (no "Open in Terminal").
  *
  * BODY: [OPEN] (default) ⇄ [CLOSED] via header click
- *   live:      TAB [TRANSCRIPT] (default) ⇄ [TERMINAL] (existing xterm, kept mounted)
- *              + "Message <agent> directly…" steer input
+ *   live:      transcript (no terminal view) + "Message <agent> directly…" steer input
  *   completed: commit · branch · merged into · tests · files ± · Open preview
  *              (no summary → read-only transcript when events exist)
  *   failed / paused: read-only transcript when events exist
  *   not running + code_session: "<branch> → <merge_target> · pushed · PR #n · merged"
  *
- * PREVIEW CARD (code_agent.preview_url, dev cloud sessions; rows 10/39): a small
- *   live preview under the header, framed only while on screen; clicking it opens
- *   the full-screen app view for this task (CodeAgentPreviewCard).
+ * OPEN APP (code_agent.preview_url, dev cloud sessions; rows 10/39): a plain
+ *   "Open app" header button opens the full-screen app view for this task; the
+ *   chip frames no live preview itself (OpenAppButton).
  *
- * Maximize opens the existing FullscreenView (owned by ClaudeCodeChip).
+ * MAXIMIZE: opens this session's code-agent view (useCodeAgentView, transcript only:
+ *   no terminal); without a view provider (isolated renders) there is no Maximize.
  */
 
 import { useState, type ReactNode } from 'react';
@@ -45,22 +44,23 @@ import {
   type CodeAgentTranscriptEvent,
   type CodeSessionFacts,
 } from '../hooks/codeAgentContract';
+import { useAgentContext } from '../hooks';
 import { useLocalEchoes } from '../hooks/codeAgentLocalState';
 import { desktopChipState, formatElapsed, useNow } from '../hooks/codeAgentSteering';
-import { ProviderIcon, StatusDisplay, TerminalSurface } from './claudeCodeChip.shared';
+import { ProviderIcon, StatusDisplay } from './claudeCodeChip.shared';
 import type { ClaudeCodeChipVM } from './claudeCodeChip.hooks';
-import {
-  ChipTabs,
-  CodeAgentSteerInput,
-  CodeAgentTranscript,
-  type ChipTab,
-} from './codeAgentChip.steer';
-import { CodeAgentPreviewCard } from './app-view/CodeAgentPreviewCard';
+import { CodeAgentSteerInput, CodeAgentTranscript } from './codeAgentChip.steer';
+import { OpenAppButton } from './app-view/OpenAppButton';
+import { useCodeAgentView } from './code-agent-view/codeAgentViewState';
+import { CodeResourcesIndicator } from './CodeResourcesIndicator';
 
 const MUTED = 'text-muted-foreground dark:text-[#a3a39d]';
 const CODE = 'font-mono text-[12.5px] text-[#e8507f]';
 
-export function Summary({ summary }: { summary: CodeAgentSummary }) {
+/** Chip rows share the transcript / steer input inset; `flush` (the view): its left edge. */
+const ROW_INSET = 'px-3.5';
+
+export function Summary({ summary, flush }: { summary: CodeAgentSummary; flush?: boolean }) {
   const tests =
     summary.tests_passed === undefined
       ? null
@@ -70,7 +70,7 @@ export function Summary({ summary }: { summary: CodeAgentSummary }) {
   return (
     <div
       data-testid="code-agent-summary"
-      className="border-t border-border pb-3 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
+      className={`border-t border-border pb-3 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
     >
       <div>
         Committed <code className={CODE}>{summary.commit.slice(0, 7)}</code> on{' '}
@@ -113,14 +113,22 @@ export function Summary({ summary }: { summary: CodeAgentSummary }) {
 }
 
 /** The persistent code session's branch and where it merges, with push / PR / merge facts. */
-export function SessionLine({ session, meta }: { session: CodeSessionFacts; meta: CodeAgentMeta }) {
+export function SessionLine({
+  session,
+  meta,
+  flush,
+}: {
+  session: CodeSessionFacts;
+  meta: CodeAgentMeta;
+  flush?: boolean;
+}) {
   const branch = session.branch ?? meta.branch;
   if (!branch) return null;
   const target = session.merge_target ?? meta.base_branch;
   return (
     <div
       data-testid="code-agent-session"
-      className="border-t border-border pb-2.5 pl-11 pr-3.5 pt-2.5 text-[13px] text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]"
+      className={`border-t border-border pb-2.5 pt-2.5 text-[13px] ${flush ? '' : ROW_INSET} text-foreground/80 dark:border-white/[0.07] dark:text-[#ecece8]`}
     >
       <code className={CODE}>{branch}</code>
       {target && (
@@ -153,11 +161,21 @@ export function SessionLine({ session, meta }: { session: CodeSessionFacts; meta
  * The backend's failure text verbatim (a LOCAL_TARGET_UNAVAILABLE message is
  * already the exact user-facing sentence); never re-worded on the client.
  */
-export function FailureBox({ meta, fallback }: { meta: CodeAgentMeta; fallback: string | null }) {
+export function FailureBox({
+  meta,
+  fallback,
+  flush,
+}: {
+  meta: CodeAgentMeta;
+  fallback: string | null;
+  flush?: boolean;
+}) {
   const body: ReactNode = meta.failure_message ?? fallback;
   if (!body) return null;
   return (
-    <div className="mx-3 mb-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+    <div
+      className={`mb-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 ${flush ? '' : 'mx-3'}`}
+    >
       <p
         data-testid="code-agent-failure"
         className="whitespace-pre-wrap text-sm text-red-600 dark:text-red-400"
@@ -179,22 +197,19 @@ export function PausedNote({ meta, className }: { meta: CodeAgentMeta; className
   );
 }
 
-/** Mac app only: open this local session in Terminal.app (window.api.localCode). */
-function OpenInTerminal({ taskId }: { taskId: string }) {
-  const localCode = typeof window === 'undefined' ? undefined : window.api?.localCode;
-  if (!localCode || taskId === 'pending') return null;
-  return (
-    <button
-      type="button"
-      onClick={(event) => {
-        event.stopPropagation();
-        void localCode.openTerminal(taskId);
-      }}
-      className="whitespace-nowrap text-xs font-semibold text-[#e8507f] hover:underline"
-    >
-      Open in Terminal
-    </button>
-  );
+/** Maximize → this session's code-agent view (its owner is the chat that holds the chip). */
+function useOpenViewAction(meta: CodeAgentMeta): (() => void) | null {
+  const view = useCodeAgentView();
+  const { selectedAgentId } = useAgentContext();
+  if (view === null || !selectedAgentId || meta.task_id === 'pending') return null;
+  return () =>
+    view.open({
+      taskId: meta.task_id,
+      ownerAgentId: selectedAgentId,
+      provider: meta.provider,
+      title: meta.title ?? '',
+      status: null,
+    });
 }
 
 interface DesktopCodeAgentChipProps {
@@ -208,9 +223,9 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
   const state = desktopChipState(meta, vm.chipState);
   const running = state === 'live' || state === 'verifying' || state === 'spinning_up';
   const [open, setOpen] = useState(true);
-  const [tab, setTab] = useState<ChipTab>('transcript');
   const echoes = useLocalEchoes(meta.task_id);
   const now = useNow(running);
+  const openView = useOpenViewAction(meta);
 
   const startedAt = eventTimeMs(meta.started_at);
   const endedAt = running ? now : (eventTimeMs(meta.ended_at) ?? null);
@@ -249,23 +264,33 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
         >
           {codeAgentTargetLabel(meta)}
         </span>
-        {isLive && meta.target === 'local' && <OpenInTerminal taskId={meta.task_id} />}
+        {meta.preview_url && (
+          <OpenAppButton
+            taskId={meta.task_id}
+            previewUrl={meta.preview_url}
+            title={meta.title ?? null}
+            provider={meta.provider}
+          />
+        )}
+        <CodeResourcesIndicator taskId={meta.task_id} running={running} />
         {elapsed && (
           <span data-testid="code-agent-elapsed" className={`text-xs tabular-nums ${MUTED}`}>
             {elapsed}
           </span>
         )}
-        <button
-          type="button"
-          aria-label={`Maximize ${codeAgentLabel(meta.provider)}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            vm.openFullscreen();
-          }}
-          className="rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"
-        >
-          <Maximize2 className={`h-4 w-4 ${MUTED}`} />
-        </button>
+        {openView && (
+          <button
+            type="button"
+            aria-label={`Maximize ${codeAgentLabel(meta.provider)}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              openView();
+            }}
+            className="rounded p-1 transition-colors hover:bg-muted dark:hover:bg-white/[.06]"
+          >
+            <Maximize2 className={`h-4 w-4 ${MUTED}`} />
+          </button>
+        )}
         {expandable &&
           (open ? (
             <ChevronUp className={`h-4 w-4 flex-shrink-0 ${MUTED}`} />
@@ -274,30 +299,12 @@ export function DesktopCodeAgentChip({ meta, vm, events, toolCallId }: DesktopCo
           ))}
       </div>
 
-      {meta.preview_url && (
-        <CodeAgentPreviewCard
-          taskId={meta.task_id}
-          previewUrl={meta.preview_url}
-          title={meta.title ?? null}
-          provider={meta.provider}
-        />
-      )}
-
       {state === 'failed' && <FailureBox meta={meta} fallback={vm.failureMessage} />}
-      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 pb-2.5 pl-11 pr-3.5" />}
+      {state === 'paused' && <PausedNote meta={meta} className="-mt-1.5 px-3.5 pb-2.5" />}
 
       {isLive && (
-        <div className={open ? '' : 'hidden'}>
-          <ChipTabs tab={tab} onChange={setTab} />
-          <div className={tab === 'transcript' ? '' : 'hidden'}>
-            <CodeAgentTranscript events={events} echoes={echoes} provider={meta.provider} />
-          </div>
-          <div className={tab === 'terminal' ? 'px-3 pt-2' : 'hidden'}>
-            <TerminalSurface
-              terminalContainerRef={vm.terminalContainerRef}
-              className="h-[300px] rounded-lg"
-            />
-          </div>
+        <div className={open ? 'border-t border-border dark:border-white/[0.07]' : 'hidden'}>
+          <CodeAgentTranscript events={events} echoes={echoes} provider={meta.provider} />
           <CodeAgentSteerInput
             taskId={meta.task_id}
             toolCallId={toolCallId}

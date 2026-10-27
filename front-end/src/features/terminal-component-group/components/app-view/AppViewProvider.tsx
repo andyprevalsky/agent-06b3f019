@@ -1,8 +1,8 @@
 /**
  * STATE MACHINE: AppViewProvider (Rose Desktop full-screen app view, rows 10/39)
  *
- *   [NORMAL] --code-agent chip live preview card--> [APP OPEN(task)]
- *   [APP OPEN] --another card--> [APP OPEN(other task)]
+ *   [NORMAL] --code-agent chip Open app--> [APP OPEN(task)]
+ *   [APP OPEN] --another chip's Open app--> [APP OPEN(other task)]
  *   [APP OPEN] --Escape | agent row | Home | New Super Agent | mobile close--> [NORMAL]
  *   [APP OPEN] --signed-in user changes--> [NORMAL]
  *

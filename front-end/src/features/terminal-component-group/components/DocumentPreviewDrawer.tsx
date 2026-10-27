@@ -22,6 +22,8 @@
  *   pptx         -> OOXML slide text extract -> <pre>
  *   download     -> last-resort metadata (unsupported binaries only)
  *
+ * LAYER: ui/sheet's modal tier (scrim z-[210] < panel z-[211]); see lib/roseLayers.ts.
+ *
  * SYSTEM CONTEXT:
  * CompletionSummaryCard / StructuredResponseDisplay -> FilePointerDisplay click
  *   -> DocumentPreviewDrawer (Sheet side=right)
@@ -90,11 +92,13 @@ export function DocumentPreviewDrawer({
       <SheetContent
         side="right"
         data-testid="document-preview-drawer"
+        // No z override: ui/sheet's z-[211] keeps the panel above its own scrim
+        // (z-[210]) and above the top-right account rail / app icons (100-110).
+        // A lower z-[110] here put the scrim over the viewer, darkening it and
+        // swallowing every wheel, so the file could not scroll.
         className={cn(
           'flex w-full max-w-2xl flex-col gap-0 p-0 sm:max-w-2xl',
           'h-full overflow-hidden',
-          // Above the top-right account rail (z-[100]) so it never covers Download.
-          'z-[110]',
         )}
       >
         <div className="flex items-start gap-3 border-b border-border px-4 py-4 pr-12">

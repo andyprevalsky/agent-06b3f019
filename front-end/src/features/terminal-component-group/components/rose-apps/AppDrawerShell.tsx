@@ -12,8 +12,10 @@
  *                    toggle it (no close X of its own). Left-edge handle /
  *                    arrow keys resize it (clamped >= 420px; transitions
  *                    paused while dragging).
- *   variant 'full':  Browser — full height from the left bar (64px) to the
- *                    right edge; not resizable.
+ *   variant 'full':  Browser and Biz health — full height from the left bar
+ *                    (64px) to the right edge; not resizable.
+ * Layer: aboveQuerybox → ROSE_LAYER.coverPanel (covers the floating query box),
+ * otherwise ROSE_LAYER.appPanel (beside it); see lib/roseLayers.ts.
  * Mobile (< md): full screen (edge to edge, below the status-bar safe area),
  * sliding up. It covers the mobile header and its app icons, so the sheet
  * keeps its own close X (top-right).
@@ -22,6 +24,7 @@
 import { X } from 'lucide-react';
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
+import { ROSE_LAYER } from '@/lib/roseLayers';
 import { cn } from '@/lib/utils';
 import { useRoseApps } from './roseAppsState';
 import {
@@ -131,7 +134,7 @@ export function AppDrawerShell({
       data-variant={variant}
       className={cn(
         'fixed flex flex-col overflow-hidden bg-white text-[hsl(240_15%_8%)] dark:bg-[#262624] dark:text-[#ecece8]',
-        aboveQuerybox ? 'z-[101]' : 'z-[66]',
+        aboveQuerybox ? ROSE_LAYER.coverPanel : ROSE_LAYER.appPanel,
         'border-l border-gray-200/95 shadow-[-12px_0_40px_rgba(20,20,40,0.08)] dark:border-white/[0.09]',
         isMobile && 'inset-0 pt-[var(--safe-area-inset-top)]',
         !open && 'pointer-events-none',

@@ -153,6 +153,15 @@ class DisplayHandler(BaseHTTPRequestHandler):
             self.send(429, '{"error":"Frame already generating"}')
             return
         try:
+            status, body = self.frame(state)
+        finally:
+            self.server.predict_lock.release()
+        # Respond only after releasing, so the viewer's next request never
+        # finds its own finished generation still holding the lock.
+        self.send(status, body)
+
+    def frame(self, state):
+        try:
             # Coalesce concurrent viewers. No generation occurs without a frame
             # request; at most one upstream request is ever in flight.
             if self.server.last_revision != state["revision"] or time.monotonic() - self.server.last_frame_at > 0.5:
@@ -184,16 +193,13 @@ class DisplayHandler(BaseHTTPRequestHandler):
                 if not decoded.startswith(b"\xff\xd8\xff"):
                     raise ValueError("Expected upstream JPEG frame")
                 if self.server.state()["revision"] != state["revision"]:
-                    self.send(409, '{"error":"Settings changed; request the latest frame"}')
-                    return
+                    return 409, '{"error":"Settings changed; request the latest frame"}'
                 self.server.last_frame = json.dumps({"revision": state["revision"], "base64_image": frame})
                 self.server.last_revision = state["revision"]
                 self.server.last_frame_at = time.monotonic()
-            self.send(200, self.server.last_frame)
+            return 200, self.server.last_frame
         except (OSError, ValueError, KeyError, RuntimeError, HTTPError, URLError):
-            self.send(502, '{"error":"StreamDiffusion frame unavailable"}')
-        finally:
-            self.server.predict_lock.release()
+            return 502, '{"error":"StreamDiffusion frame unavailable"}'
 
 
 def main():

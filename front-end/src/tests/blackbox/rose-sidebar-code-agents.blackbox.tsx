@@ -327,17 +327,32 @@ async function openCodeRow(id: string) {
 }
 
 describe('Rose left bar code agents (flag on)', () => {
+  it('code-agent pages follow display order: project agents (on top) share the first page', async () => {
+    const home = bulkAgents(50, () => ({ project_id: null }));
+    const projectAgent = makeAgent({
+      agent_id: 'rose-proj',
+      goal: 'Project work',
+      status: 'COMPLETED',
+      project_id: 'p-rose',
+      ...createdMinutesAgo(500),
+    });
+    onScreen = (id) => id === 'rose-proj';
+    renderBar({ agents: [...home, projectAgent] });
+    // With Projects on top, rose-proj is row 1: its page is the first 50 rows,
+    // not a page of its own after the 50 Home agents.
+    await waitFor(() =>
+      expect(
+        codeAgentRequests().some((page) => page.length === 50 && page.includes('rose-proj')),
+      ).toBe(true),
+    );
+  });
+
   it("one batched request lists each tree's code agents under its root row, oldest first", async () => {
     renderBar();
     expandBar();
     await openCodeRow('cc-sub');
     await openCodeRow('cc-fix');
     expect(barRowOrder()).toEqual([
-      'agent:home-run',
-      'code-agent:cc-build',
-      'code-agent:cc-fix',
-      'agent:orphan',
-      'agent:home-done',
       'project:p-rose',
       'agent:rose-run',
       'agent:rose-sub',
@@ -345,6 +360,11 @@ describe('Rose left bar code agents (flag on)', () => {
       'agent:rose-fail',
       'project:p-habits',
       'agent:habits-done',
+      'agent:home-run',
+      'code-agent:cc-build',
+      'code-agent:cc-fix',
+      'agent:orphan',
+      'agent:home-done',
     ]);
     expect(codeAgentRequests()).toHaveLength(1);
     expect(new Set(codeAgentRequests()[0])).toEqual(new Set(AGENTS.map((a) => a.agent_id)));

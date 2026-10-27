@@ -133,11 +133,13 @@ def build_agent_notification_text(
     summary: str,
     structured_response: Any = None,
     file_pointers: Optional[List[Dict[str, Any]]] = None,
+    session_id: Optional[str] = None,
 ) -> str:
     """One completion notification (Codex completion message shape).
 
     completed → FINAL_ANSWER with the uncapped result; failed → FAILED with
-    the error text capped Codex-style (head + tail).
+    the error text capped Codex-style (head + tail). A browser ending names its
+    provider ``session_id`` (paused, kept for continuation) on every outcome.
     """
     message_type = NOTIFICATION_MESSAGE_TYPES.get(status, "FAILED")
     result = summary.strip() or f"Background {agent_type} agent {status}."
@@ -151,6 +153,8 @@ def build_agent_notification_text(
     for pointer in file_pointers or []:
         if isinstance(pointer, dict):
             sections.append("File: " + json.dumps(pointer, ensure_ascii=False, sort_keys=True, default=str))
+    if session_id:
+        sections.append(f"Session ID: {session_id}")
     return inter_agent_body(message_type, task_name=recipient, sender=sender, payload="\n\n".join(sections))
 
 
@@ -181,6 +185,7 @@ def agent_notification_metadata(
     background_task_id: Optional[str],
     idempotency_key: str,
     run: int = 1,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     metadata = {
         "agentNotification": True,
@@ -194,6 +199,8 @@ def agent_notification_metadata(
     }
     if run > 1:
         metadata["backgroundRun"] = run
+    if session_id:
+        metadata["sessionId"] = session_id
     return metadata
 
 

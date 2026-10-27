@@ -160,6 +160,25 @@ describe('AppSidebar', () => {
     expect(container.querySelector('[data-letter]')).toBeNull();
   });
 
+  it('keeps the selected collapsed-rail agent icon readable on the dark selected fill', async () => {
+    const { container } = renderStockSidebar(
+      <AppSidebar
+        {...defaultProps({
+          agents: [makeAgent({ agent_id: 'active', goal: 'Active agent', status: 'ACTIVE' })],
+          selectedAgentId: 'active',
+        })}
+      />,
+    );
+
+    dragHandleTo(20);
+
+    await waitFor(() => expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED));
+    const icon = container.querySelector('[data-sidebar-agent-icon]')!;
+    // Light mode unchanged; on dark:bg-accent the glyph uses the foreground.
+    expect(icon.getAttribute('class')).toContain('text-gray-800');
+    expect(icon.getAttribute('class')).toContain('dark:text-foreground');
+  });
+
   it('renders the expanded nav labels', () => {
     renderStockSidebar(<AppSidebar {...defaultProps()} />);
     expect(screen.getByText('New Agent')).toBeInTheDocument();

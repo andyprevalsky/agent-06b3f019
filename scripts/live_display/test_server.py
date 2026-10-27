@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -31,10 +32,6 @@ class LiveDisplayTest(unittest.TestCase):
 
     def get(self, path):
         return urlopen(self.base + path, timeout=3)
-
-    def wait_for_frame_idle(self):
-        self.assertTrue(self.server.predict_lock.acquire(timeout=3), "previous frame handler did not finish")
-        self.server.predict_lock.release()
 
     def test_read_only_capability_and_live_revision(self):
         with self.assertRaises(HTTPError) as error:
@@ -79,12 +76,10 @@ class LiveDisplayTest(unittest.TestCase):
             self.server.upstream = f"http://127.0.0.1:{upstream.server_port}"
             with self.get("/fixture-capability/frame") as response:
                 frame = json.load(response)
-            self.wait_for_frame_idle()
             self.assertEqual(received, [("/api/predict", {"prompt": self.server.state()["prompt"]})])
             self.assertEqual(frame["revision"], self.server.state()["revision"])
             with self.get("/fixture-capability/frame"):
                 pass
-            self.wait_for_frame_idle()
             self.assertEqual(len(received), 1, "duplicate viewer requests reuse the bounded cache")
             update(state, {"prompt": "new prompt"})
             original = self.server.state
@@ -106,38 +101,46 @@ class LiveDisplayTest(unittest.TestCase):
             upstream.server_close()
             thread.join()
 
-    def test_stale_frame_check_joins_previous_response_handler(self):
-        lock = self.server.predict_lock
-        joined = threading.Event()
-        releasing = threading.Event()
-        timed_out = threading.Event()
-        client_thread = threading.get_ident()
-        releases = 0
+    def test_next_frame_request_never_sees_finished_generation_as_busy(self):
+        # Under host load the handler thread can be descheduled after writing a
+        # frame. The viewer's next request must not find that finished
+        # generation still holding the lock (429).
+        class SlowReleaseLock:
+            def __init__(self):
+                self.inner = threading.Lock()
 
-        class DeferredReleaseLock:
-            def acquire(self, blocking=True, timeout=-1):
-                if blocking:
-                    joined.set()
-                acquired = lock.acquire(blocking, timeout)
-                if acquired and not blocking and releases < 2:
-                    joined.clear()
-                return acquired
+            def acquire(self, blocking=True):
+                return self.inner.acquire(blocking)
 
             def release(self):
-                nonlocal releases
-                if threading.get_ident() != client_thread and releases < 2:
-                    releases += 1
-                    releasing.set()
-                    if not joined.wait(3):
-                        timed_out.set()
-                lock.release()
+                time.sleep(0.3)
+                self.inner.release()
 
-        self.server.predict_lock = DeferredReleaseLock()
-        self.test_native_upstream_protocol_and_no_stale_frame()
-        self.assertTrue(releasing.is_set())
-        self.assertTrue(joined.is_set())
-        self.assertEqual(releases, 2)
-        self.assertFalse(timed_out.is_set(), "fixture never joined the previous handler")
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                payload = json.dumps({"base64_image": base64.b64encode(b"\xff\xd8\xfffixture").decode()}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.server.upstream = f"http://127.0.0.1:{upstream.server_port}"
+            self.server.predict_lock = SlowReleaseLock()
+            for _ in range(2):
+                with self.get("/fixture-capability/frame") as response:
+                    self.assertEqual(response.status, 200)
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join()
 
     def test_inflight_frame_preserves_429(self):
         self.server.upstream = self.base
@@ -149,6 +152,7 @@ class LiveDisplayTest(unittest.TestCase):
             self.assertEqual(json.load(error.exception), {"error": "Frame already generating"})
         finally:
             self.server.predict_lock.release()
+
 
     def test_private_modal_provider_never_exposes_credentials(self):
         from types import SimpleNamespace
