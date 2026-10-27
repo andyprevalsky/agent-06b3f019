@@ -16519,8 +16519,10 @@ async def _terminate_stale_workflows():
         from temporalio.client import Client
 
         from config import load_config
-        from temporal_connection import temporal_connect_options
+        from temporal_connection import apply_stack_temporal_namespace, temporal_connect_options
 
+        # The stack's workflows live in the namespace scripts/run.sh routed it to.
+        apply_stack_temporal_namespace()
         workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
         if not workspace:
             print("  ❌ CONDUCTOR_WORKSPACE_NAME not set — cannot derive task queue")

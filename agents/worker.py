@@ -174,7 +174,7 @@ from helpers.world_model_runtime import (
     world_model_specialized_agent_activity,
     world_model_step_activity,
 )
-from temporal_connection import temporal_connect_options
+from temporal_connection import production_namespace_refusal, temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -1485,6 +1485,10 @@ async def main():
 
     # Load configuration
     config = load_config()
+    namespace_refusal = production_namespace_refusal(config.temporal.namespace, config.temporal.task_queue)
+    if namespace_refusal:
+        logger.error("Temporal namespace isolation refused worker start", reason=namespace_refusal)
+        raise SystemExit(namespace_refusal)
 
     # Log environment mode
     is_production = config.environment == "production"

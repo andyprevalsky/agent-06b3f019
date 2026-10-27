@@ -2673,3 +2673,58 @@ cloudbench_compute_token_authority_url() {
   esac
   printf '%s\n' "${CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL-$CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_ORIGIN}"
 }
+
+# Production Temporal namespace (mirror of agents/temporal_connection.py and
+# back-end/src/providers/temporalNamespaceIsolation.ts). Not a secret.
+ROSE_PRODUCTION_TEMPORAL_NAMESPACE=rose-labs-us-east-1.tch2n
+
+# stack_bench_temporal_exports [agents-env]
+# Prints `export TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… TEMPORAL_API_KEY=…`
+# lines that move a dev/benchmark stack (scripts/run.sh) off the production
+# namespace onto the benchmark namespace from the private guest override
+# (agents/.env.benchmark-temporal), or prints nothing when the stack already
+# targets a loopback dev server or another namespace. Fails when the stack
+# would otherwise use production's namespace: its per-stack queue is orphaned
+# when the stack stops (4,094 Running workflows on 2026-10-27).
+stack_bench_temporal_exports() {
+  local agents_env="${1:-agents/.env}" address namespace override
+  address="${TEMPORAL_ADDRESS-}"
+  [ -n "$address" ] || [ ! -f "$agents_env" ] || address="$(cloudbench_env_value "$agents_env" TEMPORAL_ADDRESS)"
+  namespace="${TEMPORAL_NAMESPACE-}"
+  [ -n "$namespace" ] || [ ! -f "$agents_env" ] || namespace="$(cloudbench_env_value "$agents_env" TEMPORAL_NAMESPACE)"
+  case "${address%:*}" in localhost|127.0.0.1|::1|\[::1\]) return 0 ;; esac
+  [ "$namespace" = "$ROSE_PRODUCTION_TEMPORAL_NAMESPACE" ] || return 0
+  override="$(cloudbench_guest_temporal_override_file "$agents_env")" || return 1
+  if [ -z "$override" ]; then
+    echo "❌ This stack would run in the production Temporal namespace $ROSE_PRODUCTION_TEMPORAL_NAMESPACE. Install the private 0600 agents/.env.benchmark-temporal (CLOUDBENCH_GUEST_TEMPORAL_ADDRESS/_NAMESPACE/_API_KEY; boxes.dev managed env provides it), or export TEMPORAL_ADDRESS/TEMPORAL_NAMESPACE/TEMPORAL_API_KEY for a non-production namespace." >&2
+    return 1
+  fi
+  python3 - "$override" "$ROSE_PRODUCTION_TEMPORAL_NAMESPACE" <<'PY'
+import os, re, shlex, stat, sys
+
+override, production = sys.argv[1:3]
+keys = {
+    "CLOUDBENCH_GUEST_TEMPORAL_ADDRESS": "TEMPORAL_ADDRESS",
+    "CLOUDBENCH_GUEST_TEMPORAL_NAMESPACE": "TEMPORAL_NAMESPACE",
+    "CLOUDBENCH_GUEST_TEMPORAL_API_KEY": "TEMPORAL_API_KEY",
+}
+info = os.stat(override)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    sys.exit("❌ %s must be a regular file owned by this user with mode 0600" % override)
+values = {}
+for line in open(override, encoding="utf-8"):
+    match = re.fullmatch(r"\s*(?:export\s+)?([A-Z0-9_]+)=(.*?)\s*", line.rstrip("\r\n"))
+    if match and match.group(1) in keys:
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[keys[match.group(1)]] = value
+missing = sorted(source for source, target in keys.items() if not values.get(target))
+if missing:
+    sys.exit("❌ %s is missing %s" % (override, ", ".join(missing)))
+if values["TEMPORAL_NAMESPACE"] == production:
+    sys.exit("❌ %s names the production Temporal namespace; dev and benchmark stacks need the benchmark namespace" % override)
+for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
+    print("export %s=%s" % (name, shlex.quote(values[name])))
+PY
+}
