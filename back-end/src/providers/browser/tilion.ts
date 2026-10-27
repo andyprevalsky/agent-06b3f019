@@ -25,6 +25,7 @@ import { createLogger } from '../logger';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
 import type { KernelProxyType } from './kernelProxy';
+import type { RotationProxyType } from './rotation';
 import { rotationGeolocation } from './rotationGeolocation';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import { persistBrowserSessionRow } from './sessionPersist';
@@ -671,12 +672,13 @@ export async function resumeTilionSession(
 /**
  * Rotation step on Tilion: a replacement session on a fresh exit of the
  * requested type (residential → new residential exit in another state, mobile
- * → `proxy_type: mobile`), browser state carried, proxy tier persisted. Same
- * return semantics as rotateKernelSession plus the previous binding.
+ * → `proxy_type: mobile`, direct → Tilion's own datacenter egress), browser
+ * state carried, proxy tier persisted. Same return semantics as
+ * rotateKernelSession plus the previous binding.
  */
 export async function rotateTilionSession(
   taskId: string,
-  proxyType: KernelProxyType,
+  proxyType: RotationProxyType,
   options: { keepValidationConnection?: boolean; carriedState?: StorageState } = {}
 ): Promise<TilionReplacementSession> {
   const rotateTo = tilionProxyType(proxyType);

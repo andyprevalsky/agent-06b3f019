@@ -13,9 +13,7 @@ import {
   rotateProxy,
 } from './browser';
 import {
-  isTilionExitUnavailableError,
   ROTATION_CAP,
-  rungAfterTilionUnavailable,
   nextRecoveryLabel,
   recoverySameProviderOnly,
   rotationStepLabel,
@@ -26,6 +24,7 @@ import {
 import type { TilionCarriedState } from './browser/tilion';
 import { clearPausedState, restoreTilionBrowserState } from './browser/tilionState';
 import { carryForTilionSwitch } from './browserSwitchCarry';
+import { rotateWithTilionExitFallback } from './browserRotationFallback';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
 
@@ -486,6 +485,12 @@ export function buildRotationMessage(
       `Login and cookies preserved. ${left}`
     );
   }
+  if (step.proxyType === 'direct') {
+    return (
+      `Rotated to a fresh ${provider} datacenter IP (${used}/${ROTATION_CAP}) — same region, ` +
+      `login and cookies preserved. ${left}`
+    );
+  }
   return (
     `Rotated to a fresh ${provider} residential IP (${used}/${ROTATION_CAP}) — same region, ` +
     `login and cookies preserved. ${left}`
@@ -553,7 +558,7 @@ export async function rotateBrowserProxy(
   const providerLocked = recoverySameProviderOnly();
   const availability = { browserUse: browserUseEnabled(), tilion: tilionRotationAvailable() };
   const lockedStep = providerLocked
-    ? sameProviderRotationStep(ladderStep, currentProvider, availability)
+    ? sameProviderRotationStep(ladderStep, currentProvider, availability, rotationsUsed)
     : ladderStep;
   if (providerLocked) {
     log.info(
@@ -613,35 +618,18 @@ export async function rotateBrowserProxy(
     carryFromPausedState = carryFromPausedState || prepared.fromPausedState;
   };
   try {
-    try {
-      await prepareSwitchOffTilion(step);
-      result = await dependencies.rotateProxy(taskId, step, replacementOptions(effectiveCarry));
-    } catch (error) {
-      // Tilion could not serve this exit (e.g. mobile: 409 proxy_type_unavailable).
-      // The reserved rotation still owes the agent a new IP: take the next rung now.
-      if (step.provider !== 'tilion' || !isTilionExitUnavailableError(error)) throw error;
-      const ladderFallback = rungAfterTilionUnavailable(rotationsUsed, browserUseEnabled());
-      // Provider-locked: a Tilion exit that cannot be served falls back to a Tilion
-      // residential replacement, never another provider; none left -> typed result.
-      const fallback = providerLocked
-        ? step.proxyType === 'residential'
-          ? null
-          : sameProviderRotationStep(ladderFallback, 'tilion', availability)
-        : ladderFallback;
-      if (fallback === null) throw new SameProviderRotationExhaustedError('tilion', rotationsUsed);
-      rotationFallbackReason = `tilion_${step.proxyType}_unavailable: ${
-        error instanceof Error ? error.message.slice(0, 200) : String(error)
-      }`;
-      log.warn('Tilion exit unavailable; advancing the rotation ladder', {
-        taskId,
-        rotationsUsed,
-        from: rotationStepLabel(step),
-        to: rotationStepLabel(fallback),
-        reason: rotationFallbackReason,
-      });
-      await prepareSwitchOffTilion(fallback);
-      result = await dependencies.rotateProxy(taskId, fallback, replacementOptions(effectiveCarry));
-    }
+    const rotated = await rotateWithTilionExitFallback({
+      taskId,
+      step,
+      rotationsUsed,
+      providerLocked,
+      rotate: async (attempt) => {
+        await prepareSwitchOffTilion(attempt);
+        return dependencies.rotateProxy(taskId, attempt, replacementOptions(effectiveCarry));
+      },
+    });
+    result = rotated.result;
+    rotationFallbackReason = rotated.fallbackReason;
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes

@@ -308,7 +308,7 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     );
     assert(
       rotated.recovery_action === 'ip_rotated' &&
-        rotated.next_recovery === 'switch_provider_to_kernel' &&
+        rotated.next_recovery === 'rotate_tilion_datacenter_ip' &&
         rotated.rotations_used === 1,
       `rotation 1 metadata: ${JSON.stringify({
         action: rotated.recovery_action,
@@ -449,9 +449,10 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       assert((await page.title()) === 'Example Domain', 'recreated Tilion session is not drivable');
     });
 
-    // Rotation 2 (last). Tilion serves no mobile exits on our account (probe --only
-    // mobile-exit), so the ladder is Tilion residential in place -> Kernel mobile -> Steel.
-    const ipBeforeMobile = await readExitIpWithRetry(String(recreated.ws_url));
+    // Rotation 2: Tilion's datacenter exit (a replacement session), so both Tilion
+    // exit classes are tried before leaving Tilion. Tilion serves no mobile exits on
+    // our account (probe --only mobile-exit), so rotation 3 is Kernel mobile.
+    const ipBeforeDatacenter = await readExitIpWithRetry(String(recreated.ws_url));
     await withPage(String(recreated.ws_url), async (page) => {
       await navigateKernelPage(page, 'https://example.com');
       await page.evaluate(() => localStorage.setItem('rose_tilion_parity', 'carried'));
@@ -468,8 +469,48 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       refusedRotation.status === 409 && refusedBody.error === 'carried_state_required',
       `live Tilion rotation without state was not a typed refusal: HTTP ${refusedRotation.status} ${JSON.stringify(refusedBody)}`
     );
-    // The durable path: pause harvests the browser into the row, then the switch
-    // to Kernel must restore that paused state.
+    // The durable path: pause harvests the browser into the row, then the
+    // replacement must restore that paused state.
+    await post('/close', {
+      session_id: liveSessionId,
+      pause: true,
+      current_url: 'https://example.com/',
+    });
+    const datacenter = await post('/rotate-proxy', { task_id: taskId });
+    assert(
+      datacenter.provider === 'tilion' &&
+        datacenter.proxy_tier === 'direct' &&
+        datacenter.recovery_action === 'ip_rotated' &&
+        datacenter.rotations_used === 2 &&
+        datacenter.next_recovery === 'switch_provider_to_kernel',
+      `rotation 2 expected the Tilion datacenter exit then Kernel: ${JSON.stringify({
+        provider: datacenter.provider,
+        tier: datacenter.proxy_tier,
+        action: datacenter.recovery_action,
+        used: datacenter.rotations_used,
+        next: datacenter.next_recovery,
+      })}`
+    );
+    const supersededResidential = await tilionApi('GET', `/v1/session/${liveSessionId}/status`);
+    const supersededResidentialState = (supersededResidential.body as { state?: string } | null)
+      ?.state;
+    assert(
+      supersededResidentialState === 'closed' || supersededResidentialState === 'expired',
+      `superseded Tilion session ${liveSessionId} is still ${String(supersededResidentialState)} (paid leak)`
+    );
+    liveSessionId = String(datacenter.session_id);
+    const datacenterWsUrl = String(datacenter.ws_url);
+    const datacenterIp = await readExitIpWithRetry(datacenterWsUrl, ipBeforeDatacenter);
+    const carriedAfterDatacenter = await withPage(datacenterWsUrl, async (page) => {
+      await navigateKernelPage(page, 'https://example.com');
+      return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
+    });
+    assert(
+      carriedAfterDatacenter === 'carried',
+      'Tilion datacenter replacement lost the paused localStorage'
+    );
+
+    // Rotation 3 (last checked): Kernel mobile, carrying the paused Tilion state.
     await post('/close', {
       session_id: liveSessionId,
       pause: true,
@@ -481,9 +522,9 @@ export async function runLiveTilionProviderParity(): Promise<void> {
       mobile.provider === 'kernel' &&
         mobile.proxy_tier === 'mobile' &&
         mobile.recovery_action === 'provider_switched' &&
-        mobile.rotations_used === 2 &&
+        mobile.rotations_used === 3 &&
         mobile.next_recovery === 'switch_provider_to_steel',
-      `rotation 2 expected Kernel mobile (provider_switched) then Steel: ${JSON.stringify({
+      `rotation 3 expected Kernel mobile (provider_switched) then Steel: ${JSON.stringify({
         provider: mobile.provider,
         tier: mobile.proxy_tier,
         action: mobile.recovery_action,
@@ -499,20 +540,20 @@ export async function runLiveTilionProviderParity(): Promise<void> {
     );
     liveSessionId = String(mobile.session_id);
     const mobileWsUrl = String(mobile.ws_url);
-    const mobileIp = await readExitIpWithRetry(mobileWsUrl, ipBeforeMobile);
+    const mobileIp = await readExitIpWithRetry(mobileWsUrl, datacenterIp);
     const carriedAfterMobile = await withPage(mobileWsUrl, async (page) => {
       await navigateKernelPage(page, 'https://example.com');
       return page.evaluate(() => localStorage.getItem('rose_tilion_parity'));
     });
     assert(carriedAfterMobile === 'carried', 'Kernel switch lost the paused Tilion localStorage');
     console.log(
-      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> kernel mobile ${mobileIp}`
+      `[tilion rotate_ip] exit IP ladder: ${ipBefore} -> ${ipAfter} -> datacenter ${datacenterIp} -> kernel mobile ${mobileIp}`
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
     liveSessionId = undefined;
     console.log(
-      `PASS live Tilion provider parity (sessions=${allocated.size}, ip ${ipBefore} -> ${ipAfter} -> ${mobileIp})`
+      `PASS live Tilion provider parity (sessions=${allocated.size}, ip ${ipBefore} -> ${ipAfter} -> ${datacenterIp} -> ${mobileIp})`
     );
   } finally {
     if (liveSessionId) {

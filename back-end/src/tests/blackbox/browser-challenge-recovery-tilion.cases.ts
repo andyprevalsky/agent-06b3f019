@@ -1,5 +1,8 @@
 /** Mid-run provider-switch persistence cases (Tilion <-> Kernel, pause/resume, promoted preference). Registered by browser-challenge-recovery.blackbox.ts. */
-import { TilionApiError } from '../../providers/browser/tilionClient';
+import {
+  TilionApiError,
+  TilionInsufficientCreditsError,
+} from '../../providers/browser/tilionClient';
 import type { Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
@@ -44,17 +47,39 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
           fake.dependencies
         );
         assert(first.provider === 'tilion', `rotation 1 left Tilion: ${first.provider}`);
-        // Tilion mobile is not served on our account: step 2 is Kernel mobile.
-        assert(first.next_recovery === 'switch_provider_to_kernel', `next: ${first.next_recovery}`);
-        const second = await rotateBrowserProxy(
+        // Both Tilion exit classes come first: step 2 is Tilion's datacenter exit.
+        assert(
+          first.next_recovery === 'rotate_tilion_datacenter_ip',
+          `next: ${first.next_recovery}`
+        );
+        const datacenter = await rotateBrowserProxy(
           run.session.id,
           run.owner.userId,
           'https://shop.example.com/checkout',
           {},
           fake.dependencies
         );
-        assert(second.proxy_tier === 'mobile', `rotation 2 tier: ${second.proxy_tier}`);
-        assert(second.provider === 'kernel', `rotation 2 provider: ${second.provider}`);
+        assert(datacenter.provider === 'tilion', `rotation 2 provider: ${datacenter.provider}`);
+        assert(datacenter.proxy_tier === 'direct', `rotation 2 tier: ${datacenter.proxy_tier}`);
+        assert(datacenter.recovery_action === 'ip_rotated', `${datacenter.recovery_action}`);
+        assert(
+          /^Rotated to a fresh Tilion datacenter IP \(2\/4\)/.test(datacenter.rotation_message),
+          datacenter.rotation_message
+        );
+        // Tilion mobile is not served on our account: step 3 is Kernel mobile.
+        assert(
+          datacenter.next_recovery === 'switch_provider_to_kernel',
+          `next: ${datacenter.next_recovery}`
+        );
+        const second = await rotateBrowserProxy(
+          run.session.id,
+          run.owner.userId,
+          undefined,
+          {},
+          fake.dependencies
+        );
+        assert(second.proxy_tier === 'mobile', `rotation 3 tier: ${second.proxy_tier}`);
+        assert(second.provider === 'kernel', `rotation 3 provider: ${second.provider}`);
         assert(second.recovery_action === 'provider_switched', `${second.recovery_action}`);
         assert(second.previous_provider === 'tilion', `previous: ${second.previous_provider}`);
         assert(
@@ -62,38 +87,26 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
           second.rotation_message
         );
         assert(second.next_recovery === 'switch_provider_to_steel', `${second.next_recovery}`);
-        const third = await rotateBrowserProxy(
-          run.session.id,
-          run.owner.userId,
-          undefined,
-          {},
-          fake.dependencies
-        );
-        assert(third.provider === 'steel', `rotation 3 provider: ${third.provider}`);
-        assert(third.recovery_action === 'provider_switched', `${third.recovery_action}`);
-        assert(third.previous_provider === 'kernel', `previous: ${third.previous_provider}`);
-        // Position 4 reads the persisted Steel provider; Browser Use is off, so Steel again.
-        assert(third.next_recovery === 'rotate_steel_residential_ip', `${third.next_recovery}`);
         assert(
-          third.cookies_injected && third.saved_url === 'https://shop.example.com/checkout',
-          `state not carried across the switch: ${JSON.stringify(third)}`
+          second.cookies_injected && second.saved_url === 'https://shop.example.com/checkout',
+          `state not carried across the switch: ${JSON.stringify(second)}`
         );
 
-        // Pause, then resume: the run stays on Steel with its URL and state.
+        // Pause, then resume: the run stays on Kernel with its URL and state.
         await prisma.browserSession.update({
           where: { id: run.session.id },
           data: { status: 'PAUSED', closedAt: new Date() },
         });
         const resumed = await resumeBrowserSession(run.session.id, {}, fake.dependencies);
         assert(
-          resumed.browser_session_metadata.provider === 'steel',
+          resumed.browser_session_metadata.provider === 'kernel',
           `resume reverted the switched provider: ${resumed.browser_session_metadata.provider}`
         );
         assert(resumed.current_url === 'https://shop.example.com/checkout', resumed.current_url!);
         const row = await prisma.browserSession.findUniqueOrThrow({
           where: { id: run.session.id },
         });
-        assert(row.provider === 'steel', `persisted provider after resume: ${row.provider}`);
+        assert(row.provider === 'kernel', `persisted provider after resume: ${row.provider}`);
         assert(row.status === 'ACTIVE', `resumed row status: ${row.status}`);
         assert(row.proxyRotationCount === 3, `rotation budget changed: ${row.proxyRotationCount}`);
         const last = fake.injected[fake.injected.length - 1]!;
@@ -104,7 +117,7 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
           `state not injected into the resumed session: ${JSON.stringify(last)}`
         );
 
-        // The fourth rotation follows the persisted provider too.
+        // The fourth rotation follows the persisted Kernel provider: Browser Use is off, so Steel.
         const fourth = await rotateBrowserProxy(
           run.session.id,
           run.owner.userId,
@@ -113,6 +126,9 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
           fake.dependencies
         );
         assert(fourth.provider === 'steel', `rotation 4 provider: ${fourth.provider}`);
+        assert(fourth.recovery_action === 'provider_switched', `${fourth.recovery_action}`);
+        assert(fourth.previous_provider === 'kernel', `previous: ${fourth.previous_provider}`);
+        assert(fourth.next_recovery === 'rotation_budget_exhausted', `${fourth.next_recovery}`);
 
         // A resume with no saved URL skips injection and still releases the client.
         await prisma.browserSession.update({
@@ -130,14 +146,14 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
         JSON.stringify(fake.steps.map((step) => [step.provider, step.proxyType])) ===
           JSON.stringify([
             ['tilion', 'residential'],
+            ['tilion', 'direct'],
             ['kernel', 'mobile'],
-            ['steel', 'residential'],
             ['steel', 'residential'],
           ]),
         `unexpected ladder: ${JSON.stringify(fake.steps)}`
       );
       assert(
-        JSON.stringify(fake.resumedFrom) === JSON.stringify(['steel', 'steel']),
+        JSON.stringify(fake.resumedFrom) === JSON.stringify(['kernel', 'steel']),
         `resume dispatched on ${JSON.stringify(fake.resumedFrom)}`
       );
     } finally {
@@ -255,12 +271,13 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
           {},
           fake.dependencies
         );
-        // Same request, next rung: Kernel mobile; never an untyped 500.
+        // Same request: residential refused -> Tilion datacenter, refused too -> Kernel
+        // mobile; never an untyped 500.
         assert(first.provider === 'kernel', `fallback provider: ${first.provider}`);
         assert(first.proxy_tier === 'mobile', `fallback tier: ${first.proxy_tier}`);
         assert(first.recovery_action === 'provider_switched', `${first.recovery_action}`);
         assert(
-          /^tilion_residential_unavailable: .*residential_rotation_unavailable/.test(
+          /^tilion_residential_unavailable: .*residential_rotation_unavailable.*; tilion_direct_unavailable: /.test(
             String(first.rotation_fallback_reason)
           ),
           `reason: ${first.rotation_fallback_reason}`
@@ -275,6 +292,7 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
         JSON.stringify(fake.steps.map((step) => [step.provider, step.proxyType])) ===
           JSON.stringify([
             ['tilion', 'residential'],
+            ['tilion', 'direct'],
             ['kernel', 'mobile'],
           ]),
         `unexpected attempts: ${JSON.stringify(fake.steps)}`
@@ -283,6 +301,65 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
       await run.cleanup();
     }
   }
+
+  async function testResidentialCapFallsBackToTilionDatacenter(): Promise<void> {
+    const run = await seedRun('tilion', 'residential');
+    const fake = fakeProviderOperations();
+    const rotate = fake.dependencies.rotateProxy;
+    fake.dependencies.rotateProxy = async (taskId, step, options) => {
+      if (step.provider !== 'tilion' || step.proxyType !== 'residential') {
+        return rotate(taskId, step, options);
+      }
+      fake.steps.push(step);
+      // Live 2026-10-22: the pilot's 50 GB residential allowance ran out; datacenter still served.
+      throw new TilionInsufficientCreditsError({
+        status: 402,
+        slug: 'premium_egress_exhausted',
+        message: 'premium egress allowance exhausted',
+        retryable: false,
+        requestId: null,
+        retryAfterMs: null,
+        detail: null,
+        method: 'POST',
+        path: '/v1/session',
+      });
+    };
+    try {
+      await withEnv(TILION_DEFAULT_ENV, async () => {
+        const first = await rotateBrowserProxy(
+          run.session.id,
+          run.owner.userId,
+          undefined,
+          {},
+          fake.dependencies
+        );
+        assert(first.provider === 'tilion', `fallback provider: ${first.provider}`);
+        assert(first.proxy_tier === 'direct', `fallback tier: ${first.proxy_tier}`);
+        assert(first.rotations_used === 1, `one rotation consumed: ${first.rotations_used}`);
+        assert(
+          /^tilion_residential_unavailable: .*premium_egress_exhausted/.test(
+            String(first.rotation_fallback_reason)
+          ),
+          `reason: ${first.rotation_fallback_reason}`
+        );
+      });
+      assert(
+        JSON.stringify(fake.steps.map((step) => [step.provider, step.proxyType])) ===
+          JSON.stringify([
+            ['tilion', 'residential'],
+            ['tilion', 'direct'],
+          ]),
+        `unexpected attempts: ${JSON.stringify(fake.steps)}`
+      );
+    } finally {
+      await run.cleanup();
+    }
+  }
+
+  test(
+    'a used-up Tilion residential allowance rotates to the Tilion datacenter exit',
+    testResidentialCapFallsBackToTilionDatacenter
+  );
 
   test(
     'an unavailable Tilion exit advances the rotation ladder in the same request',

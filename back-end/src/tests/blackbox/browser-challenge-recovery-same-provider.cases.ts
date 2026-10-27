@@ -67,8 +67,9 @@ export function registerSameProviderCases(test: RegisterTest): void {
       `locked ladder left Tilion: ${JSON.stringify(locked.steps)}`
     );
     assert(locked.provider === 'tilion', `persisted provider ${locked.provider}`);
+    // Position 4 alternates to Tilion's datacenter exit.
     assert(
-      locked.result?.next_recovery === 'rotate_tilion_residential_ip',
+      locked.result?.next_recovery === 'rotate_tilion_datacenter_ip',
       `${locked.result?.next_recovery}`
     );
   }
