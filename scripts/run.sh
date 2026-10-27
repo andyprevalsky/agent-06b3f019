@@ -434,7 +434,17 @@ fi
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE
 TEMPORAL_TASK_QUEUE="$(resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME")"
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-8} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+# Dev and benchmark stacks run in the benchmark Temporal namespace, never in
+# production's: a stack's private queue is orphaned when the stack stops, and
+# its Running workflows would share production's action/Visibility budgets.
+# The backend and worker both refuse a non-production queue in production's
+# namespace (temporalNamespaceIsolation.ts, temporal_connection.py).
+if ! STACK_TEMPORAL_EXPORTS="$(stack_bench_temporal_exports agents/.env)"; then
+    exit 1
+fi
+eval "$STACK_TEMPORAL_EXPORTS"
+unset STACK_TEMPORAL_EXPORTS
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE temporal_namespace=${TEMPORAL_NAMESPACE:-dotenv} benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-8} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 

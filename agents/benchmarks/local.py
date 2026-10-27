@@ -20,6 +20,7 @@ import random
 import re
 import runpy
 import selectors
+import shlex
 import shutil
 import signal
 import socket
@@ -2045,6 +2046,27 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
 BENCHMARK_DB_CONNECTION_LIMIT = 80
 
 
+def apply_stack_temporal_namespace() -> None:
+    """Point this process at the stack's Temporal namespace, as scripts/run.sh does.
+
+    run.sh moves dev/benchmark stacks onto the benchmark namespace; the runner's
+    stale-workflow cleanup must look there too, not in production's namespace.
+    """
+    result = subprocess.run(
+        ["bash", "-c", '. scripts/lib/cloudbench-env.sh && stack_bench_temporal_exports agents/.env'],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "stack Temporal namespace routing failed")
+    for line in result.stdout.splitlines():
+        name, _, value = line.removeprefix("export ").partition("=")
+        if name in {"TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"}:
+            os.environ[name] = shlex.split(value)[0] if value else ""
+
+
 def apply_manifest_environment(manifest: dict) -> None:
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
@@ -2065,6 +2087,7 @@ def apply_manifest_environment(manifest: dict) -> None:
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
         os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
+        apply_stack_temporal_namespace()
         prefix = "navi-agent-tasks-"
         if str(task_queue).startswith(prefix):
             os.environ["CONDUCTOR_WORKSPACE_NAME"] = str(task_queue)[len(prefix) :]
