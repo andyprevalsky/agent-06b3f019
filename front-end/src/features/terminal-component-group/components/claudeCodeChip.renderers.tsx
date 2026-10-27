@@ -114,6 +114,8 @@ function CollapsedHeader(props: CollapsedChipProps) {
         <SchemaChip outputSchema={props.outputSchema} size="sm" tooltipPosition="bottom" />
         {props.onMaximize && (
           <button
+            type="button"
+            aria-label={`Maximize ${props.codeProvider === 'codex' ? 'Codex' : 'Claude Code'}`}
             onClick={(event) => {
               event.stopPropagation();
               props.onMaximize?.();

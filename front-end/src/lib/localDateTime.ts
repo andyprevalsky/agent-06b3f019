@@ -19,7 +19,8 @@ function ordinalSuffix(day: number): string {
   return ['th', 'st', 'nd', 'rd'][day % 10] ?? 'th';
 }
 
-function toDate(value: Date | string): Date | null {
+/** The wait_for contract's parse: a zone-less ISO date-time is UTC (never local time). */
+export function toDate(value: Date | string): Date | null {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
   const text = value.trim();
   const ms = Date.parse(HAS_ZONE.test(text) ? text : `${text}Z`);
