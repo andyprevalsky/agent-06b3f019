@@ -51,22 +51,38 @@ For each descent scorecard, pass the completed iteration count from `state.json`
 as `--iterations N`. The success-rate graph appears only after iteration 3;
 multiple CLI launches that form one logical batch do not advance that count.
 
-A **batch size** counts distinct benchmark task names in one CLI launch, not
-`-k` copies. At `-k 3`, 20 tasks schedule 60 copies. Start with 20 tasks, order
-unvisited tasks by shortest effective timeout first (catalog timeout, then
-recorded runtime, then CLI default), and keep tasks with similar timeouts in
-the same batch. When effective timeouts tie, use a declared step budget (fewest
-steps first) and then task name for a stable order; a step budget is only a
+A **batch size** counts individual scheduled benchmark runs in one CLI launch,
+independent of `-k`. Divide the size by `-k` to get the number of distinct task
+names; for example, size 20 at `-k 2` means 10 distinct tasks run twice each,
+for exactly 20 runs. Select the requested run count first, then select exactly
+that many task names; never multiply the requested batch size by `-k` again.
+If the requested size is not divisible by `-k`, ask for a concrete size rather
+than silently rounding or changing `-k`. For the current Polar descent, use
+`-k 2`, start at 20 runs (10 distinct tasks), increase by 10 runs after an
+eligible iteration, and cap at 70 runs (35 distinct tasks).
+
+Sort **all** tasks before the first launch by shortest effective timeout first:
+catalog timeout when positive, then history-derived timeout if available, else
+the requested CLI default. For equal effective timeouts, sort by the declared
+step limit (fewest steps first), then task name for a stable order. Save the
+complete ordered task list and its source/catalog digest in descent state.
+Keep tasks with similar timeouts in the same batch. A step budget is only a
 scheduling tie-breaker and does not change any timeout or task contract.
-If a batch finishes with infra errors on fewer than 5% of its originally
-scheduled copies, increase the next batch size by 10 tasks up to 70; otherwise
-keep the size. Within a five-iteration rotation window, retain
+
+Increase the next batch size by 10 **runs** up to 70 only when every originally
+scheduled run has a terminal, scored result and fewer than 5% of those runs
+failed for any reason (task, harness, or infra). Divide all non-PASS terminal
+results by the **original scheduled run count**; missing, unknown, or running
+results block the ramp. Exactly 5% does not qualify. The separate `>=5%`
+confirmed-infra stop rule still applies during the active run. Otherwise keep
+the current size. Within a five-iteration rotation window, retain
 the current tasks and append the next shortest unvisited tasks when size grows;
 the retained tasks repeat while the growing edge adds new coverage. After the
 fifth iteration, switch to the next unvisited cohort at the current batch size;
 do not silently carry old tasks into the new cohort. An iteration is one batch
-run and its fix round. Record iteration number, task names, size, `-k`, concurrency, infra
-numerator/denominator, and rotation cursor in state. Never change a task's
+run and its fix round. Record iteration number, task names, size in runs,
+`-k`, concurrency, all-failure and infra numerators over the original scheduled
+denominator, and rotation cursor in state. Never change a task's
 timeout to fit a batch. The CLI's provider capacity bounds **simultaneous
 copies**: cap `--concurrency` to the verified provider limit and let excess
 copies queue within the same launch **only after the wide-run operator proves
@@ -74,6 +90,9 @@ bounded admission and release in its owning offline gate**. If the CLI refuses
 that shape, repair bounded scheduling before advancing the size ramp. A split
 across CLI launches does not satisfy the requested batch size; record any
 earlier split as an exception rather than silently redefining the batch.
+When the user specifies an exact first cohort, do not replace that launch with
+a paid singleton outcome proof or an old cohort; gather fix evidence within
+the scheduled cohort and keep earlier differently sized runs as diagnostics.
 
 After each run, triage every error and dispatch one fix sub-agent per independent
 INFRA or HARNESS cluster, largest member-task count first. Admit at most 8
