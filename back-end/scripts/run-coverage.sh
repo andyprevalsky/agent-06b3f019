@@ -414,6 +414,19 @@ if [[ -f "$STACK_MANIFEST" ]] && ! jq -e . "$STACK_MANIFEST" >/dev/null 2>&1; th
   exit 1
 fi
 
+# The workspace container's `victoria` is the dev stack's seeded database
+# (run.sh); coverage gets this workspace's own database there, as on system
+# Postgres. Created after the Prisma freshness check, like the system path.
+use_workspace_container_db() {
+  if ! ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+    echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+    exit 1
+  fi
+  LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"
+  DB_FOUND=true
+  echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT, database $ENSURE_SYSTEM_DB_NAME"
+}
+
 if [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && "${ROSE_USE_SYSTEM_PG:-false}" == "true" && -z "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   echo "❌ Isolated deploy coverage requires an explicit prepared BACKEND_COVERAGE_DATABASE_URL; refusing shared database fallback." >&2
   exit 1
@@ -462,8 +475,7 @@ elif [[ -f "$STACK_MANIFEST" ]] &&
     exit 1
   fi
   LOCAL_DB_PORT="$ACTUAL_PORT"
-  DB_FOUND=true
-  echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+  use_workspace_container_db
 elif docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
@@ -482,8 +494,7 @@ elif docker_info_quick; then
     LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
   if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
-    DB_FOUND=true
-    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+    use_workspace_container_db
   fi
   if $ISOLATED_DB_RESOLVED && ! $DB_FOUND; then
     echo "❌ Owned Postgres container $DB_CONTAINER is not reachable on a mapped port." >&2

@@ -145,4 +145,16 @@ for runner in run-blackbox-tests.sh run-coverage.sh; do
   }
 done
 
+# A workspace-owned Docker container also hosts the dev stack's seeded
+# `victoria` (run.sh): the standalone runners select the workspace database in
+# that container too. Only an existing-backend run may use the stack database.
+[[ "$(grep -c 'workspace_system_db_name "$WORKSPACE_HINT"' "$SCRIPT_DIR/run-blackbox-tests.sh")" -ge 2 ]] || {
+  echo "Expected run-blackbox-tests.sh's Docker branch to select the workspace database" >&2
+  exit 1
+}
+[[ "$(grep -c 'use_workspace_container_db$' "$SCRIPT_DIR/run-coverage.sh")" -eq 2 ]] || {
+  echo "Expected both run-coverage.sh Docker branches to select the workspace database" >&2
+  exit 1
+}
+
 echo "Local DB container resolution tests passed"
