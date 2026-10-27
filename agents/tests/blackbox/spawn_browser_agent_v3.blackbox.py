@@ -8472,6 +8472,42 @@ async def test_rotation_storage_capture_is_bounded_when_indexeddb_stalls():
             assert "timed out after 0.01s" in str(exc)
         else:
             raise AssertionError("expected a typed bounded storage-capture timeout")
+
+        # An empty cookie jar with no answered origin is nothing to carry: still the typed timeout.
+        async def no_cookies():
+            return []
+
+        empty = SimpleNamespace(context=SimpleNamespace(storage_state=stalled_storage_state, cookies=no_cookies))
+        try:
+            await asyncio.wait_for(_capture_rotation_storage_state(empty), timeout=1.0)
+        except BrowserStorageCaptureTimeoutError:
+            pass
+        else:
+            raise AssertionError("an empty jar must not turn the timeout into an empty carried state")
+
+        # A failed (not timed-out) full capture with cookies carries them; with none, no state.
+        async def failing_storage_state(*, indexed_db):
+            raise RuntimeError("storage read failed")
+
+        async def one_cookie():
+            return [{"name": "session", "value": "kept", "domain": "shop.example", "path": "/"}]
+
+        carried = await asyncio.wait_for(
+            _capture_rotation_storage_state(
+                SimpleNamespace(context=SimpleNamespace(storage_state=failing_storage_state, cookies=one_cookie))
+            ),
+            timeout=1.0,
+        )
+        assert carried == {"cookies": [{"name": "session", "value": "kept", "domain": "shop.example", "path": "/"}], "origins": []}, carried
+        assert (
+            await asyncio.wait_for(
+                _capture_rotation_storage_state(
+                    SimpleNamespace(context=SimpleNamespace(storage_state=failing_storage_state, cookies=no_cookies))
+                ),
+                timeout=1.0,
+            )
+            is None
+        )
     finally:
         if previous_timeout is None:
             os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)

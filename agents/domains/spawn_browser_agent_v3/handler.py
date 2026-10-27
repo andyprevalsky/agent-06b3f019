@@ -2427,7 +2427,10 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
         if frames_task.done() and not frames_task.cancelled() and frames_task.exception() is None:
             origins = frames_task.result()
         timed_out = isinstance(full_error, asyncio.TimeoutError)
-        if cookies is not None:
+        # Carry only state that exists: an empty jar with no answered origin keeps the
+        # original outcome (typed timeout, or no state on another error).
+        if cookies or origins:
+            cookies = cookies or []
             logger.warning(
                 "Full browser storage capture did not finish; carrying cookies and the open-origin storage that answered",
                 timeout_seconds=timeout_seconds,
