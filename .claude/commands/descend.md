@@ -73,13 +73,13 @@ complete ordered task list and its source/catalog digest in descent state.
 Keep tasks with similar timeouts in the same batch. A step budget is only a
 scheduling tie-breaker and does not change any timeout or task contract.
 
-Increase the next batch size by 10 **runs** up to 70 only when every originally
-scheduled run has a terminal, scored result and fewer than 5% of those runs
-failed for any reason (task, harness, or infra). Divide all non-PASS terminal
-results by the **original scheduled run count**; missing, unknown, or running
-results block the ramp. Exactly 5% does not qualify. The separate `>=5%`
-confirmed-infra stop rule still applies during the active run. Otherwise keep
-the current size. Within a five-iteration rotation window, retain
+Increase the next batch size by 10 **runs** up to 70 after a completed
+iteration with fewer than 5% confirmed infra errors over the **original
+scheduled run count**, as requested for this descent. Task failures still count
+against the benchmark goal but do not count as infra errors for this ramp.
+An interrupted/cancelled iteration or unknown infra classification blocks the
+ramp; exactly 5% does not qualify. The `>=5%` confirmed-infra stop rule applies
+during the active run. Otherwise keep the current size. Within a five-iteration rotation window, retain
 the current tasks and append the next shortest unvisited tasks when size grows;
 the retained tasks repeat while the growing edge adds new coverage. After the
 fifth iteration, switch to the next unvisited cohort at the current batch size;
