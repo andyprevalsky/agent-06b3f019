@@ -8,6 +8,7 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: scripts/run-cloudbench-controller-gate — `flyctl machine run --detach ... 2>&1 | tee "$RUN_LOG"` ran in the foreground with no deadline, so the gate waited for flyctl to exit even after the Machine ID was in the log
 symptoms:
+  - flyctl secrets list hangs before allocation
   - "Machine started, you can connect via the following private ip"
   - flyctl machine run --detach in futex_wait for ~17 min after printing Machine started
   - gate silent between machine-create.intent.json (00:35:57Z) and create.private.log (00:53:18Z)
@@ -21,7 +22,7 @@ tags:
 sources:
   - fleet run original600-1792456540111088404 shard-00 (gate pid 2560533, flyctl pid 2567131, Machine 8d99dd7be69478)
 repro: CLOUDBENCH_TEST_GATE_SOURCE=<pre-fix gate> python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py (fails: "gate launch block still blocked after 30s"); the same command on the fixed gate passes
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -113,3 +114,65 @@ no Machine ID appears.
 When a provider CLI call is needed only for a value it prints, start its
 deadline once that value appears, stop only that exact child, and never put a
 deadline before the point where the resource becomes recoverable.
+
+## Recurrence — early app-environment verification lacked a native deadline (2026-10-27)
+
+Polar k2 iteration4 at `56ad8146f3decdca1d3ff427eda9327cac4f52c0`
+blocked before allocation in a read-only canary. The launch owner reported the
+`run-bench-cloud --verify-secrets` child (1456644) waiting for `flyctl secrets
+list -a navi-whisper-lux-bench --json` (1456787), alive for13m41s at22:46UTC
+with an established API socket. Thirty scheduled members had no terminal
+result or allocated Machine at that observation. These are parent/owner
+observations; native socket cause is unknown. No task PASS or infrastructure
+terminal classification is invented from this stall.
+
+The owning boundary is `verify_app_environment`: its native command had no
+deadline. The existing `_with_timeout` function was defined only after the
+`--verify-secrets` early-exit branch. Thus that early verifier could not use it
+without moving the shared definition. This is a recurrence of the same missed
+native-call deadline class, at a different CLI entrypoint; the prior gate repair
+did not cover this verifier.
+
+The repair moves the existing native-child helper before the verifier,
+keeps identical auth/app/JSON arguments and required-secret parsing, and applies
+a default20-second read limit. That default matches this source's existing
+native inventory-read limit. `CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS` can choose
+another positive whole-second limit; zero/all-zero or malformed values are
+refused before native dispatch. Native failure/timeout retains the original
+read exit in the diagnostic. No setup, secret mutation, success fallback,
+canary bypass, retry or task change is added.
+
+Actual CLI fixtures reproduce a hung native read that ignores TERM. Baseline
+fails the read budget and invalid-budget no-dispatch assertions (2FAIL/4PASS,
+7.86s). The first bounded draft additionally exposed cancellation: the existing
+helper handled signals only for guarded mutations, so TERM of the read wrapper
+left an ignoring native child retaining stdout. That draft fails the new actual
+CLI cancellation fixture. The shared handler now covers unguarded reads too,
+retaining exact-child TERM, one-second grace, KILL and wait; guarded native
+receipts are unchanged. The final nine fixtures pass in6.02s, including actual
+CLI success, missing required names, malformed JSON, native exit17, timeout,
+cancellation and invalid/zero/all-zero no-dispatch controls. The PID marker is
+written only after the fake native installs TERM-ignore, so cancellation does
+not accidentally test an ordinary terminating child. No provider is contacted.
+
+Opened references: current Rose native timeout helper and inventory read budget;
+OpenClaw `76ddbf697fc263cc1bf89fe3f4d08d96ed4a43af`
+`src/infra/ocm-update-client.ts:189-195` bounds its JSON metadata CLI read, and
+`src/process/exec.ts:46-90` supplies execution deadline and forced cleanup while
+preserving rejection. Fly CLI `a1cf49a52b36fba66a2bf0907617bd5aadb8a727`
+`internal/command/secrets/list.go:76-88,121-145` performs secret/machine/release
+metadata reads before JSON output. Those facts support bounding the native
+operation; they do not identify the server/socket cause.
+
+Independent reviewer ph74rex3pescaywbxyjn3njr158h3pp9 returned GROUNDED for
+exact full patch SHA256054614a02556e027340f08fd515aa99f7ad8a197b54db23476f24e82a021b7cc.
+Applied verification: 11 owning CLI/helper cases passed in4.73s; campaign
+environment10 in4.068s; staged boot29 in0.328s (6 unavailable-environment skips);
+parallel mutation13 in7.062s; full cloudbench-env shell gate passed. Bash syntax
+and RCA archive validation passed. An extra broad selector produced38 passes
+and one unrelated nested-system-Python missing-httpx failure; the identical
+case passed in0.41s with the existing venv first on PATH, no code change.
+The case remains open for original native API
+causality and unchanged cohort outcome evidence. The original
+campaign's cleanup and next unchanged cohort remain parent/launch-owner work.
+No provider mutation, paid run or deployment was performed by this RCA worker.

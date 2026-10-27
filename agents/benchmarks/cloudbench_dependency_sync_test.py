@@ -8144,6 +8144,79 @@ def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
     assert "GH_TOKEN=%q" not in setup
 
 
+@pytest.mark.parametrize("mode", ["hang", "cancel", "success", "missing", "malformed", "failure", "invalid-timeout", "zero-timeout", "double-zero-timeout"])
+def test_verify_secrets_native_read_has_owned_deadline(tmp_path: Path, mode: str) -> None:
+    """The actual early CLI entry must bound/reap native reads and fail closed."""
+    import signal
+    import time
+
+    repo = tmp_path / "repo"
+    lib = repo / "scripts/lib"
+    lib.mkdir(parents=True)
+    (repo / "agents").mkdir()
+    (repo / "back-end").mkdir()
+    for name in ("cloudbench-env.sh", "cloudbench-app-env-lock.sh"):
+        (lib / name).write_text("# offline fixture: no provider operations\n")
+    (lib / "cloudbench-github-token.sh").write_text("cloudbench_export_controller_github_token(){ return 0; }\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "flyctl").write_text("""#!/usr/bin/env python3
+import json, os, signal, sys, time
+from pathlib import Path
+assert sys.argv[1:] == ['secrets', 'list', '-a', 'navi-whisper-lux-bench', '--json']
+mode = os.environ['READ_MODE']
+if mode in ('hang', 'cancel'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    Path(os.environ['READ_PID']).write_text(str(os.getpid()))
+    while True: time.sleep(1)
+Path(os.environ['READ_PID']).write_text(str(os.getpid()))
+if mode == 'failure': raise SystemExit(17)
+if mode == 'malformed': print('not-json'); raise SystemExit(0)
+names = 'AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN'.split()
+print(json.dumps([{'Name': n} for n in (names if mode == 'success' else names[:-1])]))
+""")
+    (bin_dir / "flyctl").chmod(0o755)
+    pid_file = tmp_path / "read.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLOUDBENCH_", "FLY_"))}
+    env.update(CLOUDBENCH_FLEET_ROOT=str(repo), FLY_BENCH_API_TOKEN="offline-fixture-selected-token",
+               PATH=str(bin_dir) + ":" + os.environ["PATH"], READ_PID=str(pid_file), READ_MODE=mode,
+               CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS={"invalid-timeout": "invalid", "zero-timeout": "0", "double-zero-timeout": "00"}.get(mode, "1"))
+    script = os.environ.get("CLOUDBENCH_CLOUD_SCRIPT_UNDER_TEST", str(CLOUD_SCRIPT))
+    started = time.monotonic()
+    proc = subprocess.Popen(["bash", script, "--verify-secrets"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    finished = False
+    try:
+        if mode == "cancel":
+            deadline = time.monotonic() + 2
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert pid_file.exists(), "native read never started"
+            os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=3.5)
+            finished = True
+        except subprocess.TimeoutExpired:
+            pytest.fail("native secrets read outlived its configured deadline")
+        elapsed = time.monotonic() - started
+        if mode == "success":
+            assert proc.returncode == 0 and "verified (read-only)" in stdout
+        else:
+            assert proc.returncode != 0 and "verified (read-only)" not in stdout
+        if mode == "hang":
+            assert "read exit=124" in stderr and elapsed < 3.5
+        if mode in {"invalid-timeout", "zero-timeout", "double-zero-timeout"}:
+            assert not pid_file.exists(), "invalid deadline dispatched a native read"
+        elif pid_file.exists():
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 0)
+    finally:
+        # This fixture created and still owns the isolated process session.
+        if not finished:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=2)
+
+
 def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = fleet_source_text()
@@ -8183,7 +8256,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     verify_start = cloud.index("verify_app_environment() {")
     verify_end = cloud.index("\n}\n", verify_start)
     verify = cloud[verify_start:verify_end]
-    assert 'FLY secrets list -a "$APP" --json' in verify
+    assert '_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json' in verify
     assert "secrets set" not in verify
 
     stop_cleanup_start = cloud.index("stop_on_exit() {")

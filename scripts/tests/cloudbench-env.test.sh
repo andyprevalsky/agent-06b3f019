@@ -2673,7 +2673,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'verify_app_environment' \
   "run-bench-cloud must expose the read-only environment preflight"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FLY secrets list -a "$APP" --json' \
+  '_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \

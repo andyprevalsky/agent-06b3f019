@@ -1978,6 +1978,79 @@ inject_secrets() {
     return "$status"
 }
 
+# Shared native child deadline must be defined before --verify-secrets exits.
+# Hard timeout wrapper (macOS has no `timeout`). Own the child process explicitly:
+# SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
+# ignored it for 2h22m), which prevented the outer run deadline from being read.
+_with_timeout() {  # _with_timeout <secs> <cmd> [args...]
+    local mutation_launch_code=""
+    [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" != 1 ] || mutation_launch_code="$(cloudbench_mutation_launch_code)"
+    CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE="$mutation_launch_code" \
+    CLOUDBENCH_TIMEOUT_NATIVE_MUTATION="${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_LEASE="${BOOT_CONFIG_UPDATE_SLOT:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID="$$" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START="${MUTATION_OWNER_PID_START:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-${APP:-}}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_APP="${APP:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_HELPER="${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-}/cloudbench-campaign-mutation.py" python3 -c '
+import os, signal, subprocess, sys
+
+timeout = float(sys.argv[1])
+guarded = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_MUTATION") == "1"
+interrupted = None
+proc = None
+
+def native_receipt(action):
+    if guarded:
+        subprocess.run([sys.executable, "-c", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE"],
+            os.environ["CLOUDBENCH_TIMEOUT_NATIVE_HELPER"], action,
+            "--app", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_APP"],
+            "--root", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_ROOT"],
+            "--owner-pid", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID"],
+            "--owner-start", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START"],
+            "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
+            "--native-owner-pid", str(os.getpid())], check=True)
+
+def joined_receipt():
+    # Tell the caller this attempt reaped its child and wrote join-native;
+    # its exit status alone cannot distinguish that from an unjoined one.
+    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
+    if path:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+
+native_receipt("start-native")
+def stop(signum, _frame):
+    global interrupted
+    interrupted = signum
+    raise InterruptedError()
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, stop)
+try:
+    proc = subprocess.Popen(sys.argv[2:])
+    rc = proc.wait(timeout=timeout)
+except (subprocess.TimeoutExpired, InterruptedError):
+    if interrupted is not None:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
+    # An interruption inside Popen has no proven child handle. Retain the
+    # unjoined lease instead of asserting that a native mutation was drained.
+    if proc is None:
+        raise SystemExit(128 + interrupted if interrupted is not None else 124)
+    proc.terminate()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    native_receipt("join-native")
+    joined_receipt()
+    raise SystemExit(128 + interrupted if interrupted is not None else 124)
+native_receipt("join-native")
+joined_receipt()
+raise SystemExit(rc if rc >= 0 else 128 - rc)
+' "$@"
+}
+
 # READ-ONLY env preflight for every RUN path: assert the prod-aligned app
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
@@ -1991,7 +2064,12 @@ inject_secrets() {
 REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing read_status
-    listing="$(FLY secrets list -a "$APP" --json)" || {
+    local read_timeout="${CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS:-20}"
+    while [ "${read_timeout#0}" != "$read_timeout" ]; do read_timeout="${read_timeout#0}"; done
+    case "$read_timeout" in
+        ''|*[!0-9]*) echo "❌ App environment read timeout must be positive whole seconds." >&2; return 1 ;;
+    esac
+    listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || {
         read_status=$?
         echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
         echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
@@ -2171,78 +2249,6 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command> [timeout_secs]
 # the session ends and can transiently fail (network blip, machine mid-start), so
 # every poll read is retried a few times. Returns the remote stdout on stdout;
 # returns non-zero only if every attempt failed. $1=machine id, $2=remote command.
-# Hard timeout wrapper (macOS has no `timeout`). Own the child process explicitly:
-# SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
-# ignored it for 2h22m), which prevented the outer run deadline from being read.
-_with_timeout() {  # _with_timeout <secs> <cmd> [args...]
-    local mutation_launch_code=""
-    [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" != 1 ] || mutation_launch_code="$(cloudbench_mutation_launch_code)"
-    CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE="$mutation_launch_code" \
-    CLOUDBENCH_TIMEOUT_NATIVE_MUTATION="${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_LEASE="${BOOT_CONFIG_UPDATE_SLOT:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID="$$" \
-    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START="${MUTATION_OWNER_PID_START:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-${APP:-}}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_APP="${APP:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_HELPER="${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-}/cloudbench-campaign-mutation.py" python3 -c '
-import os, signal, subprocess, sys
-
-timeout = float(sys.argv[1])
-guarded = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_MUTATION") == "1"
-interrupted = None
-proc = None
-
-def native_receipt(action):
-    if guarded:
-        subprocess.run([sys.executable, "-c", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE"],
-            os.environ["CLOUDBENCH_TIMEOUT_NATIVE_HELPER"], action,
-            "--app", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_APP"],
-            "--root", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_ROOT"],
-            "--owner-pid", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID"],
-            "--owner-start", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START"],
-            "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
-            "--native-owner-pid", str(os.getpid())], check=True)
-
-def joined_receipt():
-    # Tell the caller this attempt reaped its child and wrote join-native;
-    # its exit status alone cannot distinguish that from an unjoined one.
-    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
-    if path:
-        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
-
-native_receipt("start-native")
-if guarded:
-    def stop(signum, _frame):
-        global interrupted
-        interrupted = signum
-        raise InterruptedError()
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, stop)
-try:
-    proc = subprocess.Popen(sys.argv[2:])
-    rc = proc.wait(timeout=timeout)
-except (subprocess.TimeoutExpired, InterruptedError):
-    if interrupted is not None:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(signum, signal.SIG_IGN)
-    # An interruption inside Popen has no proven child handle. Retain the
-    # unjoined lease instead of asserting that a native mutation was drained.
-    if proc is None:
-        raise SystemExit(128 + interrupted if interrupted is not None else 124)
-    proc.terminate()
-    try:
-        proc.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    native_receipt("join-native")
-    joined_receipt()
-    raise SystemExit(128 + interrupted if interrupted is not None else 124)
-native_receipt("join-native")
-joined_receipt()
-raise SystemExit(rc if rc >= 0 else 128 - rc)
-' "$@"
-}
 
 ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
     local id="$1" cmd="$2" out="" tries="${SSH_READ_TRIES:-3}"
