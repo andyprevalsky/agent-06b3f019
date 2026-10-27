@@ -5,7 +5,7 @@
  * paused owner (only a message to the agent itself lifts its pause).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
@@ -83,6 +83,25 @@ describe('Browser-composer send', () => {
     expect(capturedRequests.some((r) => r.url.includes('/attention-requests'))).toBe(false);
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Agent resuming' }));
     expect(result.current.messageInput).toBe('');
+  });
+
+  it('keeps the browser target when the send is replayed after login', async () => {
+    const signedOut = { ...args('ACTIVE'), canSubmitGoals: false, isFullySignedIn: false };
+    const { result, rerender } = renderHook((props) => useMessageSending(props as never), {
+      initialProps: signedOut,
+    });
+    act(() => result.current.setMessageInput('go to instacart instead'));
+    await act(async () => {
+      await result.current.handleSendMessage(undefined, { browserTaskId: 'browser-task' });
+    });
+    expect(signedOut.setLoginModalOpen).toHaveBeenCalledWith(true);
+    expect(capturedRequests.some((r) => r.url.includes('/messages'))).toBe(false);
+    rerender({ ...signedOut, canSubmitGoals: true, isFullySignedIn: true });
+    await waitFor(() =>
+      expect(
+        capturedRequests.find((r) => r.method === 'POST' && r.url.includes('/messages'))?.body,
+      ).toEqual({ message: 'go to instacart instead', browser_task_id: 'browser-task' }),
+    );
   });
 
   it('a message to the paused owner itself still answers its question', async () => {

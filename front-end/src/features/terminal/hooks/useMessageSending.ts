@@ -112,6 +112,8 @@ export function useMessageSending({
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
+  // A send replayed after login keeps its destination (Browser-composer target).
+  const pendingTargetRef = useRef<MessageTarget | undefined>(undefined);
   const autoSubmitRef = useRef(false);
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
@@ -231,6 +233,7 @@ export function useMessageSending({
 
       if (!canSubmitGoals) {
         pendingSubmitRef.current = true;
+        pendingTargetRef.current = target;
         setLoginModalOpen(true);
         toast({ title: 'Authentication required', description: 'Please log in to continue' });
         return;
@@ -359,7 +362,9 @@ export function useMessageSending({
 
     pendingSubmitRef.current = false;
     autoSubmitRef.current = true;
-    void handleSendMessage()
+    const target = pendingTargetRef.current;
+    pendingTargetRef.current = undefined;
+    void handleSendMessage(undefined, target)
       .catch((e) => console.error('[Auth] Auto-submit failed', e))
       .finally(() => {
         autoSubmitRef.current = false;

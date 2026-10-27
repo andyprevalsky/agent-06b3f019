@@ -248,6 +248,7 @@ async function testBrowserTargetedMessage(accessToken: string, userId: string): 
   const live = await session(agent.id, 'ACTIVE');
   const pausedRun = await session(agent.id, 'PAUSED');
   const foreign = await session(randomUUID(), 'ACTIVE');
+  const racing = await session(agent.id, 'ACTIVE');
   const post = (browserTaskId: string, extra: Record<string, unknown> = {}) =>
     request(`${BASE_URL}/api/agents/${agent.id}/messages`, {
       method: 'POST',
@@ -314,9 +315,34 @@ async function testBrowserTargetedMessage(accessToken: string, userId: string): 
     if (after.temporalWorkflowId !== null) {
       throw new Error(`Paused-browser message did not reach the owner: ${JSON.stringify(after)}`);
     }
+    // Race: the browser's pause-close commits while the message is in flight. The
+    // ACTIVE check and the insert share the session row lock, so the message
+    // waits for the close and then falls back to the owner instead of hiding.
+    let releaseClose = () => {};
+    const closeHeld = new Promise<void>((resolve) => (releaseClose = resolve));
+    const closing = prisma.$transaction(
+      async (tx) => {
+        await tx.browserSession.update({ where: { id: racing.id }, data: { status: 'PAUSED' } });
+        await closeHeld;
+      },
+      { timeout: 15_000 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const racedPost = post(racing.id);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    releaseClose();
+    await closing;
+    const raced = await racedPost;
+    expectStatus(raced, 201);
+    const racedMetadata = ((await stored(raced)).metadata ?? {}) as Record<string, unknown>;
+    if ('browserTaskId' in racedMetadata || 'excludeFromModel' in racedMetadata) {
+      throw new Error(
+        `Message raced past the pause-close was hidden: ${JSON.stringify(racedMetadata)}`
+      );
+    }
   } finally {
     await prisma.browserSession.deleteMany({
-      where: { id: { in: [live.id, pausedRun.id, foreign.id] } },
+      where: { id: { in: [live.id, pausedRun.id, foreign.id, racing.id] } },
     });
     // The reopened chat turn may still be writing its (local-model) failure row.
     await new Promise((resolve) => setTimeout(resolve, 1500));
