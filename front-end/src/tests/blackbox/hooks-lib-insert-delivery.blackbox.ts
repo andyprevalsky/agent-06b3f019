@@ -334,6 +334,31 @@ describe('committed INSERT delivery', () => {
     hook.unmount();
   });
 
+  it('an oversized notice shows its preview and reason, then swaps in the fetched row', async () => {
+    // Rows over the backend's 8 KB live cap arrive as a bounded notice: a text
+    // preview plus the small metadata, never the full text.
+    const { handlers, hook, reads, state, release } = await renderDeferred(200);
+    const oversize = 'This message is too large to stream live; loading it from the server.';
+    const preview = 'Code-agent SDK event JSON:\n' + 'x'.repeat(973);
+    act(() =>
+      handlers.onInsertDeferred?.({
+        ...deferred,
+        reason: oversize,
+        preview,
+        metadata: { ...deferred.metadata, title: 'Run the code agent' },
+      }),
+    );
+    expect(state.messages[0]).toMatchObject({
+      message_id: blockedRow.message_id,
+      text: `${preview}\n\n${oversize}`,
+      metadata: { toolStatus: 'FINISHED', title: 'Run the code agent', liveStreamBlocked: true },
+    });
+    release();
+    await waitFor(() => expect(state.messages).toEqual([blockedRow]));
+    expect(reads).toEqual([`agent-1/${blockedRow.message_id}`]);
+    hook.unmount();
+  });
+
   it('a deferred INSERT keeps its visible reason when the row read fails', async () => {
     const { handlers, hook, reads, state, release } = await renderDeferred(500);
     act(() => handlers.onInsertDeferred?.(deferred));

@@ -4,10 +4,11 @@
  *   INSERT {row} | INSERT_ENCODED {row, base64 content; decoded in the extractor}
  *     -> other agent / scope inactive / id already claimed -> ignore
  *     -> claim id -> cloud-mode, stream and message updates -> activity notice
- *   INSERT_DEFERRED {ids, tool lifecycle, reason}   (row could not stream live)
+ *   INSERT_DEFERRED {ids, metadata, reason, preview?}   (row not streamed in full:
+ *                    refused, or over the backend's 8 KB live cap)
  *     -> other agent / scope inactive / id already claimed -> ignore
- *     -> INSERT path above with a placeholder row whose body is the reason
- *        (closes the tool card, keeps ordering)
+ *     -> INSERT path above with a placeholder row whose body is the preview
+ *        followed by the reason (closes the tool card, keeps ordering)
  *     -> GET /agents/:agentId/messages/:id (bounded by a request timeout)
  *          -> ok      -> replace the placeholder with the canonical row
  *          -> failure -> warn; the placeholder and its reason stay visible
@@ -58,7 +59,7 @@ export function createInsertHandlers(
     notifyOpenAgentActivity({ agentId, kind: 'message' });
   };
 
-  /** Show the reason in place of the row, then read only that row and swap it in. */
+  /** Show the preview and reason in place of the row, then read only that row and swap it in. */
   const onInsertDeferred = (deferred: InsertDeferredPayload) => {
     if (!active() || deferred.agentId !== agentId) return;
     if (receivedRef.current.ids.has(deferred.id)) return;
@@ -66,7 +67,7 @@ export function createInsertHandlers(
       agentId,
       id: deferred.id,
       timestamp: deferred.timestamp,
-      text: deferred.reason,
+      text: deferred.preview ? `${deferred.preview}\n\n${deferred.reason}` : deferred.reason,
       role: deferred.role,
       metadata: { ...deferred.metadata, liveStreamBlocked: true },
     });
