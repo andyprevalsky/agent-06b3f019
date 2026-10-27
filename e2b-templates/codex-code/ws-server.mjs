@@ -1073,6 +1073,11 @@ class CodexAppServer {
     this.turnStartedAt = null;
     this.ready = false;
     this.controlBusy = false;
+    // turn id -> turn/start arguments, so a credential fallback can re-send it.
+    this.turnStarts = new Map();
+    // (turn, error) => true when a credential fallback takes over a failed turn.
+    this.recoverFailedTurn = null;
+    this.pendingTurnStart = null;
     let buffer = "";
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
@@ -1184,6 +1189,20 @@ class CodexAppServer {
       this.endedTurnIds.add(p.turn.id);
       if (this.activeTurnId === p.turn.id) this.activeTurnId = null;
       const outcome = p.turn.status;
+      if (
+        outcome === "failed" &&
+        this.recoverFailedTurn?.(p.turn, p.turn.error)
+      ) {
+        // The run continues on another credential: report the error, not an end.
+        this.emit({
+          ...common,
+          type: "error",
+          message: p.turn.error?.message || "Codex turn failed",
+          error: p.turn.error,
+          usage_limit: this.usageLimit(),
+        });
+        return;
+      }
       if (p.turn.id === this.handoffTurnId) {
         // `codex exec --output-last-message`: the schema-constrained final
         // message is the handoff; nothing is written for an unusable one.
@@ -1354,7 +1373,7 @@ class CodexAppServer {
       resets_at: resets.length ? Math.max(...resets) : null,
     };
   }
-  async initialize(resumeId, goal) {
+  async connect() {
     await this.request("initialize", {
       clientInfo: { name: "rose", title: "Rose", version: "1.0.0" },
       capabilities: { experimentalApi: true },
@@ -1362,6 +1381,31 @@ class CodexAppServer {
     this.child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
     const catalog = await this.request("model/list", { includeHidden: true });
     this.models = catalog.data || [];
+  }
+  // Re-send a failed turn on a new app-server process (same thread, same input).
+  async resumeTurn(threadId, turnStart) {
+    await this.connect();
+    const response = await this.request("thread/resume", {
+      threadId,
+      model: this.settings.model,
+      serviceTier:
+        this.settings.speed === "standard" ? null : this.settings.speed,
+      cwd: workDir,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
+    this.threadId = response.thread.id;
+    const turnId = await this.start(
+      turnStart.input,
+      this.settings,
+      turnStart.clientId,
+      turnStart.outputSchema,
+    );
+    if (turnStart.outputSchema) this.handoffTurnId = turnId;
+    this.ready = true;
+  }
+  async initialize(resumeId, goal) {
+    await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
     const model =
       this.models.find(
@@ -1440,6 +1484,9 @@ class CodexAppServer {
   }
   async start(input, settings, clientId, outputSchema = null) {
     const settingsVersion = this.settingsVersion;
+    // A turn can fail in the same chunk as its turn/start response.
+    const turnStart = { input, clientId, outputSchema };
+    this.pendingTurnStart = turnStart;
     const response = await this.request("turn/start", {
       threadId: this.threadId,
       input,
@@ -1449,6 +1496,8 @@ class CodexAppServer {
       ...(clientId ? { clientUserMessageId: clientId } : {}),
       ...(outputSchema ? { outputSchema } : {}),
     });
+    this.turnStarts.set(response.turn.id, turnStart);
+    if (this.pendingTurnStart === turnStart) this.pendingTurnStart = null;
     this.activeTurnId = this.endedTurnIds.has(response.turn.id)
       ? null
       : response.turn.id;
@@ -1605,7 +1654,7 @@ function stageDirectAttachments(id, attachments = []) {
   return inputs;
 }
 
-async function runCodexAppServer() {
+function spawnCodexAppServer() {
   const legacyArgs = buildCodexArgs({ useFastModeProxy: !usingApiKey });
   // Keep the existing MCP/proxy overrides, replacing exec-only flags.
   const args = ["app-server", "--listen", "stdio://"];
@@ -1629,28 +1678,87 @@ async function runCodexAppServer() {
     },
   });
   child.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
-  const handoffSchema = handoffSchemaFromGoal(GOAL);
-  nativeCodex = new CodexAppServer(
-    child,
-    appendEvent,
-    {
-      model: CODEX_MODEL,
-      effort: process.env.CODEX_REASONING_EFFORT || null,
-      speed: process.env.CODEX_SPEED || null,
-    },
-    handoffSchema
-      ? {
-          schema: handoffSchema,
-          write: (text) => {
-            mkdirSync(dirname(CODE_AGENT_HANDOFF_PATH), { recursive: true });
-            writeFileSync(CODE_AGENT_HANDOFF_PATH, text);
-          },
-        }
-      : null,
-  );
   const closed = new Promise((resolve) =>
     child.once("close", (code, signal) => resolve({ code: code ?? 1, signal })),
   );
+  return { child, closed };
+}
+
+async function runCodexAppServer() {
+  let { child, closed } = spawnCodexAppServer();
+  const handoffSchema = handoffSchemaFromGoal(GOAL);
+  const handoff = handoffSchema
+    ? {
+        schema: handoffSchema,
+        write: (text) => {
+          mkdirSync(dirname(CODE_AGENT_HANDOFF_PATH), { recursive: true });
+          writeFileSync(CODE_AGENT_HANDOFF_PATH, text);
+        },
+      }
+    : null;
+  const settings = {
+    model: CODEX_MODEL,
+    effort: process.env.CODEX_REASONING_EFFORT || null,
+    speed: process.env.CODEX_SPEED || null,
+  };
+  nativeCodex = new CodexAppServer(child, appendEvent, settings, handoff);
+  // Runtime fallback, as in the exec transport: a turn that failed because the
+  // ChatGPT OAuth credential is unusable is re-sent ONCE on the same thread with
+  // the funded OpenAI API key (default endpoint, no ChatGPT proxy).
+  let fallback = null;
+  nativeCodex.recoverFailedTurn = (turn, error) => {
+    const reason = classifyOAuthFallbackReason(error?.message || "");
+    if (fallback || usingApiKey || !OPENAI_API_KEY || !reason) return false;
+    const failed = nativeCodex;
+    const turnStart = failed.turnStarts.get(turn.id) ?? failed.pendingTurnStart;
+    const threadId = failed.threadId;
+    if (!turnStart || !threadId) return false;
+    oauthFallbackReason = reason;
+    fallback = (async () => {
+      log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
+        reason,
+      });
+      appendOutput(
+        "stdout",
+        "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+      );
+      appendEvent({
+        type: "auth_fallback",
+        from: "chatgpt_oauth",
+        to: "openai_api_key",
+        reason,
+      });
+      failed.child.kill("SIGTERM");
+      await closed;
+      try {
+        rmSync(join(codexHome, "auth.json"), { force: true });
+      } catch {
+        // Best-effort: a stale auth.json only matters if the API-key login fails.
+      }
+      if (!(await loginWithApiKey())) {
+        appendEvent({ type: "error", message: "Codex API-key login failed" });
+        return null;
+      }
+      usingApiKey = true;
+      oauthFallbackReason = null;
+      const next = spawnCodexAppServer();
+      const resumed = new CodexAppServer(
+        next.child,
+        appendEvent,
+        failed.settings,
+        handoff,
+      );
+      nativeCodex = resumed;
+      try {
+        await resumed.resumeTurn(threadId, turnStart);
+      } catch (error) {
+        appendEvent({ type: "error", message: error.message });
+        next.child.kill("SIGTERM");
+      }
+      return next.closed;
+    })();
+    return true;
+  };
   try {
     nativeCodex.initialization = nativeCodex.initialize(
       CODEX_RESUME_SESSION_ID,
@@ -1658,10 +1766,21 @@ async function runCodexAppServer() {
     );
     await nativeCodex.initialization;
   } catch (error) {
-    appendEvent({ type: "error", message: error.message });
-    child.kill("SIGTERM");
+    // A fallback that already took over the goal turn closes this process.
+    if (!fallback) {
+      appendEvent({ type: "error", message: error.message });
+      child.kill("SIGTERM");
+    }
   }
-  const result = await closed;
+  let result = await closed;
+  if (fallback) {
+    // A failed fallback must still end the run with final/exit, never crash it.
+    const retried = await fallback.catch((error) => {
+      appendEvent({ type: "error", message: error.message });
+      return null;
+    });
+    if (retried) result = await retried;
+  }
   turnsClosed = true;
   exitCode = result.code;
   processExited = true;

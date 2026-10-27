@@ -168,6 +168,11 @@ const lateExclusiveDomainNames = new Set([
   // spent the budget and localStorage was never persisted (2026-10-20, 2/3
   // coverage runs; it passes alone). Measure that contract uncontended.
   'browser-provider',
+  // Its Rose-in-Rose HMR case measures agent write → preview DOM latency through
+  // a real Vite dev server (≤ 3 s, 10 s hard wait). In the shared pool CPU-bound
+  // sibling domains starved Vite and the update missed the wait (2026-10-27, 2/3
+  // coverage runs; it passes alone). Measure that product latency uncontended.
+  'code-preview',
   // Its feedback cases deliberately set a process-wide funded-key cooldown.
   // Keep that mutation after every other domain that may need the key.
   'codex-code',
