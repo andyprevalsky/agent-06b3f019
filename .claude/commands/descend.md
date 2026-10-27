@@ -109,6 +109,28 @@ same mechanism and comparable limits. Partial support, memory citations,
 read gaps, and weak divergences fail this gate. Rework once against changed
 bytes or return to `/RCA`; keep unsupported candidates unapplied.
 
+**Default authorization: auto-fix now; user review at the end.** Invoking
+`/descend` authorizes all in-scope branch fixes under the strong grounding and
+causal-proof rules. Do not pause for a per-fix approval, a question, or a
+snapshot-scoped evidence exception. Resolve safe implementation choices from
+the available evidence, record the decision, and continue the loop. Collect
+human keep/ablate decisions only at `FINAL_CHANGE_REVIEW`.
+
+Reference grounding and historical evidence publication are separate findings.
+The independent reviewer must strongly ground every protected hunk against
+opened references before application. A missing historical FE link, recording,
+or publication receipt does not block an otherwise grounded, causally proved
+branch repair: preserve the actual failure and missing evidence, repair its
+producer where possible, and expose the limitation at final review. Never
+fabricate an artifact, weaken a validator, count a missing run as PASS, or
+replace causal proof with an evidence waiver. A substantive grounding gap or
+unproven cause still returns to `/RCA`; it is not a reason to ask the user to
+choose a speculative fix. Keep independent fixes and useful experiments moving.
+
+This automatic loop does not authorize a full `/deploy` or production changes.
+Use branch-source benchmark transport and existing isolated benchmark infra;
+record any truly production-only dependency while continuing all branch work.
+
 Never change a task definition (prompt, evaluator or rubric, expected tools,
 fixtures/environment, pass criteria, timeout, load, concurrency, price cap)
 unless a fresh read-only cross-reviewer, independent of triage and fix authors,
@@ -129,8 +151,10 @@ runbook. Keep task contracts and provider caps intact.
 Keep fixes on the descent branch and transport that exact source to benchmark
 runners through supported branch/patch transport. A commit or push is not a
 deployment. Run `/deploy` only if a change directly affects production
-infrastructure that benchmarks exercise and branch-source runs cannot test;
-record the failed alternatives and why the roughly 3-hour deployment is needed.
+infrastructure that benchmarks exercise and branch-source runs cannot test,
+and the user separately authorizes that production action. A full deployment
+is never part of the default automatic loop. Record the failed alternatives
+and why the roughly 3-hour deployment would be needed; continue branch work.
 
 Continue until the user's exact acceptance condition holds for every original
 task. For this Polar `-k 2` descent, each task's two most recent terminal,
@@ -212,8 +236,12 @@ substeps; they do not reset the overall RCA scope or establish outcome progress.
 
 ## Canonical human-approval format
 
-FINAL_CHANGE_REVIEW and any unavoidable production infrastructure approval must follow `.claude/shared/approval-format.md`.
-Read it completely immediately before composing the request. The
+FINAL_CHANGE_REVIEW and any separately authorized production infrastructure
+review must follow `.claude/shared/approval-format.md`. Its historical media
+and publication requirements are final-review evidence requirements, not
+per-fix application gates in the automatic `/descend` loop. Preserve failures
+and evidence gaps explicitly; strong reference grounding and causal proof
+remain mandatory. Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
 replace the shared Before Behavior, After Behavior, How, TL;DR, Evidence, Detail,
 and Downstream Implications sections or their code-block presentation.
@@ -779,7 +807,7 @@ while the requested goal still has authorized work:
     triage every new error; group independent first-bad causes
     run /sync immediately before each distinct /RCA or fixed-candidate proof
     dispatch one /RCA owner per independent cause without pausing unrelated lanes
-    review concrete proof once; unblock owners and deliver scoped human requests
+    review concrete proof once; apply grounded branch fixes and record final-review findings
     run affected checks at the existing safe boundaries
     if critical repairs are verified and the next experiment is authorized:
         rerun the original experiment on the reviewed frozen snapshot
