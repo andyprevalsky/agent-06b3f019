@@ -317,7 +317,7 @@ Startup reuse:
                       exact source plus baked deps. SIM snapshots remain.
                       Requires boot launch; cannot prepare a generic pool.
   --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
-  --timeout SECONDS  Explicit hard task cap (60..7200; longer is refused); warns if
+  --timeout SECONDS  Explicit hard task cap (at most 7200; longer is refused); warns if
                      below a selected task's effective timeout. Default covers the
                      longest selected task.
   --wait             Wait for the detached fleet and return its exit status.
@@ -405,10 +405,11 @@ while [ "$#" -gt 0 ]; do
         --sim-on|--ref|--dash-base|--timeout|--autoscale-max)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             if [ "$1" = --timeout ]; then
-                # Cloud task execution windows are capped at 2 hours (sharded runner MAX_TASK_TIMEOUT).
-                case "$2" in ''|*[!0-9]*) timeout_ok=0 ;; *) timeout_ok=$(( 10#$2 >= 60 && 10#$2 <= 7200 )) ;; esac
+                # Cloud task execution windows are capped at 2 hours (sharded runner MAX_TASK_TIMEOUT);
+                # the sharded operator also refuses windows below 60 seconds.
+                case "$2" in ''|*[!0-9]*) timeout_ok=0 ;; *) timeout_ok=$(( ${#2} <= 6 && 10#$2 > 0 && 10#$2 <= 7200 )) ;; esac
                 [ "$timeout_ok" -eq 1 ] || {
-                    echo "❌ --timeout $2 refused: cloud execution timeouts must be 60..7200 seconds (2 hours)." >&2
+                    echo "❌ --timeout $2 refused: cloud execution timeouts must be 1..7200 seconds (2 hours max)." >&2
                     echo "   Ask the user to choose a lower execution timeout or to change the CLI setting" >&2
                     echo "   (MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py and this check in scripts/run-bench)." >&2
                     exit 2

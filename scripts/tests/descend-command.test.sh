@@ -258,6 +258,26 @@ grep -Fq "sharded controller operator: 70 simultaneous copies exceed one control
 ! grep -Fq "using the ordinary fleet path" "$tmp/wide70.out" ||
   { echo "FAIL: operator-only options must not fall back" >&2; exit 1; }
 [ ! -s "$tmp/wide-capture" ] || { echo "FAIL: a sharded route started an ordinary fleet" >&2; exit 1; }
+# A 2-hour execution window routes to the sharded operator; longer windows
+# are refused before any operator or fleet starts (descend I1, Polar 2h cap).
+: >"$tmp/wide-capture.operator"
+RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+  "$RUN_BENCH" "${wide70_names[@]}" --timeout 7200 >"$tmp/wide70-2h.out" 2>&1 || true
+grep -Fq "sharded controller operator: 70 simultaneous copies" "$tmp/wide70-2h.out" &&
+  ! grep -Fq "refused: cloud execution timeouts" "$tmp/wide70-2h.out" ||
+  { cat "$tmp/wide70-2h.out" >&2; echo "FAIL: --timeout 7200 was not routed to the sharded operator" >&2; exit 1; }
+: >"$tmp/wide-capture.operator"
+rc=0
+RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST="$tmp/operator-recorder" \
+RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/wide-fleet" \
+RUN_BENCH_WIDE_CAPTURE="$tmp/wide-capture" \
+  "$RUN_BENCH" "${wide70_names[@]}" --timeout 7201 >"$tmp/wide70-over.out" 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && grep -Fq "Ask the user to choose a lower execution timeout" "$tmp/wide70-over.out" ||
+  { cat "$tmp/wide70-over.out" >&2; echo "FAIL: --timeout 7201 was not refused with an actionable message" >&2; exit 1; }
+[ ! -s "$tmp/wide-capture.operator" ] && [ ! -s "$tmp/wide-capture" ] ||
+  { echo "FAIL: a refused --timeout started an operator or fleet" >&2; exit 1; }
 : >"$tmp/wide-capture"
 # The explicit ordinary fleet path keeps the whole wide slice in one fleet.
 RUN_BENCH_SHARDED_ROUTE=never \
