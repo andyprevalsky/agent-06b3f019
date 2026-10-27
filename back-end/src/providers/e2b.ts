@@ -3,6 +3,7 @@ import { createLogger } from './logger';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
+  fastModeProxySigningAvailable,
   resolveFastModeWriteEnabled,
 } from './codeAgentFastModeEnv';
 import type { FilePointer } from './storage';
@@ -327,7 +328,7 @@ async function createClaudeCodeSessionUnlocked(
     );
   } else if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
     envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
-    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+    log.info('Fast Mode: routing sandbox Anthropic calls via the tee-proxy');
   } else if (sandboxTransport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
     log.info(`Routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
@@ -605,8 +606,8 @@ export async function createCodexCodeSession(
   });
   if (fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined) {
     envs.CODEX_FAST_MODE_PROXY_URL = fastModeEnv.CODEX_FAST_MODE_PROXY_URL;
-    log.info(`Fast Mode: routing sandbox Codex calls via ${envs.CODEX_FAST_MODE_PROXY_URL}`);
-  } else if (fastModeCacheEnabled === true) {
+    log.info('Fast Mode: routing sandbox Codex calls via the tee-proxy');
+  } else if (fastModeCacheEnabled === true && fastModeProxySigningAvailable()) {
     throw new Error(
       'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured. ' +
         'Set FAST_MODE_CODEX_PROXY_URL or FAST_MODE_ANTHROPIC_PROXY_URL ending in /anthropic-proxy.'

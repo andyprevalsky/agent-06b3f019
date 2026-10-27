@@ -190,3 +190,227 @@ export async function testLateLlmArtifactIndexesOnlyItself(
     'an overwritten late artifact left stale search rows'
   );
 }
+
+/**
+ * The manifest lock must not hold a pooled connection or an open transaction
+ * while its operation performs storage I/O: Supavisor has 60 server
+ * connections, and prod held this lock for up to 120 s per root.
+ */
+export async function testManifestLockHoldsNoConnectionDuringStorageIo(
+  seed: RunSeed
+): Promise<void> {
+  const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
+  const heldInTransaction = async (since: Date) =>
+    prisma.$queryRaw<Array<{ pid: number; xactStart: Date }>>`
+      SELECT pid, xact_start AS "xactStart" FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
+    `;
+  await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
+    const operationStart = new Date();
+    // Stand-in for an R2 round trip performed under the lock.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const first = await heldInTransaction(operationStart);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const second = await heldInTransaction(operationStart);
+    const pinned = first.filter((row) =>
+      second.some((later) => later.pid === row.pid && +later.xactStart === +row.xactStart)
+    );
+    assert.deepStrictEqual(
+      pinned,
+      [],
+      `manifest lock held a pooled connection in an open transaction during storage I/O: ${JSON.stringify(pinned)}`
+    );
+    await ownership.assertOwned();
+  });
+}
+
+/** The fixture's ToolSideEffect read must seek by index, not scan the table. */
+export async function testFixtureToolSideEffectsSeekByIndex(seed: RunSeed): Promise<void> {
+  const { toolSideEffectsForAgentsSql } = await import('../../providers/traceArchiveFixture');
+  const nodes = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SET LOCAL enable_seqscan = off`;
+    const rows = await tx.$queryRaw<Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }>>(
+      Prisma.sql`EXPLAIN (FORMAT JSON) ${toolSideEffectsForAgentsSql([seed.rootAgentId])}`
+    );
+    return planNodes(rows[0]['QUERY PLAN'][0].Plan);
+  });
+  assert(
+    nodes.some(
+      (node) =>
+        node['Index Name'] === 'ToolSideEffect_operationKey_trgm_idx' &&
+        node['Index Cond']?.includes('"operationKey"')
+    ),
+    `fixture ToolSideEffect read cannot seek by operationKey: ${JSON.stringify(nodes).slice(0, 300)}`
+  );
+}
+
+/**
+ * Trajectory search stores each agent's goal once, not on every message row
+ * (prod: ~2.3 GB of copies), and search output still returns it.
+ */
+export async function testTrajectoryGoalStoredOncePerAgent(seed: RunSeed): Promise<void> {
+  const { indexArchivedTrace } = await import('../../providers/traceArchiveSearchIndex');
+  const { searchAgentTrajectories } = await import('../../domains/data/trajectoryRepo');
+  const goal = `trajectory goal probe ${seed.rootAgentId} `.repeat(40);
+  const now = Date.now();
+  const fixture = {
+    schema_version: 1,
+    kind: 'scoped-db-fixture',
+    phase: 'end',
+    captured_at: new Date(now).toISOString(),
+    base_image: 'test',
+    root_agent_id: seed.rootAgentId,
+    user_id: seed.userId,
+    agent_ids: [seed.rootAgentId],
+    table_order: [],
+    restore: {},
+    rows: {
+      Agent: [{ id: seed.rootAgentId, goal, title: 'Goal probe', source: 'WEB' }],
+      Message: [1, 2, 3].map((index) => ({
+        id: `goal-probe-${seed.rootAgentId}-${index}`,
+        agentId: seed.rootAgentId,
+        role: 'ASSISTANT',
+        text: `goal probe message ${index}`,
+        createdAt: new Date(now + index).toISOString(),
+      })),
+    },
+  } as unknown as ScopedDbFixture;
+  assert.strictEqual(await indexArchivedTrace(seed.rootAgentId, fixture, []), 3);
+
+  const rowGoalBytes = await prisma.$queryRaw<Array<{ bytes: bigint }>>`
+    SELECT COALESCE(sum(octet_length("agentGoal")), 0)::bigint AS bytes
+    FROM "AgentTrajectorySearch" WHERE "rootAgentId" = ${seed.rootAgentId}
+  `;
+  assert.strictEqual(
+    Number(rowGoalBytes[0]?.bytes ?? 0),
+    0,
+    'every trajectory row repeated the agent goal'
+  );
+  const stored = await prisma.$queryRaw<Array<{ agentGoal: string }>>`
+    SELECT "agentGoal" FROM "AgentTrajectoryAgent" WHERE "agentId" = ${seed.rootAgentId}
+  `;
+  assert.deepStrictEqual(
+    stored.map((row) => row.agentGoal),
+    [goal]
+  );
+  const hits = await searchAgentTrajectories({
+    userId: seed.userId,
+    pattern: 'goal probe message',
+    caseInsensitive: false,
+    filters: { pathRootAgentId: seed.rootAgentId },
+    limit: 10,
+    offset: 0,
+    order: 'oldest_first',
+    useKeyset: false,
+  });
+  assert.strictEqual(hits.length, 3);
+  for (const hit of hits) {
+    assert.strictEqual(hit.agentGoal, goal, 'search must still return the agent goal');
+    assert.strictEqual(hit.agentTitle, 'Goal probe');
+  }
+  // A partial archive that lacks the Agent row carries no metadata; indexing
+  // it must not blank the goal/title already stored for that agent.
+  const partial = {
+    ...fixture,
+    rows: {
+      Agent: [],
+      Message: [
+        {
+          id: `goal-probe-${seed.rootAgentId}-partial`,
+          agentId: seed.rootAgentId,
+          role: 'ASSISTANT',
+          text: 'goal probe partial archive',
+          createdAt: new Date(now + 10).toISOString(),
+        },
+      ],
+    },
+  } as unknown as ScopedDbFixture;
+  await indexArchivedTrace(seed.rootAgentId, partial, []);
+  const kept = await prisma.$queryRaw<Array<{ agentGoal: string; agentTitle: string | null }>>`
+    SELECT "agentGoal", "agentTitle" FROM "AgentTrajectoryAgent" WHERE "agentId" = ${seed.rootAgentId}
+  `;
+  assert.deepStrictEqual(
+    kept,
+    [{ agentGoal: goal, agentTitle: 'Goal probe' }],
+    'a partial archive without agent metadata blanked the stored goal'
+  );
+}
+
+/**
+ * Legacy rows carry their own goal copy. The batched backfill moves it onto
+ * the agent row and clears the copies, idempotently, without changing search.
+ */
+export async function testLegacyGoalCopiesNormalizeIdempotently(seed: RunSeed): Promise<void> {
+  const { normalizeTrajectoryGoalBatch } = await import('../../providers/traceArchiveSearchIndex');
+  const { searchAgentTrajectories } = await import('../../domains/data/trajectoryRepo');
+  // Two copies match the agent's live goal; one diverges and must be kept.
+  const agent = await prisma.agent.findUniqueOrThrow({ where: { id: seed.rootAgentId } });
+  const ids = [1, 2, 3].map((index) => `legacy-goal-${seed.rootAgentId}-${index}`);
+  for (const [index, messageId] of ids.entries()) {
+    const goal = index < 2 ? agent.goal : `divergent goal ${seed.rootAgentId}`;
+    const title = index < 2 ? agent.title : 'Divergent';
+    await prisma.$executeRaw`
+      INSERT INTO "AgentTrajectorySearch" ("messageId", "userId", "rootAgentId", "agentId",
+        surface, role, "createdAt", "searchText", "agentGoal", "agentTitle", "archivePath")
+      VALUES (${messageId}, ${seed.userId}, ${seed.rootAgentId}, ${seed.rootAgentId}, 'WEB',
+        'ASSISTANT', ${new Date(Date.now() + index)}, 'legacy goal probe', ${goal}, ${title},
+        'db/end.fixture.json.gz.enc')
+    `;
+  }
+  const search = () =>
+    searchAgentTrajectories({
+      userId: seed.userId,
+      pattern: 'legacy goal probe',
+      caseInsensitive: false,
+      filters: { pathRootAgentId: seed.rootAgentId },
+      limit: 10,
+      offset: 0,
+      order: 'oldest_first',
+      useKeyset: false,
+    }).then((rows) => rows.map((row) => [row.messageId, row.agentGoal, row.agentTitle]));
+  const before = await search();
+  const cursor = `legacy-goal-${seed.rootAgentId}-0`;
+  const first = await normalizeTrajectoryGoalBatch(cursor, 10);
+  assert.strictEqual(first.cleared, 2, 'both redundant legacy copies must be cleared');
+  assert.deepStrictEqual(await search(), before, 'normalization changed search output');
+  const again = await normalizeTrajectoryGoalBatch(cursor, 10);
+  assert.strictEqual(again.cleared, 0, 'a rerun must be a no-op');
+  const copies = await prisma.agentTrajectorySearch.findMany({
+    where: { messageId: { in: ids }, NOT: { agentGoal: '' } },
+    select: { messageId: true },
+  });
+  assert.deepStrictEqual(
+    copies.map((row) => row.messageId),
+    [ids[2]],
+    'only the divergent copy remains'
+  );
+}
+
+/** Run-scoped archive cost cases; the archive blackbox seeds a run for each. */
+export function runCostCases(
+  baseUrl: string,
+  apiKey: string
+): Array<{ name: string; fn: (seed: RunSeed) => Promise<void> }> {
+  return [
+    {
+      name: "run fixture excludes the user's lifetime history",
+      fn: testFixtureExcludesUserLifetimeHistory,
+    },
+    {
+      name: 'manifest lock holds no connection during storage I/O',
+      fn: testManifestLockHoldsNoConnectionDuringStorageIo,
+    },
+    { name: 'fixture tool side effects seek by index', fn: testFixtureToolSideEffectsSeekByIndex },
+    { name: 'trajectory goal stored once per agent', fn: testTrajectoryGoalStoredOncePerAgent },
+    {
+      name: 'legacy goal copies normalize idempotently',
+      fn: testLegacyGoalCopiesNormalizeIdempotently,
+    },
+    { name: 'finalize search-index delete seeks by root', fn: testFinalizeDeleteSeeksByRoot },
+    {
+      name: 'late llm artifact indexes only itself',
+      fn: (seed) => testLateLlmArtifactIndexesOnlyItself(baseUrl, apiKey, seed),
+    },
+  ];
+}

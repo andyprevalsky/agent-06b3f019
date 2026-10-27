@@ -7,7 +7,7 @@
  * calls still run, but successful responses are written for later Fast Mode reads.
  */
 
-import { createHash } from './crypto';
+import { createHash, createHmac, timingSafeEqual } from './crypto';
 import {
   demoCacheWriteCapability,
   shouldWriteDemoCacheForUser,
@@ -115,6 +115,52 @@ export function codeAgentTraceHash(input: CodeAgentTraceInput): string {
   return sha256(JSON.stringify(stable)).slice(0, 16);
 }
 
+const PROXY_CAPABILITY_CONTEXT = 'rose-fast-mode-proxy:v1:';
+const PROXY_CAPABILITY_SEPARATOR = ',';
+
+function proxyCapability(traceSegment: string, secret: string | undefined): string {
+  if (secret === undefined || secret === '') {
+    throw new Error('BACKEND_API_KEY is required to mint a Fast Mode proxy capability');
+  }
+  return createHmac('sha256', secret)
+    .update(`${PROXY_CAPABILITY_CONTEXT}${traceSegment}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * The trace hash is derived from the goal, so it is guessable; the proxy URL is
+ * the sandbox CLI's only credential. Append a server-minted capability so only
+ * a URL this backend issued can read or write that trace's cache entries.
+ */
+export function signProxyTraceSegment(
+  traceSegment: string,
+  secret: string | undefined = process.env.BACKEND_API_KEY
+): string {
+  // Express hands the route its param URL-decoded, so sign the decoded form.
+  const capability = proxyCapability(decodeURIComponent(traceSegment), secret);
+  return `${traceSegment}${PROXY_CAPABILITY_SEPARATOR}${capability}`;
+}
+
+/** The trace segment when the (decoded) route param `raw` carries its valid capability, else null. */
+export function verifyProxyTraceParam(
+  raw: string,
+  secret: string | undefined = process.env.BACKEND_API_KEY
+): string | null {
+  const at = raw.lastIndexOf(PROXY_CAPABILITY_SEPARATOR);
+  if (at <= 0 || secret === undefined || secret === '') return null;
+  const traceSegment = raw.slice(0, at);
+  const given = Buffer.from(raw.slice(at + 1));
+  const expected = Buffer.from(proxyCapability(traceSegment, secret));
+  return given.length === expected.length && timingSafeEqual(given, expected) ? traceSegment : null;
+}
+
+/** Whether this backend can mint proxy capabilities (BACKEND_API_KEY is set). */
+export function fastModeProxySigningAvailable(): boolean {
+  const secret = process.env.BACKEND_API_KEY;
+  return secret !== undefined && secret !== '';
+}
+
 function proxyPath(
   goal: string,
   readEnabled: boolean,
@@ -128,12 +174,12 @@ function proxyPath(
   // The trace hash carries no owner, so only recorder sessions may add slots,
   // and only through a server-signed capability the proxy verifies.
   const capability = writeEnabled ? demoCacheWriteCapability(traceSegment) : null;
+  // Every route (reads included) also requires the minted trace capability.
+  const signed = signProxyTraceSegment(traceSegment);
   if (!readEnabled) {
-    return capability === null
-      ? `${traceSegment}/record-only`
-      : `${traceSegment}/record-only.${capability}`;
+    return capability === null ? `${signed}/record-only` : `${signed}/record-only.${capability}`;
   }
-  return capability === null ? traceSegment : `${traceSegment}/record.${capability}`;
+  return capability === null ? signed : `${signed}/record.${capability}`;
 }
 
 /**
@@ -149,6 +195,8 @@ export function buildFastModeAnthropicEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
+  if (!fastModeProxySigningAvailable()) return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
@@ -176,6 +224,8 @@ export function buildFastModeCodexEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && demoCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  // No signing secret, no capability: skip the proxy rather than mint an unsigned URL.
+  if (!fastModeProxySigningAvailable()) return {};
   if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, demoCacheWriteEnabled, traceOptions)}`,
