@@ -1,15 +1,15 @@
 #!/usr/bin/env tsx
 /**
- * The per-root archive manifest lock pins one pooled connection for its whole
- * operation, and the operation's own queries need another. Unbounded, the lock
- * holders plus the callers queued behind them inside Postgres pinned every
- * connection, so no holder could run a query until the 30 s pool timeout: two
- * concurrent agent deletes starved a 4-connection pool for about 105 s
- * (2026-10-07, backend coverage; every other request in that window failed).
+ * The per-root archive manifest lock used to pin one pooled connection (an
+ * open advisory-lock transaction) for its whole operation, so lock holders and
+ * their waiters could starve the pool: two concurrent agent deletes starved a
+ * 4-connection pool for about 105 s (2026-10-07), and prod held it up to 120 s
+ * across R2 I/O. The lock is now a lease row that holds no connection.
  *
  * This runs more concurrent locked operations than the pool has connections,
  * on shared and distinct roots, each issuing one ordinary query inside the
- * lock. All of them must finish promptly and none may wait on the pool.
+ * lock. All of them must finish promptly, each root stays serialized, and
+ * distinct roots may hold their leases at once beyond the pool size.
  */
 
 import assert from 'node:assert';
@@ -40,11 +40,19 @@ async function main(): Promise<void> {
   const roots = Array.from({ length: DISTINCT_ROOTS }, () => `manifest-lock-pool-${randomUUID()}`);
   let insideLock = 0;
   let mostInsideLock = 0;
+  const insideRoot = new Map<string, number>();
   const started = Date.now();
   try {
     const results = await Promise.all(
       Array.from({ length: OPERATIONS }, (_, index) =>
         withArchiveManifestLock(roots[index % DISTINCT_ROOTS]!, async (ownership) => {
+          const root = roots[index % DISTINCT_ROOTS]!;
+          insideRoot.set(root, (insideRoot.get(root) ?? 0) + 1);
+          assert.strictEqual(
+            insideRoot.get(root),
+            1,
+            'one root is held by one operation at a time'
+          );
           insideLock += 1;
           mostInsideLock = Math.max(mostInsideLock, insideLock);
           try {
@@ -56,6 +64,7 @@ async function main(): Promise<void> {
             return rows[0]?.value;
           } finally {
             insideLock -= 1;
+            insideRoot.set(root, (insideRoot.get(root) ?? 1) - 1);
           }
         })
       )
@@ -69,11 +78,11 @@ async function main(): Promise<void> {
       elapsedMs < PROMPT_COMPLETION_MS,
       `locked operations waited on the connection pool: ${elapsedMs}ms for ${OPERATIONS} operations`
     );
-    // Every open lock pins a connection and needs one more for its own queries,
-    // so the locks held at once must leave the pool room for those queries.
+    // A held lease pins no connection, so distinct roots are not throttled by
+    // the pool size (four roots on a three-connection pool all overlap).
     assert.ok(
-      mostInsideLock * 2 <= databasePoolLimit(),
-      `${mostInsideLock} manifest locks were open at once on a ${databasePoolLimit()}-connection pool`
+      mostInsideLock > databasePoolLimit(),
+      `only ${mostInsideLock} distinct-root leases overlapped on a ${databasePoolLimit()}-connection pool`
     );
     process.stdout.write(
       `PASS ${OPERATIONS} manifest-locked operations on a ${POOL_SIZE}-connection pool finished in ${elapsedMs}ms ` +

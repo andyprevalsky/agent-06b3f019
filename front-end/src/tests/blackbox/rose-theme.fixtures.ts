@@ -99,6 +99,7 @@ export function headerElement() {
     clientSource: 'WEB',
     agents: [],
     isLoadingAgents: false,
+    hasLoadedAgents: true,
     selectedAgentId: null,
     onRefreshAgents: noop,
     dripStyles: DRIP_STYLES,

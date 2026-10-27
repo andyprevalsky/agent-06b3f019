@@ -69,6 +69,8 @@ interface MobileAgentDrawerProps {
   realtimeReady?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
+  /** False until the first agent load settles; background polls never reset it. */
+  hasLoadedAgents: boolean;
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
   onCreateAgent: () => void;
@@ -126,6 +128,7 @@ function TabButton({
 export default function MobileAgentDrawer({
   agents,
   isLoadingAgents,
+  hasLoadedAgents,
   selectedAgentId,
   onSelectAgent,
   onCreateAgent,
@@ -260,7 +263,7 @@ export default function MobileAgentDrawer({
                       attentionAgentIds={attentionAgentIds}
                       query={searchQuery}
                       contentMatchAgentIds={search.contentMatchAgentIds}
-                      isLoading={isLoadingAgents}
+                      isLoading={isLoadingAgents && !hasLoadedAgents}
                       isSearching={search.isSearching}
                       searchError={search.searchError}
                     />
