@@ -299,3 +299,62 @@ Remaining path: a bare `npx prisma db push` from `back-end/` still targets prod
 via `.env` `DIRECT_URL`. It can no longer drop these indexes, but it can still
 attempt other DDL. Closing it requires moving the prod direct URL out of the
 default `.env` variable, which is an env change needing approval.
+
+## Closing the class: the bare CLI cannot reach prod, and drift is checked hourly (S21, 2026-10-27)
+
+**Remaining path after S3.** The guarded `npm run prisma:push:local` wrapper and
+the instruction scanner only cover documented commands. A bare
+`npx prisma db push` (also `migrate dev` / `migrate reset`) from `back-end/`
+still read `back-end/.env`, whose `DIRECT_URL` is production. Between deploys,
+nothing compared the live catalog with the migrations, which is why RLS stayed
+off from 2026-10-08 until the 2026-10-26 audit (18 days).
+
+**Repro (local, ran).** `bash back-end/scripts/prisma-local-push.test.sh`: a
+scratch directory holds the real `schema.prisma` and a `.env` whose URLs point
+at `prodlike.invalid`. On origin/main `75b2a9c00`, bare `prisma db push`
+printed `Datasource "db" … at "prodlike.invalid:5432"` and failed only with
+P1001 (it tried to connect). With the fix, `db push`, `migrate dev` and
+`migrate reset` all stop at P1012
+`Environment variable not found: PRISMA_CLI_DATABASE_URL` before connecting.
+Against the real `back-end/.env`, the bare push refuses in the same way.
+
+**Fix (code only, no env move).**
+- `schema.prisma` `directUrl = env("PRISMA_CLI_DATABASE_URL")`. Only the
+  Prisma CLI reads `directUrl`; the runtime client keeps `url = env("DATABASE_URL")`.
+  No env file sets the new name, so the CLI has no default target. (Prisma 5.22
+  has no `prisma.config.ts` hook; renaming `url` would have broken 71 scripts
+  that call `new PrismaClient()` without a URL.)
+- Render's start command runs `npm run prisma:migrate`, which is now
+  `PRISMA_CLI_DATABASE_URL="${DIRECT_URL:?…}" prisma migrate deploy`, so the
+  deploy target is unchanged. It refuses when `DIRECT_URL` is not in the
+  process environment (npm does not load `.env`).
+- Every legitimate local push passes its already-local `DIRECT_URL` explicitly:
+  `prisma-local-push.sh` (after its localhost validation), `run.sh`,
+  `setup-db.sh`, `cloud-init.sh`, `run-coverage.sh`, `run-blackbox-tests.sh`,
+  `measure-seed-memory.sh`, and deploy.md Step 5.
+- Verified locally: `prisma:push:local` syncs a scratch DB; the runtime client
+  reads it without the new variable; `prisma:migrate` targets exactly
+  `DIRECT_URL` and refuses without it.
+
+**Continuous detection.** The verifier moved to `src/providers/schemaDrift`.
+`serverCron` runs it hourly in production. A `SharedEphemeralState` lease
+(50 min, not released) makes exactly one replica read the catalog per hour, in
+one READ ONLY transaction through `runTransactionWithRetry`. Any problem posts
+one `schema_drift` alert to #errors through `alertError`: missing or INVALID
+index, missing trigger, function, extension or RLS flag, an anon- or
+authenticated-readable table with RLS off, or a missing or redefined policy.
+Policies are now compared by definition (permissive, command, roles,
+normalized USING / WITH CHECK), not only by name. All 60 production policies
+match under that normalization (read-only probe, 2026-10-27), and the
+post-deploy verifier reports 466 objects present.
+
+**Regressions.** `prisma-local-push.test.sh` (bare CLI refusal and the
+Render mapping), `migration-schema-objects.test.ts` (a policy redefined to
+`USING (true)`), and `src/tests/unit/schema-drift-check.test.ts` (lease loser
+skips; the lease holder alerts once on the 2026-10-08 state; a clean catalog is
+silent; production cron registers it). Mutation checks: removing the cron
+registration or the definition comparison fails these tests.
+
+**Scale (10k agents).** No hot-path change. One catalog read per hour for the
+whole fleet; cost is O(schema objects), independent of agents. The CLI
+guard is build-time only.
