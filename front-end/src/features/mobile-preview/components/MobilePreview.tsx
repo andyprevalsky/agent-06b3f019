@@ -54,6 +54,7 @@ export default function MobilePreview() {
         <MobileAgentDrawer
           agents={MOCK_AGENTS}
           isLoadingAgents={false}
+          hasLoadedAgents
           selectedAgentId="a1"
           onSelectAgent={noop}
           onCreateAgent={noop}
