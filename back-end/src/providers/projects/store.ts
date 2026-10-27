@@ -109,6 +109,15 @@ export async function countEnvFiles(projectId: string): Promise<number> {
 }
 
 /** Project restored into a code session (null when the session has none). */
+/** The session's sandbox id (E2B id, `local-…` or `mac-…`), or null. */
+export async function findSessionSandboxId(sessionId: string): Promise<string | null> {
+  const session = await prisma.claudeCodeSession.findUnique({
+    where: { id: sessionId },
+    select: { sandboxId: true },
+  });
+  return session?.sandboxId ?? null;
+}
+
 export async function findSessionProject(
   sessionId: string
 ): Promise<{ projectId: string; userId: string } | null> {

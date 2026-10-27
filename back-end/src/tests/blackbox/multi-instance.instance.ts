@@ -260,6 +260,22 @@ async function main(): Promise<unknown> {
       await served.close();
       return { online, home, folder, live };
     }
+    case 'workspace-exec': {
+      // An E2B code session created on another instance: this instance has no
+      // registered executor, so it must reach the sandbox by the session's id.
+      const workspace = await import('../../providers/projects/workspace');
+      const connected: string[] = [];
+      await barrier();
+      const executor = await workspace.resolveWorkspaceExecutor(args[0], async (sandboxId) => {
+        connected.push(sandboxId);
+        return {
+          files: { write: async () => undefined },
+          commands: { run: async (cmd) => ({ exitCode: 0, stdout: `ran:${cmd}`, stderr: '' }) },
+        };
+      });
+      const run = executor === null ? null : await executor.run('echo hi', { timeoutMs: 1_000 });
+      return { connected, homeDir: executor?.homeDir ?? null, stdout: run?.stdout ?? null };
+    }
     case 'wa-dedupe': {
       const wa = await import('../../domains/whatsapp-webhook/service');
       await barrier();

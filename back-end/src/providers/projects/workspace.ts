@@ -18,10 +18,11 @@
  * 10k-agent behaviour: all work is per session (its own directory/sandbox);
  * the executor registry holds one entry per live session in this process.
  */
+import { Sandbox } from 'e2b';
 import { createLogger } from '../logger';
 import { normalizeProjectPath } from './paths';
 import { STARTUP_RUNNER_SCRIPT } from './startupRunner';
-import { findSessionProject, prepareProjectWorkspace } from './store';
+import { findSessionProject, findSessionSandboxId, prepareProjectWorkspace } from './store';
 import type { ProjectRestoreReport, ProjectStartupReport, ProjectWorkspace } from './types';
 import {
   e2bWorkspaceExecutor,
@@ -417,8 +418,10 @@ function parseReport(text: string): ProjectStartupReport | null {
  * report. Never hangs: the runner enforces the project timeout, and this call
  * adds a 30 s grace on top of it.
  */
-export async function runProjectStartup(sessionId: string): Promise<ProjectStartupReport> {
-  const ex = workspaceExecutorFor(sessionId);
+export async function runProjectStartup(
+  sessionId: string,
+  ex: WorkspaceExecutor | null = workspaceExecutorFor(sessionId)
+): Promise<ProjectStartupReport> {
   if (!ex) throw new Error(`No workspace executor registered for session ${sessionId}`);
   const paths = projectSessionPaths(ex.homeDir);
   const config = await ex.run(`cat ${shq(paths.configPath)}`, { timeoutMs: SHORT_TIMEOUT_MS });
@@ -457,8 +460,33 @@ export async function runProjectStartupForOwner(
 ): Promise<ProjectStartupReport | null> {
   const owner = await findSessionProject(sessionId);
   if (!owner || owner.userId !== userId || owner.projectId !== projectId) return null;
-  if (!workspaceExecutorFor(sessionId)) return null;
-  return runProjectStartup(sessionId);
+  const ex = await resolveWorkspaceExecutor(sessionId);
+  if (!ex) return null;
+  return runProjectStartup(sessionId, ex);
+}
+
+/**
+ * The session's executor as seen from THIS instance. Sessions created here are
+ * in the registry; an E2B session created on another backend instance is
+ * reachable from any instance, so a request routed here rebuilds a transient
+ * executor from its sandbox id instead of answering "not running". Local
+ * processes (`local-…` fallback, `mac-…` devices) are only reachable where
+ * they run and keep their own routing.
+ */
+export async function resolveWorkspaceExecutor(
+  sessionId: string,
+  connect: (sandboxId: string) => Promise<E2bSandboxLike> = connectE2bSandbox
+): Promise<WorkspaceExecutor | null> {
+  const registered = workspaceExecutorFor(sessionId);
+  if (registered) return registered;
+  const sandboxId = await findSessionSandboxId(sessionId);
+  if (sandboxId === null || /^(local|mac)-/.test(sandboxId)) return null;
+  return e2bWorkspaceExecutor(await connect(sandboxId), E2B_HOME);
+}
+
+async function connectE2bSandbox(sandboxId: string): Promise<E2bSandboxLike> {
+  if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY not configured');
+  return Sandbox.connect(sandboxId, { apiKey: process.env.E2B_API_KEY });
 }
 
 /**

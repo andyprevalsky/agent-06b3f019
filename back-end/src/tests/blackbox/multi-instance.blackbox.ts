@@ -21,6 +21,7 @@
  *  - concurrent AgentCard token refreshes rotate the refresh token once
  *  - a compute connect session owned by A can be polled and cancelled from B
  *  - a Mac on A serves a session that B starts, relays to and stops
+ *  - an E2B code session created on A runs project commands from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
  *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
  *
@@ -527,6 +528,33 @@ async function main(): Promise<void> {
         b.result.catch(() => undefined);
         a.child.kill();
         b.child.kill();
+      }
+    });
+
+    await test('an E2B code session created on A runs project commands from B', async () => {
+      const session = await prisma.claudeCodeSession.create({
+        data: {
+          agentId: randomUUID(),
+          sandboxId: `mi-sbx-${randomUUID()}`,
+          goal: 'multi-instance',
+        },
+      });
+      try {
+        const [remote] = await concurrently([['workspace-exec', [session.id]]]);
+        const connected = remote.connected as string[] | undefined;
+        assert(
+          Array.isArray(connected) && connected[0] === session.sandboxId,
+          `B must reach the session's sandbox: ${JSON.stringify(remote)}`
+        );
+        assert(remote.homeDir === '/home/user', `unexpected HOME ${String(remote.homeDir)}`);
+        assert(
+          remote.stdout === 'ran:echo hi',
+          `B's command must run there: ${String(remote.stdout)}`
+        );
+        const [local] = await concurrently([['workspace-exec', [randomUUID()]]]);
+        assert(local.homeDir === null, 'an unknown session must not resolve an executor');
+      } finally {
+        await prisma.claudeCodeSession.deleteMany({ where: { id: session.id } });
       }
     });
 
