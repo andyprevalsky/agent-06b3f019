@@ -28,6 +28,12 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { Toaster } from '@/components/ui/toaster';
 import AgentSettingsDialog from '@/features/terminal-component-group/components/AgentSettingsDialog';
 import { toast } from '@/hooks/use-toast';
@@ -274,6 +280,34 @@ describe('Long-press row menus on a phone', () => {
     } finally {
       document.removeEventListener('contextmenu', record, true);
     }
+  });
+});
+
+describe('Native long-press contextmenu on Android', () => {
+  it('opens once, from the trigger left edge, never under the finger', async () => {
+    const opens: Array<[number, number]> = [];
+    renderWithProviders(
+      <ContextMenu>
+        <ContextMenuTrigger
+          data-testid="row"
+          onContextMenu={(event) => opens.push([event.clientX, event.clientY])}
+        >
+          Halloween costume
+        </ContextMenuTrigger>
+        <ContextMenuContent data-testid="menu">
+          <ContextMenuItem>Rename agent</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>,
+    );
+    const row = screen.getByTestId('row');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    // Android Chrome fires its own contextmenu at the finger mid-press.
+    fireEvent.contextMenu(row, { clientX: 216, clientY: 300 });
+    await screen.findByTestId('menu');
+    // Past the 700ms long-press timer: no second, re-anchoring open.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const left = row.getBoundingClientRect().left;
+    expect(opens).toEqual([[left + EDGE, 300]]);
   });
 });
 
