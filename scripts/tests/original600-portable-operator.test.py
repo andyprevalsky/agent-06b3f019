@@ -2118,6 +2118,7 @@ class Portable(unittest.TestCase):
                                                ('rootless', names[:3] + rootless, [], 'cloud-root'),
                                                ('rootless-ordinary', names[:3] + rootless, ['--catalog-eligibility', 'ordinary'], 'cloud-root'),
                                                ('timeout', names, ['--task-timeout', '30'], 'task-timeout must be 60'),
+                                               ('timeout-over-2h', names, ['--task-timeout', '7201'], 'ask the user to choose a lower execution timeout'),
                                                ('e2e', names, ['--task-timeout', '480', '--e2e-timeout', '2000'], 'e2e-timeout must cover'),
                                                ('continuation', names, ['--resume-admission', str(fx.state)], 'original 200-task manifest')]:
                 with self.subTest(label=label):
