@@ -1,6 +1,10 @@
-/** Browser drawer: one mode/tab/proxy row, navigation, then side-by-side trajectory and browser. */
-import { useEffect, useRef } from 'react';
-import { ArrowLeft, ArrowRight, RotateCw, type LucideIcon } from 'lucide-react';
+/**
+ * STATE MACHINE: Root | browser task (agentId, taskId) selected -> one portaled pane.
+ * Browser events -> task registry -> task tab + subtitle -> selected task's URL/trajectory.
+ * Closing a task selects a surviving sibling; Root stays independently selectable.
+ */
+import { useEffect, useRef, useMemo } from 'react';
+import { ArrowLeft, ArrowRight, RotateCw, Bot, type LucideIcon } from 'lucide-react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
@@ -44,7 +48,7 @@ function DrawerTab({
       data-testid={testId}
       onClick={onClick}
       className={cn(
-        'flex h-full max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 text-[13px]',
+        'flex h-full min-w-0 max-w-[220px] flex-none items-center gap-[7px] whitespace-nowrap border-b-2 text-[13px]',
         selected
           ? 'border-[#272725] font-semibold text-[hsl(240_15%_8%)] dark:border-[#ecece8] dark:text-[#ecece8]'
           : 'border-transparent text-[hsl(240_8%_45%)] hover:text-[hsl(240_15%_8%)] dark:text-[#a3a39d] dark:hover:text-[#ecece8]',
@@ -56,17 +60,30 @@ function DrawerTab({
 }
 
 function AgentTabLabel({ tab, title }: { tab: AgentBrowserTab; title: string }) {
+  const site = tab.pageUrl ? addressParts(tab.pageUrl).host : title;
   return (
-    <>
-      <i
-        aria-hidden="true"
-        className={cn(
-          'block h-[7px] w-[7px] flex-none rounded-full',
-          tab.live ? 'bg-green-500' : 'bg-gray-300 dark:bg-white/[0.25]',
-        )}
-      />
-      <span className="truncate">{title}</span>
-    </>
+    <span
+      className="flex min-w-0 flex-col gap-1 py-2 text-left"
+      title={`${site} · ${tab.taskLabel ?? title}`}
+    >
+      <span className="flex min-w-0 items-center gap-[7px]">
+        <i
+          aria-hidden="true"
+          className={cn(
+            'h-[7px] w-[7px] flex-none rounded-full',
+            tab.live ? 'bg-green-500' : 'bg-gray-300 dark:bg-white/[0.25]',
+          )}
+        />
+        <span className="truncate">{site}</span>
+      </span>
+      <span
+        data-testid="browser-task-label"
+        className="flex min-w-0 items-center gap-1.5 text-[10px] font-normal leading-3 text-muted-foreground"
+      >
+        <Bot aria-hidden="true" className="h-3 w-3 flex-none" />
+        <span className="truncate">{tab.taskLabel ?? title}</span>
+      </span>
+    </span>
   );
 }
 
@@ -122,6 +139,11 @@ function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
 }
 
 function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean }) {
+  const ownerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const tab of apps.tabs) counts.set(tab.agentId, (counts.get(tab.agentId) ?? 0) + 1);
+    return counts;
+  }, [apps.tabs]);
   return (
     <div
       role="tablist"
@@ -137,10 +159,14 @@ function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean })
       </DrawerTab>
       {apps.tabs.map((tab) => (
         <DrawerTab
-          key={tab.agentId}
-          testId={`browser-tab-${tab.agentId}`}
-          selected={apps.browserTabAgentId === tab.agentId}
-          onClick={() => apps.selectBrowserTab(tab.agentId)}
+          key={`${tab.agentId}:${tab.taskId}`}
+          testId={
+            ownerCounts.get(tab.agentId) === 1
+              ? `browser-tab-${tab.agentId}`
+              : `browser-tab-${tab.agentId}-${tab.taskId}`
+          }
+          selected={apps.browserTabAgentId === tab.agentId && apps.browserTabTaskId === tab.taskId}
+          onClick={() => apps.selectBrowserTab(tab.agentId, tab.taskId)}
         >
           <AgentTabLabel tab={tab} title={agentTitle(apps.agents, tab.agentId)} />
         </DrawerTab>
@@ -220,7 +246,9 @@ export function BrowserAppDrawer() {
   const open = apps.openApp === 'browser';
   const active = open && roseDesktop;
   const activeAgentId = apps.browserTabAgentId;
-  const activeTab = apps.tabs.find((t) => t.agentId === activeAgentId) ?? null;
+  const activeTab =
+    apps.tabs.find((t) => t.agentId === activeAgentId && t.taskId === apps.browserTabTaskId) ??
+    null;
   const isRoot = activeAgentId === null;
   const waitingForPane =
     activeAgentId !== null &&
@@ -242,7 +270,7 @@ export function BrowserAppDrawer() {
       </div>
       <div
         data-testid="browser-tabs-row"
-        className="flex h-10 min-w-0 flex-none items-center gap-5 border-b border-border px-[18px]"
+        className="flex min-h-14 min-w-0 flex-none flex-wrap items-center gap-x-5 gap-y-1 border-b border-border px-[18px]"
       >
         {apps.browserMode === 'remote' ? (
           <BrowserTabs apps={apps} isRoot={isRoot} />

@@ -57,6 +57,15 @@ Local repros (`ROSE_USE_SYSTEM_PG=true CONDUCTOR_WORKSPACE_NAME=s10lane CONDUCTO
   - A local GIN-trigram build over 81 MB of real agent transcript text produced a 69 MB index, a ratio of 0.88, which projects a ~4.9 GB final index.
   - Adding S3's ~16 GB temp observation and ~5 GB of build WAL gives a 21–26 GB peak against 27 GB free. That is not a safe margin, and normalizing `agentGoal` does not return disk to the OS.
 
+- **Production backfill and reclaim (S13, 2026-10-27).**
+  - Dry run first: a 111,000-row primary-key-ordered sample predicted 110,993 clears, plus per-batch EXPLAINs.
+  - Then `--agent-goals --batch-size 2000`, with statement timeout 15 s and lock timeout 2 s per batch, ran 01:02–01:49Z. It scanned 2,026,519 rows, cleared 2,024,194 copies, kept 2,325 divergent copies and created 34,701 agent rows.
+  - The receipt (`agent-goals-run.jsonl.gz`, sha256 `e8440223…7b47`) lists every cleared row and the value it held.
+  - `pg_repack` 1.5.2 (`-k --no-kill-backend --wait-timeout=30 --no-order`) then shrank the table from 8,855 MB to 4,567 MB, and the database from 61 GB to 57 GB.
+  - ACCESS EXCLUSIVE was held about 0.9 s at start, 0.54 s at the swap and 0.20 s at the drop. The 3.5-minute copy ran under ACCESS SHARE only.
+  - The first attempt was killed by the `postgres` role's `idle_in_transaction_session_timeout=60s`, and pg_repack cleaned up after itself. The retry passed `PGOPTIONS='-c idle_in_transaction_session_timeout=0'` to repack's own sessions.
+- **searchText trigram index re-measured: still not shipped.** searchText is about 5.08 GB raw, giving a ~4.5 GB index at the 0.88 ratio. The ~21–25 GB build peak against ~29 GB free would leave the 95 GB filesystem near Supabase's 95% read-only threshold. It fits only after the Fast Mode cache offload and that table's repack free about 30 GB (see 2026-10-27-fast-mode-cache-browser-http-bodies-filled-prod-disk).
+
 At 10,000 agents: one goal row per agent instead of one per message; one extra primary-key lookup per search result row; one batched upsert per indexed batch; the fixture's side-effect read is an index seek.
 
 ## Human feedback
