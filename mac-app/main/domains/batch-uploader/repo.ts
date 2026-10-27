@@ -13,7 +13,7 @@
 
 import { Uploader } from '../../services/uploader';
 import type { BrowserWindow } from 'electron';
-import type { UploadResult } from './types';
+import type { MessagingUploadOptions, UploadResult } from './types';
 
 /**
  * Forward a batch upload request to the Uploader service. Typed args in,
@@ -23,7 +23,8 @@ export async function uploadBatchViaUploader(
   integrationType: string,
   data: unknown,
   accessToken: string,
-  window: BrowserWindow | null
+  window: BrowserWindow | null,
+  options: MessagingUploadOptions = {}
 ): Promise<UploadResult> {
-  return Uploader.uploadData(integrationType, data, accessToken, window);
+  return Uploader.uploadData(integrationType, data, accessToken, window, options);
 }

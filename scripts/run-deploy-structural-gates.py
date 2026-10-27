@@ -226,6 +226,10 @@ GATES = (
         "cloudbench-resume-controller-export",
         ("python3", "scripts/tests/cloudbench-resume-controller-export.test.py"),
     ),
+    Gate(
+        "cloudbench-controller-orphan-drain",
+        ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
+    ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate(
         "cloudbench-prelaunch-cancel",
