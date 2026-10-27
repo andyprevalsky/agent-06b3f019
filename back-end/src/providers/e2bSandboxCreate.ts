@@ -1,4 +1,4 @@
-import { Sandbox } from 'e2b';
+import { RateLimitError, Sandbox, ServiceBusyError } from 'e2b';
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
@@ -122,7 +122,54 @@ export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
 /** Floor for E2B control-plane requestTimeoutMs on sandbox create. */
 export const SANDBOX_CREATE_REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * How long a create waits for E2B capacity. E2B caps concurrently running
+ * sandboxes per team (Hobby 20, Pro 100, add-ons 600/1,100) and answers a
+ * create over the cap with HTTP 429 (`RateLimitError`) or a busy 503
+ * (`ServiceBusyError`). Neither creates a sandbox, so waiting for a slot is
+ * safe; failing the code agent on the first refusal was not.
+ */
+export function e2bCapacityWaitMs(): number {
+  const parsed = Number.parseInt(process.env.E2B_CAPACITY_WAIT_MS ?? '300000', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300_000;
+}
+const E2B_CAPACITY_POLL_INITIAL_MS = 2_000;
+const E2B_CAPACITY_POLL_MAX_MS = 30_000;
+
+export function isSandboxCapacityError(error: unknown): boolean {
+  return error instanceof RateLimitError || error instanceof ServiceBusyError;
+}
+
 export async function createSandboxWithRetry(
+  templateId: string,
+  options: Parameters<typeof Sandbox.create>[1],
+  label: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
+  const deadline = Date.now() + e2bCapacityWaitMs();
+  for (let refusal = 1; ; refusal += 1) {
+    try {
+      return await createSandboxAttempts(templateId, options, label);
+    } catch (error) {
+      const remainingMs = deadline - Date.now();
+      if (!isSandboxCapacityError(error) || remainingMs <= 0) throw error;
+      const delayMs = Math.min(
+        E2B_CAPACITY_POLL_MAX_MS,
+        E2B_CAPACITY_POLL_INITIAL_MS * 2 ** (refusal - 1),
+        remainingMs
+      );
+      log.warn(`E2B:${label} at sandbox capacity; waiting for a slot`, {
+        refusal,
+        delayMs,
+        remainingMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await sleep(delayMs);
+    }
+  }
+}
+
+async function createSandboxAttempts(
   templateId: string,
   options: Parameters<typeof Sandbox.create>[1],
   label: string

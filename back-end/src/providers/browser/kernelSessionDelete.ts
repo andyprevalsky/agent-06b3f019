@@ -1,5 +1,6 @@
 import https from 'node:https';
 import { retryWithBackoff } from '../retry';
+import { releaseKernelProfileWriter } from './kernelProfileWriter';
 
 /**
  * Per-attempt budget for DELETE /browsers/:id. Matches the Kernel SDK's own
@@ -45,4 +46,6 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
       component: 'Kernel session delete',
     }
   );
+  // Kernel saved the profile during the DELETE above; only now may another browser write it.
+  await releaseKernelProfileWriter(sessionId);
 }
