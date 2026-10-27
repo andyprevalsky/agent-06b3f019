@@ -35,7 +35,7 @@ async def test_rose_local_loopback_and_no_fallback():
                 'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n'
                 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
                 '"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
-                'data: [DONE]\n\n'
+                "data: [DONE]\n\n"
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -50,18 +50,29 @@ async def test_rose_local_loopback_and_no_fallback():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with patch.dict(os.environ, {
-            "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
-            "ROSE_LOCAL_MODEL": "test-local-model",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                "ROSE_LOCAL_MODEL": "test-local-model",
+            },
+        ):
             with patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")):
-                chunks = [chunk async for chunk in RoseClient().complete(
-                    pool="rose-local", messages=[{"role": "user", "content": "hello"}], dump_context=False,
-                )]
+                chunks = [
+                    chunk
+                    async for chunk in RoseClient().complete(
+                        pool="rose-local",
+                        messages=[{"role": "user", "content": "hello"}],
+                        dump_context=False,
+                    )
+                ]
             assert requests[0][0] == "/v1/chat/completions"
             assert requests[0][1]["model"] == "test-local-model"
             assert requests[0][1]["messages"][-1]["content"] == "hello"
-            assert next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata") == "local/test-local-model"
+            assert (
+                next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata")
+                == "local/test-local-model"
+            )
             assert "".join(chunk.data["text"] for chunk in chunks if chunk.kind == "content") == "local ok"
             assert any(chunk.kind == "done" for chunk in chunks)
         with patch.dict(os.environ, {"ROSE_LOCAL_BASE_URL": "https://api.openrouter.ai/v1", "ROSE_LOCAL_MODEL": "x"}):
@@ -75,6 +86,7 @@ async def test_rose_local_loopback_and_no_fallback():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 from _rose_stream_progress_fixture import single_step_waterfall
@@ -362,10 +374,9 @@ def test_cerebras_native_tools_enforce_representable_shapes():
     assert "minItems" not in params["properties"]["labels"]
     assert params["properties"]["count"]["minimum"] == 1
     assert params["properties"]["count"]["maximum"] == 5
-    # Omittable Optional: plain type (omission validates to None); see
-    # test_cerebras_tools_send_omittable_optionals_as_their_type.
-    assert params["properties"]["note"]["type"] == "string"
-    assert "anyOf" not in params["properties"]["note"]
+    # Omittable Optional[str] keeps null expressible under strict decoding; see
+    # test_cerebras_tools_keep_null_for_omittable_string_optionals.
+    assert params["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert "note" not in params["required"]
     assert body["tool_choice"] == "required"
     assert "response_format" not in body
@@ -415,7 +426,12 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
         effort=None,
     )
     props = body["tools"][0]["function"]["parameters"]["properties"]
-    for name, kind in (("sources", "array"), ("head_limit", "integer"), ("pattern", "string"), ("filters", "object")):
+    for name, kind in (
+        ("sources", "array"),
+        ("head_limit", "integer"),
+        ("multiline", "boolean"),
+        ("filters", "object"),
+    ):
         assert props[name].get("type") == kind, f"{name} must be a plain {kind}: {props[name]}"
         assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
     assert props["sources"]["items"]["enum"][0] == "messages"
@@ -438,6 +454,79 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
     assert sent.get("description") == field["description"], sent.get("description")
     assert "anyOf" not in sent
     assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
+
+
+def test_cerebras_tools_keep_null_for_omittable_string_optionals():
+    """An omittable Optional[str] (or enum) reaches Cerebras as anyOf[string, null].
+
+    Captured smoke browser-auth-assistance-declined (2026-10-27, explore task
+    80e12b33): with every Optional collapsed to its plain type, qwen-3.8-27b
+    filled all optional fields and wrote the string "null" for string ones:
+    list_agents cursor/query/path_prefix="null" (backend 400 -> tool ERROR) and
+    grep role/surface="null" (enum validation re-generation), page_after="null"
+    (InvalidGrepParamError). Replay of that exact request on cerebras-direct:
+    plain string 4/5 responses carried "null" strings; anyOf[string, null] 0/8,
+    with literal null validating to None and sources/head_limit still typed.
+    """
+    from copy import deepcopy
+
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import GrepTool, ListAgentsTool, create_agent_action_model
+
+    def sent(registry: dict) -> dict:
+        tools = build_anthropic_tools_from_response_model(
+            create_agent_action_model(list(registry), tool_registry=registry)
+        )
+        original = deepcopy(tools)
+        body = build_cerebras_body(
+            model="qwen-3.8-27b",
+            messages=[],
+            tools=tools,
+            tool_choice="any",
+            response_format=None,
+            temperature=None,
+            max_tokens=64,
+            effort=None,
+        )
+        assert tools == original, "caller tool schemas must not be mutated"
+        return {tool["function"]["name"]: tool["function"] for tool in body["tools"]}
+
+    def keeps_null(prop: dict, name: str) -> dict:
+        branches = prop.get("anyOf")
+        assert isinstance(branches, list) and {"type": "null"} in branches, f"{name} lost null: {prop}"
+        (kept,) = [branch for branch in branches if branch != {"type": "null"}]
+        assert kept.get("type") == "string", f"{name} must stay a string: {prop}"
+        assert "default" not in prop or prop["default"] is None
+        return kept
+
+    # Strict toolset (no open maps): the null branch is kept in the grammar.
+    strict = sent({"list_agents": ListAgentsTool})["list_agents"]
+    assert strict["strict"] is True
+    for name in ("node", "cursor", "query", "path_prefix"):
+        keeps_null(strict["parameters"]["properties"][name], name)
+        assert name not in strict["parameters"]["required"]
+    depth = strict["parameters"]["properties"]["depth"]
+    assert depth.get("type") == "integer" and "anyOf" not in depth, f"non-strings stay collapsed: {depth}"
+
+    # The captured explore toolset is non-strict (grep's open filters map).
+    functions = sent({"grep": GrepTool, "list_agents": ListAgentsTool})
+    grep = functions["grep"]["parameters"]["properties"]
+    for name in ("pattern", "page_after", "person", "since", "until", "trace_path"):
+        keeps_null(grep[name], name)
+    for name in ("role", "surface", "record_kind", "source", "order"):
+        assert keeps_null(grep[name], name).get("enum"), f"{name} lost its enum: {grep[name]}"
+    for name in ("cursor", "query", "path_prefix"):
+        keeps_null(functions["list_agents"]["parameters"]["properties"][name], name)
+
+    # A literal null is the declared spelling of "no value" and reaches the tool as None.
+    calls = ListAgentsTool.model_validate(
+        {"tool": "list_agents", "node": "/root/member_lookup", "depth": 3, "cursor": None, "query": None}
+    )
+    assert (calls.cursor, calls.query, calls.path_prefix) == (None, None, None)
+    grep_call = GrepTool.model_validate(
+        {"tool": "grep", "pattern": "401", "sources": ["agent_trajectories"], "role": None, "page_after": None}
+    )
+    assert (grep_call.role, grep_call.page_after) == (None, None)
 
 
 def test_cerebras_native_tools_keep_incompatible_schemas_visible():
@@ -10924,6 +11013,10 @@ async def run_all_tests():
         "cerebras_tools_send_omittable_optionals_as_their_type",
         test_cerebras_tools_send_omittable_optionals_as_their_type,
     )
+    r.record(
+        "cerebras_tools_keep_null_for_omittable_string_optionals",
+        test_cerebras_tools_keep_null_for_omittable_string_optionals,
+    )
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(
@@ -11027,7 +11120,9 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_transport_client_version", test_anthropic_transport_accepts_captured_client_version_requirement
     )
-    await r.record_async("claude_auth_client_version_rejection_surfaced", test_claude_auth_surfaces_client_version_rejection)
+    await r.record_async(
+        "claude_auth_client_version_rejection_surfaced", test_claude_auth_surfaces_client_version_rejection
+    )
     await r.record_async(
         "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
     )
