@@ -841,6 +841,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "credential-health": "credential-health",
         "amplitude-live": "credential-health",
         "chat-router-failover-live": "credential-health",
+        "migration-preflight": "credential-health",
         "backend-blackbox": "backend-blackbox",
         "smoke": "smoke",
         "semantic": "semantic",

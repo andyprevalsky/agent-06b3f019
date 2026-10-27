@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { DEMO_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
 import {
@@ -11,6 +11,13 @@ import { stripSecrets } from './demoCacheNormalizeCore';
 import { createLogger } from './logger';
 import { withSpan } from './tracing';
 import { demoCacheEnv } from './demoCacheEnv';
+import {
+  OFFLOAD_KINDS,
+  offloadPointer,
+  prepareOffload,
+  rehydrateRows,
+  uploadOffload,
+} from './demoCacheOffload';
 
 const log = createLogger('DemoCacheStore');
 
@@ -261,6 +268,10 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
       dbSpanMeta.row_count = rows.length;
       return rows;
     });
+    // Large bodies live in Storage behind a pointer; an unreadable one is a miss.
+    rows = await withSpan('demo_cache.offload_rehydrate', { row_count: rows.length }, () =>
+      rehydrateRows(rows)
+    );
 
     await withSpan(
       'demo_cache.result_build',
@@ -315,6 +326,27 @@ export async function cacheSetWithAck(args: {
   const value = stripSecrets(args.value);
   const blobPath = args.blobPath ?? null;
   deleteMemoryCache(args.key);
+  const prepared = blobPath === null ? prepareOffload(args.kind, value) : null;
+  if (prepared) {
+    // Re-recording an identical large body: the row already points at it, so
+    // skip the upload and the write (each used to rewrite the TOASTed value).
+    const existing = await demoCachePrisma.fastModeCacheEntry.findUnique({
+      where: { key: args.key },
+      select: { kind: true, goalHash: true, value: true, blobPath: true },
+    });
+    if (
+      existing &&
+      existing.kind === args.kind &&
+      existing.goalHash === args.goalHash &&
+      existing.blobPath === null &&
+      offloadPointer(existing.value)?.sha256 === prepared.pointer.sha256
+    ) {
+      writeMemoryCache(args.key, args.goalHash, { hit: true, value, blobPath });
+      return true;
+    }
+    await uploadOffload(prepared);
+  }
+  const stored = prepared ? prepared.marker : value;
   try {
     await demoCachePrisma.fastModeCacheEntry.upsert({
       where: { key: args.key },
@@ -322,13 +354,13 @@ export async function cacheSetWithAck(args: {
         key: args.key,
         kind: args.kind,
         goalHash: args.goalHash,
-        value: (value ?? null) as object,
+        value: (stored ?? null) as object,
         blobPath,
       },
       update: {
         kind: args.kind,
         goalHash: args.goalHash,
-        value: (value ?? null) as object,
+        value: (stored ?? null) as object,
         blobPath,
       },
     });
@@ -343,7 +375,7 @@ export async function cacheSetWithAck(args: {
         data: {
           kind: args.kind,
           goalHash: args.goalHash,
-          value: (value ?? null) as object,
+          value: (stored ?? null) as object,
           blobPath,
         },
       });
@@ -512,4 +544,95 @@ export async function agentFastMode(agentId: string): Promise<{
 
 export async function cacheSet(args: Parameters<typeof cacheSetWithAck>[0]): Promise<void> {
   await cacheSetWithAck(args);
+}
+
+/** 89% of production browser_http stored bytes were in values of 32 KB or more. */
+const OFFLOAD_SCAN_MIN_STORED_BYTES = 16 * 1024;
+
+export interface FastCacheOffloadBatch {
+  /** Highest key scanned; pass back as `afterKey`. */
+  lastKey: string | null;
+  scanned: number;
+  /** Rows moved to Storage (dry run: that would move). */
+  offloaded: number;
+  /** Serialized bytes moved out of the table. */
+  bytes: number;
+  /** Exact rows moved, with the verified Storage object that now holds each value. */
+  offloadedRows: Array<{ key: string; path: string; sha256: string; bytes: number }>;
+}
+
+/**
+ * Move existing large values of offloaded kinds into Storage, one
+ * primary-key-ordered batch at a time. Each body is uploaded and read back
+ * (sha256 verified) before its row is pointed at it, and the row is replaced
+ * only if it still holds the value that was uploaded, so a concurrent
+ * re-record is never overwritten with a stale pointer. Idempotent: rows that
+ * already hold a pointer are skipped.
+ */
+export async function offloadFastCacheBatch(
+  afterKey: string | null,
+  limit: number,
+  options: { dryRun?: boolean } = {}
+): Promise<FastCacheOffloadBatch> {
+  const client = getDemoCachePrisma();
+  const bounded = async <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
+    client.$transaction(async (tx) => {
+      if (options.dryRun) await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '15s'`);
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`);
+      return fn(tx);
+    });
+  // pg_column_size reads the TOAST pointer, not the value: no detoasting here.
+  const rows = await bounded((tx) =>
+    tx.$queryRaw<Array<{ key: string; kind: string; size: number }>>(Prisma.sql`
+      SELECT key, kind, pg_column_size(value)::int AS size FROM "FastModeCacheEntry"
+      WHERE ${afterKey === null ? Prisma.sql`TRUE` : Prisma.sql`key > ${afterKey}`}
+        AND "blobPath" IS NULL
+      ORDER BY key LIMIT ${limit}
+    `)
+  );
+  const batch: FastCacheOffloadBatch = {
+    lastKey: rows.length > 0 ? rows[rows.length - 1].key : afterKey,
+    scanned: rows.length,
+    offloaded: 0,
+    bytes: 0,
+    offloadedRows: [],
+  };
+  // Disk is what matters: only rows whose stored (compressed) value takes at
+  // least OFFLOAD_SCAN_MIN_STORED_BYTES are read in full; prepareOffload then
+  // applies the same serialized-size rule as the write path.
+  const candidates = rows.filter(
+    (row) => OFFLOAD_KINDS.has(row.kind) && row.size >= OFFLOAD_SCAN_MIN_STORED_BYTES
+  );
+  for (const candidate of candidates) {
+    const [current] = await bounded((tx) =>
+      tx.$queryRaw<Array<{ value: unknown; digest: string }>>(Prisma.sql`
+        SELECT value, md5(value::text) AS digest FROM "FastModeCacheEntry"
+        WHERE key = ${candidate.key} AND "blobPath" IS NULL
+      `)
+    );
+    const prepared = current ? prepareOffload(candidate.kind, current.value) : null;
+    if (!current || !prepared) continue;
+    batch.offloaded += 1;
+    batch.bytes += prepared.pointer.bytes;
+    if (options.dryRun) continue;
+    await uploadOffload(prepared);
+    const check = await rehydrateRows([{ key: candidate.key, value: prepared.marker }]);
+    if (check.length !== 1) throw new Error(`offloaded body did not read back: ${candidate.key}`);
+    const updated = await bounded((tx) =>
+      tx.$executeRaw(Prisma.sql`
+        UPDATE "FastModeCacheEntry" SET value = ${JSON.stringify(prepared.marker)}::jsonb
+        WHERE key = ${candidate.key} AND "blobPath" IS NULL
+          AND md5(value::text) = ${current.digest}
+      `)
+    );
+    if (updated !== 1) {
+      batch.offloaded -= 1;
+      batch.bytes -= prepared.pointer.bytes;
+      continue;
+    }
+    deleteMemoryCache(candidate.key);
+    batch.offloadedRows.push({ key: candidate.key, ...prepared.pointer });
+  }
+  return batch;
 }

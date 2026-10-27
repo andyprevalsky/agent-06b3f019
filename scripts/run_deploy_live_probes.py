@@ -154,6 +154,22 @@ def deploy_commands() -> tuple[Command, ...]:
             ROOT / "back-end",
             after="amplitude-live",
         ),
+        # Read-only: EXPLAINs and counts this branch's new migrations against
+        # production data, which local and CI databases never contain.
+        Command(
+            "migration-preflight",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "migration-preflight",
+                "--",
+                workspace_tsx(),
+                "scripts/migration-preflight.ts",
+                "--base",
+                "origin/main",
+            ),
+            ROOT / "back-end",
+        ),
     )
 
 
