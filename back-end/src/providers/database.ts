@@ -3,11 +3,33 @@ import dotenv from 'dotenv';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
 import { currentTraceContext } from './tracing';
+import { nonLocalDatabaseReason } from '../utils/localDatabaseUrl';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
 dotenv.config();
 
 const log = createLogger('Prisma');
+
+/**
+ * Why a query from this process must be refused, or null. A test file run
+ * directly (`npx tsx src/tests/...`) skips the runners that point DATABASE_URL
+ * at local Postgres, so dotenv hands it back-end/.env's production pooler; unit
+ * tests wrote fixture rows to prod that way on 2026-10-23 and 2026-10-27.
+ * Importing this module stays harmless (structural tests only read config).
+ */
+export function testEntryRemoteDatabaseReason(
+  entry: string | undefined = process.argv[1],
+  env: NodeJS.ProcessEnv = process.env
+): string | null {
+  if (!entry || !/[\\/]src[\\/]tests[\\/]/.test(entry)) return null;
+  if (env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1' || env.BLACKBOX_TEST_ALLOW_REMOTE_DATABASE === '1') {
+    return null;
+  }
+  const reason = nonLocalDatabaseReason(env.DATABASE_URL);
+  return reason === null ? null : `${reason} (test entry ${entry})`;
+}
+
+const TEST_ENTRY_REMOTE_DATABASE = testEntryRemoteDatabaseReason();
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
 // Retryable Prisma error codes:
@@ -262,6 +284,13 @@ export const prisma =
   }).$extends({
     query: {
       async $allOperations({ operation, model, args, query }) {
+        if (TEST_ENTRY_REMOTE_DATABASE !== null) {
+          throw new Error(
+            `Refusing ${model ?? 'raw'}.${operation} from a test against a non-local database: ` +
+              `${TEST_ENTRY_REMOTE_DATABASE}. Run tests through scripts/run-unit-tests.ts or ` +
+              'scripts/run-blackbox-tests.sh, which point DATABASE_URL at local Postgres.'
+          );
+        }
         const maxRetries = 3;
         let lastError;
 
