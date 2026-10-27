@@ -1,5 +1,5 @@
 ---
-description: "Run a benchmark slice in parallel, cluster all observed errors by root cause, delegate /RCA repairs, and report with the benchmark scorecard. Fix infra without approval; deliver runtime-fix approvals in the main thread. Stop the exact owned run immediately at >=5% infra, repair independent errors with /RCA, and rerun after verified critical fixes."
+description: "Run a benchmark slice in parallel, cluster all observed errors by root cause, delegate /RCA repairs, and report with the benchmark scorecard. Fix up to eight clusters per iteration; review the final change set with the user. Stop the exact owned run immediately at >=5% infra, repair independent errors with /RCA, and rerun after verified critical fixes."
 argument-hint: "<slice> — first N polar tasks | daily | pre-deploy | rose-bench | polar-bench | incomplete | explicit task names"
 ---
 
@@ -21,13 +21,13 @@ Report measured Machine states/costs, protected warm capacity and a concrete
 unblock action; planner maxima are not a reason to ask for more quota.
 
 
-**North star: meet the requested benchmark goal with zero reward hacks, repair
-owned error clusters, and deploy every confirmed fix. Ordinary descent targets
+**North star: meet the requested benchmark goal with zero reward hacks and repair
+owned error clusters on the descent branch. Ordinary descent targets
 a trustworthy pass for every original task; infra-only goals use their explicit
 acceptance rule.**
 
-This command composes /benchmark, /rca, and /deploy. Read
-benchmark.md, rca.md, and deploy.md completely before starting. This file owns
+This command composes /benchmark and /rca; /deploy is used only for unavoidable production infrastructure changes. Read
+benchmark.md and rca.md completely before starting, and deploy.md if that exception applies. This file owns
 their orchestration, state, user-input gates, and response contract.
 
 Read `.claude/shared/benchmark-report-format.txt` as the single source for
@@ -37,6 +37,74 @@ steering overrides defaults: persist the requested names, goal, substrate,
 budgets, concurrency and acceptance rules rather than importing another run's
 special profile. Invocation authorizes running the requested slice and repairing
 infra; it does not approve a runtime/product fix or a different paid workload.
+
+## Current descent policy and batch schedule
+
+Start `/goal` yourself when the slice is resolved: all original benchmark tasks
+must pass every requested copy in one full-slice acceptance run. Never ask the
+user to invoke it. If `/goal` is unavailable, persist the same objective in
+`state.json` and continue. Read `/benchmark` before **every** benchmark launch,
+including dry runs, batches, reruns, outcome proofs and acceptance. Delegated
+launch owners read it before their first `scripts/run-bench` call.
+
+A **batch size** counts distinct benchmark task names in one CLI launch, not
+`-k` copies. At `-k 3`, 20 tasks schedule 60 copies. Start with 20 tasks, order
+unvisited tasks by shortest effective timeout first (catalog timeout, then
+recorded runtime, then CLI default), and keep tasks with similar timeouts in
+the same batch. If a batch finishes with infra errors on fewer than 5% of its
+originally scheduled copies, increase the next batch size by 10 tasks up to
+70; otherwise keep the size. Rotate to the next task set every 5 iterations;
+repeat the same task set until then. An iteration is one batch run and its fix
+round. Record iteration number, task names, size, `-k`, concurrency, infra
+numerator/denominator, and rotation cursor in state. Never change a task's
+timeout to fit a batch. The CLI's provider capacity bounds **simultaneous
+copies**: cap `--concurrency` to the verified provider limit and let excess
+copies queue within the same launch. If the CLI refuses that shape, preserve
+the task count and use the smallest supported number of concurrent CLI launches
+while retaining one logical batch and its fixed denominator.
+
+After each run, triage every error and dispatch one fix sub-agent per independent
+INFRA or HARNESS cluster, largest member-task count first. Admit at most 8
+clusters per iteration; carry the rest forward in rank order. No per-fix user
+approval pauses the loop. Give each fix its own row-tagged commit so it can be
+ablated. Apply harness, orchestration, prompt, or runtime-context changes only
+when an independent cross-reference review returns `GROUNDED` for the exact
+snapshot, with every changed hunk tied to opened reference evidence showing the
+same mechanism and comparable limits. Partial support, memory citations,
+read gaps, and weak divergences fail this gate. Rework once against changed
+bytes or return to `/RCA`; keep unsupported candidates unapplied.
+
+Never change a task definition (prompt, evaluator or rubric, expected tools,
+fixtures/environment, pass criteria, timeout, load, concurrency, price cap)
+unless a fresh read-only cross-reviewer, independent of triage and fix authors,
+quotes the exact defect and proves from trajectories that the definition caused
+a valid failure or admits mutually exclusive correct outcomes. Pass-rate
+variation alone is stochastic evidence and does not qualify. The only allowed
+edit is the smallest correction restoring the task's original intent; never
+loosen criteria, remove a requirement, raise a timeout, or rename a task to
+make it pass. Record the verdict and evidence. CLAUDE.md rules 25 and 26a still
+require Andy's explicit keep for such changes at final review.
+
+At `ITERATION_RETRO` after every run, read `scripts/descend_step_log.py report`
+and the iteration clocks. Name the critical-path slowest step and apply one
+concrete speedup for the next iteration (or record why none exists). Show it in
+the scorecard ISSUES / NEXT ACTION and move reusable learning into the owning
+runbook. Keep task contracts and provider caps intact.
+
+Keep fixes on the descent branch and transport that exact source to benchmark
+runners through supported branch/patch transport. A commit or push is not a
+deployment. Run `/deploy` only if a change directly affects production
+infrastructure that benchmarks exercise and branch-source runs cannot test;
+record the failed alternatives and why the roughly 3-hour deployment is needed.
+
+Continue until every original task passes every `-k` copy in one full-slice run.
+Then present **one** `FINAL_CHANGE_REVIEW`: exact diffs for every change, ranked
+by an independent reviewer with the smelliest first. Andy chooses keep or
+ablate for each; revert chosen ablations and rerun their tasks and the full
+slice. A task-definition edit is ablated without Andy's explicit keep. Preserve
+all other safety, evidence, RCA, scorecard and cleanup rules below. Older
+HARNESS_FIX_DECISION, DEPLOY_ADMIN_APPROVAL and per-fix deploy instructions in
+this command are superseded by this policy.
 
 ## The iteration loop
 
@@ -59,7 +127,7 @@ infra; it does not approve a runtime/product fix or a different paid workload.
    once, batch blocking findings and reuse verified unchanged dependencies. A
    second review needs changed bytes, a failed check or a named unresolved risk.
    Do not add bookkeeping acknowledgements, unrelated gates or a full `/deploy`
-   before the next useful experiment. Human approval blocks only its scoped action.
+   before the next useful experiment. Final review follows full-slice acceptance; unavoidable production approvals block only their scoped action.
 5. **Sleep when the critical owners are working and no useful independent work
    remains.** Operational monitors and workers continue. Wake for actionable
    events or every **15 minutes**; inspect evidence, send the full scorecard,
@@ -69,7 +137,25 @@ infra; it does not approve a runtime/product fix or a different paid workload.
    narrow, split, reassign or change the experiment; do not merely report it again.
 6. **Rerun the original authorized experiment after verified critical repairs.**
    Leave unrelated RCA lanes moving. Repeat this loop until the requested goal
-   passes, then finish the normal deployment, durable publication and owned cleanup.
+   passes, then finish final change review, durable publication and owned cleanup.
+
+Between bug-fix sessions, run the affected owning tests, then rerun the same
+original authorized benchmark. A full `/deploy` is not required between fixes.
+If the benchmark actually depends on changed deployed code, satisfy only that
+necessary deployed prerequisite before the rerun; do not automatically make the
+whole release a prerequisite. An already active deployment may finish in
+parallel. Preserve the original benchmark contract, scoped approvals and normal
+production-release requirements.
+
+Use `scripts/run-bench` from the worktree containing the approved fixes; do not
+wait for production deployment to make local source available. `--local` runs
+that worktree's code. The default cloud path stages a verified workspace patch
+where supported; sharded runs such as the same-60 require a clean, pushed commit
+and check out that exact source on controllers and guests. Commit/push for cloud
+source transport is not deployment. Verify the executed source and preserve the
+original substrate, task arguments and budgets. A configured external authority
+is a separate runtime dependency: distinguish its missing API from missing
+local fixes, and do not bypass shared state or authentication to obtain a run.
 
 Parent sleep, user questions and scorecard edits do not pause active workers.
 Preparing a command, passing a diagnostic and completing an evidence packet are
@@ -77,8 +163,7 @@ substeps; they do not reset the overall RCA scope or establish outcome progress.
 
 ## Canonical human-approval format
 
-Both planned user-input gates, and any unplanned human approval permitted by
-the composed commands, must follow `.claude/shared/approval-format.md`.
+FINAL_CHANGE_REVIEW and any unavoidable production infrastructure approval must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
 replace the shared Before Behavior, After Behavior, How, TL;DR, Evidence, Detail,
@@ -89,9 +174,7 @@ and Downstream Implications sections or their code-block presentation.
 1. **No reward hacking.** Never change a benchmark definition, prompt, expected
    tools, pass criteria, load size, timeout, concurrency, price cap, or
    production behavior merely to make it pass. Never weaken a repro assertion
-   or hide a failed primary path behind a fallback. If a task contract appears
-   wrong, do not edit it; represent that proposal as a HARNESS row at
-   HARNESS_FIX_DECISION.
+   or hide a failed primary path behind a fallback. If a task contract appears wrong, route it to TASK_DEFINITION_REVIEW before any minimal correction.
 2. **No RCA without the hard proof pair.** Before a fixed candidate's
    outcome-proof benchmark rerun, the RCA
    must have a local owning-boundary repro actually observed failing on the
@@ -119,9 +202,7 @@ and Downstream Implications sections or their code-block presentation.
 5. **Infra is in scope.** RCA and fix every harness, fleet, credential plumbing,
    capacity, teardown, and control-plane failure. Never kill a benchmark fleet
    not launched by this session.
-6. **Exactly two planned user-input gates.** HARNESS_FIX_DECISION gates only
-   the affected runtime/product fix; DEPLOY_ADMIN_APPROVAL gates only its
-   approval-scoped deploy action. All human requests are delivered by the main
+6. **One final user review.** FINAL_CHANGE_REVIEW presents every applied change and its exact diff after the full slice is green. All human requests are delivered by the main
    thread, never by a worker. Neither gate pauses unrelated benchmarks,
    infra repairs or other clusters. Do not ask
    Andy to prioritize independent work, choose between safe implementation
@@ -154,8 +235,7 @@ and Downstream Implications sections or their code-block presentation.
     cluster — a singleton included — enters its own `/RCA` cycle. Give one
     worker ownership of each independent cluster, not one fixer per task.
     Require the unchanged owning-boundary repro red then green and cement it.
-    A HARNESS fix needs main-thread approval before applying it to benchmark
-    execution or production; an INFRA fix does not require approval. That
+    A HARNESS fix on protected surfaces needs the exact-snapshot strong grounding pass before applying it; an INFRA fix does not require that review. That
     exact rerun supplies `/RCA`'s benchmark outcome proof for every member.
     No fixed task may be reported Confirmed before that proof. An ordinary
     unchanged next slice may run while RCA/proof/approvals are pending;
@@ -175,7 +255,7 @@ and Downstream Implications sections or their code-block presentation.
     Exactly 5% disqualifies the run. Verify the critical repairs before its next
     authorized experiment; preserve the failed run and original breach. Ordinary
     task failures, unrelated open RCAs,
-    unresolved approvals, deploys and missing optional metrics add no gate.
+    unresolved final-review items and missing optional metrics add no next-batch gate.
     Native resource admission, exact owned cleanup, explicit user stops and
     authorized scope/budgets still apply; report their actual constraint.
 13. **One pass does not confirm a fix for a task that already passes
@@ -567,46 +647,21 @@ incomplete `/sync` blocks that RCA, rerun, or handoff—not unrelated active wor
 ## State machine
 
 ```text
-RESOLVE_SLICE
-  → SYNC_CHECKPOINT → RUN_SLICE
-  → OBSERVE / CLASSIFY_RESULTS (as results and errors arrive)
-      ├─ TRIAGE_FAILURES → CLUSTER_FAILURES → independent repair lanes
-      │    ├─ INFRA → SYNC_CHECKPOINT_PER_RCA → RCA_INFRA_FIX
-      │    │           → VERIFY_LOCAL → APPLY_AND_CLOUD_RERUN (no approval)
-      │    └─ HARNESS → SYNC_CHECKPOINT_PER_RCA
-      │                 → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL
-      │                 → RANK_CLUSTERS → PIPELINE_CLUSTERS
-      │                 → main-thread HARNESS_FIX_DECISION [GATE 1]
-      │                 → approved APPLY_AND_CLOUD_RERUN
-      │    Both: every member + canaries → confirmed ENQUEUE_DEPLOY_UNIT
-      │          failed proof → original evidence → re-triage / split / RCA
-      ├─ infra-failed jobs >=5% of original scheduled total (30/600)
-      │    → STOP_EXACT_OWNED_RUN → CLUSTER_FAILURES / PARALLEL_RCA
-      │    → VERIFY_CRITICAL_REPAIRS → next authorized original RUN_SLICE
-      └─ terminal slice below 5% → next authorized RUN_SLICE / FULL_SLICE_ACCEPTANCE
-
-MAIN:   monitor current tasks, dispatch/review repairs, deliver approvals,
-        and run the next authorized slice without awaiting unrelated lanes
-
-DEPLOY: prepare isolated fix-only worktree → /deploy
-        ├─ no admin approval required → merge → verify production
-        └─ admin approval required → main-thread DEPLOY_ADMIN_APPROVAL [GATE 2]
-                                   → merge → verify production
-
-FULL_SLICE_ACCEPTANCE
-  ├─ any non-pass → CLASSIFY_RESULTS
-  └─ requested goal + confirmed deploys complete → DONE
+RESOLVE_SLICE → START_GOAL → SYNC_CHECKPOINT → RUN_BATCH
+  → OBSERVE / CLASSIFY_RESULTS → TRIAGE_FAILURES → CLUSTER_FAILURES
+  → RANK_BY_MEMBER_COUNT → DISPATCH_UP_TO_8_PARALLEL_RCA_FIXES
+  → TASK_DEFINITION_REVIEW (only proposed task edits)
+  → STRONG_GROUNDING_REVIEW (only harness/orchestration/prompt/context edits)
+  → VERIFY_LOCAL → APPLY_AND_CLOUD_RERUN → ITERATION_RETRO
+  → NEXT_BATCH_OR_ROTATION → FULL_SLICE_ACCEPTANCE
+  → FINAL_CHANGE_REVIEW → APPLY_ABLATIONS → RERUN_FULL_SLICE → DONE
 ```
 
-HARNESS_FIX_DECISION pauses only that candidate's application/outcome proof.
-Other ready requests may be delivered independently, and approved workers keep
-running. DEPLOY_ADMIN_APPROVAL pauses only that deploy unit. Infra holds stop
-the disqualified owned run and its unrepaired rerun, not independent campaigns
-or repair work. No lane waits for
-all clusters, an infra-zero run, complete optional metrics or all deployments.
-
-User input can be injected at any time and is applied at the next safe boundary,
-but the agent deliberately yields for input only in the two states above.
+An infra breach at `>=5%` of the original scheduled total stops only the
+exact owned run and sends its errors through the same cluster/fix loop. Keep
+unaffected tasks and owners moving. Only the final change review asks Andy to
+choose changes; an unavoidable production infrastructure `/deploy` retains its
+normal approval and verification rules.
 
 ## Benchmark and background repair loop
 
@@ -687,7 +742,7 @@ while the requested goal still has authorized work:
         remove a wait, narrow/reassign a stall or add useful parallel work
         if the same blocker persists without new evidence, change the approach
         return to sleep if the critical owners still need time
-    once the requested goal passes: complete normal deploy/publication/owned cleanup
+    once the full slice passes: complete FINAL_CHANGE_REVIEW, ablation rerun, publication and owned cleanup
 ```
 
 Do not stop for Andy to fix infra. Below 5%, unrelated infra RCAs, runtime
@@ -777,6 +832,32 @@ recurrences. Add each card to an existing cluster by the same rules before
 creating a new one. If a task has two independently observed causes, preserve
 both memberships. An unknown cause remains an Observability Gap singleton.
 
+### Independent golden-reference review
+
+As soon as end/error clusters are known, start one independent read-only
+Explore subagent in parallel with RCA owners to review the current clusters
+against locally available golden references. Reuse that reviewer for new
+clusters or changed membership/first-bad boundaries; do not duplicate fix
+owners or block unrelated work. Give it exact cluster members, first-bad
+boundaries, exemplar evidence, and immutable source revisions.
+
+Route repository, reference, and evidence retrieval through the designated
+Explore agent; main and fix owners consume its evidence packet and request
+missing reads there. Reviewers may inspect actual diffs for review. For each
+cluster, check exact prompt copy, exact hyperparameters (including timeout and
+truncation limits with units), and critical new tools verbatim. Return an
+exact-match, partial, no-support, or read-gap disposition for each category,
+with necessary excerpts or exact values, paths/revisions, native integration
+constraints, and any required full-tail retrieval compatibility. Distinguish
+unavailable/unread source from a negative finding; do not refetch without
+network authorization.
+
+Golden references inform a candidate; they do not establish causality or
+authorize prompt/tool changes, relaxed budgets, or blind copying. Preserve
+existing approvals, RCA red/green proof, registered tests, and exact-task
+outcome proof. Return findings to main in the existing cluster handoff, not a
+new service, framework, or approval gate.
+
 ### Delegate cluster ownership
 
 Use managed delegated threads on boxes.dev through the
@@ -793,16 +874,13 @@ unchanged causal repro failing before/passing after, cemented regression,
 case-file validation, exact member outcome proofs, and a diff/commit handoff.
 An evidence gap stays open; a time budget never authorizes guessed repairs.
 
-Workers prepare candidate fixes and proof in their isolated worktrees. INFRA
-workers repair and verify without human approval. HARNESS workers return the
-canonical approval packet to the main thread; they do not ask the user,
-change the active benchmark snapshot, or deploy the candidate themselves.
-Return deploy-guard packets to main as well. The parent reviews the actual
-diff/proof, delivers each request, and forwards the user's exact decision for
-that snapshot. Existing explicit approval is honored; no duplicate request.
+Workers prepare candidate fixes and proof on isolated branches. INFRA workers
+repair and verify directly. HARNESS workers return the exact diff and grounding
+packet to the main thread. The parent applies only grounded protected-surface
+fixes, keeps each fix in a row-tagged commit and collects diffs for final review.
 
 Under `/descend`, its parent owns application, exact cloud outcome-proof and
-deploy dispatch; this scopes `/RCA`'s standalone fix-and-deploy default. Do not
+branch-source dispatch; this scopes `/RCA`'s standalone fix-and-deploy default. Do not
 let a worker independently launch overlapping paid validation/deploy work or
 declare a benchmark fixed from its local causal repro.
 
@@ -830,20 +908,16 @@ Only after CLUSTER_FAILURES:
    triage search finds the cluster by task name.
 
 At this boundary the owning-boundary RCA is causally proven, but the benchmark
-RCA is not outcome-complete yet. Do not apply the runtime candidate to the
-benchmark here or label the row Complete. Rank ready clusters incrementally;
-enter main-thread HARNESS_FIX_DECISION for each ready idle cluster with
-Causal proof; outcome pending. After approval, the exact
-unchanged local-snapshot benchmark rerun of every member either supplies the
-missing outcome proof and completes the RCA or becomes new primary evidence for
-the tasks that still fail.
+RCA is not outcome-complete yet. Complete the required strong grounding review
+for protected surfaces before applying the candidate. Then rerun every member
+on the exact branch snapshot; that unchanged benchmark supplies outcome proof
+or new primary evidence for tasks still failing.
 
 Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
 ## Cluster queue
 
-Run every resolved task in parallel, fix infra without approval, triage all
-errors and RCA each independent cluster. Rank the clusters as they become
+Run the selected batch at verified provider capacity, triage all errors and RCA each independent cluster. Rank the clusters as they become
 ready. Never wait for an infra-clean run or every other RCA to finish.
 
 The queue holds clusters, not tasks. Sort it by:
@@ -853,7 +927,7 @@ The queue holds clusters, not tasks. Sort it by:
 2. complexity class, easiest first, from the table below; then
 3. row ID.
 
-Infra and External Blocker never enter the runtime-fix approval queue; keep
+Infra and External Blocker remain in the same ranked cluster queue; keep
 their repair/observability states in the same durable cluster ledger.
 
 | Rank | Complexity class          | Issue classes                                                                  |
@@ -868,71 +942,38 @@ merge. Between those events the order is stable, and a cluster whose
 outcome-proof rerun fails keeps its position.
 
 A cluster is **idle** when it is not applying, outcome-rerunning, or in RCA.
-Deliver the top ready idle cluster's request in the main thread. A
+Dispatch the top ready idle cluster to an available fix owner within the eight-slot iteration cap. A
 lower-ranked ready cluster is not held behind a higher-ranked cluster still
 collecting evidence or awaiting a different decision. Deliver each independent
 request with its own snapshot ID and full canonical approval packet.
 
-Do not retract a delivered request when the queue changes. Deliver newly ready
-independent requests without waiting for an earlier answer; use the current
-rank when choosing among requests ready at the same boundary.
+Do not retract a dispatched fix when the queue changes. Dispatch newly ready
+independent clusters without waiting for another owner; use the current rank
+when choosing among clusters ready at the same boundary.
 
-## Stop 1 — HARNESS_FIX_DECISION
+## Strong grounding and task-definition reviews
 
-Enter HARNESS_FIX_DECISION for a ready cluster when that cluster has complete
-causal RCA proof: its own runtime evidence, unchanged owning-boundary repro
-red then green, a cemented test and a concrete reviewable candidate diff.
-Unrelated INFRA errors, running tasks and incomplete RCAs do not delay it.
+The independent golden-reference reviewer opens reference files and returns
+`GROUNDED` only when every harness, orchestration, prompt or runtime-context
+hunk matches a reference mechanism and comparable limits. Record exact
+revision, excerpt, hunk mapping and verdict in the cluster row. Do not apply a
+weaker candidate. A changed candidate may receive one fresh review; otherwise
+return to `/RCA` and keep the cluster open.
 
-After the queue is ranked, enter HARNESS_FIX_DECISION whenever the top idle
-cluster needs a fix decision.
-Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
-incomplete, keep that cluster in RCA_HARNESS_FAILURES_IN_PARALLEL and gather
-its missing proof autonomously. Other ready clusters proceed. The exact
-post-fix benchmark outcome
-remains explicitly pending until the harness fix is approved (by Andy or a
-`GROUNDED` golden review). An
-exhausted external blocker follows Hard rule 7; it does not become a
-user-response gate.
+For proposed task edits, use a separate read-only cross-reviewer who did not
+author the fix or triage. Its `TASK_DEFINITION_DEFECT` verdict must quote the
+flaw and demonstrate a valid trajectory failed because of it, or two mutually
+exclusive correct outcomes. `STOCHASTIC` and `UNPROVEN` forbid the edit. Record
+the reviewer, quoted evidence and smallest correction in state, and mark it
+for Andy's explicit keep in FINAL_CHANGE_REVIEW.
 
-Main first runs the shared Golden-reference adversarial review on the
-packet. `GROUNDED` sets Approval to Fix approved (golden review) and follows
-**approve** below without asking Andy. Otherwise main delivers the canonical
-request with Causal proof; outcome pending and the `Golden review:` verdict, then
-continues independent work. Andy responds with the request ID and approve,
-edit, or reject. Infra rows use Not required. Workers never open their own
-human approval request. A pending decision gates only its candidate.
+## Rerun and branch-source transport
 
-- **approve:** set Approval to Fix approved. Immediately fire a sub-agent to
-  apply the approved fix on a local code snapshot — not a prod deploy — and
-  rerun every member task of that cluster on the **cloud fleet** via
-  `scripts/run-bench <task> [<task>...]` (no `--local` unless Andy explicitly
-  directed local for this rerun). Deliver the next ready request without
-  waiting for that outcome-proof run.
-  The sub-agent then follows "Reading the outcome proof" below.
-- **edit:** set Approval to Edit requested, apply the instruction, return the
-  row through the identical owning-boundary verification gate, and ask again at
-  the same position.
-- **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
-  fix. The cluster keeps its position and needs a new RCA for a different
-  approach.
-
-The harness-fix decision does not satisfy any later prompt or terminal-behavior
-admin approval. Those approvals are snapshot-scoped inside /deploy.
-
-## Rerun and parallel deploy
-
-On each approve, immediately start that cluster's outcome-proof run on the
-**cloud fleet** (apply the fix in a local code snapshot / worktree, then
-`scripts/run-bench <task> [<task>...]` — never `--local` unless Andy opted in).
-Do not wait to batch approvals or rerun the whole failed subset first.
-Run `/sync` before every subset or full-slice rerun. The final acceptance run
-covers the entire original slice and also defaults to the cloud fleet.
-
-For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
-run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
-criteria identical to the failing run except for the exact approved fix. Never
-call the RCA complete from its owning-boundary proxy proof alone.
+After the required local repro and grounding review, apply each fix as its own
+row-tagged branch commit and run the unchanged affected tasks on the cloud fleet.
+Run `/sync` and read `/benchmark` before every subset or full-slice rerun. The
+final acceptance covers the entire original slice at the requested `-k`.
+Use supported branch-source transport; verify the executed source snapshot.
 
 ### What the outcome proof runs
 
@@ -976,74 +1017,23 @@ pass nor a failure of the fix: RCA it under the infra loop, then rerun only the
 runs it denied.
 
 - **Every member passes every required run and no canary fails:** set Real
-  rerun to Confirmed and RCA to Complete, then enqueue the deploy unit.
+  rerun to Confirmed and RCA to Complete, then retain the row-tagged fix for FINAL_CHANGE_REVIEW.
 - **The exemplar passes but a sibling fails:** the fix is real and the cluster
   was too wide. Split the failing siblings out, confirm the row for the tasks
-  that passed, and enqueue its deploy unit. The split tasks return to
+  that passed, and retain its fix for FINAL_CHANGE_REVIEW. The split tasks return to
   TRIAGE_FAILURES with their post-fix run as primary evidence.
 - **The exemplar fails a required run:** set Real rerun to Failed and rerun
   `/rca` for the cluster from that run. The cluster keeps its position.
 - **A canary fails:** set Real rerun to Failed and name the regressed task in
-  the Issue cell. The fix does not deploy until that failure is root-caused
+  the Issue cell. The fix does not enter final acceptance until that failure is root-caused
   from the canary's run. If its RCA proves a cause independent of the fix, the
   canary becomes its own cluster and the original row is Confirmed.
 
-A fix earns deployment only after:
-
-- its local RCA repro passes unchanged;
-- its test is cemented;
-- Andy accepted it when it is a HARNESS fix; and
-- a real benchmark rerun confirms the affected member tasks or infra boundary,
-  with every required run passing and no canary failing.
-
-Create one deploy unit per independent fix, or the smallest group of fixes that
-must ship together. Run `/sync`, then record base_sha and exact fix_commits.
-Prepare a clean isolated worktree containing only that unit and start a
-background sub-agent running /deploy. This fix-only handoff is mandatory because
-/deploy ships its entire worktree.
-
-Before starting that worker, hydrate and provision the isolated worktree from
-the controller. This creates a persistent child identity and collision-free
-port range, links the controller's local credential files, installs missing
-dependencies, and starts a Postgres container owned by the child worktree:
-
-```bash
-bash scripts/prepare-deploy-worktree.sh \
-  --worktree "$DEPLOY_WORKTREE" \
-  --source "$(git rev-parse --show-toplevel)"
-```
-
-Require this command to pass before the worker starts. Never run the controller's
-`scripts/setup-db.sh` from the child: an inherited Conductor identity can reset
-the controller database. Database cleanup or reclamation is a separate RCA; the
-preflight fails closed instead of deleting an existing mismatched container.
-
-The main controller does not block on deploys. It continues remaining RCAs and
-reruns, actively tracks every deploy worker, and updates the lifecycle ledger.
-If another deploy merges first, remaining deploy units sync origin/main and
-rerun their required gates.
-
-## Stop 2 — DEPLOY_ADMIN_APPROVAL
-
-Each deploy unit runs /deploy's prompt and agent
-recovery/terminal-behavior guards.
-
-- If neither guard requires approval, preserve Fix approved for accepted HARNESS
-  rows or set Not required for INFRA rows, then continue without stopping.
-- If a guard requires approval, run the shared Golden-reference adversarial
-  review. `GROUNDED` sets the rows to Deploy approved (golden review) and the
-  deploy continues. Otherwise set all affected rows to
-  Deploy approval, return the full packet to the main thread to show the exact
-  snapshot-scoped diff, and pause only
-  that deploy unit.
-- After Andy approves that exact diff, set the rows to
-  Deploy approved and resume the deploy.
-- If a later change modifies an approval-gated hunk, return the affected deploy
-  unit to Deploy approval with a new snapshot ID.
-
-Credential, billing, quota, review-service, or provider failures remain scoped
-deploy blockers. Continue unrelated work and show the blocker in Deployed;
-do not turn them into ad hoc prioritization questions.
+A fix is eligible for the final change set only after its unchanged local
+repro passes, its regression is cemented and its required exact-task outcome
+proof passes. A direct production-infrastructure change that the benchmark
+cannot exercise from branch source follows `/deploy` and its normal guards;
+all other fixes remain on the descent branch for FINAL_CHANGE_REVIEW.
 
 ## Response contract
 
@@ -1091,58 +1081,25 @@ infra result allows the next slice; it does not mean all tasks passed, all fixes
 are proven or all resources released. Recovery/proof attempts and errors stay
 visible even when their failure is accepted for a separate infrastructure goal.
 
-### Main-thread approvals
+### Final change review
 
-All HARNESS_FIX_DECISION and DEPLOY_ADMIN_APPROVAL requests are emitted by the
-main thread using `.claude/shared/approval-format.md`, separate from progress
-cards, only after its Golden-reference adversarial review did not clear them. Read that file completely before composing a request. Use its seven
-sections (How: immediately before TL;DR:), exact inline diff, durable
-failing-run evidence, pre/post causal measurements, golden reference, full
-unchanged exemplar task prompt, required Links list and explicit decision
-syntax (`Approve: <row ID> approve`).
-
-The core claim identifies the issue class and proven first-bad boundary: the
-issue is the measured root cause, not a timeout label. State the wrong observed
-value, expected value and identical repro now passing. Label the packet
-Causal proof; outcome pending when benchmark verification is deferred until
-approval. Do not imply that causal proof guarantees the benchmark will pass.
-List each member's own observed boundary evidence, exact task name, FE evidence
-and required proof runs; a sibling count alone is insufficient.
-
-Use one complete approval block and ID per independent snapshot decision. Two
-ready runtime clusters can have two separate requests in the main thread;
-never bundle their diffs under one blanket approval or hide the second behind
-an unanswered independent request. Record each delivered request and decision
-in state. Duplicate cluster occurrences update the same request/ledger row;
-changed gated hunks need a new snapshot decision. No human fix request is
-created for an ordinary INFRA repair.
-
-The main thread continues monitoring, infra repair and authorized next slices
-while decisions are pending. Only the affected candidate or deploy action
-waits. Report Completed benchmark goal separately from RCA/outcome/deploy
-completion; a progress card or approval request does not end authorized work.
+After the full-slice acceptance passes, an independent reviewer ranks all
+row-tagged commits by smell and risk. The main thread presents each exact diff
+inline with its causal and outcome evidence. Andy chooses keep or ablate for
+each. A task-definition correction requires explicit keep under CLAUDE.md rules
+25 and 26a. Revert every ablated change, rerun its affected tasks and the full
+slice, and repeat repair if green is lost. Do not ask after individual fixes.
 
 ## Done
 
-Completion follows the persisted user goal. For an ordinary descent:
-
-- every original task has a trustworthy pass on a full-slice acceptance rerun;
-- every in-scope owned error cluster has been repaired and its required causal
-  and outcome proofs are complete, or has an explicitly recorded unresolved
-  disposition accepted by the user;
-- every RCA repro is cemented in its owning consistently-run suite;
-- every accepted and real-rerun-confirmed fix is deployed and production-verified;
-- no required approval, outcome proof or deploy unit remains unfinished; and
-- controller exit, final publication and exact resource release are verified,
-  with the full ledger and measured duration preserved and the final scorecard
-  emitted.
-
-An explicitly infrastructure-only or consecutive-slice goal uses the user's
-acceptance rule, retaining genuine task FAILs and actual infra rates. Do not
-add a zero-infra goal, a full-financial-proof goal or another acceptance gate.
-Goal credit never substitutes for outcome proof or verified resource release.
-Keep remaining authorized repairs/deploys moving and label their state honestly.
-Do not enable a cron or expand the paid workload without a user request.
+Completion requires every original task passing every requested copy in one
+full-slice acceptance run; all error clusters causally repaired and outcome
+proved or explicitly dispositioned; cemented regressions; FINAL_CHANGE_REVIEW
+completed with every chosen ablation applied and the full slice rerun green;
+and controller exit, final publication and exact resource release verified.
+Keep genuine task failures and infra reliability separate in the final
+scorecard. Do not add a new acceptance gate or paid workload beyond the
+requested scope.
 
 For fleet publication/cleanup regressions, follow the canonical benchmark CLI
 and `scripts/tests/benchmark-live-results.test.py`, not a private replacement

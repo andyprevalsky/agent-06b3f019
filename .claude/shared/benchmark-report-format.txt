@@ -112,6 +112,11 @@ Measurement contract
   reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
   replace the old standalone active-run/progress/cost blocks. A live experiment
   ends RUNNING; an unknown historical end reads END UNRECORDED, not capture time.
+- Once a goal has more than three launched experiments, show SUCCESS RATE OVER
+  TIME above the latest-three rows. Plot task PASS divided by scored tasks for
+  every experiment in goal order. Leave experiments with no scored tasks as
+  gaps, and draw a still-running experiment's point hollow. The text fallback
+  lists the same percentages and gaps.
 - Progress counts refer to scheduled logical members, not child agents or retries:
   QUEUED + IN_PROGRESS + COMPLETED = requested total. Queued has not started;
   in_progress includes startup, execution and evaluation before a terminal outcome;
@@ -181,6 +186,8 @@ Cost <metered or UNMETERED> · <unmetered providers> UNMETERED
 Cache <rate and denominator or UNMEASURED> · LLM latency <UNMEASURED or measured>
 Lifecycle
   <✅/🔴/🟠/🔵> <release, controllers, exports, results, publication evidence>
+SUCCESS RATE OVER TIME (only after >3 experiments)
+  #<n> <task pass % | gap> [running]
 LAST 3 EXPERIMENTS
   #<n> <state> <label> · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>
 ACTIVE SUB-AGENTS / PARENT

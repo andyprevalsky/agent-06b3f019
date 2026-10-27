@@ -223,6 +223,25 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(data["history"][1]["outcomes"]["INFRA"], 14)
         self.valid(data)
 
+    def test_success_rate_trend_after_four_experiments(self):
+        data = render(self.f.sharded(), self.f)
+        data["trend"] = [
+            {"number": 1, "rate": .25, "running": False},
+            {"number": 2, "rate": None, "running": False},
+            {"number": 3, "rate": .75, "running": False},
+            {"number": 4, "rate": 1.0, "running": True},
+        ]
+        document = self.valid(data)
+        self.assertIn("SUCCESS RATE OVER TIME", document)
+        self.assertIn("Experiment #4: 100.0%", document)
+        self.assertIn('class="dot running"', document)
+        self.assertEqual(document.count('class="path"'), 1, "unscored experiment breaks the line")
+        fallback = CARD["render_text"](data)
+        self.assertIn("#2 gap", fallback)
+        self.assertIn("#4 100.0% (running)", fallback)
+        data["trend"] = data["trend"][:3]
+        self.assertNotIn("SUCCESS RATE OVER TIME", self.valid(data))
+
     def test_native_audit_presence_and_absence(self):
         admission = self.f.sharded(audit=False)
         no_audit = render(admission, self.f)["experiment"]

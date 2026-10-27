@@ -880,6 +880,17 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     if not mine:
         history.insert(0, _history_row(dict(exp, number=None)))
         history = history[:3]
+    trend = []
+    if len(history_entries) > 3:
+        for entry in history_entries:
+            if mine and entry["id"] == mine["id"]:
+                item = exp
+            else:
+                path = Path(entry.get("run_dir") or "")
+                item = load(path, deep=False) if entry.get("run_dir") and path.exists() else _from_ledger(entry)
+            outcomes, scored = item.get("outcomes"), item.get("scored")
+            trend.append({"number": entry["number"], "rate": outcomes["PASS"] / scored if outcomes and scored else None,
+                          "running": item.get("state") == "RUNNING"})
     ended = [(h["ended_at"], h["label"]) for h in history if h.get("ended_at")]
     since = None
     if exp["state"] == "RUNNING":
@@ -898,7 +909,7 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
                            + "\n  ".join(stale))
     exp_issues = _issues(exp) + overlay_issues
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
-            "since": since, "experiment": exp, "history": history, "agents": agents,
+            "since": since, "experiment": exp, "history": history, "trend": trend, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
             "in_ledger": bool(mine)}
 
@@ -989,6 +1000,7 @@ ul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wr
 .hist{border-top:1px solid var(--line);padding:6px 0;font-size:13px}.hist:first-of-type{border-top:0}
 .hist .l1{display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:650}.hist .l2,.hist .l3{color:var(--muted);overflow-wrap:anywhere}
 .hist .l3{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.trend svg{display:block;width:100%;height:auto;max-height:180px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .path{fill:none;stroke:var(--ok);stroke-width:2}.trend .dot{fill:var(--ok);stroke:var(--ok);stroke-width:2}.trend .dot.running{fill:light-dark(#fff,#0d1117)}
 .agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}
 .agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}
 .agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}
@@ -1277,7 +1289,33 @@ def _history_html(card) -> str:
                       + "</div>")
     if not blocks:
         blocks.append('<div class="note">No launched experiments recorded.</div>')
-    return f'<section data-section="history"><h2>LAST 3 EXPERIMENTS</h2>{"".join(blocks)}</section>'
+    return _trend_html(card) + f'<section data-section="history"><h2>LAST 3 EXPERIMENTS</h2>{"".join(blocks)}</section>'
+
+
+def _trend_html(card: dict) -> str:
+    trend = card.get("trend") or []
+    if len(trend) <= 3:
+        return ""
+    width, height, left, top = 600, 150, 34, 10
+    usable_width, usable_height = width - left - 10, height - top - 22
+    x = lambda i: left + usable_width * i / (len(trend) - 1)
+    y = lambda rate: top + usable_height * (1 - rate)
+    parts = [f'<section data-section="trend" class="trend"><h2>SUCCESS RATE OVER TIME</h2>',
+             f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Task pass percentage by experiment; gaps mean no scored tasks">',
+             f'<line class="grid" x1="{left}" y1="{y(1):.1f}" x2="{width-10}" y2="{y(1):.1f}"/>',
+             f'<line class="grid" x1="{left}" y1="{y(0):.1f}" x2="{width-10}" y2="{y(0):.1f}"/>',
+             f'<text x="0" y="{y(1)+4:.1f}">100%</text><text x="8" y="{y(0)+4:.1f}">0%</text>']
+    for i in range(1, len(trend)):
+        a, b = trend[i-1], trend[i]
+        if a["rate"] is not None and b["rate"] is not None:
+            parts.append(f'<path class="path" d="M {x(i-1):.1f} {y(a["rate"]):.1f} L {x(i):.1f} {y(b["rate"]):.1f}"/>')
+    for i, item in enumerate(trend):
+        if item["rate"] is None:
+            continue
+        label = f'Experiment #{item["number"]}: {item["rate"]*100:.1f}%'
+        parts.append(f'<circle class="dot{" running" if item["running"] else ""}" cx="{x(i):.1f}" cy="{y(item["rate"]):.1f}" r="4"><title>{e(label)}</title></circle>')
+    parts.append('</svg><div class="note">Task pass % per run · hollow point = running · gap = no scored tasks</div></section>')
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------- text
@@ -1326,6 +1364,10 @@ def render_text(card: dict) -> str:
                  + " · LLM latency UNMEASURED")
     lines.append("Lifecycle")
     lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
+    if len(card.get("trend") or []) > 3:
+        lines.append("SUCCESS RATE OVER TIME")
+        lines.append("  " + " · ".join(f'#{t["number"]} {t["rate"]*100:.1f}%{" (running)" if t["running"] else ""}'
+                                       if t["rate"] is not None else f'#{t["number"]} gap' for t in card["trend"]))
     lines.append("LAST 3 EXPERIMENTS")
     for h in card.get("history") or []:
         ho = h.get("outcomes") or {}
