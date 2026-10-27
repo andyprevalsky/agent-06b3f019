@@ -150,3 +150,29 @@ observations, then approved the reviewed regression and barrier in stages.
 ## Reusable lesson
 
 Hold the fixture operation until its intended contender has crossed the real admission boundary instead of assuming worker startup fits inside a timed overlap window.
+
+## October 27 failure-path follow-up during main integration
+
+Independent review of merged source4b1743934 found that the held owner promise
+had no rejection observer while the contender was awaited. A controlled native
+12-second contender startup exceeded the unchanged10-second owner deadline:
+Node reported unhandledRejection and exited before fixture cleanup, leaving one
+owned child, context/session and STARTED ledger. This schedule reproduces a
+failure path; it does not establish the historical production/load schedule.
+
+The fixture now immediately observes both operations with Promise.all while
+retaining the exact incompatibility, pending-owner and STARTED assertions in
+the contender task. Its finally still releases the owner. A registered
+incompatible-owner-timeout scenario keeps the10-second deadline and12-second
+fault input; only this explicit negative control expects the precise fixture
+timeout error, joins both children and verifies server closure plus zero exact
+context/session/ledger rows. Ordinary timeouts remain failures. All43 existing
+assertion calls are unchanged, with six new expected-error/cleanup checks.
+
+The same permanent control on old sequencing exited1 with unhandled rejection
+and retained resources; corrected sequencing exited0 with34 ordinary cases and
+two explicit expected-timeout controls, both providers reporting zero children
+and rows before observer cleanup. No supervisor cleanup was needed after green.
+Exact commands, source hashes and pre-cleanup receipts are retained under
+.context/deploy-fresh-20261027/independent-review/ir1-native. This repair changes
+only the test fixture; full combined coverage remains the deploy owner's gate.
