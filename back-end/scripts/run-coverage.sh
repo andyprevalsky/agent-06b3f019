@@ -595,7 +595,7 @@ SQL
   echo "Syncing Prisma schema to local test database..."
   bash "$SCRIPT_DIR/normalize-local-user-phones.sh" "$LOCAL_PSQL_URL" >/dev/null
   bash "$SCRIPT_DIR/backfill-local-message-record-owner.sh" "$LOCAL_PSQL_URL" >/dev/null
-  npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --skip-generate --accept-data-loss >/dev/null
   DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
   bash "$SCRIPT_DIR/apply-local-message-record-trgm-index.sh" "$LOCAL_PSQL_URL" >/dev/null
