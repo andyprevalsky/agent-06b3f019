@@ -19,6 +19,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { createLogger } from '../logger';
+import { retryWithBackoff } from '../retry';
 import { deleteEphemeral, liveEphemeralKeys, putEphemeral } from '../sharedState';
 
 const log = createLogger('SteelSessionIdentity');
@@ -79,7 +80,14 @@ const inFlight = new Map<string, number>();
  * expires with the TTL.
  */
 function sharedInFlightWrite(op: string, sessionId: string, write: () => Promise<void>) {
-  return write().catch((error: unknown) =>
+  // A transient error is retried briefly: without the row, another instance's
+  // reaper could release this session once it is ten minutes old.
+  return retryWithBackoff(write, {
+    maxRetries: 3,
+    fixedDelays: [100, 300, 900],
+    isRetryable: () => true,
+    component: 'SteelInFlightRegistry',
+  }).catch((error: unknown) =>
     log.warn('Shared Steel in-flight registry write failed', {
       op,
       sessionId,

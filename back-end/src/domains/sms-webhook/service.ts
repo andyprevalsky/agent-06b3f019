@@ -223,15 +223,22 @@ async function handleSupervisorFailure(input: SupervisorFailureInput): Promise<v
   });
 
   // Send error SMS as fallback. Gate on the same seq the run captured: if a
-  // newer SMS arrived during our run, stay silent — the newer run is
-  // responsible for the user reply.
+  // newer SMS (or a /clear, on any instance) arrived during our run, stay
+  // silent. Check and send under the per-user commit lock so a /clear cannot
+  // land between them.
   try {
-    const currentSeq = await repo.getInboundSeq(userId);
-    if ((currentSeq ?? 0) > mySeq) {
-      log.info('Error path: seq advanced, suppressing fallback SMS', { userId, mySeq, currentSeq });
-      return;
-    }
-    await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
+    await withCommitLock(userId, async () => {
+      const currentSeq = await repo.getInboundSeq(userId);
+      if ((currentSeq ?? 0) > mySeq) {
+        log.info('Error path: seq advanced, suppressing fallback SMS', {
+          userId,
+          mySeq,
+          currentSeq,
+        });
+        return;
+      }
+      await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
+    });
   } catch (smsError) {
     log.error('Failed to send error SMS', {
       error: smsError instanceof Error ? smsError.message : String(smsError),
