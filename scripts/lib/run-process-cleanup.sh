@@ -155,6 +155,45 @@ run_process_env_value_wait() {
   return 1
 }
 
+# Lexical (no filesystem access) normalization into the variable named <out>:
+# drops empty and `.` segments and resolves `..` against the preceding segment
+# (`/..` is `/`). Without it `<root>/../other` passed the `"$root"/*` prefix
+# test and a process outside the worktree looked owned (CodeRabbit, PR #1592).
+# A path containing a newline cannot be one argv/cwd token: fail closed.
+run_path_normalize() {  # <path> <out-var>
+  # Locals are prefixed: `printf -v` assigns through dynamic scope, so a local
+  # sharing the caller's <out-var> name would swallow the result.
+  local _rpn_in="$1" _rpn_seg _rpn_out="" _rpn_abs=""
+  local -a _rpn_parts _rpn_kept
+  _rpn_kept=()
+  [ -n "$_rpn_in" ] || return 1
+  case "$_rpn_in" in *$'\n'*) return 1 ;; /*) _rpn_abs=1 ;; esac
+  IFS=/ read -r -a _rpn_parts <<<"$_rpn_in" || true
+  for _rpn_seg in ${_rpn_parts[@]+"${_rpn_parts[@]}"}; do
+    case "$_rpn_seg" in
+      "" | .) ;;
+      ..)
+        if [ "${#_rpn_kept[@]}" -gt 0 ] && [ "${_rpn_kept[${#_rpn_kept[@]}-1]}" != ".." ]; then
+          unset "_rpn_kept[${#_rpn_kept[@]}-1]"
+        elif [ -z "$_rpn_abs" ]; then
+          _rpn_kept+=("..")
+        fi
+        ;;
+      *) _rpn_kept+=("$_rpn_seg") ;;
+    esac
+  done
+  for _rpn_seg in ${_rpn_kept[@]+"${_rpn_kept[@]}"}; do
+    _rpn_out="$_rpn_out/$_rpn_seg"
+  done
+  if [ -n "$_rpn_abs" ]; then
+    _rpn_out="${_rpn_out:-/}"
+  else
+    _rpn_out="${_rpn_out#/}"
+    _rpn_out="${_rpn_out:-.}"
+  fi
+  printf -v "$2" '%s' "$_rpn_out"
+}
+
 # Agent worktrees live INSIDE the canonical checkout (`.claude/worktrees/<n>`),
 # so a bare "$root"/* prefix test claims every nested worktree's processes as
 # this stack's. On 2026-10-26 a canonical-checkout sweep SIGTERMed a gate
@@ -162,8 +201,12 @@ run_process_env_value_wait() {
 # only when no directory between <root> (exclusive) and the path has its own
 # `.git` — i.e. it does not cross into a nested worktree or checkout.
 run_path_in_worktree() {  # <path> <root>
-  local path="$1" root="${2%/}" dir
-  [ -n "$path" ] && [ -n "$root" ] || return 1
+  local path root dir
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  run_path_normalize "$1" path || return 1
+  run_path_normalize "$2" root || return 1
+  # `/` (the old empty "${2%/}") never scopes a sweep.
+  [ "$root" != "/" ] || return 1
   case "$path" in
     "$root") return 0 ;;
     "$root"/*) ;;

@@ -44,6 +44,8 @@ export interface PanelGroup {
 export interface PanelCounts {
   total: number;
   running: number;
+  /** User-paused (resumable) nodes: never running, but the dock must stay reachable. */
+  paused: number;
 }
 
 export interface AgentPanelModel {
@@ -165,16 +167,18 @@ function withSpawnGoal(node: TreeNode | undefined, id: string, parent: string, g
 function countAll(groups: PanelGroup[], getChildren: (id: string) => TreeNode[]): PanelCounts {
   let total = 0;
   let running = 0;
+  let paused = 0;
   const seen = new Set<string>();
   const walk = (node: TreeNode) => {
     if (seen.has(node.agentId)) return;
     seen.add(node.agentId);
     total += 1;
     if (isRunningNode(node)) running += 1;
+    else if (node.status === 'PAUSED') paused += 1;
     getChildren(node.agentId).forEach(walk);
   };
   groups.forEach((group) => group.roots.forEach(walk));
-  return { total, running };
+  return { total, running, paused };
 }
 
 function runningFirst(nodes: TreeNode[]): TreeNode[] {

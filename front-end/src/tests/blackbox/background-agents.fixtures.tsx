@@ -1,8 +1,8 @@
 /**
  * Message builders for background-agents.blackbox.tsx: the rows a background
  * spawn posts (hidden "Started" row, live UI rows, completion notifications)
- * and three canned spawns (general purpose, for_each, explore), plus the dock
- * render used by the dock cases.
+ * and canned spawns (general purpose, for_each, explore, a user-paused
+ * browser), plus the dock render used by the dock cases.
  */
 import { render } from '@testing-library/react';
 import { vi } from 'vitest';
@@ -11,6 +11,7 @@ import { AgentContext } from '@/features/agent-context';
 import { BackgroundAgentsBanner } from '@/features/terminal-component-group/components/background-agents/BackgroundAgentsBanner';
 import type { Message } from '@/lib/api';
 import { makeAgentCtx } from './message-bubble.fixtures';
+import { makeAgentTreeNode } from './terminal-component-chips.fixtures';
 
 const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
 let seq = 0;
@@ -94,9 +95,91 @@ export const explore = () => [
   }),
 ];
 
-export function renderDock(messages: Message[], onNavigate = vi.fn()) {
+// The rows prod root 447576b9 posted for /root/order_breakfast_dd when Andy
+// paused the root (2026-10-26 16:08:51Z): the activity's cancel row, local
+// teardown, the manager's pause row (provider session id) and the
+// notification whose workflow status is "paused".
+export const pausedBrowser = () => [
+  started('call_br', 'browser', '/root/order_breakfast_dd', 'Place a breakfast order'),
+  row({
+    toolCallId: 'call_br',
+    toolName: 'spawn_browser_agent',
+    toolStatus: 'IN_PROGRESS',
+    excludeFromModel: true,
+    title: 'Clicking <a "Continue">',
+  }),
+  row(
+    {
+      toolCallId: 'call_br',
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'FINISHED',
+      excludeFromModel: true,
+      title: 'Browser Session Cancelled',
+      action_type: 'task_complete',
+      task_id: 't-br',
+    },
+    'Agent paused by user',
+  ),
+  row(
+    {
+      toolCallId: 'call_br',
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'FINISHED',
+      excludeFromModel: true,
+      title: 'Browser Session Closed',
+      action_type: 'task_complete',
+      task_id: 't-br',
+    },
+    'Browser session closed after teardown',
+  ),
+  row(
+    {
+      toolCallId: 'call_br',
+      toolName: 'spawn_browser_agent',
+      toolStatus: 'ERROR',
+      excludeFromModel: true,
+      title: 'Browser Session Paused',
+      action_type: 'task_complete',
+      task_id: 't-br',
+      session_id: 'kernel-sess-1',
+    },
+    'User paused the browser agent',
+  ),
+  row(
+    {
+      agentNotification: true,
+      toolName: 'agent_notification',
+      fromAgentAddress: '/root/order_breakfast_dd',
+      agentType: 'browser',
+      status: 'paused',
+      messageType: 'FAILED',
+      backgroundTaskId: 'call_br',
+      sessionId: 'kernel-sess-1',
+    },
+    'Message Type: FAILED\nTask name: /root\nSender: /root/order_breakfast_dd\nPayload:\nUser paused the browser agent\n\nSession ID: kernel-sess-1',
+    'USER',
+  ),
+];
+
+/** Root tree node whose Agent.backgroundTasks holds the breakfast browser task. */
+export const rootWithBrowserTask = (status: string) =>
+  makeAgentTreeNode({
+    agentId: 'root-1',
+    status: status === 'paused' ? 'PAUSED' : 'ACTIVE',
+    backgroundTasks: [
+      {
+        address: 'call_br',
+        path: '/root/order_breakfast_dd',
+        type: 'browser',
+        goal: 'Place a breakfast order',
+        status,
+      },
+    ],
+  });
+
+export function dockElement(messages: Message[], onNavigate = vi.fn()) {
   // Production mounts the dock inside the selected agent's AgentProvider.
-  return render(
+  return (
     <AgentContext.Provider value={makeAgentCtx({ selectedAgentId: 'root-1', messages })}>
       <TooltipProvider>
         <BackgroundAgentsBanner
@@ -105,6 +188,10 @@ export function renderDock(messages: Message[], onNavigate = vi.fn()) {
           onNavigate={onNavigate}
         />
       </TooltipProvider>
-    </AgentContext.Provider>,
+    </AgentContext.Provider>
   );
+}
+
+export function renderDock(messages: Message[], onNavigate = vi.fn()) {
+  return render(dockElement(messages, onNavigate));
 }
