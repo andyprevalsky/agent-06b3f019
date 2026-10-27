@@ -9,8 +9,17 @@
  * The browser half lives in rose-ui-cli-browser.test.ts.
  */
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
@@ -43,6 +52,7 @@ interface Cli {
   USERCONTENT_CSP: string;
   DEFAULT_BUDGETS: Record<string, number>;
   evaluateBudgets(result: unknown): Verdict;
+  rendererPids(rootPid: number, proc?: string): number[];
   traceMainThreadTasks(
     trace: Buffer,
     minMs: number,
@@ -320,6 +330,42 @@ test('long-task: page CPU or page-made blocking calls fail; host stalls fail unl
     })
   );
   assert.throws(() => cli.traceMainThreadTasks(noCpu, 50), /no thread CPU time/);
+});
+
+test('thread sampler finds renderers forked by any thread (Chromium launches from a launcher thread)', () => {
+  // Fake /proc: node 10 -> browser 20, whose launcher thread 21 forked the zygote 30 and, as with
+  // --no-zygote, renderer 40; the zygote's main thread forked renderer 31.
+  const proc = mkdtempSync(join(tmpdir(), 'rose-ui-proc-'));
+  const mkdirAndReturn = (dir: string) => {
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const pidDir = (pid: number, cmdline: string, kids: Record<number, number[]>) => {
+    writeFileSync(
+      join(mkdirAndReturn(join(proc, String(pid))), 'cmdline'),
+      cmdline.replace(/ /g, '\0')
+    );
+    for (const [tid, children] of Object.entries(kids)) {
+      writeFileSync(
+        join(mkdirAndReturn(join(proc, String(pid), 'task', tid)), 'children'),
+        children.map((c) => `${c} `).join('')
+      );
+    }
+  };
+  try {
+    pidDir(10, 'node rose-ui.cjs check', { 10: [20] });
+    pidDir(20, 'chrome-headless-shell --headless', { 20: [], 21: [30, 40] });
+    pidDir(30, 'chrome-headless-shell --type=zygote', { 30: [31] });
+    pidDir(31, 'chrome-headless-shell --type=renderer', { 31: [] });
+    pidDir(40, 'chrome-headless-shell --type=renderer', { 40: [] });
+    assert.deepEqual(
+      cli.rendererPids(10, proc).sort((x, y) => x - y),
+      [31, 40]
+    );
+    assert.deepEqual(cli.rendererPids(99, proc), [], 'an exited root has no renderers');
+  } finally {
+    rmSync(proc, { recursive: true, force: true });
+  }
 });
 
 test('frame stats and CLS session windows', () => {

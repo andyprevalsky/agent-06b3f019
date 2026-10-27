@@ -847,28 +847,49 @@ async function hostBaseline(browser, preview, viewport) {
 const SCRIPT_EVENTS = new Set(['FunctionCall', 'EvaluateScript', 'v8.evaluateModule', 'v8.callFunction', 'v8.run', 'RunMicrotasks', 'BlinkScheduler_PerformMicrotaskCheckpoint']);
 
 /**
+ * Chromium renderer processes descended from rootPid. /proc/<pid>/task/<tid>/children lists only
+ * the processes that thread forked, and Chromium launches children from a launcher thread (all of
+ * them with --no-zygote), so every thread of every process is followed.
+ */
+function rendererPids(rootPid, proc = '/proc') {
+  const children = (pid) => {
+    let tids;
+    try {
+      tids = fs.readdirSync(`${proc}/${pid}/task`);
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const tid of tids) {
+      try {
+        out.push(...fs.readFileSync(`${proc}/${pid}/task/${tid}/children`, 'utf8').split(/\s+/).filter(Boolean).map(Number));
+      } catch { /* thread exited */ }
+    }
+    return out;
+  };
+  const found = [];
+  const seen = new Set();
+  const stack = [rootPid];
+  while (stack.length) {
+    const pid = stack.pop();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    stack.push(...children(pid));
+    try {
+      if (fs.readFileSync(`${proc}/${pid}/cmdline`, 'utf8').includes('--type=renderer')) found.push(pid);
+    } catch { /* exited */ }
+  }
+  return found;
+}
+
+/**
  * Samples the scheduler state of every Chromium renderer main thread under this process
  * (Linux /proc) every ~2 ms, on the trace clock (CLOCK_MONOTONIC, microseconds). Returns
  * { stop() → samples[] | null }; null where /proc is unavailable.
  */
 function startThreadSampler() {
-  const children = (pid) => {
-    try {
-      return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').split(/\s+/).filter(Boolean).map(Number);
-    } catch {
-      return [];
-    }
-  };
   if (process.platform !== 'linux' || !fs.existsSync(`/proc/${process.pid}/task/${process.pid}/children`)) return { stop: () => null };
-  const renderers = [];
-  const stack = [process.pid];
-  while (stack.length) {
-    const pid = stack.pop();
-    stack.push(...children(pid));
-    try {
-      if (fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--type=renderer')) renderers.push(pid);
-    } catch { /* exited */ }
-  }
+  const renderers = rendererPids(process.pid);
   const samples = [];
   const sample = () => {
     const t = Number(process.hrtime.bigint() / 1000n);
@@ -1460,5 +1481,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS, USAGE,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, rendererPids, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };
