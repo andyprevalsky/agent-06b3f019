@@ -1,4 +1,4 @@
-# R1b proposal — runtime not applied
+# R1b implementation — explicit historical evidence exception
 
 Base: `b0853214450c5716f648a863c8003fede03361b2`.
 Proposed patch: [exact diff](2026-10-27-neutral-worker-hydration.patch), SHA256
@@ -48,9 +48,10 @@ not an end-to-end backend resume claim.
 
 ## Next exact proof
 
-Resolve the publication/recording approval boundary using surviving evidence or
-an explicit authorized exception; do not silently apply this patch. After
-full clearance, apply the exact snapshot, run owning gates, and push a separate
-row-tagged runtime commit. Only the parent coordinates the next unchanged paid
-cohort. Historical20 task FAILs remain FAILs; all20 native resources were
+The parent relayed explicit user authorization to clear this exact historical
+recording-evidence exception and apply reviewed snapshot `86e5c336` without
+production deployment or a paid rerun. The runtime was applied byte-for-byte;
+owning offline gates and file hashes are recorded in the case and handoff.
+The missing recording is preserved, not fabricated. Only the parent coordinates
+the next unchanged paid cohort. Historical20 task FAILs remain FAILs; all20 native resources were
 reported released by their launch owner.

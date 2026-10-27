@@ -60,7 +60,7 @@ credentials and do not justify inventing a realm for blank pages.
 
 ## Solution
 
-The proposed worker correction accepts a missing realm only when the caller
+The worker correction accepts a missing realm only when the caller
 supplies exact `about:blank` and the complete payload matches the backend's
 empty inventory with no password/passkey data or selected credential. It
 creates no secret refs, attempted auth paths or auth prompt section. Default
@@ -108,10 +108,29 @@ logs are retained under `.context/polar-r1b/`.
 The exact proposed patch SHA256 is
 `86e5c336f7b2673acbedcb29e044c45144a5e8e6b8f01b7c12045745c9c849da`.
 Independent reviewer `ph713pr5yxbgrhp4j9d1tdvvqh8h2c2y` marked each runtime
-hunk GROUNDED, but the full approval remains NOT_GROUNDED because the required
-recording validation fails (shared-agent API recovery is now complete). The patch has not been applied. I12 is
-investigating publication using the existing artifacts; no paid rerun was
-launched to obtain approval evidence.
+hunk GROUNDED. Full automatic approval remained NOT_GROUNDED solely because
+historical recording validation failed; shared-agent API recovery is complete.
+I12's authenticated provider replay lookup returned HTTP200 and an empty list
+at2026-10-27T20:39:19.387371Z (response SHA256
+`37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570`).
+No genuine recording existed to recover.
+
+The parent relayed explicit user authorization on2026-10-27 to proceed with
+this exact reviewed patch despite the historical recording-evidence gap:
+"auto fix all; approvals at end; never block on question; no full deploy or
+prod effects." The parent explicitly cleared this R1b exception and instructed
+application of exact `86e5c336` bytes. The four code/test file digests were
+verified against the independent review before and after application. The
+recording absence and original task FAILs remain preserved; this grants no
+PASS credit and no future recording-policy exemption. No paid rerun or
+deployment was launched.
+
+Applied-source verification: all50 credential controls passed in15.232s;
+eight native activity/JIT/redirect/quarantine controls passed in6.787s;
+Python compilation and all1178 RCA archive cases passed. Every applied
+runtime/test file SHA256 matches the independently reviewed snapshot. Full
+deployment qualification and unchanged task outcome proof remain pending.
+
 
 ## Human feedback
 

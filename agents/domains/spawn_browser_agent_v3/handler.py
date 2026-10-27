@@ -8083,6 +8083,7 @@ async def _spawn_browser_agent_activity_v3_real(
             has_write_lock_resume_state=write_lock_resume_state is not None,
         )
         reused_session_deadline: Optional[Tuple[str, float]] = None
+        credential_target_url = start_url
         if is_resume and task_id:
             is_auth_assistance_resume = (
                 write_lock_resume_state is not None
@@ -8187,6 +8188,10 @@ async def _spawn_browser_agent_activity_v3_real(
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
+            credential_target_url = (
+                session_info.get("current_url") or session_info.get("saved_url")
+                or session_info.get("start_url") or ""
+            )
             browser_activity_checkpoint(f"Resuming task {task_id}")
         else:
             browser_activity_checkpoint("Initializing browser session")
@@ -8516,13 +8521,14 @@ async def _spawn_browser_agent_activity_v3_real(
                 logger.info(f"Loaded {len(session_passwords)} passwords from session response")
             _realm_credential_state = await build_realm_credential_state(
                 {
-                    "auth_realm": auth_realm,
+                    "auth_realm": auth_options.get("realm", auth_realm),
                     "auth_options": auth_options,
                     "passwords": session_passwords,
                     "passkeys": session_passkeys,
                     "auth_credential_ref": session_credential_ref,
                 },
                 decryption_key=config.payment.decryption_key,
+                target_url=credential_target_url,
             )
             _auth_options_section = _realm_credential_state.auth_options_section
             _password_origins = _realm_credential_state.password_origins

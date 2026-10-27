@@ -25225,7 +25225,7 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
     ), completions[0]["message"]
 
 
-async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank"):
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
@@ -25258,6 +25258,22 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "user_settings": {},
     }
+    if neutral:
+        session_data.update(
+            auth_realm="",
+            auth_options={'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            passkeys=[], auth_credential_ref=None, current_url=resume_url, same_session_available=True,
+        )
+    final_url = "about:blank" if neutral else "https://example.com/cart"
     llm_step = AsyncMock(
         return_value={
             "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
@@ -25270,7 +25286,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     async def execute_step_while_deploy_lands(*args, **kwargs):
         executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
         env.worker_shutdown()
-        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+        return {"success": True, "message": "Scrolled down", "current_url": final_url}
 
     close_mock = AsyncMock()
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
@@ -25303,6 +25319,13 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
 
+    if neutral:
+        patch_targets.extend([
+            patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "about:blank", "title": ""})),
+            patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "about:blank", "screenshot": None})),
+            patch.object(_FakeDomService, "get_current_url", AsyncMock(return_value="about:blank")),
+            patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_data)),
+        ])
     with ExitStack() as stack:
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
@@ -25316,7 +25339,8 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
             task_id="task-1",
             output_schema={"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
-            start_url="https://example.com",
+            start_url="about:blank" if neutral else "https://example.com",
+            is_resume=resume,
         )
 
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
@@ -25332,8 +25356,8 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
     assert result["task_id"] == "task-1", result
     close_mock.assert_not_awaited()
-    assert result["current_url"] == "https://example.com/cart", result
-    assert "https://example.com/cart" in result.get("visited_urls", []), result
+    assert result["current_url"] == final_url, result
+    assert final_url in result.get("visited_urls", []), result
     turn_tool_calls = [
         call["function"]["name"]
         for message in result.get("browser_turn_messages", [])
@@ -25343,6 +25367,36 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result.get("reasoning_messages") == ["Looking for the cart"], result
     llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+
+
+async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+    await _exercise_first_step_shutdown()
+
+
+async def test_neutral_initialization_reaches_first_browser_step():
+    await _exercise_first_step_shutdown(neutral=True)
+
+
+async def test_neutral_resume_reaches_first_browser_step():
+    await _exercise_first_step_shutdown(neutral=True, resume=True)
+
+
+async def test_neutral_resume_rejects_empty_inventory_at_web_url():
+    try:
+        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url="https://example.com/account")
+    except RuntimeError as error:
+        assert str(error) == "Credential payload is missing auth_realm"
+    else:
+        raise AssertionError("Resumed HTTPS page accepted a neutral inventory")
+
+
+async def test_neutral_resume_rejects_missing_session_url():
+    try:
+        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
+    except RuntimeError as error:
+        assert str(error) == "Credential payload is missing auth_realm"
+    else:
+        raise AssertionError("Resumed unknown page borrowed the original blank URL")
 
 
 async def test_private_browser_pause_urls_use_protected_continuity():
@@ -34747,6 +34801,10 @@ async def run_all_tests():
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
+    await r.record_async("neutral_initialization_reaches_first_browser_step", test_neutral_initialization_reaches_first_browser_step)
+    await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
+    await r.record_async("neutral_resume_rejects_empty_inventory_at_web_url", test_neutral_resume_rejects_empty_inventory_at_web_url)
+    await r.record_async("neutral_resume_rejects_missing_session_url", test_neutral_resume_rejects_missing_session_url)
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,

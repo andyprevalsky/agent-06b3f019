@@ -1654,6 +1654,8 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("exact_neutral_inventory_has_no_auth_material_or_prompt", test_exact_neutral_inventory_has_no_auth_material_or_prompt)
+    await runner.record_async("neutral_hydration_rejects_missing_context_and_nonempty_inventory", test_neutral_hydration_rejects_missing_context_and_nonempty_inventory)
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
@@ -2022,3 +2024,60 @@ async def test_phone_stream_long_progress_remains_incremental():
             assert "".join(r["delta"] for r in records) == "Progress. " * 10000
 
     await _capture_phone_stream(exercise)
+
+
+def _neutral_credential_payload():
+    return {"auth_realm": "", "auth_options": {'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            "passwords": [], "passkeys": [], "auth_credential_ref": None}
+
+
+async def test_exact_neutral_inventory_has_no_auth_material_or_prompt():
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    state = await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url="about:blank")
+    assert state.auth_realm == "" and state.auth_options_section == ""
+    assert not state.password_secret_refs and not state.password_origins
+    assert not state.credential_refs_by_secret_ref and not state.decrypted_passkeys
+    assert not state.passkey_ref_by_credential_id and state.auth_credential_ref is None
+    assert not state.auth_runtime_state.password_ids and not state.auth_runtime_state.minted_present
+
+
+async def test_neutral_hydration_rejects_missing_context_and_nonempty_inventory():
+    import copy
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    for url in (None, "", "https://example.com", "file:///tmp/page", "about:blank#other"):
+        try:
+            await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url=url)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted empty realm for {url!r}")
+    payload = _neutral_credential_payload()
+    mutations = [
+        {"passwords": [{"id": "password"}]}, {"passkeys": [{"id": "passkey"}]},
+        {"auth_credential_ref": {"kind": "cookie_bundle", "id": "cookie"}},
+        {"auth_options": {}}, {"auth_realm": None},
+    ]
+    for key, value in (("cookie_bundles", [{"id": "cookie"}]), ("passwords", [{"id": "password"}]),
+                       ("passkeys", [{"id": "passkey"}]), ("minted", {"email": "fixture@example.com"}),
+                       ("readable_identifiers", ["fixture@example.com"]), ("steel_session", {"id": "session"}),
+                       ("email_otp", {"available": True})):
+        changed = copy.deepcopy(payload["auth_options"])
+        changed[key] = value
+        mutations.append({"auth_options": changed})
+    for mutation in mutations:
+        changed = {**copy.deepcopy(payload), **mutation}
+        try:
+            await build_realm_credential_state(changed, decryption_key=None, target_url="about:blank")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted inconsistent neutral inventory: {mutation!r}")

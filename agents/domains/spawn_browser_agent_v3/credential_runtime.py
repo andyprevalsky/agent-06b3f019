@@ -54,11 +54,34 @@ async def build_realm_credential_state(
     *,
     decryption_key: Optional[str],
     decrypt_secret: Callable[[str, Any], Optional[str]] = decrypt_password_with_key,
+    target_url: Optional[str] = None,
 ) -> RealmCredentialState:
-    """Hydrate a complete backend realm payload or fail without partial auth."""
+    """Hydrate a complete realm or explicit neutral inventory without partial auth."""
     auth_options = copy.deepcopy(payload.get("auth_options") or {})
     auth_realm = str(payload.get("auth_realm") or auth_options.get("realm") or "")
     if not auth_realm:
+        # The neutral initializer owns this exact empty inventory. Do not
+        # accept incomplete web-realm payloads or retain any prior secrets.
+        neutral_options = {
+            "realm": "", "steel_session": None, "cookie_bundles": [],
+            "passwords": [], "passkeys": [],
+            "email_otp": {"available": False, "connected_emails": [], "match_for_site_account": None},
+            "readable_identifiers": [], "minted": None,
+        }
+        if (
+            target_url == "about:blank"
+            and payload.get("auth_realm") == ""
+            and auth_options == neutral_options
+            and payload.get("passwords") == []
+            and payload.get("passkeys") == []
+            and payload.get("auth_credential_ref") is None
+        ):
+            return RealmCredentialState(
+                auth_realm="", auth_options=auth_options, auth_options_section="",
+                password_secret_refs={}, password_origins={}, credential_refs_by_secret_ref={},
+                auth_runtime_state=AuthRuntimeState.from_auth_options(auth_options),
+                decrypted_passkeys=[], passkey_ref_by_credential_id={}, auth_credential_ref=None,
+            )
         raise RuntimeError("Credential payload is missing auth_realm")
     auth_options["realm"] = auth_realm
 
