@@ -14249,6 +14249,14 @@ async def test_browser_native_read_tool_output_call_reaches_dispatcher(objects):
             ),
             "NEEDLE",
         ),
+        (
+            # Models sometimes quote numbers; the JSON-action path must coerce
+            # them through the tool's own schema, as native calls already are.
+            normalize_browser_use_response(
+                {"action": [{"read_tool_output": {"output_id": output_id, "offset": "29990", "limit": 5.0}}]}
+            ),
+            "x" * 5,
+        ),
     )
     for action, expected in cases:
         assert action["action"] == "read_tool_output" and action["index"] is None, action

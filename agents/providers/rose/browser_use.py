@@ -1436,9 +1436,12 @@ def _normalize_action_params(
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
     if normalized_action == "read_tool_output":
-        # Exactly read_tool_output's arguments; the generic mapping below drops
-        # output_id/offset/limit and renames query to instruction.
-        return {key: params[key] for key in ("output_id", "offset", "limit", "query") if params.get(key) is not None}
+        # Validate against read_tool_output's own schema and pass the coerced
+        # values; the generic mapping below drops output_id/offset/limit and
+        # renames query to instruction.
+        from browser_tools.schemas import validate_browser_tool_args
+
+        return validate_browser_tool_args("read_tool_output", params)
 
     if normalized_action == "read_logs":
         log_params: Dict[str, Any] = {}
