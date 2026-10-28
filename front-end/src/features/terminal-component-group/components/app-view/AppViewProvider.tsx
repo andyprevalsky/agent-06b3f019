@@ -3,7 +3,7 @@
  *
  *   [NORMAL] --code-agent chip Open app--> [APP OPEN(task)]
  *   [APP OPEN] --another chip's Open app--> [APP OPEN(other task)]
- *   [APP OPEN] --Escape | agent row | Home | New Super Agent | mobile close--> [NORMAL]
+ *   [APP OPEN] --Escape | agent row | a "+" (project or Home) | New Super Agent | mobile close--> [NORMAL]
  *   [APP OPEN] --signed-in user changes--> [NORMAL]
  *
  * The open view replaces the chat column (AgentChatArea renders the app view);
