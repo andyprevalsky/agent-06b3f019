@@ -89,7 +89,9 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GMV')).toBeInTheDocument();
     expect(screen.getByText('$256.00')).toBeInTheDocument();
     expect(screen.getByText('$2.00')).toBeInTheDocument();
-    expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
+    // Standalone per-metric charts folded into the secondary tiles' hover charts.
+    expect(screen.queryByText('GMV Per Task')).not.toBeInTheDocument();
+    expect(screen.queryByText('Output Tokens Per Task')).not.toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
     expect(
@@ -181,6 +183,36 @@ describe('AdminHealth page', () => {
     const value = await screen.findByText('No finished tasks');
     // The tile's value slot (directly under its title) reads the empty state, not 0%.
     expect(value.previousElementSibling?.textContent).toBe('Task Completion Rate');
+  });
+
+  it('hovering or focusing a secondary metric shows its over-time chart, like Revenue', async () => {
+    renderWithProviders(<AdminHealth />);
+    await screen.findByText('01 Primary Metric');
+
+    const titles = [
+      '# of People in App',
+      'Avg Tasks / User / 30 Days',
+      'Output Tokens / Task',
+      'GMV / Task',
+      'Task Completion Rate',
+    ];
+    for (const title of titles) {
+      const tile = screen.getByRole('group', { name: new RegExp(`^${escapeRegExp(title)}: `) });
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.mouseEnter(tile);
+      const chart = screen.getByRole('img', { name: `${title} over time` });
+      // Same shared chart as the primary metric, plotted over the response's periods.
+      expect(chart.querySelector('.recharts-responsive-container')).not.toBeNull();
+      fireEvent.mouseLeave(tile);
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.focus(tile);
+      expect(screen.getByRole('img', { name: `${title} over time` })).toBeInTheDocument();
+      // The hovered tile is lifted above later tiles/sections so the popover shows.
+      expect(tile.className).toContain('z-30');
+      fireEvent.keyDown(tile, { key: 'Escape' });
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.blur(tile);
+    }
   });
 
   it('requests the selected time slice with auth', async () => {
@@ -407,3 +439,7 @@ describe('AdminHealth page', () => {
     }
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
