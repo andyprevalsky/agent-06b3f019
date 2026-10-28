@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 # Pure, dependency-free redaction lives in utils (importable from every layer);
 # re-exported here for existing callers.
 from utils.url_redaction import redact_cdp_url, redact_url_secrets
-from utils.url_redaction import tilion_hosts as _tilion_hosts
+from utils.url_redaction import is_tilion_host
 
 __all__ = [
     "is_tilion_cdp_url",
@@ -42,7 +42,7 @@ def is_tilion_cdp_url(cdp_url: str) -> bool:
     parsed = urlsplit(cdp_url or "")
     return (
         parsed.scheme in {"ws", "wss"}
-        and (parsed.hostname or "").lower() in _tilion_hosts()
+        and is_tilion_host(parsed.hostname or "")
         and parsed.path.startswith("/v1/session/")
         and parsed.path.endswith("/cdp")
     )

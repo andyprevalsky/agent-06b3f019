@@ -7590,3 +7590,12 @@
 {"task": "browser-smoke", "duration_seconds": 160.5, "cost_cents": 1.0, "timestamp": "2026-10-28T05:30:18.506237+00:00", "agent_id": "6bc16f7e-308d-402f-b585-9011509f385c"}
 {"task": "chat-mode", "duration_seconds": 13.7, "cost_cents": 0.0, "timestamp": "2026-10-28T05:30:18.506237+00:00", "agent_id": "e7b0e9c0-35ac-4051-9fb8-2de64ddf9e2f"}
 {"task": "background-agent-message-smoke", "duration_seconds": 140.3, "cost_cents": 2.0, "timestamp": "2026-10-28T05:52:14.581195+00:00", "agent_id": "bf31b933-4d72-449f-b3d6-5ba47112cd46"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 138.1, "cost_cents": 3.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "3e79a2d6-d25f-4b16-b6ff-f02e25d9ad33"}
+{"task": "spawn-sub-agents", "duration_seconds": 182.0, "cost_cents": 12.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "9f0f4b14-8e8c-4054-b521-3774552cf150"}
+{"task": "parallel-tool-calls", "duration_seconds": 94.6, "cost_cents": 8.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "3583204c-a2ec-4525-acd0-e5a86de543c3"}
+{"task": "browser-auth-member-discount-purchase", "duration_seconds": 307.0, "cost_cents": 1.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "2f24c897-c7c3-412f-b3c5-655bbed395c1"}
+{"task": "browser-smoke", "duration_seconds": 158.1, "cost_cents": 1.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "28606f5a-17c8-4b4c-9715-751020fb62e9"}
+{"task": "chat-mode", "duration_seconds": 14.6, "cost_cents": 0.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "9311b587-9e7b-4b2f-8661-35d6617ad61e"}
+{"task": "background-agent-message-smoke", "duration_seconds": 174.3, "cost_cents": 0.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "80f19ac3-76c5-41c8-a654-7a3b91fee067"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 217.3, "cost_cents": 1.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "4ae258aa-baf8-457f-938b-f62f06b372a6"}
+{"task": "browser-auth-guest-purchase", "duration_seconds": 205.9, "cost_cents": 1.0, "timestamp": "2026-10-28T20:29:59.692863+00:00", "agent_id": "2941efba-1512-4b50-be5a-7942a2e3e281"}

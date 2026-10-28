@@ -22,6 +22,12 @@ def tilion_hosts() -> set:
     return hosts
 
 
+def is_tilion_host(host: str) -> bool:
+    """Recognize configured gateways and provider-owned regional CDP hosts."""
+    host = host.lower()
+    return host in tilion_hosts() or host.endswith(".back.tilion.dev")
+
+
 def redact_cdp_url(cdp_url: str) -> str:
     """Log-safe CDP URL: secret query values (Tilion ``token``, Steel ``apiKey``) are masked."""
     parsed = urlsplit(cdp_url or "")
@@ -45,4 +51,4 @@ def redact_url_secrets(url: Optional[str]) -> Optional[str]:
     if not url:
         return url
     host = (urlsplit(url).hostname or "").lower()
-    return redact_cdp_url(url) if host in tilion_hosts() else url
+    return redact_cdp_url(url) if is_tilion_host(host) else url

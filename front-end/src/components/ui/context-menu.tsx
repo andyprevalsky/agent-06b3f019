@@ -147,7 +147,7 @@ ContextMenuContent.displayName = ContextMenuPrimitive.Content.displayName;
 const ContextMenuItem = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Item> & { destructive?: boolean }
->(({ className, destructive = false, ...props }, ref) => (
+>(({ className, destructive = false, onPointerUp, ...props }, ref) => (
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
@@ -156,6 +156,11 @@ const ContextMenuItem = React.forwardRef<
       destructive && 'text-red-600 dark:text-red-400 focus:text-red-600 dark:focus:text-red-400',
       className,
     )}
+    onPointerUp={(event) => {
+      onPointerUp?.(event);
+      // Opening a context menu must not select an item under the released right button.
+      if (event.button !== 0) event.preventDefault();
+    }}
     {...props}
   />
 ));

@@ -316,6 +316,56 @@ async def test_tilion_cdp_url_detection_and_redaction():
             await multiplexer.close()
 
 
+
+async def test_tilion_regional_worker_attach_uses_one_upstream_socket():
+    """The canonical API returns regional CDP hosts; both worker clients still share one socket."""
+    import browser_tools.cdp_multiplexer as mux_module
+
+    original_url = FakeTilionGateway.cdp_url.fget
+    original_connect = mux_module._default_upstream_connect
+    loopback_urls = {}
+
+    def regional_url(gateway):
+        url = f"wss://oregon.back.tilion.dev/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}"
+        loopback_urls[url] = original_url(gateway)
+        return url
+
+    async def connect_owned_fixture(url):
+        # Keep the real regional URL at the classifier boundary. Only the fake
+        # provider transport maps it to its exact owned loopback listener.
+        assert url in loopback_urls, "unexpected upstream authority reached the fixture"
+        return await original_connect(loopback_urls[url])
+
+    with (
+        patch.object(FakeTilionGateway, "cdp_url", property(regional_url)),
+        patch.object(mux_module, "_default_upstream_connect", connect_owned_fixture),
+        patch.dict(globals(), {
+            "_tilion_env": lambda _gateway: patch.dict(
+                os.environ, {"TILION_BASE_URL": "https://back.tilion.dev"}
+            )
+        }),
+    ):
+        await test_tilion_worker_attach_uses_one_upstream_socket()
+
+
+async def test_tilion_regional_authorities_and_url_privacy():
+    from domains.spawn_browser_agent_v3.cdp_urls import is_tilion_cdp_url
+    from utils.url_redaction import redact_url_secrets
+
+    suffix = f"/v1/session/{TILION_SESSION}/cdp?token={TILION_TOKEN}&apiKey=private&jwt=private"
+    with patch.dict(os.environ, {"TILION_BASE_URL": "https://custom-gateway.example:8443"}):
+        for host in ("back.tilion.dev", "oregon.back.tilion.dev", "OREGON.BACK.TILION.DEV", "custom-gateway.example:8443"):
+            url = "wss://" + host + suffix
+            assert is_tilion_cdp_url(url), host
+            safe = redact_url_secrets(url)
+            assert TILION_TOKEN not in safe and "private" not in safe, host
+            assert "token=REDACTED" in safe and "apiKey=REDACTED" in safe and "jwt=REDACTED" in safe
+        for host in ("back.tilion.dev.evil.example", "oregon.back.tilion.dev.evil.example", "evilback.tilion.dev", "back.tilion.dev@evil.example", "sub.custom-gateway.example"):
+            assert not is_tilion_cdp_url("wss://" + host + suffix), host
+        assert not is_tilion_cdp_url("https://oregon.back.tilion.dev" + suffix)
+        assert not is_tilion_cdp_url("wss://oregon.back.tilion.dev/v1/session/x/playwright")
+
+
 # ----- HTTP fixture site ----------------------------------------------------
 
 DOWNLOAD_BYTES = b"%PDF-1.4 tilion download fixture\n" + bytes(range(256)) * 8
@@ -3250,6 +3300,8 @@ async def run_all_tests():
     for name, test in [
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
+        ("tilion_regional_worker_attach_uses_one_upstream_socket", test_tilion_regional_worker_attach_uses_one_upstream_socket),
+        ("tilion_regional_authorities_and_url_privacy", test_tilion_regional_authorities_and_url_privacy),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
