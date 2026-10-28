@@ -106,6 +106,11 @@ const PROBES: Probe[] = [
   { path: '/api/attention-requests', domain: 'attention-requests' },
   { path: '/api/people', domain: 'people (Person)' },
   {
+    path: '/api/integrations/cli',
+    domain: 'integrations/cli (owned connections and setup status)',
+    requireStatusIn: [200],
+  },
+  {
     path: '/api/tool-usage/tree/8e0c9c2e-1e95-4135-8dd4-43469b961c4f',
     domain: 'tool-usage (ToolUsage tree)',
   },

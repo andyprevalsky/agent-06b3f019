@@ -1,8 +1,8 @@
 /**
- * CLI connections retain one native login in one persistent code-session home.
- * Only configuration is stored here; credentials never leave that home.
- * Each command leases its template and claims a durable caller-scoped receipt
- * before executing. Ambiguous transport failures are never retried implicitly.
+ * CLI connections publish installs into per-user filesystem templates and keep
+ * encrypted credentials separate, leased only while native commands execute.
+ * Legacy proxied commands retain their durable caller-scoped execution receipts;
+ * ambiguous transport failures are never retried implicitly.
  */
 import { Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';

@@ -18,6 +18,8 @@ import {
   type ResponseSchemaDirectAuth,
 } from '../../providers/setResponseSchema';
 import type { PostMessageBody } from './types';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
@@ -55,20 +57,6 @@ function resolveRole(
     return { role: body.role };
   }
   return { role: 'USER' };
-}
-
-export function buildUserMessageSignalValue(
-  messageText: string,
-  metadata: Record<string, unknown> | undefined
-): string {
-  const idempotencyKey = metadata?.idempotencyKey;
-  if (metadata?.isResponseSchemaUpdate === true && typeof idempotencyKey === 'string') {
-    return JSON.stringify({
-      internal_type: 'response_schema_update',
-      idempotency_key: idempotencyKey,
-    });
-  }
-  return messageText;
 }
 
 /** USER rows written by agents rather than people (metadata flags, never text). */
