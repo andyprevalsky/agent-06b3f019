@@ -12,6 +12,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { z } from 'zod';
 import { isUserGated } from '../../providers/inviteGate';
 import { createLogger } from '../../providers/logger';
+import { uploadToStorage } from '../../providers/storage';
 import { getAgentUrl } from '../../providers/smsTemplates';
 import * as lifecycleService from './agentLifecycleService';
 import * as repo from './repo';
@@ -39,16 +40,118 @@ function toolError(text: string) {
   return { isError: true, content: [{ type: 'text' as const, text }] };
 }
 
-async function spawnAgent(goal: string, userId: string, clientIP: string | null) {
+/** Root cloud agent in plan mode on rose-1-ultra; shared by MCP and the Index 01 webhook. */
+export async function spawnIndex01Agent(
+  goal: string,
+  userId: string,
+  clientIP: string | null,
+  via: 'mcp' | 'webhook'
+): Promise<{ agent_id: string; url: string }> {
   const body = createAgentSchema.parse({ goal, start_phase: 'plan', model: AGENT_MCP_MODEL });
   const result = (await lifecycleService.createAgent(body, userId, false, clientIP)) as {
     agent_id: string;
   };
-  const url = getAgentUrl(result.agent_id);
-  log.info('Spawned agent from MCP', { agentId: result.agent_id, userId });
+  log.info('Spawned Index 01 agent', { agentId: result.agent_id, userId, via });
+  return { agent_id: result.agent_id, url: getAgentUrl(result.agent_id) };
+}
+
+const TRANSCRIPT_KEYS = ['transcript', 'transcription', 'text', 'content', 'message', 'body'];
+
+/**
+ * The Index app's webhook schema is undocumented: take the first non-empty
+ * string under a transcript-like key, searching nested objects breadth-first.
+ */
+export function extractTranscript(payload: unknown): string | null {
+  const queue: unknown[] = [payload];
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (node === null || typeof node !== 'object') continue;
+    const record = node as Record<string, unknown>;
+    for (const key of TRANSCRIPT_KEYS) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim() !== '') return value.trim();
+    }
+    queue.push(...Object.values(record).filter((v) => v !== null && typeof v === 'object'));
+  }
+  return null;
+}
+
+/** The app's "Send test event" posts a sample transcription with `test` set. */
+export function isIndex01TestEvent(body: unknown): boolean {
+  if (body === null || typeof body !== 'object') return false;
+  const test = (body as Record<string, unknown>).test;
+  return test === true || test === 'true' || test === '1';
+}
+
+/** Multipart text fields may carry JSON (e.g. a `metadata` field): parse those in place. */
+export function normalizeWebhookBody(body: unknown): unknown {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return body;
+  return Object.fromEntries(
+    Object.entries(body as Record<string, unknown>).map(([k, v]) => {
+      if (typeof v !== 'string' || !/^\s*[{[]/.test(v)) return [k, v];
+      try {
+        return [k, JSON.parse(v) as unknown];
+      } catch {
+        return [k, v];
+      }
+    })
+  );
+}
+
+export interface WebhookFile {
+  fieldname: string;
+  originalname: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+}
+
+/**
+ * Keep raw Index 01 recordings in the user's storage so they can be
+ * re-transcribed later. Best-effort backup: a failed upload is logged and the
+ * transcript still spawns the agent.
+ */
+export async function archiveIndex01Recordings(
+  userId: string,
+  files: WebhookFile[]
+): Promise<string[]> {
+  const paths: string[] = [];
+  for (const file of files) {
+    try {
+      const name = `index01-recording_${Date.now()}_${file.originalname || file.fieldname}`;
+      const { storage_path } = await uploadToStorage(userId, file.buffer, name, file.mimetype);
+      paths.push(storage_path);
+    } catch (error) {
+      log.error('Index 01 recording archive failed', {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return paths;
+}
+
+/** Key → type outline of a payload (values never logged), to learn the webhook schema. */
+export function describePayloadShape(payload: unknown, depth = 0): unknown {
+  if (Array.isArray(payload)) {
+    return depth > 3 ? 'array' : [describePayloadShape(payload[0], depth + 1)];
+  }
+  if (payload === null || typeof payload !== 'object')
+    return payload === null ? 'null' : typeof payload;
+  if (depth > 3) return 'object';
+  return Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).map(([k, v]) => [
+      k,
+      describePayloadShape(v, depth + 1),
+    ])
+  );
+}
+
+async function spawnAgent(goal: string, userId: string, clientIP: string | null) {
+  const { agent_id, url } = await spawnIndex01Agent(goal, userId, clientIP, 'mcp');
   return {
     content: [{ type: 'text' as const, text: `Rose agent started: ${url}` }],
-    structuredContent: { agent_id: result.agent_id, url },
+    structuredContent: { agent_id, url },
   };
 }
 

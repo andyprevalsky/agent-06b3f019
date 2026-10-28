@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -3566,6 +3567,24 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
                 os.environ[key] = value
 
 
+@contextlib.contextmanager
+def _no_outer_demo_cache_context():
+    """run with no outer DEMO cache context, restoring the caller's afterwards.
+
+    The WMH provider installs its DEMO cache context only when no outer one is
+    active. Every test in this domain shares one task, so a context left by an
+    earlier test keyed these calls with generic semantics (T56: seen only in
+    full-suite runs, reproduced by pre-setting an active DEMO cache context).
+    """
+    from providers.demo_cache.context import reset_context, set_context
+
+    token = set_context(None)
+    try:
+        yield
+    finally:
+        reset_context(token)
+
+
 async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     """Run-local action IDs and timestamps must not bust identical DEMO predictions."""
     from wmh.core.render import build_env_prompt
@@ -3583,7 +3602,11 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     # the current fundraiser prompt instead of pinning a copy that drifts.
     goal = get_task_by_name("raise-5m-rose-labs-brex").prompt
     assert demo_cache_allowed(goal), "The fundraiser catalog prompt must stay a DEMO cache goal"
+    from benchmarks.wmh_rose_provider import _wmh_cache_key_material
+    from providers.demo_cache.normalize import canonical_messages
+
     keys = []
+    key_inputs = []
     sent_prompts = []
 
     class RecordingClient:
@@ -3592,6 +3615,15 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
             assert context is not None and context.read_enabled
             material = request_key_material({**kwargs, "provider_fast_mode": context.provider_fast_mode})
             keys.append(context.llm_key("wmh_world_model", material))
+            # T56: this failed once under 99-domain load and never reproduced;
+            # keep what was keyed so the next occurrence names the differing input.
+            key_inputs.append(
+                {
+                    "base_step": context.base_step,
+                    "goal_hash": hashlib.sha256(str(context.goal).encode()).hexdigest()[:12],
+                    "canonical": canonical_messages(_wmh_cache_key_material(material)),
+                }
+            )
             sent_prompts.append(kwargs["messages"][1]["content"])
             response = RoseResponse()
             response.content = '{"output":"ok","is_error":false,"state_note":""}'
@@ -3603,7 +3635,7 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     async def no_auth():
         return None, None
 
-    with patch.object(provider, "_lease_auth", no_auth):
+    with _no_outer_demo_cache_context(), patch.object(provider, "_lease_auth", no_auth):
         for root_id, tool_id, timestamp_ms, phase in (
             ("5ef8d350-deab-46b7-9077-5ebe64c94c41", "call_abcdefghijklmnop", 1790596437171, "plan"),
             ("944a1e33-c63a-4e2f-a896-0fcdde85b526", "call_qrstuvwxyzabcdef", 1790601558171, "plan"),
@@ -3629,7 +3661,15 @@ async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
             await provider._complete_async(system, [Message(role="user", content=user)], max_tokens=16384)
 
     assert sent_prompts[0] != sent_prompts[1], "The provider must see the unmodified WMH prompt"
-    assert keys[0] == keys[1], "Equivalent DEMO actions must reuse the same WHM cache entry"
+    if keys[0] != keys[1]:
+        import difflib
+
+        first, second = (
+            [f"base_step={item['base_step']} goal={item['goal_hash']}", *str(item["canonical"]).split("\\n")]
+            for item in key_inputs[:2]
+        )
+        diff = "\n".join(list(difflib.unified_diff(first, second, "call-1", "call-2", lineterm=""))[:80])
+        raise AssertionError(f"Equivalent DEMO actions must reuse the same WHM cache entry; keyed inputs differ:\n{diff}")
     assert keys[1] != keys[2], "A meaningful action change must still produce a new key"
 
 

@@ -33,6 +33,8 @@ function fakeBrowser() {
           cookies: [{ name: 'sid', value: 'v', domain: 'example.com', path: '/' }],
           origins: [],
         }),
+        // Storage capture also reads open page/frame origins; none here.
+        pages: () => [],
       },
     ],
     close: async () => undefined,

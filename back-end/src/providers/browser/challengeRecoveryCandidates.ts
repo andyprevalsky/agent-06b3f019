@@ -2,7 +2,11 @@ import type { ProxyGeoLocation } from '../geoip';
 import type { KernelRecoveryProxySpecificity } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
-import { browserUseEnabled } from './config';
+import { createLogger } from '../logger';
+import { browserProviderEnabled, browserUseEnabled } from './config';
+import { recoverySameProviderOnly, tilionMobileEnabled } from './rotation';
+
+const log = createLogger('BrowserChallengeRecovery');
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -13,7 +17,12 @@ export interface BrowserRecoveryConfig {
   /** Create the Kernel session without a managed/shared proxy exit. */
   omitManagedProxy?: boolean;
   steelProxyMode?: 'managed' | 'fixed';
+  /** Tilion paid exit type requested on create (`proxy_type`). */
+  tilionProxyType?: TilionRecoveryProxyType;
 }
+
+/** `direct` is Tilion's own datacenter egress (no residential/mobile proxy). */
+export type TilionRecoveryProxyType = 'residential' | 'mobile' | 'direct';
 
 /** A transport failure can affect a provider's whole proxy fleet, so try the
  * other provider's exits before spending time on more tiers of the same one.
@@ -27,6 +36,27 @@ export function alternateProviderFirst(
     ...configs.filter((config) => config.provider !== failedProvider),
     ...configs.filter((config) => config.provider === failedProvider),
   ];
+}
+
+/**
+ * Candidate order after a proxy-transport failure (tunnel refusal) on
+ * `failedProvider`. Tilion's residential/mobile egress refuses CONNECT to some
+ * third-party hosts (live 2026-10-21: Stripe/PayPal/anti-fraud CDNs with
+ * net::ERR_TUNNEL_CONNECTION_FAILED) while its direct egress reaches them, so a
+ * Tilion session that is not already direct tries `tilion_direct` first: same
+ * provider and state, another egress. The candidate probe and classifier still
+ * decide; sites that challenge datacenter IPs fall through to other providers.
+ * The trigger is the observed transport failure, never a host list.
+ */
+export function transportFailureOrder(
+  configs: BrowserRecoveryConfig[],
+  failedProvider: BrowserProviderName,
+  failedConfigKey?: string
+): BrowserRecoveryConfig[] {
+  const ordered = alternateProviderFirst(configs, failedProvider);
+  if (failedProvider !== 'tilion' || failedConfigKey === 'tilion_direct') return ordered;
+  const direct = ordered.filter((config) => config.key === 'tilion_direct');
+  return [...direct, ...ordered.filter((config) => config.key !== 'tilion_direct')];
 }
 
 export function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
@@ -114,6 +144,7 @@ export function recoverySearchPlan(options: {
  *
  * Probe order (sequential within each cookie lane):
  *   steel_fixed → kernel_mobile → kernel residential → steel_managed → kernel_isp
+ *   → tilion_residential → tilion_mobile (only with TILION_MOBILE_ENABLED) → tilion_direct
  *
  * Residential is one geo tier: city and state when available, else country.
  * Prefer-Steel (payment CDN) keeps this relative order among Steel entries only.
@@ -184,6 +215,26 @@ export function browserRecoveryCandidates(
       kernelProxyType: 'isp',
       kernelSpecificity: fallbackSpecificity,
     },
+    // Tilion places a residential/mobile exit from the full geo target and
+    // reports what landed, so one candidate per exit type covers every tier.
+    {
+      key: 'tilion_residential',
+      provider: 'tilion',
+      proxyMode: `residential_${fallbackSpecificity}`,
+      tilionProxyType: 'residential',
+    },
+    {
+      key: 'tilion_mobile',
+      provider: 'tilion',
+      proxyMode: `mobile_${fallbackSpecificity}`,
+      tilionProxyType: 'mobile',
+    },
+    {
+      key: 'tilion_direct',
+      provider: 'tilion',
+      proxyMode: 'direct',
+      tilionProxyType: 'direct',
+    },
   ];
   if (!options?.preferSteel) return candidates;
   // Kernel hard-blacklists Stripe Checkout on managed proxies AND on
@@ -195,13 +246,48 @@ export function browserRecoveryCandidates(
   return candidates.filter((candidate) => candidate.provider === 'steel');
 }
 
+/** Tilion kill switch plus credential: off or unkeyed means no new Tilion recovery session. */
+export function tilionRecoveryAvailable(): boolean {
+  return (
+    browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true) &&
+    Boolean(process.env.TILION_API_KEY?.trim())
+  );
+}
+
+/**
+ * BROWSER_RECOVERY_SAME_PROVIDER_ONLY (experiment knob, default off): keep only
+ * the session's current provider's candidates, so other providers' sessions are
+ * never created or probed. Logs one line naming the knob and what it skipped.
+ */
+export function lockCandidatesToProvider(
+  configs: BrowserRecoveryConfig[],
+  currentProvider: string,
+  context: { taskId: string; phase: string }
+): BrowserRecoveryConfig[] {
+  if (!recoverySameProviderOnly()) return configs;
+  const kept = configs.filter((config) => config.provider === currentProvider);
+  const skipped = configs.filter((config) => config.provider !== currentProvider).map((c) => c.key);
+  log.info(
+    `recovery provider-locked (BROWSER_RECOVERY_SAME_PROVIDER_ONLY): kept ${
+      kept.map((config) => config.key).join(', ') || 'none'
+    }; skipped ${skipped.join(', ') || 'none'}`,
+    { taskId: context.taskId, phase: context.phase, currentProvider }
+  );
+  return kept;
+}
+
 /** Do not spend a recovery lane on a provider that cannot be provisioned. */
 export function availableBrowserRecoveryCandidates(
   location: ProxyGeoLocation,
   options?: { preferSteel?: boolean }
 ): BrowserRecoveryConfig[] {
-  const candidates = browserRecoveryCandidates(location, options);
-  return browserUseEnabled() && process.env.BROWSER_USE_API_KEY?.trim()
-    ? candidates
-    : candidates.filter((candidate) => candidate.provider !== 'browser-use');
+  const browserUseReady = browserUseEnabled() && Boolean(process.env.BROWSER_USE_API_KEY?.trim());
+  const tilionReady = tilionRecoveryAvailable();
+  return browserRecoveryCandidates(location, options).filter(
+    (candidate) =>
+      (candidate.provider !== 'browser-use' || browserUseReady) &&
+      (candidate.provider !== 'tilion' || tilionReady) &&
+      // Tilion mobile is not served on our account (409 proxy_type_unavailable).
+      (candidate.key !== 'tilion_mobile' || tilionMobileEnabled())
+  );
 }

@@ -147,7 +147,7 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
 
 - Production: https://roselabs.ai
 - Backend API: https://api.roselabs.ai (custom domain on Render service `Navi`; `https://navi-j9a9.onrender.com` is the same service and still works)
-- Index 01 / MCP: `https://api.roselabs.ai/mcp/<rose-api-key>` (Streamable HTTP; `spawn_agent` → plan mode, rose-1-ultra)
+- Index 01: webhook `POST https://api.roselabs.ai/api/index01/webhook` (`Authorization: Bearer <rose-api-key>`, JSON or multipart; transcript → plan-mode rose-1-ultra agent, audio archived as `index01-recording_*`) or MCP `https://api.roselabs.ai/mcp` (Streamable, same Bearer)
 - API Docs: https://docs.roselabs.ai
 
 ## Sub-agent delegation
