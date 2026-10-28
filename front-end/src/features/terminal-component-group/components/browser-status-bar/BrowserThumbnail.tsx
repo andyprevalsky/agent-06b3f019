@@ -13,6 +13,7 @@ import { Maximize2 } from 'lucide-react';
 import {
   computeCroppedLiveViewIframe,
   computeLiveViewLetterbox,
+  presentLiveViewIframeUrl,
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
@@ -72,7 +73,7 @@ export function BrowserThumbnail({
       {live && !ended && (
         <iframe
           ref={iframeRef}
-          src={browserUrl}
+          src={presentLiveViewIframeUrl(browserUrl)}
           className="border-0 pointer-events-none"
           tabIndex={-1}
           style={{

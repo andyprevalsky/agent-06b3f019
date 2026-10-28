@@ -53,7 +53,7 @@ async function run(): Promise<void> {
     // --- 1. Posts to Slack when webhook is configured ---
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
     delete process.env.AUTO_RCA_ENABLED;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
 
     alertError({
@@ -102,7 +102,7 @@ async function run(): Promise<void> {
 
     // --- 4. No webhook configured → no fetch, no throw ---
     delete process.env.SLACK_ERROR_WEBHOOK_URL;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
     await sleep(30);
@@ -114,7 +114,7 @@ async function run(): Promise<void> {
 
     // --- 5. Never throws even when fetch rejects ---
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     failNext = true;
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
@@ -127,7 +127,7 @@ async function run(): Promise<void> {
     //         driven by the Slack card this alert posts. ---
     process.env.AUTO_RCA_ENABLED = '1';
     process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'agent_workflow', message: 'rca please', agentId: 'agent-rca' });
     await sleep(30);
@@ -164,7 +164,7 @@ async function run(): Promise<void> {
       return new Response('nope', { status: 500 });
     }) as typeof fetch;
     delete process.env.AUTO_RCA_ENABLED;
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
     await sleep(30); // must not throw despite the 500
     alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
@@ -194,7 +194,7 @@ async function run(): Promise<void> {
     process.env.SLACK_BOT_TOKEN = 'xoxb-test';
     process.env.SLACK_ERROR_CHANNEL_ID = 'C_INPUT';
     process.env.AUTO_RCA_ENABLED = '1';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });
     await sleep(30);
@@ -223,7 +223,7 @@ async function run(): Promise<void> {
     delete process.env.SLACK_ERROR_CHANNEL_ID;
     delete process.env.AUTO_RCA_ENABLED;
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
-    __resetAlertThrottleForTests();
+    await __resetAlertThrottleForTests();
     calls.length = 0;
     alertError({ source: 'chat', message: 'webhook fallback still works', agentId: 'w' });
     await sleep(30);

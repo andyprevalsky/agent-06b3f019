@@ -224,7 +224,46 @@ async function finalizeSyncedIntegrations(): Promise<void> {
   }
 }
 
-async function drain(): Promise<void> {
+/**
+ * Keep a claimed part's lease alive while it is processed: renew it every
+ * lease/3 so a slow part is not reclaimed (and re-run, burning an attempt) by
+ * another instance's drain. Stops on the first lost renewal.
+ */
+function holdPartClaim(id: string, claimedUntil: Date, claimLeaseMs: number): () => void {
+  let held = claimedUntil;
+  let stopped = false;
+  const heartbeat = setInterval(
+    () => {
+      const next = new Date(Date.now() + claimLeaseMs);
+      jobsRepo
+        .renewMessagingUploadJobClaim(id, held, next)
+        .then((renewed) => {
+          if (renewed) {
+            held = next;
+            return;
+          }
+          if (!stopped)
+            log.warn('Messaging upload part claim lost while processing', { jobId: id });
+          stopped = true;
+          clearInterval(heartbeat);
+        })
+        .catch((error: unknown) =>
+          log.warn('Messaging upload part claim renewal failed', {
+            jobId: id,
+            error: errorMessage(error),
+          })
+        );
+    },
+    Math.max(Math.floor(claimLeaseMs / 3), 1_000)
+  );
+  heartbeat.unref();
+  return () => {
+    stopped = true;
+    clearInterval(heartbeat);
+  };
+}
+
+async function drain(claimLeaseMs: number): Promise<void> {
   await failExhaustedParts();
   for (;;) {
     const ids = await jobsRepo.findClaimableMessagingUploadJobIds(
@@ -235,8 +274,9 @@ async function drain(): Promise<void> {
     if (ids.length === 0) break;
     for (const id of ids) {
       const now = new Date();
-      const until = new Date(now.getTime() + CLAIM_LEASE_MS);
+      const until = new Date(now.getTime() + claimLeaseMs);
       if (!(await jobsRepo.claimMessagingUploadJob(id, now, until, MAX_ATTEMPTS))) continue;
+      const releaseClaim = holdPartClaim(id, until, claimLeaseMs);
       try {
         await processClaimedPart(id);
       } catch (error: unknown) {
@@ -246,6 +286,8 @@ async function drain(): Promise<void> {
           jobId: id,
           error: errorMessage(error),
         });
+      } finally {
+        releaseClaim();
       }
     }
   }
@@ -256,7 +298,7 @@ async function drain(): Promise<void> {
 let draining: Promise<void> | null = null;
 let rerun = false;
 
-function startDrain(): Promise<void> {
+function startDrain(claimLeaseMs = CLAIM_LEASE_MS): Promise<void> {
   if (draining !== null) {
     rerun = true;
     return draining;
@@ -264,7 +306,7 @@ function startDrain(): Promise<void> {
   draining = (async () => {
     do {
       rerun = false;
-      await drain();
+      await drain(claimLeaseMs);
     } while (rerun);
   })()
     .catch((error: unknown) => {
@@ -282,6 +324,8 @@ export function kickMessagingUploadJobs(): void {
 }
 
 /** Drain every claimable part now; the cron entrypoint and a restarted process's recovery path. */
-export async function runMessagingUploadJobs(): Promise<void> {
-  await startDrain();
+export async function runMessagingUploadJobs(
+  options: { claimLeaseMs?: number } = {}
+): Promise<void> {
+  await startDrain(options.claimLeaseMs);
 }

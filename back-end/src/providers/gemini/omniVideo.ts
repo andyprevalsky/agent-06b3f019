@@ -3,20 +3,25 @@
  * to Google for video. The raw GEMINI_API_KEY never leaves this provider: agents
  * and sandboxes reach it only through the backend (domains/agent-tools/videoService.ts).
  *
- *   generateOmniVideo({prompt, images, aspectRatio, resolution})
- *     │ POST {base}/v1beta/interactions   model, input[], response_format{type:video,
- *     │                                   aspect_ratio, resolution, delivery:uri},
- *     │                                   store:false, background:false, stream:false
+ *   generateOmniVideo({prompt, images[], aspectRatio, resolution, seed?})
+ *     │ POST {base}/v1beta/interactions   model, input (text, or image parts + text),
+ *     │                                   response_format{type:video, aspect_ratio,
+ *     │                                   resolution, delivery:uri}, generation_config{seed},
+ *     │                                   store:true (Google requires it for uri delivery),
+ *     │                                   stream:false
  *     ▼
- *   steps[].content[type=video]  →  inline `data` (base64)  → bytes
- *                                   or `uri` (Files API)    → poll GET files/{id}
- *                                                              until ACTIVE, then
- *                                                              GET files/{id}:download
- *   mp4DurationSeconds(bytes) → billed seconds (price × duration; read from the mvhd box)
+ *   steps[type=model_output].content[type=video]
+ *        uri  ".../files/{id}:download?alt=media"  → GET files/{id} until ACTIVE,
+ *                                                     then GET files/{id}:download?alt=media
+ *        data (inline base64, if a gateway inlines) → bytes
+ *   usage.output_tokens_by_modality[video]  → cost (documented $/1M tokens)
+ *   mp4DurationSeconds(bytes)               → real seconds (mvhd box)
  *
- * Duration and audio are prompt-level in Omni (there is no duration/audio field);
- * callers append them to the prompt text. Failures throw OmniVideoError with the
- * provider's own message so the model sees what really happened.
+ * Live facts (probed 2026-10-28, gemini-omni-1.1-flash): a clip is 3–10 s
+ * (no prompt yields more than 10 s); duration, audio and negatives are
+ * prompt-level (the API rejects duration/fps/negative_prompt/audio fields);
+ * temperature is documented as unsupported, seed is accepted. Errors come back
+ * as {"error":{"message","code"}} and are passed through verbatim.
  *
  * 10k agents: one bounded request (≤ OMNI_MAX_WAIT_MS) per call and nothing held
  * between calls; the per-user in-flight cap lives in the service.
@@ -32,30 +37,69 @@ export function omniVideoModel(): string {
 }
 
 export const OMNI_ASPECT_RATIOS = ['16:9', '9:16'] as const;
-export const OMNI_RESOLUTIONS = ['360p', '720p', '1080p'] as const;
+export const OMNI_RESOLUTIONS = ['360p', '720p', '1080p', '4k'] as const;
 export type OmniAspectRatio = (typeof OMNI_ASPECT_RATIOS)[number];
 export type OmniResolution = (typeof OMNI_RESOLUTIONS)[number];
 
 /**
- * USD per generated second. Only the 720p rate ($0.10/s) is published to us;
- * 360p and 1080p are billed at the same rate here so cost is never under-counted
- * for a cheaper tier and the 1080p figure is flagged `rate_basis: 'assumed'`.
+ * Documented paid-tier prices for gemini-omni-1.1-flash (ai.google.dev pricing,
+ * 2026-10-28), USD per 1M tokens: input $1.50; output $17.50 video, $9.00 text
+ * and thinking. Google bills 720p at 5,792 video tokens per second (~$0.10/s).
  */
-const USD_PER_SECOND: Record<OmniResolution, { usd: number; basis: 'published' | 'assumed' }> = {
-  '360p': { usd: 0.1, basis: 'assumed' },
-  '720p': { usd: 0.1, basis: 'published' },
-  '1080p': { usd: 0.1, basis: 'assumed' },
+export const OMNI_USD_PER_M_TOKENS = { input: 1.5, videoOutput: 17.5, textOutput: 9 } as const;
+
+/**
+ * Video tokens per generated second by resolution. 720p is Google's published
+ * rate; the others were measured from live usage (360p 1,931, 1080p 8,604,
+ * 4k 17,238). Used for pre-call estimates and when a response lacks usage.
+ */
+export const OMNI_VIDEO_TOKENS_PER_SECOND: Record<OmniResolution, number> = {
+  '360p': 1931,
+  '720p': 5792,
+  '1080p': 8604,
+  '4k': 17238,
 };
 
-export function omniCost(resolution: OmniResolution, seconds: number) {
-  const rate = USD_PER_SECOND[resolution];
-  const usd = rate.usd * seconds;
+export interface OmniUsage {
+  inputTokens: number;
+  videoOutputTokens: number;
+  /** Text output plus thinking tokens (both billed at the text output rate). */
+  textOutputTokens: number;
+}
+
+export interface OmniCost {
+  usd: number;
+  cents: number;
+  /** Effective USD per generated second for this clip. */
+  rate_usd_per_second: number;
+  /** usage_tokens: billed from the response's token usage; estimated: tokens/s table. */
+  rate_basis: 'usage_tokens' | 'estimated';
+  video_tokens: number;
+}
+
+export function omniEstimatedUsdPerSecond(resolution: OmniResolution): number {
+  return (OMNI_VIDEO_TOKENS_PER_SECOND[resolution] * OMNI_USD_PER_M_TOKENS.videoOutput) / 1e6;
+}
+
+export function omniCost(
+  resolution: OmniResolution,
+  seconds: number,
+  usage: OmniUsage | null
+): OmniCost {
+  const videoTokens =
+    usage?.videoOutputTokens ?? Math.ceil(OMNI_VIDEO_TOKENS_PER_SECOND[resolution] * seconds);
+  const usd =
+    (videoTokens * OMNI_USD_PER_M_TOKENS.videoOutput +
+      (usage?.textOutputTokens ?? 0) * OMNI_USD_PER_M_TOKENS.textOutput +
+      (usage?.inputTokens ?? 0) * OMNI_USD_PER_M_TOKENS.input) /
+    1e6;
   return {
     usd,
     // ToolUsage stores integer cents; round up so spend is never under-reported.
     cents: Math.ceil(usd * 100 - 1e-9),
-    rate_usd_per_second: rate.usd,
-    rate_basis: rate.basis,
+    rate_usd_per_second: seconds > 0 ? usd / seconds : 0,
+    rate_basis: usage ? 'usage_tokens' : 'estimated',
+    video_tokens: videoTokens,
   };
 }
 
@@ -79,11 +123,13 @@ export interface OmniImageInput {
   mimeType: string;
 }
 
+/** Images are sent in this order; the prompt's tags refer to them as Image1..N. */
 export interface OmniVideoRequest {
   prompt: string;
   images: OmniImageInput[];
   aspectRatio: OmniAspectRatio;
   resolution: OmniResolution;
+  seed?: number;
 }
 
 export interface OmniVideoResult {
@@ -93,6 +139,8 @@ export interface OmniVideoResult {
   interactionId: string | null;
   durationSeconds: number;
   latencyMs: number;
+  /** Null when the response carried no usage block. */
+  usage: OmniUsage | null;
 }
 
 function apiBase(): string {
@@ -117,16 +165,46 @@ async function providerFetch(url: string, init: RequestInit, key: string): Promi
   });
 }
 
-async function providerErrorMessage(response: Response): Promise<string> {
-  const text = await response.text();
+/**
+ * Google's own words. Interactions errors are {"error":{"message","code"}};
+ * Files API errors are {"error":{"code":<number>,"message","status"}}.
+ */
+export async function providerErrorMessage(response: Response): Promise<string> {
+  const text = await response.text().catch(() => '');
+  let message = '';
+  let label = '';
   try {
-    const parsed = JSON.parse(text) as { error?: { message?: string; status?: string } };
-    if (parsed.error?.message)
-      return `${parsed.error.status ?? response.status}: ${parsed.error.message}`;
+    const error = (JSON.parse(text) as { error?: Record<string, unknown> }).error ?? {};
+    message = typeof error.message === 'string' ? error.message.trim() : '';
+    label =
+      [error.status, error.code].find(
+        (value): value is string => typeof value === 'string' && value.length > 0
+      ) ?? '';
   } catch {
     // not JSON: fall through to the raw body
   }
-  return text.slice(0, 500) || `HTTP ${response.status}`;
+  const http = `HTTP ${response.status}`;
+  if (message) return `${message} (${label ? `${label}, ` : ''}${http})`;
+  return text.trim() ? `${text.trim().slice(0, 500)} (${http})` : http;
+}
+
+function readUsage(body: unknown): OmniUsage | null {
+  const usage = (body as { usage?: Record<string, unknown> })?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  const byModality = Array.isArray(usage.output_tokens_by_modality)
+    ? (usage.output_tokens_by_modality as { modality?: string; tokens?: unknown }[])
+    : [];
+  const video = byModality
+    .filter((entry) => entry?.modality === 'video')
+    .reduce((sum, entry) => sum + num(entry.tokens), 0);
+  if (video === 0) return null;
+  return {
+    inputTokens: num(usage.total_input_tokens),
+    videoOutputTokens: video,
+    textOutputTokens:
+      Math.max(0, num(usage.total_output_tokens) - video) + num(usage.total_thought_tokens),
+  };
 }
 
 interface VideoPart {
@@ -182,6 +260,7 @@ export function mp4DurationSeconds(bytes: Buffer): number | null {
 }
 
 async function pollAndDownload(uri: string, key: string, deadline: number): Promise<Buffer> {
+  // ".../v1beta/files/{id}:download?alt=media" (live shape) or ".../files/{id}".
   const fileMatch = /\/files\/([^/:?]+)/.exec(uri);
   if (!fileMatch) throw new OmniVideoError(`unrecognised video uri ${uri.slice(0, 200)}`, true);
   const base = `${apiBase()}/v1beta/files/${fileMatch[1]}`;
@@ -238,16 +317,18 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
       resolution: request.resolution,
       delivery: 'uri',
     },
-    background: false,
-    store: false,
+    ...(request.seed !== undefined ? { generation_config: { seed: request.seed } } : {}),
+    // Google: "store=true is required when response format has video delivery set to URI."
+    store: true,
     stream: false,
   };
   log.info('[GenerateVideo] provider request', {
     model,
     prompt_chars: request.prompt.length,
-    reference_images: request.images.length,
+    images: request.images.length,
     aspect_ratio: request.aspectRatio,
     resolution: request.resolution,
+    seed: request.seed ?? null,
   });
   let response: Response;
   try {
@@ -295,10 +376,13 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     throw new OmniVideoError('provider returned an unreadable video file', true);
   }
   const latencyMs = Date.now() - started;
+  const usage = readUsage(interaction);
   log.info('[GenerateVideo] provider response', {
     model,
+    interaction_id: interaction.id ?? null,
     bytes: bytes.length,
     duration_seconds: durationSeconds,
+    video_tokens: usage?.videoOutputTokens ?? null,
     latency_ms: latencyMs,
   });
   return {
@@ -308,5 +392,6 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     interactionId: interaction.id ?? null,
     durationSeconds,
     latencyMs,
+    usage,
   };
 }
