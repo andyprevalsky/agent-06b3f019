@@ -9731,7 +9731,9 @@ async def test_close_browser_session_reports_unacknowledged_cleanup():
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs == {"timeout": 10.0}
+            # Live checkpoint + Tilion release has taken 11–12s before the
+            # backend acknowledges an exact-session pause.
+            assert kwargs == {"timeout": 60.0}
 
         async def __aenter__(self):
             return self
