@@ -39,6 +39,21 @@ rate over time above those rows; pass the iteration count with `--iterations N`
 so multiple CLI launches in one batch do not advance the threshold. For other
 goals, use more than three experiments. Leave unscored experiments as gaps and
 draw running ones hollow.
+For every `/descend` scorecard, show one full-selected-suite cake chart for
+historical outcomes over the latest X scored runs per task (X follows the goal):
+green for all X PASS, red for a genuine FAIL in the window, gray for explicitly
+unrun tasks, and amber for partial or unknown coverage. Keep final-source
+qualification separate. The time graph shows only the global fraction of the
+selected suite with all X PASS; missing snapshots remain gaps.
+For measured `/descend` KPIs, color infra below 5% green using the original
+scheduled denominator; otherwise red. Use scored PASS + FAIL as the PASS
+denominator: above 95% green, above 80% yellow, otherwise red. Unknown or
+unmeasured KPIs stay amber and never become scored PASS or FAIL. Remove the lifecycle display section while preserving all
+underlying cleanup and acceptance checks. Fill LLM latency from verified native
+request timings with units and coverage. Show recorded user-metered cost with
+coverage; keep separate Azure/provider/infrastructure spend unmetered unless
+actual billing evidence is available. Never treat missing cost as zero.
+
 Color-code the card itself: green verified successes, red failures/blockers,
 blue active work and amber warnings/unmeasured coverage. On boxes.dev render
 actual CSS-colored text in a published HTML scorecard; diff highlighting and
