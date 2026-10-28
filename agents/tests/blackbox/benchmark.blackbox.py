@@ -13876,16 +13876,27 @@ def test_attempt_ledger_records_run_id_and_outcome_class():
         ):
             with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "campaign-7"}):
                 timeout_history.record_attempt(
-                    task_name="t", passed=False, status="COMPLETED", duration_seconds=4.0,
-                    cost_cents=0.0, run_id="run-1", outcome_class="cleanup-failure",
+                    task_name="t",
+                    passed=False,
+                    status="COMPLETED",
+                    duration_seconds=4.0,
+                    cost_cents=0.0,
+                    run_id="run-1",
+                    outcome_class="cleanup-failure",
                 )
             with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": ""}):
                 timeout_history.record_attempt(
-                    task_name="t", passed=True, status="COMPLETED", duration_seconds=2.0, cost_cents=0.0,
+                    task_name="t",
+                    passed=True,
+                    status="COMPLETED",
+                    duration_seconds=2.0,
+                    cost_cents=0.0,
                 )
         first, second = (json.loads(line) for line in ledger.read_text().splitlines())
     assert (first["run_id"], first["group_run_id"], first["outcome_class"]) == (
-        "run-1", "campaign-7", "cleanup-failure",
+        "run-1",
+        "campaign-7",
+        "cleanup-failure",
     )
     assert not {"run_id", "group_run_id", "outcome_class"} & set(second)
 
