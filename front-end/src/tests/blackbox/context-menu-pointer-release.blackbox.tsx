@@ -25,15 +25,23 @@ function release(item: HTMLElement, button: number) {
   fireEvent.pointerUp(item, { pointerType: 'mouse', button, clientX: 117, clientY: 107 });
 }
 describe('context menu pointer release ownership', () => {
-  it.each([1, 2])('does not select an item from the opening mouse button %i release', async (button) => {
-    const { item, onSelect } = await open();
-    release(item, button);
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(item).toBeVisible();
-  });
+  it.each([1, 2])(
+    'does not select an item from the opening mouse button %i release',
+    async (button) => {
+      const { item, onSelect } = await open();
+      release(item, button);
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(item).toBeVisible();
+    },
+  );
   it('keeps primary release selection', async () => {
     const { item, onSelect } = await open();
-    fireEvent.pointerUp(document.body, { pointerType: 'mouse', button: 2, clientX: 117, clientY: 107 });
+    fireEvent.pointerUp(document.body, {
+      pointerType: 'mouse',
+      button: 2,
+      clientX: 117,
+      clientY: 107,
+    });
     await new Promise((resolve) => setTimeout(resolve, 0));
     release(item, 0);
     expect(onSelect).toHaveBeenCalledTimes(1);
@@ -46,11 +54,46 @@ describe('context menu pointer release ownership', () => {
   it('preserves the caller cancellation of primary release', async () => {
     const cancel = vi.fn((event: React.PointerEvent<HTMLDivElement>) => event.preventDefault());
     const { item, onSelect } = await open(vi.fn(), cancel);
-    fireEvent.pointerUp(document.body, { pointerType: 'mouse', button: 2, clientX: 117, clientY: 107 });
+    fireEvent.pointerUp(document.body, {
+      pointerType: 'mouse',
+      button: 2,
+      clientX: 117,
+      clientY: 107,
+    });
     await new Promise((resolve) => setTimeout(resolve, 0));
     release(item, 0);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
     expect(item).toBeVisible();
+  });
+
+  it('keeps a rapid reopened menu protected when the prior release timer runs', async () => {
+    const { item, onSelect } = await open();
+    vi.useFakeTimers();
+    try {
+      release(item, 2);
+      fireEvent.keyDown(item, { key: 'Escape' });
+      fireEvent.contextMenu(screen.getByTestId('trigger'), { clientX: 237, clientY: 207 });
+      vi.runOnlyPendingTimers();
+      const reopened = screen.getByRole('menuitem', { name: 'Delete project' });
+      fireEvent.pointerUp(reopened, {
+        pointerType: 'mouse',
+        button: 2,
+        clientX: 237,
+        clientY: 207,
+      });
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(reopened).toBeVisible();
+      vi.runOnlyPendingTimers();
+      fireEvent.pointerUp(reopened, {
+        pointerType: 'mouse',
+        button: 0,
+        clientX: 237,
+        clientY: 207,
+      });
+      expect(onSelect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
