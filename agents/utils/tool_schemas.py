@@ -3,6 +3,7 @@
 import json
 import re
 from enum import Enum
+from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 from urllib.parse import urlsplit
 
@@ -1852,6 +1853,14 @@ def create_agent_action_model(
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 
+    # Compiled classes are shared definitions: instantiate them or derive a
+    # JSON schema, but do not mutate their fields or force model rebuilding.
+    return _agent_action_model_for_types(tuple(tool_types))
+
+
+@lru_cache(maxsize=128)
+def _agent_action_model_for_types(tool_types: tuple[Type[BaseModel], ...]) -> Type[BaseModel]:
+    """Compile each ordered tool-model set once, including across workflow replays."""
     # Create union type for tool calls
     if not tool_types:
         # No tools available - agent can only communicate

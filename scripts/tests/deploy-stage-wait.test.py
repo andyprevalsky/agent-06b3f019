@@ -125,6 +125,23 @@ class DeployStageWaitTest(unittest.TestCase):
         self.assertEqual(payload["stage"], "lane-dies")
         self.assertLess(elapsed, 5)
 
+    def test_stale_admission_before_since_is_not_a_death(self) -> None:
+        # A forced kill before the runner installed its signal handlers can
+        # leave an admission without a receipt. It predates this wait's
+        # --since, so it must not report the rerun's lane as dead.
+        admissions = self.run_root / "waittest" / "admissions"
+        admissions.mkdir(parents=True, exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        stale = admissions / f"lane-stale-{dead.pid}-deadbeef.json"
+        stale.write_text(json.dumps({"schema_version": 1, "run_id": "waittest", "token": stale.stem, "pid": dead.pid}))
+        old = time.time() - 120
+        os.utime(stale, (old, old))
+        since = f"{time.time():.3f}"
+        code, payload, _elapsed = self.wait("--since", since, "--timeout", "0.6", "lane-stale")
+        self.assertEqual(code, 124, payload)
+        self.assertEqual(payload["not_started"], ["lane-stale"])
+
     def test_silent_stall_wakes_the_owner(self) -> None:
         since = f"{time.time():.3f}"
         self.stage("lane-quiet", "echo started; sleep 6")

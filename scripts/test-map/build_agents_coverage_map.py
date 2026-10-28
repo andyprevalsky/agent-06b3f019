@@ -36,6 +36,11 @@ def main() -> int:
     parser.add_argument("--out", default=str(OUT))
     args = parser.parse_args()
     real_coverage = AGENTS / "venv" / "bin" / "coverage"
+    try:
+        from coverage import CoverageData
+    except ImportError:
+        print("coverage is not importable; run with agents/venv/bin/python", file=sys.stderr)
+        return 2
     with tempfile.TemporaryDirectory(prefix="agents-covmap-") as tmp:
         data_dir = Path(tmp) / "data"
         data_dir.mkdir()
@@ -58,7 +63,6 @@ def main() -> int:
             cwd=AGENTS, env=env,
         )
         elapsed = time.monotonic() - started
-        from coverage import CoverageData  # type: ignore[import-not-found]
 
         files: dict[str, set[str]] = defaultdict(set)
         for data_file in data_dir.iterdir():

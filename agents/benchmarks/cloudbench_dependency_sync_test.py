@@ -36431,3 +36431,12 @@ fleet_reap_registry_record_native {shlex.quote(str(registry))} stale 2 0 {shlex.
         assert not any(call.startswith("audit ") for call in call_log)
         assert record.read_text() == "name=cloudbench-late\nvolume_id=vol_late\n"
         assert "does not mount owned volume vol_late; retaining record" in result.stderr
+
+
+def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regressions() -> None:
+    """Run the native/shared readiness regression in the deployed cloudbench gate."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/tests/cloudbench-status-readiness-observability.test.py")],
+        text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

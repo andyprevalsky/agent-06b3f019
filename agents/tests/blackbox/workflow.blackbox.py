@@ -53,6 +53,160 @@ def test_task_dag_parallel():
     assert dag.is_complete(), "Should be complete with all 3 done"
 
 
+def test_workflow_policy_import_does_not_rebuild_provider_clients():
+    """A pure workflow timeout policy must not load activity-side provider clients."""
+    import builtins
+
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    import sys
+
+    host_pricing = sys.modules["helpers.model_pricing"]
+    importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+    with importer.applied():
+        builtins.__import__("helpers.wmh_activity_policy")
+        sandbox_pricing = builtins.__import__("helpers.model_pricing", fromlist=["get_default_pricing"])
+    provider_modules = sorted(name for name in importer.new_modules if name.startswith("providers.rose"))
+    assert not provider_modules, f"workflow policy import rebuilt activity-side provider clients: {provider_modules}"
+    assert sandbox_pricing is host_pricing, "pricing module must reuse the host instance on cold workflow replay"
+    assert sandbox_pricing.get_default_pricing is host_pricing.get_default_pricing
+
+
+def test_workflow_helper_exports_reuse_host_activity_definitions():
+    """Cold imports keep workflow isolation while reusing registered activities."""
+    import builtins
+    import helpers
+    import sys
+
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    host_exports = {name: getattr(helpers, name) for name in helpers.__all__}
+    importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+    with importer.applied():
+        policy = builtins.__import__("helpers.wmh_activity_policy", fromlist=["wmh_activity_timeout_options"])
+        sandbox_helpers = builtins.__import__("helpers", fromlist=list(host_exports))
+    assert sandbox_helpers is not helpers, "the helpers package must remain sandbox-isolated"
+    assert policy is not sys.modules["helpers.wmh_activity_policy"], (
+        "pure workflow helpers must remain sandbox-isolated"
+    )
+    rebuilt = [name for name, value in host_exports.items() if getattr(sandbox_helpers, name) is not value]
+    assert not rebuilt, f"cold replay rebuilt registered helper exports: {rebuilt}"
+
+
+def test_workflow_action_model_cache_preserves_registry_and_validation():
+    """Equivalent replay inputs reuse a schema without sharing different tools."""
+    from typing import Literal
+
+    from pydantic import BaseModel, ValidationError
+    from utils.tool_schemas import create_agent_action_model
+
+    class FirstTool(BaseModel):
+        tool: Literal["custom"]
+        first: str
+
+    class ReplacementTool(BaseModel):
+        tool: Literal["custom"]
+        replacement: int
+
+    first = create_agent_action_model(["custom"], {"custom": FirstTool})
+    same = create_agent_action_model(["custom"], dict(custom=FirstTool))
+    assert first is same, "identical replay tool types rebuilt the action schema"
+    replacement = create_agent_action_model(["custom"], {"custom": ReplacementTool})
+    assert first is not replacement, "a changed user-tool registry reused a stale schema"
+    registry = {"first": FirstTool, "replacement": ReplacementTool}
+    forward = create_agent_action_model(["first", "replacement"], registry)
+    reverse = create_agent_action_model(["replacement", "first"], registry)
+    assert forward is not reverse, "tool union ordering must remain part of the schema identity"
+    assert first.model_validate({"response": "", "tool_calls": [{"tool": "custom", "first": "ok"}]}).tool_calls
+    assert replacement.model_validate({"response": "", "tool_calls": [{"tool": "custom", "replacement": 3}]}).tool_calls
+    try:
+        replacement.model_validate({"response": "", "tool_calls": [{"tool": "custom", "first": "stale"}]})
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("the new registry accepted a payload valid only under the old schema")
+
+
+def test_workflow_sandbox_keeps_worker_logging_configuration():
+    """Workflow logging uses the worker's configured processors on cold replay."""
+    import builtins
+    import structlog
+
+    from helpers.workflow_sandbox import workflow_sandbox_restrictions
+    from temporalio.worker.workflow_sandbox._importer import Importer
+    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
+
+    previous = structlog.get_config()
+    was_configured = structlog.is_configured()
+    processors = [lambda logger, method, event: event]
+    try:
+        structlog.configure(processors=processors)
+        importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
+        with importer.applied():
+            sandbox_logging = builtins.__import__("structlog")
+        assert sandbox_logging.get_config()["processors"] is processors, (
+            "cold workflow replay rebuilt structlog and lost the worker's logging processors"
+        )
+    finally:
+        if was_configured:
+            structlog.configure(**previous)
+        else:
+            structlog.reset_defaults()
+
+
+async def test_blackbox_result_preserves_empty_exceptions_and_tracebacks():
+    """Empty exception messages still identify the failing boundary in run logs."""
+    from contextlib import redirect_stderr, redirect_stdout
+    from io import StringIO
+
+    def fail_sync():
+        raise AssertionError()
+
+    async def fail_async():
+        raise TimeoutError()
+
+    for name, invoke, exception_name, frame_name in (
+        ("sync", fail_sync, "AssertionError", "fail_sync"),
+        ("async", fail_async, "TimeoutError", "fail_async"),
+    ):
+        result = BlackboxResult()
+        stdout, stderr = StringIO(), StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            if name == "sync":
+                result.record(name, invoke)
+            else:
+                await result.record_async(name, invoke)
+        assert result.summary() == {"passed": 0, "failed": 1, "total": 1}
+        assert exception_name in stdout.getvalue(), stdout.getvalue()
+        assert exception_name in result.errors[0], result.errors
+        assert frame_name in stderr.getvalue(), stderr.getvalue()
+
+    # Temporal cases collect errors, then report them outside the except block.
+    try:
+        try:
+            fail_sync()
+        except AssertionError as cause:
+            raise TimeoutError() from cause
+    except TimeoutError as caught:
+        deferred_error = caught
+    result = BlackboxResult()
+    stdout, stderr = StringIO(), StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        result.record_result("deferred", deferred_error)
+        result.record_result("passed", None)
+    assert result.summary() == {"passed": 1, "failed": 1, "total": 2}
+    assert "deferred: TimeoutError" in stdout.getvalue(), stdout.getvalue()
+    assert "passed" in stdout.getvalue(), stdout.getvalue()
+    assert result.errors == ["deferred: TimeoutError"], result.errors
+    assert "AssertionError" in stderr.getvalue(), stderr.getvalue()
+    assert "TimeoutError" in stderr.getvalue(), stderr.getvalue()
+    assert "fail_sync" in stderr.getvalue(), stderr.getvalue()
+
+
 def test_usage_model_falls_back_when_cache_provenance_is_unknown():
     """Legacy Fast Mode entries use the literal ``unknown`` provenance value.
 
@@ -718,7 +872,8 @@ async def mock_call_llm_activity(
         # Poll-retry scenarios deliberately exercise loop exhaustion. A valid
         # already-elapsed wait keeps polling without completing or sleeping.
         "tool_calls": [{"tool": "wait_for", "until_timestamp": "2000-01-01T00:00:00Z"}]
-        if activity_agent_id in POLL_TRANSIENT_BURST else [
+        if activity_agent_id in POLL_TRANSIENT_BURST
+        else [
             {
                 "tool": "attempt_completion",
                 "result": "All done",
@@ -12334,6 +12489,17 @@ async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
 
+    await r.record_async(
+        "blackbox_result_empty_exception_diagnostics", test_blackbox_result_preserves_empty_exceptions_and_tracebacks
+    )
+
+    r.record("wf_policy_import_avoids_provider_clients", test_workflow_policy_import_does_not_rebuild_provider_clients)
+    r.record("wf_helper_exports_reuse_host_activities", test_workflow_helper_exports_reuse_host_activity_definitions)
+    r.record(
+        "wf_action_model_cache_preserves_registry", test_workflow_action_model_cache_preserves_registry_and_validation
+    )
+    r.record("wf_logging_keeps_worker_configuration", test_workflow_sandbox_keeps_worker_logging_configuration)
+
     # Pure logic tests (sync)
     r.record("task_dag_parallel", test_task_dag_parallel)
     r.record("task_dag_sequential", test_task_dag_sequential)
@@ -12786,7 +12952,9 @@ async def run_all_tests():
         test_workflow_cost_limit_flushes_tree_cost_before_pausing,
     )
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
-    await r.record_async("wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus)
+    await r.record_async(
+        "wf_update_tree_state_no_bus_persists_status", test_workflow_update_tree_state_persists_status_without_bus
+    )
     await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
     await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
     await r.record_async("wf_query_parent_state_empty", test_workflow_query_parent_state_returns_empty_without_parent)
@@ -13131,13 +13299,7 @@ async def run_all_tests():
     wf_results = await _run_all_workflow_tests()
     wf_results += await _run_parked_tool_cutover_tests()
     for test_name, err in wf_results:
-        if err is None:
-            r.passed += 1
-            print(f"  \u2705 {test_name}")
-        else:
-            r.failed += 1
-            r.errors.append(f"{test_name}: {err}")
-            print(f"  \u274c {test_name}: {err}")
+        r.record_result(test_name, err)
 
     teardown_mock()
     return r.all_passed

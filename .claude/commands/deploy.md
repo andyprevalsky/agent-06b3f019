@@ -311,9 +311,26 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes"
 # data, not payment lifecycle code; a main sync carries other deploys' rows.
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/history/' | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
-# Keep the aggregate coverage worker pool within this 14-core deploy host.
-# Backend blackboxes and unit files overlap, so both pools count. An uncapped
-# all-repo run starts 18+ workers and makes every lane slower.
+# These worker counts are ceilings for a 14-core/high-memory host. The pipeline
+# scales them down using os.cpu_count(), MemTotal and MemAvailable, and the
+# recorded boxes watchdog cap (90% of MemTotal when no cap is recorded).
+# macOS reads /usr/sbin/sysctl -n hw.memsize and /usr/bin/vm_stat on each
+# sample; available memory estimates free + inactive + speculative pages,
+# excluding overlapping purgeable/file-backed counts. Missing native counters
+# fail closed with the commands to verify; physical RAM alone is insufficient.
+# Each lane declares memory_mb; plan also derives a default --max-parallel
+# from cores and usable memory, capped at seven lanes. Structural --max-workers
+# is passed explicitly so its worker count matches its memory reservation.
+# Structural reserves 1024 MiB plus 1840 MiB per active suite: the recorded
+# 1471.98 MiB largest-child peak rounded up with a 25% margin for each worker.
+# run reserves 2 GiB for other processes below both available memory and the
+# watchdog cap, rechecks whole-box headroom before every admission, and never
+# admits reservations over that headroom. A lane that cannot fit alone fails
+# visibly without starting. Explicit resource limits can only tighten memory
+# admission. Receipts include timestamped MemAvailable samples, per-lane child
+# peak RSS (wait4/getrusage), load peaks and memory-watchdog TERM records.
+# Account for Postgres, Docker and other agents outside the deploy cgroup:
+# MemoryHigh on one unit does not protect the rest of this 16 GiB box.
 BACKEND_BLACKBOX_WORKERS=4
 BACKEND_UNIT_WORKERS=6
 AGENTS_COVERAGE_WORKERS=6
@@ -569,13 +586,19 @@ Smoke, semantic, AgentCard and E2B lanes in Group 4 use the same pattern.
 
 Optionally drive Group 3 and Group 4 lanes concurrently with
 `python3 scripts/run_deploy_pipeline.py plan|run` (every lane still runs
-through `run-deploy-stage`; previously failed lanes are admitted first and a
-source change after the freeze marks the run `stale`). Its
-`python3 scripts/run_deploy_pipeline.py wait --state-dir <dir> [--stall-seconds S]`
+through `run-deploy-stage`; previously failed lanes are admitted first, lanes
+are admitted against the host's cores and memory budget as described under
+the worker budgets above, and a source change after the freeze marks the run
+`stale`). Capture `SINCE=$(python3 -c 'import time; print(time.time())')`
+before launching `run`; its
+`python3 scripts/run_deploy_pipeline.py wait --state-dir <dir> --since "$SINCE" [--stall-seconds S]`
 is this same waiter over the pipeline's lanes, with the same exit codes plus
-`5` for a stale source and `3` for a dead supervisor; never arm a second,
-different waiter for the same lanes. An exact-input `--reuse-passed` hit
-records `reused`, which both count as a pass.
+`5` for a stale source and `3` for a dead supervisor; a receipt started before
+`--since` belongs to an earlier iteration and never satisfies the wait, and a
+lane that failed before writing a stage row (refused by the memory budget,
+spawn error) wakes it like any other failure. Never arm a second, different
+waiter for the same lanes. An exact-input `--reuse-passed` hit records
+`reused`, which both count as a pass.
 
 ## Step 1: Prettier format
 
@@ -835,8 +858,10 @@ and observe through owned-resource release. Early task PASS/FAIL and stale cards
 are distinct from controller exit and cleanup. The existing live-results gate
 also runs the compact monitor controls; no additional live verification is added.
 
-The structural runner admits eight suites concurrently by default and runs the
-complete registry. Use `--max-workers N` to choose a host-appropriate limit;
+The structural runner defaults to `floor(8 * cores / 14)` concurrent suites
+(between 1 and 8; eight on a 14-core host, four on an 8-core host), and runs the
+complete registry. The pipeline supplies its memory-scaled `--max-workers`
+explicitly. Use `--max-workers N` to choose another limit;
 this changes test scheduling only, not benchmark fleet width or task deadlines.
 Activate `agents/venv` and keep its `bin` before Homebrew in `PATH`, since the
 registered Python children inherit that interpreter selection.

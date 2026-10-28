@@ -9,12 +9,17 @@ back to running everything, or one of the selector's safety rules regresses
 from __future__ import annotations
 
 import sys
+import builtins
+import contextlib
+import io
+import runpy
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import select_affected_tests as sat  # noqa: E402  (script-relative import)
+import select_affected_tests as sat
 
 FAILURES: list[str] = []
 
@@ -25,7 +30,30 @@ def check(condition: bool, message: str) -> None:
         FAILURES.append(message)
 
 
+def check_coverage_map_dependency_preflight() -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/test-map/build_agents_coverage_map.py"))
+    original_import = builtins.__import__
+
+    def without_coverage(name, *args, **kwargs):
+        if name == "coverage":
+            raise ImportError("coverage missing in invoking interpreter")
+        return original_import(name, *args, **kwargs)
+
+    error = io.StringIO()
+    with patch.object(sys, "argv", ["build_agents_coverage_map.py"]), \
+         patch("subprocess.run") as runner, \
+         patch("builtins.__import__", side_effect=without_coverage), contextlib.redirect_stderr(error):
+        try:
+            code = namespace["main"]()
+        except ImportError:
+            code = -1
+    check(not runner.called, "missing coverage fails before launching the long agents runner")
+    check(code == 2 and "agents/venv/bin/python" in error.getvalue(),
+          "missing coverage gives an actionable interpreter preflight diagnostic")
+
+
 def main() -> int:
+    check_coverage_map_dependency_preflight()
     selector = sat.Selector()
 
     problems = sat.self_check(selector)

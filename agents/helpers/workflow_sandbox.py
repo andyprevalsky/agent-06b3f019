@@ -18,12 +18,14 @@ def workflow_sandbox_restrictions() -> SandboxRestrictions:
         # but they're only used in activities, not workflows
         "rich",
         "rich.console",
-        "structlog.dev",
         "markdown_it",
         "markdown_it_py",
         "pygments",
         "httpx",
         "sniffio",
+        # Workflow loggers must use the worker's configured processors and
+        # contextvars, without rebuilding the logging package on every replay.
+        "structlog",
         # helpers.llm uses threading.Lock via OpenAI/instructor clients
         # but workflow only calls activities via execute_activity, not directly
         "helpers.llm",

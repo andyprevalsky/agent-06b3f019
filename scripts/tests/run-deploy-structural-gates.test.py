@@ -435,6 +435,7 @@ class StructuralGateRunnerTests(unittest.TestCase):
 
             try:
                 with (
+                    patch.object(module.os, "cpu_count", return_value=14),
                     patch.object(module, "GATES", gates),
                     patch.object(module, "FAILURE_STATE", root / "failures.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
@@ -459,6 +460,54 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     max_workers=3,
                     failure_state=module.ROOT / module.FAILURE_STATE,
                 )
+
+    def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
+        """The deploy lane runs the registry inside a transient systemd service
+        (UMask 0022) while interactive devbox shells use 077. A gate must see
+        the same umask from either invoker, or a fixture can pass only where
+        the inherited umask happened to make its files private."""
+        spec = importlib.util.spec_from_file_location("deploy_runner_umask", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.assertEqual(module.GATE_UMASK, 0o022)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-umask-") as temporary:
+            root = Path(temporary)
+            observed = root / "observed.json"
+            gates = (
+                module.Gate(
+                    "umask-probe",
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "import json, os, stat; from pathlib import Path; "
+                            f"probe = Path({str(root / 'probe')!r}); probe.write_text('x'); "
+                            f"Path({str(observed)!r}).write_text(json.dumps(dict("
+                            "umask=os.umask(0), probe_mode=stat.S_IMODE(probe.stat().st_mode))))"
+                        ),
+                    ),
+                ),
+            )
+            for inherited in (0o077, 0o000):
+                observed.unlink(missing_ok=True)
+                (root / "probe").unlink(missing_ok=True)
+                previous = os.umask(inherited)
+                try:
+                    with (
+                        patch.object(module, "GATES", gates),
+                        patch.object(module, "FAILURE_STATE", root / "failures.json"),
+                        patch.object(sys, "argv", [str(RUNNER)]),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        result = module.main()
+                finally:
+                    os.umask(previous)
+                self.assertEqual(result, 0)
+                seen = json.loads(observed.read_text())
+                self.assertEqual(seen["umask"], module.GATE_UMASK, f"inherited umask {inherited:#o}")
+                self.assertEqual(seen["probe_mode"], 0o666 & ~module.GATE_UMASK)
 
     def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)

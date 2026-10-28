@@ -278,14 +278,25 @@ def analyze_ledger(
     gap_seconds: Counter = Counter()
     largest: list[dict[str, Any]] = []
     sources = []
+    run_starts = {
+        run_id: min(float(row["started_epoch"]) for row in run_stages)
+        for run_id, run_stages in by_run.items()
+    }
     for run_id, run_stages in by_run.items():
-        start = min(float(row["started_epoch"]) for row in run_stages)
+        start = run_starts[run_id]
         finish = max(float(row["finished_epoch"]) for row in run_stages)
         branch = run_stages[0].get("branch")
+        next_start = min(
+            (other_start for other, other_start in run_starts.items()
+             if other != run_id and by_run[other][0].get("branch") == branch and other_start > start),
+            default=float("inf"),
+        )
         run_events = [
             row
             for row in deploy_events
-            if row.get("branch") == branch and start <= float(row["recorded_epoch"]) <= finish + 6 * 3600
+            if row.get("branch") == branch
+            and start <= float(row["recorded_epoch"]) <= finish + 6 * 3600
+            and float(row["recorded_epoch"]) < next_start
         ]
         for gap in run_gaps(run_stages, run_events):
             gap_causes[gap["cause"]] += 1

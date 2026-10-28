@@ -8,8 +8,9 @@ set -euo pipefail
 #   one fails again. When they pass, every other domain and unit file still runs
 #   and thresholds are enforced, so a regression elsewhere is still caught.
 # --mode=subset (fast diagnosis only, NOT a gate): run just the failed blackbox
-#   domains and unit files. It cannot enforce thresholds and ends "PARTIAL";
-#   a full sweep remains mandatory afterwards.
+#   domains and unit files. It cannot enforce thresholds and ends "PARTIAL" with
+#   a non-zero exit (3) even when every selected test passed, so it can never be
+#   recorded as a passing gate; a full sweep remains mandatory afterwards.
 # Missing or unreadable failure records fall back to the plain full suite.
 #
 # Usage: bash scripts/coverage-rerun-failed.sh [--mode=failed-first|subset] [failure-evidence-dir]
@@ -73,6 +74,7 @@ if [[ "$MODE" == "failed-first" ]]; then
 fi
 echo "Rerunning failed blackbox domains: ${DOMAINS:-<none>}"
 echo "Rerunning failed unit files: ${UNITS:-<none>}"
+echo "Subset mode is diagnostic only: it ends PARTIAL with a non-zero exit and never satisfies the coverage gate."
 SKIP_BLACKBOX=0
 SKIP_UNITS=0
 [[ -n "$DOMAINS" ]] || SKIP_BLACKBOX=1

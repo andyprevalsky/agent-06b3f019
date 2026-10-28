@@ -196,10 +196,13 @@ const domainWeights = new Map<string, number>([
   ['proactive-sms', 20],
 ]);
 // Retry scheduling: domains that failed in the previous run go first so their
-// verdict arrives early. Exclusive ones run alone before the pool (still
-// uncontended); the rest lead the pool. With BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE=1
-// a repeated priority failure stops scheduling new domains; otherwise every
-// selected domain still runs, so the gate remains a full sweep.
+// verdict arrives early. Priority never moves a domain out of its phase: a
+// late-exclusive domain that failed AFTER the fixture writers must be retried
+// after them again (it could pass on a pre-writer database), so it only leads
+// the late-exclusive phase, and priority pool domains lead the pool. With
+// BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE=1 a repeated priority failure stops
+// scheduling new domains; otherwise every selected domain still runs, so the
+// gate remains a full sweep.
 const priorityDomainNames = new Set(
   (readEnv('BLACKBOX_TEST_PRIORITY_DOMAINS') ?? '')
     .split(',')
@@ -207,17 +210,16 @@ const priorityDomainNames = new Set(
     .filter((domain) => domain && requested.includes(domain))
 );
 const abortOnPriorityFailure = readEnv('BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE') === '1';
-const priorityExclusiveDomains = requested.filter(
-  (domain) => priorityDomainNames.has(domain) && lateExclusiveDomainNames.has(domain)
-);
-const lateExclusiveDomains = requested.filter(
-  (domain) => lateExclusiveDomainNames.has(domain) && !priorityDomainNames.has(domain)
-);
+const priorityFirst = (left: string, right: string): number =>
+  Number(priorityDomainNames.has(right)) - Number(priorityDomainNames.has(left));
+const lateExclusiveDomains = requested
+  .filter((domain) => lateExclusiveDomainNames.has(domain))
+  .sort((left, right) => priorityFirst(left, right));
 const parallelDomains = requested
   .filter((domain) => !lateExclusiveDomainNames.has(domain))
   .sort(
     (left, right) =>
-      Number(priorityDomainNames.has(right)) - Number(priorityDomainNames.has(left)) ||
+      priorityFirst(left, right) ||
       (domainWeights.get(right) ?? 0) - (domainWeights.get(left) ?? 0) ||
       left.localeCompare(right)
   );
@@ -396,17 +398,13 @@ async function runWithConcurrency<T, R>(
 }
 
 async function main(): Promise<void> {
-  const priorityExclusiveResults = await runWithConcurrency(
-    priorityExclusiveDomains,
-    1,
-    runScheduledDomain
-  );
   const parallelResults = await runWithConcurrency(
     parallelDomains,
     concurrency,
     runScheduledDomain
   );
-  // Aggregate assertions run after every parallel fixture writer has finished.
+  // Aggregate assertions run after every parallel fixture writer has finished,
+  // including a previously failed one being retried (same phase as its failure).
   // This also lets coverage run isolated unit processes during the long
   // provider domains without invalidating admin-health's whole-DB snapshot.
   const lateExclusiveResults = await runWithConcurrency(
@@ -415,7 +413,7 @@ async function main(): Promise<void> {
     runScheduledDomain
   );
   const resultsByDomain = new Map(
-    [...priorityExclusiveResults, ...parallelResults, ...lateExclusiveResults]
+    [...parallelResults, ...lateExclusiveResults]
       .filter((result): result is Result => result !== undefined)
       .map((result) => [result.domain, result])
   );

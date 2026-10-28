@@ -546,9 +546,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _record_review_window(triggered_at: datetime | None, waiter_started: float, pr: str, state: str) -> None:
+    # A trigger's GitHub time remains stable across re-waits; automatic reviews
+    # are measured from waiter startup. Record the same pair on every exit.
+    requested = triggered_at.timestamp() if triggered_at is not None else waiter_started
+    reason = "manual-trigger" if triggered_at is not None else "waiter-start"
+    record_review_event("review-request", requested, pr, reason)
+    record_review_event("review-arrival", time.time(), pr, state)
+
+
 def main() -> int:
     args = parse_args()
     waiter_started = time.time()
+    triggered_at = None
     try:
         triggered_at = latest_review_trigger_at(
             args.pr, args.repo, timeout=min(60.0, args.timeout)
@@ -564,15 +574,10 @@ def main() -> int:
         )
     except (ReviewWaitError, TimeoutError) as error:
         print(str(error), file=sys.stderr)
+        _record_review_window(triggered_at, waiter_started, args.pr,
+                              "timeout" if isinstance(error, TimeoutError) else "error")
         return 2
-    # A manual trigger's GitHub time is stable across re-waits, so the ledger
-    # deduplicates repeated request rows; an automatic review is measured from
-    # when this waiter started, and says so.
-    if triggered_at is not None:
-        record_review_event("review-request", triggered_at.timestamp(), args.pr, "manual-trigger")
-    else:
-        record_review_event("review-request", waiter_started, args.pr, "waiter-start")
-    record_review_event("review-arrival", time.time(), args.pr, status.state)
+    _record_review_window(triggered_at, waiter_started, args.pr, status.state)
 
     print(
         json.dumps(

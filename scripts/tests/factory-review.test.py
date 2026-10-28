@@ -2112,6 +2112,33 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertIn("typecheck (src/a.ts)", text)
         self.assertIn("fix-before-retry", text)
 
+    def test_events_belong_to_latest_run_on_the_same_branch(self) -> None:
+        rows = [
+            stage("old", "build", 0, 10),
+            stage("new", "build", 200, 210),
+            # The event at the next start belongs to new, including the boundary.
+            event("deploy", "review-request", "coderabbit", 200),
+            event("deploy", "review-arrival", "coderabbit", 400),
+            event("deploy", "outcome", "completed", 401),
+        ]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual(result["largest_gaps"], [{
+            "run_id": "new", "seconds": 190.0, "after": "build(passed)",
+            "before": "review-arrival:coderabbit", "cause": "wait:review:coderabbit",
+        }])
+        self.assertEqual(result["gap_causes"], [{
+            "cause": "wait:review:coderabbit", "count": 1, "seconds": 190.0,
+        }])
+
+    def test_event_window_is_not_cut_off_by_other_branch(self) -> None:
+        rows = [stage("original", "build", 0, 10),
+                {**stage("other", "build", 100, 110), "branch": "feat/other"},
+                event("deploy", "outcome", "completed", 200),
+                event("deploy", "outcome", "outside-window", 10 + 6 * 3600 + 1)]
+        result = DIAGNOSTICS.analyze_ledger(rows)
+        self.assertEqual([(g["run_id"], g["seconds"]) for g in result["largest_gaps"]],
+                         [("original", 190.0)])
+
     def test_reused_rows_do_not_count_as_failed_or_executed_deploy_calls(self) -> None:
         rows = [
             stage("run-1", "eslint", 0, 10),

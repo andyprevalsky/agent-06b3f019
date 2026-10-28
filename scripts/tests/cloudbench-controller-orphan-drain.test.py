@@ -26,6 +26,20 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 M = runpy.run_path(str(ROOT / "scripts/cloudbench-controller-orphan-drain.py"))
+# Every fixture here runs under the conventional umask 022 (the deploy lane's
+# transient-service and macOS default). Interactive devbox shells use 077,
+# which hides fixtures that only pass because the umask made them private.
+FIXTURE_UMASK = 0o022
+_inherited_umask: list[int] = []
+
+
+def setUpModule():
+    _inherited_umask.append(os.umask(FIXTURE_UMASK))
+
+
+def tearDownModule():
+    if _inherited_umask:
+        os.umask(_inherited_umask.pop())
 
 
 class Drain(unittest.TestCase):
@@ -734,7 +748,12 @@ class NormalAgent(unittest.TestCase):
             ]
         )
         old_path = producer / "cloudbench-controller-orphan-drain.py"
-        old_path.write_bytes(old_source)
+        # saved_positive_plan reads this through the private-file reader
+        # (owner-only mode); create it 0600 explicitly rather than through
+        # the inherited umask, which is 022 under the deploy lane's service.
+        with os.fdopen(os.open(old_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(old_source)
         for path in (ROOT / "scripts").iterdir():
             if path.is_file() and path.name != old_path.name:
                 (producer / path.name).symlink_to(path)

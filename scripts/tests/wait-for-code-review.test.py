@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
+import json
+import os
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +24,35 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReviewWaitTest(unittest.TestCase):
+    def test_failed_wait_records_a_complete_review_window(self) -> None:
+        # Match the CLI's script import path when calling main in-process.
+        self.addCleanup(setattr, sys, "path", sys.path[:])
+        sys.path.insert(0, str(ROOT / "scripts"))
+        args = argparse.Namespace(pr="123", head="a" * 40, repo="acme/rose", timeout=600, poll=5)
+        triggered = MODULE.parse_github_time("2026-10-01T23:54:31Z")
+        for error, trigger, fails_during_trigger, reason in (
+            (TimeoutError("review timed out"), triggered, False, "timeout"),
+            (MODULE.ReviewWaitError("PR HEAD changed"), None, False, "error"),
+            (MODULE.ReviewWaitError("trigger unavailable"), None, True, "error"),
+        ):
+            with self.subTest(error=str(error)), tempfile.TemporaryDirectory() as directory:
+                ledger = Path(directory) / "events.jsonl"
+                with patch.object(MODULE, "parse_args", return_value=args), \
+                     patch.object(MODULE, "latest_review_trigger_at", return_value=trigger,
+                                  side_effect=error if fails_during_trigger else None), \
+                     patch.object(MODULE, "wait_for_review", side_effect=error), \
+                     patch.dict(os.environ, {"FACTORY_EVENT_LOG": str(ledger)}):
+                    code = MODULE.main()
+                self.assertEqual(code, 2)
+                self.assertTrue(ledger.exists(), "failed review wait lost both timing events")
+                rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+                self.assertEqual([row["event"] for row in rows], ["review-request", "review-arrival"])
+                self.assertEqual(rows[0]["detail"]["reason"], "manual-trigger" if trigger else "waiter-start")
+                self.assertEqual(rows[1]["detail"]["reason"], reason)
+                self.assertGreaterEqual(rows[1]["recorded_epoch"], rows[0]["recorded_epoch"])
+                if trigger:
+                    self.assertEqual(rows[0]["recorded_epoch"], trigger.timestamp())
+
     def test_legacy_success_needs_no_started_at(self) -> None:
         head = "a" * 40
         payload = {

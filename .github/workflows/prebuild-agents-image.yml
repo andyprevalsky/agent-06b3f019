@@ -1,13 +1,16 @@
 name: Prebuild Agents Image
 
-# Build the worker image for a PR's exact agents tree while the /deploy gates
-# run, so the post-merge cooperative cutover promotes it by digest instead of
-# rebuilding (scripts/prebuild-agents-image.sh). Build-only + push: no Fly
-# Machine is created and no release changes. A later agents change on main
-# changes the tree hash, so the cutover then builds as before.
-
+# Build untrusted Dockerfiles without credentials, then transfer only the image
+# to a fresh runner for publishing. The context key is identical to the cutover
+# lookup, so a matching merged tree still promotes the image by digest.
+#
+# pull_request_target: this YAML always comes from the base branch, so a
+# same-repository PR cannot edit the publish job to reach FLY_API_TOKEN. The PR
+# commit is never checked out or executed; its agents tree is read as git
+# objects and only its Dockerfile runs, inside `docker build`, in the job that
+# has no credentials. Changes to this file take effect after they merge.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, synchronize]
     paths:
       - "agents/**"
@@ -16,6 +19,7 @@ on:
       - "!agents/**/*.md"
       - "scripts/prebuild-agents-image.sh"
       - "scripts/agents-image-context.sh"
+      - ".github/workflows/prebuild-agents-image.yml"
 
 permissions:
   contents: read
@@ -25,16 +29,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prebuild:
-    # Same-repository PRs only: fork PRs never receive the Fly token.
+  build:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout trusted build tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          # Same sparse, blob-filtered checkout as deploy-agents.yml.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
           filter: blob:none
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -42,9 +48,96 @@ jobs:
             !/agents/benchmarks/
             !/front-end/public/
             !/claude-code-src/
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Build and push prebuilt-<agents tree>
+      - name: Prepare build context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_VALUE_0
+          git fetch --no-tags --filter=blob:none --depth=1 origin "$HEAD_SHA"
+          mkdir -p "$RUNNER_TEMP/agents-context"
+          # The helper is new in this PR and may not exist on the default
+          # branch yet. Read immutable objects directly; never run PR scripts.
+          # Match agents-image-context.sh, including nested exclusions/modes.
+          while IFS=$'\t' read -r meta name; do
+            read -r mode type object <<< "$meta"
+            case "$name" in benchmarks|tests) continue ;; esac
+            case "$type:$mode" in
+              tree:040000)
+                git archive --prefix="$name/" "$HEAD_SHA:agents/$name" |
+                  tar -x -C "$RUNNER_TEMP/agents-context" --exclude=benchmarks --exclude=tests ;;
+              blob:100644|blob:100755)
+                git cat-file blob "$object" > "$RUNNER_TEMP/agents-context/$name"
+                chmod "$(printf '%o' $(( (${mode: -3} == 755 ? 8#755 : 8#644) & ~8#$(umask) )))" "$RUNNER_TEMP/agents-context/$name" ;;
+              blob:120000)
+                ln -s "$(git cat-file blob "$object")" "$RUNNER_TEMP/agents-context/$name" ;;
+              *) echo "unsupported agents entry $name ($type $mode)" >&2; exit 1 ;;
+            esac
+          done < <(git ls-tree "$HEAD_SHA:agents")
+      - name: Build image without credentials
+        run: |
+          set -euo pipefail
+          docker build --tag "agents-prebuild:$HEAD_SHA" "$RUNNER_TEMP/agents-context"
+          docker save --output "$RUNNER_TEMP/agents-image.tar" "agents-prebuild:$HEAD_SHA"
+      - name: Transfer image to isolated publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agents-prebuild-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/agents-image.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout trusted publishing configuration
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
+      - name: Install pinned Fly client
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Download image without executing PR code
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agents-prebuild-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/prebuild
+      - name: Resolve trusted destination and content key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          APP=$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' agents/fly.toml)
+          [[ "$APP" =~ ^[a-z0-9-]+$ ]]
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_VALUE_0
+          git fetch --no-tags --filter=blob:none --depth=1 origin "$HEAD_SHA"
+          ENTRIES=$(git ls-tree "$HEAD_SHA:agents" | awk -F'\t' '$2 != "benchmarks" && $2 != "tests"')
+          TREE=$(printf '%s\n' "$ENTRIES" | git hash-object --stdin)
+          [[ "$TREE" =~ ^[a-f0-9]{40}$ ]]
+          printf 'PREBUILD_REF=registry.fly.io/%s:prebuilt-%s\n' "$APP" "$TREE" >> "$GITHUB_ENV"
+          docker load --input "$RUNNER_TEMP/prebuild/agents-image.tar"
+          docker tag "agents-prebuild:$HEAD_SHA" "registry.fly.io/$APP:prebuilt-$TREE"
+      - name: Authenticate registry
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/prebuild-agents-image.sh build --sha "$HEAD_SHA"
+        run: flyctl auth docker
+      - name: Push prebuilt image
+        run: docker push "$PREBUILD_REF"

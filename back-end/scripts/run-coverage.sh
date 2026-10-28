@@ -137,6 +137,9 @@ if [[ -n "$COVERAGE_SHARD" ]]; then
   export BACKEND_UNIT_SHARD="$COVERAGE_SHARD"
 fi
 COVERAGE_PARTIAL=0
+# Exit status of a partial (subset) run whose selected tests all passed. Non-zero
+# on purpose: thresholds were not enforced, so it can never be a passing gate.
+COVERAGE_PARTIAL_EXIT=3
 if [[ -n "$COVERAGE_SHARD" || -n "${BACKEND_COVERAGE_BLACKBOX_DOMAINS:-}" ||
   -n "${BACKEND_UNIT_TEST_FILES:-}" || "${BACKEND_COVERAGE_SKIP_UNITS:-0}" == "1" ||
   "${BACKEND_COVERAGE_SKIP_BLACKBOX:-0}" == "1" ]]; then
@@ -287,8 +290,46 @@ COV_PORT_END="${BACKEND_COVERAGE_END_PORT:-$((BASE_PORT + 8))}"
 COV_PORT_LOCK_ROOT="${BACKEND_COVERAGE_PORT_LOCK_ROOT:-$ROOT_DIR/.context/test-runs/.port-locks}"
 mkdir -p "$COV_PORT_LOCK_ROOT"
 
+# A listener scan alone misses a port the kernel autobound to an outbound
+# connection (ESTABLISHED, or a client's TIME_WAIT; never LISTEN): Node's
+# dual-stack listen() on it still fails with EADDRINUSE (coverage shard 1,
+# 2026-10-28). Probe with the same bind Node/libuv performs — wildcard
+# dual-stack with SO_REUSEADDR — so such a port is skipped, while a port our
+# own previous server left in TIME_WAIT (which that listen() can reuse) is not
+# burned from the two-port shard range.
+port_rejects_bind() {
+  local port="$1"
+  # python3 already backs the reservation lock keeper; without it the probe
+  # must not silently degrade to the LISTEN-only scan that missed 56022.
+  command -v python3 >/dev/null 2>&1 || {
+    echo "❌ python3 is required to probe coverage ports with Node's bind semantics." >&2
+    exit 1
+  }
+  ! python3 - "$port" <<'PYEOF'
+import socket, sys
+port = int(sys.argv[1])
+try:
+    sock = socket.socket(socket.AF_INET6)
+    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    target = ("::", port)
+except OSError:
+    sock = socket.socket(socket.AF_INET)
+    target = ("0.0.0.0", port)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(target)
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PYEOF
+}
+
 port_in_use() {
   local port="$1"
+  if port_rejects_bind "$port"; then
+    return 0
+  fi
   if command -v lsof >/dev/null 2>&1; then
     lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
     return $?
@@ -879,8 +920,10 @@ if [[ -n "$COVERAGE_SHARD" && -n "${BACKEND_COVERAGE_MERGE_DIR:-}" ]]; then
   exit 0
 fi
 if [[ "$COVERAGE_PARTIAL" -eq 1 ]]; then
-  echo "PARTIAL coverage run passed (selected tests only). Thresholds were NOT checked; a full coverage run is still required before merge."
-  exit 0
+  # A subset run is a diagnostic, never a gate result: the selected tests passed
+  # but thresholds were not checked, so it must not read as a passing gate row.
+  echo "PARTIAL coverage run: the selected tests passed but thresholds were NOT checked. Exiting $COVERAGE_PARTIAL_EXIT so this never counts as a passing gate; a full coverage run is still required before merge."
+  exit "$COVERAGE_PARTIAL_EXIT"
 fi
 
 # Generate the coverage report and also the json-summary for the gap analysis

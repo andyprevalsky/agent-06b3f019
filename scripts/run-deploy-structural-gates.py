@@ -58,7 +58,21 @@ def gate_environment() -> dict[str, str]:
 
 
 SIGNAL_GRACE_SECONDS = 1.0
+# Ceiling for the default worker count; sized for the 14-core deploy host.
 DEFAULT_MAX_WORKERS = 8
+
+
+def default_max_workers(cpu_count: int | None = None) -> int:
+    """CPU-scaled default, capped at the existing 14-core worker budget.
+
+    Eight concurrent suites on an 8-core/16 GB devbox (inside a /deploy
+    pipeline that also ran coverage lanes) drove load1 to 39.8 and tripped
+    10 s / 120 s subprocess timeouts that pass in isolation (2026-10-28).
+    The pipeline supplies --max-workers explicitly after also considering
+    whole-box memory, so its declared lane reservation matches the command.
+    """
+    cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    return max(1, min(DEFAULT_MAX_WORKERS, DEFAULT_MAX_WORKERS * cpus // 14))
 # run.sh, kill-services.sh and run-process-cleanup.sh resolve listener and
 # process ownership with lsof. Without it the kill-services, run-process-cleanup
 # and run-port-collision fixtures fail as "listener did not start" / "process is
@@ -73,6 +87,13 @@ DEFAULT_GATE_TIMEOUT_SECONDS = 600.0
 TIMEOUT_FACTOR = 3.0
 TIMEOUT_EXIT_CODE = 124
 SHARD_ENV = "DEPLOY_GATE_SHARD"
+# Every gate child starts with this umask, not the invoker's. The deploy lane
+# runs inside a transient systemd service (UMask 0022) while interactive devbox
+# shells use 077; a fixture that only passed because 077 made its files private
+# (cloudbench-controller-orphan-drain, 2026-10-28) must fail the same way
+# everywhere. 022 is the conventional default (macOS, systemd) and the stricter
+# check for fixtures that feed owner-only readers.
+GATE_UMASK = 0o022
 # The CLI records which gates failed so a retry can run them first. Every
 # retry still runs the full registry; ordering never skips a gate.
 FAILURE_STATE = Path(".context") / "deploy-structural" / "last-failures.json"
@@ -534,6 +555,7 @@ def run_gates(
                         stdout=output,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
+                        umask=GATE_UMASK,
                     )
                     running.append(
                         RunningGate(
@@ -645,7 +667,7 @@ def main() -> int:
         return 1
     state = None if args.no_failed_first else ROOT / FAILURE_STATE
     if args.max_workers is None:
-        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS, failure_state=state)
+        return run_gates(GATES, max_workers=default_max_workers(), failure_state=state)
     return run_gates(GATES, max_workers=args.max_workers, failure_state=state)
 
 

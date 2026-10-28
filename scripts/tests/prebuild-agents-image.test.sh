@@ -122,7 +122,99 @@ grep -Fq 'prebuild-agents-image.sh" lookup --sha "$BUILD_ID"' "$CUTOVER" || fail
 grep -Fq 'flyctl deploy --local-only --build-only --push --image-label "$IMAGE_LABEL"' "$CUTOVER" ||
   fail "cutover lost its fallback build"
 WORKFLOW="$ROOT/.github/workflows/prebuild-agents-image.yml"
-grep -Fq 'bash scripts/prebuild-agents-image.sh build --sha "$HEAD_SHA"' "$WORKFLOW" || fail "PR prebuild workflow is not wired"
+python3 - "$WORKFLOW" "$REPO" "$TMP" <<'PYTEST'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+workflow, repo, temporary = map(Path, sys.argv[1:])
+text = workflow.read_text()
+assert "\n  build:\n" in text and "\n  publish:\n" in text, "build and credentialed publish must use separate runners"
+build, publish = text.split("\n  build:\n", 1)[1].split("\n  publish:\n", 1)
+assert "secrets." not in build and "FLY_API_TOKEN" not in build, "PR build must have no deployment credential"
+assert "needs: build" in publish
+assert "actions/upload-artifact@" in build and "actions/download-artifact@" in publish
+for action in re.findall(r"uses: ([^\s]+)", text):
+    assert re.fullmatch(r"[^@]+@[a-f0-9]{40}", action), f"mutable action reference: {action}"
+assert text.count("persist-credentials: false") == 2
+assert text.count("ref: ${{ github.event.repository.default_branch }}") == 2
+assert "prebuild-agents-image.sh build" not in text, "never run a PR script with the deployment token"
+# Under `pull_request` a same-repository PR runs ITS copy of this YAML, so it
+# could move secrets.FLY_API_TOKEN into any step. `pull_request_target` runs the
+# base branch's YAML; the PR commit is only ever read as git objects.
+assert text.startswith("name:") and "\non:\n  pull_request_target:\n" in text, "prebuild must run the base branch's workflow YAML"
+assert "\n  pull_request:\n" not in text, "a pull_request trigger would hand the PR branch control of this YAML"
+assert "ref: ${{ github.event.pull_request.head.sha }}" not in text and "ref: ${{ env.HEAD_SHA }}" not in text, \
+    "never check out the PR head; read its objects"
+assert "bash scripts/" not in text, "new PR helpers need not exist on the trusted default branch"
+assert "docker run" not in publish and "docker build" not in publish
+assert publish.count("${{ secrets.FLY_API_TOKEN }}") == 1
+
+# Execute the workflow's real shell on the same git fixture, with a Docker
+# boundary double. This proves the build context and tag match promotion.
+def script(name):
+    section = text.split(f"- name: {name}\n", 1)[1]
+    body = section.split("        run: |\n", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line and not line.startswith("          "):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines)
+
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+env = dict(os.environ, HEAD_SHA=head, RUNNER_TEMP=str(temporary), GITHUB_WORKSPACE=str(repo), GH_TOKEN="fixture-read-token")
+env.pop("FLY_API_TOKEN", None)
+# Context preparation fetches an exact SHA in Actions; the fixture already has it.
+prepare = script("Prepare build context")
+prepare = prepare.replace('git fetch --no-tags --filter=blob:none --depth=1 origin "$HEAD_SHA"', 'git cat-file -e "$HEAD_SHA"')
+subprocess.run(["bash", "-euc", prepare], cwd=repo, env=env, check=True)
+assert (temporary / "agents-context/worker.py").read_bytes() == (repo / "agents/worker.py").read_bytes()
+assert not (temporary / "agents-context/tests").exists()
+assert subprocess.run(["diff", "-r", str(temporary / "ctx-new"), str(temporary / "agents-context")],
+                      capture_output=True).returncode == 0, "workflow and cutover contexts must match"
+assert (temporary / "agents-context/run.sh").stat().st_mode == (temporary / "ctx-new/run.sh").stat().st_mode
+
+fake_bin = temporary / "workflow-bin"
+fake_bin.mkdir()
+(fake_bin / "docker").write_text('#!/usr/bin/env bash\nset -euo pipefail\n[[ -z "${FLY_API_TOKEN:-}" ]] || exit 98\nprintf \'%s\\n\' "$*" >> "$RUNNER_TEMP/workflow-docker.log"\ncase "$1" in\n  build) [[ "$*" == "build --tag agents-prebuild:$HEAD_SHA $RUNNER_TEMP/agents-context" ]] ;;\n  save) [[ "$*" == "save --output $RUNNER_TEMP/agents-image.tar agents-prebuild:$HEAD_SHA" ]]; touch "$RUNNER_TEMP/agents-image.tar" ;;\n  *) exit 99 ;;\nesac\n')
+(fake_bin / "docker").chmod(0o755)
+env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+subprocess.run(["bash", "-euc", script("Build image without credentials")], cwd=repo, env=env, check=True)
+assert (temporary / "agents-image.tar").exists()
+# A malicious PR helper is never invoked by the publisher. Only docker load,
+# tag and push handle the image on the new runner; nothing runs that image.
+(repo / "scripts/prebuild-agents-image.sh").write_text("exit 97\n")
+(temporary / "prebuild").mkdir()
+(temporary / "prebuild/agents-image.tar").write_bytes((temporary / "agents-image.tar").read_bytes())
+env["GITHUB_ENV"] = str(temporary / "publish.env")
+(fake_bin / "docker").write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+    '[[ -z "${FLY_API_TOKEN:-}" ]] || exit 98\n'
+    'case "$1" in load|tag|push) ;; *) exit 99 ;; esac\n'
+    'printf "%s\\n" "$*" >> "$RUNNER_TEMP/publish-docker.log"\n')
+resolve = script("Resolve trusted destination and content key").replace(
+    'git fetch --no-tags --filter=blob:none --depth=1 origin "$HEAD_SHA"', 'git cat-file -e "$HEAD_SHA"')
+subprocess.run(["bash", "-euc", resolve], cwd=repo, env=env, check=True)
+reference = (temporary / "publish.env").read_text().strip().split("=", 1)[1]
+entries = subprocess.check_output(["git", "ls-tree", f"{head}:agents"], cwd=repo)
+entries = b"\n".join(line for line in entries.splitlines() if line.split(b"\t")[1] not in (b"benchmarks", b"tests")) + b"\n"
+key = subprocess.check_output(["git", "hash-object", "--stdin"], cwd=repo, input=entries).decode().strip()
+assert reference == f"registry.fly.io/test-prod:prebuilt-{key}", reference
+(fake_bin / "flyctl").write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+    '[[ "$*" == "auth docker" && "$FLY_API_TOKEN" == "fixture-publish-token" ]]\n')
+(fake_bin / "flyctl").chmod(0o755)
+subprocess.run(["bash", "-euc", "flyctl auth docker"], cwd=repo,
+               env={**env, "FLY_API_TOKEN": "fixture-publish-token"}, check=True)
+subprocess.run(["bash", "-euc", 'docker push "$PREBUILD_REF"'], cwd=repo,
+               env={**env, "PREBUILD_REF": reference}, check=True)
+assert (temporary / "publish-docker.log").read_text().splitlines() == [
+    f"load --input {temporary}/prebuild/agents-image.tar",
+    f"tag agents-prebuild:{head} {reference}", f"push {reference}"]
+print("PASS trusted publisher preserves the promotion key without executing PR code")
+print("PASS isolated credential-free build and pinned workflow actions")
+PYTEST
 grep -Fq "github.event.pull_request.head.repo.full_name == github.repository" "$WORKFLOW" ||
   fail "fork PRs must never receive the Fly token"
 echo "prebuild-agents-image: PASS"

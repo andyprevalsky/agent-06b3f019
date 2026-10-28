@@ -65,23 +65,40 @@ grep -q "no active deploy timing run" "$TEST_ROOT/late.out" \
 
 # Successful deterministic gates may be reused only for an identical command
 # and exact worktree snapshot in the same deploy. Failures are never reusable.
+# The snapshot is a whole-worktree fingerprint, so this runs in its own
+# committed fixture repository: on a shared checkout another editor can change
+# the real tree between the two calls ("deploy inputs changed while cached
+# ran") and the reuse miss would be the environment, not the runner.
+REUSE_REPO="$TEST_ROOT/reuse-repo"
+mkdir -p "$REUSE_REPO/scripts"
+cp "$ROOT_DIR/scripts/run-deploy-stage" "$ROOT_DIR/scripts/run_deploy_stage.py" \
+    "$ROOT_DIR/scripts/deploy_stage.py" "$ROOT_DIR/scripts/factory_metadata.py" \
+    "$ROOT_DIR/scripts/factory_detail.py" "$REUSE_REPO/scripts/"
+printf 'fixture\n' > "$REUSE_REPO/README"
+printf '.context/\n' > "$REUSE_REPO/.gitignore"
+git -C "$REUSE_REPO" init -q
+git -C "$REUSE_REPO" add -A
+git -C "$REUSE_REPO" -c user.name=t -c user.email=t@t commit -qm fixture
 RUN_ROOT="$TEST_ROOT/reuse"
-run_stage --start --run-id reuse >/dev/null
+reuse_stage() {
+    (cd "$REUSE_REPO" && DEPLOY_RUN_ROOT="$RUN_ROOT" bash scripts/run-deploy-stage "$@")
+}
+reuse_stage --start --run-id reuse >/dev/null
 counter="$TEST_ROOT/reuse-counter"
-run_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >/dev/null
-run_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >"$TEST_ROOT/reused.out"
+reuse_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >/dev/null
+reuse_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >"$TEST_ROOT/reused.out"
 [ "$(wc -l < "$counter" | tr -d ' ')" = 1 ] || fail "identical passed gate executed twice"
 grep -q "reused passed deploy stage" "$TEST_ROOT/reused.out" || fail "cache hit was not disclosed"
-run_stage cached --reuse-passed -- bash -c 'printf "changed-command\n" >> "$1"' _ "$counter" >/dev/null
+reuse_stage cached --reuse-passed -- bash -c 'printf "changed-command\n" >> "$1"' _ "$counter" >/dev/null
 [ "$(wc -l < "$counter" | tr -d ' ')" = 2 ] || fail "changed command reused stale evidence"
 failed_counter="$TEST_ROOT/reuse-failed-counter"
 for _ in 1 2; do
-    if run_stage failed-cache --reuse-passed -- bash -c 'printf "failed\n" >> "$1"; exit 1' _ "$failed_counter" >/dev/null; then
+    if reuse_stage failed-cache --reuse-passed -- bash -c 'printf "failed\n" >> "$1"; exit 1' _ "$failed_counter" >/dev/null; then
         fail "failing cache fixture reported success"
     fi
 done
 [ "$(wc -l < "$failed_counter" | tr -d ' ')" = 2 ] || fail "failed gate was reused"
-run_stage --finish >/dev/null
+reuse_stage --finish >/dev/null
 
 # A failed finalize must remain non-zero even though summary rendering succeeds,
 # and the pointer stays available so the operator can repair/retry the run.
@@ -267,5 +284,15 @@ rm "$LANE_REPO/front-end/src/app.ts"
 expect_lane frontend-coverage-blackbox $((fe + 3)) "deleting a front-end file"
 chmod +x "$LANE_REPO/shared/contract/fixtures.json"
 expect_lane frontend-coverage-blackbox $((fe + 4)) "a mode-only change"
+# A staged rename out of lane scope removes an in-scope file: git's default
+# rename detection lists only the destination, so the source must still be
+# seen as deleted (--no-renames) or a stale pass stays reusable.
+printf 'moved\n' > "$LANE_REPO/front-end/src/moved.ts"
+git -C "$LANE_REPO" add -A
+git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qm "add moved.ts"
+expect_lane frontend-coverage-blackbox $((fe + 5)) "adding a front-end file"
+expect_lane frontend-coverage-blackbox $((fe + 5)) "no change after the add"
+git -C "$LANE_REPO" mv front-end/src/moved.ts docs/moved.ts
+expect_lane frontend-coverage-blackbox $((fe + 6)) "a staged rename of a front-end file out of scope"
 
 echo "run-deploy-stage regression tests passed"

@@ -112,7 +112,13 @@ def _split_paths(output: bytes) -> list[str]:
 def _scoped_content_fingerprint(digest: "hashlib._Hash", stage: str) -> None:
     excluded, reincluded = _LANE_SCOPES[stage]
     _hash_field(digest, "scope", json.dumps([stage, excluded, reincluded]).encode())
-    changed = set(_split_paths(_git_output("diff", "--no-ext-diff", "--name-only", "-z", "HEAD")))
+    # --no-renames: a staged rename out of scope must list its in-scope source
+    # as deleted, otherwise the unchanged HEAD entry keeps a stale pass reusable.
+    changed = set(
+        _split_paths(
+            _git_output("diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", "HEAD")
+        )
+    )
     for entry in sorted(_split_paths(_git_output("ls-tree", "-r", "-z", "--full-tree", "HEAD"))):
         meta, _, relative = entry.partition("\t")
         if relative in changed or not _in_lane_scope(relative, excluded, reincluded):

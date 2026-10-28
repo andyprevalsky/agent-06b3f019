@@ -9,7 +9,12 @@
 #      shards' retained summaries) with abort-on-repeat, and a repeated failure
 #      stops the sibling shards instead of waiting for them;
 #   3. the merged threshold check (npx c8 report --check-coverage) runs only
-#      when every shard passed, and its exit status is the gate's.
+#      when every shard passed, and its exit status is the gate's;
+#   4. the REAL blackbox runner (back-end/src/tests/blackbox/run.ts, run against
+#      fake domain files) keeps failed-first retries inside their phase: a
+#      previously failed late-exclusive domain still runs only after the parallel
+#      fixture writers, and an aborted sweep reports unrun domains as NOT RUN
+#      failures (non-zero exit, aborted:true in summary.json).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -103,5 +108,53 @@ elapsed=$((SECONDS - started))
 grep -q 'priority=code-preview,user-ui' "$TMP/rec/shard-1.env" || fail "priority domains not exported: $(cat "$TMP/rec/shard-1.env")"
 grep -q 'abort=1' "$TMP/rec/shard-2.env" || fail "abort-on-repeat not exported"
 grep -q terminated "$TMP/rec/shard-2.env" || fail "sibling shard was not stopped"
+
+# 4. Real runner, fake domains. `writer` is an ordinary pool domain and
+#    `admin-health` is a real late-exclusive (whole-DB aggregate) name; both get
+#    the same fake body that records start/end order and obeys FAKE_FAIL_<domain>.
+RUNNER_REPO="$TMP/runner"
+mkdir -p "$RUNNER_REPO/src/tests/blackbox"
+cp "$ROOT_DIR/back-end/src/tests/blackbox/run.ts" "$RUNNER_REPO/src/tests/blackbox/run.ts"
+# Domain children are spawned with `node --import tsx` from the runner's repo root.
+ln -s "$ROOT_DIR/node_modules" "$RUNNER_REPO/node_modules"
+cat >"$RUNNER_REPO/fake.ts" <<'FAKE'
+import { appendFileSync } from 'node:fs';
+const domain = process.env.BLACKBOX_TEST_DOMAIN as string;
+const key = domain.replace(/-/g, '_');
+appendFileSync(process.env.FAKE_ORDER_LOG as string, `start ${domain}\n`);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+appendFileSync(process.env.FAKE_ORDER_LOG as string, `end ${domain}\n`);
+process.exit(process.env[`FAKE_FAIL_${key}`] === '1' ? 1 : 0);
+FAKE
+for domain in writer admin-health; do
+  cp "$RUNNER_REPO/fake.ts" "$RUNNER_REPO/src/tests/blackbox/$domain.blackbox.ts"
+done
+run_real_runner() {
+  rm -f "$TMP/order.log"
+  (cd "$ROOT_DIR/back-end" && FAKE_ORDER_LOG="$TMP/order.log" \
+    node --import tsx "$RUNNER_REPO/src/tests/blackbox/run.ts" writer,admin-health)
+}
+# 4a. A previously failed late-exclusive domain must still run after the pool.
+BLACKBOX_TEST_PRIORITY_DOMAINS=admin-health BLACKBOX_TEST_ARTIFACT_DIR="$TMP/art-a" \
+  run_real_runner >"$TMP/out4a" 2>&1 || fail "real runner failed on passing fake domains: $(cat "$TMP/out4a")"
+[[ "$(tr '\n' ' ' <"$TMP/order.log")" == "start writer end writer start admin-health end admin-health " ]] ||
+  fail "failed-first moved the late-exclusive domain before the fixture writers: $(tr '\n' ' ' <"$TMP/order.log")"
+grep -q '"aborted": false' "$TMP/art-a/summary.json" || fail "summary.json lacks aborted flags"
+# 4b. A repeated priority failure aborts the sweep: unrun domains are NOT RUN
+#     failures, the runner exits non-zero and records aborted:true.
+if FAKE_FAIL_writer=1 BLACKBOX_TEST_PRIORITY_DOMAINS=writer BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE=1 \
+  BLACKBOX_TEST_ARTIFACT_DIR="$TMP/art-b" run_real_runner >"$TMP/out4b" 2>&1; then
+  fail "aborted sweep exited 0"
+fi
+grep -q 'PRIORITY FAILURE: writer failed again' "$TMP/out4b" || fail "repeated priority failure not announced"
+grep -q 'NOT RUN  admin-health' "$TMP/out4b" || fail "unscheduled domain not reported as NOT RUN: $(cat "$TMP/out4b")"
+grep -q '1 failed, 1 not run, 2 total' "$TMP/out4b" || fail "NOT RUN domain not counted separately from failures"
+[[ "$(tr '\n' ' ' <"$TMP/order.log")" == "start writer end writer " ]] || fail "aborted sweep still ran admin-health"
+node -e '
+  const s = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  const byDomain = Object.fromEntries(s.results.map((r) => [r.domain, r]));
+  if (byDomain["admin-health"].aborted !== true || byDomain["admin-health"].passed !== false) process.exit(1);
+  if (byDomain.writer.aborted !== false || byDomain.writer.passed !== false) process.exit(1);
+' "$TMP/art-b/summary.json" || fail "summary.json does not record the aborted domain as an unpassed NOT RUN"
 
 echo "All backend coverage shard gate checks passed."

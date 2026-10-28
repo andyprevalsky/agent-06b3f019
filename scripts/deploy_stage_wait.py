@@ -67,13 +67,21 @@ def _rows(run_dir: Path) -> list[dict]:
     return rows
 
 
-def _admissions(run_dir: Path) -> dict[str, list[int]]:
+def _admissions(run_dir: Path, since: float = 0.0) -> dict[str, list[int]]:
+    """Admissions written at or after ``since``; older ones belong to an earlier wait.
+
+    A forced kill before the runner installed its signal handlers leaves an
+    admission without a receipt. Finish rows are already filtered by ``since``,
+    so such a stale admission must not report the current rerun's lane as dead.
+    """
     running: dict[str, list[int]] = {}
     for path in (run_dir / "admissions").glob("*.json"):
         match = TOKEN_PATTERN.match(path.name)
         if match is None:
             continue
         try:
+            if path.stat().st_mtime < since:
+                continue
             pid = int(json.loads(path.read_text())["pid"])
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             continue  # released between glob and read
@@ -118,7 +126,7 @@ def wait_for_stages(
             stage = row.get("stage")
             if stage in stages and float(row.get("started_epoch") or 0) >= since:
                 finished[stage] = row  # newest row per stage wins
-        admitted = _admissions(run_dir)
+        admitted = _admissions(run_dir, since)
         running: dict[str, list[int]] = {}
         for stage in stages:
             for pid in admitted.get(stage, []):

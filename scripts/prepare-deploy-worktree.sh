@@ -429,6 +429,14 @@ if $CHECK_ONLY; then
     echo "❌ Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $WORKTREE." >&2
     exit 1
   }
+  # The owned ten-port range must not be exposed to kernel ephemeral autobind:
+  # an outbound connection that takes one of its ports makes a later listen()
+  # fail with EADDRINUSE (backend coverage shard 1 lost 56022 on 2026-10-28).
+  # New claims avoid the live window; an older claim must be reserved by the host.
+  python3 "$SCRIPT_DIR/deploy-worktree-port.py" check --base-port "$CONDUCTOR_PORT" || {
+    echo "❌ Deploy worktree base port $CONDUCTOR_PORT is exposed to kernel ephemeral autobind; see the remedy above." >&2
+    exit 1
+  }
   check_env_files "$WORKTREE" "$ROSE_DEPLOY_SOURCE_WORKSPACE"
   [ -x "$WORKTREE/agents/venv/bin/python" ] || {
     echo "❌ Deploy worktree is missing agents/venv." >&2

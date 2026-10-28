@@ -123,6 +123,27 @@ type EventHandler = (payload: unknown) => void;
  */
 export type EventHandlers = Record<string, EventHandler>;
 
+// A plain Error (not DOMException): jsdom's DOMException is not an `instanceof`
+// the Node realm's Error, so callers detect cancellation by name only.
+function abortError(channelName: string): Error {
+  const error = new Error(`Subscription cancelled for ${channelName}`);
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, channelName: string): void {
+  if (signal?.aborted) throw abortError(channelName);
+}
+
+/** True when `error` is the cancellation raised by an aborted subscribe call. */
+export function isSubscriptionAbort(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'AbortError'
+  );
+}
+
 /**
  * Generic channel subscription function.
  * Handles auth, creates channel, attaches event handlers, and manages subscription lifecycle.
@@ -130,6 +151,9 @@ export type EventHandlers = Record<string, EventHandler>;
  * @param channelName - The full channel name (e.g., "agent:abc123", "bus:xyz789")
  * @param eventHandlers - Map of event names to handler functions
  * @param logPrefix - Prefix for log messages (e.g., "Agent", "Bus")
+ * @param onDisconnect - Called once when a joined channel later drops
+ * @param signal - Abort to cancel a join that is still pending; the channel is
+ *   removed and the promise rejects with an `AbortError`
  * @returns The realtime channel (call unsubscribe to clean up)
  */
 export async function subscribeToChannel(
@@ -137,12 +161,14 @@ export async function subscribeToChannel(
   eventHandlers: EventHandlers,
   logPrefix: string = 'Channel',
   onDisconnect?: () => void,
+  signal?: AbortSignal,
 ): Promise<RealtimeChannel> {
   // Verify session exists
   const session = getSession();
   if (!session?.access_token) {
     throw new Error('Not authenticated');
   }
+  throwIfAborted(signal, channelName);
 
   // Bind the realtime socket's auth token before creating the channel so the
   // private-channel join payload carries it (see RealtimeChannel._rejoin, which
@@ -157,6 +183,9 @@ export async function subscribeToChannel(
   // pre-subscribe rebind is a no-op in the common case yet guarantees the join
   // signs with a live token. See: https://github.com/supabase/realtime-js/pull/126
   await ensureFreshRealtimeAuth();
+  // The owner may have gone away while the auth rebind was in flight; creating
+  // the channel now would register a join nobody can ever release.
+  throwIfAborted(signal, channelName);
 
   // Private channels are the production default (RLS checks the Supabase
   // managed DB). Dev and explicitly-local production bundles use public
@@ -173,14 +202,33 @@ export async function subscribeToChannel(
   const shortName = channelName.length > 16 ? `${channelName.slice(0, 16)}...` : channelName;
 
   let resolved = false;
+  let aborted = false;
   let disconnectNotified = false;
   return new Promise((resolve, reject) => {
+    // Cancellation while the join is still pending. phoenix arms the join
+    // timeout the moment `subscribe()` is called (the frame is buffered until
+    // the socket opens), so a caller that unmounts mid-join cannot simply drop
+    // the promise: the timeout would still fire up to 10s later, logging
+    // TIMED_OUT and calling back into an owner that no longer exists. Leaving
+    // the channel cancels that timer and unregisters the channel synchronously.
+    const onAbort = () => {
+      if (resolved) return; // The caller owns a joined channel and unsubscribes it itself.
+      aborted = true;
+      void supabase.removeChannel(channel);
+      reject(abortError(channelName));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     // realtime-js passes a second `err` argument on CHANNEL_ERROR/TIMED_OUT
     // (the phx_join error reply, or the normalized transport reason). We MUST
     // surface it — a bare "CHANNEL_ERROR" hides whether the join was rejected
     // for auth/RLS reasons vs a transport drop, which is exactly what's needed
     // to diagnose intermittent subscription failures.
     channel.subscribe((status, err) => {
+      // A deliberately cancelled join is not a disconnect: the CLOSED that
+      // removeChannel triggers is the cancellation itself, not news.
+      if (aborted) return;
+
       // Log all status changes for debugging
       console.log(`🔌 ${logPrefix} channel (${shortName}) status: ${status}`);
 
@@ -188,6 +236,7 @@ export async function subscribeToChannel(
         console.log(`✅ Connected to ${channelName}`);
         resolved = true;
         disconnectNotified = false; // Reset on successful (re)join
+        signal?.removeEventListener('abort', onAbort);
         resolve(channel);
       } else if (status === 'CHANNEL_ERROR') {
         const reason = err?.message || 'unknown';
@@ -350,6 +399,8 @@ export interface AttentionRequestHandlers {
   onUpdate?: (payload: unknown) => void;
   onDelete?: (payload: unknown) => void;
   onDisconnect?: () => void;
+  /** Abort to cancel a join that is still pending (owner unmounted). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -380,6 +431,7 @@ export async function subscribeToAttentionRequests(
     eventHandlers,
     'User attention',
     handlers.onDisconnect,
+    handlers.signal,
   );
 }
 

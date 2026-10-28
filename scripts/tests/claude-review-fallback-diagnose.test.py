@@ -57,6 +57,40 @@ def test_429_is_usage_exhausted_jsonl(tmp: Path) -> None:
     assert "api_error_status=429" in out
 
 
+def test_ambiguous_status_does_not_prescribe_credential_or_quota_repair(tmp: Path) -> None:
+    for status, message in ((403, "Permission denied for this resource"),
+                            (429, "Temporary rate limit; retry after 10 seconds")):
+        path = tmp / f"{status}.json"
+        path.write_text(json.dumps({"type": "result", "is_error": True,
+                                    "api_error_status": status, "result": message}))
+        out = run(path)
+        assert "diagnosis: PROVIDER_ERROR" in out, out
+        assert "claude setup-token" not in out and "Step 9a" not in out, out
+
+
+def test_explicit_error_evidence_supports_diagnosis(tmp: Path) -> None:
+    for status, message, expected in (
+        (403, "OAuth access token is invalid", "CREDENTIAL_INVALID"),
+        (429, "Claude AI usage limit reached", "USAGE_EXHAUSTED"),
+        (None, "Your credit balance is too low", "USAGE_EXHAUSTED"),
+    ):
+        path = tmp / "evidence.json"
+        path.write_text(json.dumps({"type": "result", "is_error": True,
+                                    "api_error_status": status, "result": message}))
+        assert f"diagnosis: {expected}" in run(path)
+
+
+def test_execution_limits_preserve_subtype_and_errors(tmp: Path) -> None:
+    for subtype in ("error_max_turns", "error_max_budget_usd", "error_during_execution"):
+        path = tmp / "limit.json"
+        path.write_text(json.dumps({"type": "result", "is_error": True,
+                                    "subtype": subtype, "errors": ["Execution stopped at configured limit"]}))
+        out = run(path)
+        assert "diagnosis: EXECUTION_ERROR" in out, out
+        assert f"subtype={subtype}" in out and "Execution stopped at configured limit" in out, out
+        assert "Provider/API error" not in out, out
+
+
 def test_success_prints_no_review_content(tmp: Path) -> None:
     path = tmp / "ok.json"
     path.write_text(json.dumps([{"type": "result", "is_error": False, "result": "SECRET REVIEW BODY"}]))
@@ -76,7 +110,11 @@ def test_workflow_and_deploy_wiring() -> None:
     assert "id: review\n        uses: anthropics/claude-code-action@v1" in wf
     assert "if: failure() && steps.review.outcome == 'failure'" in wf
     assert "EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}" in wf
-    assert 'python3 scripts/claude_review_fallback_diagnose.py "$EXECUTION_FILE"' in wf
+    assert 'python3 -I "$GITHUB_WORKSPACE/.trusted-review/scripts/claude_review_fallback_diagnose.py" "$EXECUTION_FILE"' in wf
+    assert "ref: ${{ github.event.repository.default_branch }}" in wf
+    assert "path: .trusted-review" in wf
+    assert "persist-credentials: false" in wf
+    assert "if: ${{ false }}" in wf, "the retired fallback must remain disabled"
     deploy = DEPLOY.read_text()
     assert "Diagnose Claude failure" in deploy and "CREDENTIAL_INVALID" in deploy
     assert "~2s + 1 turn + $0 = provider-blocked" not in deploy, "signature alone must not imply exhaustion"
@@ -84,7 +122,9 @@ def test_workflow_and_deploy_wiring() -> None:
 
 def main() -> int:
     tests = [test_revoked_oauth_token_is_credential_invalid, test_429_is_usage_exhausted_jsonl,
-             test_success_prints_no_review_content, test_other_and_missing, test_workflow_and_deploy_wiring]
+             test_success_prints_no_review_content, test_other_and_missing, test_workflow_and_deploy_wiring,
+             test_ambiguous_status_does_not_prescribe_credential_or_quota_repair,
+             test_explicit_error_evidence_supports_diagnosis, test_execution_limits_preserve_subtype_and_errors]
     for test in tests:
         with tempfile.TemporaryDirectory() as d:
             if test.__code__.co_argcount:
