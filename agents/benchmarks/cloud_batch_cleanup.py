@@ -86,7 +86,7 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
         if (
             not isinstance(row, dict)
             or row.get("agent_id") not in tree
-            or row.get("provider") not in {"kernel", "steel"}
+            or row.get("provider") not in {"kernel", "steel", "tilion"}
             or not isinstance(row.get("session_id"), str)
             or re.fullmatch(r"[A-Za-z0-9_-]{8,128}", row["session_id"]) is None
         ):

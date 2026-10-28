@@ -12,6 +12,11 @@
  *   - validation: an empty goal is a tool error, not an agent
  *   - GET is 405 (stateless, no SSE stream); request logs redact the key
  *
+ * Index 01 webhook (POST /api/index01/webhook, Bearer key):
+ *   - no/unknown key → 401; JSON transcript (nested too) → 201 plan-mode agent
+ *   - multipart "Both" (audio + transcription field) → 201, audio archived best-effort
+ *   - app test event (test=true) or no transcript → 200 spawned:false, no agent
+ *
  * Usage: npx tsx src/tests/blackbox/mcp.blackbox.ts
  */
 
@@ -180,6 +185,98 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
 ];
+
+async function webhook(
+  body: BodyInit,
+  headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` }
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${BASE_URL}/api/index01/webhook`, { method: 'POST', headers, body });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+async function assertSpawned(
+  r: { status: number; body: Record<string, unknown> },
+  goal: string
+): Promise<void> {
+  assert(r.status === 201, `expected 201, got ${r.status} ${JSON.stringify(r.body)}`);
+  const agentId = r.body.agent_id as string;
+  createdAgentIds.push(agentId);
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { userId: true, goal: true, model: true },
+  });
+  assert(agent?.userId === userId, 'agent not owned by key user');
+  assert(agent.goal === goal, `goal ${agent.goal}`);
+  assert(agent.model === 'rose-labs/rose-1-ultra', `model ${agent.model}`);
+}
+
+const json = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+
+tests.push(
+  [
+    'webhook: no key / unknown key → 401',
+    async () => {
+      const none = await webhook('{}', { 'Content-Type': 'application/json' });
+      assert(none.status === 401, `expected 401, got ${none.status}`);
+      const bad = await webhook('{}', {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer nope',
+      });
+      assert(bad.status === 401, `expected 401, got ${bad.status}`);
+    },
+  ],
+  [
+    'webhook: JSON transcript spawns a plan-mode agent',
+    async () => {
+      const goal = `Index 01 webhook ${RUN}: book a table for two`;
+      await assertSpawned(await webhook(JSON.stringify({ transcript: goal }), json), goal);
+    },
+  ],
+  [
+    'webhook: nested transcription field is found',
+    async () => {
+      const goal = `Index 01 nested ${RUN}: email Sam the deck`;
+      const payload = { event: 'recording', data: { transcription: { text: goal } } };
+      await assertSpawned(await webhook(JSON.stringify(payload), json), goal);
+    },
+  ],
+  [
+    'webhook: multipart audio + transcription spawns and reports recordings',
+    async () => {
+      const goal = `Index 01 multipart ${RUN}: order more coffee`;
+      const form = new FormData();
+      form.append('transcription', goal);
+      form.append('audio', new Blob([new Uint8Array(64)], { type: 'audio/wav' }), 'rec.wav');
+      const r = await webhook(form, { Authorization: `Bearer ${apiKey}` });
+      await assertSpawned(r, goal);
+      assert(Array.isArray(r.body.recordings), 'recordings must be an array');
+    },
+  ],
+  [
+    'webhook: app test event (multipart, test=true) parses but spawns nothing',
+    async () => {
+      const before = await prisma.agent.count({ where: { userId } });
+      const form = new FormData();
+      form.append('transcription', 'Index webhook test event');
+      form.append('test', 'true');
+      form.append('recordedAt', new Date().toISOString());
+      form.append('client', 'index-app');
+      const r = await webhook(form, { Authorization: `Bearer ${apiKey}` });
+      assert(r.status === 200 && r.body.spawned === false, JSON.stringify(r));
+      assert(r.body.transcript === 'Index webhook test event', 'transcript not parsed');
+      assert((await prisma.agent.count({ where: { userId } })) === before, 'agent was created');
+    },
+  ],
+  [
+    'webhook: test event without transcript → 200, no agent',
+    async () => {
+      const before = await prisma.agent.count({ where: { userId } });
+      const r = await webhook(JSON.stringify({ event: 'test', timestamp: Date.now() }), json);
+      assert(r.status === 200 && r.body.spawned === false, JSON.stringify(r));
+      assert((await prisma.agent.count({ where: { userId } })) === before, 'agent was created');
+    },
+  ]
+);
 
 async function cleanup(): Promise<void> {
   for (const id of createdAgentIds) {

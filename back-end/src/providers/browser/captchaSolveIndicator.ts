@@ -272,7 +272,9 @@ export function resolveCaptchaAutoSolveActive(
 ): boolean {
   if (telemetry.isSolving === true) return true;
   if (telemetry.isSolving === false) return false;
-  if (telemetry.provider === 'kernel') {
+  // Kernel and Tilion (cdp_observe) expose no in-flight solve flag, so a live
+  // challenge-widget probe stands in for "solver is engaged".
+  if (telemetry.provider === 'kernel' || telemetry.provider === 'tilion') {
     return options.kernelChallengeWidgetsPresent === true;
   }
   return false;
