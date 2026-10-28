@@ -112,6 +112,12 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
+    // Other blackbox domains may probe ephemeral ports while this server is bound.
+    // Keep those requests out of the provider-call count and the per-test handler.
+    if (req.headers['x-goog-api-key'] !== 'blackbox-gemini-key') {
+      res.writeHead(404).end();
+      return;
+    }
     void readJson(req).then((body) => {
       const recorded: Recorded = {
         method: req.method ?? '',
@@ -120,6 +126,10 @@ before(async () => {
         body,
       };
       calls.push(recorded);
+      if (typeof handler !== 'function') {
+        res.writeHead(503).end();
+        return;
+      }
       handler(recorded, (status, payload, raw) => {
         res.statusCode = status;
         if (raw) {
