@@ -183,6 +183,32 @@ describe('wait_for row label', () => {
     expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(expected);
   });
 
+  it.each([
+    // The model's description differs from the agent: the row names the agent's task.
+    [{ agents: ['/root/pull_bank_data'] }, 'Waiting for pull_bank_data'],
+    [{ agents: ['/root/a', '/root/b'] }, 'Waiting for a, b'],
+    [{ agents: ['/root/x'], targetNames: ['pull_bank_data'] }, 'Waiting for pull_bank_data'],
+    // No resolvable name (agent id / "any"): the stripped description.
+    [{ agents: ['3f1c9a2e-agent-id'] }, 'Waiting for Chase balances'],
+    [{ agents: 'any' }, 'Waiting for Chase balances'],
+  ])('agents wait %j names the waited-on agent', (extra, expected) => {
+    const row = msg(
+      {
+        toolName: 'wait_for',
+        toolCallId: 'w',
+        toolStatus: 'IN_PROGRESS',
+        waitForMode: 'agents',
+        title: 'Waiting for Waiting for Chase balances',
+        ...extra,
+      },
+      { message_id: 'w', timestamp: at(5) },
+    );
+    renderWithProviders(
+      createElement(TrajectoryWorkGroup, { group: runningGroup([row]), renderMessage: () => null }),
+    );
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(expected);
+  });
+
   it('normalizes a model-written description to the waited-on target', () => {
     expect(waitTarget('Waiting for Chase balances')).toBe('Chase balances');
     expect(waitTarget('Chase balances')).toBe('Chase balances');

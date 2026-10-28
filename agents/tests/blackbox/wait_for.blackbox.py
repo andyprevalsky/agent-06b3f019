@@ -2200,36 +2200,39 @@ async def test_wait_for_agents_mode_returns_at_once_for_finished_agent():
 
 
 async def test_wait_for_title_never_doubles_the_waiting_prefix():
-    """Andy 2026-10-28: the work row read "Waiting for Waiting for Chase balances".
+    """Andy 2026-10-28: the work row read "Waiting for Waiting for Chase balances";
+    it must read "Waiting for <agent task name>".
 
-    A model-written description that already says "Waiting for ..." keeps one prefix;
-    a plain task name reads "Waiting for <name>" unchanged.
+    A listed agent is named by its own task name even when the model's description
+    differs; the description (with any "Waiting for" prefix stripped) is only the
+    fallback when no name resolves ("any").
     """
     from domains.wait_for.handler import WaitForManager
     from tools.base import MessageStatus
 
-    for description, expected in (
-        ("Waiting for Chase balances", "Waiting for Chase balances"),
-        ("waiting for waiting for Chase balances", "Waiting for Chase balances"),
-        ("Chase balances", "Waiting for Chase balances"),
+    for description, agents, expected, meta_description in (
+        ("Waiting for Chase balances", ["/root/pull_bank_data"], "Waiting for pull_bank_data", "pull_bank_data"),
+        ("waiting for waiting for the bank", ["/root/pull_bank_data"], "Waiting for pull_bank_data", "pull_bank_data"),
+        ("Waiting for Chase balances", ["any"], "Waiting for Chase balances", "Chase balances"),
+        ("Chase balances", ["any"], "Waiting for Chase balances", "Chase balances"),
     ):
         rows, clock = _Rows(), _Clock()
         with _real_wf(rows, clock) as wf:
-            gates = {"chase_balances": asyncio.Event()}
+            gates = {"pull_bank_data": asyncio.Event()}
             wf._execute_tool = _gated_spawns(wf, gates)
-            await _spawn_bg(wf, "chase_balances", "toolu_c")
-            gates["chase_balances"].set()
+            await _spawn_bg(wf, "pull_bank_data", "toolu_c")
+            gates["pull_bank_data"].set()
             await wf._background_handles["toolu_c"]
             events = await _collect(
                 WaitForManager().execute_tool(
                     workflow_instance=wf,
-                    tool_call={"description": description, "agents": ["/root/chase_balances"]},
+                    tool_call={"description": description, "agents": agents},
                     tool_call_id="tc-title",
                 )
             )
         running = [e for e in events if e.status == MessageStatus.IN_PROGRESS]
         assert running and running[0].title == expected, (description, [e.title for e in events])
-        assert running[0].metadata["description"] == "Chase balances", running[0].metadata
+        assert running[0].metadata["description"] == meta_description, running[0].metadata
 
 
 def test_wait_for_agents_schema_is_a_plain_string_array():
