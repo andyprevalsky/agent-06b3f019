@@ -4,7 +4,7 @@ description: "Push current branch, obtain a CodeRabbit review, merge, and wait f
 
 # Deploy
 
-Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code fallback), merge, and wait for deploys to finish.
+Push the current branch, create a PR, obtain a CodeRabbit review, merge, and wait for deploys to finish.
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
@@ -1854,30 +1854,13 @@ if [ "$REVIEW_KIND_OPEN" = initial ]; then
   GRAPHIDE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr comment "$PR_NUMBER" --body '@graphide-review review' >/dev/null 2>&1 || GRAPHIDE_TS=""
 fi
-REVIEW_RACE=$(bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" \
-  --timeout 2400 --poll 5 --race-fallback-after 600)
-printf '%s\n' "$REVIEW_RACE"
+bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --timeout 600 --poll 5
 ```
 
 Run it with `run_in_background` (it starts at the freeze push and overlaps
-Group 3/4). **Race:** if CodeRabbit has no valid review within 600 s, or ends
-unsuccessfully earlier (quota, skip, failure), the waiter toggles the
-`claude-review-fallback` label exactly once (the Step 9a trigger) and keeps
-watching both; the first valid review on `REVIEW_HEAD` wins. The fallback stays
-inside the open cycle, so the bounded `deploy_review_cycle.py` state machine is
-unchanged. Its JSON names the `reviewer` (`coderabbit` or `claude-fallback`),
-`fallback_triggered_at` and `fallback_run_id`:
-
-- `coderabbit` → apply the Step 9a substantive-review check. If it is not
-  substantive and no fallback ran yet, trigger it per Step 9a.
-- `claude-fallback` → the fallback workflow already succeeded for this exact
-  HEAD. Read the three endpoints filtered at `fallback_triggered_at` (this is
-  `FALLBACK_TS`) and continue at Step 10; do not toggle the label again.
-- exit 1 (`reviewer: none`) → both ended without a valid review; use
-  `fallback_run_id` for Step 9a's repairable vs. usage-exhaustion decision.
-
-A fallback still running when CodeRabbit wins is not awaited; fold in its
-findings only if they land before the Step 10 classification.
+Group 3/4). The Claude fallback is disabled (Step 9a), so this waits only for
+CodeRabbit; there is no fallback race. If CodeRabbit ends unavailable, follow
+Step 9a's usage-exhaustion clause.
 
 This fails if the PR HEAD changes while waiting, preventing an older success
 from satisfying the gate. **A green check alone does not prove a substantive

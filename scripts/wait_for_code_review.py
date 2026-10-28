@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 def _trusted_github_host() -> str:
@@ -518,232 +518,6 @@ def wait_for_review(
         sleeper(max(0.0, min(poll_seconds, deadline - time.monotonic())))
 
 
-FALLBACK_LABEL = "claude-review-fallback"
-FALLBACK_WORKFLOW = "claude-code-review-fallback.yml"
-
-
-@dataclass(frozen=True)
-class RaceOutcome:
-    """First valid review in a CodeRabbit vs. Claude-fallback race."""
-
-    reviewer: str  # "coderabbit" | "claude-fallback" | "none"
-    successful: bool
-    coderabbit: ReviewStatus | None
-    fallback_triggered_at: datetime | None
-    fallback_run: dict[str, object] | None
-
-
-def trigger_fallback_label(pr: str, repo: str | None, *, timeout: float = 60.0) -> datetime:
-    """Toggle the opt-in label exactly as Step 9a does; return the trigger time."""
-    _validate_repo_ref(repo)
-    slug = _repo_slug(repo, timeout=timeout)
-    number = _pr_number(pr)
-    triggered = datetime.now(tz=timezone.utc).replace(microsecond=0)
-    label = [
-        "gh", "label", "create", FALLBACK_LABEL, "--force", "--color", "7B61FF",
-        "--description", "Run Claude Code review when the primary reviewer is unavailable",
-    ]
-    if repo:
-        label.extend(["--repo", slug])
-    subprocess.run(label, check=False, capture_output=True, timeout=timeout)
-    subprocess.run(
-        ["gh", "api", f"repos/{slug}/issues/{number}/labels/{FALLBACK_LABEL}", "-X", "DELETE"],
-        check=False,
-        capture_output=True,
-        timeout=timeout,
-    )
-    added = subprocess.run(
-        [
-            "gh", "api", f"repos/{slug}/issues/{number}/labels", "-X", "POST",
-            "-f", f"labels[]={FALLBACK_LABEL}",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if added.returncode != 0:
-        raise GhCommandError(added.stderr.strip() or "could not add the fallback label")
-    return triggered
-
-
-def fallback_run_for(
-    head: str, triggered_at: datetime, repo: str | None, *, timeout: float = 60.0
-) -> dict[str, object] | None:
-    """Newest fallback workflow run for this exact HEAD created after the trigger."""
-    command = [
-        "gh", "run", "list", "--workflow", FALLBACK_WORKFLOW, "--event", "pull_request",
-        "--limit", "20", "--json", "databaseId,createdAt,headSha,status,conclusion",
-    ]
-    if repo:
-        command.extend(["--repo", _parse_repo_ref(repo)[1]])
-    runs = _gh_json(command, timeout=timeout)
-    if not isinstance(runs, list):
-        raise ReviewWaitError("gh run list returned a non-list payload")
-    matches = []
-    for run in runs:
-        if not isinstance(run, dict) or run.get("headSha") != head:
-            continue
-        created = parse_github_time(run.get("createdAt"))
-        if created is not None and created >= triggered_at:
-            matches.append((created, run))
-    return max(matches, key=lambda item: item[0])[1] if matches else None
-
-
-def race_review(
-    *,
-    pr: str,
-    expected_head: str,
-    repo: str | None,
-    timeout_seconds: float,
-    poll_seconds: float,
-    race_after_seconds: float,
-    loader: Callable[[str, str | None], dict[str, object]] | None = None,
-    trigger: Callable[[], datetime] | None = None,
-    fallback_loader: Callable[[datetime], dict[str, object] | None] | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
-    clock: Callable[[], float] = time.monotonic,
-    progress: Callable[[str], None] | None = None,
-    triggered_at: datetime | None = None,
-) -> RaceOutcome:
-    """Race CodeRabbit against the Claude fallback on one exact HEAD.
-
-    CodeRabbit is watched exactly as in ``wait_for_review``. Once
-    ``race_after_seconds`` pass without a valid CodeRabbit review, or as soon as
-    CodeRabbit ends unsuccessfully, the Claude fallback is started once and the
-    first valid review wins. The HEAD check runs on every poll, and the fallback
-    stays inside the already-open review cycle (it never consumes a cycle).
-    """
-    start = clock()
-    deadline = start + timeout_seconds
-    active_loader = loader or (lambda number, name: gh_payload(number, name, timeout=60.0))
-    active_trigger = trigger or (lambda: trigger_fallback_label(pr, repo))
-    active_fallback = fallback_loader or (
-        lambda since: fallback_run_for(expected_head, since, repo)
-    )
-    fallback_at: datetime | None = None
-    fallback_run: dict[str, object] | None = None
-    coderabbit_final: ReviewStatus | None = None
-    status: ReviewStatus | None = None
-    last = ""
-
-    def report(message: str) -> None:
-        nonlocal last
-        if progress is not None and message != last:
-            progress(message)
-            last = message
-
-    while True:
-        try:
-            payload: dict[str, object] | None = active_loader(pr, repo)
-        except GhCommandError as error:
-            report(f"gh failed while racing reviews on {expected_head[:12]}; retrying: {error}")
-            payload = None
-        if payload is not None:
-            actual_head = str(payload.get("headRefOid") or "")
-            if actual_head != expected_head:
-                raise ReviewWaitError(
-                    "PR HEAD changed while waiting: "
-                    f"expected {expected_head}, got {actual_head or 'missing'}"
-                )
-            entry = coderabbit_entry(payload)
-            status = (
-                normalize_status(entry)
-                if entry is not None
-                else ReviewStatus("MISSING", False, False, "missing", {})
-            )
-            if (
-                triggered_at is not None
-                and status.terminal
-                and not status.successful
-                and _awaiting_triggered_review(status, triggered_at)
-            ):
-                status = ReviewStatus(
-                    "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
-                )
-            report(f"CodeRabbit {status.state} on {expected_head[:12]}")
-            if status.terminal and status.successful:
-                return RaceOutcome("coderabbit", True, status, fallback_at, fallback_run)
-            if status.terminal:
-                coderabbit_final = status
-        if fallback_at is None and (
-            coderabbit_final is not None or clock() - start >= race_after_seconds
-        ):
-            try:
-                fallback_at = active_trigger()
-                report(f"Claude fallback started for {expected_head[:12]} at {fallback_at.isoformat()}")
-            except GhCommandError as error:
-                report(f"could not start the Claude fallback yet; retrying: {error}")
-        if fallback_at is not None:
-            try:
-                run = active_fallback(fallback_at)
-            except GhCommandError as error:
-                report(f"gh failed reading the Claude fallback run; retrying: {error}")
-                run = None
-            if run is not None:
-                fallback_run = run
-                if str(run.get("status") or "").lower() == "completed":
-                    if str(run.get("conclusion") or "").lower() == "success":
-                        return RaceOutcome(
-                            "claude-fallback", True, coderabbit_final or status,
-                            fallback_at, fallback_run,
-                        )
-                    if coderabbit_final is not None:
-                        # Both reviewers ended without a valid review: Step 9a
-                        # decides repair vs. usage exhaustion from this evidence.
-                        return RaceOutcome(
-                            "none", False, coderabbit_final, fallback_at, fallback_run
-                        )
-        if clock() >= deadline:
-            final = coderabbit_final or status
-            raise TimeoutError(
-                f"no valid review on {expected_head[:12]} within {timeout_seconds:g}s "
-                f"(CodeRabbit: {final.state if final else 'MISSING'}; fallback run: "
-                f"{fallback_run.get('databaseId') if fallback_run else 'none'})"
-            )
-        sleeper(max(0.0, min(poll_seconds, deadline - clock())))
-
-
-def race_main(args: argparse.Namespace) -> int:
-    try:
-        triggered_at = latest_review_trigger_at(
-            args.pr, args.repo, timeout=min(60.0, args.timeout)
-        )
-        outcome = race_review(
-            pr=args.pr,
-            expected_head=args.head,
-            repo=args.repo,
-            timeout_seconds=args.timeout,
-            poll_seconds=args.poll,
-            race_after_seconds=args.race_fallback_after,
-            progress=lambda message: print(message, file=sys.stderr, flush=True),
-            triggered_at=triggered_at,
-        )
-    except (ReviewWaitError, TimeoutError) as error:
-        print(str(error), file=sys.stderr)
-        return 2
-    run = outcome.fallback_run or {}
-    print(
-        json.dumps(
-            {
-                "head": args.head,
-                "reviewer": outcome.reviewer,
-                "successful": outcome.successful,
-                "state": outcome.coderabbit.state if outcome.coderabbit else "MISSING",
-                "fallback_triggered_at": (
-                    outcome.fallback_triggered_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    if outcome.fallback_triggered_at
-                    else None
-                ),
-                "fallback_run_id": run.get("databaseId"),
-                "fallback_conclusion": run.get("conclusion"),
-            },
-            separators=(",", ":"),
-        )
-    )
-    return 0 if outcome.successful else 1
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", required=True, help="pull-request number or URL")
@@ -751,20 +525,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", help="OWNER/REPO, when not inferable by gh")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--poll", type=float, default=5.0)
-    parser.add_argument(
-        "--race-fallback-after",
-        type=float,
-        help="start the Claude fallback after this many seconds without a valid "
-        "CodeRabbit review (or at once when CodeRabbit fails) and accept the first "
-        "valid review; size --timeout to cover the fallback run",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.race_fallback_after is not None:
-        return race_main(args)
     try:
         triggered_at = latest_review_trigger_at(
             args.pr, args.repo, timeout=min(60.0, args.timeout)

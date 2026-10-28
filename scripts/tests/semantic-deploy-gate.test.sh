@@ -233,7 +233,6 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/measure-seed-memory.sh 5 0 0 --enfo
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
-require_text "$DEPLOY_COMMAND" '--race-fallback-after 600' "/deploy must race the Claude fallback against a slow CodeRabbit review"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"' "/deploy must batch approval-scoped hunks at the source freeze"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py check' "/deploy must prove the approval still covers the merged bytes"
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE"' "/deploy gate waits must wake on stage receipts, not fixed polls"
