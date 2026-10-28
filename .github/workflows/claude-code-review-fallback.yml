@@ -89,4 +89,5 @@ jobs:
         shell: bash
         env:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
-        run: python3 -I "$GITHUB_WORKSPACE/.trusted-review/scripts/claude_review_fallback_diagnose.py" "$EXECUTION_FILE"
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: python3 -I "$GITHUB_WORKSPACE/.trusted-review/scripts/claude_review_fallback_diagnose.py" "$EXECUTION_FILE" "$REVIEW_OUTCOME"

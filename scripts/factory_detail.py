@@ -251,13 +251,13 @@ def outcome_detail(exit_code: int, log_text: str) -> dict[str, Any]:
     return out
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str) -> str | None:
     try:
         return subprocess.run(
             ["git", *args], cwd=repo, check=True, capture_output=True, text=True, timeout=30
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
 
 
 def lane_for(path: str) -> str:
@@ -275,12 +275,18 @@ def source_detail(repo: Path, base_ref: str = "origin/main") -> dict[str, Any]:
     out: dict[str, Any] = {"sha": head}
     base = _git(repo, "merge-base", "HEAD", base_ref)
     working = _git(repo, "diff", "--no-ext-diff", "HEAD")
-    out["dirty"] = bool(working)
-    if working:
-        out["dirty_digest"] = hashlib.sha256(working.encode()).hexdigest()[:16]
+    if working is not None:
+        out["dirty"] = bool(working)
+        if working:
+            out["dirty_digest"] = hashlib.sha256(working.encode()).hexdigest()[:16]
     if base:
         out["base_sha"] = base
         numstat = _git(repo, "diff", "--numstat", base)
+        untracked_text = _git(repo, "ls-files", "--others", "--exclude-standard")
+        if untracked_text is not None:
+            out["untracked_files"] = len(untracked_text.splitlines())
+        if numstat is None:
+            return out
         files: list[str] = []
         insertions = deletions = 0
         for line in numstat.splitlines():
@@ -291,9 +297,10 @@ def source_detail(repo: Path, base_ref: str = "origin/main") -> dict[str, Any]:
             files.append(path)
             insertions += int(added) if added.isdigit() else 0
             deletions += int(removed) if removed.isdigit() else 0
-        untracked = _git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
-        out["untracked_files"] = len(untracked)
-        files.extend(untracked)
+        out.update(insertions=insertions, deletions=deletions)
+        if untracked_text is None:
+            return out
+        files.extend(untracked_text.splitlines())
         out.update(
             {
                 "files_changed": len(files),
@@ -340,9 +347,14 @@ def attempt_detail(run_dir: Path, stage: str, source: dict[str, Any]) -> dict[st
         out["retry_cause"] = "new-commit"
         out["fix_sha"] = current_sha
         out["prior_sha"] = prior_sha
-    elif prior_sha and last_source.get("dirty_digest") != source.get("dirty_digest"):
+    elif prior_sha and current_sha and not (
+        ("dirty" in last_source or last_source.get("dirty_digest"))
+        and ("dirty" in source or source.get("dirty_digest"))
+    ):
+        out["retry_cause"] = "unrecorded-source-state"
+    elif prior_sha and current_sha and last_source.get("dirty_digest") != source.get("dirty_digest"):
         out["retry_cause"] = "worktree-edit"
-    elif prior_sha:
+    elif prior_sha and current_sha:
         out["retry_cause"] = "unchanged-source"
     else:
         out["retry_cause"] = "unrecorded-prior-source"
@@ -505,7 +517,7 @@ def parse_event_detail(pairs: Sequence[str]) -> dict[str, Any]:
                 f"unsupported factory detail {key!r}; allowed: {', '.join(sorted(EVENT_DETAIL_FIELDS))}"
             )
         if expected is int:
-            if not raw.isdigit():
+            if not (raw.isascii() and raw.isdigit() and len(raw) <= 18):
                 raise DetailError(f"factory detail {key} must be a non-negative integer")
             out[key] = int(raw)
         elif expected is float:

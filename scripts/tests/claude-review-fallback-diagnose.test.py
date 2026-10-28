@@ -25,11 +25,11 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude-code-review-fallback.yml"
 DEPLOY = ROOT / ".claude" / "commands" / "deploy.md"
 
 
-def run(path: Path, summary: Path | None = None) -> str:
+def run(path: Path, summary: Path | None = None, outcome: str | None = None) -> str:
     env = {k: v for k, v in os.environ.items() if k != "GITHUB_STEP_SUMMARY"}
     if summary is not None:
         env["GITHUB_STEP_SUMMARY"] = str(summary)
-    proc = subprocess.run([sys.executable, str(SCRIPT), str(path)], capture_output=True, text=True, env=env, timeout=30)
+    proc = subprocess.run([sys.executable, str(SCRIPT), str(path)] + ([outcome] if outcome else []), capture_output=True, text=True, env=env, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
 
@@ -100,6 +100,16 @@ def test_success_prints_no_review_content(tmp: Path) -> None:
     assert "diagnosis: OK" in out and "SECRET REVIEW BODY" not in out, out
 
 
+def test_action_failure_overrides_successful_cli(tmp: Path) -> None:
+    path = tmp / "success.json"
+    path.write_text(json.dumps({"type": "result", "is_error": False, "result": "PRIVATE REVIEW"}))
+    for outcome, expected in (("failure", "EXECUTION_ERROR"), ("success", "OK")):
+        out = run(path, outcome=outcome)
+        assert f"diagnosis: {expected}" in out, out
+        assert "PRIVATE REVIEW" not in out
+    assert "REVIEW_OUTCOME: ${{ steps.review.outcome }}" in WORKFLOW.read_text()
+
+
 def test_other_and_missing(tmp: Path) -> None:
     path = tmp / "500.json"
     path.write_text(json.dumps({"type": "result", "is_error": True, "api_error_status": 500, "result": "boom"}))
@@ -123,7 +133,7 @@ def test_workflow_and_deploy_wiring() -> None:
 
 
 def main() -> int:
-    tests = [test_revoked_oauth_token_is_credential_invalid, test_429_is_usage_exhausted_jsonl,
+    tests = [test_action_failure_overrides_successful_cli, test_revoked_oauth_token_is_credential_invalid, test_429_is_usage_exhausted_jsonl,
              test_success_prints_no_review_content, test_other_and_missing, test_workflow_and_deploy_wiring,
              test_ambiguous_status_does_not_prescribe_credential_or_quota_repair,
              test_explicit_error_evidence_supports_diagnosis, test_execution_limits_preserve_subtype_and_errors]

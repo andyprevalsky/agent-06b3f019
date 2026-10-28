@@ -283,8 +283,8 @@ export async function withBrowserResumeLifecycle<T>(
       throw new Error('Browser resume lifecycle ownership lost');
     }
   };
-  // A caught hydration failure has a known owner and candidate. Retire that
-  // candidate before admitting another resume; crashed/unknown owners stay fenced.
+  // A caught hydration failure has a known owner and candidate. Settle its
+  // receipt after safe cleanup; crashed/unknown owners stay fenced.
   const abandonFailedHydration = async (candidate: string, cause: unknown): Promise<void> => {
     const detail = {
       taskId,
@@ -307,26 +307,22 @@ export async function withBrowserResumeLifecycle<T>(
             binding.controlLeaseExpiresAt.getTime() > Date.now()))
       )
         throw new Error('Failed hydration candidate ownership changed');
-      if (request.provider === '' || candidate === request.source) {
-        log.error(
-          'Browser resume kept custody: failed hydration candidate is not releasable',
-          detail
-        );
-        return;
-      }
-      if (!(await deps.release(request.provider, candidate))) {
-        log.error(
-          'Browser resume kept custody: failed hydration candidate release unconfirmed',
-          detail
-        );
-        return;
-      }
-      if (!(await deps.ended(candidate))) {
-        log.error(
-          'Browser resume kept custody: failed hydration candidate still reported live',
-          detail
-        );
-        return;
+      const retainCandidate = request.provider === '' || candidate === request.source;
+      if (!retainCandidate) {
+        if (!(await deps.release(request.provider, candidate))) {
+          log.error(
+            'Browser resume kept custody: failed hydration candidate release unconfirmed',
+            detail
+          );
+          return;
+        }
+        if (!(await deps.ended(candidate))) {
+          log.error(
+            'Browser resume kept custody: failed hydration candidate still reported live',
+            detail
+          );
+          return;
+        }
       }
       const settled = { ...request, nativeId: candidate, nativeOutstanding: false };
       await runTransactionWithRetry(async (tx) => {
@@ -348,13 +344,20 @@ export async function withBrowserResumeLifecycle<T>(
           data: {
             status: 'RELEASED',
             request: settled as unknown as Prisma.InputJsonObject,
-            response: { phase: 'rejected', source: request.source, abandoned: candidate },
+            response: {
+              phase: 'rejected',
+              source: request.source,
+              ...(retainCandidate ? { retained: candidate } : { abandoned: candidate }),
+            },
           },
         });
         if (changed.count !== 1) throw new Error('Failed hydration candidate custody changed');
       });
       request = settled;
-      log.warn('Browser resume released its failed hydration candidate', detail);
+      log.warn('Browser resume settled its failed hydration candidate', {
+        ...detail,
+        retained: retainCandidate,
+      });
     } catch (cleanupError) {
       log.error('Browser resume kept custody: failed hydration cleanup did not complete', {
         ...detail,

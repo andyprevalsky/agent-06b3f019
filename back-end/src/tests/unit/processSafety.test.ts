@@ -63,7 +63,12 @@ test('TypeScript preload supports every declared Node generation and file URL en
       assert.equal(command, process.execPath);
       assert.equal(argv[0], flag, version);
       assert.equal(new URL(argv[1]).protocol, 'file:');
-      assert.deepEqual(argv.slice(2), ['-e', 'void 0']);
+      assert.deepEqual(
+        argv.slice(2),
+        flag === '--loader'
+          ? ['--require', require.resolve('tsx/cjs'), '-e', 'void 0']
+          : ['-e', 'void 0']
+      );
     }
   } finally {
     Object.defineProperty(process.versions, 'node', descriptor);

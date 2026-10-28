@@ -81,6 +81,7 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
         attempts++;
         const scope = browserResumeScope()!;
         if (scenario === 'reattached-source' || scenario === 'unknown-provider') {
+          if (scenario === 'reattached-source') await scope.beforeCreate('kernel');
           const candidate =
             scenario === 'reattached-source' ? session.sessionId! : 'unattributed-native';
           await prisma.browserSession.update({
@@ -136,6 +137,14 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
         assert.equal(ready.sessionId, replacement);
         assert.equal(ready.checkpointRef, checkpointRef);
         assert.equal(attempts, 2);
+      } else if (scenario === 'reattached-source' || scenario === 'unknown-provider') {
+        assert.equal(ledger.status, 'RELEASED', 'caught failure relinquishes receipt custody');
+        const receipt = ledger.response as { phase: string; retained: string };
+        assert.equal(receipt.phase, 'rejected');
+        assert.equal(receipt.retained, failedCandidate);
+        assert.equal(afterFailure.sessionId, failedCandidate, 'retain the native binding');
+        assert.deepEqual(released, [], 'never release the source or unidentified provider');
+        assert.equal(attempts, 1);
       } else {
         assert.equal(ledger.status, 'STARTED', `${scenario} must remain fenced`);
         assert.equal(attempts, 1);

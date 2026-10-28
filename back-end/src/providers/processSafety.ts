@@ -14,7 +14,11 @@ export function typeScriptProcess(args: string[]): [string, string[]] {
     major > 20 || (major === 20 && minor >= 6) || (major === 18 && minor >= 19)
       ? '--import'
       : '--loader';
-  return [process.execPath, [flag, pathToFileURL(require.resolve('tsx')).href, ...args]];
+  const preload = flag === '--loader' ? ['--require', require.resolve('tsx/cjs')] : [];
+  return [
+    process.execPath,
+    [flag, pathToFileURL(require.resolve('tsx')).href, ...preload, ...args],
+  ];
 }
 
 export async function execTypeScript(args: string[], options: ExecFileOptions = {}) {

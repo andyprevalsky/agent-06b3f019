@@ -65,11 +65,11 @@ def find_result(text: str) -> Optional[dict]:
     return results[-1] if results else None
 
 
-def classify(result: Optional[dict]) -> str:
+def classify(result: Optional[dict], action_outcome: Optional[str] = None) -> str:
     if result is None:
         return NO_RESULT
     if result.get("is_error") is not True:
-        return OK
+        return EXECUTION_ERROR if action_outcome == "failure" else OK
     status = result.get("api_error_status")
     evidence = json.dumps([result.get("result"), result.get("errors")]).lower()
     # 403 may mean permissions and 429 may be transient throttling. Neither
@@ -89,7 +89,7 @@ def classify(result: Optional[dict]) -> str:
 
 def report(result: Optional[dict], verdict: str) -> list[str]:
     lines = [f"Claude review fallback diagnosis: {verdict}"]
-    if result is not None and verdict != OK:
+    if result is not None and result.get("is_error") is True and verdict != OK:
         message = str(result.get("result") or "")[:500]
         lines.append(
             f"api_error_status={result.get('api_error_status')} "
@@ -99,6 +99,8 @@ def report(result: Optional[dict], verdict: str) -> list[str]:
         )
         lines.append(f"subtype={result.get('subtype')} errors={json.dumps(result.get('errors') or [])}")
         lines.append(f"error: {message}")
+    if result is not None and result.get("is_error") is not True and verdict == EXECUTION_ERROR:
+        lines.append("Review action failed after a successful CLI result; inspect action-level limits.")
     lines.append(REMEDIATION[verdict])
     return lines
 
@@ -108,7 +110,7 @@ def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 and argv[1] else default
     text = path.read_text(errors="replace") if path.is_file() else ""
     result = find_result(text)
-    verdict = classify(result)
+    verdict = classify(result, argv[2] if len(argv) > 2 else None)
     lines = report(result, verdict)
     prefix = "::error::" if verdict in (CREDENTIAL_INVALID, PROVIDER_ERROR, EXECUTION_ERROR, NO_RESULT) else ""
     print(prefix + lines[0])

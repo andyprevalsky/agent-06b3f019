@@ -790,10 +790,10 @@ def changed_files(base: str | None, head: str | None) -> list[str]:
 
     if head:
         revisions = [f"{base}...{head}"] if base else [f"{head}^", head]
-        return sorted(set(git("diff", "--name-only", *revisions)))
+        return sorted(set(git("diff", "--no-renames", "--name-only", *revisions)))
     base = base or "origin/main"
-    files = set(git("diff", "--name-only", f"{base}...HEAD"))
-    files |= set(git("diff", "--name-only", "HEAD"))
+    files = set(git("diff", "--no-renames", "--name-only", f"{base}...HEAD"))
+    files |= set(git("diff", "--no-renames", "--name-only", "HEAD"))
     files |= set(git("ls-files", "--others", "--exclude-standard"))
     return sorted(f for f in files if not f.startswith(EXCLUDED_TOP))
 

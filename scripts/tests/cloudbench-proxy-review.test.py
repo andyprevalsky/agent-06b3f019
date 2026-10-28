@@ -1,6 +1,6 @@
 """Offline replay of late bind failure and a host pause near readiness expiry."""
 from pathlib import Path
-import subprocess,tempfile,unittest
+import os,subprocess,tempfile,unittest
 ROOT=Path(__file__).resolve().parents[2]
 class ProxyReviewTests(unittest.TestCase):
  def replay(self,body):
@@ -147,5 +147,29 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
 cloudbench_terminate_and_wait 1 "$result"
 ''')
     self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+ def test_invalid_timeout_rejected_before_dispatch(self):
+  for value in ['0','-1','2.5','180s','9999999999999999999','08x',' 8']:
+   with self.subTest(value=value):
+    r=subprocess.run(['bash','-c','source "$1"; cloudbench_shared_relay_enabled(){ return 0; }; cloudbench_shared_proxy_start(){ echo DISPATCHED; }; cloudbench_start_data_plane_proxy 1 2 host /dev/null pid status "$2"','test',str(ROOT/'scripts/lib/cloudbench-env.sh'),value],capture_output=True,text=True,timeout=5)
+    self.assertEqual(r.returncode,2,r.stdout+r.stderr);self.assertIn('Invalid proxy readiness timeout',r.stderr);self.assertNotIn('DISPATCHED',r.stdout)
+ def test_decimal_defaults_and_invalid_settle(self):
+  for value,expected in [('0008','8'),('180','180'),('999999999999999999','999999999999999999')]:
+   r=subprocess.run(['bash','-c','source "$1"; cloudbench_shared_relay_enabled(){ return 0; }; cloudbench_shared_proxy_start(){ printf "%s" "$7"; }; cloudbench_start_data_plane_proxy 1 2 host /dev/null pid status "$2"','test',str(ROOT/'scripts/lib/cloudbench-env.sh'),value],capture_output=True,text=True,timeout=5)
+   self.assertEqual((r.returncode,r.stdout),(0,expected),r.stderr)
+  for settle,expected in [('bad','3'),('-1','3'),('1.2.3','3'),('NaN','3'),('1e309','3'),('.5','.5'),('0','0'),('3','3')]:
+   with tempfile.TemporaryDirectory() as tmp:
+    script='''source "$1"
+D="$2"; echo 0 > "$D/clock"; APP=offline
+cloudbench_shared_relay_enabled(){ return 1; }
+date(){ if [ "$1" = +%s ]; then n=$(cat "$D/clock"); echo "$n"; echo $((n+1)) > "$D/clock"; else echo fixed; fi; }
+sleep(){ printf '%s\\n' "$1" >> "$D/sleeps"; }
+flyctl(){ return 1; }
+curl(){ return 0; }
+cloudbench_terminate_and_wait(){ wait "$2" 2>/dev/null || true; }
+cloudbench_start_data_plane_proxy 1 2 host "$D/proxy.log" pid backend 1 || true
+'''
+    r=subprocess.run(['bash','-c',script,'test',str(ROOT/'scripts/lib/cloudbench-env.sh'),tmp],env={**os.environ,'CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS':settle},capture_output=True,text=True,timeout=5)
+    self.assertEqual(r.returncode,0,r.stderr);values=(Path(tmp)/'sleeps').read_text().splitlines();self.assertIn(expected,values);self.assertNotIn(settle,values) if settle!=expected else None
 
 if __name__=='__main__':unittest.main()

@@ -1601,13 +1601,25 @@ def load_ledger_rows(
     module = _factory_ledger_module()
     rows: dict[tuple[Any, ...], dict[str, Any]] = {}
     sources = [module.read_jsonl(ledger), *(module.parse_jsonl(text) for text in extra_texts)]
-    for row in (row for source in sources for row in source):
-        if row.get("kind") in {"deploy-stage", "factory-event"}:
-            rows.setdefault(module.row_key(row), row)
+    diagnostics = _factory_ledger_module("factory_diagnostics")
+    candidates = [row for source in sources for row in source]
     for root in roots:
-        for row in (*module.stage_rows(root), *module.event_rows(root)):
-            rows.setdefault(module.row_key(row), row)
-    return sorted(rows.values(), key=module.row_epoch)
+        candidates.extend((*module.stage_rows(root), *module.event_rows(root)))
+    rejected = 0
+    for row in candidates:
+        if row.get("kind") not in {"deploy-stage", "factory-event"}:
+            continue
+        if not diagnostics.valid_ledger_row(row):
+            rejected += 1
+            continue
+        rows.setdefault(module.row_key(row), row)
+
+    class LedgerRows(list):
+        pass
+
+    result = LedgerRows(sorted(rows.values(), key=module.row_epoch))
+    result.rejected_rows = rejected
+    return result
 
 
 def _epoch_iso(epoch: float) -> str:

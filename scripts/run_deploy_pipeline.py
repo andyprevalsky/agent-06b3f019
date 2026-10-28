@@ -97,6 +97,15 @@ def host_resources(cpus: int | None = None, mem_available_mb: int | None = None,
             "mem_total_mb": mem_total_mb, "watchdog_cap_mb": watchdog_cap_mb}
 
 
+def runtime_host_resources() -> dict:
+    """A failed live probe is unknown headroom, never cached admission capacity."""
+    try:
+        return host_resources()
+    except ValueError as error:
+        print(f"PIPELINE_HOST_SAMPLE: unavailable: {error}", file=sys.stderr, flush=True)
+        return {"error": str(error)}
+
+
 def _memory_info() -> dict[str, int]:
     if sys.platform == "darwin":
         return _macos_memory_info()
@@ -259,7 +268,8 @@ def source_digest(root: Path | None = None) -> dict[str, str]:
 
     def git(*arguments: str) -> bytes:
         return subprocess.run(
-            ("git", *arguments), cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ("git", *arguments), cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=300,
         ).stdout
 
     digest = hashlib.sha256()
@@ -441,7 +451,7 @@ def run(
     last_sample = time.monotonic()
     while True:
         if time.monotonic() - last_sample >= HOST_SAMPLE_SECONDS:
-            sample = host_resources()
+            sample = runtime_host_resources()
             sample_host_peak(receipt["host_peak"], sample)
             receipt["host_samples"].append({"at": _now(), **sample,
                                             "headroom_mb": memory_budget_mb(sample)})
@@ -494,20 +504,19 @@ def run(
                         continue
                     if reserved + lane.memory_mb > budget_mb:
                         continue  # admitted when running lanes release their share
-                sample = host_resources()
+                sample = runtime_host_resources()
                 headroom = memory_budget_mb(sample)
                 sample_host_peak(receipt["host_peak"], sample)
+                receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                 if headroom is None or reserved + lane.memory_mb > headroom:
                     if running:
                         continue  # this run can still release reservations
-                    receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                     pending.remove(lane)
                     receipt["lanes"][lane.name].update(
                         status="failed", exit=None, finished_epoch=time.time(),
                         note=f"refused: needs {lane.memory_mb} MB, live headroom {headroom} MB",
                     )
                     continue
-                receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": headroom})
                 pending.remove(lane)
                 argv = ["bash", str(STAGE_WRAPPER), lane.name]
                 if lane.reuse_passed:
@@ -556,7 +565,7 @@ def run(
 
     receipt["finished_at"] = _now()
     receipt["wall_s"] = round(time.time() - receipt["started_epoch"], 1)
-    sample = host_resources()
+    sample = runtime_host_resources()
     sample_host_peak(receipt["host_peak"], sample)
     receipt["host_samples"].append({"at": _now(), **sample, "headroom_mb": memory_budget_mb(sample)})
     receipt["finished_epoch"] = time.time()

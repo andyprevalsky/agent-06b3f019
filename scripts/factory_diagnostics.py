@@ -15,6 +15,7 @@ treating missing data as zero.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -28,6 +29,21 @@ PAIRED_EVENTS = {
     ("production-start", "production-finish"): "external-deploy",
     ("stage-start", "stage-finish"): "stage",
 }
+
+
+def valid_ledger_row(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    fields = (
+        ("started_epoch", "finished_epoch") if row.get("kind") == "deploy-stage"
+        else ("recorded_epoch",) if row.get("kind") == "factory-event" else ()
+    )
+    if not fields:
+        return False
+    try:
+        return all(not isinstance(row[field], bool) and math.isfinite(float(row[field])) for field in fields)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def _median(values: Sequence[float]) -> float | None:
@@ -267,6 +283,9 @@ def analyze_ledger(
     attempts_path: Path | None = None,
     descend_records: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
+    valid = [row for row in rows if valid_ledger_row(row)]
+    rejected = getattr(rows, "rejected_rows", 0) + len(rows) - len(valid)
+    rows = valid
     stages = [row for row in rows if row.get("kind") == "deploy-stage"]
     deploy_events = [
         row for row in rows if row.get("kind") == "factory-event" and row.get("workflow") == "deploy"
@@ -325,7 +344,7 @@ def analyze_ledger(
     detailed = sum(1 for row in stages if _detail(row))
     return {
         "schema_version": 1,
-        "coverage": {"stage_rows": len(stages), "stage_rows_with_detail": detailed, "deploy_runs": len(by_run)},
+        "coverage": {"stage_rows": len(stages), "stage_rows_with_detail": detailed, "deploy_runs": len(by_run), "rejected_rows": rejected},
         "gates": gate_diagnostics(stages),
         "retry_causes": _top(
             Counter(
@@ -359,6 +378,8 @@ def render_text(diagnostics: dict[str, Any]) -> list[str]:
         f"Diagnostics: {coverage['stage_rows_with_detail']}/{coverage['stage_rows']} stage rows carry detail "
         f"across {coverage['deploy_runs']} deploy runs"
     ]
+    if coverage.get("rejected_rows"):
+        lines.append(f"Rejected malformed ledger rows: {coverage['rejected_rows']}")
     gates = [gate for gate in diagnostics["gates"] if gate["failed"] or gate["reruns"] or gate["reused"]]
     if gates:
         lines.append("Gate                         Exec  Fail  Rerun  Reuse  Exec p50  Top failure")

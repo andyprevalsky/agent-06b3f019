@@ -85,7 +85,7 @@ class ReviewRegressionTest(unittest.TestCase):
  def test_explicit_git_range_has_only_range_argument(self):
   with patch.object(sat.subprocess,'run',return_value=types.SimpleNamespace(stdout='x.py\n')) as run:
    self.assertEqual(sat.changed_files('base','head'),['x.py'])
-  self.assertEqual(run.call_args.args[0],['git','diff','--name-only','base...head'])
+  self.assertEqual(run.call_args.args[0],['git','diff','--no-renames','--name-only','base...head'])
  def coverage_attempt(self,status,with_data,partial=False):
   with tempfile.TemporaryDirectory() as tmp:
    out=Path(tmp)/'map.json';out.write_text('preserved')
@@ -123,4 +123,172 @@ class ReviewRegressionTest(unittest.TestCase):
    file=Path(tmp)/'replay.jsonl';file.write_text('');out=io.StringIO()
    with patch.object(sys,'argv',['replay',str(file)]),patch.object(sat,'load_edges',return_value={'no_tests':[]}),contextlib.redirect_stdout(out):self.assertEqual(replay.main(),0)
    self.assertIn("today's path gating",out.getvalue());self.assertIn('unmeasured',out.getvalue())
+
+class C8ScriptRegressionTest(unittest.TestCase):
+ def test_approval_git_timeout_is_bounded_and_typed(self):
+  def timeout(*args,**kwargs):
+   self.assertGreater(kwargs.get('timeout',0),0)
+   raise subprocess.TimeoutExpired('git',kwargs['timeout'])
+  with patch.object(approval.subprocess,'run',side_effect=timeout):
+   with self.assertRaises(approval.BatchError):approval._git(ROOT,'status')
+ def test_approval_guard_timeout_is_bounded_and_typed(self):
+  calls=[]
+  def timeout(*args,**kwargs):
+   self.assertGreater(kwargs.get('timeout',0),0)
+   raise subprocess.TimeoutExpired('guard',kwargs['timeout'])
+  def communicate(*args,**kwargs):
+   self.assertGreater(kwargs.get('timeout',0),0)
+   calls.append(1)
+   if len(calls)==1:raise subprocess.TimeoutExpired('guard',kwargs['timeout'])
+   return '', ''
+  child=types.SimpleNamespace(pid=12345,returncode=-15,stdout=io.StringIO(),stderr=io.StringIO(),communicate=communicate)
+  with patch.object(approval,'guard_commands',return_value={'test':('guard',)}),patch.object(approval.subprocess,'run',side_effect=timeout),patch.object(approval.subprocess,'Popen',return_value=child),patch.object(approval.os,'killpg'):
+   with self.assertRaises(approval.BatchError):approval.run_guards(ROOT)
+ def test_source_git_failure_is_unknown_not_empty(self):
+  def run(command,**kwargs):
+   if command[1:]==['rev-parse','HEAD']:return types.SimpleNamespace(stdout='a'*40)
+   if command[1:]==['merge-base','HEAD','origin/main']:return types.SimpleNamespace(stdout='b'*40)
+   raise subprocess.TimeoutExpired(command,30)
+  with patch.object(detail.subprocess,'run',side_effect=run):value=detail.source_detail(ROOT)
+  self.assertEqual(value,{'sha':'a'*40,'base_sha':'b'*40})
+ def test_source_partial_stats_do_not_claim_total_without_untracked(self):
+  def run(command,**kwargs):
+   args=command[1:]
+   if args==['rev-parse','HEAD']:return types.SimpleNamespace(stdout='a'*40)
+   if args[:1]==['merge-base']:return types.SimpleNamespace(stdout='b'*40)
+   if args[:2]==['diff','--no-ext-diff']:return types.SimpleNamespace(stdout='')
+   if args[:2]==['diff','--numstat']:return types.SimpleNamespace(stdout='1\t2\tscripts/x.py\n')
+   raise OSError('git unavailable')
+  with patch.object(detail.subprocess,'run',side_effect=run):value=detail.source_detail(ROOT)
+  self.assertIs(value['dirty'],False)
+  self.assertNotIn('files_changed',value);self.assertNotIn('lanes',value)
+  self.assertEqual((value['insertions'],value['deletions']),(1,2))
+ def test_unknown_source_does_not_claim_unchanged_retry(self):
+  with tempfile.TemporaryDirectory() as raw:
+   p=Path(raw);p.joinpath('stages.jsonl').write_text(json.dumps({'stage':'lint','status':'failed','started_epoch':1,'detail':{'source':{'sha':'a'*40,'dirty':False}}})+'\n')
+   result=detail.attempt_detail(p,'lint',{'sha':'a'*40})
+   self.assertNotEqual(result.get('retry_cause'),'unchanged-source')
+   self.assertNotEqual(result.get('retry_cause'),'worktree-edit')
+ def test_integer_validation_always_raises_detail_error(self):
+  for raw in ['²','١','9'*19,'9'*5000]:
+   with self.subTest(length=len(raw)):
+    with self.assertRaises(detail.DetailError):detail.parse_event_detail(['attempt='+raw])
+  self.assertEqual(detail.parse_event_detail(['attempt=18'])['attempt'],18)
+ def test_malformed_ledger_rows_rejected_before_sort_and_counted(self):
+  review=module('c8_factory_review','scripts/factory_review.py')
+  good={'kind':'deploy-stage','run_id':'r','stage':'s','started_epoch':0,'finished_epoch':1,'status':'passed'}
+  bad=[{**good,'started_epoch':v} for v in [None,'invalid',float('nan'),float('inf')]]
+  bad.append({'kind':'factory-event','workflow':'deploy','event':'review-request'})
+  with tempfile.TemporaryDirectory() as raw:
+   p=Path(raw)/'ledger.jsonl';p.write_text('\n'.join(json.dumps(r) for r in [good,*bad,good]))
+   rows=review.load_ledger_rows(p,[])
+   self.assertEqual(list(rows),[good]);self.assertEqual(getattr(rows,'rejected_rows',None),5)
+   output=diag.analyze_ledger(rows)
+   self.assertEqual(output['coverage']['rejected_rows'],5)
+   direct=diag.analyze_ledger([good,*bad])
+   self.assertEqual(direct['coverage']['rejected_rows'],5)
+ def test_pipeline_source_git_calls_are_bounded(self):
+  calls=[]
+  def run(command,**kwargs):
+   calls.append(command);self.assertGreater(kwargs.get('timeout',0),0)
+   return types.SimpleNamespace(stdout=b'a'*40 if 'rev-parse' in command else b'')
+  with patch.object(pipeline.subprocess,'run',side_effect=run):pipeline.source_digest(ROOT)
+  self.assertGreaterEqual(len(calls),3)
+ def host_failure(self,position):
+  good={'cpus':4,'mem_available_mb':20000,'mem_total_mb':20000,'watchdog_cap_mb':18000}
+  active={};started=[];reaped=[];samples=[];failed=False;last_good=True
+  def host(*args,**kwargs):
+   nonlocal failed,last_good
+   trigger=(position=='periodic' and bool(active)) or (position=='admission' and bool(active)) or (position=='final' and bool(reaped) and not active)
+   if trigger and not failed:
+    failed=True;last_good=False;raise ValueError('fixture memory sample unavailable')
+   last_good=True;return good
+  def popen(command,**kwargs):
+   self.assertTrue(last_good,'lane admitted using an unknown/stale memory sample')
+   process=types.SimpleNamespace(pid=100+len(started),returncode=None)
+   started.append(command[2]);active[process.pid]=process;return process
+  waits={}
+  def wait4(pid,flags):
+   waits[pid]=waits.get(pid,0)+1
+   if waits[pid]==1:return 0,0,types.SimpleNamespace(ru_maxrss=1024)
+   active.pop(pid,None);reaped.append(pid);return pid,0,types.SimpleNamespace(ru_maxrss=1024)
+  with tempfile.TemporaryDirectory() as raw:
+   p=Path(raw);plan=p/'plan.json';plan.write_text(json.dumps({'lanes':[{'name':n,'command':['true'],'memory_mb':1} for n in ['a','b']]}))
+   with patch.object(pipeline,'host_resources',side_effect=host),patch.object(pipeline,'source_digest',return_value={'head':'fixture','digest':'same'}),patch.object(pipeline,'_stage_run_dir',return_value=None),patch.object(pipeline,'watchdog_terminations',return_value=[]),patch.object(pipeline,'HOST_SAMPLE_SECONDS',0 if position=='periodic' else 100000),patch.object(pipeline.subprocess,'Popen',side_effect=popen),patch.object(pipeline.os,'wait4',side_effect=wait4),patch.object(pipeline.signal,'signal'),patch.object(pipeline.time,'sleep'),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+    result=pipeline.run(plan,p/'state',max_parallel=1 if position=='periodic' else 2)
+   receipt=json.loads((p/'state/receipt.json').read_text())
+   self.assertTrue(failed);self.assertEqual(result,0);self.assertEqual(len(reaped),len(started));self.assertFalse(active)
+   self.assertTrue(any(row.get('error')=='fixture memory sample unavailable' and row.get('headroom_mb') is None for row in receipt['host_samples']))
+ def test_periodic_memory_failure_keeps_reaping(self):self.host_failure('periodic')
+ def test_admission_memory_failure_never_uses_stale_headroom(self):self.host_failure('admission')
+ def test_final_memory_failure_keeps_terminal_receipt(self):self.host_failure('final')
+ def test_renames_include_old_path_in_all_diff_modes(self):
+  def run(command,**kwargs):
+   return types.SimpleNamespace(stdout='old.py\nnew.py\n' if '--no-renames' in command else 'new.py\n')
+  for base,head in [('base','head'),(None,'head'),('base',None)]:
+   with self.subTest(base=base,head=head),patch.object(sat.subprocess,'run',side_effect=run):
+    self.assertIn('old.py',sat.changed_files(base,head))
+ def test_unknown_memory_before_first_admission_refuses_lane(self):
+  good={'cpus':4,'mem_available_mb':20000,'mem_total_mb':20000,'watchdog_cap_mb':18000}
+  with tempfile.TemporaryDirectory() as raw:
+   p=Path(raw);plan=p/'plan.json';plan.write_text(json.dumps({'lanes':[{'name':'a','command':['true'],'memory_mb':1}]}))
+   with patch.object(pipeline,'host_resources',side_effect=[good,ValueError('probe failed'),good]),patch.object(pipeline,'source_digest',return_value={'head':'fixture','digest':'same'}),patch.object(pipeline,'_stage_run_dir',return_value=None),patch.object(pipeline,'watchdog_terminations',return_value=[]),patch.object(pipeline.subprocess,'Popen') as spawn,patch.object(pipeline.signal,'signal'),patch.object(pipeline,'HOST_SAMPLE_SECONDS',100000),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+    result=pipeline.run(plan,p/'state')
+   self.assertEqual(result,1);spawn.assert_not_called()
+   receipt=json.loads((p/'state/receipt.json').read_text());self.assertEqual(receipt['status'],'failed')
+   self.assertIn('headroom None',receipt['lanes']['a']['note'])
+ def test_real_child_is_reaped_after_transient_memory_failure(self):
+  good={'cpus':4,'mem_available_mb':20000,'mem_total_mb':20000,'watchdog_cap_mb':18000}
+  real_popen=subprocess.Popen;children=[];failed=False
+  def spawn(*args,**kwargs):
+   process=real_popen(*args,**kwargs);children.append(process);return process
+  def host(*args,**kwargs):
+   nonlocal failed
+   if children and not failed:
+    failed=True;raise ValueError('real child probe failure')
+   return good
+  with tempfile.TemporaryDirectory() as raw:
+   p=Path(raw);wrapper=p/'stage.sh';wrapper.write_text('#!/bin/bash\nshift\nif [ "$1" = "--reuse-passed" ]; then shift; fi\nshift\nexec "$@"\n')
+   plan=p/'plan.json';plan.write_text(json.dumps({'lanes':[{'name':'child','command':[sys.executable,'-c','import time; time.sleep(.03)'],'memory_mb':1}]}))
+   try:
+    with patch.object(pipeline,'STAGE_WRAPPER',wrapper),patch.object(pipeline,'host_resources',side_effect=host),patch.object(pipeline,'source_digest',return_value={'head':'fixture','digest':'same'}),patch.object(pipeline,'_stage_run_dir',return_value=None),patch.object(pipeline,'watchdog_terminations',return_value=[]),patch.object(pipeline,'HOST_SAMPLE_SECONDS',0),patch.object(pipeline.subprocess,'Popen',side_effect=spawn),patch.object(pipeline.signal,'signal'),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+     result=pipeline.run(plan,p/'state')
+    self.assertTrue(failed);self.assertEqual(result,0);self.assertTrue(children)
+    self.assertTrue(all(child.returncode==0 for child in children),'supervisor left a real child unreaped')
+   finally:
+    for child in children:
+     if child.poll() is None:child.terminate();child.wait(timeout=5)
+ def test_real_git_rename_preserves_old_path(self):
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw)
+   def git(*args):
+    return subprocess.run(['git','-c','commit.gpgsign=false','-c','diff.renames=true',*args],cwd=root,check=True,capture_output=True,text=True).stdout.strip()
+   git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture')
+   (root/'old.py').write_text('print("fixture")\n');git('add','.');git('commit','-qm','base');base=git('rev-parse','HEAD')
+   git('mv','old.py','new.py');git('commit','-qm','rename');head=git('rev-parse','HEAD')
+   with patch.object(sat,'ROOT',root):
+    self.assertEqual(sat.changed_files(base,head),['new.py','old.py'])
+    self.assertEqual(sat.changed_files(None,head),['new.py','old.py'])
+    git('mv','new.py','latest.py')
+    self.assertEqual(sat.changed_files(base,None),['latest.py','new.py','old.py'])
+ def test_guard_timeout_stops_real_grandchild(self):
+  import signal
+  with tempfile.TemporaryDirectory() as raw:
+   root=Path(raw);pidfile=root/'pid';child=root/'child.py';guard=root/'guard.sh'
+   child.write_text('import os,signal,time\nfrom pathlib import Path\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nPath('+repr(str(pidfile))+').write_text(str(os.getpid()))\ntime.sleep(30)\n')
+   guard.write_text('"'+sys.executable+'" "'+str(child)+'" &\nwait\n')
+   pid=None
+   try:
+    with patch.object(approval,'SUBPROCESS_TIMEOUT_SECONDS',.3),patch.object(approval,'guard_commands',return_value={'fixture':('bash',str(guard))}):
+     with self.assertRaises(approval.BatchError):approval.run_guards(root)
+    self.assertTrue(pidfile.exists(),'grandchild did not start')
+    pid=int(pidfile.read_text())
+    observed=subprocess.run(['ps','-p',str(pid),'-o','stat='],capture_output=True,text=True,timeout=5)
+    self.assertTrue(observed.returncode!=0 or observed.stdout.strip().startswith('Z'),'timed-out guard left its grandchild running')
+   finally:
+    if pid is None and pidfile.exists():pid=int(pidfile.read_text())
+    if pid is not None:
+     try:os.kill(pid,signal.SIGKILL)
+     except ProcessLookupError:pass
+
 if __name__=='__main__':unittest.main()

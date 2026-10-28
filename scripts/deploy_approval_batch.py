@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -40,6 +41,9 @@ GUARDS = {
 }
 DECISIONS = {"approved", "grounded", "rejected"}
 EXIT_OK, EXIT_REREQUEST, EXIT_USAGE, EXIT_PENDING = 0, 1, 2, 3
+SUBPROCESS_TIMEOUT_SECONDS = 300
+GUARD_TERMINATION_GRACE_SECONDS = 1
+GUARD_KILL_GRACE_SECONDS = 1
 
 
 class BatchError(RuntimeError):
@@ -47,9 +51,13 @@ class BatchError(RuntimeError):
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ("git", *args), cwd=repo, check=True, capture_output=True, text=True
-    ).stdout
+    try:
+        return subprocess.run(
+            ("git", *args), cwd=repo, check=True, capture_output=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        ).stdout
+    except subprocess.TimeoutExpired as error:
+        raise BatchError(f"git operation timed out after {SUBPROCESS_TIMEOUT_SECONDS}s") from error
 
 
 def _now() -> str:
@@ -64,11 +72,48 @@ def guard_commands() -> dict[str, tuple[str, ...]]:
     return dict(GUARDS)
 
 
+def _run_guard(repo: Path, name: str, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    """Own the guard session so a timeout also stops its Git/helper descendants."""
+    child = subprocess.Popen(
+        command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    try:
+        stdout, stderr = child.communicate(timeout=SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        try:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                child.communicate(timeout=GUARD_TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            # A leader can exit while a descendant ignores TERM or closes its
+            # inherited pipes. Kill the exact owned group even in that case.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                child.communicate(timeout=GUARD_KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as cleanup_error:
+                raise BatchError(f"{name} guard cleanup exceeded its bounded deadline") from cleanup_error
+        finally:
+            if child.stdout is not None:
+                child.stdout.close()
+            if child.stderr is not None:
+                child.stderr.close()
+        raise BatchError(f"{name} guard timed out after {SUBPROCESS_TIMEOUT_SECONDS}s") from error
+    return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+
+
 def run_guards(repo: Path) -> dict[str, list[str]]:
     """Run each guard without the approval flag; return its flagged entries."""
     flagged: dict[str, list[str]] = {}
     for name, command in guard_commands().items():
-        result = subprocess.run(command, cwd=repo, capture_output=True, text=True)
+        result = _run_guard(repo, name, command)
         if result.returncode == 0:
             flagged[name] = []
             continue

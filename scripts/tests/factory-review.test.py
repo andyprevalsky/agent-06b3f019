@@ -2083,7 +2083,7 @@ class DiagnosticsTest(unittest.TestCase):
                 attempts_path=attempts,
                 descend_records=[{"run_id": "d1", "detail": {"infra_failed": 2, "scheduled_total": 600}}],
             )
-        self.assertEqual(result["coverage"], {"stage_rows": 5, "stage_rows_with_detail": 3, "deploy_runs": 1})
+        self.assertEqual(result["coverage"], {"stage_rows": 5, "stage_rows_with_detail": 3, "deploy_runs": 1, "rejected_rows": 0})
         gate = next(row for row in result["gates"] if row["gate"] == "typescript")
         self.assertEqual((gate["executed"], gate["failed"], gate["reruns"], gate["reused"]), (2, 1, 1, 1))
         self.assertEqual(gate["failure_classes"], [{"name": "typecheck", "count": 1}])

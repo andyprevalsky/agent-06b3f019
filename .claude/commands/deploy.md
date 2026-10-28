@@ -758,6 +758,7 @@ their assertions or test counts:
 `python3 scripts/tests/run-deploy-pipeline.test.py`,
 `bash scripts/tests/backend-coverage-sharded.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
+`python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,

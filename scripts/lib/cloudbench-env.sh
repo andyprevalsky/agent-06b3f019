@@ -1761,12 +1761,26 @@ cloudbench_charge_bounded_step() {
 }
 
 cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
-  if cloudbench_shared_relay_enabled; then
-    cloudbench_shared_proxy_start "$@"; return $?
-  fi
   local local_port="$1" remote_port="$2" host="$3" log_file="$4"
   local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
   local settle="${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}" settle_whole
+  # Bound decimal parsing before shell comparisons/arithmetic or any launch.
+  if [[ ! "$timeout" =~ ^[0-9]+$ ]]; then
+    printf 'Invalid proxy readiness timeout: expected a positive decimal integer\n' >&2
+    return 2
+  fi
+  timeout="${timeout#"${timeout%%[!0]*}"}"
+  if [ -z "$timeout" ] || [ "${#timeout}" -gt 18 ]; then
+    printf 'Invalid proxy readiness timeout: outside supported positive integer range\n' >&2
+    return 2
+  fi
+  if [[ ! "$settle" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || [ "${#settle}" -gt 32 ]; then
+    settle=3
+  fi
+  if cloudbench_shared_relay_enabled; then
+    cloudbench_shared_proxy_start "$local_port" "$remote_port" "$host" "$log_file" "$pid_var" "$label" "$timeout"
+    return $?
+  fi
   local pid attempt=0 probe_path="/" health_code attempt_first_line
   # Budget accounting: only bounded controller work is charged (see
   # cloudbench_charge_bounded_step). Ceilings are the sum of each segment's
@@ -1775,6 +1789,9 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
   local wait_budget probe_budget sleep_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
   settle_whole="${settle%%.*}"
   case "$settle_whole" in ''|*[!0-9]*) settle_whole=3 ;; esac
+  settle_whole="${settle_whole#"${settle_whole%%[!0]*}"}"
+  [ -n "$settle_whole" ] || settle_whole=0
+  if [ "${#settle_whole}" -gt 18 ]; then settle=3; settle_whole=3; fi
   attempt_ceiling=$(( 30 + settle_whole ))
   # Retain earlier attempts: ensure_status_proxy re-enters this launcher after a
   # transport loss, and truncating here erased the original readiness evidence
