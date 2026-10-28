@@ -142,3 +142,27 @@ runtime candidate requires independent exact-snapshot strong grounding first.
 
 Distinguish a well-grounded task failure from an unproven recovery cause, and
 retain the complete candidate observations before changing challenge gates.
+
+## It8 R11a: distinct captured challenge/proxy-timeout path
+
+Source ca562dd8b9a259800980bbdc2205d873bc657d5e; BU023 run2,
+agent e1b7f546-e70d-4043-8f32-2479ebcbcc96, fleet20261028-051014-17505.
+Normal shard01 export SHA256
+9ecd2ac44e3602f13b5958239c967b0c775c17c876285e2c19f229790837966d.
+Run JSON SHA256d5770f4f5889cf6822f48aa77ac32926ab4e20105e93bbc9f1fd58bddd9b30a3;
+worker SHA256a1bca91e716dd8d73c48673f7f9bbdc47addb4d107dd400c3fcfe777912e462a.
+
+This run has repeated challenge/recovery work and a captured upstream502
+(upstream_timeout) from the browser proxy for m.pngtree.com at05:26:43Z.
+Recovery failures occur at05:21:54,05:33:06 and06:03:56. It continues navigation
+until the native browser activity reaches StartToClose at06:06:40.769427Z,
+then the task isFAILED after3020.1s. A later06:07:28 pause notification is cleanup
+after that terminal error; it is not evidence the user caused the failure.
+The run1 sibling reaches the live TextEffect page and passes in1680.2s.
+
+The matching site is an archive lead, not proof of the same earlier cause.
+No captured first-bad local mutation or causal offline control establishes why
+this run failed recovery while its sibling succeeded. Status remains open,
+with no runtime patch, retry, deadline relaxation or task reclassification.
+OriginalFAILED/infrafalse is preserved. Existing local artifacts were read;
+no new browser, provider or paid task calls were made.

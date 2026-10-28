@@ -853,6 +853,63 @@ async def test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps(
     assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
 
 
+async def test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    # Captured R11b shape: older native observations alone exhaust the budget,
+    # while recent step-owned evaluation receipts are waiting behind them.
+    rows = [
+        {"step": step, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": f"native-{step}: count=3 " + "n" * 10000}}
+        for step in range(1, 22)
+    ] + [
+        {"step": step, "action": "evaluate", "params": {"code": f"readRows({step})"},
+         "result": {"success": True, "value": f"evaluation-{step}: count=4 " + "e" * 6500}}
+        for step in range(22, 31)
+    ]
+    # Equal-step conflicting and failed receipts remain distinct and attributed.
+    rows += [{"step": 30, "action": "evaluate", "params": {"code": "failedRead()"},
+              "result": {"success": False, "error": "denied", "value": "failed-receipt"}},
+             {"step": None, "action": "evaluate", "params": {},
+              "result": {"success": True, "value": "unknown-step-must-not-be-promoted"}}]
+    history = ActionHistory(); history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current",
+            browser_state={"dom_tree": "Independent current page: count=3"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") in {"read_browser_state", "evaluate"}]
+    assert receipts[0]["metadata"]["toolName"] == "read_browser_state"
+    assert receipts[0]["metadata"]["browser_action_step"] == 21
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "evaluation-30" in body, "Recent executed receipt starved behind old native observations"
+    assert "native-21" in body and "Independent current page: count=3" in body
+    assert "count=4" in body and "not independent DOM confirmation" in body
+    assert "failed-receipt" in body and "denied" in body
+    assert not any(m["metadata"].get("browser_action_step") is None for m in receipts)
+    assert "native-1:" not in body, "Oldest native history must not displace recent receipts"
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+    # A huge latest JS result still obeys the individual cap, and cannot remove
+    # the latest native contradictory observation or become independent proof.
+    rows[29]["result"]["value"] = "oversized-head " + "z" * 50000 + " oversized-tail"
+    rows.append({"step": 30, "action": "read_browser_state", "params": {},
+                    "result": {"success": True, "formatted_state": "latest-native-conflict: count=3"}})
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current",
+            browser_state={"dom_tree": "Independent current page: count=3"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "oversized-head" in body and "oversized-tail" in body and "verifier truncated" in body
+    assert "latest-native-conflict: count=3" in body and "Independent current page: count=3" in body
+    assert "not independent DOM confirmation" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+
 async def test_browser_verifier_context_grounds_in_final_state():
     """The extracted verifier-context builder (shared by attempt_completion AND
     the new max-steps final synthesis pass) grounds in final-state DOM +
@@ -36026,6 +36083,7 @@ async def run_all_tests():
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
+    await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)
     await r.record_async("browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps", test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps)
     await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)
     await r.record_async("phone_off_rotation_has_no_discovery_or_input_change", test_phone_off_rotation_has_no_discovery_or_input_change)

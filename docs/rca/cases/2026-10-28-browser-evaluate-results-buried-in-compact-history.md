@@ -127,3 +127,67 @@ full944-row correctness remain open; no acceptance credit from this repair.
 Keep executed request/result evidence as bounded per-operation receipts. A compact
 log is a summary, and preserving tool evidence does not establish that its
 claims are true. Test the actual admitted model payload, not just its input.
+
+## It8 R11b recurrence: receipts present but starved during admission
+
+At source ca562dd8b9a259800980bbdc2205d873bc657d5e, BU025 run2
+(agent4d1fd846-221d-4191-be09-bbaf0bb0b427, fleet20261028-051014-17511)
+failed after3017.7s. The native browser activity reached StartToClose at
+06:06:44.323416Z. Original taskFAILED/infrafalse remains unchanged. The passing
+run1 sibling completed in1574.0s with a944-row CSV; that is comparison evidence,
+not proof of run2 correctness or a counterfactual task pass.
+
+The normal shard01 export is
+9ecd2ac44e3602f13b5958239c967b0c775c17c876285e2c19f229790837966d.
+Run JSON SHA25644bb4d5738754d656fb3ca48a9ed9a2875ba9710050b534f4b8b48de9ca626d5;
+worker SHA256d5934ab3dd8dc577de9930e294a1b9f65d17303772c36115209cfe4aa74ce4a5.
+
+This is a recurrence at a different boundary from the initial repair. The
+05:57:03.600063Z raw verifier context (worker line42095) contains9 separately
+attributed evaluate receipts; the06:00:29.285936Z context (line48415) contains16.
+All are dropped during final admission:21 native observation receipts precede
+them and consume the entire160000-character total budget. The final model
+requests contain zero evaluate TOOL_RESULTs. The original compact action history
+is still capped at12000, omitting33446 and123246 characters respectively.
+
+The unchanged build_verifier_context_messages replay reproduces EVERY admitted
+TOOL_RESULT line byte-for-byte from the captured model requests. First request
+6a0e73890c38 has decoded SHA256
+b9ead7ed2600066d40a7372b4f7dbcafd411088c8800dfa13a9bc7e6ca11a9c4;
+second2179c25c899e has SHA256
+0679816f8036b722a2d5cb33665025502f564ff86fedc623b41ea652104e6405.
+Their admitted tool-body hashes are040fb9c84636767281cced9d639a80e16c44c4e0f098c6f2a8abf4119eccd89c
+and4b976acdd42dcf328a4c9ceb8d914c0c6848dd5f36e549280c8e97155a34fc82.
+No provider call, model replay, task outcome synthesis or cap change is needed
+to reproduce this transport defect. The verifier's50% response specifically
+reports incomplete available evidence. It does not prove all944 rows correct.
+
+The independently reviewed bounded ordering retains the newest native observation first, then
+orders remaining native and evaluate receipts by descending recorded step,
+with native first for equal steps. Both existing budgets and receipt bodies
+remain unchanged. This trades older native observations for recent evaluated
+request/result pairs; it does not promote JavaScript returns to native truth.
+The captured first context changes native admitted steps from
+64,57,55,48,46,44,42,40,37,35,33,30,18,16,14,12,10 to
+64,57,55,48,46,44,42,40,37,35,33,30,18,16, while admitting9 evaluate receipts.
+The second retains native64,57,55,48,46,44 and admits16 evaluate receipts.
+Some large individual results are still truncated. The original terminal
+activity failure and full-task outcome remain open; transport proof cannot
+substitute for a funded unchanged task outcome.
+
+R11b exact two-path patch SHA256
+6bd96fe509cb1b6ff5ae1bdfce0ce598b5557a735651d5dd9b8655782d3ebba6
+was GROUNDED by ph74rex3pescaywbxyjn3njr158h3pp9 before application. The
+registered receipt-budget control fails on the original source for the intended
+starvation assertion and passes with the same test after the ordering change.
+It covers current native conflict, failed/duplicate/unknown-step receipts and
+an oversized latest evaluation. Existing privacy and budget semantics remain.
+The reviewer independently ran that control; the captured-original hash chain
+is investigator evidence, not claimed to have been independently re-opened.
+
+After exact reviewed application,16 registered offline controls pass: the new
+budget-starvation regression plus existing native-target, evaluation identity,
+privacy, final-state, screenshot, checkpoint, payment, observation-persistence,
+and cancellation controls. Both changed Python files compile, the RCA archive
+validates, and all six original task-run/worker-log hash pairs are unchanged.
+No benchmark was re-executed; the case remains open for its full outcome gate.

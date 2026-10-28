@@ -614,7 +614,15 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
-    ] + observation_evidence + evaluation_evidence
+    ] + observation_evidence[:1] + sorted(
+        # Keep the latest independent native observation first. Admit remaining
+        # step-owned receipts newest first across both kinds, so old native
+        # history cannot consume the whole budget ahead of recent evaluations.
+        # Stable sorting keeps native observations first for equal steps.
+        observation_evidence[1:] + evaluation_evidence,
+        key=lambda receipt: receipt["metadata"]["browser_action_step"],
+        reverse=True,
+    )
 
 
 def append_completion_evidence(
