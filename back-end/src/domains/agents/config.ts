@@ -12,6 +12,12 @@ export const bugReportScreenshotUpload = multer({
   limits: { fileSize: MAX_BUG_REPORT_SCREENSHOT_BYTES, files: 1 },
 });
 
+/** Index 01 webhook: "Both" / "Recording" modes post multipart audio + text fields. */
+export const index01WebhookUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
+
 /** Read a {{VAR_NAME}} prompt secret from its PROMPT_SECRET_* env var. */
 export function getPromptSecret(varName: string): string | undefined {
   return process.env[`PROMPT_SECRET_${varName}`];

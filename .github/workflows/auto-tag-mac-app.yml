@@ -3,6 +3,11 @@ name: Auto-tag Mac App Release
 on:
   pull_request:
     types: [closed]
+  # `/push` lands on main without a PR, so a merged-PR event alone missed those
+  # front-end changes. Every push to main is evaluated too; the already-tagged
+  # check below dedupes the PR-merge and push runs for the same commit.
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -20,29 +25,36 @@ jobs:
     # whether this merge actually changed the shipped Mac surface. The
     # MAC-APP-RELEASE label is still honored as an explicit override.
     if: >-
+      github.event_name == 'push' || (
       github.event.pull_request.merged == true &&
-      github.event.pull_request.base.ref == 'main'
+      github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout main at merge commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
           token: ${{ secrets.GH_UPDATE_TOKEN }}
 
       - name: Decide whether this merge ships the Mac app
         id: decide
         env:
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
           MAC_APP_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE') }}
         run: |
           set -euo pipefail
 
-          # First parent of the merge commit is the previous main, so this diff
-          # is exactly what the PR added to main.
-          git diff --name-only "${MERGE_SHA}^1" "${MERGE_SHA}" > changed-files.txt
+          # A push diffs against the previous main tip (it may carry several
+          # commits); a merged PR diffs against the merge commit's first parent.
+          BASE="${MERGE_SHA}^1"
+          if [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            BASE="$BEFORE_SHA"
+          fi
+          git diff --name-only "$BASE" "${MERGE_SHA}" > changed-files.txt
           echo "Changed files in this merge:"
           cat changed-files.txt
 
@@ -53,7 +65,7 @@ jobs:
       - name: Create and push tag
         if: steps.decide.outputs.ship == 'true'
         env:
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           REASON: ${{ steps.decide.outputs.reason }}
         run: |
           set -euo pipefail
