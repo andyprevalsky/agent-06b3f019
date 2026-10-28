@@ -16,6 +16,7 @@ import {
   describePayloadShape,
   normalizeWebhookBody,
   extractTranscript,
+  isIndex01TestEvent,
   resolveMcpUser,
   spawnIndex01Agent,
 } from './agentMcpService';
@@ -57,6 +58,10 @@ router.post(
       recordings,
       hasTranscript: transcript !== null,
     });
+    if (isIndex01TestEvent(body)) {
+      res.status(200).json({ received: true, spawned: false, transcript, reason: 'test event' });
+      return;
+    }
     if (transcript === null) {
       res
         .status(200)

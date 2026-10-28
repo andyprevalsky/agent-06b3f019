@@ -13,7 +13,7 @@
  * QUERY BOX (useAppComposer): every message steers that code session
  *      ("Message Claude Code directly…" / "Message Codex directly…").
  * PUBLISH (AppViewPublish): push the branch + open a PR; never merge or deploy.
- * EXIT: Escape (AppViewProvider), an agent row, Home / New Super Agent, or —
+ * EXIT: Escape (AppViewProvider), an agent row, a project's or Home's + / New Super Agent, or —
  *      below md, where there is no left bar or keyboard — the bare close icon.
  * The host keys this screen by task, so another session starts fresh.
  *
