@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from factory_metadata import load_metadata
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
@@ -94,6 +95,7 @@ def init_run(
     run_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "schema_version": 1,
+        "telemetry": load_metadata(),
         "run_id": run_id,
         "status": "active",
         "started_at": started_at,
@@ -279,11 +281,13 @@ def append_stage(
     finished_epoch: float,
     exit_code: int,
     log: str,
+    telemetry: dict | None = None,
 ) -> None:
     _append_json_line(
         run_dir / "stages.jsonl",
         {
             "schema_version": 1,
+            "telemetry": load_metadata() if telemetry is None else telemetry,
             "run_id": run_id,
             "stage": stage,
             "started_at": started_at,

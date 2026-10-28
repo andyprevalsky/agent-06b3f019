@@ -689,11 +689,12 @@ test("open-object schemas cannot be strict: no outputSchema, no written handoff"
 });
 
 // 2026-10-27: the ChatGPT OAuth account hit its usage limit and every app-server
-// session ended failed, although a funded OPENAI_API_KEY was injected. Only the
-// legacy exec transport retried with the key. The app-server transport must do
-// the same: report the OAuth error, log in with the key and resume the thread
-// with the same turn input, so the run completes on the funded key.
-test("app-server falls back to the funded OPENAI_API_KEY when ChatGPT OAuth hits its usage limit", async () => {
+// session ended failed; the OpenAI GPT_API_KEY behind the funded fallback is
+// not funded either (2026-10-28). The funded path is our Azure OpenAI
+// deployment: report the OAuth error, switch Codex to the azure provider (no
+// login; the key is read from AZURE_OPENAI_API_KEY) and resume the thread with
+// the same turn input on the Azure deployment.
+test("app-server falls back to the funded Azure OpenAI provider when ChatGPT OAuth hits its usage limit", async () => {
   const directory = mkdtempSync(join(tmpdir(), "rose-native-codex-fallback-"));
   const fixturePath = join(directory, "codex");
   const journal = join(directory, "journal.jsonl");
@@ -701,16 +702,17 @@ test("app-server falls back to the funded OPENAI_API_KEY when ChatGPT OAuth hits
     fixturePath,
     `#!/usr/bin/env node
 const fs=require('node:fs');const path=require('node:path');
-const home=process.env.CODEX_HOME;const marker=path.join(home,'api-key-login');
+const home=process.env.CODEX_HOME;
 const note=x=>fs.appendFileSync(${JSON.stringify(journal)},JSON.stringify(x)+'\\n');
-if(process.argv[2]==='login'){let key='';process.stdin.on('data',d=>key+=d);process.stdin.on('end',()=>{fs.writeFileSync(marker,key.trim());note({login:key.trim()});process.exit(0);});return;}
-const apiKey=fs.existsSync(marker);
+if(process.argv[2]==='login'){note({login:true});process.exit(1);}
+const argv=process.argv.join(' ');
+const apiKey=argv.includes('model_provider="azure"')&&argv.includes('model_providers.azure.base_url="https://azure.example/openai/v1"')&&argv.includes('model_providers.azure.env_key="AZURE_OPENAI_API_KEY"')&&process.env.AZURE_OPENAI_API_KEY==='azure-fixture-key';
 const readline=require('node:readline');let turn=0;const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);if(m.id===undefined)return;let result={};
  if(m.method==='model/list')result={data:[{id:'model',model:'model',supportedReasoningEfforts:[],serviceTiers:[]}]};
- if(m.method==='thread/start'||m.method==='thread/resume'){note({method:m.method,threadId:m.params.threadId,apiKey});result={thread:{id:'thread'},model:'model',reasoningEffort:null,serviceTier:null};}
- if(m.method==='turn/start'){note({method:m.method,input:m.params.input,apiKey,auth:fs.existsSync(path.join(home,'auth.json'))});result={turn:{id:(apiKey?'key-':'oauth-')+(++turn)}};}
+ if(m.method==='thread/start'||m.method==='thread/resume'){note({method:m.method,threadId:m.params.threadId,model:m.params.model,apiKey});result={thread:{id:'thread'},model:'model',reasoningEffort:null,serviceTier:null};}
+ if(m.method==='turn/start'){note({method:m.method,input:m.params.input,model:m.params.model,apiKey,auth:fs.existsSync(path.join(home,'auth.json'))});result={turn:{id:(apiKey?'key-':'oauth-')+(++turn)}};}
  send({id:m.id,result});
  if(m.method!=='turn/start')return;
  const id=result.turn.id;send({method:'turn/started',params:{threadId:'thread',turn:{id}}});
@@ -733,7 +735,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PATH: `${directory}:${process.env.PATH}`,
         HOME: directory,
         CODEX_AUTH_JSON: JSON.stringify({ auth_mode: "chatgpt", tokens: {} }),
-        OPENAI_API_KEY: "sk-funded-fixture",
+        OPENAI_API_KEY: "",
+        AZURE_OPENAI_API_KEY: "azure-fixture-key",
+        CODEX_AZURE_BASE_URL: "https://azure.example/openai/v1",
+        CODEX_AZURE_MODEL: "azure-terra",
         CODEX_GOAL: "write the sentinel",
         CODEX_MODEL: "model",
         CODE_SESSION_TURN_TOKEN: "native-token",
@@ -798,6 +803,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     );
     const fallback = seen.find((e) => e.type === "auth_fallback");
     assert.equal(fallback?.to, "openai_api_key");
+    assert.equal(fallback?.funded_provider, "azure");
+    assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
     assert.equal(fallback?.reason, "usage_limit_reached");
     const calls = readFileSync(journal, "utf8")
       .trim()
@@ -805,27 +812,28 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       .map((l) => JSON.parse(l));
     assert.deepEqual(
       calls.map((c) => c.login ?? c.method),
-      [
-        "thread/start",
-        "turn/start",
-        "sk-funded-fixture",
-        "thread/resume",
-        "turn/start",
-      ],
+      ["thread/start", "turn/start", "thread/resume", "turn/start"],
+      "no codex login: the azure provider reads its key from the environment",
     );
+    assert.equal(calls[0].apiKey, false, "user OAuth is tried first");
     assert.equal(
-      calls[3].threadId,
+      calls[2].threadId,
       "thread",
       "the funded retry resumes the same thread",
     );
+    assert.equal(
+      calls[2].model,
+      "azure-terra",
+      "the retry runs on the Azure deployment",
+    );
     assert.deepEqual(
-      calls[4].input,
+      calls[3].input,
       calls[1].input,
       "the funded retry re-sends the same turn input",
     );
-    assert.equal(calls[4].apiKey, true);
+    assert.equal(calls[3].apiKey, true, "the retry selects the azure provider");
     assert.equal(
-      calls[4].auth,
+      calls[3].auth,
       false,
       "the ChatGPT auth.json is removed before the retry",
     );

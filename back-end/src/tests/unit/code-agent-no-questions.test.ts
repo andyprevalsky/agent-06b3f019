@@ -185,6 +185,9 @@ function codexArgs(withRoseCli: boolean): string[] {
     existsSync: () => withRoseCli,
     codexFastModeProxy: null,
     MOBBIN_MCP_TOKEN: '',
+    usingApiKey: false,
+    CODEX_AZURE_MODEL: '',
+    fundedProviderArgs: () => [],
   }) as (options: { useFastModeProxy: boolean }) => string[];
   return build({ useFastModeProxy: false });
 }

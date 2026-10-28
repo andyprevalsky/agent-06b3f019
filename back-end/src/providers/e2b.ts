@@ -15,7 +15,6 @@ import {
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import {
   fetchGptCodeCredentialsWithMeta,
-  isGptApiKeyOnCooldown,
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
@@ -54,6 +53,7 @@ import {
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
   resolveClaudeCodeTokenSource,
+  resolveCodexAzureFunding,
   resolveCodexCodeAuthEnvs,
   shouldEnableClaudeCodeFastMode,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
@@ -529,18 +529,10 @@ export async function createCodexCodeSession(
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
-  // No OAuth credential (or every pool token is rate-limited → filtered to
-  // null) falls back to the funded OpenAI API key, mirroring the Claude Code
-  // path and the Rose completions fallback. GPT_API_KEY is the same funded key
-  // the in-process Rose client uses when compute tokens are exhausted.
-  const fundedKeyConfigured =
-    process.env.GPT_API_KEY !== undefined && process.env.GPT_API_KEY !== '';
-  const fundedKeyOnCooldown = fundedKeyConfigured ? await isGptApiKeyOnCooldown() : false;
-  const authEnvs = resolveCodexCodeAuthEnvs(
-    credentialMeta,
-    process.env.GPT_API_KEY,
-    fundedKeyOnCooldown
-  );
+  // User OAuth first; the funded fallback is our Azure Codex deployment (the
+  // OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
+  const azureFunding = resolveCodexAzureFunding();
+  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
@@ -571,7 +563,9 @@ export async function createCodexCodeSession(
   if (credentialMeta) {
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
-    log.info(`Using OPENAI_API_KEY funded fallback for Codex Code agent ${agentId}`);
+    log.info(
+      `Using Azure ${azureFunding?.deployment} funded fallback for Codex Code agent ${agentId}`
+    );
   }
 
   const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
