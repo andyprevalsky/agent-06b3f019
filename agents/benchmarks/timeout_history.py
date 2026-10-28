@@ -140,6 +140,8 @@ def record_attempt(
     timestamp: Optional[str] = None,
     suite: Optional[str] = None,
     counts_for_deploy_eligibility: Optional[bool] = None,
+    run_id: Optional[str] = None,
+    outcome_class: Optional[str] = None,
 ) -> None:
     """Append EVERY completed run (pass or fail, local or prod) to the attempts ledger.
 
@@ -152,6 +154,12 @@ def record_attempt(
     Predeploy / active-worktree runs still append (for timing/history) but mark
     `counts_for_deploy_eligibility=false` so they cannot break a canary's
     last-3-pass streak after it is assigned into smoke.
+
+    `run_id` groups the attempts of one benchmark run (plus the optional
+    `BENCHMARK_HUB_GROUP_RUN_ID` campaign group) so factory reviews can report
+    per-run task counts and per-attempt durations; `outcome_class` separates
+    a passed verdict, a failed verdict and an owned-cleanup failure. Absent
+    values are omitted, never guessed.
 
     Best-effort, O_APPEND, never raises.
     """
@@ -175,6 +183,13 @@ def record_attempt(
     }
     if resolved_suite:
         entry["suite"] = resolved_suite
+    if run_id:
+        entry["run_id"] = str(run_id)[:128]
+    group_run_id = os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID", "").strip()
+    if group_run_id:
+        entry["group_run_id"] = group_run_id[:128]
+    if outcome_class:
+        entry["outcome_class"] = outcome_class
     try:
         with open(ATTEMPTS_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")

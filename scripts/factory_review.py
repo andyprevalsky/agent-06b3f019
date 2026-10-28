@@ -43,7 +43,7 @@ COMMAND_RE = re.compile(r"^\s*/(deploy|rca)\b", re.IGNORECASE)
 FACTORY_EVENT_RE = re.compile(
     r"^\s*(?:python(?:3)?|[^\s]*/python(?:3)?)\s+"
     r"(?:(?:\./)?scripts/|[^\s]*/scripts/)record_factory_event\.py\s+"
-    r"(deploy|rca)\s+([a-z-]+)\s+([a-z-]+)\s*$",
+    r"(deploy|rca)\s+([a-z-]+)\s+([a-z-]+)(?:\s+--detail(?:=|\s+)[^\s;&|]+)*\s*$",
     re.IGNORECASE,
 )
 APPROVAL_REQUEST_RE = re.compile(
@@ -1571,9 +1571,9 @@ def load_turns(db_path: Path, repo_name: str) -> list[Turn]:
         conn.close()
 
 
-def _factory_ledger_module() -> Any:
+def _factory_ledger_module(name: str = "factory_ledger") -> Any:
     spec = importlib.util.spec_from_file_location(
-        "factory_ledger", Path(__file__).with_name("factory_ledger.py")
+        name, Path(__file__).with_name(f"{name}.py")
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -1724,6 +1724,8 @@ def ledger_deploy_turns(rows: Sequence[dict[str, Any]]) -> list[Turn]:
                 stage.get("status") != "passed",
             )
             for index, stage in enumerate(group["stages"])
+            # An exact-input reuse executed nothing; diagnostics count it.
+            if stage.get("status") != "reused"
         ]
         invocations.extend(
             _ledger_event_invocation(f"ledger-event-{group['key']}-{index}", event, origin)
@@ -2953,6 +2955,16 @@ def render_sources_note(sources: dict[str, Any]) -> str:
     )
 
 
+def render_diagnostics_section(diagnostics: dict[str, Any]) -> str:
+    lines = _factory_ledger_module("factory_diagnostics").render_text(diagnostics)
+    return (
+        '<section class="flow"><h2>Failures, reruns and gaps</h2>'
+        '<p class="history-note">From stage/event <code>detail</code> in the factory ledger; '
+        "rows recorded before detail existed count toward attempts and gaps only.</p>"
+        f'<pre class="note">{html.escape(chr(10).join(lines))}</pre></section>'
+    )
+
+
 def render_predeploy_section(metrics: dict[str, Any]) -> str:
     if not metrics.get("attempts"):
         return (
@@ -3062,6 +3074,8 @@ def render_html(payload: dict[str, Any]) -> str:
         content += render_descend_table(payload["descend"])
     if "predeploy" in payload:
         content += render_predeploy_section(payload["predeploy"])
+    if payload.get("diagnostics"):
+        content += render_diagnostics_section(payload["diagnostics"])
     trend_data = json.dumps(
         {
             "generated_at": payload["generated_at"],
@@ -3479,6 +3493,11 @@ def print_summary(payload: dict[str, Any]) -> None:
                 f"${row['cents_per_deploy'] / 100:>7.2f}  {row['pass_rate'] * 100:>3.0f}%"
             )
         print()
+    diagnostics = payload.get("diagnostics")
+    if diagnostics:
+        for line in _factory_ledger_module("factory_diagnostics").render_text(diagnostics):
+            print(line)
+        print()
 
 
 def self_test() -> None:
@@ -3765,9 +3784,13 @@ def main() -> int:
             "description": f"Conductor transcripts ({args.db}).",
             "gaps": [],
         }
-    else:
-        roots = args.telemetry_root or [DEFAULT_TELEMETRY_ROOT]
-        turns = load_ledger_turns(args.ledger, roots, [remote_main_text(args.ledger)])
+    roots = args.telemetry_root or [DEFAULT_TELEMETRY_ROOT]
+    ledger_rows = load_ledger_rows(args.ledger, roots, [remote_main_text(args.ledger)])
+    if source != "conductor":
+        turns = sorted(
+            [*ledger_deploy_turns(ledger_rows), *ledger_rca_turns(ledger_rows)],
+            key=lambda turn: turn.started_at,
+        )
         sources = {
             "mode": "ledger",
             "description": (
@@ -3782,16 +3805,22 @@ def main() -> int:
                 "A run without a final outcome event is excluded, not counted as zero.",
             ],
         }
+    descend_records = load_descend_factory_events(
+        args.descend_history, [remote_main_text(args.descend_history)]
+    )
     payload = analyze(
         turns,
         args.deploy_since,
         args.limit,
-        descend_records=load_descend_factory_events(
-            args.descend_history, [remote_main_text(args.descend_history)]
-        ),
+        descend_records=descend_records,
         descend_window=args.descend_window,
         predeploy=predeploy_consumption(args.history_dir, args.catalog),
         sources=sources,
+    )
+    payload["diagnostics"] = _factory_ledger_module("factory_diagnostics").analyze_ledger(
+        ledger_rows,
+        attempts_path=args.history_dir / "task_attempts.jsonl",
+        descend_records=descend_records,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = (args.output_dir / "factory-review.json").resolve()
