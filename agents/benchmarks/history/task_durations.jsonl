@@ -7547,3 +7547,13 @@
 {"task": "browser-smoke", "duration_seconds": 160.5, "cost_cents": 1.0, "timestamp": "2026-10-28T05:30:18.506237+00:00", "agent_id": "6bc16f7e-308d-402f-b585-9011509f385c"}
 {"task": "chat-mode", "duration_seconds": 13.7, "cost_cents": 0.0, "timestamp": "2026-10-28T05:30:18.506237+00:00", "agent_id": "e7b0e9c0-35ac-4051-9fb8-2de64ddf9e2f"}
 {"task": "background-agent-message-smoke", "duration_seconds": 140.3, "cost_cents": 2.0, "timestamp": "2026-10-28T05:52:14.581195+00:00", "agent_id": "bf31b933-4d72-449f-b3d6-5ba47112cd46"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 166.1, "cost_cents": 3.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "71fcf29f-630a-4722-902b-2c906568b21d"}
+{"task": "spawn-sub-agents", "duration_seconds": 125.3, "cost_cents": 1.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "20faba84-a7a1-4e9f-80a0-c585733525ed"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 295.0, "cost_cents": 1.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "99dd308d-b7b7-49c9-b1aa-8d74dd3adc20"}
+{"task": "browser-smoke", "duration_seconds": 200.7, "cost_cents": 2.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "f5a3529f-d142-4c9c-bf20-92346780ec1d"}
+{"task": "background-agent-message-smoke", "duration_seconds": 59.1, "cost_cents": 1.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "c627da15-4f7c-4741-996a-590394fac99e"}
+{"task": "chat-mode", "duration_seconds": 13.4, "cost_cents": 0.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "78022771-9078-4646-b95f-d492a324907c"}
+{"task": "parallel-tool-calls", "duration_seconds": 342.4, "cost_cents": 5.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "63cb7053-3953-47e2-aa23-480b5a423e79"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 195.5, "cost_cents": 2.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "8be2a9cc-73f0-48cf-898a-0e9e91ead3af"}
+{"task": "browser-auth-account-locked", "duration_seconds": 68.4, "cost_cents": 0.0, "timestamp": "2026-10-28T05:56:17.021217+00:00", "agent_id": "a1fbb533-cf9f-4bfa-a779-737c8f4b9860"}
+{"task": "browser-auth-assistance-declined", "duration_seconds": 181.3, "cost_cents": 2.0, "timestamp": "2026-10-28T07:04:53.498400+00:00", "agent_id": "71f3575d-598d-4d5c-955c-8ec4cb36de52"}
