@@ -22,6 +22,7 @@ import {
   waitTarget,
 } from '@/features/terminal-component-group/components/waitForPhrase';
 import { markdownPreview } from '@/features/terminal-component-group/components/browser-agent-chip/resultPreview';
+import { buildAgentToolData } from '@/features/terminal-component-group/components/message-bubble/agentToolData';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { isRoseDesktopSession } from '@/lib/roseDesktopSession';
 import type { Message } from '@/lib/api';
@@ -181,6 +182,53 @@ describe('wait_for row label', () => {
       }),
     );
     expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(expected);
+  });
+
+  it.each([
+    // The model's description differs from the agent: the row names the agent's task.
+    [{ agents: ['/root/pull_bank_data'] }, 'Waiting for pull_bank_data'],
+    [{ agents: ['/root/a', '/root/b'] }, 'Waiting for a, b'],
+    [{ agents: ['/root/x'], targetNames: ['pull_bank_data'] }, 'Waiting for pull_bank_data'],
+    // No resolvable name (agent id / "any"): the stripped description.
+    [{ agents: ['3f1c9a2e-agent-id'] }, 'Waiting for Chase balances'],
+    [{ agents: 'any' }, 'Waiting for Chase balances'],
+  ])('agents wait %j names the waited-on agent', (extra, expected) => {
+    const row = msg(
+      {
+        toolName: 'wait_for',
+        toolCallId: 'w',
+        toolStatus: 'IN_PROGRESS',
+        waitForMode: 'agents',
+        title: 'Waiting for Waiting for Chase balances',
+        ...extra,
+      },
+      { message_id: 'w', timestamp: at(5) },
+    );
+    renderWithProviders(
+      createElement(TrajectoryWorkGroup, { group: runningGroup([row]), renderMessage: () => null }),
+    );
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(expected);
+  });
+
+  it('the expanded wait card names the same task as the work row', () => {
+    const card = (toolStatus: string, text = '') =>
+      buildAgentToolData(
+        msg(
+          {
+            toolName: 'wait_for',
+            toolStatus,
+            waitForMode: 'agents',
+            agents: ['/root/x'],
+            targetNames: ['pull_bank_data'],
+            description: 'pull_bank_data',
+          },
+          { message_id: `w-${toolStatus}`, text },
+        ),
+      );
+    expect(card('IN_PROGRESS')?.title).toBe('Waiting for pull_bank_data');
+    expect(card('FINISHED', 'Woken by a sub-agent finishing.')?.title).toBe(
+      'Waited for pull_bank_data · woken by a sub-agent finishing',
+    );
   });
 
   it('normalizes a model-written description to the waited-on target', () => {
