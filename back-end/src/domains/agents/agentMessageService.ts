@@ -20,7 +20,7 @@ import {
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
-import { readTaskInboxMessages } from './agentToAgentService';
+import { withPiggybackedInbox } from './agentInboxPiggyback';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Agents');
@@ -294,21 +294,6 @@ async function createBrowserTargetedMessage(
  */
 function staleWorkerRejection(): { error: string; status: number } {
   return { error: 'Workflow generation is no longer current', status: 409 };
-}
-
-/**
- * Explore progress posts carry their task's inbox read (one bounded indexed
- * query) instead of a separate per-step GET /:id/agent-inbox.
- */
-async function withPiggybackedInbox<T extends object>(
-  agentId: string,
-  body: PostMessageBody,
-  isInternal: boolean,
-  posted: T
-): Promise<T & { pending_inbox?: Awaited<ReturnType<typeof readTaskInboxMessages>> }> {
-  if (!isInternal || body.inbox === undefined) return posted;
-  const pending = await readTaskInboxMessages(agentId, body.inbox.task_id, body.inbox.since);
-  return { ...posted, pending_inbox: pending };
 }
 
 /** Post a message to an agent (user or internal). */
