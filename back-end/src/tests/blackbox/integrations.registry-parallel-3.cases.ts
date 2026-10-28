@@ -7,6 +7,7 @@ import {
   testIndexedDBUpload_missingOrigins,
   testIndexedDBUpload_originsNotArray,
   testIndexedDBUpload_erroredOriginsFiltered,
+  testIndexedDBUpload_nulCharactersStripped,
   testFingerprintUpload_invalidEncryption,
 } from './integrations.browser-uploads-1.cases';
 import {
@@ -89,6 +90,10 @@ export function parallelTestsPart3() {
     {
       name: 'POST /indexedDB/upload errored origins filtered',
       fn: testIndexedDBUpload_erroredOriginsFiltered,
+    },
+    {
+      name: 'POST /indexedDB/upload NUL characters stripped, not 500',
+      fn: testIndexedDBUpload_nulCharactersStripped,
     },
     {
       name: 'POST /fingerprint/upload bad encryption -> 400',

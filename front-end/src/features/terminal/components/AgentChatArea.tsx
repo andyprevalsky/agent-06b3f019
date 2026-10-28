@@ -36,7 +36,7 @@
  *   a code-agent chip's "Open app" button opens that code session's preview,
  *   which replaces the whole chat column (AppScreenHost): the app full screen,
  *   the normal query box floating over it (Popular Goals hidden) steering that
- *   session. Escape / an agent row / Home / New Super Agent close it.
+ *   session. Escape / an agent row / a project's or Home's + / New Super Agent close it.
  *
  * MOBILE BOTTOM (Rose Desktop only, UI ledger #11):
  *   the input area pads by --mobile-querybox-gap only and carries

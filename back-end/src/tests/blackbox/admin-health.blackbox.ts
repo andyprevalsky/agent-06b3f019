@@ -18,7 +18,6 @@ import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
-import { ADMIN_USER_IDS } from '../../domains/admin-health/config';
 import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
 import { isCacheableAdminHealthResponse } from '../../domains/admin-health/service';
 import {
@@ -227,6 +226,35 @@ async function expectedAdminHealthUserIds(
   return latest.userIds;
 }
 
+/**
+ * Completed / resolved real agent runs by the core team or that period's Stripe
+ * subscribers, a core-team member's retried goal counted once by its latest
+ * resolved attempt; no resolved task is null rather than 0%.
+ */
+async function expectedCompletionRate(periodStart: string, periodEnd: string) {
+  const { fetchStripeSubscribersByPeriod } =
+    await import('../../domains/admin-health/stripeSubscribers');
+  const series = await fetchStripeSubscribersByPeriod([{ start: periodStart, end: periodEnd }]);
+  const subscribed = series.at(-1)?.subscribedUserIds ?? new Set<string>();
+  const productTasks = await findProductRootTasksBetween(
+    new Date(periodStart),
+    new Date(periodEnd)
+  );
+  const latestByKey = new Map<string, (typeof productTasks)[number]>();
+  for (const task of productTasks) {
+    if (!task.coreTeam && !subscribed.has(task.userId)) continue;
+    if (['STARTING_UP', 'ACTIVE', 'PAUSED'].includes(task.status) || task.archivedBeforeOutcome)
+      continue;
+    const key = task.coreTeam ? `${task.userId} ${task.goal}` : task.taskId;
+    const kept = latestByKey.get(key);
+    if (!kept || task.createdAt > kept.createdAt) latestByKey.set(key, task);
+  }
+  const resolved = [...latestByKey.values()];
+  if (resolved.length === 0) return null;
+  const completed = resolved.filter((task) => task.status === 'COMPLETED').length;
+  return Number((completed / resolved.length).toFixed(4));
+}
+
 async function liveStripeRevenueCents(start: string, end: string): Promise<number> {
   const { getVerifiedStripeMetricsClient } = await import('../../providers/stripe');
   const stripe = await getVerifiedStripeMetricsClient();
@@ -362,32 +390,13 @@ async function testAdminHappyWeekly() {
   if (body.summary.taskCompletionRate !== latest.taskCompletionRate) {
     throw new Error('Task completion rate must match the current weekly period');
   }
-  const productTasks = await findProductRootTasksBetween(
-    new Date(body.range.start),
-    new Date(body.range.end)
-  );
-  // Completed / resolved, with an operator's retried goal counted once by its
-  // latest resolved attempt; no resolved task is null rather than 0%.
-  const latestByKey = new Map<string, (typeof productTasks)[number]>();
-  for (const task of productTasks) {
-    if (['STARTING_UP', 'ACTIVE', 'PAUSED'].includes(task.status) || task.archivedBeforeOutcome)
-      continue;
-    const key = ADMIN_USER_IDS.has(task.userId) ? `${task.userId} ${task.goal}` : task.taskId;
-    const kept = latestByKey.get(key);
-    if (!kept || task.createdAt > kept.createdAt) latestByKey.set(key, task);
-  }
-  const resolvedTasks = [...latestByKey.values()];
-  const expectedCompletionRate =
-    resolvedTasks.length === 0
-      ? null
-      : Number(
-          (
-            resolvedTasks.filter((task) => task.status === 'COMPLETED').length /
-            resolvedTasks.length
-          ).toFixed(4)
-        );
-  if (body.summary.taskCompletionRate !== expectedCompletionRate) {
-    throw new Error('Completion summary and chart must use the real product cohort');
+  if (process.env.STRIPE_SECRET_KEY) {
+    const expected = await expectedCompletionRate(body.range.start, body.range.end);
+    if (body.summary.taskCompletionRate !== expected) {
+      throw new Error(
+        `Completion must cover the core team + Stripe subscribers: expected ${expected}, got ${body.summary.taskCompletionRate}`
+      );
+    }
   }
   if (
     body.velocity.dev.linearPointsCompleted.status === 'ready' &&

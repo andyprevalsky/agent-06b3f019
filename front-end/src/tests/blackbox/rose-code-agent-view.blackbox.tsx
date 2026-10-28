@@ -570,7 +570,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(row()).not.toHaveAttribute('aria-current');
   });
 
-  it('the owner row returns without reloading it; another row or Home leaves it', async () => {
+  it('the owner row returns without reloading it; another row or the Home + leaves it', async () => {
     const user = await renderOnOwner();
     await openFromRow(user);
     await user.click(screen.getByTestId(`rose-agent-row-${OWNER}`));
@@ -590,7 +590,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     fireEvent.click(row());
     expect(await screen.findByTestId('code-agent-view')).toBeInTheDocument();
     expect(urlParams().get('agent-id')).toBe(OWNER);
-    await user.click(screen.getByRole('button', { name: 'Home' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New agent in Home' }));
     expect(view()).toBeNull();
     expect(urlParams().get('code-agent')).toBeNull();
     expect(await screen.findByPlaceholderText('Enter any goal')).toBeInTheDocument();

@@ -521,12 +521,37 @@ describe('New agent from a project (Terminal)', () => {
     return requests('POST', '/agents');
   }
 
-  it("a project's + passes project_id in POST /api/agents; New Super Agent does not", async () => {
+  it("a project's + shows the pending ring, passes project_id and the agent lands in that project; Home + does not", async () => {
+    // A backend that keeps what was created: POST echoes the requested id and
+    // project_id, and the list (GET /api/agents) returns those agents.
+    const created: Record<string, unknown>[] = [];
+    server.use(
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        const agent = {
+          ...makeAgent({
+            agent_id: String(body.agent_id),
+            goal: String(body.goal),
+            status: 'STARTING_UP',
+          }),
+          project_id: (body.project_id as string | undefined) ?? null,
+        };
+        created.push(agent);
+        return HttpResponse.json(agent);
+      }),
+      http.get(`${API_BASE}/agents`, () => HttpResponse.json({ agents: created })),
+    );
     const user = userEvent.setup({ delay: null });
     renderWithProviders(<Terminal />);
     await screen.findByTestId('rose-sidebar');
     expandBar();
     await user.click(await screen.findByRole('button', { name: 'New agent in Rose' }));
+
+    // The project's icon wears the liquid-metal ring until the agent exists.
+    expandBar();
+    const rose = screen.getByTestId('rose-project-row-p-rose');
+    expect(rose).toHaveAttribute('data-pending', 'true');
+    expect(within(rose).getByTestId('pending-project-ring')).toBeInTheDocument();
 
     const composer = await screen.findByPlaceholderText('Enter any goal');
     await user.click(composer);
@@ -535,15 +560,31 @@ describe('New agent from a project (Terminal)', () => {
     expect(agentCreates()[0].body).toEqual(
       expect.objectContaining({ goal: 'Fix the flaky sidebar test', project_id: 'p-rose' }),
     );
+    const firstId = String((agentCreates()[0].body as { agent_id: string }).agent_id);
+    // The new agent is listed under Rose, and the ring is gone.
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('rose-group-p-rose')).getByTestId(`rose-agent-row-${firstId}`),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
 
     expandBar();
-    fireEvent.click(screen.getByRole('button', { name: 'New Super Agent' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New agent in Home' }));
+    expect(screen.getByTestId('rose-home-project-row')).toHaveAttribute('data-pending', 'true');
     const home = await screen.findByPlaceholderText('Enter any goal');
     await user.click(home);
     await user.type(home, 'Plan Tahoe trip{Enter}');
     await waitFor(() => expect(agentCreates()).toHaveLength(2));
     expect(agentCreates()[1].body).toEqual(expect.objectContaining({ goal: 'Plan Tahoe trip' }));
     expect(agentCreates()[1].body).not.toHaveProperty('project_id');
+    const secondId = String((agentCreates()[1].body as { agent_id: string }).agent_id);
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('rose-group-home')).getByTestId(`rose-agent-row-${secondId}`),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
   });
 });
 
