@@ -1,14 +1,18 @@
 /**
  * STATE MACHINE: StreamingMetric
  *
- * [HIDDEN] startedAtMs missing and tokenCount=0
+ * [HIDDEN] startedAtMs missing and tokenCount=0 (unless showZeroTokens)
  *   |
  *   | stream state provides llm_started_at_ms or token count
  *   v
  * [VISIBLE] elapsed seconds count from LLM request start, token count springs in
  *
+ * showZeroTokens (Thinking): a known count is on screen from the first frame,
+ *   reading ↓ 0 before the first byte and springing up as tokens arrive. An
+ *   unknown count (undefined) is never invented.
+ *
  * RENDER:
- *   X.Ys · ↓ X tokens
+ *   X.Ys · ↓ X tokens   (no start: ↓ X tokens)
  */
 
 import { ArrowDown } from 'lucide-react';
@@ -22,6 +26,7 @@ interface StreamingMetricProps {
   tokensPerSecond?: number;
   className?: string;
   iconClassName?: string;
+  showZeroTokens?: boolean;
 }
 
 function useElapsedSeconds(startedAtMs?: number) {
@@ -45,6 +50,7 @@ export function StreamingMetric({
   tokensPerSecond,
   className,
   iconClassName,
+  showZeroTokens = false,
 }: StreamingMetricProps) {
   const elapsedSeconds = useElapsedSeconds(startedAtMs);
 
@@ -52,7 +58,10 @@ export function StreamingMetric({
     typeof tokenCount === 'number' && Number.isFinite(tokenCount) && tokenCount >= 0;
   const hasRate =
     typeof tokensPerSecond === 'number' && Number.isFinite(tokensPerSecond) && tokensPerSecond >= 0;
-  if (!startedAtMs && !(hasTokens && tokenCount > 0) && !hasRate) return null;
+  const zeroTokensShown = showZeroTokens && hasTokens;
+  if (!startedAtMs && !(hasTokens && tokenCount > 0) && !hasRate && !zeroTokensShown) return null;
+  // No request start: a Thinking counter shows tokens alone, never a frozen 0.0s clock.
+  const showClock = Boolean(startedAtMs) || (hasTokens && !showZeroTokens);
 
   return (
     <span
@@ -61,10 +70,10 @@ export function StreamingMetric({
         className,
       )}
     >
-      {(startedAtMs || hasTokens) && <>{elapsedSeconds.toFixed(1)}s</>}
+      {showClock && <>{elapsedSeconds.toFixed(1)}s</>}
       {hasTokens && (
         <>
-          <span className="mx-1 text-muted-foreground/35">·</span>
+          {showClock && <span className="mx-1 text-muted-foreground/35">·</span>}
           <ArrowDown
             aria-hidden="true"
             className={cn(

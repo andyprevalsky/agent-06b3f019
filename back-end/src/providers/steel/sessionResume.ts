@@ -4,7 +4,8 @@ import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { getProviderProfile, rememberProviderProfile } from '../browser/context';
-import { INVALIDATED_STEEL_PROFILE_SOURCE } from '../browser/profileBinding';
+import { reusableSteelRecordedProfileId } from './profileBinding';
+export { reusableSteelRecordedProfileId } from './profileBinding';
 import type { BrowserProviderName } from '../browser/types';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import {
@@ -38,6 +39,8 @@ import { steelCdpConnectionUrl } from './urls';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import {
   withSteelLifecycleClaim,
+  withBrowserResumeClaim,
+  browserResumeScope,
   type SteelNativeEffect,
   type SteelLifecycleMutation,
 } from './lifecycleClaim';
@@ -55,34 +58,6 @@ function hasValue(value: string | null | undefined): value is string {
 function sleepBeforeSteelRetry(attempt: number): Promise<void> {
   const delayMs = Math.min(2_000, 250 * 2 ** (attempt - 1));
   return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
-/**
- * The recorded provider profile id that Steel may legitimately reload.
- *
- * Only a prior STEEL session's recorded profile is a valid Steel profile id.
- * On a provider switch (e.g. the rotate ladder's Kernel → Steel rung) the
- * recorded providerProfileId belongs to the other provider — a non-UUID Kernel
- * profile — which Steel rejects with "400 profileId must be a valid UUID".
- * Returns null for any non-Steel-origin or unrecorded profile so the caller
- * falls back to the context's Steel-native persisted profile (or none).
- */
-export function reusableSteelRecordedProfileId(oldSession: {
-  provider: string;
-  providerProfileId?: string | null;
-  // Required on purpose: an object literal that omits this compiles with
-  // `undefined`, which passes the invalidated-source check below and reuses a
-  // profile that was explicitly invalidated. Every caller reads a Prisma row,
-  // so they can all supply it.
-  providerProfileSource: string | null;
-}): string | null {
-  const wasSteel = oldSession.provider === 'steel';
-  return wasSteel &&
-    oldSession.providerProfileSource !== INVALIDATED_STEEL_PROFILE_SOURCE &&
-    typeof oldSession.providerProfileId === 'string' &&
-    oldSession.providerProfileId !== ''
-    ? oldSession.providerProfileId
-    : null;
 }
 
 class ConcurrentSessionReplacementError extends Error {
@@ -207,7 +182,9 @@ export async function recreateSession(
   options: SteelReplacementOptions,
   dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
 ): Promise<RecreatedSteelSession> {
-  const claim = dependencies.withLifecycleClaim ?? withSteelLifecycleClaim;
+  const claim =
+    dependencies.withLifecycleClaim ??
+    (browserResumeScope() ? withBrowserResumeClaim : withSteelLifecycleClaim);
   // A replacement is handed off only once every enclosing claim settles. If a
   // claim rejects after publication, close the unreturned validation transport
   // and forward that claim's original error.
@@ -384,7 +361,9 @@ async function recreateSessionWithinClaim(
           options.forceManagedRotation
         );
         await dependencies.verifyLifecycleOwnership?.();
-        const requestedSessionId = newOwnedSteelSessionId();
+        const intent = await browserResumeScope()?.beforeCreate('steel', newOwnedSteelSessionId());
+        const requestedSessionId =
+          intent?.recoveredId ?? intent?.marker ?? newOwnedSteelSessionId();
         await (dependencies.prepareCandidateCleanup ?? prepareSteelCandidateCleanup)(
           taskId,
           requestedSessionId,
@@ -393,21 +372,24 @@ async function recreateSessionWithinClaim(
         createdSessionId = requestedSessionId;
         await registerInFlightSteelSession(requestedSessionId);
         const create = () =>
-          dependencies.createSession({
-            sessionId: requestedSessionId,
-            profileId: profile.profileId,
-            persistProfile: profile.persistProfile,
-            userAgent:
-              userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
-                ? userAgent
-                : undefined,
-            useProxy: proxySettings.config,
-            solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
-            debugConfig: { systemCursor: false },
-            stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-            timeout: steelSessionTimeoutMs(),
-            dimensions: { width: 1288, height: 891 },
-          });
+          intent?.recoveredId
+            ? steel.sessions.retrieve(intent.recoveredId)
+            : dependencies.createSession({
+                sessionId: requestedSessionId,
+                profileId: profile.profileId,
+                persistProfile: profile.persistProfile,
+                userAgent:
+                  userAgent !== undefined &&
+                  envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
+                    ? userAgent
+                    : undefined,
+                useProxy: proxySettings.config,
+                solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
+                debugConfig: { systemCursor: false },
+                stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+                timeout: steelSessionTimeoutMs(),
+                dimensions: { width: 1288, height: 891 },
+              });
         const session = dependencies.runOwnedNative
           ? await dependencies.runOwnedNative(requestedSessionId, 'create', create)
           : await create();
@@ -592,6 +574,7 @@ async function recreateSessionWithinClaim(
               uncommittedSessionId,
               'RELEASED'
             );
+            await browserResumeScope()?.settleCreate(uncommittedSessionId);
             await unregisterInFlightSteelSession(uncommittedSessionId);
             createdSessionId = null;
           } catch (releaseError) {

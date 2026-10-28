@@ -28,6 +28,12 @@
  * Desktop is unaffected: TerminalHeader renders this only below the md
  * breakpoint (the desktop AttentionInbox bell owns notifications there).
  *
+ * SAFE AREAS (installed PWA): content pads by the status-bar inset on top and
+ * the home-indicator inset at the bottom (Logout stays tappable); the Sheet's
+ * close target sits below the status bar at the right of the tab row, which
+ * leaves room for it (pr-12). Row menus use the shared menu layer (z 220),
+ * above the Sheet (211); Rename opens later on the same modal tier, so on top.
+ *
  * ROSE HEADER (roseHeader, the Rose Desktop mobile header): the hamburger sits
  * on the header's LEFT with a 40px target and opens the drawer from the LEFT
  * (the left bar's place); no count badge on it — the pill's bell carries the
@@ -210,14 +216,14 @@ export default function MobileAgentDrawer({
           if (event.target instanceof HTMLInputElement && event.target.dataset.projectNameEditor)
             event.preventDefault();
         }}
-        className="flex w-screen max-w-none flex-col p-0 pt-[var(--safe-area-inset-top)]"
+        className="flex w-screen max-w-none flex-col p-0 pt-[var(--safe-area-inset-top)] pb-[var(--safe-area-inset-bottom)]"
       >
         <SheetTitle className="sr-only">Menu</SheetTitle>
         <SheetDescription className="sr-only">Your agents and notifications</SheetDescription>
 
         {isSignedIn ? (
           <>
-            <div className="flex gap-1 border-b border-border bg-muted/50 p-1.5">
+            <div className="flex gap-1 border-b border-border bg-muted/50 p-1.5 pr-12">
               <TabButton
                 active={tab === 'agents'}
                 onClick={() => setTab('agents')}

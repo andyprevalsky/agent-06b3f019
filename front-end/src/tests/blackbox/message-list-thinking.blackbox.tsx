@@ -206,6 +206,15 @@ describe('MessageList thinking states', () => {
     expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
   });
 
+  it('shows the ↓ token counter while thinking before any stream starts', async () => {
+    renderList(makeAgentCtx({ agent: makeAgent({ status: 'ACTIVE' }) }));
+    await waitFor(() => expect(screen.getByTestId('thinking-indicator')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(screen.getByTestId('thinking-indicator')).toHaveTextContent(/^Thinking0 tokens$/);
+    expect(document.querySelector('.lucide-arrow-down')).not.toBeNull();
+  });
+
   it('renders concurrent assistant streams as separate thinking rows', async () => {
     const ctx = makeAgentCtx({
       agent: makeAgent({ status: 'ACTIVE' }),

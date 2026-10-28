@@ -10,11 +10,14 @@
  *                        center = Research (signed-out stock only; signed-in accounts have
  *                                 no Research/Careers links — UI ledger #14)
  *                        right  = hamburger drawer (signed in) OR Login (signed out)
- * [MOBILE  <  md] Rose Desktop --> transparent row at y=0 (safe-area aware):
- *                        left   = hamburger (40px; opens the agents drawer from
- *                                 the LEFT, the left bar's place)
+ * [MOBILE  <  md] Rose Desktop --> opaque bar at y=0 (bg-background, safe-area aware;
+ *                        scrolled chat never shows through it or the status bar):
+ *                        left   = Back (only while an agent is open: sub-agent ->
+ *                                 its parent, root -> home) + hamburger (40px;
+ *                                 opens the agents drawer from the LEFT)
  *                        center = bell and the four app actions (40px targets)
- *                        far right = Rose icon (40px target)
+ *                        far right = Rose icon (40px target; hidden below 360px
+ *                                    while Back shows, which goes home too)
  *                        fits 320-744px without overlap; light + dark
  *
  * MOBILE RIGHT ACTION:
@@ -34,6 +37,10 @@
  * Notifications tab — never both mount (viewport-branched), so a single
  * useAttentionRequests subscription is active.
  *
+ * MOBILE BACK (Rose Desktop, installed PWAs have no browser back):
+ * [HOME]       no agent open --> no Back
+ * [AGENT_OPEN] tap Back --> parent id ? onSelectAgent(parent) : onCreateNewAgent()
+ *
  * SYSTEM CONTEXT:
  * mobile tap Login -> onLoginClick -> useTerminalAgents.handleLoginClick
  * -> TerminalModals.loginModalOpen -> PhoneAuthModal -> useAuth.refreshAuthState
@@ -42,6 +49,7 @@
 import { isStandaloneApp } from '@/lib/isStandaloneApp';
 import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
+import { ChevronLeft } from 'lucide-react';
 
 import {
   AttentionInbox,
@@ -67,6 +75,8 @@ interface TerminalHeaderProps {
   isLoadingAgents: boolean;
   hasLoadedAgents: boolean;
   selectedAgentId: string | null;
+  /** Parent of the open agent (sub-agents); Back returns there instead of home. */
+  selectedAgentParentId?: string | null;
   onRefreshAgents: () => void | Promise<void>;
   dripStyles: DripStyles;
   blur: number;
@@ -281,21 +291,47 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
   );
 }
 
-/** Rose dark mode only for the mobile pill (light keeps its translucent white). */
+/** Installed PWAs have no browser back: an open agent closes to its parent or home. */
+function MobileBackButton({
+  selectedAgentParentId,
+  onSelectAgent,
+  onCreateNewAgent,
+}: Pick<TerminalHeaderProps, 'selectedAgentParentId' | 'onSelectAgent' | 'onCreateNewAgent'>) {
+  return (
+    <button
+      type="button"
+      aria-label="Back"
+      onClick={() =>
+        selectedAgentParentId ? onSelectAgent(selectedAgentParentId) : onCreateNewAgent()
+      }
+      className="grid h-10 w-10 place-items-center rounded-lg text-[hsl(240_8%_45%)] transition-colors hover:text-foreground dark:text-[#a3a39d] dark:hover:text-[#ecece8]"
+    >
+      <ChevronLeft className="h-6 w-6" />
+    </button>
+  );
+}
 
 /**
- * Rose Desktop mobile (< md): agent menu far left, bell and app actions between,
- * Rose icon far right. The row itself is transparent and lets
- * taps through between its controls.
+ * Rose Desktop mobile (< md): Back (agent open) + agent menu far left, bell and
+ * app actions between, Rose icon far right, on an opaque bar so the chat
+ * scrolling beneath never shows through the controls or the status bar.
  */
 function RoseMobileHeaderBar(props: TerminalHeaderProps) {
   const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
+  const agentOpen = props.selectedAgentId !== null;
   return (
     <header
       data-testid="rose-mobile-header"
-      className="pointer-events-none fixed inset-x-0 top-0 z-50 flex h-[var(--mobile-terminal-header-height)] items-center gap-1 px-1.5 pt-[var(--safe-area-inset-top)]"
+      className="fixed inset-x-0 top-0 z-50 flex h-[var(--mobile-terminal-header-height)] items-center gap-1 bg-background px-1.5 pt-[var(--safe-area-inset-top)]"
     >
-      <div className="pointer-events-auto flex-none">
+      <div className="flex flex-none items-center">
+        {agentOpen && (
+          <MobileBackButton
+            selectedAgentParentId={props.selectedAgentParentId}
+            onSelectAgent={onSelectAgent}
+            onCreateNewAgent={onCreateNewAgent}
+          />
+        )}
         <MobileAgentDrawer
           roseHeader
           agents={props.agents}
@@ -310,7 +346,7 @@ function RoseMobileHeaderBar(props: TerminalHeaderProps) {
           onLogout={props.onLogout}
         />
       </div>
-      <div className="pointer-events-auto flex min-w-0 flex-1 items-center justify-end">
+      <div className="flex min-w-0 flex-1 items-center justify-end">
         <HeaderAuthAction
           isSignedIn={isSignedIn}
           onLoginClick={onLoginClick}
@@ -318,7 +354,10 @@ function RoseMobileHeaderBar(props: TerminalHeaderProps) {
         />
         <RoseAppIcons placement="header" />
       </div>
-      <div data-testid="rose-mobile-pill" className="pointer-events-auto flex-none">
+      <div
+        data-testid="rose-mobile-pill"
+        className={cn('flex-none', agentOpen && 'max-[359px]:hidden')}
+      >
         <BrandButton compact onCreateNewAgent={onCreateNewAgent} />
       </div>
     </header>
