@@ -41,6 +41,7 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = 
   createdAt: new Date(createdAt),
   tokensOut: 100,
   status: 'COMPLETED' as AgentStatus,
+  archivedBeforeOutcome: false,
 });
 
 const run = (taskId: string, createdAt: string) => ({ taskId, createdAt: new Date(createdAt) });
@@ -463,6 +464,32 @@ const benchmarkSeries = buildSeries(
       ...task('cust-2', '2026-05-11T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
       status: 'FAILED',
     },
+    // Still running: no outcome yet, so it is neither completed nor failed.
+    {
+      ...task('cust-3', '2026-05-12T00:00:00.000Z', 'subscriber-user', 'plan my trip'),
+      status: 'ACTIVE',
+    },
+    // Archived while running: FAILED by the archive, but no outcome to count.
+    {
+      ...task('cust-4', '2026-05-13T00:00:00.000Z', 'subscriber-user', 'find a dentist'),
+      status: 'FAILED',
+      archivedBeforeOutcome: true,
+    },
+    // The core team is the real in-app population; an operator retrying one goal
+    // counts once, by its latest resolved attempt (FAILED -> COMPLETED -> PAUSED).
+    {
+      ...task('andy-1', '2026-05-02T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+      status: 'FAILED',
+    },
+    task('andy-2', '2026-05-04T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+    {
+      ...task('andy-3', '2026-05-06T00:00:00.000Z', ANDY_USER_ID, 'order my coffee'),
+      status: 'PAUSED',
+    },
+    {
+      ...task('andy-june', '2026-06-03T00:00:00.000Z', ANDY_USER_ID, 'book me a flight'),
+      status: 'ACTIVE',
+    },
   ]
 );
 assert.strictEqual(
@@ -472,8 +499,8 @@ assert.strictEqual(
 );
 assert.deepStrictEqual(
   benchmarkSeries.map((point) => point.taskCompletionRate),
-  [0.5, 0],
-  'Customer completions are never diluted by internal runs or deduped by goal text; empty usage is zero'
+  [0.6667, null],
+  'Completion = completed / resolved tasks with operator retries collapsed; archived-while-running has no outcome; no resolved task is null, never 0%'
 );
 
 const retention = buildRetentionCohorts(
