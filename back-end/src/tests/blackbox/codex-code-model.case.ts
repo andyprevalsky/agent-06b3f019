@@ -16,6 +16,7 @@ import {
   claudeCodeSettingsEnvs,
   codeAgentSettingsForAgent,
   codeAgentSpeed,
+  storedAgentSpeed,
   codeAgentTier,
   codexAzureDeployment,
   codexCodeSettingsEnvs,
@@ -117,12 +118,18 @@ export function testCodeAgentModels_tierTableAndUnknownIsFlash() {
     for (const model of ['rose-labs/rose-1-flash', 'rose-labs/rose-1-mini', '', null, undefined]) {
       assert(codeAgentTier(model) === 'flash', `${String(model)} is flash`);
     }
-    // The Fast Mode button is the speed request; an unknown agent keeps Rose's default (on).
+    // Stored speed takes precedence; absent requests use standard.
     same(
-      [codeAgentSpeed(true), codeAgentSpeed(false), codeAgentSpeed(null)],
-      ['fast', 'standard', 'fast'],
-      'speed from the Fast Mode button'
+      [codeAgentSpeed('fast'), codeAgentSpeed('standard'), codeAgentSpeed(null)],
+      ['fast', 'standard', 'standard'],
+      'stored speed, with standard for unknown'
     );
+    for (const speed of ['standard', 'fast', 'ultrafast'] as const) {
+      for (const cache of [true, false]) {
+        same(storedAgentSpeed({ speed, fastModeCacheEnabled: cache }), speed, 'cache never overrides stored speed');
+      }
+    }
+    same(storedAgentSpeed(null), 'standard', 'missing agent uses standard');
   });
 }
 
@@ -244,10 +251,10 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
   headers: Record<string, string>
 ) {
   const cases = [
-    { model: 'rose-labs/rose-1-ultra', fast: true, effort: 'xhigh', speed: 'fast', claude: 'fast' },
+    { model: 'rose-labs/rose-1-ultra', fast: false, effort: 'xhigh', speed: 'ultrafast', claude: 'fast' },
     {
       model: 'rose-labs/rose-1-flash',
-      fast: false,
+      fast: true,
       effort: 'medium',
       speed: 'standard',
       claude: 'standard',
@@ -261,6 +268,7 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
         goal: `code-agent speed blackbox ${c.model} ${crypto.randomUUID()}`,
         model: c.model,
         fast_mode_cache_enabled: c.fast,
+        speed: c.speed,
       }),
     });
     assertStatus(created.status, 201, created.data);

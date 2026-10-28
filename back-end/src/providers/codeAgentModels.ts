@@ -1,6 +1,6 @@
 /**
  * What a code agent's CLI runs: model and effort per parent tier, speed from
- * the parent's Fast Mode button. One table for every path: E2B spawn and
+ * the parent's stored speed. One table for every path: E2B spawn and
  * resume (e2b.ts), the provider switch (it creates the other provider's session
  * the same way), the inspector (codeSessions/inspect.ts), local devices
  * (localDevices/session.ts) and the funded paths (the Anthropic key runs the
@@ -11,8 +11,7 @@
  *   anything else, unknown   flash    opus 5.5 / gpt-6.1-sol / gpt-6.1-sol / medium
  *
  *   spawning agent's stored speed (storedAgentSpeed) ──► speed request
- *   standard | fast | ultrafast; until the create-agent `speed` field lands the
- *   only stored value is the Fast Mode button: on (or unknown) = fast, off = standard
+ *   standard | fast | ultrafast; legacy rows use agentSpeedFromRow's migration policy
  *
  * Speed only selects provider speed; it never turns a cache on (the Fast Mode
  * tee-proxy keeps its own DEMO-cache gate in e2b.ts). Each ws-server maps the
@@ -28,6 +27,7 @@
  * pins them.
  */
 import { prisma } from './database';
+import { agentSpeedFromRow, normalizeAgentSpeed } from './rose/speed';
 
 export type CodeAgentTier = 'ultra' | 'flash';
 /** Speed a code agent requests, from its spawning agent's stored speed. */
@@ -64,9 +64,9 @@ export function codeAgentTier(parentModel: string | null | undefined): CodeAgent
   return pool === 'rose-1-ultra' ? 'ultra' : 'flash';
 }
 
-/** The Fast Mode button: on (or unknown, the Rose default) requests fast. */
-export function codeAgentSpeed(fastMode: boolean | null | undefined): CodeAgentSpeed {
-  return fastMode === false ? 'standard' : 'fast';
+/** Unknown/absent requests are standard; never infer speed from a cache. */
+export function codeAgentSpeed(speed: unknown): CodeAgentSpeed {
+  return normalizeAgentSpeed(speed);
 }
 
 export interface CodeAgentSettings {
@@ -75,19 +75,16 @@ export interface CodeAgentSettings {
 }
 
 /** Agent columns the code-agent settings read. */
-const SETTINGS_SELECT = { model: true, fastModeCacheEnabled: true } as const;
+const SETTINGS_SELECT = { model: true, speed: true, fastModeCacheEnabled: true } as const;
 
-/**
- * The one accessor for an agent's stored speed. Today the agent row stores only
- * the Fast Mode button; when the create-agent `speed` column lands this reads it.
- */
+/** Stored speed, sharing the speed tree's legacy-row migration policy. */
 export function storedAgentSpeed(
-  agent: { fastModeCacheEnabled: boolean } | null | undefined
+  agent: { speed?: string | null; fastModeCacheEnabled?: boolean | null } | null | undefined
 ): CodeAgentSpeed {
-  return codeAgentSpeed(agent?.fastModeCacheEnabled);
+  return agent ? agentSpeedFromRow(agent) : 'standard';
 }
 
-/** Tier and speed of the agent that spawns the code agent; flash + fast when unknown. */
+/** Tier and speed of the agent that spawns the code agent; flash + standard when unknown. */
 export async function codeAgentSettingsForAgent(
   agentId: string | null | undefined
 ): Promise<CodeAgentSettings> {
