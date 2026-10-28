@@ -9,6 +9,9 @@
  *
  * Clicks call onSelectAgent(ancestor.id) so the URL + panel switch to that
  * ancestor. Hub archive GET /agents/:id then serves the parent the same way.
+ *
+ * LAYOUT: phones place the trail just below the safe-area-aware mobile header
+ * (--mobile-terminal-header-height); md+ keeps the 80px desktop offset.
  */
 
 import type { AgentDetail, AncestorNode } from '@/lib/api';
@@ -50,7 +53,7 @@ export function SubAgentBreadcrumb({
 }: SubAgentBreadcrumbProps) {
   const trail = resolveBreadcrumbAncestors(ancestors, agentDetail);
   return (
-    <div className="absolute top-20 left-0 right-0 z-40 px-6">
+    <div className="absolute top-[calc(var(--mobile-terminal-header-height)+0.5rem)] left-0 right-0 z-40 px-2 md:top-20 md:px-6">
       <div className="max-w-4xl mx-auto">
         <div
           className="inline-flex px-4 py-2 rounded-lg text-sm items-center gap-1 border border-gray-200/50 dark:border-white/[0.08] bg-white/80 dark:bg-[rgba(32,32,30,0.78)] shadow-lg overflow-x-auto max-w-full"

@@ -66,3 +66,35 @@ forbids self-review — a narrow override scoped to this PR only.
 A credential preflight must probe the exact route the runtime will use — checking a
 sibling credential surface converts a missing-credential condition into a full
 retry-budget timeout.
+
+
+### October 27 recurrence: deploy-token scope versus provider-neutral fallback
+
+Smoke run `ca786f36-7806-423b-a358-1910ede72137`, root
+`1b5b551e-803c-4b9a-8f70-2f0d39567479`, failed after303s under its unchanged
+300s limit. The goal explicitly requested Claude Code for the Collatz sequence
+from27. Runtime had no leasable Claude credential and correctly used its
+existing Codex fallback, which computed111 steps and112 terms; the root then
+tried Claude Web to satisfy the requested tool. Preflight had admitted the
+Claude-specific deploy task from OpenRouter configuration, even though the
+standing deploy skip requires an own/pool Claude token. This repeats the
+credential-surface inconsistency, not a demonstrated sandbox transport defect.
+
+Only with existing `BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1` does the
+preflight now treat the existing user/pool token route as authoritative:
+nonempty token200 qualifies, actual404 proves absence, malformed200/auth/server/
+network errors remain failures. Default funded fallback outside this opt-in
+mode is unchanged. Dispatch also refuses to silently skip without the flag.
+There is no new endpoint, benchmark criterion, timeout or waiver.
+
+Four identical source-overlay owning tests passed one/failed three before and
+passed four after; wall-clock timing for this private pair was not recorded.
+They cover own/pool tokens,404 despite shared fallback, malformed200/401/500/
+network errors, default Anthropic/OpenRouter fallback and opt-in-only dispatch.
+The tests are registered in the normal benchmark domain and compute-preflight
+unit suite. All121 agent domains,214 DEMO and172 unit tests subsequently passed
+under84% combined coverage at source29e2c47e3. Golden N3392r4 grounds the
+mandatory harness hunks. The original task failure remains unchanged; actual
+post-fix smoke admission/skip and full-model acceptance are still pending.
+Archive search also found2026-10-01-codex-credit-skip-masked-oauth-revocation:
+only typed evidence may authorize an existing skip, never an unknown error.

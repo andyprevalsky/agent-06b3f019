@@ -2,7 +2,7 @@
  * Blackbox: the Rose Desktop header on phones and iPads, through the real
  * Terminal (flag on) with the stock account as the control.
  *
- *   < 768px (phones 375-430, iPad mini 744): one transparent row —
+ *   < 768px (phones 375-430, iPad mini 744): one opaque row (Back while an agent is open) —
  *     hamburger (left, opens the agents drawer from the LEFT) · the Rose pill
  *     (brand + bell, centered between) · the four app icons (Browser, Phone,
  *     Integrations + red reconnect dot, Dark mode) — every target >= 40px, the
@@ -61,6 +61,9 @@ async function renderTerminal(userId = ROSE_USER) {
   const user = userEvent.setup({ delay: null });
   renderWithProviders(<Terminal />);
   await screen.findByPlaceholderText('Enter any goal');
+  if (window.innerWidth < 768 && roseDesktopFlag.isRoseDesktopUser({ id: userId })) {
+    await screen.findByTestId('rose-mobile-header');
+  }
   return user;
 }
 
@@ -247,7 +250,11 @@ describe('all-account rollout', () => {
     setViewport(390);
     await renderTerminal('ordinary-account');
     expect(header()).toBeInTheDocument();
-    for (const label of APP_LABELS)
-      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
+    const icons = within(header()).getByRole('navigation', { name: 'Apps' });
+    expect(
+      within(icons)
+        .getAllByRole('button')
+        .map((button) => button.getAttribute('aria-label')?.replace('Light mode', 'Dark mode')),
+    ).toEqual(APP_LABELS);
   });
 });

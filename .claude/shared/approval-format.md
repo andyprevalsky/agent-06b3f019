@@ -378,6 +378,12 @@ golden citation and are not reviewed here.
    to refute the grounding, not to confirm it. Give it the approval ID,
    snapshot, exact diff of every in-scope hunk and the drafted packet.
 2. **Checks.** The reviewer must:
+   - research at least the three most relevant open-source references for
+     the hunk's mechanism itself, choosing by closeness to the change and
+     reading their actual code or prompts, and name each with the `path:line`
+     it opened. Fewer than three opened is `NOT_GROUNDED`; a reference cited
+     in the packet does not count unless the reviewer opened it and decided
+     its verdict from what it found;
    - open every cited golden reference itself (run
      `bash scripts/sync-reference-repos.sh` when a clone is missing) and
      confirm that the `path:line` exists and does what the packet claims,

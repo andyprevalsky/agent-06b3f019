@@ -44,7 +44,7 @@ async function run(): Promise<void> {
   assert.equal(options.provider_fast_mode, true);
   assert.equal(options.abort_signal, abortController.signal);
   assert.equal(options.temperature, 0);
-  assert.equal(options.max_tokens, 1_024);
+  assert.equal(options.max_tokens, 2_048);
   assert.equal(
     buildRouterCompletionOptions({
       model: phases.router,

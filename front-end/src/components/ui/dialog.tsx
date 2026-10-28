@@ -12,6 +12,13 @@ const DialogPortal = DialogPrimitive.Portal;
 
 const DialogClose = DialogPrimitive.Close;
 
+/**
+ * Dialogs and sheets (ui/sheet) share one modal tier: scrim z-[210], content
+ * z-[211], so each content sits above its own scrim. Portals mount in open
+ * order, so whichever modal opened last paints on top (a Sheet opened inside a
+ * Dialog, or Rename opened from the mobile agents Sheet). Menus, popovers and
+ * selects (z 220) float above both. See lib/roseLayers.ts.
+ */
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
@@ -19,7 +26,7 @@ const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      'fixed inset-0 z-[200] bg-black/80  data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+      'fixed inset-0 z-[210] bg-black/80  data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
       className,
     )}
     {...props}
@@ -36,7 +43,7 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed left-1/2 top-1/2 z-[201] grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 backdrop-blur-[12px] p-6 shadow-lg sm:rounded-lg',
+        'fixed left-1/2 top-1/2 z-[211] grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 backdrop-blur-[12px] p-6 shadow-lg sm:rounded-lg',
         className,
       )}
       style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', ...props.style }}

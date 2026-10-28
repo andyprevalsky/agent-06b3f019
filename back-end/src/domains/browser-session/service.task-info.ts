@@ -9,6 +9,7 @@ import { BROWSER_SESSION_MIN_REMAINING_MS } from '../../providers/steel/sessionL
 import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import { storedBrowserProvider } from '../../providers/browser/types';
 import * as repo from './repo';
+import { recordEndedLogicalBrowser } from '../../providers/browser/sessionPersist';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
 const log = createLogger('BrowserSession');
@@ -178,7 +179,10 @@ async function applyLiveSessionAvailability(
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionByTaskId>>>
 ) {
   const legacySteelResponse = session.provider === 'steel';
-  if (session.status !== 'ACTIVE') {
+  if (
+    session.status !== 'ACTIVE' &&
+    !(session.logicalOwnerKey !== null && session.status === 'ERROR')
+  ) {
     response.same_session_available = false;
     response.same_session_unavailable_reason = `db_status_${session.status.toLowerCase()}`;
     return response;
@@ -213,6 +217,18 @@ async function applyLiveSessionAvailability(
   const availability = sameSessionAvailability(health, legacySteelResponse);
   response.same_session_available = availability.available;
   if (!availability.available) response.same_session_unavailable_reason = availability.reason;
+
+  if (
+    session.logicalOwnerKey !== null &&
+    (await recordEndedLogicalBrowser(session.id, session.sessionId, health))
+  ) {
+    const current = await repo.findSessionByTaskId(session.id);
+    if (current?.sessionId === session.sessionId) response.status = current.status;
+  }
+  if (response.status !== 'ACTIVE') {
+    response.same_session_available = false;
+    response.same_session_unavailable_reason = `db_status_${response.status.toLowerCase()}`;
+  }
 
   return response;
 }

@@ -1,5 +1,28 @@
-import { restoreLogicalBrowserCheckpoint } from './browser/checkpoint';
-import { browserResumeScope, withBrowserResumeLifecycle } from './steel/lifecycleClaim';
+import {
+  serializePasswords,
+  serializePasskeys,
+  type UserSettings,
+  type SerializedPassword,
+  type SerializedPasskey,
+} from './browser/resumeCredentials';
+export type {
+  UserSettings,
+  SerializedPassword,
+  SerializedPasskey,
+} from './browser/resumeCredentials';
+import {
+  checkpointLogicalBrowser,
+  loadLogicalBrowserCheckpoint,
+  restoreLogicalBrowserCheckpoint,
+} from './browser/checkpoint';
+import { isConfirmedBrowserEnd, recordEndedLogicalBrowser } from './browser/sessionPersist';
+import { BROWSER_SESSION_MIN_REMAINING_MS } from './steel/sessionLifetime';
+import { assertBrowserInitializationReady } from './browser/initialization';
+import {
+  browserResumeScope,
+  withBrowserResumeClaim,
+  withBrowserResumeLifecycle,
+} from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
 import { iphoneCapability } from './phoneAccountPolicy';
@@ -64,79 +87,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 }
 
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
-
-export interface SerializedPassword {
-  id: string;
-  origin: string;
-  username: string;
-  encryptedPassword: string;
-  dateLastUsed: number | null;
-}
-
-export interface UserSettings {
-  iphoneCapability?: { enabled: true };
-  name: string | null;
-  email: string | null;
-  phone: string | null;
-  deliveryRecipientName: string | null;
-  addressLine1: string | null;
-  addressLine2: string | null;
-  city: string | null;
-  state: string | null;
-  postalCode: string | null;
-  country: string | null;
-  encryptedPaymentInformation: string | null;
-  systemName: string | null;
-  profilePicture: string | null;
-  customSystemPrompt: string | null;
-}
-
-export interface SerializedPasskey {
-  id: string;
-  credentialId: string;
-  encryptedPrivateKey: string;
-  rpId: string;
-  userHandle: string | null;
-  signCount: number;
-}
-
-function serializePasswords(
-  passwords: Array<{
-    id: string;
-    origin: string;
-    username: string;
-    encryptedPassword: string;
-    dateLastUsed: bigint | null;
-  }>
-): SerializedPassword[] {
-  return passwords.map((password) => ({
-    id: password.id,
-    origin: password.origin,
-    username: password.username,
-    encryptedPassword: password.encryptedPassword,
-    dateLastUsed: password.dateLastUsed !== null ? Number(password.dateLastUsed) : null,
-  }));
-}
-
-function serializePasskeys(
-  passkeys: Array<{
-    id: string;
-    credentialId: string;
-    encryptedPrivateKey: string;
-    rpId: string;
-    userHandle: string | null;
-    signCount: number;
-  }>
-): SerializedPasskey[] {
-  return passkeys.map((p) => ({
-    id: p.id,
-    credentialId: p.credentialId,
-    encryptedPrivateKey: p.encryptedPrivateKey,
-    rpId: p.rpId,
-    userHandle: p.userHandle,
-    signCount: p.signCount,
-  }));
-}
 
 type SettingsAccount = UserSettings & { userId: string; isAnonymous: boolean };
 function toUserSettings(user: SettingsAccount | null): UserSettings | null {
@@ -224,17 +174,27 @@ export async function resumeBrowserSession(
   });
 
   const read = () => prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
-  const initial = await read();
+  let initial = await read();
+  if (initial.logicalOwnerKey && initial.status === 'ERROR') {
+    const health = initial.sessionId ? await getBrowserSessionHealth(initial.sessionId) : null;
+    if (
+      !initial.sessionId ||
+      !health ||
+      !(await recordEndedLogicalBrowser(taskId, initial.sessionId, health))
+    )
+      throw new Error('Browser release outcome remains unresolved');
+    initial = await read();
+  }
+  if (initial.logicalOwnerKey !== null) await assertBrowserInitializationReady(taskId);
   if (initial.logicalOwnerKey !== null && initial.status === 'CLOSED')
     throw new Error('Retired logical browser cannot resume');
-  if (initial.logicalOwnerKey !== null && initial.provider === 'steel')
-    throw new Error('Logical Steel browser restore requires durable hydration custody');
   if (
     initial.controlState !== 'AGENT' &&
     (initial.controlLeaseExpiresAt === null || initial.controlLeaseExpiresAt.getTime() > Date.now())
   ) {
     throw new Error('Browser resume cannot replace a session under user control');
   }
+  let sourceEnded = false;
   const resume = async () => {
     const current = await read();
     if (current.logicalOwnerKey !== null && current.status === 'CLOSED')
@@ -246,6 +206,40 @@ export async function resumeBrowserSession(
     ) {
       throw new Error('Browser resume cannot replace a session under user control');
     }
+    if (current.logicalOwnerKey && current.sessionId && current.status === 'ACTIVE') {
+      const health = await getBrowserSessionHealth(current.sessionId);
+      if (health.sessionId !== current.sessionId)
+        throw new Error('Browser resume health binding changed');
+      sourceEnded = isConfirmedBrowserEnd(health.status);
+      if (sourceEnded) await recordEndedLogicalBrowser(taskId, current.sessionId, health);
+      else if (
+        health.status !== null &&
+        ['live', 'active', 'running'].includes(health.status.toLowerCase())
+      )
+        await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
+          checkpointLogicalBrowser(current.sessionId!, mutate)
+        );
+      else throw new Error('Browser resume liveness is unknown');
+    }
+    if (current.logicalOwnerKey) {
+      await loadLogicalBrowserCheckpoint(taskId, current.sessionId !== null);
+      await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
+        mutate(async (tx) => {
+          const changed = await tx.browserSession.updateMany({
+            where: {
+              id: taskId,
+              sessionId: current.sessionId,
+              contextId: current.contextId,
+              status: { in: ['ACTIVE', 'PAUSED'] },
+              OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
+            },
+            data: { status: 'PAUSED' },
+          });
+          if (changed.count !== 1)
+            throw new Error('Browser resume source ownership or control changed');
+        })
+      );
+    }
     const result = await resumeSession(taskId, {
       ...options,
       forceFreshProfile: current.logicalOwnerKey ? true : options.forceFreshProfile,
@@ -253,8 +247,12 @@ export async function resumeBrowserSession(
     });
     return assembleResumeResponse(taskId, result);
   };
-  if (initial.provider !== 'kernel' && initial.provider !== 'browser-use') return resume();
-  let sourceEnded = false;
+  if (
+    !initial.logicalOwnerKey &&
+    initial.provider !== 'kernel' &&
+    initial.provider !== 'browser-use'
+  )
+    return resume();
   return withBrowserResumeLifecycle(taskId, {
     readBinding: read,
     compatibility: options.forceFreshProfile ? 'fresh' : 'default',
@@ -264,12 +262,12 @@ export async function resumeBrowserSession(
       const current = await read();
       if (current.sessionId === null) return false;
       const health = await getBrowserSessionHealth(current.sessionId);
-      if (health.status === null) throw new Error('Browser resume liveness is unknown');
-      sourceEnded = !['active', 'live', 'running'].includes(health.status.toLowerCase());
-      return (
-        ['active', 'live', 'running'].includes(health.status.toLowerCase()) &&
-        (health.ttlMs === null || health.ttlMs > 60_000)
-      );
+      const live =
+        health.status !== null &&
+        ['active', 'live', 'running'].includes(health.status.toLowerCase());
+      sourceEnded = isConfirmedBrowserEnd(health.status);
+      if (!live && !sourceEnded) throw new Error('Browser resume liveness is unknown');
+      return live && (health.ttlMs === null || health.ttlMs >= BROWSER_SESSION_MIN_REMAINING_MS);
     },
     resume,
     inspect: inspectResumeCandidate,
@@ -408,8 +406,21 @@ async function assembleResumeResponseWithTransport(
     userSettings = toUserSettings(user);
   }
 
+  const health = await getBrowserSessionHealth(result.sessionId).catch((error: unknown) => {
+    log.warn('Could not inspect resumed browser health', {
+      taskId,
+      sessionId: result.sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  if (health && health.sessionId !== result.sessionId)
+    throw new Error('Resumed browser health binding changed');
+  if (health && isConfirmedBrowserEnd(health.status))
+    throw new Error('Resumed browser ended before readiness');
+
   if (!readOnly) await browserResumeScope()?.assertOwned();
-  if (!readOnly && session?.logicalOwnerKey) {
+  if (!readOnly && session?.logicalOwnerKey && !browserResumeScope()) {
     const ready = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: result.sessionId, status: 'PAUSED' },
       data: { status: 'ACTIVE' },
@@ -427,6 +438,8 @@ async function assembleResumeResponseWithTransport(
     current_url: currentUrl,
     auth_realm: authRealm,
     status: 'ACTIVE' as const,
+    browser_session_health: health,
+    ...(health?.provider === 'steel' ? { steel_session_health: health } : {}),
     browser_session_metadata: {
       provider: result.provider,
       proxy_source: result.proxySource,

@@ -877,7 +877,7 @@ def test_claude_code_preflight_rejects_empty_runtime_credential():
 
 def test_claude_code_task_rechecks_credentials_when_its_execution_slot_opens():
     task = rb.get_task_by_name("claude-code-agent")
-    with patch.object(
+    with patch.dict(os.environ, {"BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP": "1"}), patch.object(
         rb,
         "_check_claude_code_credentials",
         new=AsyncMock(return_value=False),

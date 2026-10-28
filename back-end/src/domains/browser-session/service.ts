@@ -1,8 +1,13 @@
 import { initLegacySession } from './service.init-legacy';
+import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
+import { getTaskInfo } from './service.task-info';
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
 import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
-import { BrowserSessionReclaimConflictError } from '../../providers/browser/sessionPersist';
+import {
+  initializeLogicalBrowser,
+  waitForBrowserInitialization,
+} from '../../providers/browser/initialization';
 /**
  * Browser-session domain service — business logic, no req/res.
  */
@@ -60,9 +65,7 @@ const log = createLogger('BrowserSession');
 async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
   if (userId === undefined) return;
   const session = await repo.findSessionBySessionId(sessionId);
-  if (session === null || session.context.userId !== userId) {
-    throw new SessionNotFoundError();
-  }
+  if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
 }
 
 interface BrowserSessionMetadataInput {
@@ -198,31 +201,61 @@ export async function prepareSessionCredentials(
 
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
-  const logical = await ensureLogicalBrowser(userId, agentId);
-  if (id !== undefined && id !== logical.id)
-    return initLegacySession(userId, agentId, startUrl, id, {
+  let logical = await ensureLogicalBrowser(userId, agentId);
+  if (id !== undefined && id !== logical.id) {
+    const result = await initLegacySession(userId, agentId, startUrl, id, {
       prepare: prepareSessionCredentials,
       metadata: buildBrowserSessionMetadata,
     });
+    return {
+      ...result,
+      releaseOnDisconnect: () => closeBrowserSession(result.session_id, false),
+    };
+  }
+  await waitForBrowserInitialization(logical.id, userId);
   await repo.updateLogicalSessionUrls(
     logical.id,
     logical.startUrl ?? startUrl,
     logical.currentUrl ?? startUrl
   );
   if (logical.sessionId === null && !logicalHasPrivateState(logical)) {
-    // First materialization of an empty logical browser: initialize it bound to
-    // its logical row. A concurrent first init that loses the row's binding race
-    // follows the winner through the resume path instead of failing.
-    try {
-      return await initLegacySession(userId, agentId, startUrl, logical.id, {
+    const initialized = await initializeLogicalBrowser(logical.id, userId, () =>
+      initLegacySession(userId, agentId, startUrl, logical.id, {
         prepare: prepareSessionCredentials,
         metadata: buildBrowserSessionMetadata,
-      });
-    } catch (error) {
-      if (!(error instanceof BrowserSessionReclaimConflictError)) throw error;
+      })
+    );
+    if (initialized !== null) return { ...initialized, releaseOnDisconnect: undefined };
+  }
+  // Both an already materialized caller and a joined initializer must use the
+  // binding after the durable readiness boundary, not the earlier snapshot.
+  const currentLogical = await repo.findSessionByTaskId(logical.id);
+  if (currentLogical === null || currentLogical.context.userId !== userId)
+    throw new Error('Logical browser owner changed before reattachment');
+  logical = currentLogical;
+  if (logical.sessionId !== null && logical.status === 'ACTIVE') {
+    const existing = await getTaskInfo(logical.id, { validateLive: true });
+    if (existing?.same_session_available === true && existing.session_id !== null) {
+      const current = await repo.findSessionByTaskId(logical.id);
+      if (
+        current?.sessionId !== existing.session_id ||
+        current.status !== 'ACTIVE' ||
+        current.context.userId !== userId
+      )
+        throw new Error('Logical browser binding changed before reattachment');
+      if (
+        current.controlState !== 'AGENT' &&
+        (current.controlLeaseExpiresAt === null ||
+          current.controlLeaseExpiresAt.getTime() > Date.now())
+      )
+        throw new Error('Browser init cannot reattach a session under user control');
+      return { ...existing, session_id: existing.session_id, releaseOnDisconnect: undefined };
     }
   }
-  return resumeOwnedBrowserSession(logical.id, userId);
+  return {
+    ...(await resumeOwnedBrowserSession(logical.id, userId)),
+    releaseOnDisconnect: undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
