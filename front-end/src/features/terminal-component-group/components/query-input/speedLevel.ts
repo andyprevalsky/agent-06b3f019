@@ -18,18 +18,8 @@ import { useSyncExternalStore } from 'react';
 
 export type SpeedLevel = 'normal' | 'fast' | 'ultra';
 
-/** The create-agent `speed` value the backend forwards to every provider. */
-export type AgentSpeed = 'standard' | 'fast' | 'ultrafast';
-
-const AGENT_SPEED_BY_LEVEL: Record<SpeedLevel, AgentSpeed> = {
-  normal: 'standard',
-  fast: 'fast',
-  ultra: 'ultrafast',
-};
-
-export function agentSpeedForLevel(level: SpeedLevel): AgentSpeed {
-  return AGENT_SPEED_BY_LEVEL[level];
-}
+export { agentSpeedForLevel } from '@/lib/agentSpeed';
+export type { AgentSpeed } from '@/lib/agentSpeed';
 
 export const SPEED_LEVELS: readonly SpeedLevel[] = ['normal', 'fast', 'ultra'];
 

@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
 import { currentTraceContext } from './tracing';
-import { nonLocalDatabaseReason } from '../utils/localDatabaseUrl';
+import { testEntrypointDatabaseRefusal } from '../utils/localDatabaseUrl';
 import { demoCacheEnv } from './demoCacheEnv';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
@@ -22,12 +22,9 @@ export function testEntryRemoteDatabaseReason(
   entry: string | undefined = process.argv[1],
   env: NodeJS.ProcessEnv = process.env
 ): string | null {
-  if (!entry || !/[\\/]src[\\/]tests[\\/]/.test(entry)) return null;
-  if (env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1' || env.BLACKBOX_TEST_ALLOW_REMOTE_DATABASE === '1') {
-    return null;
-  }
-  const reason = nonLocalDatabaseReason(env.DATABASE_URL);
-  return reason === null ? null : `${reason} (test entry ${entry})`;
+  const allowRemote =
+    env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1' || env.BLACKBOX_TEST_ALLOW_REMOTE_DATABASE === '1';
+  return testEntrypointDatabaseRefusal(entry, env.DATABASE_URL, allowRemote ? '1' : undefined);
 }
 
 const TEST_ENTRY_REMOTE_DATABASE = testEntryRemoteDatabaseReason();
@@ -311,13 +308,7 @@ export const prisma =
   }).$extends({
     query: {
       async $allOperations({ operation, model, args, query }) {
-        if (TEST_ENTRY_REMOTE_DATABASE !== null) {
-          throw new Error(
-            `Refusing ${model ?? 'raw'}.${operation} from a test against a non-local database: ` +
-              `${TEST_ENTRY_REMOTE_DATABASE}. Run tests through scripts/run-unit-tests.ts or ` +
-              'scripts/run-blackbox-tests.sh, which point DATABASE_URL at local Postgres.'
-          );
-        }
+        if (TEST_ENTRY_REMOTE_DATABASE !== null) throw new Error(TEST_ENTRY_REMOTE_DATABASE);
         return retryWithBackoff(
           async () => {
             const trace = currentTraceContext();

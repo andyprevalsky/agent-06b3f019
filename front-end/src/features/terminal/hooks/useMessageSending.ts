@@ -35,7 +35,7 @@ import {
   speedLevelOf,
   setUltraPreferred,
   useUltraPreferred,
-} from '@/features/terminal-component-group/components/query-input/speedLevel';
+} from '@/lib/agentSpeed';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, checkAndRespondToAttention } from '../api';
