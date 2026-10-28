@@ -3340,9 +3340,213 @@ async def test_click_coordinates_follow_an_element_the_page_re_rendered():
         assert gateway.rejected_4409 == 0
 
 
+async def test_tilion_pause_releases_socket_before_backend_checkpoint():
+    """Native worker close helper hands Tilion's one socket to checkpoint capture."""
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+    from aiohttp import web
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError, close_browser_session
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+    from domains.spawn_browser_agent_v3.config import BROWSER_DISCONNECT_TIMEOUT_SECONDS
+
+    source = ast.parse((Path(__file__).resolve().parents[2] / "domains/spawn_browser_agent_v3/handler.py").read_text())
+    names = {"_await_bounded_browser_cleanup", "_capture_browser_passkey_usage", "_disconnect_browser"}
+    definitions = [node for node in source.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names]
+    helper = next(node for node in ast.walk(source) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_close_browser_with_cleanup_receipt")
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n").body[0]
+    factory.body.append(helper)
+    factory.body.extend(ast.parse('async def pause():\n    await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url, require_complete_passkeys=True)\n    if cleanup_failure is not None:\n        raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))\nreturn pause').body)
+
+    for failure in (None, "disconnect_error", "disconnect_hung", "passkey_error"):
+        events, requests, pending = [], [], set()
+        async with _chromium() as (playwright, _browser, endpoint):
+            async with FakeTilionGateway(endpoint) as gateway:
+                from browser_tools.dom_service import DOMService
+                from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+                with _tilion_env(gateway), tempfile.TemporaryDirectory(prefix="tilion-pause-recording-") as artifacts, patch.dict(os.environ, {"BROWSER_AGENT_RECORDINGS_DIR": artifacts}):
+                    local_url, mux = await open_browser_cdp_connection(gateway.cdp_url, label="pause-checkpoint")
+                    service = DOMService(cdp_url=local_url, cdp_multiplexer=mux)
+                    pw_browser = None
+                    recorder = None
+                    server = None
+                    backend_done = asyncio.Event()
+                    async def checkpoint(request):
+                        task = asyncio.current_task()
+                        pending.add(task)
+                        requests.append(await request.json())
+                        events.append("backend_checkpoint")
+                        attached = None
+                        try:
+                            while gateway.active:
+                                async with websockets.connect(gateway.cdp_url, proxy=None) as blocked:
+                                    with contextlib.suppress(websockets.ConnectionClosed):
+                                        await blocked.recv()
+                                    assert blocked.close_code == 4409
+                                await asyncio.sleep(0.01)
+                            attached = await playwright.chromium.connect_over_cdp(gateway.cdp_url)
+                            storage = await attached.contexts[0].storage_state()
+                            assert any(cookie["name"] == "pause-proof" for cookie in storage["cookies"])
+                            events.append("backend_checkpoint_complete")
+                            return web.json_response({"world_state": {}})
+                        finally:
+                            if attached:
+                                await attached.close()
+                            pending.discard(task)
+                            backend_done.set()
+                    app = web.Application(); app.router.add_post("/api/browser-session/close", checkpoint)
+                    server = web.AppRunner(app); await server.setup()
+                    site = web.TCPSite(server, "127.0.0.1", 0); await site.start()
+                    port = site._server.sockets[0].getsockname()[1]
+                    try:
+                        await service.connect()
+                        pw_browser = await playwright.chromium.connect_over_cdp(local_url)
+                        page = pw_browser.contexts[0].pages[0]
+                        await page.goto("data:text/html,<title>pause-proof</title>")
+                        await pw_browser.contexts[0].add_cookies([{"name":"pause-proof", "value":"retained", "url":"https://fixture.test/"}])
+                        recorder = BrowserAgentRecorder(page=page, agent_id="pause-fixture", task_id="pause-fixture", session_id=TILION_SESSION, browser_url="https://fixture.test/", session_metadata={"provider":"tilion"})
+                        await recorder.start()
+                        original_recording_close = recorder.close
+                        async def recording_close(**options):
+                            assert gateway.active == 1, "recording must finish before socket handoff"
+                            result = await original_recording_close(**options)
+                            assert result is not None and result.exists()
+                            events.append("recording_captured")
+                            return result
+                        recorder.close = recording_close
+                        async def passkeys(**_options):
+                            assert await page.title() == "pause-proof"
+                            events.append("passkeys_captured")
+                            if failure == "passkey_error":
+                                raise RuntimeError("fixture passkey read failure")
+                        real_disconnect = service.disconnect
+                        async def disconnect():
+                            await real_disconnect()
+                            events.append("socket_released")
+                        service.disconnect = disconnect
+                        upstream = mux._upstream
+                        original_upstream_close = upstream.close
+                        original_upstream_wait_closed = upstream.wait_closed
+                        if failure in ("disconnect_error", "disconnect_hung"):
+                            async def rejected_upstream_close(*_args, **_kwargs):
+                                if failure == "disconnect_hung":
+                                    await asyncio.Event().wait()
+                                raise RuntimeError("fixture upstream close failure")
+                            async def rejected_upstream_wait_closed():
+                                if failure == "disconnect_hung":
+                                    await asyncio.Event().wait()
+                                raise RuntimeError("fixture upstream closure unconfirmed")
+                            if failure == "disconnect_error":
+                                upstream.close = rejected_upstream_close
+                            upstream.wait_closed = rejected_upstream_wait_closed
+                        namespace = {
+                            "asyncio":asyncio,"contextlib":contextlib,"Dict":dict,"Any":object,"BrowserSessionCloseError":BrowserSessionCloseError,
+                            "close_browser_session":close_browser_session,"_stop_kernel_replay_before_session_close":lambda _rec: asyncio.sleep(0),
+                            "browser_recorder":recorder,"config":SimpleNamespace(backend=SimpleNamespace(api_url=f"http://127.0.0.1:{port}",api_key="")),
+                            "session_id":TILION_SESSION,"current_url":"https://fixture.test/","credential_signin_realms":set(),"task_id":"pause-fixture",
+                            "world_state_receipt_summary":lambda _receipt:[],"logger":SimpleNamespace(info=lambda *a,**k:None,warning=lambda *a,**k:None),
+                            "record_passkey_usage_once":passkeys,"dom_service":service,
+                            "BROWSER_DISCONNECT_TIMEOUT_SECONDS":BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                            "_EXPIRED_OPTIONAL_CDP_TASK_NAME":"fixture-cdp-cleanup","_background_browser_cleanup_tasks":set(),
+                            "extract_error_message":str,
+                        }
+                        exec(compile(ast.fix_missing_locations(ast.Module(body=[*definitions,factory],type_ignores=[])),"native-close-helper","exec"),namespace)
+                        pause = namespace["factory"]()
+                        if failure is None:
+                            await pause()
+                            assert events.index("passkeys_captured") < events.index("recording_captured") < events.index("socket_released") < events.index("backend_checkpoint")
+                            assert events[-1] == "backend_checkpoint_complete"
+                            assert requests == [{"session_id":TILION_SESSION,"pause":True,"current_url":"https://fixture.test/"}]
+                        else:
+                            try:
+                                await pause()
+                            except BrowserSessionCloseError:
+                                pass
+                            else:
+                                raise AssertionError("failed local capture/release must reject the pause")
+                            assert not requests, "unconfirmed local release issued backend pause"
+                        assert "passkeys_captured" in events
+                        if failure in ("disconnect_error","disconnect_hung"):
+                            assert "recording_captured" in events
+                    finally:
+                        if "upstream" in locals():
+                            upstream.close = original_upstream_close
+                            upstream.wait_closed = original_upstream_wait_closed
+                            await upstream.close()
+                        if recorder is not None:
+                            recorder.close = original_recording_close
+                        await _stop_dom_service(service)
+                        if mux is not None:
+                            await mux.close()
+                        if pw_browser is not None:
+                            with contextlib.suppress(Exception): await pw_browser.close()
+                        if pending:
+                            await asyncio.wait_for(backend_done.wait(), 10)
+                        if server is not None:
+                            await server.cleanup()
+                        if recorder is not None:
+                            await recorder.abort_local(settle_timeout=2)
+                            recorder.cleanup_local_artifacts(force=True)
+                    assert gateway.active == 0, "native test left an upstream client"
+
+
+async def test_tilion_checkpoint_waits_for_pending_dial_and_real_close():
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, CdpMultiplexerUpstreamClosed
+
+    dial_started, release_dial = asyncio.Event(), asyncio.Event()
+    close_started, wait_started, acknowledge = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+    class Wire:
+        closed = False
+        async def recv(self):
+            await asyncio.Event().wait()
+        async def close(self):
+            close_started.set()
+        async def wait_closed(self):
+            wait_started.set()
+            await acknowledge.wait()
+            self.closed = True
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield ""
+    wire = Wire()
+    async def connect(_url):
+        calls.append(_url)
+        dial_started.set()
+        await release_dial.wait()
+        return wire
+    mux = SingleCdpConnectionMultiplexer("ws://127.0.0.1/fixture", upstream_connect=connect)
+    opening = asyncio.create_task(mux._ensure_upstream())
+    await dial_started.wait()
+    closing = asyncio.create_task(mux.disconnect_confirmed(mux.close))
+    await asyncio.sleep(0)
+    queued = asyncio.create_task(mux._ensure_upstream())
+    try:
+        release_dial.set()
+        await opening
+        await asyncio.wait_for(wait_started.wait(), 1)
+        assert not closing.done() and not wire.closed, "pending dial was falsely acknowledged before transport closure"
+        acknowledge.set()
+        await closing
+        assert wire.closed and len(calls) == 1
+        try:
+            await queued
+        except CdpMultiplexerUpstreamClosed:
+            pass
+        else:
+            raise AssertionError("queued redial escaped the checkpoint close fence")
+    finally:
+        release_dial.set()
+        acknowledge.set()
+        await asyncio.gather(opening, closing, queued, return_exceptions=True)
+        await mux.close()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("tilion_checkpoint_waits_for_pending_dial_and_real_close", test_tilion_checkpoint_waits_for_pending_dial_and_real_close),
+        ("tilion_pause_releases_socket_before_backend_checkpoint", test_tilion_pause_releases_socket_before_backend_checkpoint),
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
         ("tilion_regional_worker_attach_uses_one_upstream_socket", test_tilion_regional_worker_attach_uses_one_upstream_socket),

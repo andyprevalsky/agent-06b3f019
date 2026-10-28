@@ -4,10 +4,13 @@ import type { Browser, CDPSession, Frame, Page } from 'playwright';
 import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets';
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
+import { createLogger } from '../logger';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
 import type { HydrationTarget } from './resumeLifecycle';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
 import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
+
+const log = createLogger('BrowserCheckpoint');
 
 type Storage = Awaited<ReturnType<ReturnType<Browser['contexts']>[number]['storageState']>>;
 type FrameStorage = {
@@ -277,7 +280,11 @@ export async function restoreLogicalBrowserCheckpoint(
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser checkpoint restore context missing');
   await assertRestoreBinding();
-  if (!recovery?.targets) await context.setStorageState(checkpoint.storage);
+  if (!recovery?.targets) {
+    log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'storage_started' });
+    await context.setStorageState(checkpoint.storage);
+    log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'storage_completed' });
+  }
   const targets = checkpoint.tabs.length
     ? checkpoint.tabs
     : [row.currentUrl ?? row.startUrl]
@@ -329,6 +336,7 @@ export async function restoreLogicalBrowserCheckpoint(
   }
   const blank = context.pages().find((page) => page.url() === 'about:blank');
   const prepared: Array<{ page: Page; url: string; seedUrlHash?: string }> = [];
+  log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'seeding_started' });
   for (let index = 0; index < targets.length; index++) {
     await assertRestoreBinding();
     const target = targets[index]!;
@@ -365,6 +373,7 @@ export async function restoreLogicalBrowserCheckpoint(
       /* The caller retains unknown custody if provenance cannot be recorded. */
     }
   }
+  log.info('Browser checkpoint restore phase', { task_id: taskId, phase: 'navigation_started' });
   for (const { page, url } of prepared) {
     await assertRestoreBinding();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });

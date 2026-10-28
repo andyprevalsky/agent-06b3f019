@@ -8530,6 +8530,18 @@ async def _spawn_browser_agent_activity_v3_real(
                         session_id=exact_session_id,
                     )
             await _stop_kernel_replay_before_session_close(browser_recorder)
+            if pause and dom_service is not None and getattr(dom_service, "single_cdp_client", False):
+                # Preserve the recording before relinquishing the one CDP slot
+                # that the backend needs to capture the logical checkpoint.
+                if browser_recorder is not None:
+                    await browser_recorder.close(include_steel_media=False, archive_artifacts=False)
+                if not await _await_bounded_browser_cleanup(
+                    dom_service.cdp_multiplexer.disconnect_confirmed(dom_service.disconnect),
+                    timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                    timeout_message="Checkpoint CDP release timed out",
+                    failure_message="Checkpoint CDP release failed",
+                ):
+                    raise BrowserSessionCloseError(exact_session_id, pause)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
                 options["current_url"] = current_url
