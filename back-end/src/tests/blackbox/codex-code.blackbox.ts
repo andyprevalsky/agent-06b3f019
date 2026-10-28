@@ -298,16 +298,30 @@ async function testSmoke_codexCompletesE2bTask() {
       const typed = event as { type?: string; to?: string };
       return typed.type === 'auth_fallback' && typed.to === 'openai_api_key';
     });
+    // The task row records what served the run at spawn: a ChatGPT login ('user' | 'pool')
+    // or the funded Azure deployment alone ('azure').
+    const servedBy = (
+      await prisma.claudeCodeSession.findUnique({
+        where: { id: taskId },
+        select: { claudeTokenSource: true },
+      })
+    )?.claudeTokenSource;
+    assert(
+      servedBy === 'user' || servedBy === 'pool' || servedBy === 'azure',
+      `Codex task must record the credential that served it, got ${String(servedBy)}`
+    );
     if (sawRecoverableOAuthFailure) {
       assert(
         sawAuthFallback,
-        `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
+        `Codex OAuth credential failed but did NOT fall back to the Azure deployment. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via the Azure funded runtime fallback (OAuth unusable)'
+        `    ↳ codex smoke completed via the Azure funded runtime fallback (${servedBy} OAuth unusable)`
       );
+    } else if (servedBy === 'azure') {
+      console.log('    ↳ codex smoke completed on the funded Azure deployment (no ChatGPT login)');
     } else {
-      console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
+      console.log(`    ↳ codex smoke completed via ${servedBy} ChatGPT OAuth (no usage limit hit)`);
     }
 
     const { Sandbox } = await import('e2b');
