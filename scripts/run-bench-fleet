@@ -18358,6 +18358,8 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
         local desired_workers tracked_workers ready_workers terminal_deadline ready_reconcile_rc
+        local desired_read_rc desired_ready
+        local -a desired_check_rcs
         [ -e "$out/benchmark-child.finished" ] || [ "${1:-}" = "verified-runtime" ] || return 1
         # Child completion stops new metrics decisions; it does not revoke
         # capacity already committed by a prior desired-count observation. Keep
@@ -18389,8 +18391,17 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 return 1
             fi
             [ ! -s "$out/autoscaler.failed" ] || return 1
-            desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
-            if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+            desired_read_rc=0
+            desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null)" || desired_read_rc=$?
+            if printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+                :
+            else
+                desired_check_rcs=("${PIPESTATUS[@]}")
+                desired_ready=0
+                [ ! -e "$out/autoscaler.ready" ] || desired_ready=1
+                printf '  ❌ [%s] desired capacity check failed: read_exit=%s validation_exit=%s printf_exit=%s readiness=%s\n' \
+                    "$bench" "$desired_read_rc" "${desired_check_rcs[1]:-unknown}" \
+                    "${desired_check_rcs[0]:-unknown}" "$desired_ready" >&2
                 printf '%s\n' "autoscaler never observed valid desired capacity" \
                     > "$out/autoscaler.failed"
                 echo "  ❌ [$bench] mandatory autoscaler: no valid desired capacity before child completion" >&2
