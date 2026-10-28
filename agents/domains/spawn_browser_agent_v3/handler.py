@@ -8160,6 +8160,23 @@ async def _spawn_browser_agent_activity_v3_real(
     _secret_log_scope.__enter__()
 
     try:
+        if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
+            # A declined sign-in handoff ends this browser task. Continuing the
+            # model on the signed-out page can trigger another login or code
+            # request even when the original approval was correctly rejected.
+            await _close_browser_with_cleanup_receipt(session_id, pause=False)
+            await collect_unread_user_instructions()
+            return _visible_activity_result({
+                "status": "auth_assistance_declined",
+                "success": False,
+                "user_declined_auth": True,
+                "message": "The user declined sign-in assistance; no member number was retrieved.",
+                "task_id": task_id,
+                "session_id": session_id,
+                "browser_url": browser_url,
+                "usage_items": [],
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
+            })
         response_schema, schema_usage = await _refresh_browser_output_schema(
             goal=goal,
             agent_id=agent_id,

@@ -23029,7 +23029,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
 
 
 async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance():
-    """A sign-in-help denial is a native result, not task completion or sign-in."""
+    """A sign-in-help denial closes the browser before another model decision."""
     import logging
     from domains.spawn_browser_agent_v3 import handler as h
     from workflows.agent_workflow import AgentWorkflow
@@ -23059,18 +23059,14 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
                     resume_overrides={"browser_turn_messages": turns, "rejected_action": {
                         "tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
                         "request_id": "auth-request", "url": "https://example.com"}})
-                denied = [m for m in actor.captured_turns[0] if m.get("tool_call_id") == "denied-auth-call"]
-                assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
-                assert json.loads(denied[0]["content"])["success"] is False
-                assert [m["content"] for m in actor.captured_turns[0] if m.get("role") == "user"] == ([feedback] if feedback else [])
-                if feedback:
-                    assert sum(m.get("text") == feedback for m in judge.await_args.kwargs["args"][0]) == 1
-                    actor.schema_generator.assert_awaited_once()
+                actor.assert_not_awaited()
+                judge.assert_not_awaited()
                 assert actor.activity_result["task_id"] == "task-1"
+                assert actor.activity_result["user_declined_auth"] is True
 
 
 async def test_browser_empty_completion_preserves_verified_denial_for_parent():
-    """A no-argument completion must carry the accepted verdict to its parent."""
+    """The parent receives the denial without another browser completion turn."""
     from domains.spawn_browser_agent_v3 import handler as h
     from helpers.background_agents import build_agent_notification_text
 
@@ -23103,19 +23099,16 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
                                 "request_id": "denied-auth-request", "url": "https://example.com/login"},
         },
     )
-    denied = [m for m in actor.captured_turns[0] if m.get("tool_call_id") == "denied-auth-call"]
-    assert len(denied) == 1 and json.loads(denied[0]["content"])["status"] == "rejected"
-    actor.assert_awaited_once()
-    verifier.assert_awaited_once()
+    actor.assert_not_awaited()
+    verifier.assert_not_awaited()
     result = actor.activity_result
-    assert result["status"] == "completed" and result["success"] is True
-    assert result["structured_response"] == {"member_number": "", "evidence": ""}
+    assert result["status"] == "auth_assistance_declined" and result["user_declined_auth"]
     notification = build_agent_notification_text(
         recipient="/root", sender="/root/member_number", agent_type="browser",
-        status="completed", summary=result["message"], structured_response=result["structured_response"],
+        status="completed", summary=result["message"], structured_response=result.get("structured_response"),
     )
-    assert f"**Outcome**: {reason}" in result["message"], "accepted verifier explanation lost at browser completion"
-    assert reason in notification, "parent notification lost the verified denial"
+    assert "declined sign-in assistance" in result["message"]
+    assert "declined sign-in assistance" in notification
 
 
 @_in_browser_activity_context
@@ -23930,6 +23923,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             write_lock_resume_state={
                 "approval_type": approval_type,
                 "task_id": "task-1",
+                **({"session_id": "session-1"} if approval_type == "auth_assistance_declined" else {}),
                 "user_message_cursor": "2026-10-14T17:21:35.438+00:00",
                 "pending_action": pending_action,
                 **(resume_overrides or {}),
@@ -23942,6 +23936,14 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     if approved_message_intent:
         message_binding.assert_awaited_once()
+    if approval_type == "auth_assistance_declined":
+        assert result["status"] == "auth_assistance_declined" and result["user_declined_auth"]
+        assert result["success"] is False and result["session_id"] == "session-1"
+        actor_call.assert_not_awaited()
+        judge_call.assert_not_awaited()
+        close_mock.assert_awaited_once()
+        actor_call.activity_result = result
+        return actor_call, judge_call
     if actor_responses_override is not None:
         assert actor_call.await_count, "auth denial terminalized the browser before its next model decision"
         assert result["status"] == "completed" and result["success"]
@@ -24188,6 +24190,11 @@ async def test_legacy_rejection_recovers_existing_native_call_and_history():
                 provider=provider, approval_type=state["approval_type"], resume_overrides=state,
                 actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
             )
+            if kind == "auth_assistance":
+                actor.assert_not_awaited()
+                judge.assert_not_awaited()
+                assert actor.activity_result["user_declined_auth"] is True
+                continue
             observed = actor.captured_turns[0]
             assert observed[0] == original_call
             denied = [m for m in observed if m.get("tool_call_id") == "legacy-native-call"]
@@ -26841,6 +26848,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
         ]
         resume_state = {
             "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
+            **({"session_id": "session-1"} if pause == "declined" else {}),
             "secret_redaction_refs": {
                 "pwd:url": secret,
                 "card_cvv": "234",
@@ -27008,7 +27016,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             "auth": "awaiting_auth_assistance",
             "completed": "completed",
             "max_steps": "max_iterations",
-            "declined": "completed",
+            "declined": "auth_assistance_declined",
         }[pause]
         assert result["status"] == expected
         if pause == "payment":
@@ -27083,7 +27091,10 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 "label": "{{secret:pwd:url}}",
             }
             assert finished[-1]["message"] == "{{secret:pwd:url}}"
-        if pause in {"completed", "declined", "max_steps"}:
+        if pause == "declined":
+            judge.assert_not_awaited()
+            assert result["user_declined_auth"] is True
+        if pause in {"completed", "max_steps"}:
             assert judge.await_count == 1
             verifier_args = judge.await_args.kwargs["args"]
             assert verifier_args[5] == ("verifier_browser_max_steps" if pause == "max_steps" else "verifier_browser")
@@ -27113,7 +27124,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                     "text": "[image omitted from Temporal resume]",
                 }, "untrusted verifier media reached the provider"
             assert secret not in str(context)
-        if pause in {"completed", "declined", "max_steps"}:
+        if pause in {"completed", "max_steps"}:
             assert result["browser_output_schema"]["fields"][0] == {
                 **output_schema["fields"][0],
                 "description": visible_url,

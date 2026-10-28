@@ -20,9 +20,9 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
         connects.append(True)
         raise AssertionError('unexpected network in full cleanup fixture')
     with patch.object(socket.socket, 'connect', forbidden):
-        cases = [('declined', 500, False), ('completion', 500, False), ('cancellation', 500, False), ('maxstep', 500, False), ('original_error', 500, False), ('declined', 200, False), ('completion', 200, False), ('cancellation', 200, False), ('completion', 409, False), ('maxstep', 200, False), ('completion', 500, True), ('original_error', 500, True), ('completion', 200, True), ('declined_lookup_error', 500, False), ('completion_request_cancelled', None, False), ('cancellation_request_cancelled', None, False)]
+        cases = [('declined', 500, False), ('completion', 500, False), ('cancellation', 500, False), ('maxstep', 500, False), ('original_error', 500, False), ('declined', 200, False), ('completion', 200, False), ('cancellation', 200, False), ('completion', 409, False), ('maxstep', 200, False), ('completion', 500, True), ('original_error', 500, True), ('completion', 200, True), ('completion_request_cancelled', None, False), ('cancellation_request_cancelled', None, False)]
         if sealed_only:
-            cases = [("cancellation", 500, False), ("original_error", 500, False), ("declined_lookup_sealed", 500, False)]
+            cases = [("cancellation", 500, False), ("original_error", 500, False)]
         if terminal_writer_status is not None:
             cases = [("cancellation", 200, False), ("original_error", 200, False)] if terminal_writer_stage == "terminal" else [("original_error", 200, False)]
         for scenario, http_status, fail_background in cases:
@@ -177,7 +177,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             cleanup = [m for m in terminal if (m.get('extra_metadata') or {}).get('browser_cleanup')]
             closecaptures = [c for c in get_captured_requests() if '/api/browser-session/close' in c['url']]
             for close_call in close.await_args_list:
-                assert close_call.kwargs.get('pause') is True, (scenario, close_call)
+                assert close_call.kwargs.get('pause') is (not scenario.startswith('declined')), (scenario, close_call)
                 if scenario in ('completion', 'maxstep'):
                     assert close_call.kwargs.get('current_url') == 'https://example.com/login', (scenario, close_call)
 
@@ -225,7 +225,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                 continue
             if sealed_only:
                 assert error == 'WorkflowGenerationSealed', r
-                assert close.await_count == (0 if scenario == "declined_lookup_sealed" else 1), r
+                assert close.await_count == 1, r
                 assert not terminal, r
                 assert all(request['onlyPreviouslyEnqueuedMessages'] for request in post_seal_requests), post_seal_requests
                 assert not any(event['afterSeal'] for event in queue_events), queue_events
@@ -250,7 +250,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             assert len(owned_tasks) == 1, r
             if fail_background:
                 assert failed_finalize.await_count == 1, r
-            expected_status = 'cancelled' if scenario.startswith('cancellation') else 'max_iterations' if scenario == 'maxstep' else 'completed'
+            expected_status = 'cancelled' if scenario.startswith('cancellation') else 'max_iterations' if scenario == 'maxstep' else 'auth_assistance_declined' if scenario.startswith('declined') else 'completed'
             if scenario == 'declined_lookup_error':
                 assert error == 'RuntimeError' and error_message == 'owned fixture ordinary lookup failure', r
                 assert outcome is None and not actor_turns, r
@@ -259,12 +259,8 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             elif scenario != 'original_error':
                 assert error is None and outcome['status'] == expected_status, r
                 if scenario.startswith('declined'):
-                    assert outcome['success'] is True and not outcome.get('user_declined_auth'), r
-                    assert len(actor_turns) == 1, r
-                    denied = [message for message in actor_turns[0] if message.get('role') == 'tool' and message.get('tool_call_id') == 'denied-auth-call']
-                    assert len(denied) == 1 and json.loads(denied[0]['content'])['status'] == 'rejected', r
-                    assert json.loads(denied[0]['content'])['success'] is False, r
-                    assert not [message for message in actor_turns[0] if message.get('role') == 'user'], r
+                    assert outcome['success'] is False and outcome.get('user_declined_auth'), r
+                    assert not actor_turns, r
                 elif scenario == 'completion':
                     assert outcome['success'] is True, r
                 business = {key: outcome.get(key) for key in ('status', 'success', 'message', 'user_declined_auth', 'task_id', 'session_id', 'structured_response', 'best_effort_response')}

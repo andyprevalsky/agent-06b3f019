@@ -264,6 +264,12 @@ async def test_secret_placeholder_provenance_and_structured_redaction():
     with secret_logging_context({"pwd:issued": "activity-only-secret"}, fresh=True):
         assert "{{secret:pwd:issued}}" in await preview_tool_text("ref: {{secret:pwd:issued}}", **owner)
         assert "hunter2" not in await preview_tool_text(untrusted, **owner)
+        headers = {"headers": {"Authorization": "{{secret:pwd:issued}}", "api_key": "hunter2"}}
+        redacted = await bound_tool_result(headers, **owner)
+        assert redacted["headers"]["Authorization"] == "{{secret:pwd:issued}}"
+        assert redacted["headers"]["api_key"] == "[REDACTED]"
+        trusted_only = {"headers": {"Authorization": "{{secret:pwd:issued}}"}, "status": 200}
+        assert await bound_tool_result(trusted_only, **owner) == trusted_only
 
     nested = json.dumps('{"password":"hunter2"}')
     assert "hunter2" not in redact_sensitive_text(nested)

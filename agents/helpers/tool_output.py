@@ -65,11 +65,11 @@ def _storage_path(owner: tuple[str, str, str], output_id: str) -> str:
 def _safe_text(text: str) -> str:
     from browser_tools.secret_refs import current_secret_placeholders, redact_current_secret_values
 
-    # Do not let the generic key=value matcher consume a trusted placeholder
-    # and the unrelated source text immediately following its closing braces.
-    trusted = current_secret_placeholders()
-    pieces = re.split(r"(\{\{secret:[^}]+\}\})", redact_current_secret_values(text))
-    return "".join(piece if piece in trusted else redact_sensitive_text(piece) for piece in pieces)
+    # Redact complete JSON as one value. Splitting around placeholders before
+    # parsing can leave half a quoted field and produce malformed JSON.
+    return redact_sensitive_text(
+        redact_current_secret_values(text), trusted_placeholders=current_secret_placeholders()
+    )
 
 
 async def _safe_text_async(text: str) -> str:
