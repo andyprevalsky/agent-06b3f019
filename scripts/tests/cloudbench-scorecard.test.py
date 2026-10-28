@@ -384,6 +384,44 @@ class Scorecard(unittest.TestCase):
         write(args["global_history"], history)
         with self.assertRaises(ValueError): render(self.f.fleet(), self.f, iterations=5, **args)
 
+    def test_global_timeline_labels_both_rates_using_all_slots_and_breaks_gaps(self):
+        ledger, args = self.global_inputs(count=200)
+        for i, row in enumerate(ledger["rows"]):
+            if i < 24:
+                continue
+            if i == 24:
+                row["last_scored"][1]["verdict"] = "FAIL"
+            elif i < 40:
+                for receipt in row["last_scored"]:
+                    receipt["verdict"] = "FAIL"
+            else:
+                row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        snapshots = [
+            dict(experiment_id="it6", finished_at=T0 + 600, acceptance_ledger=ledger),
+            dict(experiment_id="it7", finished_at=T0 + 700, acceptance_ledger=None),
+            dict(experiment_id="it8", finished_at=T0 + 800, acceptance_ledger=ledger),
+            dict(experiment_id="it9", finished_at=T0 + 900, acceptance_ledger=ledger),
+        ]
+        write(args["global_acceptance"], ledger)
+        args["global_history"] = write(self.tmp / "timeline.json", dict(
+            schema="descend-global-history-v1", selected_tasks_sha256=args["selected_tasks_sha256"],
+            task_count=200, k=2, snapshots=snapshots))
+        data = render(self.f.fleet(), self.f, iterations=9, **args)
+        html = self.valid(data)
+        self.assertEqual(data["global_progress"]["slot_counts"], dict(PASS=49, FAIL=31, UNKNOWN=0, UNRUN=320))
+        self.assertEqual(html.count('data-label="PASS"'), 3)
+        self.assertEqual(html.count('data-label="FAIL"'), 3)
+        self.assertEqual(html.count('>12.2%</text>'), 3)
+        self.assertEqual(html.count('>7.8%</text>'), 3)
+        self.assertEqual(html.count('data-series="PASS"'), 1)  # it8 -> it9 only
+        self.assertEqual(html.count('data-series="FAIL"'), 1)
+        self.assertIn('full 400 slots', html)
+        self.assertIn('missing snapshot', html)
+        self.assertNotIn('61.3%', html)  # 49/80 is not global coverage
+        text = CARD["render_text"](data)
+        self.assertIn('it6: PASS 12.2% · FAIL 7.8% of 400 slots', text)
+        self.assertIn('it7: gap', text)
+
     def test_descent_strict_color_boundaries_and_unknowns(self):
         data = render(self.f.fleet(), self.f, iterations=2)
         exp = data["experiment"]

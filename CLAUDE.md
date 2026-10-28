@@ -43,9 +43,11 @@ For every `/descend` scorecard, show a full-selected-suite cake chart with
 N selected tasks × latest X individual scored-run slots (200 × 2 = 400).
 Green is one scored PASS, red one scored FAIL, gray no scored result in an
 explicitly unfilled slot (unscored attempts may exist), amber unknown evidence. Do not collapse a task's X results into one
-color. The global time graph is individual PASS / (N × X), using original
-finish clocks and leaving missing snapshots as gaps. Keep historical X/X task
-qualification and final-source qualification separate. Publish HTML embeddings
+color. The global time graph is a stacked-area timeline of PASS, FAIL, no scored
+result and unknown slots, each divided by N × X. Show visible PASS% and FAIL%
+labels beside every valid recorded point. Use original experiment finish clocks
+and leave missing snapshots as gaps in every layer, never interpolated values.
+Keep historical X/X task qualification and final-source qualification separate. Publish HTML embeddings
 only; never send, attach or display screenshots/images for these scorecards.
 Private DOM/count/overflow inspection is allowed without screenshot output.
 For measured `/descend` KPIs, color infra below 5% green using the original

@@ -1385,7 +1385,9 @@ ul{list-style:none;margin:0;padding:0;font-size:13px}li{margin:2px 0;overflow-wr
 .hist{border-top:1px solid var(--line);padding:6px 0;font-size:13px}.hist:first-of-type{border-top:0}
 .hist .l1{display:flex;flex-wrap:wrap;gap:2px 10px;font-weight:650}.hist .l2,.hist .l3{color:var(--muted);overflow-wrap:anywhere}
 .hist .l3{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
-.trend svg{display:block;width:100%;height:auto;max-height:180px}.trend text{fill:var(--fg);font-size:15px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .path{fill:none;stroke:var(--ok);stroke-width:2}.trend .dot{fill:var(--ok);stroke:var(--ok);stroke-width:2}.trend .dot.running{fill:light-dark(#fff,#0d1117)}
+.trend svg{display:block;width:100%;height:auto;max-height:300px}.trend text{fill:var(--fg);font-size:15px}.trend .grid{stroke:var(--line);stroke-width:1}.trend .path{fill:none;stroke:var(--ok);stroke-width:2}.trend .dot{fill:var(--ok);stroke:var(--ok);stroke-width:2}.trend .dot.running{fill:light-dark(#fff,#0d1117)}
+[data-section="global-trend"] svg{max-height:none}.trend .point-label{font-size:18px;font-weight:650}
+@media(max-width:500px){.trend .point-label{font-size:26px}}
 .agents{display:grid;grid-template-columns:1fr auto auto auto;gap:2px 10px;font-size:13px;font-variant-numeric:tabular-nums}
 .agents .h{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.agents .life{text-align:right}
 .agents .why{grid-column:1/-1;color:var(--bad);font-size:12px;padding-left:18px}
@@ -1797,7 +1799,7 @@ def render_text(card: dict) -> str:
                      (f'{gp["slot_counts"]} / {gp["slot_count"]} individual run slots; final-source-qualified {gp["final_source_qualified"]}/{gp["task_count"]}' if gp else "UNRECORDED"))
         lines.append("LLM latency " + global_mod.latency_text(card.get("observed_telemetry")))
         lines.append("GLOBAL SUCCESS RATE OVER TIME: " + (" · ".join(
-            f'{r["id"]}: {r["rate"]*100:.1f}%' if r["rate"] is not None else f'{r["id"]}: gap'
+            f'{r["id"]}: PASS {r["slot_counts"]["PASS"] / gp["slot_count"] * 100:.1f}% · FAIL {r["slot_counts"]["FAIL"] / gp["slot_count"] * 100:.1f}% of {gp["slot_count"]} slots' if r.get("slot_counts") is not None else f'{r["id"]}: gap'
             for r in (gp or {}).get("history", [])) or "UNMEASURED"))
     if card.get("iterations") is None and card.get("trend") and (len(card["trend"]) > 3 or (card.get("iterations") or 0) > 3):
         lines.append("SUCCESS RATE OVER TIME")

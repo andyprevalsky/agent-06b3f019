@@ -170,7 +170,8 @@ def load(acceptance, selected, selected_sha256, history, now, expected_k=None):
             item = snapshot.get("acceptance_ledger")
             point = project(item, names, at, expected_k) if item is not None else None
             result["history"].append({"id": identity, "finished_at": at,
-                                      "rate": point["slot_pass_fraction"] if point else None})
+                                      "rate": point["slot_pass_fraction"] if point else None,
+                                      "slot_counts": point["slot_counts"] if point else None})
         result["history_sha256"] = history_sha
     return result
 
@@ -214,23 +215,60 @@ def clock_label(epoch):
 
 def curve(progress):
     rows = (progress or {}).get("history", [])
-    parts = ['<section data-section="global-trend" class="trend"><h2>GLOBAL SUCCESS RATE OVER TIME</h2>']
+    parts = ['<section data-section="global-trend" class="trend"><h2>GLOBAL SUCCESS RATE OVER TIME · PASS + FAIL</h2>']
     if not rows:
         return ''.join(parts) + '<p class="warn">UNMEASURED · no verified full-suite history snapshots</p></section>'
     start, end = rows[0]["finished_at"], rows[-1]["finished_at"]
-    x = lambda at: 40 + 620 * (at - start) / (end - start) if end > start else 350
-    y = lambda rate: 125 - 100 * rate
-    parts.append('<svg viewBox="0 0 690 185" role="img" aria-label="Historical full-suite individual scored-run coverage by original experiment finish; missing snapshots are gaps"><text x="0" y="29">100%</text><text x="10" y="129">0%</text>')
-    for a, b in zip(rows, rows[1:]):
-        if a["rate"] is not None and b["rate"] is not None:
-            parts.append(f'<path class="path" d="M{x(a["finished_at"]):.2f} {y(a["rate"]):.2f} L{x(b["finished_at"]):.2f} {y(b["rate"]):.2f}"/>')
-    for row in rows:
-        if row["rate"] is not None:
-            parts.append(f'<circle class="dot" cx="{x(row["finished_at"]):.2f}" cy="{y(row["rate"]):.2f}" r="4"><title>{e_text(row["id"])}: {row["rate"] * 100:.1f}% · {clock_label(row["finished_at"])}</title></circle>')
+    n = progress["task_count"] * progress["k"]
+    x = lambda at: 48 + 594 * (at - start) / (end - start) if end > start else 345
+    label_lanes, lane_ends = {}, []
+    for index, row in enumerate(rows):
+        if row.get("slot_counts") is None:
+            continue
+        px = x(row["finished_at"])
+        lane = next((i for i, end_x in enumerate(lane_ends) if px - end_x >= 86), len(lane_ends))
+        if lane == len(lane_ends):
+            lane_ends.append(px)
         else:
-            parts.append(f'<circle cx="{x(row["finished_at"]):.2f}" cy="145" r="2" fill="none" stroke="var(--na)"><title>{e_text(row["id"])}: missing snapshot · {clock_label(row["finished_at"])}</title></circle>')
-    parts.append(f'<text x="40" y="175">{clock_label(start)}</text><text x="660" y="175" text-anchor="end">{clock_label(end)}</text>')
-    return ''.join(parts) + f'</svg><p class="note">Individual PASS / ({progress["task_count"]} selected tasks × {progress["k"]} latest run slots). Original experiment finish clocks; missing snapshots are not bridged. Hollow marks indicate missing snapshots.</p></section>'
+            lane_ends[lane] = px
+        label_lanes[index] = lane
+    margin = 40 + 40 * max(1, len(lane_ends))
+    baseline, height = margin + 140, margin * 2 + 180
+    y = lambda rate: baseline - 140 * rate
+    statuses = ("PASS", "FAIL", "UNRUN", "UNKNOWN")
+    parts.append(f'<svg viewBox="0 0 690 {height}" role="img" aria-label="Full-suite PASS, FAIL, no scored result and unknown percentages over original experiment finish time; missing snapshots are gaps"><text x="0" y="{margin + 4}">100%</text><text x="10" y="{baseline + 4}">0%</text>')
+    # Only adjacent, independently recorded snapshots form an area. Missing
+    # snapshots break every layer, rather than becoming invented empty slots.
+    for a, b in zip(rows, rows[1:]):
+        if a.get("slot_counts") is None or b.get("slot_counts") is None:
+            continue
+        bottom_a = bottom_b = 0
+        for status in statuses:
+            top_a = bottom_a + a["slot_counts"][status] / n
+            top_b = bottom_b + b["slot_counts"][status] / n
+            path = f'M{x(a["finished_at"]):.2f} {y(bottom_a):.2f} L{x(b["finished_at"]):.2f} {y(bottom_b):.2f} L{x(b["finished_at"]):.2f} {y(top_b):.2f} L{x(a["finished_at"]):.2f} {y(top_a):.2f} Z'
+            parts.append(f'<path data-series="{status}" d="{path}" fill="{COLORS[status]}" fill-opacity=".3"/>')
+            bottom_a, bottom_b = top_a, top_b
+    for index, row in enumerate(rows):
+        counts = row.get("slot_counts")
+        if counts is None:
+            parts.append(f'<circle cx="{x(row["finished_at"]):.2f}" cy="{baseline + 12}" r="3" fill="none" stroke="var(--na)"><title>{e_text(row["id"])}: missing snapshot · {clock_label(row["finished_at"])}</title></circle>')
+            continue
+        cumulative = 0
+        for status in statuses:
+            rate = counts[status] / n
+            cumulative += rate
+            if status not in ("PASS", "FAIL"):
+                continue
+            px, py = x(row["finished_at"]), y(cumulative)
+            label_y = 24 + label_lanes[index] * 40 if status == "PASS" else baseline + 38 + label_lanes[index] * 40
+            label = f'{rate * 100:.1f}%'
+            parts.append(f'<circle class="dot" data-point="{status}" cx="{px:.2f}" cy="{py:.2f}" r="3" style="fill:{COLORS[status]};stroke:{COLORS[status]}"><title>{e_text(row["id"])}: {status} {label} ({counts[status]}/{n}) · {clock_label(row["finished_at"])}</title></circle>')
+            parts.append(f'<path d="M{px:.2f} {py:.2f} L{px:.2f} {label_y:.2f}" stroke="{COLORS[status]}" stroke-opacity=".35" fill="none"/>')
+            parts.append(f'<text class="point-label" data-label="{status}" x="{px:.2f}" y="{label_y:.2f}" text-anchor="middle" style="fill:{COLORS[status]}">{label}</text>')
+    parts.append(f'<text x="48" y="{height - 3}">{clock_label(start)}</text><text x="642" y="{height - 3}" text-anchor="end">{clock_label(end)}</text>')
+    legend = ''.join(f'<span style="color:{COLORS[status]}">■ {"NO SCORED RESULT" if status == "UNRUN" else status}</span>' for status in statuses)
+    return ''.join(parts) + f'</svg><div class="legend">{legend}</div><p class="note">PASS and FAIL percentages each use the full {n} slots ({progress["task_count"]} selected tasks × {progress["k"]} latest run slots), not only scored results. Original experiment finish clocks; missing snapshots are not bridged. Hollow marks indicate missing snapshots.</p></section>'
 
 
 def e_text(value):

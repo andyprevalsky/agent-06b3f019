@@ -266,10 +266,12 @@ FAIL contributes one green and one red slot, never a single task-level color.
 Missing task rows are unknown, never assumed unrun. Label these historical
 outcomes; keep X/X task qualification and final-source acceptance separate.
 
-Use individual PASS slots divided by N × X as the only global time graph,
-at original experiment finish
-clocks. Missing snapshots are gaps; do not substitute slice percentages or
-invent earlier history. Preserve the existing greater-than-three-iterations
+Use a stacked-area global timeline at original experiment finish clocks.
+Its green PASS, red FAIL, gray no-scored-result and amber unknown layers each
+use the full N × X slot denominator. Put visible PASS% and FAIL% labels beside
+every valid recorded point; never use the scored-only KPI denominator here.
+Missing snapshots are gaps in every layer; do not interpolate across them,
+substitute slice percentages or invent earlier history. Preserve the existing greater-than-three-iterations
 threshold and last-ten experiment rows. Remove current-slice outcome bars and
 the lifecycle display section for descents; underlying lifecycle, custody,
 release checks and unresolved issues remain intact. Generic benchmark displays
