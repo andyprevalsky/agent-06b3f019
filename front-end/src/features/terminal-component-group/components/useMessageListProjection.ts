@@ -4,7 +4,6 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import type { Message } from '../hooks';
 import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
-import { useDisplayDestination } from './rose-apps/useDisplayDestination';
 import { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { useTrajectoryWorkGroups } from './useTrajectoryWorkGroups';
 export function useMessageListProjection({
@@ -31,7 +30,6 @@ export function useMessageListProjection({
     () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
     [filteredMessages, roseDesktop],
   );
-  const openDisplay = useDisplayDestination(visibleMessages, selectedAgentId, roseDesktop);
   const displayGrouping = useMemo(
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
     [visibleMessages, roseDesktop],
@@ -50,5 +48,5 @@ export function useMessageListProjection({
     currentAnimatingId,
     onAnimationComplete,
   );
-  return { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups };
+  return { visibleMessages, displayGrouping, localExchanges, workGroups };
 }
