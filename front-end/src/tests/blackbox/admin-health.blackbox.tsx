@@ -94,7 +94,7 @@ describe('AdminHealth page', () => {
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
     expect(
       screen.getByText(
-        'Completed / finished real agent runs started in the selected period, with a retried goal counted once. Running or archived-while-running tasks have no outcome yet; chat-only questions, benchmarks, test fixtures and simulations are excluded.',
+        'Completed / finished agent runs by Andy, Tamara, Aman and subscribed users in the selected period; a core-team retry of the same goal counts once. Running or archived-while-running tasks have no outcome yet; chat-only questions, benchmarks, test accounts and simulations are excluded.',
       ),
     ).toBeInTheDocument();
     // Cost labels/values appear in both the summary strip and chart legend.

@@ -2,11 +2,9 @@ import { Prisma } from '@prisma/client';
 
 import { ARCHIVED_AGENT_STATUS_MESSAGE } from '../../providers/agentKill';
 import { prisma } from '../../providers/database';
-import {
-  agentRanToolsSql,
-  realRootAgentSql,
-  realTaskOwnerSql,
-} from '../../providers/realAgentRuns';
+import { agentRanToolsSql, realRootAgentSql } from '../../providers/realAgentRuns';
+import { realWaitlistPersonSql } from '../../providers/waitlistIdentity';
+import { ADMIN_HEALTH_ADDITIONAL_PHONES, ADMIN_USER_IDS } from './config';
 import type { RootTaskRecord } from './repo';
 
 export type ProductRootTaskRecord = Pick<
@@ -15,15 +13,21 @@ export type ProductRootTaskRecord = Pick<
 > & {
   /** Archived while still running: FAILED by the archive, never a real outcome. */
   archivedBeforeOutcome: boolean;
+  /** Andy, Tamara or Aman (by id or phone); their retried goals are collapsed. */
+  coreTeam: boolean;
 };
+
+const CORE_TEAM_PHONE_DIGITS = [...ADMIN_HEALTH_ADDITIONAL_PHONES].map((phone) => phone.slice(-10));
 
 /**
  * Live roots + latest archived roots -> real agent runs -> completion rate.
- * Uses the shared real-agent-run definition (providers/realAgentRuns, also used
- * by /biz-review): root, non-benchmark, real world model, operator or real
- * person, and at least one non-chat tool call. The core team is the in-app
- * population today, so the old customer-only cohort was empty and the rate was
- * stuck at 0%; their repeated test goals are collapsed in series.ts instead.
+ * Runs use the shared real-agent-run shape (providers/realAgentRuns, also used
+ * by /biz-review): root, non-benchmark, real world model, at least one
+ * non-chat tool call. Population (Andy, October 28 2026): the core team (Andy,
+ * Tamara, Aman by user id or phone) plus real people; series.ts then keeps
+ * only people subscribed at that period's end (the same Stripe lifecycles the
+ * "People in App" card uses, without invite-code redeemers).
+ * Unsubscribed users and synthetic/fixture accounts never count.
  * Indexed date windows and an indexed live-ID anti-join keep this a single
  * dashboard query, with no per-agent requests or new runtime bookkeeping.
  */
@@ -57,13 +61,22 @@ export async function findProductRootTasksBetween(
       -- Filter after DISTINCT ON: the latest archive row decides provenance.
       WHERE history."wasAgentRun" = true AND history."isBenchmark" = false
         AND history."worldModelMode" = 'real'
+    ), owners AS (
+      SELECT roots.*,
+             (roots."userId" IN (${Prisma.join([...ADMIN_USER_IDS])})
+               OR (RIGHT(regexp_replace(COALESCE(person.phone, ''), '[^0-9]', '', 'g'), 10)
+                     IN (${Prisma.join(CORE_TEAM_PHONE_DIGITS)})
+                   AND ${realWaitlistPersonSql('person')})) AS "coreTeam",
+             ${realWaitlistPersonSql('person')} AS "realPerson"
+      FROM roots
+      INNER JOIN "User" person ON person."userId" = roots."userId"
     )
-    SELECT roots."taskId", roots."userId", roots.goal, roots."createdAt", roots.status,
-           (roots.status = 'FAILED'
-             AND roots."statusMessage" IS NOT DISTINCT FROM ${ARCHIVED_AGENT_STATUS_MESSAGE})
-             AS "archivedBeforeOutcome"
-    FROM roots
-    INNER JOIN "User" person ON person."userId" = roots."userId"
-    WHERE ${realTaskOwnerSql(Prisma.sql`roots."userId"`, 'person')}
+    SELECT owners."taskId", owners."userId", owners.goal, owners."createdAt", owners.status,
+           (owners.status = 'FAILED'
+             AND owners."statusMessage" IS NOT DISTINCT FROM ${ARCHIVED_AGENT_STATUS_MESSAGE})
+             AS "archivedBeforeOutcome",
+           owners."coreTeam"
+    FROM owners
+    WHERE owners."coreTeam" OR owners."realPerson"
   `);
 }
