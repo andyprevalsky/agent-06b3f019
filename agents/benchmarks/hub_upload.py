@@ -112,58 +112,126 @@ def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0
     return min(300.0, max(float(base_timeout), derived))
 
 
-# The backend accepts JSON bodies up to 100MB (back-end/src/server.ts). A
-# 26-task run record is ~125MB, almost all of it raw worker log lines, and the
-# 413 that came back turned a fully passing run into a failed invocation.
-HUB_UPLOAD_MAX_BYTES = 90 * 1024 * 1024
-WORKER_LOG_TRIM_KEY = "worker_logs"
+# The Hub parses POST /api/benchmarks/runs with the backend's single global
+# JSON parser, `app.use(express.json({ limit: '100mb' }))` in
+# back-end/src/server.ts. body-parser applies that limit to the inflated body,
+# i.e. exactly the JSON bytes measured here, so the trimmer targets the same
+# value. Keep the two declarations equal: the agents `benchmark` blackbox reads
+# server.ts and fails if they diverge (a 90MB target once hid the real defect).
+HUB_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+# Rendered evidence: the graded transcript and the agent tree.
+_RENDERED_LOG_KEYS = frozenset({"messages", "tree"})
 
 
 def _encoded_size(value) -> int:
     return len(json.dumps(value, default=str).encode("utf-8"))
 
 
-def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BYTES) -> dict:
-    """Keep the upload under the Hub's body limit by shortening raw worker logs.
+def _dedupe_repeated_evidence(owner: dict, task_logs: dict | None) -> int:
+    """Replace exact copies of rendered evidence with references; return copies removed.
 
-    Transcripts, trees and evaluator evidence are what the Hub renders, so they
-    are never touched. Worker log lines are dropped oldest-first from the task
-    that has the most, and each task records how many were left out. The full
-    record stays on disk in ``runs/*.json``.
+    A failed or skipped task stores the agent tree in ``logs.tree`` and again in
+    ``logs.failure_evidence.benchmark_state.tree``, and its graded
+    ``owned_roots`` record carries the very same logs object. Sending them
+    verbatim multiplies the largest block of the record (4x for mass-agent).
     """
+    removed = 0
+    logs = owner.get("logs")
+    if not isinstance(logs, dict):
+        return removed
+    if task_logs is not None and logs == task_logs:
+        owner["logs"] = {"same_as_task_logs": True}
+        return 1
+    evidence = logs.get("failure_evidence")
+    state = evidence.get("benchmark_state") if isinstance(evidence, dict) else None
+    if isinstance(state, dict) and state.get("tree") and state.get("tree") == logs.get("tree"):
+        logs["failure_evidence"] = {**evidence, "benchmark_state": {
+            **{key: value for key, value in state.items() if key != "tree"}, "tree_same_as_logs_tree": True,
+        }}
+        removed += 1
+    return removed
+
+
+def _trim_heaviest_log_list(owners: list[dict], *, rendered: bool) -> bool:
+    """Halve the heaviest log list, oldest entries first; False when none remain."""
+    candidates = [
+        (owner["logs"], key)
+        for owner in owners
+        for key, value in owner["logs"].items()
+        if isinstance(value, list) and value and (key in _RENDERED_LOG_KEYS) == rendered
+    ]
+    if not candidates:
+        return False
+    logs, key = max(candidates, key=lambda item: _encoded_size(item[0][item[1]]))
+    lines = logs[key]
+    dropped = len(lines) - len(lines) // 2
+    logs[key] = lines[dropped:]
+    logs[f"{key}_omitted_for_upload"] = int(logs.get(f"{key}_omitted_for_upload") or 0) + dropped
+    return True
+
+
+def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int | None = None) -> dict:
+    """Keep the upload under the Hub's body limit without touching grading.
+
+    Task identity, status and summary fields are never changed. In order:
+    exact duplicate evidence becomes a reference; diagnostic log lists are
+    shortened oldest-first (heaviest first); only then the graded transcript,
+    again oldest-first. The agent tree the Hub renders is kept whole. Each owner
+    records how many entries were left out; the full record stays on disk in
+    ``runs/*.json``. A body that still cannot fit raises instead of sending a
+    request the Hub is certain to reject.
+    """
+    max_bytes = HUB_UPLOAD_MAX_BYTES if max_bytes is None else max_bytes
     if _encoded_size(body) <= max_bytes:
         return body
     fitted = dict(body)
     tasks = [dict(task) if isinstance(task, dict) else task for task in fitted.get("tasks") or []]
     fitted["tasks"] = tasks
+    owners: list[dict] = []
+    duplicates = 0
     for task in tasks:
-        if isinstance(task, dict) and isinstance(task.get("logs"), dict):
-            task["logs"] = dict(task["logs"])
+        if not isinstance(task, dict):
+            continue
+        original_logs = task.get("logs")
+        if isinstance(original_logs, dict):
+            task["logs"] = dict(original_logs)
+            owners.append(task)
+        duplicates += _dedupe_repeated_evidence(task, None)
+        if isinstance(task.get("owned_roots"), list):
+            records = []
+            for record in task["owned_roots"]:
+                if isinstance(record, dict):
+                    record = dict(record)
+                    if isinstance(record.get("logs"), dict):
+                        if record["logs"] == original_logs:
+                            duplicates += _dedupe_repeated_evidence(record, original_logs)
+                        else:
+                            record["logs"] = dict(record["logs"])
+                            duplicates += _dedupe_repeated_evidence(record, None)
+                            owners.append(record)
+                records.append(record)
+            task["owned_roots"] = records
     while _encoded_size(fitted) > max_bytes:
-        candidates = [
-            task
-            for task in tasks
-            if isinstance(task, dict)
-            and isinstance((task.get("logs") or {}).get(WORKER_LOG_TRIM_KEY), list)
-            and task["logs"][WORKER_LOG_TRIM_KEY]
-        ]
-        if not candidates:
+        if not (_trim_heaviest_log_list(owners, rendered=False)
+                or _trim_heaviest_log_list([o for o in owners if isinstance(o["logs"].get("messages"), list)
+                                            and len(o["logs"]["messages"]) > 1], rendered=True)):
             break
-        heaviest = max(candidates, key=lambda task: _encoded_size(task["logs"][WORKER_LOG_TRIM_KEY]))
-        lines = heaviest["logs"][WORKER_LOG_TRIM_KEY]
-        keep = len(lines) // 2
-        dropped = len(lines) - keep
-        heaviest["logs"][WORKER_LOG_TRIM_KEY] = lines[dropped:]
-        heaviest["logs"]["worker_logs_omitted_for_upload"] = (
-            int(heaviest["logs"].get("worker_logs_omitted_for_upload") or 0) + dropped
-        )
     omitted = sum(
-        int((task.get("logs") or {}).get("worker_logs_omitted_for_upload") or 0)
-        for task in tasks
-        if isinstance(task, dict)
+        int(value or 0)
+        for owner in owners
+        for key, value in owner["logs"].items()
+        if key.endswith("_omitted_for_upload")
     )
     limit_mb = max_bytes // (1024 * 1024)
-    print(f"✂️  Hub upload: left out {omitted} oldest worker log line(s) to fit the {limit_mb}MB body limit")
+    size = _encoded_size(fitted)
+    print(
+        f"✂️  Hub upload: replaced {duplicates} duplicate evidence cop(ies) and left out {omitted} "
+        f"oldest log entr(ies) to fit the {limit_mb}MB body limit ({size} bytes)"
+    )
+    if size > max_bytes:
+        raise HubVisibilityError(
+            f"benchmark Hub bundle is {size} bytes after fitting, above the {max_bytes}-byte body limit"
+        )
     return fitted
 
 
@@ -671,7 +739,13 @@ def _post_run_bundle(
         return False
     body = prepare_run_bundle_for_upload(_with_run_group(bundle), live=live, required=required)
     body.setdefault("source", "manual-run")
-    body = fit_bundle_to_upload_limit(body)
+    try:
+        body = fit_bundle_to_upload_limit(body)
+    except HubVisibilityError as error:
+        if required:
+            raise
+        print(f"⚠️  {label} upload skipped: {error}")
+        return False
     payload = json.dumps(body, default=str).encode("utf-8")
     payload_bytes = len(payload)
     effective_timeout = upload_timeout_for_payload(payload_bytes, base_timeout=timeout)

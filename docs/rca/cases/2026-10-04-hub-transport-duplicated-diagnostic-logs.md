@@ -10,6 +10,9 @@ first_bad_boundary: Hub uploader included duplicated process logs in its termina
 symptoms:
   - Fifty evaluated task rows remained live after final upload returned HTTP 413
   - Gzip transport fit upstream size limits but failed the decoded Express limit
+  - "Hub upload: left out 0 oldest worker log line(s) to fit the 90MB body limit"
+  - "benchmark Hub upload failed: HTTP Error 413" response_error="request entity too large" after test-mass-agent-run-0
+  - scripts/run-predeploy-local exits 1 although every graded task passed or skipped
 tags:
   - benchmark-hub
   - publication
@@ -19,8 +22,10 @@ sources:
   - fleet run 20261004-201108-11163
   - PR #1453
   - agent bb938dbe-1cc2-437c-80e7-faf31f300ce2
+  - benchmark run b90db716-5649-429b-8f12-4ccd267e05f4 (test-mass-agent-run-0, 2026-10-28)
+  - memory:local-bench-hub-413-large-run
 repro: scripts/tests/benchmark-live-results.test.py
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -60,9 +65,7 @@ before teardown, with compact tests cemented in deployment.
 
 ## Reusable lesson
 
-A compressed body can still exceed a decoded parser limit. Keep duplicated
-forensic blobs out of the view transport without truncating evidence or raising
-the memory boundary.
+A compressed body can still exceed a decoded parser limit: bind the uploader's size target to the parser's limit and make the fitter remove exact duplicates before it trims anything.
 
 
 ## 2026-10-17 recurrence: owned-root logs bypassed the existing transport projection
@@ -236,3 +239,60 @@ Owning regressions: `agents/benchmarks/archived_diagnostics_test.py` and
 in `agents/tests/blackbox/benchmark.blackbox.py`. Private proof/body/receipt
 artifacts remain encrypted; nonsensitive terminal preservation receipts are in
 `docs/handoffs/whm-b07d9037-preservation/run17-infra-verification60m.json`.
+
+
+## 2026-10-28 recurrence: fit helper could not shrink duplicated failure evidence
+
+Local pre-deploy smoke `test-mass-agent-run-0` (run
+`b90db716-5649-429b-8f12-4ccd267e05f4`, branch feat/omni-video-code-agent)
+wrote a 176,445,534-byte run record and exited 1: the isolated backend answered
+HTTP 413 and `HubVisibilityError` replaced the result marker (also seen on
+2026-10-24 with a 172 MB record). The task itself was SKIPPED, not failed.
+
+Field measurement of the real file after the existing projection: decoded body
+140,345,162 bytes against the 104,857,600-byte Express limit. The agent tree
+(33.6 MB) was sent four times: `logs.tree`, `logs.failure_evidence.benchmark_state.tree`
+(`_capture_task_failure_evidence` keeps the whole `_benchmark` state, which
+already holds the tree), and the graded `owned_roots` record, whose `logs` is the
+same object as the task logs (`_bind_task_root_custody`). Projection had already
+removed worker logs, so `fit_bundle_to_upload_limit` (worker-log-only) found
+nothing, printed "left out 0", and returned the oversized body. Its 90 MiB
+target was a separate unbound literal; the real parser limit is exactly
+100 MiB of inflated bytes (verified: express.json 104,857,600 -> 201,
+104,857,601 -> 413).
+
+This is the open preflight limitation recorded in the 2026-10-17 append.
+
+### Fix
+
+- `HUB_UPLOAD_MAX_BYTES` now equals the backend parser limit; the
+  agents `benchmark` blackbox reads `back-end/src/server.ts` and fails when the
+  two declarations diverge (the uploader runs as a standalone copied script on
+  fleet guests, so it cannot import a shared file).
+- The fit helper resolves the limit at call time and, only when oversized:
+  replaces exact duplicates with references (`same_as_task_logs`,
+  `tree_same_as_logs_tree`); then halves the heaviest diagnostic log list
+  oldest-first; then, last, the graded transcript oldest-first. The rendered
+  tree, task identity/status/summary and the local record are never changed.
+  A body that still cannot fit raises before sending (required) or is skipped
+  with a warning (optional) instead of sending a certain 413.
+
+### Proof
+
+- Repro: `test_hub_upload_fits_duplicated_failure_record_under_backend_body_limit`
+  in `agents/tests/blackbox/benchmark.blackbox.py` (actual `upload_run_bundle`
+  against a loopback Hub enforcing the decoded limit). Before: limit-equality
+  assertion failed (90 MiB vs 100 MiB); with only the limit aligned it failed
+  with `HubVisibilityError ... HTTP Error 413`. After: PASS, 5/5 consecutive runs.
+- Real 176 MB file through the actual upload path to a loopback server with the
+  100 MiB decoded limit: before, 413 at 140,345,162 decoded bytes; after, 201 at
+  36,562,019 decoded bytes (8,136,026 gzip), two duplicate copies replaced, zero
+  log entries dropped, tree/messages/summary/status unchanged.
+- `agents/benchmarks/hub_upload_test.py` 53 passed; 9 Hub blackbox cases passed.
+- Outcome rerun of the exact local benchmark was not run here (an active
+  /deploy owned the checkout and local stacks); the deploy smoke rerun is the
+  outcome check.
+
+Human feedback for this recurrence: the user required one source of truth for
+the limit, no arbitrary limit increase (10k-agent request size), and preserving
+grading results and newest evidence.
