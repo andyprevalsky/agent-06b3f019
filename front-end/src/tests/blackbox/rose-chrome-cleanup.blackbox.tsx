@@ -439,6 +439,29 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     expect(rootLayerZ(panel)).toBeGreaterThan(rootLayerZ(composer));
   });
 
+  it('Settings opened from the account row stacks above the floating query box', async () => {
+    // Andy: "when i click the settings pane (it should be z-indexed above querybox)".
+    // Nothing insets the chat column for a right panel, so the 560px Settings
+    // drawer overlaps the centered composer; under it, the query box covered
+    // the bottom of the Settings forms.
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    // A just-onboarded account has no profile name yet: the row reads "Account".
+    await user.click(await screen.findByRole('button', { name: 'Account' }));
+    const panel = screen
+      .getAllByTestId('rose-app-panel')
+      .find((drawer) => drawer.dataset.state === 'open');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-settings')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
+    // The top-right icon row that toggles it stays above its corner.
+    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(panel));
+  });
+
   it('an app opened while project settings is open covers the drawer, not the reverse', async () => {
     const user = userEvent.setup({ delay: null });
     await renderTerminal(true);
