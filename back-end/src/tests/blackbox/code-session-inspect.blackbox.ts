@@ -46,6 +46,7 @@ import {
   inspectCodeSession,
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
+import { fakeInspectCli } from './code-session-inspect.fake-cli';
 
 config();
 
@@ -66,6 +67,8 @@ const ENV_KEYS = [
   'CODE_SESSION_STORAGE_LOCAL_DIR',
   'ANTHROPIC_API_KEY',
   'GPT_API_KEY',
+  'AZURE_FOUNDRY_ENDPOINT_3',
+  'AZURE_FOUNDRY_API_KEY_3',
   'CLAUDE_CODE_ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
   'ANTHROPIC_BASE_URL',
@@ -98,77 +101,7 @@ async function restoreCooldownRow(): Promise<void> {
   });
 }
 
-/**
- * Scripted CLIs. claude reads the question on stdin; codex gets it as the last
- * argument and writes its answer to --output-last-message. Each run records
- * what it saw (argv, cwd, env, guard results) to cli-runs.jsonl.
- */
-const FAKE_CLI = String.raw`#!/usr/bin/env python3
-import json, os, pathlib, subprocess, sys
-CLI = os.path.basename(sys.argv[0])
-LOG = pathlib.Path(${JSON.stringify(cliLog)})
-MODE = pathlib.Path(${JSON.stringify(modeFile)})
-REAL_GIT = ${JSON.stringify(realGit)}
-mode = MODE.read_text().strip() if MODE.exists() else "answer"
-argv = sys.argv[1:]
-if CLI == "codex" and argv[:1] == ["login"]:
-    sys.stdin.read()
-    sys.exit(0)
-prompt = sys.stdin.read() if CLI == "claude" else argv[-1]
-
-def run(cmd):
-    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return {"cmd": cmd, "rc": p.returncode, "out": p.stdout.strip()[-300:], "err": p.stderr.strip()[-300:]}
-
-record = {"cli": CLI, "argv": argv, "cwd": os.getcwd(), "prompt": prompt, "mode": mode,
-          "path0": os.environ.get("PATH", "").split(":")[0],
-          "anthropic_key": os.environ.get("ANTHROPIC_API_KEY", ""), "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
-          "github_token": bool(os.environ.get("GITHUB_TOKEN")),
-          "env_file_left": (pathlib.Path(os.environ["HOME"]) / ".rose-inspect" / "env").exists(),
-          "home_claude_md": (pathlib.Path(os.environ["HOME"]) / "CLAUDE.md").exists()}
-if CLI == "claude" and mode == "rate_limit":
-    print(json.dumps({"type": "system", "subtype": "init"}))
-    print(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1790988600}}))
-    print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "limit"}))
-    LOG.open("a").write(json.dumps(record) + "\n")
-    sys.exit(1)
-if mode == "crash":
-    LOG.open("a").write(json.dumps(record) + "\n")
-    sys.stderr.write("boom\n")
-    sys.exit(2)
-if mode == "slow":
-    import time
-    LOG.open("a").write(json.dumps(record) + "\n")
-    time.sleep(3)
-    record["slow_done_ms"] = int(time.time() * 1000)
-    LOG.open("a").write(json.dumps(record) + "\n")
-    sys.exit(0)
-head_before = run("git rev-parse HEAD")["out"]
-record["attempts"] = {
-    "read": run("git log -1 --format=%s"),
-    "commit": run("git commit -am 'inspector commit'"),
-    "push": run("git push origin HEAD"),
-    "merge": run("git -C . merge main"),
-    "direct_commit": run(REAL_GIT + " commit --allow-empty -m 'direct commit'"),
-    "gh": run("gh pr create --fill"),
-}
-record["head_before"] = head_before
-record["head_after"] = run("git rev-parse HEAD")["out"]
-record["remote"] = run("git remote get-url origin")["out"]
-pathlib.Path("inspector-scratch.txt").write_text("scratch\n")
-feature = pathlib.Path("feature.txt").read_text().strip()
-LOG.open("a").write(json.dumps(record) + "\n")
-answer = ("feature.txt holds: " + feature + "\n\nCitations:\n- feature.txt:1\n- README.md:1-2\n"
-          "- missing/nowhere.ts:9\n- ../escape.txt:1\n")
-if CLI == "codex":
-    out = argv[argv.index("--output-last-message") + 1]
-    pathlib.Path(out).write_text(answer)
-    print(json.dumps({"type": "thread.started", "thread_id": "t-1"}))
-    print(json.dumps({"type": "turn.completed", "usage": {}}))
-else:
-    print(json.dumps({"type": "system", "subtype": "init"}))
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": answer}))
-`;
+const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -274,6 +207,7 @@ interface CliRun {
   path0: string;
   anthropic_key: string;
   openai_key: boolean;
+  azure_key: string;
   github_token: boolean;
   env_file_left: boolean;
   home_claude_md: boolean;
@@ -323,6 +257,9 @@ before(async () => {
   // Fake funded keys; no decryption key, so no stored credential is ever decrypted.
   process.env.ANTHROPIC_API_KEY = 'sk-ant-inspect-test-key-0000000000000000';
   process.env.GPT_API_KEY = 'sk-inspect-test-openai';
+  // The funded Codex provider is the westus Azure deployment, never GPT_API_KEY.
+  process.env.AZURE_FOUNDRY_ENDPOINT_3 = 'https://rose-foundry-westus.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY_3 = 'azure-inspect-test-key';
   for (const key of [
     'CLAUDE_CODE_ANTHROPIC_API_KEY',
     'OPENROUTER_API_KEY',
@@ -646,7 +583,11 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
       ['claude', 'codex']
     );
     assert.ok(runs[1].argv.includes('--ignore-user-config'), 'codex loads no MCP config');
-    assert.equal(runs[1].openai_key, true);
+    assert.deepEqual(
+      [runs[1].openai_key, runs[1].azure_key, runs[1].argv.includes('model_provider="azure"')],
+      [false, 'azure-inspect-test-key', true],
+      'codex runs on the Azure funding, never the unfunded OpenAI key'
+    );
     assert.deepEqual(
       sandboxes.slice(before).map((sandbox) => [sandbox.provider, sandbox.kills]),
       [

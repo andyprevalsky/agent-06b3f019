@@ -327,7 +327,19 @@ async function inspectOnce(
     const timeoutS = cliTimeoutS();
     await fs.exec(
       inspectRunScript(
-        { provider, workDir, model: inspectModel(provider), timeoutS },
+        {
+          provider,
+          workDir,
+          timeoutS,
+          ...(provider === 'codex' &&
+          auth.envs.CODEX_AUTH_JSON === undefined &&
+          auth.envs.CODEX_AZURE_BASE_URL !== undefined
+            ? {
+                model: auth.envs.CODEX_AZURE_MODEL,
+                codexAzureBaseUrl: auth.envs.CODEX_AZURE_BASE_URL,
+              }
+            : { model: inspectModel(provider) }),
+        },
         paths,
         fs.home
       ),
