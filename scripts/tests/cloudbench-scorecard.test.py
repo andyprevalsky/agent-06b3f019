@@ -592,6 +592,89 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(item["state"], "warn")
         self.assertEqual(item["detail"], "final group NOT published: " + reason[:160])
 
+    def mixed_shard_fixture(self):
+        admission = self.f.sharded(live=True)
+        coordination = json.loads((admission / "coordination.json").read_text())
+        coordination["scheduled_total"] = 40
+        write(admission / "coordination.json", coordination)
+        rows = [job(i, "passed" if i <= 18 else "failed", "PASSED" if i <= 18 else "FAILED", False)
+                for i in range(1, 21)]
+        export = admission / "shard-00/run/export"
+        write(export / "disposable-export.verified.json", {})
+        with tarfile.open(export / "originals.tar.gz", "w:gz") as stream:
+            raw = json.dumps({"jobs": rows}).encode()
+            info = tarfile.TarInfo("context/benchmarks/campaigns/campaign-it7-shard00/summary.json")
+            info.size = len(raw)
+            stream.addfile(info, io.BytesIO(raw))
+        # Stale counters for the exported shard must not be counted or supply reasons.
+        write(admission / "shard-00/run/shard-status.json", {"state": "LIVE", "infra": {"progress": {
+            "combos": [["failed", "INFRA_ERROR", True, 20]], "reasons": [["INFRA", "stale", 20]]}}})
+        write(admission / "shard-01/run/shard-status.json", {"state": "LIVE", "infra": {"progress": {
+            "combos": [["passed", "PASSED", False, 17], ["failed", "FAILED", False, 1],
+                       ["failed", "INFRA_ERROR", True, 1], ["running", None, None, 1]],
+            "jobs": 20, "terminal_attempts": 19, "infra_attempts": 1,
+            "reasons": [["INFRA", "seed failed", 1]]}}})
+        return admission, rows
+
+    def test_mixed_verified_export_and_live_shard_keep_all_scheduled_jobs(self):
+        admission, _ = self.mixed_shard_fixture()
+        data = render(admission, self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["progress"], {"queued": 0, "in_progress": 1, "completed": 39, "unobserved": 0})
+        self.assertEqual(exp["scheduled_total"], 40)
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["INFRA"]), (35, 3, 1))
+        self.assertEqual((exp["infra_jobs"], exp["infra_threshold"], exp["infra_breached"]), (1, 2, False))
+        self.assertEqual((exp["terminal_attempts"], exp["infra_attempts"]), (39, 1))
+        self.assertEqual(exp["state"], "RUNNING")
+        self.assertEqual(exp["rows_source"], "verified controller exports + live shard-status counters")
+        self.assertIn(["INFRA", "seed failed", 1], exp["reasons"])
+        self.assertFalse(any("stale" in reason for _, reason, _ in exp["reasons"]))
+        self.assertEqual(exp["released"], {"yes": 20, "of": 39})
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 20, "of": 39})
+        self.assertEqual(exp["wall"]["n"], 20)
+        self.assertIsNone(exp["cost"]["metered_usd"])
+        self.assertIn("COMPLETED 39/40", CARD["render_text"](data))
+        document = self.valid(data)
+        self.assertIn("35/38 scored", document)
+        self.assertIn("39/40", document)
+        self.assertIn("verified controller exports + live shard-status counters", document)
+
+    def test_mixed_shards_without_status_remain_unobserved(self):
+        admission, _ = self.mixed_shard_fixture()
+        (admission / "shard-01/run/shard-status.json").unlink()
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["progress"], {"queued": 0, "in_progress": 0, "completed": 20, "unobserved": 20})
+        self.assertEqual(exp["outcomes"]["PASS"], 18)
+        self.assertEqual(exp["rows_source"], "verified controller exports")
+        self.assertEqual(exp["state"], "RUNNING")
+
+    def test_exported_empty_summary_does_not_revive_its_stale_counters(self):
+        admission, _ = self.mixed_shard_fixture()
+        (admission / "shard-01/run/shard-status.json").unlink()
+        archive = admission / "shard-00/run/export/originals.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            raw = json.dumps({"jobs": []}).encode()
+            info = tarfile.TarInfo("context/benchmarks/campaigns/campaign-empty/summary.json")
+            info.size = len(raw)
+            stream.addfile(info, io.BytesIO(raw))
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["scheduled_total"], 40)
+        self.assertIsNone(exp["outcomes"])
+        self.assertIsNone(exp["progress"])
+        self.assertEqual(exp["reasons"], [])
+        self.assertEqual(exp["state"], "RUNNING")
+
+    def test_result_rows_still_override_export_and_live_counters(self):
+        admission, exported = self.mixed_shard_fixture()
+        final = exported + [job(i, "passed", "PASSED", False) for i in range(21, 41)]
+        write(admission / "result.json", {"jobs": CARD["compact_rows"]({"jobs": final})})
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["rows_source"], "result.json")
+        self.assertEqual(exp["progress"]["completed"], 40)
+        self.assertEqual(exp["outcomes"]["PASS"], 38)
+        self.assertEqual(exp["outcomes"]["INFRA"], 0)
+        self.assertEqual(exp["reasons"], [["AGENT FAIL", "reason UNRECORDED", 2]])
+
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
         exp = data["experiment"]

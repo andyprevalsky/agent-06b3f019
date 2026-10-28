@@ -801,17 +801,31 @@ def load_sharded(run_dir: Path, deep: bool = True, raw: bool = False) -> dict:
     terminals = [read_json(out / "terminal.json") for out in outs]
     statuses = [read_json(out / "shard-status.json") or {} for out in outs]
     result = read_json(run_dir / "result.json")
+    loaded_per_shard = False
     if isinstance(result, dict) and isinstance(result.get("jobs"), list):
         exp["rows"], exp["rows_source"] = result["jobs"], "result.json"
     elif deep and any((out / "export/disposable-export.verified.json").exists() for out in outs):
         with ThreadPoolExecutor(max_workers=8) as pool:
             records = list(pool.map(lambda out: export_records(out / "export"), outs))
-        for record in records:
+        loaded_per_shard = True
+        sources = set()
+        for record, status in zip(records, statuses):
             if record["summary"]:
                 exp["rows"] += compact_rows(record["summary"], record["cards"])
-        exp["rows_source"] = "verified controller exports"
+                sources.add("verified controller exports")
+            else:
+                progress = (status.get("infra") or {}).get("progress") or {}
+                if progress.get("combos"):
+                    exp["rows"] += rows_from_counters(progress)
+                    sources.add("live shard-status counters")
+                    for entry in progress.get("reasons") or []:
+                        if isinstance(entry, list) and len(entry) in (2, 3) and isinstance(entry[-1], int):
+                            category = entry[0] if len(entry) == 3 and entry[0] in CATEGORIES else "UNKNOWN"
+                            exp.setdefault("live_reasons", []).append([category, reason_key(entry[-2]), entry[-1]])
+        exp["rows_source"] = " + ".join(name for name in ("verified controller exports", "live shard-status counters")
+                                        if name in sources) or "verified controller exports"
     if not exp["rows"]:
-        progress = [((s.get("infra") or {}).get("progress") or {}) for s in statuses]
+        progress = [] if loaded_per_shard else [((s.get("infra") or {}).get("progress") or {}) for s in statuses]
         if any(p.get("combos") for p in progress):
             for item in progress:
                 exp["rows"] += rows_from_counters(item)
