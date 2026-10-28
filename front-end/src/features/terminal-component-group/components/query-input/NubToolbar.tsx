@@ -59,7 +59,6 @@ export function NubToolbar(props: TopBarProps) {
         variant="nub"
         agent={agentDetail ?? null}
         onUpdate={props.onAgentUpdate}
-        onDelete={props.onAgentDelete}
       />
       <ReportBugDialog variant="nub" agent={agentDetail ?? null} />
       <QueryInfoMenu />

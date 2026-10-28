@@ -4,7 +4,8 @@
  *   [HIDDEN] <-- non-admin account or no agent (renders nothing)
  *
  *   [CLOSED] --click bug icon--> [COMPOSING] (composer opens straight away)
- *   [COMPOSING] --Cancel | click outside | Esc--> [CLOSED] (draft discarded)
+ *   [COMPOSING] --Cancel | Esc | outside click (only while the draft is empty)-->
+ *               [CLOSED] (draft discarded)
  *   [COMPOSING] --Submit--> [SUBMITTING] --ok--> [LAUNCHED] (Open/Copy explicit)
  *                                        --err--> [COMPOSING] (draft kept)
  *   [LAUNCHED] --Done | click outside | Esc--> [CLOSED]
@@ -80,6 +81,11 @@ function ReportBugPanel({ agent, nub }: { agent: AgentDetail; nub: boolean }) {
       {nub ? <NubTip label="Report bug">{trigger}</NubTip> : trigger}
       <DialogContent
         data-testid="report-bug-dialog"
+        // A typed draft survives clicks elsewhere (e.g. copying from the chat);
+        // Cancel, Esc or the trigger still close it.
+        onInteractOutside={(event) => {
+          if (flow.description.trim() !== '' || flow.isSubmitting) event.preventDefault();
+        }}
         className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden bg-[#EEEFF2] dark:bg-[#262624] md:bg-transparent md:dark:bg-transparent"
         style={{
           position: 'fixed',

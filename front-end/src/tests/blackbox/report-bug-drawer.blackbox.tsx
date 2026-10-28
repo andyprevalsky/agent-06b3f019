@@ -98,6 +98,21 @@ describe('Report bug outside Agent Settings', () => {
     expect(within(panel).queryByRole('button', { name: /Delete Agent/ })).toBeNull();
   });
 
+  it('a typed draft survives a click outside the Report bug panel', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    renderWithProviders(
+      <>
+        <button type="button">elsewhere</button>
+        <ReportBugDialog agent={makeAgent()} />
+      </>,
+    );
+    await u.click(screen.getByTestId('report-bug-trigger'));
+    await u.type(await screen.findByTestId('report-bug-description'), 'keep me');
+    await u.click(screen.getByRole('button', { name: 'elsewhere' }));
+    expect(screen.getByTestId('report-bug-description')).toHaveValue('keep me');
+  });
+
   it('Cancel closes the Report bug panel and a reopen starts a fresh draft', async () => {
     mockSession(ANDY_USER_ID);
     const u = userEvent.setup();
