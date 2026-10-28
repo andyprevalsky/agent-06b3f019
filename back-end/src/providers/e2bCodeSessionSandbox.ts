@@ -228,7 +228,14 @@ export async function acquireCodeSandbox(
   if (trajectory !== null) {
     // C15 provider switch: after the checkpoint restore, so the previous CLI's
     // session log is in the HOME the new CLI starts in, where the handoff points.
-    await writeHandoffTrajectory(e2bSandboxFs(acquired.sandbox), trajectory);
+    // The sandbox is new (a switch drops the old one); on a failed write it is
+    // killed and the spawn fails, so no CLI starts on a prompt naming a missing file.
+    try {
+      await writeHandoffTrajectory(e2bSandboxFs(acquired.sandbox), trajectory);
+    } catch (error) {
+      await acquired.sandbox.kill().catch(() => undefined);
+      throw error;
+    }
   }
   return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
 }

@@ -288,6 +288,60 @@ export function registerCodeSessionRotationCases(ctx: RotationContext): void {
     }
   });
 
+  test('(c) a start that fails after the switch hands the session back; the retry hands off again', async () => {
+    const { session, cliLog } = await pausedClaudeSession('switch-retry', 'sb-switch-retry');
+    const homes = [
+      join(fixtureDir, 'home-switch-retry-1'),
+      join(fixtureDir, 'home-switch-retry-2'),
+    ];
+    for (const home of homes) mkdirSync(home, { recursive: true });
+    let created = 0;
+    patchE2b({
+      kill: async () => undefined,
+      create: async () => fakeSandbox(homes[created], `sb-codex-${++created}`),
+    });
+    const retry = (fail: boolean) =>
+      createWithCodeSession(
+        {
+          agentId,
+          userId,
+          repoUrl: 'rose-project:switch-retry',
+          codeProvider: 'codex',
+          codeSessionId: session.id,
+          leaseOwner: 'tool:retry:switch-retry',
+        },
+        async (codeSession: SpawnCodeSession | null, handoff) => {
+          const acquired = await acquireCodeSandbox(codeSession, 'tpl-codex', {}, 'Codex Code');
+          if (fail) throw new Error('Codex WebSocket server failed to become ready');
+          return { ...acquired, handoff };
+        }
+      );
+    try {
+      await assert.rejects(retry(true), /failed to become ready/);
+      const reverted = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
+      assert.equal(reverted.codeProvider, 'claude', 'the failed start hands the session back');
+      assert.equal(reverted.state, 'PAUSED');
+      const { session: started, fields } = await retry(false);
+      assert.equal(
+        fields.provider_handoff,
+        true,
+        'the Temporal retry switches (and hands off) again'
+      );
+      assert.match(
+        String(started.handoff),
+        /Its full trajectory .* is at \/home\/user\/\.rose\/handoff\//
+      );
+      const exported = join(homes[1], '.rose', 'handoff', `${session.id}-claude.jsonl`);
+      assert.equal(
+        readFileSync(exported, 'utf8'),
+        cliLog,
+        'the retry sandbox has the trajectory too'
+      );
+    } finally {
+      Object.assign(Sandbox, original);
+    }
+  });
+
   test('(f) duplicate concurrent retries: one lease holder and exactly one provider switch', async () => {
     const { session } = await pausedClaudeSession('duplicate', 'sb-dup-held');
     const killed: string[] = [];

@@ -633,3 +633,19 @@ export async function switchCodeSessionProvider(
   });
   return { session: updated, handoff, trajectory };
 }
+
+/**
+ * Undo a provider switch whose start failed: the session goes back to the
+ * provider it came from (only if nothing else changed it since), so the next
+ * retry rotates again and its new CLI gets the handoff and the trajectory.
+ */
+export async function revertCodeSessionProvider(
+  codeSessionId: string,
+  switchedTo: string,
+  switchedFrom: string
+): Promise<void> {
+  await prisma.codeSession.updateMany({
+    where: { id: codeSessionId, codeProvider: switchedTo, cliSessionId: null },
+    data: { codeProvider: switchedFrom },
+  });
+}

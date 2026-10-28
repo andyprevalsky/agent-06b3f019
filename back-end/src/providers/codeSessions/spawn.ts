@@ -25,7 +25,11 @@ import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
-import { switchCodeSessionProvider, type SpawnCodeSession } from './usageLimit';
+import {
+  revertCodeSessionProvider,
+  switchCodeSessionProvider,
+  type SpawnCodeSession,
+} from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
 import {
@@ -137,7 +141,9 @@ export async function createWithCodeSession<
   // log rides on the session handle, and the sandbox acquire writes it into
   // the new sandbox at the path the prompt names.
   let handoff: string | null = null;
+  let switchedFrom: string | null = null;
   if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    switchedFrom = codeSession.codeProvider;
     // A concurrent duplicate loses with CodeSessionBusyError and keeps the
     // winner's lease (same owner), so exactly one spawn rotates the session.
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
@@ -150,6 +156,11 @@ export async function createWithCodeSession<
   try {
     session = await create(codeSession, handoff);
   } catch (error) {
+    // A start that failed after the switch hands the session back, so the
+    // retry switches again and gets the handoff and trajectory once more.
+    if (codeSession !== null && switchedFrom !== null) {
+      await revertCodeSessionProvider(codeSession.id, params.codeProvider, switchedFrom);
+    }
     if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
       await markPaused(codeSession.id);
     }
