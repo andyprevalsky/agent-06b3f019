@@ -59,8 +59,9 @@ mkdir -p "$ARTIFACT_DIR/worker"
 # Build from the immutable Git tree, never from files another local process can
 # change while Docker reads its context. These directories are also excluded by
 # the committed Docker ignore file; do not materialize their large test history.
-git -C "$ROOT" archive "$BUILD_ID:agents" |
-  tar -x -C "$ARTIFACT_DIR/worker" --exclude=benchmarks --exclude=tests
+# The shared helper never touches excluded blobs, so the workflow's sparse,
+# blob-filtered checkout never lazily downloads the benchmark history.
+bash "$ROOT/scripts/agents-image-context.sh" "$BUILD_ID" "$ARTIFACT_DIR/worker"
 cd "$ARTIFACT_DIR/worker"
 # Local build: neither the builder nor the rollout creates a Fly Machine.
 flyctl deploy --local-only --build-only --push --image-label "$IMAGE_LABEL" -a "$APP"
