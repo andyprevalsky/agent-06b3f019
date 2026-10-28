@@ -21,7 +21,13 @@ import { createLogger } from './logger';
 const log = createLogger('ErrorAlert');
 
 export type FailureSource =
-  'chat' | 'sms' | 'whatsapp' | 'agent_workflow' | 'backend_crash' | 'agent_watchdog';
+  | 'chat'
+  | 'sms'
+  | 'whatsapp'
+  | 'agent_workflow'
+  | 'backend_crash'
+  | 'agent_watchdog'
+  | 'schema_drift';
 
 const SOURCE_LABEL: Record<FailureSource, string> = {
   chat: '🔴 Chat loop failed',
@@ -30,6 +36,7 @@ const SOURCE_LABEL: Record<FailureSource, string> = {
   agent_workflow: '🔴 Agent failed',
   backend_crash: '🔴 Backend crashing',
   agent_watchdog: '🔴 Agent stuck / silently died',
+  schema_drift: '🔴 Production schema drift (RLS / indexes / policies)',
 };
 
 const OUTBOUND_TIMEOUT_MS = 4000;

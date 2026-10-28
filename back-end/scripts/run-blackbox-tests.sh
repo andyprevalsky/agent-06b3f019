@@ -246,8 +246,15 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
     LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
   if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
+    # The container's `victoria` is the dev stack's seeded database (run.sh):
+    # tests get this workspace's own database there, as on system Postgres.
+    if ! ENSURE_SYSTEM_DB_NAME="$(workspace_system_db_name "$WORKSPACE_HINT")"; then
+      echo "❌ Workspace name '$WORKSPACE_HINT' cannot name a test database (letters, digits, - and _ only)." >&2
+      exit 1
+    fi
+    SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$ENSURE_SYSTEM_DB_NAME"
     DB_FOUND=true
-    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT, database $ENSURE_SYSTEM_DB_NAME"
   fi
   if $ISOLATED_DB_RESOLVED && ! $DB_FOUND; then
     echo "❌ Owned Postgres container $DB_CONTAINER is not reachable on a mapped port." >&2
@@ -348,7 +355,7 @@ SQL
     echo "Syncing Prisma schema to local test database..."
     bash "$SCRIPT_DIR/normalize-local-user-phones.sh" "$LOCAL_DB_URL" >/dev/null
     bash "$SCRIPT_DIR/backfill-local-message-record-owner.sh" "$LOCAL_DB_URL" >/dev/null
-    npx prisma db push --skip-generate --accept-data-loss >/dev/null
+    PRISMA_CLI_DATABASE_URL="$DIRECT_URL" npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     bash "$SCRIPT_DIR/apply-local-message-record-trgm-index.sh" "$LOCAL_DB_URL" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may

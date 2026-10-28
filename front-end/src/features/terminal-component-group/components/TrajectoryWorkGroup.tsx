@@ -11,7 +11,8 @@
  *
  * RUNNING header: fixed-height live carousel (latest activity icon + label,
  *   spinning loader for tool batches, live elapsed). EXPANDED swaps the icon for
- *   a chevron.
+ *   a chevron. Thinking always shows the ↓ token counter: the live stream's
+ *   indicator, or the persisted thought's own size until the next stream starts.
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
  *   paged 20 at a time; opening a running batch shows its latest page, and new
@@ -21,7 +22,9 @@
 import { useId, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, LoaderCircle, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
+import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 import { useBatchElapsed } from './useBatchElapsed';
+import { StreamingMetric } from './StreamingMetric';
 import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import { workLabel } from '../hooks/codeSessionTurns';
@@ -29,6 +32,22 @@ const PAGE_SIZE = 20;
 /** Leaf clock: its tick re-renders only this text, never the open history rows. */
 function BatchElapsed({ startedAt }: { startedAt: number | null }) {
   return <span data-testid="trajectory-batch-elapsed">{useBatchElapsed(startedAt, true)}</span>;
+}
+/** A persisted thought between streams keeps the ↓ counter, sized by its own text. */
+function PersistedThinking({ message, label }: { message: Message; label: string }) {
+  const tokens = Math.round(message.text.length / 4);
+  return (
+    <span className="flex items-center gap-2">
+      {label}
+      <StreamingMetric
+        tokenCount={tokens}
+        animatedTokenCount={useAnimatedCounter(tokens, 0.3)}
+        className="text-xs"
+        iconClassName="h-3 w-3"
+        showZeroTokens
+      />
+    </span>
+  );
 }
 /** The folded rows' kinds and tool identity, matching the stock row's data-* attributes. */
 function toolIdentity(group: Group) {
@@ -71,6 +90,8 @@ export function TrajectoryWorkGroup({
   const lastPage = Math.max(0, Math.ceil(group.activities.length / PAGE_SIZE) - 1);
   const activePage = Math.min(page, lastPage);
   const label = running ? latest.label : workLabel(group);
+  const thinking = running && latest.kind === 'thinking';
+  const liveThinking = thinking && indicator;
   const tools = toolIdentity(group);
   return (
     <div
@@ -93,7 +114,7 @@ export function TrajectoryWorkGroup({
         className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
       >
         {running && !expanded ? (
-          latest.kind === 'thinking' && indicator ? null : (
+          liveThinking ? null : (
             <Icon
               data-testid="trajectory-activity-icon"
               size={14}
@@ -115,7 +136,13 @@ export function TrajectoryWorkGroup({
             data-activity-key={latest.key}
             className={running ? 'trajectory-activity-enter block truncate' : 'block truncate'}
           >
-            {running && latest.kind === 'thinking' && indicator ? indicator : label}
+            {liveThinking ? (
+              indicator
+            ) : thinking ? (
+              <PersistedThinking message={latest.message} label={label} />
+            ) : (
+              label
+            )}
           </span>
         </span>
         <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs">

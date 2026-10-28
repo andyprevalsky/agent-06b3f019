@@ -2,7 +2,7 @@
  * Blackbox: the Rose Desktop header on phones and iPads, through the real
  * Terminal (flag on) with the stock account as the control.
  *
- *   < 768px (phones 375-430, iPad mini 744): one transparent row —
+ *   < 768px (phones 375-430, iPad mini 744): one opaque row (Back while an agent is open) —
  *     hamburger (left, opens the agents drawer from the LEFT) · the Rose pill
  *     (brand + bell, centered between) · the four app icons (Browser, Phone,
  *     Integrations + red reconnect dot, Dark mode) — every target >= 40px, the
