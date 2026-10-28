@@ -224,6 +224,7 @@ function buildReturn(a: BuildArgs) {
   return {
     user: a.auth.isFullySignedIn ? a.auth.user : null,
     authUser: a.auth.user,
+    inviteRequired: a.auth.inviteRequired,
     isFullySignedIn: a.auth.isFullySignedIn,
     isAuthenticated: a.auth.isAuthenticated,
     isAnonymous: a.auth.isAnonymous,
