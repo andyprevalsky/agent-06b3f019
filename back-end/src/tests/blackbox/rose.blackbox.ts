@@ -7,6 +7,7 @@
  * test growth pushes file lines past the 600 default. See e.g.
  * agents.blackbox.ts, integrations.blackbox.ts which use the same disable.
  */
+/* eslint-disable max-lines */
 /**
  * Module-level black-box tests for back-end/src/providers/rose/.
  *
