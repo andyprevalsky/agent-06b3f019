@@ -7,11 +7,10 @@
 
 import { Router, type Request, type Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { getClientIP } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { buildAgentMcpServer } from './agentMcpService';
+import { buildAgentMcpServer, resolveMcpUser } from './agentMcpService';
 
 const log = createLogger('AgentMcp');
 const router = Router();
@@ -24,27 +23,25 @@ function roseApiKeyFrom(req: Request): string | undefined {
   return undefined;
 }
 
-// Only Rose API keys authenticate here: rewrite the credential into X-API-Key
-// and reject every other hybridAuth outcome (internal key, JWT, x402).
-const mcpAuth = asyncHandler<HybridAuthRequest>(async (req, res, next) => {
+type McpRequest = Request & { mcpUserId?: string };
+
+const mcpAuth = asyncHandler<McpRequest>(async (req, res, next) => {
   const apiKey = roseApiKeyFrom(req);
   if (apiKey === undefined) {
     res.status(401).json({ error: 'Rose API key required: use /mcp/<key>' });
     return;
   }
-  delete req.headers.authorization;
-  req.headers['x-api-key'] = apiKey;
-  await hybridAuth(req, res, () => {
-    if (req.isRoseApiKey !== true || req.userId === undefined) {
-      res.status(401).json({ error: 'Invalid API key' });
-      return;
-    }
-    next();
-  });
+  const resolved = await resolveMcpUser(apiKey);
+  if ('error' in resolved) {
+    res.status(resolved.status).json({ error: resolved.error });
+    return;
+  }
+  req.mcpUserId = resolved.userId;
+  next();
 });
 
-const handleMcp = asyncHandler<HybridAuthRequest>(async (req, res) => {
-  const server = buildAgentMcpServer(req.userId as string, getClientIP(req));
+const handleMcp = asyncHandler<McpRequest>(async (req, res) => {
+  const server = buildAgentMcpServer(req.mcpUserId as string, getClientIP(req));
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -55,7 +52,7 @@ const handleMcp = asyncHandler<HybridAuthRequest>(async (req, res) => {
   });
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res as Response, req.body);
+    await transport.handleRequest(req, res, req.body);
   } catch (error) {
     log.error('MCP request failed', {
       error: error instanceof Error ? error.message : String(error),
