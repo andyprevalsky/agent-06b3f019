@@ -280,10 +280,12 @@ async function testSmoke_codexCompletesE2bTask() {
     );
 
     // Runtime-fallback invariant: if the ChatGPT login proved unusable (revoked,
-    // refresh failed) mid-run, the sandbox MUST switch to the funded Azure
-    // deployment (auth_fallback event) rather than giving up. A usage limit is not
-    // switched in the sandbox: it pauses for the parent's retry (C15), so a limited
-    // run never completes here and is a credit SKIP above.
+    // refresh failed) mid-run and the run still completed, the sandbox switched to
+    // the funded Azure deployment (auth_fallback event). The switch is armed only
+    // when no other subscription is leasable (subscriptions first, C15); otherwise
+    // the run fails above (a revoked login stays a hard failure) and the parent's
+    // retry takes that subscription. A usage limit is not switched in the sandbox:
+    // it pauses for the parent's retry, so a limited run is a credit SKIP above.
     const sawRecoverableOAuthFailure = events.some((event) => {
       const typed = event as { type?: string; message?: string };
       return (
