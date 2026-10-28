@@ -168,3 +168,45 @@ so matching uses exact exported names plus owner tokens.
 ## Reusable lesson
 
 Derive a release audit's ownership set from every owner the run created (registries, audits, primaries, native owner tokens), and fail closed on any owner that never retired, never only from identities a successful teardown wrote.
+
+## 2026-10-28 recurrence: I30 portable physical closure
+
+It7 at source 19380f9e9c1e06a8a5965c3613a512c549bd4e57 retained owner
+665d7cb61b06489a8e3266b46679e577 after failed runtime capture. Its controller
+was normally joined, exported and deleted. The native audit correctly refused
+release despite empty native lists: the original provider epoch was absent.
+Same-host stale-owner recovery could not consume the deleted controller's
+registry. The 104-file local subset matched the original export manifest; the
+full archive remains required for canonical execution, not inferred from that
+subset. Scripts-field changes, list absence and a destroyed-provider-retained
+WAL entry do not establish historical runtime sealing or an original epoch.
+
+The explicit forensic mode now validates complete original exports, exact
+once-owned identities, original delete authority and joined writers. It observes
+positive app authority and fresh exact native resource states, then the ordinary
+audit command can produce a separate full-admission current physical closure
+projection. Exact terminal retained Volumes remain distinct from absent objects.
+Original audit inode, timestamps and bytes, task grades, failed runtime evidence,
+INFRA and missing historical epochs remain unchanged. No registry restoration,
+host spoofing, DELETE retry or historical lifecycle credit is introduced.
+
+Independent opened-reference review GROUNDED the five source/test paths at patch
+SHA256 bdff840ee9434c9a7ab20df214ac57ebc495ea81a247623cd5062daa4aa488ed
+before application. Earlier drafts were rejected for namespace authority and
+late-timeout publication counterexamples. The same permanent controls against
+the prior draft reproduced publication and selected-terminal-volume failures;
+the final exact source passed all 11 new controls. Post-application gates passed:
+12 archived-stop tests, 46 scorecard/audit tests and 14 runner self-tests.
+
+Grounding uses the existing Fly observer and canonical terminal Volume predicate,
+Fly's app identity/resource API documentation, and original archived-stop custody.
+OpenClaw owned manifest cleanup and Hermes verified archive publication are
+limited ownership/publication analogs, not claims of identical Fly recovery code.
+Archive searches used retained-registry/portable-recovery/deleted-controller and
+native-release-audit/archived-owner/claims vocabularies.
+
+Status: source capability mitigated; actual original-case canonical execution and
+current native closure are pending the launch owner. The worker made no provider
+calls. Historical runtime capture remains unsealed and the original INFRA stays
+authoritative. Reads are sequential, bounded by the existing 300-second operation
+deadline, and do not freeze future provider state.

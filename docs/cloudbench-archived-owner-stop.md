@@ -73,3 +73,75 @@ rewrite the incomplete registry, manufacture historical volume ownership,
 authorize reuse, release claims or certify guest cleanup. The default command
 continues to skip incomplete records. Keep these IDs excluded from subsequent
 reuse unless a separate supported protocol establishes that authority.
+
+## Forensic current resource reconciliation after a deleted controller
+
+An immutable exported owner can retain failed runtime evidence after its exact
+resources have reached a native terminal disposition. The original audit and
+missing historical epoch remain unchanged. The following separate forensic mode
+requires a complete normal export, original joined/deleted controller receipts,
+complete fresh disposable ownership and original delete authority. It never
+restores a local registry, changes host identity, repeats DELETE or releases
+historical evidence claims.
+
+First obtain the normal fresh inventory required by the existing archived-owner
+planner, and use the original shard run directory on the operator host. Inventory
+must be a private regular file in a physical private directory and include the
+protected warm cohort; do not restore archived registries into .git. All final
+shards must retain their complete original archives and authority receipts:
+
+```bash
+umask 077
+python3 scripts/cloudbench-archived-owner-stop.py \
+  --run-dir "$ORIGINAL_SHARD_RUN" --inventory "$NATIVE_INVENTORY" \
+  --out-dir "$PRIVATE_RECOVERY_DIR" \
+  --forensic-resource-closure "$EXACT_OWNER"
+python3 scripts/cloudbench-archived-owner-stop.py \
+  --run-dir "$ORIGINAL_SHARD_RUN" --inventory "$NATIVE_INVENTORY" \
+  --out-dir "$PRIVATE_RECOVERY_DIR" \
+  --forensic-resource-closure "$EXACT_OWNER" \
+  --agents-env "$AGENTS_ENV" --execute
+```
+
+In this explicit mode, `--execute` performs GET only. It first requires a
+successful exact app identity, then exact terminal observations of the selected
+controller and once-owned guest/volume IDs. Machines require exact absence;
+Volumes may instead have canonical pending_destroy/destroyed state when their
+identity and original delete authority match. Live, foreign or unknown resources
+refuse. The printed receipt path is content-bound
+and append-only. This preliminary selected-owner receipt alone does not close
+the admission.
+
+Pass that exact receipt to the ordinary release-audit command's forensic
+reconciliation mode:
+
+```bash
+python3 scripts/cloudbench-native-release-audit.py "$ORIGINAL_ADMISSION" \
+  --forensic-closure "$EXACT_RECEIPT" --agents-env "$AGENTS_ENV"
+```
+
+The consumer verifies every final shard's complete export and joined/deleted
+writer, derives all once-owned guest and controller workspace subjects, and
+makes new native reads. It uses the ordinary full-scope inventory predicate to
+catch active or newly unrecorded owned resources, then exact-GETs every known ID;
+list omission is never proof. It preserves the original
+`native-release-audit.json` bytes, inode and modification time. Its separate
+`forensic-release-projection-*.json` can set
+`current_physical_resource_release_verified: true` only after the complete fresh
+scope is terminal. Exact 404 absence and an identity-matching Volume in canonical
+`pending_destroy`/`destroyed` state remain distinct; soft deletion never becomes
+an absence claim. The projection names its checked subjects and observation
+clock and binds the raw observation receipt.
+
+Original task results, INFRA, failed runtime capture, retained evidence claims
+and missing historical provider epoch remain unchanged. Current resource
+closure is not runtime sealing or historical task/lifecycle credit. Another
+retained owner, incomplete/unallocated/borrowed cohort, foreign source, missing
+original authority, active/unknown native state or the existing overall cleanup
+deadline causes refusal. No automatic fallback or native mutation follows.
+
+Both commands use the existing 300-second operation deadline, including receipt
+publication. Timeout or interruption leaves no new success projection; partial
+observation receipts may remain. Monitor the one exact command PID and its private
+log. Observations are sequential facts as of the recorded clock, not an atomic
+provider freeze or a guarantee against future resource creation.
