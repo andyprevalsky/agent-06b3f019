@@ -224,8 +224,8 @@ async function testRoutesEachRequestByLiveLatency(): Promise<void> {
   );
   assert.deepEqual(
     provider?.ignore,
-    ['friendli'],
-    'the host that missed the live router completion bound must be excluded'
+    ['friendli', 'inference-net'],
+    'hosts that missed the live router completion bound or emit strict-schema keys out of declared order (deciding the router action last) must be excluded'
   );
   assert.equal(
     provider?.require_parameters,
