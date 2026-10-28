@@ -105,6 +105,77 @@ class Forensic(OLD['ArchivedStop']):
         self.reseal(self.members)
         shutil.copytree(self.run,self.admission/'shard-00/run',dirs_exist_ok=True)
 
+    def _recorded_it10_runtime_fact(self):
+        # Exact original cleanup JSON from owner efed9c0b (SHA4a959091...).
+        # Only owner is rebound to this existing synthetic archive's identity.
+        original = b'{"guest_cleanup_missing": true, "owner": "efed9c0b519c46ac9b61a56c0ed4b843", "runtime_evidence_missing": false, "schema": "disposable-cleanup-v1", "successful_runtime_inferred": false}'
+        self.assertEqual(hashlib.sha256(original).hexdigest(), '4a959091f2949a4594fe91523e4ada5a4ee787b92cd27e0753d8ad9d1a88a6be')
+        self.retained_missing_guest()
+        cleanup = json.loads(original); cleanup['owner'] = 'b'*32
+        path='context/fleet/runs/20261028-021139-15597/_batch/disposable-cleanup.json'
+        self.members[path]=json.dumps(cleanup).encode()
+        # The observed original has no runtime marker. Its absence grants no seal.
+        self.members.pop('git-common/cloudbench-fleet-ownership/'+'b'*32+'/runtime-evidence-unconfirmed')
+        self.reseal(self.members)
+        shutil.copytree(self.run,self.admission/'shard-00/run',dirs_exist_ok=True)
+        return path
+
+    def test_runtime_capture_present_keeps_original_fact_through_full_consumer(self):
+        self._recorded_it10_runtime_fact()
+        original = dict(self.members)
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        self.assertIs(plan['historical_runtime_evidence_missing'],False)
+        self.assertIs(plan['historical_guest_cleanup_missing'],True)
+        api,calls=self.exact_api()
+        receipt=F['observe'](api,plan,self.out)
+        checked=F['verify'](receipt)
+        self.assertIs(checked['plan']['historical_runtime_evidence_missing'],False)
+        result=F['reconcile'](self.admission,receipt,api)
+        self.assertTrue(result['current_physical_resource_release_verified'])
+        self.assertFalse(result['claims_released'])
+        self.assertFalse(result['runtime_sealed'])
+        self.assertTrue(result['old_infra_retained'])
+        self.assertIsNone(result['original_release_epoch'])
+        self.assertTrue(all(method=='GET' for method,path in calls))
+        self.assertEqual(self.members,original)
+        self.assertEqual((self.admission/'native-release-audit.json').read_bytes(),self.original_bytes)
+
+    def test_runtime_capture_present_canonical_cli_remains_get_only(self):
+        self._recorded_it10_runtime_fact()
+        self.test_canonical_cli_producer_and_consumer_use_loopback_only()
+
+    def test_runtime_capture_fact_requires_strict_boolean_and_exact_plan(self):
+        path=self._recorded_it10_runtime_fact();original=dict(self.members)
+        for value in (0,1,'false','true',None):
+            with self.subTest(value=value):
+                cleanup=json.loads(original[path]);cleanup['runtime_evidence_missing']=value
+                self.members=dict(original);self.members[path]=json.dumps(cleanup).encode();self.reseal(self.members)
+                with self.assertRaisesRegex(ValueError,'runtime evidence fact must be boolean'):
+                    F['prepare'](self.run,self.inventory,'b'*32)
+        self.members=dict(original);cleanup=json.loads(original[path]);cleanup.pop('runtime_evidence_missing')
+        self.members[path]=json.dumps(cleanup).encode();self.reseal(self.members)
+        with self.assertRaisesRegex(ValueError,'runtime evidence fact must be boolean'):
+            F['prepare'](self.run,self.inventory,'b'*32)
+        for changed in ({'owner':'c'*32}, {'successful_runtime_inferred':True}, {'guest_cleanup_missing':False}, {'extra':False}):
+            with self.subTest(forged=changed):
+                cleanup=json.loads(original[path]);cleanup.update(changed)
+                self.members=dict(original);self.members[path]=json.dumps(cleanup).encode();self.reseal(self.members)
+                with self.assertRaisesRegex(ValueError,'forensic failure facts differ'):
+                    F['prepare'](self.run,self.inventory,'b'*32)
+        self.members=original;self.reseal(original)
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        api,_=self.exact_api();receipt=F['observe'](api,plan,self.out)
+        data=json.loads(receipt.read_bytes());data['plan']['historical_runtime_evidence_missing']=True
+        encoded=json.dumps(data,sort_keys=True,separators=(',',':')).encode()
+        forged=self.out/('forensic-resource-closure-'+hashlib.sha256(encoded).hexdigest()+'.json');forged.write_bytes(encoded);forged.chmod(0o600)
+        with self.assertRaisesRegex(ValueError,'forensic plan no longer exact'):F['verify'](forged)
+
+    def test_true_runtime_capture_fact_keeps_legacy_plan_shape(self):
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        self.assertNotIn('historical_runtime_evidence_missing',plan)
+        api,_=self.exact_api();receipt=F['observe'](api,plan,self.out)
+        self.assertEqual(F['verify'](receipt)['plan'],plan)
+
     def test_retained_missing_guest_ack_only_observes_current_physical_state(self):
         self.retained_missing_guest()
         original_members=dict(self.members)
@@ -566,6 +637,6 @@ class Forensic(OLD['ArchivedStop']):
 # Select only this extension's controls rather than inherited stop controls.
 if __name__=='__main__':
     import sys
-    names=sys.argv[1:] or ('test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline','test_retained_missing_guest_ack_only_observes_current_physical_state','test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts','test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
+    names=sys.argv[1:] or ('test_runtime_capture_present_keeps_original_fact_through_full_consumer','test_runtime_capture_present_canonical_cli_remains_get_only','test_runtime_capture_fact_requires_strict_boolean_and_exact_plan','test_true_runtime_capture_fact_keeps_legacy_plan_shape','test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline','test_retained_missing_guest_ack_only_observes_current_physical_state','test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts','test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
     suite=unittest.TestSuite(Forensic(name) for name in names)
     raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

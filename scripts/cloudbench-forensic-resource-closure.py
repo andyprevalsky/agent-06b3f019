@@ -86,10 +86,16 @@ def prepare(run, inventory, owner):
         need(sha(data)==cleanup_entry['sha256'],'cleanup proof differs')
         cleanup=json.loads(data)
     need(type(cleanup.get('guest_cleanup_missing')) is bool, 'guest cleanup fact must be boolean')
-    need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=guest_cleanup_missing,runtime_evidence_missing=True,successful_runtime_inferred=False),'forensic failure facts differ')
+    runtime_evidence_missing = cleanup.get('runtime_evidence_missing')
+    need(type(runtime_evidence_missing) is bool, 'runtime evidence fact must be boolean')
+    need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=guest_cleanup_missing,runtime_evidence_missing=runtime_evidence_missing,successful_runtime_inferred=False),'forensic failure facts differ')
     controller_identity = _identity(obj(run/'export/disposable-controller.ownership.json')['machine'])
     need(controller_identity['id'] == plan['controller'], 'controller creation identity differs')
     plan.update(controller_identity=controller_identity,forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
+    # Legacy plans admitted only True and bind that original cleanup via inputs.
+    # Preserve their exact shape; explicitly carry the newly admitted False fact.
+    if runtime_evidence_missing is False:
+        plan['historical_runtime_evidence_missing'] = False
     if meta['cleanup_policy'] == 'retain' or guest_cleanup_missing:
         plan.update(historical_cleanup_policy=meta['cleanup_policy'],
                     historical_guest_cleanup_missing=guest_cleanup_missing)
