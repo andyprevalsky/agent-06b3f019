@@ -2,7 +2,7 @@ import Kernel, { APIConnectionTimeoutError, BadRequestError } from '@onkernel/sd
 import type { Prisma } from '@prisma/client';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
 export type KernelProxyType = 'residential' | 'mobile' | 'isp';
@@ -266,7 +266,7 @@ async function resolveKernelProxy(
     // connection during remote I/O, even when many different geo keys miss.
     // A blocking advisory lock would occupy the entire pool with waiters.
     // Try-lock losers commit immediately and sleep without a DB connection.
-    const resolved = await prisma.$transaction(
+    const resolved = await runTransactionWithRetry(
       async (tx) => {
         const [lock] = await tx.$queryRaw<Array<{ acquired: boolean }>>`
         SELECT pg_try_advisory_xact_lock(187003377, 1) AS acquired
