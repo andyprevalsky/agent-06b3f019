@@ -42,12 +42,12 @@ curl() {
   echo $(( $(cat "$D/clock") + 537 )) > "$D/clock"; printf 000;; esac
 }
 rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result status 18 || rc=$?
-[ "$rc" = 1 ] && [ -z "$result" ] && [ "$(cat "$D/probes")" = 2 ]
+[ "$rc" = 1 ] && [ -z "$result" ] && [ "$(cat "$D/probes")" = 3 ] && [ "$(grep -c 'post-thaw probe' "$D/proxy.log")" = 1 ]
 ''');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 
 
  def test_remaining_budget_bounds_probe_and_single_monotone_charge(self):
-  for timeout, expected_calls, expected_rc in ((5, 0, 1), (6, 1, 1), (7, 2, 0)):
+  for timeout, expected_calls, expected_rc in ((5, 1, 1), (6, 1, 1), (7, 2, 0)):
    with self.subTest(timeout=timeout):
     r=self.replay(r'''sleep() { local n; n=$(cat "$D/clock"); echo $((n+1)) > "$D/clock"; command sleep .01; }
 flyctl() { exec sleep 30; }
@@ -97,5 +97,55 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
 grep -q 'post-thaw probe charged=17 timeout=18' "$D/proxy.log"
 cloudbench_terminate_and_wait 1 "$result"
 ''');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+
+ def test_short_tail_zero_clock_progress_is_bounded_without_relaunch(self):
+  r=self.replay(r'''sleep() { [ "$1" != 2 ] || echo 3 > "$D/clock"; command sleep .01; }
+flyctl() { echo launch >> "$D/launches"; exec sleep 30; }
+eval "$(declare -f cloudbench_charge_bounded_step | sed '1s/cloudbench_charge_bounded_step/original_charge/')"
+cloudbench_charge_bounded_step() {
+ local before=${!1}
+ original_charge "$@"
+ case "$6" in *wait)
+  [ "${!1}" -gt "$before" ] && [ "${!1}" -le 3 ] || exit 91
+  printf '%s\n' "${!1}" >> "$D/charges"
+ ;; esac
+}
+curl() {
+ case " $* " in *" -w %{http_code} "*)
+  while [ "$#" -gt 0 ]; do if [ "$1" = --max-time ]; then shift; echo "$1" >> "$D/probe-limits"; break; fi; shift; done
+  printf 503
+ ;; esac
+}
+rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result status 3 || rc=$?
+[ "$rc" = 1 ] && [ -z "$result" ] && [ "$(wc -l < "$D/launches")" = 1 ] || exit 92
+[ "$(tr '\n' ' ' < "$D/probe-limits")" = '2 1 1 ' ] || exit 93
+[ "$(tr '\n' ' ' < "$D/charges")" = '1 2 3 ' ] || exit 94
+''');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
+
+ def test_each_one_two_three_second_tail_observes_same_live_proxy(self):
+  for remaining, limit in ((1, 1), (2, 1), (3, 2)):
+   with self.subTest(remaining=remaining):
+    r=self.replay(f"INITIAL={4-remaining}\nEXPECTED_LIMIT={limit}\n" + r'''sleep() {
+ case "$1" in
+  0.5) echo "$INITIAL" > "$D/clock";;
+  2) echo $(( $(cat "$D/clock") + 2 )) > "$D/clock";;
+ esac
+ command sleep .01
+}
+flyctl() { echo launch >> "$D/launches"; exec sleep 30; }
+curl() {
+ case " $* " in *" -w %{http_code} "*)
+  while [ "$#" -gt 0 ]; do if [ "$1" = --max-time ]; then shift; echo "$1" >> "$D/probe-limits"; break; fi; shift; done
+  printf 425
+ ;; esac
+}
+rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result status 4 || rc=$?
+[ "$rc" = 0 ] && [ -n "$result" ] || { cat "$D/proxy.log"; exit 91; }
+[ "$(wc -l < "$D/launches")" = 1 ] && [ "$(cat "$D/probe-limits")" = "$EXPECTED_LIMIT" ] || exit 92
+cloudbench_terminate_and_wait 1 "$result"
+''')
+    self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 
 if __name__=='__main__':unittest.main()

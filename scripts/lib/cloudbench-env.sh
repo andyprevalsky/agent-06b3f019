@@ -1743,12 +1743,13 @@ cloudbench_shared_proxy_start() {  # same signature as data-plane proxy
 # six healthy guests were failed closed without one post-thaw attempt, while
 # the three already-established tunnels recovered in 20 s. The stall is logged
 # and excluded; the budget keeps counting only bounded controller work.
-#   cloudbench_charge_bounded_step <charged-var> <stalled-var> <step-started-epoch> <ceiling-s> <log> <label>
+#   cloudbench_charge_bounded_step <charged-var> <stalled-var> <step-started-epoch> <ceiling-s> <log> <label> [minimum-s]
 cloudbench_charge_bounded_step() {
   local charged_var="$1" stalled_var="$2" step_started="$3" ceiling="$4" log_file="$5" label="$6"
-  local elapsed excess
+  # Subsecond failed probes still consume a bounded budget unit when requested.
+  local elapsed excess minimum="${7:-0}"
   elapsed=$(( $(date +%s) - step_started ))
-  [ "$elapsed" -ge 0 ] || elapsed=0
+  [ "$elapsed" -ge "$minimum" ] || elapsed="$minimum"
   if [ "$elapsed" -gt "$ceiling" ]; then
     excess=$(( elapsed - ceiling ))
     printf '[%s] %s: host stall %ss during a %ss-bounded step (excluded from the readiness budget)\n' \
@@ -1771,7 +1772,7 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
   # cloudbench_charge_bounded_step). Ceilings are the sum of each segment's
   # fixed limits plus slack for a loaded host.
   local charged=0 stalled=0 step_started attempt_ceiling wait_ceiling=15 retire_ceiling=15
-  local wait_budget probe_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
+  local wait_budget probe_budget sleep_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
   settle_whole="${settle%%.*}"
   case "$settle_whole" in ''|*[!0-9]*) settle_whole=3 ;; esac
   attempt_ceiling=$(( 30 + settle_whole ))
@@ -1824,23 +1825,25 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
         step_started="$(date +%s)"
         wait_budget=$((timeout - charged))
         [ "$wait_budget" -le "$wait_ceiling" ] || wait_budget="$wait_ceiling"
-        # Do not admit a step unless its fixed 3s probe and 1s sleep fit.
-        [ "$wait_budget" -ge 4 ] || break
-        probe_budget=3
-        [ "$probe_budget" -le "$wait_budget" ] || probe_budget="$wait_budget"
+        # Reserve a sleep second when available; the last second still gets
+        # one bounded observation of this same live proxy.
+        sleep_budget=0
+        [ "$wait_budget" -le 1 ] || sleep_budget=1
+        probe_budget=$((wait_budget - sleep_budget))
+        [ "$probe_budget" -le 3 ] || probe_budget=3
         fresh_budget=0
         did_thaw_probe=0
         health_code="$(curl --noproxy '*' -sS --max-time "$probe_budget" -o /dev/null -w '%{http_code}' \
           "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
-        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code"; then
-          sleep 1
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" && [ "$sleep_budget" -gt 0 ]; then
+          sleep "$sleep_budget"
         fi
         probe_elapsed=$(( $(date +%s) - step_started ))
         if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
           && [ "$probe_elapsed" -gt "$wait_budget" ] && [ "$thaw_probe_used" -eq 0 ]; then
-          # Reserve the first probe's fixed bound and sleep before one fresh
+          # Reserve the first probe's fixed bound and optional sleep before one fresh
           # observation. Both probes stay inside this one existing wait step.
-          fresh_budget=$((wait_budget - probe_budget - 1))
+          fresh_budget=$((wait_budget - probe_budget - sleep_budget))
           [ "$fresh_budget" -le 3 ] || fresh_budget=3
           if [ "$fresh_budget" -gt 0 ]; then
             thaw_probe_used=1
@@ -1856,7 +1859,7 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
             "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
         fi
         cloudbench_charge_bounded_step charged stalled "$step_started" "$wait_budget" \
-          "$log_file" "$label proxy attempt $attempt wait"
+          "$log_file" "$label proxy attempt $attempt wait" 1
         if [ "$did_thaw_probe" -eq 1 ]; then
           printf 'status proxy: post-thaw probe charged=%s timeout=%s\n' "$charged" "$timeout" >> "$log_file"
         fi
