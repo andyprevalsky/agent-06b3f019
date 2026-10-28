@@ -11,9 +11,13 @@ This supervisor only schedules lanes and writes one atomic receipt:
   collects every failure. When all lanes finish it re-hashes the source and
   marks the receipt ``stale`` if anything changed after the freeze, so an
   older snapshot can never be reported green.
-* ``wait`` blocks (local file watch, no agent turns) until the receipt shows
-  the first failed lane, all lanes passed, or a stale source. Exit 0 = all
-  green, 1 = a lane failed, 3 = stale source, 2 = usage/receipt error.
+* ``wait`` is the same event waiter as ``run-deploy-stage --wait``
+  (``scripts/deploy_stage_wait.py``) over this pipeline's lanes: it watches
+  the lanes' own stage receipts and adds only supervisor events (supervisor
+  died, lane never started, stale source). Exit codes match that waiter:
+  0 = all green, 1 = a lane failed, 2 = usage/receipt error, 3 = a lane
+  runner or the supervisor died, 4 = stalled (``--stall-seconds``),
+  124 = timeout, 5 = stale source.
 
 Plan file (JSON): {"lanes": [{"name", "command": [...], "cwd": "back-end",
 "env": {...}, "after": ["lane"], "reuse_passed": true, "group": "3"}]}
@@ -33,9 +37,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import deploy_stage_wait  # scripts/ is sys.path[0]: one waiter for every /deploy gate
+
 ROOT = Path(__file__).resolve().parents[1]
 STAGE_WRAPPER = ROOT / "scripts" / "run-deploy-stage"
 RECEIPT_SCHEMA = 1
+EXIT_STALE = 5
 TERMINAL_LANE = {"passed", "failed"}
 
 
@@ -145,6 +152,7 @@ def run(plan: Path, state_dir: Path, max_parallel: int) -> int:
         "order": [lane.name for lane in order],
         "lanes": {lane.name: {"status": "pending", "group": lane.group} for lane in order},
         "status": "running",
+        "stage_run_dir": _stage_run_dir(),
     }
     write_receipt(receipt_path, receipt)
     log_dir = state_dir / "logs"
@@ -226,44 +234,117 @@ def run(plan: Path, state_dir: Path, max_parallel: int) -> int:
     if final_source != frozen:
         receipt["status"] = "stale"
     write_receipt(receipt_path, receipt)
-    return {"passed": 0, "failed": 1, "stale": 3}.get(receipt["status"], 1)
+    return {"passed": 0, "failed": 1, "stale": EXIT_STALE}.get(receipt["status"], 1)
 
 
-def wait(state_dir: Path, timeout: float) -> int:
+def _stage_run_dir() -> str | None:
+    """The run-deploy-stage timing run every lane records into."""
+    run_root = Path(os.environ.get("DEPLOY_RUN_ROOT") or ROOT / ".context" / "deploy-runs")
+    try:
+        run_id = (run_root / "current").read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    return str(run_root / run_id) if run_id else None
+
+
+def _read_receipt(path: Path) -> dict | None:
+    try:
+        receipt = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _supervisor_alive(receipt: dict) -> bool:
+    pid = receipt.get("supervisor_pid")
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _supervisor_event(receipt: dict) -> tuple[int, dict] | None:
+    """Events only the supervisor knows; lane events come from stage receipts."""
+    if receipt.get("status") == "stale":
+        return EXIT_STALE, {"event": "stale"}
+    unstarted = [
+        name
+        for name, lane in receipt["lanes"].items()
+        if lane.get("status") == "failed" and lane.get("note") == "not started"
+    ]
+    if unstarted:
+        return 1, {"event": "failed", "failed": unstarted}
+    if receipt.get("status") == "running" and not _supervisor_alive(receipt):
+        return 3, {"event": "supervisor-died", "pid": receipt.get("supervisor_pid")}
+    return None
+
+
+def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0) -> int:
+    """One waiter for every /deploy gate: delegate lanes to deploy_stage_wait."""
     receipt_path = state_dir / "receipt.json"
-    deadline = time.monotonic() + timeout if timeout else None
-    while True:
-        try:
-            receipt = json.loads(receipt_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            receipt = None
-        if receipt:
-            status = receipt.get("status")
-            failed = [n for n, lane in receipt["lanes"].items() if lane.get("status") == "failed"]
-            if status in {"failed", "failing"} or failed:
-                for name in failed:
-                    lane = receipt["lanes"][name]
-                    print(f"FAILED {name} exit={lane.get('exit')} log={lane.get('log')}")
-                running = [n for n, lane in receipt["lanes"].items() if lane.get("status") == "running"]
-                print(f"PIPELINE_WAKE status=failed still_running={','.join(running) or '-'}")
-                return 1
-            if status == "passed":
-                print(f"PIPELINE_WAKE status=passed wall_s={receipt.get('wall_s')} head={receipt['source']['head']}")
-                return 0
-            if status == "stale":
-                print("PIPELINE_WAKE status=stale (source changed after freeze; rerun on the new source)")
-                return 3
-            pid = receipt.get("supervisor_pid")
-            if pid and status == "running":
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    print(f"PIPELINE_WAKE status=supervisor-died pid={pid}")
-                    return 2
-        if deadline and time.monotonic() > deadline:
-            print("PIPELINE_WAKE status=timeout")
+    limit = timeout if timeout else float("inf")
+    started = time.monotonic()
+    receipt = _read_receipt(receipt_path)
+    while receipt is None:
+        if time.monotonic() - started > min(limit, 30.0):
+            print("PIPELINE_WAKE status=no-receipt exit=2")
             return 2
-        time.sleep(0.5)
+        time.sleep(0.2)
+        receipt = _read_receipt(receipt_path)
+    if not receipt.get("stage_run_dir"):
+        print("PIPELINE_WAKE status=no-stage-run exit=2 (start one with run-deploy-stage --start)")
+        return 2
+    lanes = list(receipt["lanes"])
+    stage_run_dir = Path(receipt["stage_run_dir"])
+    latest = {"receipt": receipt}
+
+    def refresh() -> dict:
+        latest["receipt"] = _read_receipt(receipt_path) or latest["receipt"]
+        return latest["receipt"]
+
+    code, payload = deploy_stage_wait.wait_for_stages(
+        stage_run_dir,
+        lanes,
+        since=float(receipt["started_epoch"]),
+        timeout=max(0.0, limit - (time.monotonic() - started)),
+        stall_seconds=stall_seconds,
+        extra_event=lambda: _supervisor_event(refresh()),
+    )
+    while code == 0:
+        # Every lane passed; the supervisor still re-hashes the frozen source.
+        current = refresh()
+        status = current.get("status")
+        if status in {"passed", "failed", "stale"}:
+            code = {"passed": 0, "failed": 1, "stale": EXIT_STALE}[status]
+            payload = {"event": status}
+            break
+        if not _supervisor_alive(current):
+            code, payload = 3, {"event": "supervisor-died", "pid": current.get("supervisor_pid")}
+            break
+        time.sleep(0.2)
+    final = latest["receipt"]
+    rows = {
+        row.get("stage"): row
+        for row in deploy_stage_wait._rows(stage_run_dir)
+        if row.get("stage") in lanes and float(row.get("started_epoch") or 0) >= final["started_epoch"]
+    }
+    failed = list(payload.get("failed", []))
+    for name in failed:
+        lane = final["lanes"].get(name, {})
+        print(f"FAILED {name} exit={rows.get(name, {}).get('exit_code', lane.get('exit'))} log={lane.get('log')}")
+    running = sorted(set(lanes) - set(rows) - set(failed))
+    print(
+        f"PIPELINE_WAKE status={payload.get('event')} exit={code} head={final['source']['head']} "
+        f"still_running={','.join(running) or '-'}"
+    )
+    payload["exit"] = code
+    print(json.dumps(payload, sort_keys=True, default=str))
+    return code
 
 
 AGENTCARD_TASKS = (
@@ -333,6 +414,7 @@ def main(argv: list[str] | None = None) -> int:
     wait_parser = sub.add_parser("wait")
     wait_parser.add_argument("--state-dir", type=Path, required=True)
     wait_parser.add_argument("--timeout", type=float, default=0)
+    wait_parser.add_argument("--stall-seconds", type=float, default=0.0)
     plan_parser = sub.add_parser("plan", help="print the standard Group 3/4 plan JSON")
     plan_parser.add_argument("--group", choices=("3", "4", "all"), default="all")
     plan_parser.add_argument("--backend", action="store_true")
@@ -350,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.action == "run":
         return run(args.plan, args.state_dir, args.max_parallel)
-    return wait(args.state_dir, args.timeout)
+    return wait(args.state_dir, args.timeout, args.stall_seconds)
 
 
 if __name__ == "__main__":

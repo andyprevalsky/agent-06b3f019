@@ -90,6 +90,24 @@ def main() -> int:
         assert receipt["lanes"]["fails"]["started_epoch"] < receipt["lanes"]["fast-a"]["started_epoch"]
         assert (state / "history.jsonl").read_text().count("\n") == 1
 
+        # A --reuse-passed cache hit records status "reused" (exp/telemetry); the
+        # shared stage waiter must treat it as a pass, never as a failed lane.
+        write_plan(plan, [{"name": "cached", "command": ["true"], "reuse_passed": True}])
+        for _ in range(2):
+            ran = subprocess.run(
+                [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state)], env=env
+            )
+            assert ran.returncode == 0, ran.returncode
+        waited = subprocess.run(
+            [sys.executable, str(DRIVER), "wait", "--state-dir", str(state), "--timeout", "10"],
+            env=env, stdout=subprocess.PIPE, text=True,
+        )
+        run_dir = Path(json.loads((state / "receipt.json").read_text())["stage_run_dir"])
+        reused_rows = [row for row in map(json.loads, (run_dir / "stages.jsonl").read_text().splitlines())
+                       if row.get("stage") == "cached" and row.get("status") == "reused"]
+        assert reused_rows, "second run must be an exact-input reuse"
+        assert waited.returncode == 0, waited.stdout
+
         # A source edit during the sweep must never report green.
         probe = ROOT / ".pipeline-stale-probe.tmp"
         write_plan(plan, [{"name": "edits", "command": ["bash", "-c", f"echo x > {probe}"],
@@ -104,7 +122,7 @@ def main() -> int:
             )
         finally:
             probe.unlink(missing_ok=True)
-        assert stale.returncode == 3 and waited.returncode == 3, (stale.returncode, waited.stdout)
+        assert stale.returncode == 5 and waited.returncode == 5, (stale.returncode, waited.stdout)
     print("run-deploy-pipeline: all checks passed")
     return 0
 

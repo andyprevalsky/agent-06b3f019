@@ -540,7 +540,7 @@ run the Step 4d push block (ledger `start --reset --kind initial`, factory
 `stage-start code-review`, push, open the PR). Opening the PR starts both the
 initial CodeRabbit review and, for agents changes, the
 `prebuild-agents-image.yml` worker-image build. The review then overlaps Group 3
-instead of starting after it. Step 9's racing waiter runs in the background
+instead of starting after it. Step 9's CodeRabbit waiter runs in the background
 alongside the gates. If a Group 3 lane later needs a fix, follow the existing
 "do not push while a review cycle is open" rule: let the cycle finish, batch
 the gate fixes and review findings, and push once; the incremental cycle
@@ -566,6 +566,16 @@ log has not grown for `--stall-seconds`; `124` healthy lanes still running
 poll interval, and it doubles as the rule-19 liveness/output-growth owner after
 the first 60 s (keep the 10 s early-death checks during that first minute).
 Smoke, semantic, AgentCard and E2B lanes in Group 4 use the same pattern.
+
+Optionally drive Group 3 and Group 4 lanes concurrently with
+`python3 scripts/run_deploy_pipeline.py plan|run` (every lane still runs
+through `run-deploy-stage`; previously failed lanes are admitted first and a
+source change after the freeze marks the run `stale`). Its
+`python3 scripts/run_deploy_pipeline.py wait --state-dir <dir> [--stall-seconds S]`
+is this same waiter over the pipeline's lanes, with the same exit codes plus
+`5` for a stale source and `3` for a dead supervisor; never arm a second,
+different waiter for the same lanes. An exact-input `--reuse-passed` hit
+records `reused`, which both count as a pass.
 
 ## Step 1: Prettier format
 
@@ -1211,7 +1221,7 @@ exact-HEAD waiter is running.
 Once Group 3 is green and the PR exists, launch all applicable Group 4 lanes together
 in one assistant message with separate parallel Bash tool calls:
 
-1. Code review racing waiter (Step 9; already running since the freeze push).
+1. CodeRabbit review waiter (Step 9; already running since the freeze push).
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
 3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
 4. Semantic tests (Step 6b; never skip).

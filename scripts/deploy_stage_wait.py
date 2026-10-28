@@ -36,6 +36,9 @@ EXIT_USAGE = 2
 EXIT_DIED = 3
 EXIT_STALLED = 4
 EXIT_TIMEOUT = 124
+# An exact-input reuse (``run-deploy-stage --reuse-passed`` cache hit) records
+# ``reused``: it is a pass that executed nothing, never a failure.
+PASSING_STATUSES = frozenset({"passed", "reused"})
 
 
 def _pid_alive(pid: int) -> bool:
@@ -104,7 +107,9 @@ def wait_for_stages(
     tick: float = 0.2,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    extra_event: Callable[[], tuple[int, dict] | None] | None = None,
 ) -> tuple[int, dict]:
+    """Wake on the first stage event; ``extra_event`` lets a supervisor add its own."""
     started = clock()
     progress: dict[tuple[str, int], tuple[int, float]] = {}
     while True:
@@ -125,10 +130,14 @@ def wait_for_stages(
                     return EXIT_DIED, {"event": "died", "stage": stage, "pid": pid}
         # A rerun admitted after a failed row supersedes that row.
         failed = [
-            s for s, row in finished.items() if row.get("status") != "passed" and s not in running
+            s for s, row in finished.items() if row.get("status") not in PASSING_STATUSES and s not in running
         ]
         if failed:
             return EXIT_FAILED, {"event": "failed", "failed": failed, "finished": finished}
+        if extra_event is not None:
+            event = extra_event()
+            if event is not None:
+                return event
         if all(stage in finished and stage not in running for stage in stages):
             return EXIT_PASSED, {"event": "passed", "finished": finished}
         now = clock()
