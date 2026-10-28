@@ -79,3 +79,9 @@ test pass (17/17). Generic unpinned compatibility tests remain unchanged.
 Evidence: `/var/tmp/rose-agent-speed-fixture-before.log` and
 `/var/tmp/rose-agent-speed-fixture-after.log`. The original full-suite failure
 is retained; this focused pass does not relabel that run as green.
+
+The Python full Rose suite also retained a pre-pin expectation that production
+Ultra would use GPT-6 Sol. The corrected test asserts GPT-6.1 for both WMH and
+production Ultra, then separately exercises GPT-6 compatibility with an explicitly
+unpinned PoolSpec. The unchanged instrumented Rose command passes 273 checks
+after this and the independently diagnosed loopback fixture repair.
