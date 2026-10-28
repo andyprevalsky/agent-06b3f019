@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -74,7 +73,9 @@ DEFAULT_GATE_TIMEOUT_SECONDS = 600.0
 TIMEOUT_FACTOR = 3.0
 TIMEOUT_EXIT_CODE = 124
 SHARD_ENV = "DEPLOY_GATE_SHARD"
-PASS_CACHE = ROOT / ".context" / "deploy-structural" / "passes.json"
+# The CLI records which gates failed so a retry can run them first. Every
+# retry still runs the full registry; ordering never skips a gate.
+FAILURE_STATE = Path(".context") / "deploy-structural" / "last-failures.json"
 
 
 @dataclass(frozen=True)
@@ -127,88 +128,41 @@ class RunningGate:
     timed_out: bool = False
 
 
-def expand_jobs(gates: Sequence[Gate]) -> list[Job]:
-    """Shard expansion, longest expected job first; ties keep registry order."""
+def expand_jobs(gates: Sequence[Gate], first: frozenset[str] = frozenset()) -> list[Job]:
+    """Shard expansion: previously failed gates first, then longest expected
+    job first; ties keep registry order."""
     jobs = []
     for gate in gates:
         if gate.shards > 1:
             jobs.extend(Job(gate, shard) for shard in range(1, gate.shards + 1))
         else:
             jobs.append(Job(gate, 0))
-    return sorted(jobs, key=lambda job: -job.expected_seconds)
+    return sorted(
+        jobs, key=lambda job: (job.gate.name not in first, -job.expected_seconds)
+    )
 
 
-def input_fingerprint() -> str | None:
-    """Over-inclusive digest of everything a gate could read, or None if unknown.
-
-    Covers the committed tree, every tracked/untracked non-ignored change in
-    the worktree (content, not names), the ignored env files and dependency
-    installs the suites use, the interpreters and host tools. Any change to
-    any of these invalidates every cached pass.
-    """
-    digest = hashlib.sha256()
-
-    def git(*args: str) -> bytes:
-        return subprocess.run(
-            ("git", "-C", str(ROOT), *args), check=True, capture_output=True, timeout=120
-        ).stdout
-
+def load_previous_failures(path: Path) -> set[str]:
     try:
-        digest.update(git("rev-parse", "HEAD^{tree}"))
-        status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
-        digest.update(status)
-        for entry in status.split(b"\0"):
-            if len(entry) < 4:
-                continue
-            path = ROOT / os.fsdecode(entry[3:])
-            if path.is_file():
-                digest.update(entry[3:] + b"\0" + hashlib.sha256(path.read_bytes()).digest())
-        for relative in (
-            "agents/.env",
-            "back-end/.env",
-            "front-end/.env",
-            "node_modules/.package-lock.json",
-            "back-end/node_modules/.package-lock.json",
-            "front-end/node_modules/.package-lock.json",
-            "agents/venv/pyvenv.cfg",
-        ):
-            path = ROOT / relative
-            digest.update(relative.encode() + b"\0")
-            if path.exists():
-                digest.update(os.path.realpath(path).encode())
-                digest.update(hashlib.sha256(path.read_bytes()).digest())
-        for directory in sorted((ROOT / "agents/venv/lib").glob("python*/site-packages")):
-            names = sorted(entry.name for entry in os.scandir(directory))
-            digest.update("\0".join(names).encode())
-        search_path = gate_environment().get("PATH")
-        for tool in ("python3", "node", "bash", "git", "lsof", "psql"):
-            located = shutil.which(tool, path=search_path)
-            digest.update(f"{tool}={located and os.path.realpath(located)}".encode())
-        digest.update(sys.version.encode())
-        digest.update(sys.platform.encode())
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return digest.hexdigest()
-
-
-def _cache_key(job: Job, fingerprint: str) -> str:
-    material = json.dumps([job.label, list(job.gate.command), fingerprint])
-    return hashlib.sha256(material.encode()).hexdigest()
-
-
-def _load_cache() -> dict[str, dict[str, object]]:
-    try:
-        loaded = json.loads(PASS_CACHE.read_text())
+        recorded = json.loads(path.read_text())
     except (OSError, ValueError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        return set()
+    failed = recorded.get("failed") if isinstance(recorded, dict) else None
+    return {name for name in failed if isinstance(name, str)} if isinstance(failed, list) else set()
 
 
-def _store_cache(entries: dict[str, dict[str, object]]) -> None:
-    PASS_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = PASS_CACHE.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(entries, indent=1, sort_keys=True))
-    os.replace(temporary, PASS_CACHE)
+def record_failures(path: Path, failed: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "failed": sorted(failed),
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+    )
+    os.replace(temporary, path)
 
 
 GATES = (
@@ -446,13 +400,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--max-workers", type=int)
     parser.add_argument(
-        "--reuse-passes",
+        "--no-failed-first",
         action="store_true",
-        help=(
-            "skip jobs that passed before with byte-identical inputs "
-            "(whole worktree, env files, dependencies, tools); a retry after "
-            "a flaky failure reruns only the failed jobs"
-        ),
+        help="ignore the recorded failures of the previous run when ordering",
     )
     return parser
 
@@ -508,25 +458,28 @@ def _enforce_timeouts(running: Sequence[RunningGate]) -> None:
             pass
 
 
-def run_gates(gates: Sequence[Gate], max_workers: int, reuse_passes: bool = False) -> int:
+def run_gates(
+    gates: Sequence[Gate],
+    max_workers: int,
+    failure_state: Path | None = None,
+) -> int:
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
 
-    jobs = expand_jobs(gates)
-    fingerprint = input_fingerprint() if reuse_passes else None
-    cache = _load_cache() if fingerprint else {}
-    reused: dict[str, str] = {}
-    if fingerprint:
-        for job in jobs:
-            entry = cache.get(_cache_key(job, fingerprint))
-            if isinstance(entry, dict) and entry.get("exit") == 0:
-                reused[job.label] = str(entry.get("recorded_at", "unknown"))
-    elif reuse_passes:
+    previously_failed = load_previous_failures(failure_state) if failure_state else set()
+    previously_failed &= {gate.name for gate in gates}
+    jobs = expand_jobs(gates, frozenset(previously_failed))
+    if previously_failed:
         print(
-            "deploy structural gates: inputs unknown; running every gate",
+            "deploy structural gates: running previously failed gate(s) first: "
+            + ", ".join(sorted(previously_failed))
+            + "; the full registry still runs unless one fails again",
             file=sys.stderr,
+            flush=True,
         )
-    pending = deque(job for job in jobs if job.label not in reused)
+    pending = deque(jobs)
+    began = time.monotonic()
+    repeated_failure = ""
     running: list[RunningGate] = []
     results: dict[str, tuple[int, float, str]] = {}
     timed_out: set[str] = set()
@@ -547,8 +500,13 @@ def run_gates(gates: Sequence[Gate], max_workers: int, reuse_passes: bool = Fals
     try:
         with tempfile.TemporaryDirectory(prefix="deploy-structural-") as temporary:
             output_root = Path(temporary)
-            while (running or pending) and not received_signal:
-                while pending and len(running) < max_workers and not received_signal:
+            while (running or pending) and not received_signal and not repeated_failure:
+                while (
+                    pending
+                    and len(running) < max_workers
+                    and not received_signal
+                    and not repeated_failure
+                ):
                     job = pending.popleft()
                     output_path = output_root / (job.label.replace("/", "-of-") + ".log")
                     output = output_path.open("wb")
@@ -591,14 +549,18 @@ def run_gates(gates: Sequence[Gate], max_workers: int, reuse_passes: bool = Fals
                         )
                     results[item.gate.label] = (exit_code, duration, rendered)
                     running.remove(item)
+                    print(
+                        f"[+{time.monotonic() - began:7.1f}s] {item.gate.label} "
+                        f"exit={exit_code} duration={duration:.1f}s",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if exit_code != 0 and item.gate.gate.name in previously_failed:
+                        repeated_failure = item.gate.label
 
             if not received_signal:
                 for job in jobs:
-                    if job.label in reused:
-                        print(
-                            f"\n== {job.label}: exit=0 REUSED pass recorded "
-                            f"{reused[job.label]} for identical inputs =="
-                        )
+                    if job.label not in results:
                         continue
                     exit_code, duration, rendered = results[job.label]
                     print(
@@ -618,32 +580,32 @@ def run_gates(gates: Sequence[Gate], max_workers: int, reuse_passes: bool = Fals
 
     if received_signal:
         return 128 + received_signal
-    if fingerprint:
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        for job in jobs:
-            outcome = results.get(job.label)
-            if outcome is not None and outcome[0] == 0:
-                cache[_cache_key(job, fingerprint)] = {
-                    "exit": 0,
-                    "gate": job.label,
-                    "recorded_at": now,
-                }
-        try:
-            _store_cache(cache)
-        except OSError as error:
-            print(f"deploy structural gates: pass cache not saved: {error}", file=sys.stderr)
     failures = [
         name + (" (timed out)" if name in timed_out else "")
         for name, (exit_code, _, _) in results.items()
         if exit_code != 0
     ]
-    if failures:
+    failed_gates = {
+        job.gate.name for job in jobs if results.get(job.label, (0,))[0] != 0
+    }
+    if repeated_failure:
+        failed_gates |= previously_failed
+        skipped = [job.label for job in jobs if job.label not in results]
+        print(
+            f"deploy structural gates: previously failed {repeated_failure} failed "
+            f"again; stopped early, {len(skipped)} job(s) not run. "
+            "Fix it and rerun; the gate passes only after a full sweep.",
+            file=sys.stderr,
+        )
+    if failure_state is not None:
+        try:
+            record_failures(failure_state, sorted(failed_gates))
+        except OSError as error:
+            print(f"deploy structural gates: failure record not saved: {error}", file=sys.stderr)
+    if failures or repeated_failure:
         print("failed deploy structural gates: " + ", ".join(failures), file=sys.stderr)
         return 1
-    print(
-        f"\nAll {len(gates)} deploy structural gates passed"
-        + (f" ({len(reused)} job(s) reused from identical inputs)." if reused else ".")
-    )
+    print(f"\nAll {len(gates)} deploy structural gates passed.")
     return 0
 
 
@@ -665,9 +627,9 @@ def main() -> int:
         )
         return 1
     workers = DEFAULT_MAX_WORKERS if args.max_workers is None else args.max_workers
-    if args.reuse_passes:
-        return run_gates(GATES, max_workers=workers, reuse_passes=True)
-    return run_gates(GATES, max_workers=workers)
+    if args.no_failed_first:
+        return run_gates(GATES, max_workers=workers)
+    return run_gates(GATES, max_workers=workers, failure_state=ROOT / FAILURE_STATE)
 
 
 if __name__ == "__main__":

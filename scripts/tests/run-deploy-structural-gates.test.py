@@ -436,6 +436,7 @@ class StructuralGateRunnerTests(unittest.TestCase):
             try:
                 with (
                     patch.object(module, "GATES", gates),
+                    patch.object(module, "FAILURE_STATE", root / "failures.json"),
                     patch.object(sys, "argv", [str(RUNNER)]),
                     patch.object(module.subprocess, "Popen", side_effect=launch),
                     patch.object(module.time, "sleep", side_effect=observe_admission),
@@ -453,7 +454,11 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
             ):
                 self.assertEqual(module.main(), 0)
-                run.assert_called_once_with(module.GATES, max_workers=3)
+                run.assert_called_once_with(
+                    module.GATES,
+                    max_workers=3,
+                    failure_state=module.ROOT / module.FAILURE_STATE,
+                )
 
     def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)
@@ -1224,7 +1229,7 @@ def _load_runner(name: str):
 
 
 class StructuralGateSchedulingTests(unittest.TestCase):
-    """Sharding, longest-first admission, hard timeouts and pass reuse."""
+    """Sharding, longest-first admission, hard timeouts and failed-first retries."""
 
     def test_shards_partition_the_selection_exactly_once(self) -> None:
         sys.path.insert(0, str(ROOT / "scripts" / "tests"))
@@ -1341,71 +1346,74 @@ class StructuralGateSchedulingTests(unittest.TestCase):
         self.assertEqual(quick.timeout_seconds, module.DEFAULT_GATE_TIMEOUT_SECONDS)
         self.assertEqual(slow.timeout_seconds, max(module.DEFAULT_GATE_TIMEOUT_SECONDS, 3 * 350))
 
-    def test_reuse_reruns_only_failures_and_everything_when_inputs_change(self) -> None:
-        module = _load_runner("deploy_runner_reuse")
-        with tempfile.TemporaryDirectory(prefix="deploy-runner-reuse-") as temporary:
+    def test_retry_runs_previous_failures_first_then_the_full_sweep(self) -> None:
+        module = _load_runner("deploy_runner_failed_first")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-failed-first-") as temporary:
             root = Path(temporary)
-            fail_flag = root / "fail"
-            fail_flag.touch()
+            order = root / "order"
+            broken = root / "broken"
+            state = root / "state.json"
 
-            def counting(name: str, fails: bool) -> object:
-                body = f"echo run >> {root / name}"
-                if fails:
-                    body += f"; test ! -e {fail_flag}"
-                return module.Gate(name, ("bash", "-c", body))
+            def gate(name: str, seconds: float) -> object:
+                body = f"echo {name} >> {order}; test ! -e {broken}.{name}"
+                return module.Gate(name, ("bash", "-c", body), expected_seconds=seconds)
 
-            gates = (counting("passes", False), counting("flaky", True))
+            gates = (gate("long", 100), gate("middle", 50), gate("short", 1))
 
-            def runs(name: str) -> int:
-                path = root / name
-                return len(path.read_text().splitlines()) if path.exists() else 0
-
-            def run(fingerprint: str | None, reuse: bool = True) -> int:
+            def run() -> tuple[int, list[str], str]:
+                order.write_text("")
+                stderr = io.StringIO()
                 with (
-                    patch.object(module, "PASS_CACHE", root / "cache.json"),
-                    patch.object(module, "input_fingerprint", return_value=fingerprint),
                     contextlib.redirect_stdout(io.StringIO()),
-                    contextlib.redirect_stderr(io.StringIO()),
+                    contextlib.redirect_stderr(stderr),
                 ):
-                    return module.run_gates(gates, max_workers=2, reuse_passes=reuse)
+                    result = module.run_gates(gates, max_workers=1, failure_state=state)
+                return result, order.read_text().split(), stderr.getvalue()
 
-            self.assertEqual(run("inputs-a"), 1)
-            self.assertEqual((runs("passes"), runs("flaky")), (1, 1))
-            fail_flag.unlink()
-            self.assertEqual(run("inputs-a"), 0, "retry of the failure must pass")
-            self.assertEqual((runs("passes"), runs("flaky")), (1, 2), "only the failure reran")
-            self.assertEqual(run("inputs-a"), 0)
-            self.assertEqual((runs("passes"), runs("flaky")), (1, 2), "all passes reused")
-            self.assertEqual(run("inputs-b"), 0)
-            self.assertEqual((runs("passes"), runs("flaky")), (2, 3), "changed inputs rerun all")
-            self.assertEqual(run(None), 0)
-            self.assertEqual((runs("passes"), runs("flaky")), (3, 4), "unknown inputs rerun all")
-            self.assertEqual(run("inputs-b", reuse=False), 0)
-            self.assertEqual((runs("passes"), runs("flaky")), (4, 5), "reuse is opt-in")
+            Path(f"{broken}.short").touch()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (1, ["long", "middle", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
 
-    def test_input_fingerprint_tracks_worktree_content(self) -> None:
-        module = _load_runner("deploy_runner_fingerprint")
-        with tempfile.TemporaryDirectory(prefix="deploy-runner-fingerprint-") as temporary:
-            root = Path(temporary)
-            subprocess.run(["git", "init", "-q", str(root)], check=True)
-            (root / "tracked.txt").write_text("a")
-            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-            subprocess.run(
-                ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
-                check=True,
-            )
-            with patch.object(module, "ROOT", root):
-                clean = module.input_fingerprint()
-                (root / "tracked.txt").write_text("b")
-                edited = module.input_fingerprint()
-                (root / "tracked.txt").write_text("c")
-                edited_again = module.input_fingerprint()
-                (root / "untracked.txt").write_text("u")
-                untracked = module.input_fingerprint()
-            self.assertEqual(len({clean, edited, edited_again, untracked}), 4)
-            with patch.object(module, "ROOT", root / "missing"):
-                self.assertIsNone(module.input_fingerprint(), "unknown inputs never reuse")
+            # Still broken: the retry signals within the first job and stops.
+            result, ran, stderr = run()
+            self.assertEqual((result, ran), (1, ["short"]))
+            self.assertIn("previously failed short failed again", stderr)
+            self.assertEqual(json.loads(state.read_text())["failed"], ["short"])
 
+            # Fixed, but the fix broke another gate: the full sweep catches it.
+            Path(f"{broken}.short").unlink()
+            Path(f"{broken}.long").touch()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (1, ["short", "long", "middle"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], ["long"])
+
+            # Everything fixed: only a complete sweep passes, and clears state.
+            Path(f"{broken}.long").unlink()
+            result, ran, _ = run()
+            self.assertEqual((result, ran), (0, ["long", "middle", "short"]))
+            self.assertEqual(json.loads(state.read_text())["failed"], [])
+
+            # Without a recorded state the order is plain longest-first.
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                order.write_text("")
+                self.assertEqual(module.run_gates(gates, max_workers=1), 0)
+            self.assertEqual(order.read_text().split(), ["long", "middle", "short"])
+
+    def test_unreadable_failure_state_runs_the_normal_order(self) -> None:
+        module = _load_runner("deploy_runner_failed_first_state")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-state-") as temporary:
+            state = Path(temporary) / "state.json"
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text("{not json")
+            self.assertEqual(module.load_previous_failures(state), set())
+            state.write_text('{"failed": "short"}')
+            self.assertEqual(module.load_previous_failures(state), set())
+            module.record_failures(state, ["b", "a"])
+            self.assertEqual(module.load_previous_failures(state), {"a", "b"})
 
 if __name__ == "__main__":
     unittest.main()
