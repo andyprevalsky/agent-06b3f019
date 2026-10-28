@@ -599,7 +599,7 @@ BEGIN
   IF to_regclass('"Integration"') IS NOT NULL THEN
     DELETE FROM "Integration"
     WHERE "userId" = '00000000-0000-0000-0000-000000000000'
-      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown', 'codex_funded_cooldown');
   END IF;
 END $$;
 SQL
