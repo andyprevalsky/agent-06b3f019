@@ -131,7 +131,8 @@ cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agen
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
-    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
+    "${CLOUDBENCH_BROWSER_PROVIDER:-}" \
+    "${CLOUDBENCH_WORKER_BROWSER_PROVIDER-${CLOUDBENCH_BROWSER_PROVIDER:-}}" || exit 1
 
 # ── Point the worker at the primary box's backend + the bench's queue ───────
 PRIMARY_HOST="${PRIMARY_HOST:?PRIMARY_HOST required}"

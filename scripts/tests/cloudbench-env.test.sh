@@ -3870,7 +3870,7 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
       *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
     esac
-    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; }
+    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER=kernel; }
     resolve_durable_github_token() { echo gh-token; }
     assert_app_environment_lock_ownership() { return 0; }
     environment_activation_targets() { printf 'pool\tpool-1\n'; }
@@ -4076,3 +4076,6 @@ PYWIRE
   [ "$(effective true "$dir/agents/.env")" = "https://navi-j9a9.onrender.com" ] \
     || { echo "a missing agents/.env has no explicit Lantern credential" >&2; exit 1; }
 ) || fail "benchmark stacks must give workers the central people credential broker"
+
+# The same role-specific contract must survive staging and every guest boot path.
+python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
