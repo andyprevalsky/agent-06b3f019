@@ -88,17 +88,23 @@ interface X402Payment {
 async function getOrCreateWalletUser(walletAddress: string) {
   const userId = walletAddress.toLowerCase();
 
-  let user = await prisma.user.findUnique({
+  const existing = await prisma.user.findUnique({
     where: { userId },
   });
+  if (existing !== null) return existing;
 
-  if (user === null) {
-    user = await prisma.user.create({
-      data: { userId },
-    });
-    log.info('Created x402 user for wallet', { userId });
+  // Concurrent first payments (possibly on different instances) race to create
+  // the same wallet user: the loser reads the winner's row instead of failing.
+  let user;
+  try {
+    user = await prisma.user.create({ data: { userId } });
+  } catch (error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      throw error;
+    }
+    user = await prisma.user.findUniqueOrThrow({ where: { userId } });
   }
-
+  log.info('Resolved x402 user for wallet', { userId });
   return user;
 }
 

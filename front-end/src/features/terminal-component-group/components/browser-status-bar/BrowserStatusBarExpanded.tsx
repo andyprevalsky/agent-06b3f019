@@ -24,6 +24,8 @@ interface ExpandedProps {
   taskId: string;
   browserUrl: string;
   browserLive?: boolean;
+  /** The owning agent finished: show a terminal "session ended" state, never "Connecting…". */
+  browserEnded?: boolean;
   isDisconnected: boolean;
   isWaitingForAuthAssistance: boolean;
   outputSchema: OutputSchemaRef | undefined;
@@ -37,6 +39,7 @@ interface ExpandedProps {
 function ExpandedHeader({
   browserUrl,
   browserLive,
+  browserEnded,
   controlState,
   outputSchema,
   browserSessionMetadata,
@@ -46,6 +49,7 @@ function ExpandedHeader({
 }: {
   browserUrl: string;
   browserLive: boolean;
+  browserEnded: boolean;
   controlState: BrowserControlState;
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
@@ -53,8 +57,9 @@ function ExpandedHeader({
   onFullscreenToggle: (e: MouseEvent) => void;
   onCollapse: () => void;
 }) {
-  const statusLabel =
-    controlState === 'disconnected'
+  const statusLabel = browserEnded
+    ? 'Browser session ended'
+    : controlState === 'disconnected'
       ? 'Disconnected'
       : controlState === 'waiting'
         ? 'Agent waiting for assistance'
@@ -65,6 +70,7 @@ function ExpandedHeader({
       <BrowserThumbnail
         browserUrl={browserUrl}
         live={browserLive}
+        ended={browserEnded}
         width={144}
         height={90}
         wrapperClassName="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40 hidden sm:block"
@@ -108,6 +114,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
     taskId,
     browserUrl,
     browserLive = true,
+    browserEnded = false,
     isDisconnected,
     isWaitingForAuthAssistance,
     outputSchema,
@@ -128,6 +135,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
         <ExpandedHeader
           browserUrl={browserUrl}
           browserLive={browserLive}
+          browserEnded={browserEnded}
           controlState={controlState}
           outputSchema={outputSchema}
           browserSessionMetadata={browserSessionMetadata}

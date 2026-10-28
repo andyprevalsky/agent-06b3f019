@@ -103,6 +103,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       if (existing === undefined) return [...prev, tab];
       if (
         existing.live === tab.live &&
+        (existing.ended ?? false) === (tab.ended ?? false) &&
         existing.taskLabel === tab.taskLabel &&
         (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
         (existing.actualModel ?? null) === (tab.actualModel ?? null) &&
