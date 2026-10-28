@@ -92,6 +92,14 @@ def row_key(row: dict[str, Any]) -> tuple[Any, ...]:
             row.get("stage"),
             round(float(row.get("started_epoch") or 0.0), 3),
         )
+    if row.get("event") == "metadata" and row.get("value") == "snapshot":
+        return (
+            "factory-metadata",
+            row.get("workflow"),
+            row.get("workspace"),
+            row.get("recorded_epoch"),
+            json.dumps(row.get("telemetry"), sort_keys=True, separators=(",", ":")),
+        )
     return (
         "factory-event",
         row.get("workflow"),

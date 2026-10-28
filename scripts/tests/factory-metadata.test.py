@@ -106,6 +106,27 @@ class FactoryMetadataTest(unittest.TestCase):
             )
             self.assertEqual(len(pending_rows(old, [root])), 1)
 
+    def test_distinct_snapshots_at_same_timestamp_are_not_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = {
+                "workflow": "deploy",
+                "event": "metadata",
+                "value": "snapshot",
+                "recorded_epoch": 1,
+                "workspace": "fixture",
+            }
+            first = {**base, "telemetry": normalize_metadata(sample())}
+            changed = sample()
+            changed["execution"]["reasoning_effort"] = "xhigh"
+            second = {**base, "telemetry": normalize_metadata(changed)}
+            (root / "factory-events.jsonl").write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n"
+            )
+            pending = pending_rows("", [root])
+            self.assertEqual(len(pending), 2)
+            self.assertEqual(pending_rows(encode_rows(pending), [root]), [])
+
     def test_per_stage_snapshot_beats_run_defaults_and_legacy_still_loads(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
