@@ -2199,6 +2199,39 @@ async def test_wait_for_agents_mode_returns_at_once_for_finished_agent():
     assert clock.timeouts == []
 
 
+async def test_wait_for_title_never_doubles_the_waiting_prefix():
+    """Andy 2026-10-28: the work row read "Waiting for Waiting for Chase balances".
+
+    A model-written description that already says "Waiting for ..." keeps one prefix;
+    a plain task name reads "Waiting for <name>" unchanged.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    for description, expected in (
+        ("Waiting for Chase balances", "Waiting for Chase balances"),
+        ("waiting for waiting for Chase balances", "Waiting for Chase balances"),
+        ("Chase balances", "Waiting for Chase balances"),
+    ):
+        rows, clock = _Rows(), _Clock()
+        with _real_wf(rows, clock) as wf:
+            gates = {"chase_balances": asyncio.Event()}
+            wf._execute_tool = _gated_spawns(wf, gates)
+            await _spawn_bg(wf, "chase_balances", "toolu_c")
+            gates["chase_balances"].set()
+            await wf._background_handles["toolu_c"]
+            events = await _collect(
+                WaitForManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"description": description, "agents": ["/root/chase_balances"]},
+                    tool_call_id="tc-title",
+                )
+            )
+        running = [e for e in events if e.status == MessageStatus.IN_PROGRESS]
+        assert running and running[0].title == expected, (description, [e.title for e in events])
+        assert running[0].metadata["description"] == "Chase balances", running[0].metadata
+
+
 def test_wait_for_agents_schema_is_a_plain_string_array():
     """agents is a plain string array; "any" is ["any"], never a string branch.
 
@@ -2697,6 +2730,7 @@ async def run_all_tests():
         "agents_mode_timeout_status", test_wait_for_agents_mode_timeout_reports_status_and_reads_tree_for_others
     )
     await r.record_async("agents_mode_already_finished", test_wait_for_agents_mode_returns_at_once_for_finished_agent)
+    await r.record_async("title_never_doubles_waiting_prefix", test_wait_for_title_never_doubles_the_waiting_prefix)
     r.record("agents_mode_schema_validation", test_wait_for_schema_validates_agents_mode)
     r.record("agents_schema_is_plain_string_array", test_wait_for_agents_schema_is_a_plain_string_array)
     await r.record_async(

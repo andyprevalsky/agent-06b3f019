@@ -20,6 +20,7 @@
 import { isAgentMessageMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
 import { codexPayload } from '../../hooks/codexMessage';
+import { waitTarget } from '../waitForPhrase';
 import type { ToolMessageData } from './types';
 
 export const AGENT_MESSAGE_TOOL_NAME = 'agent_message';
@@ -83,7 +84,8 @@ function waitTargets(metadata: Metadata): string {
   const agents = metadata.agents;
   if (agents === 'any') return 'any agent';
   if (Array.isArray(agents) && agents.length > 0) return agents.map(String).join(', ');
-  return str(metadata.description) ?? 'other agents';
+  const description = str(metadata.description);
+  return description ? waitTarget(description) : 'other agents';
 }
 
 const VERBS: Record<string, string> = {
