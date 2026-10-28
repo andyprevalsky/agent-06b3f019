@@ -26,6 +26,7 @@ export {
 export {
   useAgentContext,
   AgentContext,
+  fetchAgentDetail,
   type StreamingBubble,
   type StreamingPlan,
   type StreamingAttention,
