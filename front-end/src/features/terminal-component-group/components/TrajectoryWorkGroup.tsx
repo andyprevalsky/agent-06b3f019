@@ -9,9 +9,9 @@
  *   [DONE, COLLAPSED]   <---- click ---->  [DONE, EXPANDED]
  *   The same instance carries expand state and history across every transition.
  *
- * RUNNING header: fixed-height live carousel (latest activity icon + label,
- *   spinning loader for tool batches, live elapsed). EXPANDED swaps the icon for
- *   a chevron. Thinking always shows the ↓ token counter: the live stream's
+ * RUNNING header: fixed-height live carousel: disclosure chevron (→ collapsed,
+ *   ↓ expanded), then the latest activity icon + label and the live elapsed; no
+ *   spinner. Thinking always shows the ↓ token counter: the live stream's
  *   indicator, or the persisted thought's own size until the next stream starts.
  *   When the latest activity is a spawned agent, a smaller line beneath rotates
  *   through the tool(s) it is using now (SpawnedAgentToolLine).
@@ -22,7 +22,7 @@
  *   (BatchElapsed), so its 100 ms tick never re-renders the history rows.
  */
 import { useId, useState, type ReactNode } from 'react';
-import { ChevronDown, ChevronRight, Lightbulb, LoaderCircle, MessagesSquare } from 'lucide-react';
+import { ChevronDown, ChevronRight, Lightbulb, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 import { useBatchElapsed } from './useBatchElapsed';
@@ -86,7 +86,6 @@ export function TrajectoryWorkGroup({
   const latest = group.activities.at(-1)!;
   const comms = group.activities.filter((activity) => activity.kind === 'comms').length;
   const toolName = String(latest.message.metadata?.toolName ?? '');
-  const toolBatch = latest.kind === 'work' && !['cloud_agent', 'agent_init'].includes(toolName);
   const Icon =
     latest.kind === 'comms'
       ? MessagesSquare
@@ -119,19 +118,23 @@ export function TrajectoryWorkGroup({
         }}
         className="flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden text-left text-sm text-muted-foreground"
       >
-        {running && !expanded ? (
-          liveThinking ? null : (
-            <Icon
-              data-testid="trajectory-activity-icon"
-              size={14}
-              aria-hidden
-              className="shrink-0"
-            />
-          )
-        ) : expanded ? (
-          <ChevronDown size={14} aria-hidden />
+        {expanded ? (
+          <ChevronDown
+            data-testid="trajectory-disclosure"
+            size={14}
+            aria-hidden
+            className="shrink-0"
+          />
         ) : (
-          <ChevronRight size={14} aria-hidden />
+          <ChevronRight
+            data-testid="trajectory-disclosure"
+            size={14}
+            aria-hidden
+            className="shrink-0"
+          />
+        )}
+        {running && !liveThinking && (
+          <Icon data-testid="trajectory-activity-icon" size={14} aria-hidden className="shrink-0" />
         )}
         <span
           data-testid="trajectory-activity-line"
@@ -154,14 +157,6 @@ export function TrajectoryWorkGroup({
         <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs">
           {running ? (
             <>
-              {toolBatch && (
-                <LoaderCircle
-                  data-testid="tool-batch-progress-ring"
-                  size={12}
-                  aria-hidden
-                  className="animate-spin"
-                />
-              )}
               <BatchElapsed startedAt={group.startedAt} />
               {comms > 0 && <span>· {comms} exchanges</span>}
             </>

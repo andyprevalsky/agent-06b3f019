@@ -4,7 +4,12 @@ import { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 import type * as repo from './repo';
 import type { ProductRootTaskRecord } from './repoProductUsage';
 import type { SubscriberSeriesPoint } from './subscriberMetrics';
-import { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskStats';
+import {
+  averageOutputTokens,
+  isResolvedTask,
+  taskCompletionRate,
+  tasksIssuedPerUser,
+} from './taskStats';
 import { findPeriodIndex } from './time';
 import type {
   AdminHealthPeriod,
@@ -54,16 +59,25 @@ export function buildSeries(
     const index = findPeriodIndex(periods, record.createdAt);
     if (index >= 0) gmvByPeriod[index].push(record);
   }
-  const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
+  const emptySubscriber: SubscriberSeriesPoint = {
+    userCount: 0,
+    newUsers: 0,
+    userIds: new Set(),
+    subscribedUserIds: new Set(),
+  };
   return periods.map((period, index) => {
     const subscriberPoint = subscribers[index] ?? emptySubscriber;
     const periodTasks = dedupeInternalRepeatTasks(
       tasksByPeriod[index].filter((task) => subscriberPoint.userIds.has(task.userId))
     );
-    // Platform GMV is total facilitated commerce (not cohort-filtered): AgentCard
-    // clearances + structured-output order confirmations. Per-task efficiency uses
-    // the same subscriber task denominator as outputTokensPerTask.
-    const gmvCents = sumGmvCents(gmvByPeriod[index]);
+    // Platform GMV: real purchases (live AgentCard + verified order confirmations,
+    // see repoProductGmv) by the core team or this period's Stripe subscribers —
+    // the completion-rate population. Per-task uses the subscriber task count.
+    const gmvCents = sumGmvCents(
+      gmvByPeriod[index].filter(
+        (record) => record.coreTeam || subscriberPoint.subscribedUserIds.has(record.userId)
+      )
+    );
     return {
       ...period,
       ...revenue[index],
@@ -76,8 +90,33 @@ export function buildSeries(
       tasksIssuedPerUser: tasksIssuedPerUser(periodTasks, subscriberPoint.userCount),
       outputTokensPerTask: averageOutputTokens(periodTasks),
       gmvPerTask: gmvPerTaskCents(gmvCents, periodTasks.length),
-      taskCompletionRate: taskCompletionRate(productTasksByPeriod[index]),
+      taskCompletionRate: taskCompletionRate(
+        latestResolvedAttempts(
+          productTasksByPeriod[index].filter(
+            (task) => task.coreTeam || subscriberPoint.subscribedUserIds.has(task.userId)
+          )
+        )
+      ),
       costPerTask: calculateTaskCostPerTask(rootAgentRunsByPeriod[index], rootAgentRunUsage),
     };
+  });
+}
+
+/**
+ * A core-team member retrying the same goal is one task: keep its latest
+ * resolved attempt so repeated test prompts neither inflate nor dilute the
+ * rate. Subscriber tasks are never collapsed.
+ */
+function latestResolvedAttempts(tasks: ProductRootTaskRecord[]): ProductRootTaskRecord[] {
+  const newestFirst = tasks
+    .filter(isResolvedTask)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  const seen = new Set<string>();
+  return newestFirst.filter((task) => {
+    if (!task.coreTeam) return true;
+    const key = `${task.userId} ${task.goal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }

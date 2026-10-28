@@ -5,6 +5,13 @@ on:
     tags:
       - "v*" # Triggers on version tags like v1.0.0, v1.2.3
 
+# Builds never cancel a running build. GitHub keeps at most one pending run
+# per group and replaces it with any newer tag, so the next build to start is
+# always the newest release.
+concurrency:
+  group: release-mac-app
+  cancel-in-progress: false
+
 permissions:
   contents: write # softprops/action-gh-release creates the GitHub Release entry
 

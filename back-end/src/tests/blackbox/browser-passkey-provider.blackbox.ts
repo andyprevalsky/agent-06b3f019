@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/** Live CDP WebAuthn transfer: one Kernel passkey signs in on Steel and Browser Use. */
+/** Live CDP WebAuthn transfer: one Kernel passkey signs in on Steel, Tilion and Browser Use. */
 import { randomUUID } from 'node:crypto';
 import type { Browser, CDPSession, Page } from 'playwright';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
@@ -13,6 +13,10 @@ import {
   createBrowserUseRecoverySession,
   releaseBrowserUseRemoteSession,
 } from '../../providers/browser/browserUse';
+import {
+  createTilionRecoverySession,
+  releaseTilionRemoteSession,
+} from '../../providers/browser/tilion';
 
 type Credential = {
   credentialId: string;
@@ -179,10 +183,22 @@ async function assertTransferredPasskey(
 }
 
 async function run(): Promise<void> {
-  const required = ['KERNEL_API_KEY', 'STEEL_API_KEY', 'BROWSER_USE_API_KEY'];
+  // Every target leg runs by default; RUN_BROWSER_PASSKEY_PROVIDERS=tilion,steel narrows it.
+  const legs = (process.env.RUN_BROWSER_PASSKEY_PROVIDERS ?? 'steel,tilion,browser-use')
+    .split(',')
+    .map((leg) => leg.trim())
+    .filter(Boolean);
+  const keys: Record<string, string> = {
+    steel: 'STEEL_API_KEY',
+    tilion: 'TILION_API_KEY',
+    'browser-use': 'BROWSER_USE_API_KEY',
+  };
+  for (const leg of legs) assert(keys[leg], `unknown passkey provider leg ${leg}`);
+  const required = ['KERNEL_API_KEY', ...legs.map((leg) => keys[leg])];
   for (const name of required) assert(process.env[name]?.trim(), `${name} is required`);
   let kernel: Awaited<ReturnType<typeof createKernelRecoverySession>> | undefined;
   let steel: Awaited<ReturnType<typeof createSteelRecoverySession>> | undefined;
+  let tilion: Awaited<ReturnType<typeof createTilionRecoverySession>> | undefined;
   let browserUse: Awaited<ReturnType<typeof createBrowserUseRecoverySession>> | undefined;
   let failure: unknown;
   try {
@@ -193,27 +209,40 @@ async function run(): Promise<void> {
     const key = await register(kernel.validationBrowser);
     await kernel.validationBrowser.close();
 
-    steel = await createSteelRecoverySession({
-      proxyLocation: DEFAULT_GEOLOCATION,
-      proxyMode: 'managed',
-    });
-    assert(steel.validationBrowser, 'Steel validation browser unavailable');
-    await assertTransferredPasskey('Steel', steel.validationBrowser, key);
-    await steel.validationBrowser.close();
+    if (legs.includes('steel')) {
+      steel = await createSteelRecoverySession({
+        proxyLocation: DEFAULT_GEOLOCATION,
+        proxyMode: 'managed',
+      });
+      assert(steel.validationBrowser, 'Steel validation browser unavailable');
+      await assertTransferredPasskey('Steel', steel.validationBrowser, key);
+      await steel.validationBrowser.close();
+    }
 
-    browserUse = await createBrowserUseRecoverySession(DEFAULT_GEOLOCATION);
-    assert(browserUse.validationBrowser, 'Browser Use validation browser unavailable');
-    await assertTransferredPasskey('Browser Use', browserUse.validationBrowser, key);
-    await browserUse.validationBrowser.close();
+    if (legs.includes('tilion')) {
+      tilion = await createTilionRecoverySession(DEFAULT_GEOLOCATION);
+      assert(tilion.validationBrowser, 'Tilion validation browser unavailable');
+      await assertTransferredPasskey('Tilion', tilion.validationBrowser, key);
+      await tilion.validationBrowser.close();
+    }
+
+    if (legs.includes('browser-use')) {
+      browserUse = await createBrowserUseRecoverySession(DEFAULT_GEOLOCATION);
+      assert(browserUse.validationBrowser, 'Browser Use validation browser unavailable');
+      await assertTransferredPasskey('Browser Use', browserUse.validationBrowser, key);
+      await browserUse.validationBrowser.close();
+    }
   } catch (error) {
     failure = error;
   } finally {
     const results = await Promise.allSettled([
       kernel?.validationBrowser?.close(),
       steel?.validationBrowser?.close(),
+      tilion?.validationBrowser?.close(),
       browserUse?.validationBrowser?.close(),
       kernel && releaseKernelRemoteSession(kernel.sessionId),
       steel && releaseSteelRemoteSession(steel.sessionId),
+      tilion && releaseTilionRemoteSession(tilion.sessionId),
       browserUse && releaseBrowserUseRemoteSession(browserUse.sessionId),
     ]);
     const rejected = results.find((result) => result.status === 'rejected');

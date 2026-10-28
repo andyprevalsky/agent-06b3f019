@@ -25,12 +25,12 @@ import structlog
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
+from utils.browser_auth_contract import build_authentication_contract
 
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from utils.browser_auth_contract import build_authentication_contract
 
 logger = structlog.get_logger()
 
@@ -923,6 +923,16 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         for popup in popups:
             popups_text += f"  - {popup}\n"
 
+    downloads = bs.get("downloaded_files") or []
+    downloads_text = ""
+    if downloads:
+        # File names come from the site: quote them so a name stays one inert line.
+        downloads_text = "\nDownloaded files (this browser session):\n"
+        for item in downloads:
+            size = item.get("size")
+            name = json.dumps(str(item.get("name") or "")[:200])
+            downloads_text += f"  - {name}" + (f" ({size} bytes)" if isinstance(size, int) else "") + "\n"
+
     viewport = bs.get("viewport") or {}
     title_part = f" - {bs['title']}" if bs.get("title") else ""
     url = str(bs.get("url") or "")
@@ -935,7 +945,7 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
         f"Timestamp: {timestamp}\n"
         f"{stats_text}Current URL: {url}{title_part}\n"
         f"Viewport: {viewport.get('width', 0)}x{viewport.get('height', 0)}\n"
-        f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
+        f"{scroll_text}{tabs_text}{events_text}{popups_text}{downloads_text}{block_text}"
         f"Interactive elements:\n{dom_tree}"
     )
 

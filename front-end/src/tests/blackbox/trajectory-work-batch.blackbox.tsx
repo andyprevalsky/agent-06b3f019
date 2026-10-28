@@ -42,8 +42,9 @@ describe('current work batch elapsed time and ring semantics', () => {
     const view = render(<TrajectoryWorkGroup group={group(messages)} renderMessage={() => null} />);
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('2.0s');
     expect(screen.queryByText('Live')).toBeNull();
-    // The ring is a live activity loader: it must visibly spin like every other loader.
-    expect(screen.getByTestId('tool-batch-progress-ring')).toHaveClass('animate-spin');
+    // Andy 2026-10-28: no little spinner in the working row; the arrow + icon carry it.
+    expect(screen.queryByTestId('tool-batch-progress-ring')).toBeNull();
+    expect(screen.getByTestId('trajectory-disclosure')).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(1500));
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('3.5s');
     messages.push(activity('web_search', 'next-call', start + 3000));

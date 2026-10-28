@@ -8,10 +8,14 @@
  *   Mac stays expanded after leaving; pointer in the left18% outside controls or a leftward drag collapses it.
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
- * LAYOUT (top → bottom, rows 17/30/57/59/63):
- *   Home · New Super Agent (black) · Search
- *   Projects on top: each project row + its agents, then + New project; then the
- *   Home agents (RoseAgentGroups), with per-agent one-layer disclosures.
+ * LAYOUT (top → bottom, Andy 2026-10-28):
+ *   Back (←, collapses the bar; expanded only) | Search — one row
+ *   New project (folder-plus; collapsed keeps the icon in this top slot), then
+ *   the created projects: each project row + its agents, divider lines between
+ *   groups; the Home project last (every agent without a project). Every "+"
+ *   shows the "Create Super Agent" tooltip. RoseAgentGroups renders them, with
+ *   per-agent one-layer disclosures. Collapsed: per group its icon, its agents,
+ *   a divider pill; Home last.
  *   The compact rail shows active tree counts >1; code sessions retain their
  *   provider icons. Code reads stay batched per on-screen page of ≤50 roots.
  *   ── Feedback · [Biz health, admins] · Archived · [Browse] · account row.
@@ -30,15 +34,25 @@
  *     owner's row only closes the code agent (no reload); Home / views close it too
  *   No provider (isolated renders): a code-agent row selects its owner agent.
  *
+ * PENDING NEW-AGENT PROJECT (usePendingNewAgentGroup):
+ *   [NONE] --project P "+"--> [PENDING(P)] (composer: next agent created in P)
+ *   [NONE] --Home "+"--> [PENDING(home)]
+ *   [PENDING(x)] --another "+"--> [PENDING(y)]
+ *   [PENDING(x)] --agent created (it becomes selected) | an agent row picked--> [NONE]
+ *   While an agent is selected nothing is pending. When the terminal supplies
+ *   roseActions.newAgentProjectId (the create request's project_id), that value
+ *   decides the pending project, so the ring always matches where the agent lands.
+ *   PENDING(x) puts the liquid-metal ring + shadow + glow on x's icon.
+ *
  * PANELS: project settings beside the bar (useRoseSidebarProjects); archive dialog;
  * rename dialog (useAgentRowActions); delete-project confirm dialog.
  *
  * APP VIEW (AppViewProvider; opened from a code-agent chip's preview card): an
- * agent or code-agent row, Home and New Super Agent close it first.
+ * agent or code-agent row and every "+" (a project's or Home's) close it first.
  */
 
-import { ArrowLeft, Activity, Archive, Globe, Megaphone } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -57,15 +71,9 @@ import { useAgentRowActions } from '../useAgentRowActions';
 import { useSidebarSearch } from '../useSidebarSearch';
 import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
-import RoseAgentGroups from './RoseAgentGroups';
+import RoseAgentGroups, { HOME_GROUP } from './RoseAgentGroups';
 import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
-import {
-  RoseAccountRow,
-  RoseHomeRow,
-  RoseNavRow,
-  RoseNewAgentButton,
-  RoseSearchRow,
-} from './RoseSidebarChrome';
+import { RoseAccountRow, RoseNavRow, RoseSearchRow } from './RoseSidebarChrome';
 import {
   ROSE_BAR_DURATION_MS,
   ROSE_BAR_EASE,
@@ -121,6 +129,29 @@ function useCodeAgentRows(props: AppSidebarProps) {
   return { onOpenCodeAgent, selectAgentRow, selectedCodeAgentId: openCodeAgent?.taskId ?? null };
 }
 
+/**
+ * Which group's icon shows the pending new-agent ring (see PENDING above).
+ * Clicks are remembered until the selected agent changes to a real agent.
+ */
+function usePendingNewAgentGroup(
+  selectedAgentId: string | null,
+  newAgentProjectId: string | null | undefined,
+) {
+  const [clicked, setClicked] = useState<string | null>(null);
+  const lastSelected = useRef(selectedAgentId);
+  useEffect(() => {
+    if (lastSelected.current === selectedAgentId) return;
+    lastSelected.current = selectedAgentId;
+    if (selectedAgentId !== null) setClicked(null);
+  }, [selectedAgentId]);
+  let pending: string | null = clicked;
+  if (selectedAgentId !== null) pending = null;
+  else if (newAgentProjectId !== undefined) {
+    pending = newAgentProjectId ?? (clicked === HOME_GROUP ? HOME_GROUP : null);
+  }
+  return { pending, mark: setClicked };
+}
+
 /** The bar is md+ only; below md nothing mounts (MobileAgentDrawer owns the list). */
 export default function RoseSidebar(props: AppSidebarProps) {
   const isMobile = useIsMobile();
@@ -159,9 +190,27 @@ function RoseSidebarBar(props: AppSidebarProps) {
     if (showAdminHealth) prewarmAdminHealth();
   }, [showAdminHealth]);
   const roseActions = props.roseActions ?? {};
-  const projects = useRoseSidebarProjects(
-    roseActions.onCreateAgentInProject ?? (() => notYet('New agent in a project')),
+  const pendingGroup = usePendingNewAgentGroup(
+    props.selectedAgentId,
+    roseActions.newAgentProjectId,
   );
+  const createInProject = roseActions.onCreateAgentInProject;
+  const projects = useRoseSidebarProjects((project) => {
+    if (createInProject === undefined) {
+      notYet('New agent in a project');
+      return;
+    }
+    pendingGroup.mark(project.id);
+    exits.close();
+    createInProject(project);
+  });
+  const projectActions = {
+    ...projects.projectActions,
+    onCreateHomeAgent: () => {
+      pendingGroup.mark(HOME_GROUP);
+      exits.onCreateAgent();
+    },
+  };
   const { grouped, isFiltering, attention } = useGroupedAgents(props, query, projects.projects);
   const { handlers, renameDialog } = useAgentRowActions({
     onRefresh: async () => {
@@ -207,26 +256,12 @@ function RoseSidebarBar(props: AppSidebarProps) {
             transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
           }}
         >
-          <div className="relative h-[38px] flex-none">
-            <RoseHomeRow
-              isExpanded={isExpanded}
-              onClick={exits.onCreateAgent}
-              insetForBackArrow={expansion.sticky && isExpanded}
-            />
-            {expansion.sticky && isExpanded && (
-              <button
-                type="button"
-                aria-label="Collapse agent sidebar"
-                onClick={expansion.close}
-                className="absolute left-[22px] top-1/2 -translate-y-1/2 text-muted-foreground"
-                data-testid="sidebar-collapse-hint"
-              >
-                <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
-              </button>
-            )}
-          </div>
-          <RoseNewAgentButton isExpanded={isExpanded} onClick={exits.onCreateAgent} />
-          <RoseSearchRow isExpanded={isExpanded} value={query} onChange={setQuery} />
+          <RoseSearchRow
+            isExpanded={isExpanded}
+            value={query}
+            onChange={setQuery}
+            onBack={expansion.close}
+          />
           <ScrollArea className="min-h-0 flex-1">
             <RoseAgentGroups
               grouped={grouped}
@@ -239,10 +274,11 @@ function RoseSidebarBar(props: AppSidebarProps) {
               attentionAgentIds={attention}
               settingsProjectId={projects.openProject?.id ?? null}
               renamingProjectId={projects.renamingProjectId}
+              pendingGroupKey={pendingGroup.pending}
               onSelectAgent={codeAgentRows.selectAgentRow}
               actionsFor={actionsFor}
               onMenuOpenChange={expansion.setMenuOpen}
-              projectActions={projects.projectActions}
+              projectActions={projectActions}
               codeAgentsFor={codeAgentsFor}
               onOpenCodeAgent={codeAgentRows.onOpenCodeAgent}
               observeRoot={observeRoot}

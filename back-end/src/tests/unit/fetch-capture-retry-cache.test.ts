@@ -215,8 +215,54 @@ async function testCompletionOrderedCredentialCursor(): Promise<void> {
   }
 }
 
+/** A captured 204/205 must come back with a null body: `new Response('', { status: 204 })` throws. */
+async function testNullBodyStatusesSurviveCapture(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const previousReplay = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+  const files: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = input instanceof Request ? input.url : String(input);
+    return new Response(null, { status: url.includes('/reset') ? 205 : 204 });
+  }) as typeof fetch;
+  process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = '1';
+  const app = express();
+  app.use('/captures', installFetchCapture());
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  try {
+    for (const [path, status] of [
+      ['/v1/session/sess_released', 204],
+      ['/v1/reset', 205],
+    ] as const) {
+      const url = `https://null-body-${randomUUID()}.example.test${path}`;
+      files.push(
+        resolve(
+          __dirname,
+          '../../../../.context/fast-forward-cache/outbound-fetch',
+          `${createHash('sha256')
+            .update(outboundReplayCacheKey(url, 'DELETE', null))
+            .digest('hex')}.json`
+        )
+      );
+      const response = await fetch(url, { method: 'DELETE' });
+      assert.equal(response.status, status, `captured ${status} changed status`);
+      assert.equal(await response.text(), '', `captured ${status} grew a body`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousReplay === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = previousReplay;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+    await delay(100);
+    for (const file of files) if (existsSync(file)) unlinkSync(file);
+  }
+}
+
 async function run(): Promise<void> {
   await testCompletionOrderedCredentialCursor();
+  await testNullBodyStatusesSurviveCapture();
   await testCredentialExchanges();
   assert.strictEqual(isRetryableOutboundResponseStatus(429), true);
   assert.strictEqual(isRetryableOutboundResponseStatus(500), true);
@@ -227,6 +273,26 @@ async function run(): Promise<void> {
     shouldBypassOutboundReplay('https://analytics.eu.amplitude.com/api/2/funnels'),
     true
   );
+  // Tilion creates paid browsers: a replayed POST /v1/session returns a long-dead
+  // session id, which then fails CDP validation on every live blackbox create.
+  assert.strictEqual(shouldBypassOutboundReplay('https://back.tilion.dev/v1/session'), true);
+  const previousTilionBase = process.env.TILION_BASE_URL;
+  process.env.TILION_BASE_URL = 'https://tilion-staging.example.test/';
+  try {
+    assert.strictEqual(
+      shouldBypassOutboundReplay('https://tilion-staging.example.test/v1/sessions'),
+      true
+    );
+    // A local fake exempts only its own authority, never other services on the host.
+    process.env.TILION_BASE_URL = 'http://127.0.0.1:4555';
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1:4555/v1/session'), true);
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1:3001/api/agents'), false);
+    assert.strictEqual(shouldBypassOutboundReplay('http://127.0.0.1/v1/session'), false);
+  } finally {
+    if (previousTilionBase === undefined) delete process.env.TILION_BASE_URL;
+    else process.env.TILION_BASE_URL = previousTilionBase;
+  }
+  assert.strictEqual(shouldBypassOutboundReplay('https://tilion.dev.example.test/'), false);
 
   const originalFetch = globalThis.fetch;
   const previousReplay = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;

@@ -3,16 +3,17 @@
  * account row: signed in = cursive initial + name (Rose profile name first, see
  * accountDisplayName; member icon while the profile loads), anonymous = member
  * icon (both open Settings); no session = member icon labelled "Sign in" (opens login).
- * Home (label just "Home"), the raw black "New Super Agent" button (row 76; dark mode
- * inverts it: #f2f2ef fill, #1f1f1d label/plus, mock panels/dark.js .nb), the
- * Search row, plain nav rows (Archived, Browse, Health) and the account row. Stateless.
+ * the top row (Back ← while expanded | Search; Andy 2026-10-28 replaced the Home
+ * row and the black "New Super Agent" button with the Home project's "+"; the
+ * mobile drawer keeps that button: #f2f2ef fill / #1f1f1d label in dark),
+ * plain nav rows (Archived, Browse, Health) and the account row. Stateless.
  *
  * Every row keeps its icon at the same x whether the bar is collapsed (64px)
  * or hover-expanded (236px); labels fade in. Active = color/weight, no fills.
  */
 
 import type { User } from '@supabase/supabase-js';
-import { Home, Plus, Search } from 'lucide-react';
+import { ArrowLeft, Plus, Search } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { cn } from '@/lib/utils';
@@ -37,32 +38,7 @@ function Label({ isExpanded, children }: { isExpanded: boolean; children: ReactN
   );
 }
 
-export function RoseHomeRow({
-  isExpanded,
-  onClick,
-  insetForBackArrow = false,
-}: {
-  isExpanded: boolean;
-  onClick: () => void;
-  insetForBackArrow?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label="Home"
-      onClick={onClick}
-      className={cn(
-        ROW,
-        'font-semibold text-[hsl(240_15%_8%)] dark:text-[#ecece8]',
-        insetForBackArrow && 'pl-[54px]',
-      )}
-    >
-      <Home className="h-[21px] w-[21px] flex-none" strokeWidth={1.7} />
-      <Label isExpanded={isExpanded}>Home</Label>
-    </button>
-  );
-}
-
+/** The mobile drawer's raw black New Super Agent button (the desktop bar uses Home's "+"). */
 export function RoseNewAgentButton({
   isExpanded,
   onClick,
@@ -93,27 +69,51 @@ export function RoseSearchRow({
   isExpanded,
   value,
   onChange,
+  onBack,
 }: {
   isExpanded: boolean;
   value: string;
   onChange: (next: string) => void;
+  /** Back (←): collapses the expanded bar; shown left of Search while expanded. */
+  onBack?: () => void;
 }) {
+  const showBack = isExpanded && onBack !== undefined;
   return (
-    <label className={cn(ROW, 'text-[hsl(240_6%_60%)] dark:text-[#a3a39d]')}>
-      <Search className="h-[19px] w-[19px] flex-none" strokeWidth={1.7} />
-      <input
-        type="search"
-        aria-label="Search agents"
-        placeholder="Search"
-        value={value}
-        tabIndex={isExpanded ? 0 : -1}
-        onChange={(e) => onChange(e.target.value)}
+    <div data-testid="rose-sidebar-top-row" className="flex h-[38px] flex-none items-center">
+      {showBack && (
+        <button
+          type="button"
+          aria-label="Back"
+          title="Back"
+          onClick={onBack}
+          data-testid="sidebar-collapse-hint"
+          className="flex h-full flex-none items-center pl-[22px] pr-1 text-[hsl(240_8%_40%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]"
+        >
+          <ArrowLeft className="h-5 w-5" strokeWidth={1.7} />
+        </button>
+      )}
+      <label
         className={cn(
-          'min-w-0 flex-1 bg-transparent text-[hsl(240_15%_8%)] dark:text-[#ecece8] outline-none placeholder:text-[hsl(240_6%_60%)] dark:placeholder:text-[#a3a39d] transition-opacity duration-200',
-          isExpanded ? 'opacity-100' : 'opacity-0',
+          ROW,
+          'min-w-0 flex-1 text-[hsl(240_6%_60%)] dark:text-[#a3a39d]',
+          showBack && 'pl-3',
         )}
-      />
-    </label>
+      >
+        <Search className="h-[19px] w-[19px] flex-none" strokeWidth={1.7} />
+        <input
+          type="search"
+          aria-label="Search agents"
+          placeholder="Search"
+          value={value}
+          tabIndex={isExpanded ? 0 : -1}
+          onChange={(e) => onChange(e.target.value)}
+          className={cn(
+            'min-w-0 flex-1 bg-transparent text-[hsl(240_15%_8%)] dark:text-[#ecece8] outline-none placeholder:text-[hsl(240_6%_60%)] dark:placeholder:text-[#a3a39d] transition-opacity duration-200',
+            isExpanded ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+      </label>
+    </div>
   );
 }
 

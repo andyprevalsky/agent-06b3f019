@@ -167,6 +167,7 @@ async function realmRows(userId: string, authRealm: string) {
 
 async function skipGates(): Promise<void> {
   assert.equal(shouldPersistSignedInBrowserState({ provider: 'kernel' }).persist, true);
+  assert.equal(shouldPersistSignedInBrowserState({ provider: 'tilion' }).persist, true);
   assert.equal(
     shouldPersistSignedInBrowserState({ provider: 'browser-use' }).reason,
     'unsupported_provider'

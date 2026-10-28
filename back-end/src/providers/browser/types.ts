@@ -1,14 +1,14 @@
 import type { Browser } from 'playwright';
 import type { ProxyGeoLocation } from '../geoip';
 
-export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use'] as const;
+export const BROWSER_PROVIDERS = ['steel', 'kernel', 'browser-use', 'tilion'] as const;
 
 export type BrowserProviderName = (typeof BROWSER_PROVIDERS)[number];
 
 export function storedBrowserProvider(value: string): BrowserProviderName {
   // BrowserSession.provider has no database constraint. Preserve the previous
-  // legacy fallback while recognizing Browser Use explicitly.
-  return value === 'kernel' || value === 'browser-use' ? value : 'steel';
+  // legacy fallback while recognizing Browser Use and Tilion explicitly.
+  return value === 'kernel' || value === 'browser-use' || value === 'tilion' ? value : 'steel';
 }
 
 export interface BrowserProviderSession {
@@ -22,6 +22,24 @@ export interface BrowserProviderSession {
   profileId: string | null;
   profileSource: string;
   validationBrowser: Browser | null;
+  /** Set when the created provider differs from the one first requested (visible fallback). */
+  providerSelection?: BrowserProviderSelection;
+  /** Requested vs applied exit placement, when the provider reports it (Tilion: country only). */
+  geoTargeting?: BrowserGeoTargeting;
+}
+
+export interface BrowserGeoTargeting {
+  requested: string;
+  applied: string;
+  requestedLocation: ProxyGeoLocation;
+  geoApplied: boolean | null;
+  geoUnsupported: string[];
+}
+
+export interface BrowserProviderSelection {
+  requestedProvider: BrowserProviderName;
+  /** e.g. `preferred_config_create_failed: <error>`, `tilion_kill_switch`. */
+  fallbackReason: string;
 }
 
 export interface BrowserProviderResumeSession {

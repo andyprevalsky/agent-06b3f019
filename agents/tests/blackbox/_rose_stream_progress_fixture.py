@@ -182,6 +182,21 @@ class _SSE(httpx.AsyncByteStream):
                     }
                 elif self.mode == "reasoning":
                     event = {"choices": [{"index": 0, "delta": {"reasoning": "r"}}]}
+                elif self.mode in {"opaque_reasoning", "summarized_reasoning"}:
+                    # One complete encrypted Responses reasoning item per second.
+                    item = {"type": "reasoning", "id": f"rs_fixture_{index}", "summary": []}
+                    added = {"type": "response.output_item.added", "output_index": index, "item": item}
+                    yield self.frame({**added, "item": {**item, "encrypted_content": ""}}, "reasoning_item_start")
+                    if self.mode == "summarized_reasoning":
+                        yield self.frame(
+                            {"type": "response.reasoning_summary_text.delta", "item_id": item["id"], "delta": "r"},
+                            "reasoning",
+                        )
+                    event = {
+                        "type": "response.output_item.done",
+                        "output_index": index,
+                        "item": {**item, "encrypted_content": "opaque"},
+                    }
                 elif self.mode in {"orphan_anthropic", "mismatched_anthropic"}:
                     event = {
                         "type": "content_block_delta",
@@ -253,6 +268,7 @@ async def assert_progress_case(
     exhausted=False,
     fallback=False,
     consumer_pause=0,
+    pause_at=1,
     idle_timeout_s=120.0,
 ):
     _reset_cerebras_cooldown_cache()
@@ -342,7 +358,7 @@ async def assert_progress_case(
                             dump_context=False,
                         ):
                             chunks.append(chunk)
-                            if len(chunks) == 1 and consumer_pause:
+                            if len(chunks) == pause_at and consumer_pause:
                                 clock.now += consumer_pause
                     except RoseAllFailed as exc:
                         assert exhausted and len(exc.step_errors) == 2, exc
@@ -363,8 +379,10 @@ async def assert_progress_case(
         counts = Counter(chunk.kind for chunk in chunks)
         expected_counts = {
             "metadata": 1,
-            "reasoning": prelude + (seconds if mode == "reasoning" else 0),
-            "tool_call": 1 if mode == "tool" else 0,
+            "reasoning": prelude + (seconds if mode in {"reasoning", "summarized_reasoning"} else 0),
+            "codex_reasoning_item": seconds if mode in {"opaque_reasoning", "summarized_reasoning"} else 0,
+            # The Responses fixture always finishes with a function_call item.
+            "tool_call": 1 if mode == "tool" or protocol == "responses" else 0,
             "usage": 1,
             "done": 1,
         }

@@ -1,5 +1,5 @@
 /**
- * Report-bug flow for AgentSettingsDialog.
+ * Report-bug flow for ReportBugDialog (its own control, outside Agent Settings).
  *
  * STATE:
  *   [IDLE] -- start --> [COMPOSING] -- cancel --> [IDLE]
@@ -7,7 +7,7 @@
  *      |                     +-- submit --> [SUBMITTING] -- ok --> [LAUNCHED]
  *      |                                        |
  *      |                                        +-- err --> [COMPOSING]
- *      +-- (agent change / dialog close) --> reset to IDLE
+ *      +-- (agent change / panel close) --> reset to IDLE
  *
  * COMPOSING also accepts dragged or pasted screenshots (useBugReportScreenshots);
  * submit waits until every pending screenshot upload has finished.

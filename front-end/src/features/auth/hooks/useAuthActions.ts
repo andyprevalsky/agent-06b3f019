@@ -39,12 +39,14 @@ interface AuthStateSetters {
   setUser: React.Dispatch<React.SetStateAction<User | null>>;
   setSession: React.Dispatch<React.SetStateAction<Session | null>>;
   setIsFullySignedIn: React.Dispatch<React.SetStateAction<boolean>>;
+  /** True only once the invite check actually answered "needs an invite code". */
+  setInviteRequired: React.Dispatch<React.SetStateAction<boolean>>;
   setRealtimeReady: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 /** Memoized auth actions: updateInviteStatus, applySession, refreshAuthState, signOut. */
 export function useAuthActions(setters: AuthStateSetters) {
-  const { setUser, setSession, setIsFullySignedIn, setRealtimeReady } = setters;
+  const { setUser, setSession, setIsFullySignedIn, setInviteRequired, setRealtimeReady } = setters;
   // Generation counter for invite checks. checkNeedsInviteCode() is async, so an
   // EARLIER call can resolve after a later one and write a stale answer. That is
   // not hypothetical here: an invite check started before a switch would resolve
@@ -57,6 +59,7 @@ export function useAuthActions(setters: AuthStateSetters) {
       const request = ++inviteStatusRequest.current;
       if (!currentSession || isAnonymousUser(currentUser)) {
         setIsFullySignedIn(false);
+        setInviteRequired(false);
         return;
       }
       // The invite gate asks "has THIS account redeemed a code?" — a question
@@ -70,6 +73,7 @@ export function useAuthActions(setters: AuthStateSetters) {
       // way to act as the account that was just switched into.
       if (getImpersonatedAccount() !== null) {
         setIsFullySignedIn(true);
+        setInviteRequired(false);
         logAuth('Invite check skipped: impersonating');
         return;
       }
@@ -77,6 +81,7 @@ export function useAuthActions(setters: AuthStateSetters) {
         const needsInvite = await checkNeedsInviteCode();
         if (request !== inviteStatusRequest.current) return;
         setIsFullySignedIn(!needsInvite);
+        setInviteRequired(needsInvite);
         logAuth('Invite check result', { needsInvite, isFullySignedIn: !needsInvite });
       } catch (error) {
         if (request !== inviteStatusRequest.current) return;
@@ -84,7 +89,7 @@ export function useAuthActions(setters: AuthStateSetters) {
         setIsFullySignedIn(false);
       }
     },
-    [setIsFullySignedIn],
+    [setIsFullySignedIn, setInviteRequired],
   );
 
   const applySession = useCallback(
@@ -123,6 +128,7 @@ export function useAuthActions(setters: AuthStateSetters) {
     setUser(null);
     persistCachedUser(null);
     setIsFullySignedIn(false);
+    setInviteRequired(false);
     setRealtimeReady(false);
     await setRealtimeAuth(null);
     try {
@@ -131,7 +137,7 @@ export function useAuthActions(setters: AuthStateSetters) {
     } catch (error) {
       console.error('[Auth] Failed to create anonymous session after signout:', error);
     }
-  }, [applySession, setSession, setUser, setIsFullySignedIn, setRealtimeReady]);
+  }, [applySession, setSession, setUser, setIsFullySignedIn, setInviteRequired, setRealtimeReady]);
 
   return { applySession, refreshAuthState, signOut };
 }

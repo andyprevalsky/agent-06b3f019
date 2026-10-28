@@ -63,42 +63,51 @@ export class InitialBroadcastDispatcher<
   private head?: InitialTopic<T>;
   private tail?: InitialTopic<T>;
 
-  /** Droppable (ephemeral) frame: refused once its topic or shard is full. */
-  enqueue(value: T): boolean {
-    return this.admit([value], false);
-  }
-
   /**
-   * A committed cohort must belong to one request, including mixed batches.
-   * It is never refused here: CommittedMessageDelivery already bounds it (one
-   * in-flight cohort per agent lane, 32 messages / 256 KB per agent, 1 MiB and
-   * 128 lanes per shard), so droppable stream frames queued on the same topic
-   * cannot crowd out the canonical row. It still joins the topic FIFO, so it
-   * stays ordered after the frames it supersedes.
+   * `coalesce(queued, next)` may fold an ephemeral event into the topic's last
+   * still-queued (unsent) entry, returning the single replacement frame. A
+   * same-tick burst of stream deltas then occupies one queue slot instead of
+   * one per chunk, so it cannot exhaust the per-topic message cap.
    */
-  enqueueCommitted(values: T[]): void {
-    this.admit(values, true);
+  constructor(private readonly coalesce?: (queued: T, next: T) => T | undefined) {}
+
+  enqueue(value: T): boolean {
+    if (this.coalesceIntoTail(value)) return true;
+    return this.enqueueGroup([value]);
   }
 
-  private admit(values: T[], committed: boolean): boolean {
+  private coalesceIntoTail(value: T): boolean {
+    if (this.coalesce === undefined) return false;
+    const shard = this.shards[topicShardIndex(value.topic)];
+    const topic = shard.topics.get(value.topic);
+    const last = topic?.queue[topic.queue.length - 1];
+    if (topic === undefined || last === undefined || last.values.length !== 1) return false;
+    const merged = this.coalesce(last.values[0], value);
+    if (merged === undefined) return false;
+    const bytes = initialBytes([merged]);
+    const growth = bytes - last.bytes;
+    if (topic.bytes + growth > MAX_AGENT_BYTES || shard.bytes + growth > MAX_SHARD_BYTES) {
+      return false;
+    }
+    last.values[0] = merged;
+    last.bytes = bytes;
+    topic.bytes += growth;
+    shard.bytes += growth;
+    return true;
+  }
+
+  /** A committed cohort must belong to one request, including mixed batches. */
+  enqueueGroup(values: T[]): boolean {
     const first = values[0];
-    const bytes = values.reduce(
-      (sum, value) =>
-        sum +
-        Buffer.byteLength(JSON.stringify(value.payload)) +
-        Buffer.byteLength(value.topic) +
-        INITIAL_MESSAGE_OVERHEAD_BYTES,
-      0
-    );
+    const bytes = initialBytes(values);
     const shard = this.shards[topicShardIndex(first.topic)];
     let topic = shard.topics.get(first.topic);
     if (
-      !committed &&
-      (bytes > MAX_AGENT_BYTES ||
-        (topic?.bytes ?? 0) + bytes > MAX_AGENT_BYTES ||
-        (topic?.messages ?? 0) + values.length > MAX_INITIAL_TOPIC_MESSAGES ||
-        shard.bytes + bytes > MAX_SHARD_BYTES ||
-        (topic === undefined && shard.topics.size >= MAX_SHARD_LANES))
+      bytes > MAX_AGENT_BYTES ||
+      (topic?.bytes ?? 0) + bytes > MAX_AGENT_BYTES ||
+      (topic?.messages ?? 0) + values.length > MAX_INITIAL_TOPIC_MESSAGES ||
+      shard.bytes + bytes > MAX_SHARD_BYTES ||
+      (topic === undefined && shard.topics.size >= MAX_SHARD_LANES)
     ) {
       log.error('Initial broadcast delivery rejected', {
         topic: first.topic,
@@ -199,6 +208,17 @@ export class InitialBroadcastDispatcher<
     else this.tail.next = topic;
     this.tail = topic;
   }
+}
+
+function initialBytes(values: Array<{ topic: string; payload: Record<string, unknown> }>): number {
+  return values.reduce(
+    (sum, value) =>
+      sum +
+      Buffer.byteLength(JSON.stringify(value.payload)) +
+      Buffer.byteLength(value.topic) +
+      INITIAL_MESSAGE_OVERHEAD_BYTES,
+    0
+  );
 }
 
 /** A definite HTTP refusal of these bytes; transient statuses are retried instead. */
