@@ -5,7 +5,123 @@ import { cn } from '@/lib/utils';
 
 const ContextMenu = ContextMenuPrimitive.Root;
 
-const ContextMenuTrigger = ContextMenuPrimitive.Trigger;
+/** Radix's own touch long-press delay. */
+const LONG_PRESS_MS = 700;
+/** Inset of a touch-opened menu from the trigger's left edge. */
+const TOUCH_ANCHOR_INSET_PX = 8;
+
+/**
+ * Touch / pen long-press opens the menu from the trigger's left edge at the
+ * touch height instead of under the finger. Radix anchors at the pointer and
+ * only shifts menus vertically, so on a phone a wide menu pressed mid-row had
+ * room on neither side and hung off the screen. Browsers that fire their own
+ * long-press contextmenu (Android Chrome) open it at the same edge anchor right
+ * away instead of at the finger, so the menu never opens twice or jumps. The
+ * click that follows the finger lifting is swallowed so the long-press never
+ * also activates the trigger (opening the pressed row). Mouse right-click is
+ * unchanged.
+ */
+const ContextMenuTrigger = React.forwardRef<
+  React.ElementRef<typeof ContextMenuPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Trigger>
+>(
+  (
+    {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      onPointerCancel,
+      onClickCapture,
+      onContextMenu,
+      ...props
+    },
+    ref,
+  ) => {
+    const timer = React.useRef<number | undefined>(undefined);
+    /** The pending touch press's edge anchor; null when no long-press is pending. */
+    const pending = React.useRef<{ target: HTMLElement; clientX: number; clientY: number } | null>(
+      null,
+    );
+    const dispatching = React.useRef(false);
+    const longPressOpened = React.useRef(false);
+    const cancel = () => {
+      window.clearTimeout(timer.current);
+      pending.current = null;
+    };
+    const openAtEdge = () => {
+      const press = pending.current;
+      cancel();
+      if (!press) return;
+      longPressOpened.current = true;
+      dispatching.current = true;
+      try {
+        press.target.dispatchEvent(
+          new MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            clientX: press.clientX,
+            clientY: press.clientY,
+          }),
+        );
+      } finally {
+        dispatching.current = false;
+      }
+    };
+    React.useEffect(() => cancel, []);
+    return (
+      <ContextMenuPrimitive.Trigger
+        ref={ref}
+        {...props}
+        onContextMenu={(event) => {
+          if (!dispatching.current && pending.current) {
+            // The browser's own long-press menu (at the finger): open at the edge now.
+            event.preventDefault();
+            openAtEdge();
+            return;
+          }
+          onContextMenu?.(event);
+        }}
+        onClickCapture={(event) => {
+          if (longPressOpened.current) {
+            longPressOpened.current = false;
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          onClickCapture?.(event);
+        }}
+        onPointerDown={(event) => {
+          longPressOpened.current = false;
+          onPointerDown?.(event);
+          if (event.defaultPrevented || event.pointerType === 'mouse') return;
+          // Skips Radix's finger-anchored long-press; ours dispatches the open.
+          event.preventDefault();
+          const target = event.currentTarget;
+          cancel();
+          pending.current = {
+            target,
+            clientX: target.getBoundingClientRect().left + TOUCH_ANCHOR_INSET_PX,
+            clientY: event.clientY,
+          };
+          timer.current = window.setTimeout(openAtEdge, LONG_PRESS_MS);
+        }}
+        onPointerMove={(event) => {
+          onPointerMove?.(event);
+          cancel();
+        }}
+        onPointerUp={(event) => {
+          onPointerUp?.(event);
+          cancel();
+        }}
+        onPointerCancel={(event) => {
+          onPointerCancel?.(event);
+          cancel();
+        }}
+      />
+    );
+  },
+);
+ContextMenuTrigger.displayName = ContextMenuPrimitive.Trigger.displayName;
 
 const ContextMenuPortal = ContextMenuPrimitive.Portal;
 

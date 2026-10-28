@@ -2,11 +2,9 @@
 import assert from 'node:assert/strict';
 import { runBrowserLazyRetirementCustodyCase } from './browser-session-lazy-retirement.cases';
 import { runBrowserResumeRetryAfterRejectedCreateCase } from './browser-session-resume-retry.cases';
-import { retryWithBackoff } from '../../providers/retry';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { prisma } from '../../providers/database';
 
 type Outcome = { ok: boolean; sessionId?: string; error?: string; pid: number };
@@ -21,6 +19,8 @@ export async function runBrowserResumeCustodyCases() {
   const outcomes: unknown[] = [];
   for (const provider of ['browser-use', 'kernel']) {
     for (const scenario of [
+      'leader-exit',
+      'leader-exit-stalled',
       'concurrent',
       'lost-ack',
       'zero-match',
@@ -30,6 +30,7 @@ export async function runBrowserResumeCustodyCases() {
       'user-lease',
       'provider-ended',
       'incompatible',
+      'incompatible-timeout',
       'manual-follow',
       'stale-binding',
       'fresh-sequential',
@@ -38,8 +39,31 @@ export async function runBrowserResumeCustodyCases() {
       'logical-pause',
       'create-rejected',
     ]) {
+      const concurrent = [
+        'concurrent',
+        'logical-empty',
+        'fresh-concurrent',
+        'incompatible',
+        'incompatible-timeout',
+        'leader-exit',
+        'leader-exit-stalled',
+      ].includes(scenario);
+      const leaderExit = scenario.startsWith('leader-exit');
+      const freshOperation = ['fresh-concurrent', 'incompatible', 'incompatible-timeout'].includes(
+        scenario
+      );
       const owner = `custody-${randomUUID()}`;
       const children = new Set<ChildProcess>();
+      const childClosures: Promise<void>[] = [];
+      let forks = 0;
+      let signalProviderEntry!: () => void;
+      const providerEntry = new Promise<void>((resolve) => {
+        signalProviderEntry = resolve;
+      });
+      let releaseNative!: () => void;
+      const nativeGate = new Promise<void>((resolve) => {
+        releaseNative = resolve;
+      });
       let creates = 0,
         hydrations = 0,
         stops = 0;
@@ -50,6 +74,7 @@ export async function runBrowserResumeCustodyCases() {
       let nativeVisible = true;
       let profileReads = 0;
       let nativeDead = false;
+      let manualFollowStarted = false;
       let nativeId = `native-${randomUUID()}`;
       const native = () =>
         provider === 'kernel'
@@ -69,16 +94,13 @@ export async function runBrowserResumeCustodyCases() {
               startedAt: new Date().toISOString(),
               timeoutAt: new Date(Date.now() + 60000).toISOString(),
             };
-      let settleIncompatibleSecond = () => {};
-      const incompatibleSecondSettled = new Promise<void>((resolve) => {
-        settleIncompatibleSecond = resolve;
-      });
       const server = createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) body += chunk;
         res.setHeader('Content-Type', 'application/json');
         if (req.method === 'POST' && req.url?.endsWith('/browsers')) {
           creates++;
+          signalProviderEntry();
           if (creates > 1) nativeId = `native-${randomUUID()}`;
           nativeDead = false;
           const input = JSON.parse(body);
@@ -94,15 +116,13 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          if (scenario === 'incompatible') {
-            // Hold the first create until the competing resume has answered, so
-            // the second always meets in-progress custody however slowly its
-            // child process boots (a fixed 1s hold raced fork startup under load).
-            await Promise.race([incompatibleSecondSettled, delay(8000, undefined, { ref: false })]);
+          if (concurrent) {
+            // A real follower ledger read establishes overlap; process launch does not.
+            await nativeGate;
             res.end(JSON.stringify(native()));
-            return;
+          } else {
+            setTimeout(() => res.end(JSON.stringify(native())), 100);
           }
-          setTimeout(() => res.end(JSON.stringify(native())), 100);
         } else if (req.method === 'GET' && req.url?.includes('/browsers?')) {
           const items = nativeVisible ? [native()] : [];
           res.end(
@@ -113,12 +133,19 @@ export async function runBrowserResumeCustodyCases() {
         } else if (req.url?.startsWith('/profiles/')) {
           res.end(JSON.stringify({ updatedAt: `version-${++profileReads}` }));
         } else if (req.url === '/health') {
-          if (scenario === 'manual-follow')
+          if (scenario === 'manual-follow' && manualFollowStarted)
             await prisma.browserSession.update({
               where: { id: session.id },
               data: { controlState: 'USER', controlLeaseExpiresAt: new Date(Date.now() + 60000) },
             });
-          res.end(JSON.stringify({ status: nativeDead ? 'stopped' : 'active', ttlMs: null }));
+          res.end(
+            JSON.stringify({
+              provider,
+              sessionId: nativeId,
+              status: nativeDead ? 'stopped' : 'active',
+              ttlMs: null,
+            })
+          );
         } else if (req.url === '/restore') {
           const restoring = await prisma.browserSession.findUniqueOrThrow({
             where: { id: session.id },
@@ -174,7 +201,12 @@ export async function runBrowserResumeCustodyCases() {
         },
       });
       const key = `steel-browser-task-lifecycle:${session.id}`;
-      const run = (fresh = false) =>
+      const run = (
+        fresh = false,
+        observeInFlight = false,
+        stall = false,
+        exitBeforeEntry = false
+      ) =>
         new Promise<Outcome>((resolve, reject) => {
           const child = fork(
             new URL('./browser-session-resume-custody.worker.ts', import.meta.url),
@@ -189,6 +221,9 @@ export async function runBrowserResumeCustodyCases() {
                 CONDUCTOR_WORKSPACE_NAME: owner,
                 CUSTODY_PROVIDER: provider,
                 CUSTODY_FRESH: fresh ? '1' : '0',
+                CUSTODY_OBSERVE_INFLIGHT: observeInFlight ? '1' : '0',
+                CUSTODY_STALL: stall ? '1' : '0',
+                CUSTODY_EXIT_BEFORE_ENTRY: exitBeforeEntry ? '1' : '0',
                 CUSTODY_LOGICAL_PAUSE: scenario === 'logical-pause' ? '1' : '0',
                 CUSTODY_STALE: scenario === 'stale-binding' ? '1' : '0',
                 KERNEL_PROXY_ENABLED: 'false',
@@ -200,6 +235,8 @@ export async function runBrowserResumeCustodyCases() {
             }
           );
           children.add(child);
+          childClosures.push(new Promise<void>((resolve) => child.once('close', () => resolve())));
+          forks++;
           let logs = '';
           let received = false;
           const timer = setTimeout(() => {
@@ -208,16 +245,38 @@ export async function runBrowserResumeCustodyCases() {
           }, 10000);
           child.stdout!.on('data', (x) => (logs += x));
           child.stderr!.on('data', (x) => (logs += x));
-          child.once('message', (message) => {
+          child.on('message', function receive(message) {
+            const observation = message as {
+              type?: string;
+              taskId?: string;
+              status?: string;
+              compatibility?: string;
+            };
+            if (observation?.type === 'custody-inflight-observed') {
+              if (
+                !observeInFlight ||
+                observation.taskId !== session.id ||
+                observation.status !== 'STARTED' ||
+                observation.compatibility !== (freshOperation ? 'fresh' : 'default')
+              ) {
+                clearTimeout(timer);
+                reject(new Error('Unexpected fixture in-flight observation'));
+                return;
+              }
+              releaseNative();
+              return;
+            }
+            child.off('message', receive);
             received = true;
             clearTimeout(timer);
             resolve(message as Outcome);
           });
           child.once('error', reject);
-          child.once('exit', () => {
+          child.once('exit', (code, signal) => {
             children.delete(child);
             clearTimeout(timer);
-            if (!received) reject(new Error(logs));
+            if (!received)
+              reject(new Error(`fixture worker exited code=${code} signal=${signal}: ${logs}`));
           });
         });
       const expire = async (foreign = false) => {
@@ -235,23 +294,54 @@ export async function runBrowserResumeCustodyCases() {
       };
       try {
         let results: Outcome[];
-        if (scenario === 'concurrent' || scenario === 'logical-empty')
-          results = await Promise.all([run(), run()]);
-        else if (scenario === 'logical-pause') results = [await run()];
-        else if (scenario === 'fresh-concurrent')
-          results = await Promise.all([run(true), run(true)]);
+        if (concurrent) {
+          if (scenario === 'incompatible-timeout')
+            console.log(
+              'Custody timeout control',
+              JSON.stringify({ owner, contextId: context.id, sessionId: session.id })
+            );
+          const first = run(freshOperation, false, false, leaderExit);
+          // Provider entry and leader settlement own the complete startup lifetime.
+          // A failed leader rejects this race; there is no polling task left to fork later.
+          const second = Promise.race([
+            providerEntry,
+            first.then(() => {
+              throw new Error('fixture leader completed without provider entry');
+            }),
+          ]).then(() =>
+            run(
+              scenario === 'fresh-concurrent',
+              true,
+              scenario === 'incompatible-timeout' || scenario === 'leader-exit-stalled'
+            )
+          );
+          // Own both failures immediately, including while the follower is starting.
+          const joined = Promise.all([first, second]).finally(releaseNative);
+          if (leaderExit) {
+            await assert.rejects(joined, /fixture worker exited code=23/);
+            await Promise.allSettled([second]);
+            assert.equal(forks, 1, 'failed leader must never start a follower');
+            assert.equal(creates, 0);
+            outcomes.push({ provider, scenario, forks, creates, expectedFailure: 'leader exit23' });
+            continue;
+          }
+          if (scenario === 'incompatible-timeout') {
+            await assert.rejects(joined, /fixture timeout:/);
+            assert.equal(creates, 1);
+            assert.equal(hydrations, 0);
+            outcomes.push({
+              provider,
+              scenario,
+              creates,
+              hydrations,
+              expectedFailure: 'fixture timeout',
+            });
+            continue;
+          }
+          results = await joined;
+        } else if (scenario === 'logical-pause') results = [await run()];
         else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
-        else if (scenario === 'incompatible') {
-          const first = run(true);
-          await retryWithBackoff(async () => creates > 0, {
-            maxRetries: 1000,
-            initialBackoffMs: 10,
-            fixedDelays: Array.from({ length: 999 }, () => 10),
-            shouldRetryResult: (created) => !created,
-          });
-          const second = run().finally(settleIncompatibleSecond);
-          results = await Promise.all([first, second]);
-        } else {
+        else {
           results = [await run()];
           if (scenario === 'user-lease') {
             assert(!results[0]!.ok);
@@ -259,6 +349,7 @@ export async function runBrowserResumeCustodyCases() {
             assert.equal(hydrations, 0);
           } else if (['ready-ack', 'manual-follow', 'provider-ended'].includes(scenario)) {
             if (scenario === 'provider-ended') nativeDead = true;
+            if (scenario === 'manual-follow') manualFollowStarted = true;
             results.push(await run());
           } else if (scenario === 'stale-binding') {
             assert(!results[0]!.ok);
@@ -308,7 +399,7 @@ export async function runBrowserResumeCustodyCases() {
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
         } else if (scenario === 'incompatible' || scenario === 'manual-follow') {
-          assert(results[0]!.ok);
+          assert(results[0]!.ok, JSON.stringify({ provider, scenario, results }));
           assert(!results[1]!.ok);
           assert.equal(creates, 1);
           assert.equal(hydrations, 1);
@@ -342,8 +433,18 @@ export async function runBrowserResumeCustodyCases() {
           'ledger must not persist credential-bearing URLs'
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
+      } catch (error) {
+        console.error('Browser resume custody case failed', {
+          provider,
+          scenario,
+          creates,
+          hydrations,
+        });
+        throw error;
       } finally {
+        releaseNative();
         for (const child of children) child.kill('SIGTERM');
+        await Promise.all(childClosures);
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
         await new Promise<void>((resolve) => server.close(() => resolve()));

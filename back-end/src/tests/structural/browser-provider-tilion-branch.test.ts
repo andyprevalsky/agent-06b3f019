@@ -22,6 +22,12 @@ const srcDir = path.resolve(__dirname, '../..');
  */
 const REVIEWED_GENERIC: ReadonlyMap<string, string> = new Map<string, string>([
   [
+    'providers/browser/rotationMessage.ts',
+    'rotate_ip outcome text (moved out of browserSessionResume.ts). Tilion rows take the ' +
+      'generic residential/mobile lines through PROVIDER_DISPLAY_NAMES; only Steel and ' +
+      'Browser Use get bespoke wording.',
+  ],
+  [
     'providers/browser/resumeRecovery.ts',
     'Native locator lookup for the resume-custody lifecycle, which resumeBrowserSession ' +
       'enters only for Kernel and Browser Use rows; Tilion resumes outside it and never ' +

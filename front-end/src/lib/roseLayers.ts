@@ -18,9 +18,11 @@
  *                  and Biz health (right / full width)
  *   coverIcons     top-right app icons, over a coverPanel's corner
  *   left bar       hover-expanded z-[110] (RoseSidebar), over a full panel
- *   modal          ui/dialog (scrim 200 < content 201) and ui/sheet (scrim
- *                  210 < panel 211, e.g. the file viewer). Never give modal
- *                  content a z below its own scrim.
+ *   modal          ui/dialog and ui/sheet (e.g. the file viewer, the mobile
+ *                  agents drawer) share one tier: scrim 210 < content 211.
+ *                  Portals mount in open order, so the last-opened modal paints
+ *                  on top (a Sheet inside a Dialog, Rename from the drawer).
+ *                  Never give modal content a z below its own scrim.
  *   popover        popovers opened from any layer above (ui/popover), e.g.
  *                  the composer's Rose toolset
  *

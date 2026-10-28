@@ -168,6 +168,9 @@ CODE_TARGET_LOCAL: Final[str] = "local"
 # Error type for a local (Mac) target that cannot start; matches the backend's
 # 409 ``code`` so the handler surfaces the exact text as the tool error.
 LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
+# Backend code when E2B refuses a sandbox over the plan's concurrent-sandbox limit.
+# Fails the tool immediately with the backend's message: no retry, no soft-fail.
+E2B_CAPACITY_EXHAUSTED_CODE: Final[str] = "E2B_CAPACITY_EXHAUSTED"
 # Reason codes shared with back-end/src/providers/localDevices/messages.ts.
 LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
 LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"

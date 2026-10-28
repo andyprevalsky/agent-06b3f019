@@ -6,7 +6,16 @@ import {
   TilionUncarriedStateError,
   type TilionCarriedState,
 } from './browser/tilion';
-import { clearPausedState, loadPausedState } from './browser/tilionState';
+import {
+  clearPausedState,
+  loadPausedState,
+  restoreTilionBrowserState,
+} from './browser/tilionState';
+import type { resumeSession } from './browser';
+import { createLogger } from './logger';
+
+type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
+const log = createLogger('BrowserSwitchCarry');
 
 export async function tilionSessionLive(sessionId: string): Promise<boolean> {
   try {
@@ -61,4 +70,52 @@ export async function withTilionSwitchCarry<T>(
   const result = await replace(prepared.carry);
   if (prepared.fromPausedState) await clearPausedState({ taskId });
   return result;
+}
+
+/**
+ * The worker captured the live Tilion session's state (cookies, localStorage,
+ * IndexedDB) because the backend cannot connect to it. A Tilion replacement
+ * consumes it inside the Tilion adapter; a switch to another provider (Kernel,
+ * Steel) must write it here, after the DB state, since it is the fresher copy,
+ * then return the tab to the saved URL. Best effort: a failed restore never
+ * fails the rotation, but it is logged.
+ */
+export async function applyCarriedStateToReplacement(
+  taskId: string,
+  result: Pick<RecreatedSession, 'provider' | 'validationBrowser' | 'savedUrl'>,
+  restore: typeof restoreTilionBrowserState,
+  carriedState: TilionCarriedState | undefined
+): Promise<void> {
+  if (carriedState === undefined || result.provider === 'tilion') return;
+  const browser = result.validationBrowser;
+  if (browser === undefined) {
+    log.warn('Carried browser state not restored: replacement has no validation client', {
+      taskId,
+      provider: result.provider,
+    });
+    return;
+  }
+  try {
+    const restored = await restore(browser, carriedState);
+    const savedUrl = result.savedUrl;
+    // Restoring origins navigated the tab through them; put it back where the agent was.
+    if (restored.origins > 0 && savedUrl !== undefined && savedUrl !== '') {
+      await browser
+        .contexts()[0]
+        ?.pages()[0]
+        ?.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+    }
+    log.info('Carried browser state restored into the replacement', {
+      taskId,
+      provider: result.provider,
+      cookies: restored.cookies,
+      origins: restored.origins,
+    });
+  } catch (error) {
+    log.warn('Carried browser state restore failed', {
+      taskId,
+      provider: result.provider,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }

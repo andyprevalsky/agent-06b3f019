@@ -4,7 +4,7 @@ import { type HybridAuthRequest } from '../../providers/hybridAuth';
 import { BrowserProviderRateLimitError } from '../../providers/browser';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { initSession, closeBrowserSession } from './service';
+import { initSession } from './service';
 import { initSessionSchema } from './types';
 
 const log = createLogger('BrowserSession');
@@ -15,13 +15,14 @@ export function registerBrowserInitRoute(router: Router, auth: RequestHandler): 
     auth,
     asyncHandler<HybridAuthRequest>(async (req, res) => {
       let sessionId: string | undefined;
+      let releaseOnDisconnect: (() => Promise<unknown>) | undefined;
       let disconnected = res.destroyed;
       let release: Promise<unknown> | undefined;
       const releaseDisconnectedSession = () => {
-        if (!disconnected || sessionId === undefined) return;
+        if (!disconnected || releaseOnDisconnect === undefined) return;
         // Retain this same operation until its exact allocation returns. A
         // failed native close keeps ERROR for terminal-agent reconciliation.
-        release ??= closeBrowserSession(sessionId, false).catch((error) => {
+        release ??= releaseOnDisconnect().catch((error) => {
           log.error('Failed to release disconnected browser initialization', {
             sessionId,
             error: error instanceof Error ? error.message : String(error),
@@ -44,8 +45,16 @@ export function registerBrowserInitRoute(router: Router, auth: RequestHandler): 
           return;
         }
 
-        const result = await initSession(userId, agent_id, start_url, task_id);
+        const { releaseOnDisconnect: cleanup, ...result } = await initSession(
+          userId,
+          agent_id,
+          start_url,
+          task_id
+        );
         sessionId = result.session_id;
+        // Persistent logical sessions belong to their durable owner after
+        // preparation commits. Only transient allocations give a request cleanup.
+        releaseOnDisconnect = cleanup;
         disconnected ||= res.destroyed;
         if (disconnected) {
           await releaseDisconnectedSession();

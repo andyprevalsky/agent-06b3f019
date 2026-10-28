@@ -64,7 +64,7 @@ import {
   codeSessionCreateOptions,
   recordE2bCodeSessionSandbox,
 } from '../e2bCodeSessionSandbox';
-import { createSandboxWithRetry } from '../e2bSandboxCreate';
+import { createSandboxWithRetry, E2BSandboxCapacityError } from '../e2bSandboxCreate';
 import { isSafeUserUiPath } from '../userUi/manifest';
 import { readOwnedUserUiFile, userOwnsUserUiVersion } from '../userUi/store';
 import { completeUserToolCall, findUserToolCall, type UserToolRun } from './callRecords';
@@ -184,6 +184,9 @@ async function e2bSandbox(session: CodeSessionRow): Promise<UserToolSandbox> {
     return { fs: e2bSandboxFs(sandbox), resumedFrom };
   } catch (error) {
     if (error instanceof UserToolRunError) throw error;
+    if (error instanceof E2BSandboxCapacityError) {
+      throw new UserToolRunError(error.statusCode, error.code, error.message);
+    }
     throw new UserToolRunError(
       503,
       'USER_TOOL_SANDBOX_UNAVAILABLE',

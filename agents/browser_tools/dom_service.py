@@ -1068,6 +1068,9 @@ class DOMService:
             profile = BrowserProfile(
                 cdp_url=self.cdp_url,
                 is_local=False,  # Remote browser (Steel/Kernel)
+                # Only the backend owns provider release. stop() otherwise also
+                # terminates Browser Use Cloud sessions discovered from CDP URLs.
+                keep_alive=True,
                 # The provider owns the existing window and viewport. Host display
                 # detection must not resize every attached tab during reconnect.
                 headless=False,
@@ -1283,8 +1286,8 @@ class DOMService:
     async def disconnect(self) -> None:
         """Disconnect from the browser.
 
-        Note: For remote browsers (Steel), this just releases our connection.
-        The actual browser session may still be alive on the server.
+        Remote profiles use keep_alive: this releases our connection while the
+        backend owns checkpointing and provider-session release.
         """
         try:
             await self._disconnect_session()
@@ -1307,9 +1310,8 @@ class DOMService:
                 except (asyncio.CancelledError, Exception):
                     pass
             try:
-                # BrowserSession.stop() uses BrowserStopEvent(force=False): it
-                # closes the CDP client, event bus, and watchdog state without
-                # killing the remote Steel browser.
+                # keep_alive prevents BrowserStopEvent from stopping a remote
+                # provider, including sessions discovered from their CDP URL.
                 await session.stop()
             except Exception as e:
                 logger.warning(f"Error during disconnect: {e}")
@@ -2230,14 +2232,15 @@ class DOMService:
                 counts[cid] = int(cred.get("signCount") or 0)
         return counts
 
-    async def read_passkey_signcounts(self) -> Dict[str, int]:
+    async def read_passkey_signcounts(self, *, require_complete: bool = False) -> Dict[str, int]:
         """Return {credentialId: highest observed signCount} across armed targets.
 
         Compared against the seeded base, a higher value means the relying party
         actually invoked our passkey — the signal we use to record a passkey
         credential_ref so post-run propagation can mark success/failure. The
         ceremony can happen on any target we armed, so take the max across all of
-        them rather than trusting a single handle.
+        them rather than trusting a single handle. Approval capture requires
+        every seeded live authenticator to answer; observation remains best effort.
         """
         # Seed from observed maxima first: invalidate_passkey_state_for_live_target
         # may have removed the authenticator after saving an advanced signCount.
@@ -2245,29 +2248,42 @@ class DOMService:
         # when reinject fails and _passkey_authenticator_by_target is empty.
         counts: Dict[str, int] = dict(self._passkey_observed_max_counts)
         session = self._session
-        if session is None or not self._passkey_authenticator_by_target:
-            return counts
+        if require_complete:
+            for target_id, seeded in self._passkey_seeded_by_target.items():
+                if seeded and (session is None or target_id not in self._passkey_authenticator_by_target):
+                    raise RuntimeError("Seeded passkey authenticator is unavailable for approval capture")
         for target_id in list(self._passkey_authenticator_by_target):
+            seeded = self._passkey_seeded_by_target.get(target_id, set())
             try:
+                if session is None:
+                    continue
                 cdp_session = await session.get_or_create_cdp_session(target_id, focus=False)
             except Exception:
+                if require_complete and seeded:
+                    raise RuntimeError("Passkey target is unavailable for approval capture") from None
                 continue
             target_counts = await self._read_signcounts_for_target(target_id, cdp_session)
             if target_counts is None:
+                if require_complete and seeded:
+                    raise RuntimeError("Passkey readback failed during approval capture")
                 continue
+            if require_complete and not seeded.issubset(target_counts):
+                raise RuntimeError("Passkey readback is missing seeded credentials during approval capture")
             for cid, value in target_counts.items():
                 if value > counts.get(cid, -1):
                     counts[cid] = value
+        if require_complete and not self._passkey_seed_counts.keys() <= counts.keys():
+            raise RuntimeError("Passkey usage could not be verified before approval capture")
         return counts
 
-    async def get_used_passkey_credential_ids(self) -> List[str]:
+    async def get_used_passkey_credential_ids(self, *, require_complete: bool = False) -> List[str]:
         """Return credentialIds whose signCount advanced past the seeded base.
 
         An advance means the relying party invoked our passkey during this run.
         """
         if not self._passkey_seed_counts:
             return []
-        counts = await self.read_passkey_signcounts()
+        counts = await self.read_passkey_signcounts(require_complete=True) if require_complete else await self.read_passkey_signcounts()
         return [cid for cid, base in self._passkey_seed_counts.items() if counts.get(cid, base) > base]
 
     def _page_geometry(self, state: Any) -> Dict[str, Any]:

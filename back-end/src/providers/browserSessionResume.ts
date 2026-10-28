@@ -1,5 +1,28 @@
-import { restoreLogicalBrowserCheckpoint } from './browser/checkpoint';
-import { browserResumeScope, withBrowserResumeLifecycle } from './steel/lifecycleClaim';
+import {
+  serializePasswords,
+  serializePasskeys,
+  type UserSettings,
+  type SerializedPassword,
+  type SerializedPasskey,
+} from './browser/resumeCredentials';
+export type {
+  UserSettings,
+  SerializedPassword,
+  SerializedPasskey,
+} from './browser/resumeCredentials';
+import {
+  checkpointLogicalBrowser,
+  loadLogicalBrowserCheckpoint,
+  restoreLogicalBrowserCheckpoint,
+} from './browser/checkpoint';
+import { isConfirmedBrowserEnd, recordEndedLogicalBrowser } from './browser/sessionPersist';
+import { BROWSER_SESSION_MIN_REMAINING_MS } from './steel/sessionLifetime';
+import { assertBrowserInitializationReady } from './browser/initialization';
+import {
+  browserResumeScope,
+  withBrowserResumeClaim,
+  withBrowserResumeLifecycle,
+} from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
@@ -29,9 +52,21 @@ import {
 } from './browser/rotation';
 import type { TilionCarriedState } from './browser/tilion';
 import { clearPausedState, restoreTilionBrowserState } from './browser/tilionState';
-import { carryForTilionSwitch, withTilionSwitchCarry } from './browserSwitchCarry';
+import {
+  applyCarriedStateToReplacement,
+  carryForTilionSwitch,
+  withTilionSwitchCarry,
+} from './browserSwitchCarry';
 import { storedBrowserProvider } from './browser/types';
 import { browserProviderEnabled, browserUseEnabled } from './browser/config';
+import {
+  findPasswords,
+  findUserSettings,
+  reservePasskeysForRealm,
+  toUserSettings,
+} from './browser/resumeCredentialLookups';
+import { buildRotationMessage } from './browser/rotationMessage';
+export { buildRotationMessage };
 
 export {
   ProxyRotationExhaustedError,
@@ -91,13 +126,6 @@ function tilionRotationAvailable(): boolean {
   return browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true);
 }
 
-const PROVIDER_DISPLAY_NAMES: Record<RotationStep['provider'], string> = {
-  kernel: 'Kernel',
-  steel: 'Steel',
-  'browser-use': 'Browser Use',
-  tilion: 'Tilion',
-};
-
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
@@ -117,23 +145,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
 
-export type {
-  SerializedPasskey,
-  SerializedPassword,
-  UserSettings,
-} from './browserSessionResumeCredentials';
-import {
-  findPasswords,
-  findUserSettings,
-  reservePasskeysForRealm,
-  serializePasskeys,
-  serializePasswords,
-  toUserSettings,
-  type SerializedPasskey,
-  type SerializedPassword,
-  type UserSettings,
-} from './browserSessionResumeCredentials';
-
 export async function resumeBrowserSession(
   taskId: string,
   options: { forceFreshProfile?: boolean } & BrowserStateCarry = {},
@@ -145,17 +156,27 @@ export async function resumeBrowserSession(
   });
 
   const read = () => prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
-  const initial = await read();
+  let initial = await read();
+  if (initial.logicalOwnerKey && initial.status === 'ERROR') {
+    const health = initial.sessionId ? await getBrowserSessionHealth(initial.sessionId) : null;
+    if (
+      !initial.sessionId ||
+      !health ||
+      !(await recordEndedLogicalBrowser(taskId, initial.sessionId, health))
+    )
+      throw new Error('Browser release outcome remains unresolved');
+    initial = await read();
+  }
+  if (initial.logicalOwnerKey !== null) await assertBrowserInitializationReady(taskId);
   if (initial.logicalOwnerKey !== null && initial.status === 'CLOSED')
     throw new Error('Retired logical browser cannot resume');
-  if (initial.logicalOwnerKey !== null && initial.provider === 'steel')
-    throw new Error('Logical Steel browser restore requires durable hydration custody');
   if (
     initial.controlState !== 'AGENT' &&
     (initial.controlLeaseExpiresAt === null || initial.controlLeaseExpiresAt.getTime() > Date.now())
   ) {
     throw new Error('Browser resume cannot replace a session under user control');
   }
+  let sourceEnded = false;
   const resume = async () => {
     const current = await read();
     if (current.logicalOwnerKey !== null && current.status === 'CLOSED')
@@ -166,6 +187,40 @@ export async function resumeBrowserSession(
         current.controlLeaseExpiresAt.getTime() > Date.now())
     )
       throw new Error('Browser resume cannot replace a session under user control');
+    if (current.logicalOwnerKey && current.sessionId && current.status === 'ACTIVE') {
+      const health = await getBrowserSessionHealth(current.sessionId);
+      if (health.sessionId !== current.sessionId)
+        throw new Error('Browser resume health binding changed');
+      sourceEnded = isConfirmedBrowserEnd(health.status);
+      if (sourceEnded) await recordEndedLogicalBrowser(taskId, current.sessionId, health);
+      else if (
+        health.status !== null &&
+        ['live', 'active', 'running'].includes(health.status.toLowerCase())
+      )
+        await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
+          checkpointLogicalBrowser(current.sessionId!, mutate)
+        );
+      else throw new Error('Browser resume liveness is unknown');
+    }
+    if (current.logicalOwnerKey) {
+      await loadLogicalBrowserCheckpoint(taskId, current.sessionId !== null);
+      await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
+        mutate(async (tx) => {
+          const changed = await tx.browserSession.updateMany({
+            where: {
+              id: taskId,
+              sessionId: current.sessionId,
+              contextId: current.contextId,
+              status: { in: ['ACTIVE', 'PAUSED'] },
+              OR: [{ controlState: 'AGENT' }, { controlLeaseExpiresAt: { lte: new Date() } }],
+            },
+            data: { status: 'PAUSED' },
+          });
+          if (changed.count !== 1)
+            throw new Error('Browser resume source ownership or control changed');
+        })
+      );
+    }
     const forceFreshProfile = current.logicalOwnerKey ? true : options.forceFreshProfile;
     const replaceWith = async (carry: BrowserStateCarry) => {
       const result = await dependencies.resumeSession(taskId, {
@@ -179,8 +234,12 @@ export async function resumeBrowserSession(
       ? withTilionSwitchCarry(taskId, options, dependencies.tilionSessionLive, replaceWith)
       : replaceWith(options);
   };
-  if (initial.provider !== 'kernel' && initial.provider !== 'browser-use') return resume();
-  let sourceEnded = false;
+  if (
+    !initial.logicalOwnerKey &&
+    initial.provider !== 'kernel' &&
+    initial.provider !== 'browser-use'
+  )
+    return resume();
   return withBrowserResumeLifecycle(taskId, {
     readBinding: read,
     compatibility: options.forceFreshProfile ? 'fresh' : 'default',
@@ -190,12 +249,12 @@ export async function resumeBrowserSession(
       const current = await read();
       if (current.sessionId === null) return false;
       const health = await getBrowserSessionHealth(current.sessionId);
-      if (health.status === null) throw new Error('Browser resume liveness is unknown');
-      sourceEnded = !['active', 'live', 'running'].includes(health.status.toLowerCase());
-      return (
-        ['active', 'live', 'running'].includes(health.status.toLowerCase()) &&
-        (health.ttlMs === null || health.ttlMs > 60_000)
-      );
+      const live =
+        health.status !== null &&
+        ['active', 'live', 'running'].includes(health.status.toLowerCase());
+      sourceEnded = isConfirmedBrowserEnd(health.status);
+      if (!live && !sourceEnded) throw new Error('Browser resume liveness is unknown');
+      return live && (health.ttlMs === null || health.ttlMs >= BROWSER_SESSION_MIN_REMAINING_MS);
     },
     resume,
     inspect: inspectResumeCandidate,
@@ -246,58 +305,14 @@ async function assembleResumeResponse(
 ) {
   return withOwnedResumeTransport(result, async () => {
     const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
-    await applyCarriedStateToReplacement(taskId, result, dependencies, carriedState);
+    await applyCarriedStateToReplacement(
+      taskId,
+      result,
+      dependencies.restoreCarriedState ?? restoreTilionBrowserState,
+      carriedState
+    );
     return response;
   });
-}
-
-/**
- * The worker captured the live Tilion session's state (cookies, localStorage,
- * IndexedDB) because the backend cannot connect to it. A Tilion replacement
- * consumes it inside the Tilion adapter; a switch to another provider (Kernel,
- * Steel) must write it here, after the DB state, since it is the fresher copy,
- * then return the tab to the saved URL. Best effort: a failed restore never
- * fails the rotation, but it is logged.
- */
-async function applyCarriedStateToReplacement(
-  taskId: string,
-  result: RecreatedSession,
-  dependencies: BrowserSessionResumeDependencies,
-  carriedState: TilionCarriedState | undefined
-): Promise<void> {
-  if (carriedState === undefined || result.provider === 'tilion') return;
-  const browser = result.validationBrowser;
-  if (browser === undefined) {
-    log.warn('Carried browser state not restored: replacement has no validation client', {
-      taskId,
-      provider: result.provider,
-    });
-    return;
-  }
-  try {
-    const restore = dependencies.restoreCarriedState ?? restoreTilionBrowserState;
-    const restored = await restore(browser, carriedState);
-    const savedUrl = result.savedUrl;
-    // Restoring origins navigated the tab through them; put it back where the agent was.
-    if (restored.origins > 0 && savedUrl !== undefined && savedUrl !== '') {
-      await browser
-        .contexts()[0]
-        ?.pages()[0]
-        ?.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-    }
-    log.info('Carried browser state restored into the replacement', {
-      taskId,
-      provider: result.provider,
-      cookies: restored.cookies,
-      origins: restored.origins,
-    });
-  } catch (error) {
-    log.warn('Carried browser state restore failed', {
-      taskId,
-      provider: result.provider,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 }
 
 async function assembleResumeResponseWithTransport(
@@ -392,8 +407,21 @@ async function assembleResumeResponseWithTransport(
     userSettings = toUserSettings(user);
   }
 
+  const health = await getBrowserSessionHealth(result.sessionId).catch((error: unknown) => {
+    log.warn('Could not inspect resumed browser health', {
+      taskId,
+      sessionId: result.sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  if (health && health.sessionId !== result.sessionId)
+    throw new Error('Resumed browser health binding changed');
+  if (health && isConfirmedBrowserEnd(health.status))
+    throw new Error('Resumed browser ended before readiness');
+
   if (!readOnly) await browserResumeScope()?.assertOwned();
-  if (!readOnly && session?.logicalOwnerKey) {
+  if (!readOnly && session?.logicalOwnerKey && !browserResumeScope()) {
     const ready = await prisma.browserSession.updateMany({
       where: { id: taskId, sessionId: result.sessionId, status: 'PAUSED' },
       data: { status: 'ACTIVE' },
@@ -411,6 +439,8 @@ async function assembleResumeResponseWithTransport(
     current_url: currentUrl,
     auth_realm: authRealm,
     status: 'ACTIVE' as const,
+    browser_session_health: health,
+    ...(health?.provider === 'steel' ? { steel_session_health: health } : {}),
     browser_session_metadata: {
       provider: result.provider,
       proxy_source: result.proxySource,
@@ -434,51 +464,6 @@ async function assembleResumeResponseWithTransport(
     passkeys: serializedPasskeys,
     user_settings: userSettings,
   };
-}
-
-export function buildRotationMessage(
-  step: RotationStep,
-  used: number,
-  remaining: number,
-  previousProvider?: RotationStep['provider'] | 'local'
-): string {
-  const left = `${remaining} rotation${remaining === 1 ? '' : 's'} remaining.`;
-  if (step.recoveryAction === 'provider_switched' && step.provider === 'browser-use') {
-    return `Switched to Browser Use with a new country-level residential proxy session (${used}/${ROTATION_CAP}). Login and cookies preserved. ${left}`;
-  }
-  if (step.recoveryAction === 'provider_switched') {
-    const from =
-      previousProvider === undefined || previousProvider === 'local'
-        ? 'Kernel'
-        : PROVIDER_DISPLAY_NAMES[previousProvider];
-    const to = PROVIDER_DISPLAY_NAMES[step.provider];
-    const tier = step.proxyType === 'mobile' ? 'mobile-carrier' : step.proxyType;
-    return (
-      `Switched from ${from} to ${to} with a fresh ${to} ${tier} IP ` +
-      `(${used}/${ROTATION_CAP}) — browser and proxy infrastructure changed, same region. ` +
-      `Login and cookies preserved. ${left}`
-    );
-  }
-  if (step.provider === 'steel') {
-    return (
-      `Rotated to another fresh Steel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
-      `login and cookies preserved. ${left}`
-    );
-  }
-  if (step.provider === 'browser-use') {
-    return `Started a new Browser Use residential proxy session (${used}/${ROTATION_CAP}) in the same country. Login and cookies preserved. ${left}`;
-  }
-  const provider = PROVIDER_DISPLAY_NAMES[step.provider];
-  if (step.proxyType === 'mobile') {
-    return (
-      `Rotated to a fresh ${provider} mobile-carrier IP (${used}/${ROTATION_CAP}) — same region. ` +
-      `Login and cookies preserved. ${left}`
-    );
-  }
-  return (
-    `Rotated to a fresh ${provider} residential IP (${used}/${ROTATION_CAP}) — same region, ` +
-    `login and cookies preserved. ${left}`
-  );
 }
 
 /**

@@ -11,6 +11,7 @@
  * See providers/codeSessions/inspect.ts for the flow.
  */
 import { type Response, type Router } from 'express';
+import { E2BSandboxCapacityError } from '../../providers/e2bSandboxCreate';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import {
@@ -69,6 +70,10 @@ export function registerCodeInspectRoutes(router: Router): void {
       } catch (error) {
         if (error instanceof CodeInspectError) {
           res.status(error.status).json({ error: error.message, code: error.code });
+          return;
+        }
+        if (error instanceof E2BSandboxCapacityError) {
+          res.status(error.statusCode).json({ error: error.message, code: error.code });
           return;
         }
         throw error;
