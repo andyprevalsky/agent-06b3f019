@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Re-prove only the tests that failed in the previous backend coverage run.
+# Retry backend coverage after a failed run, using that run's failures.
 #
-# Reads the failed blackbox domains from the preserved blackbox summary.json and
-# the failed unit files from the unit results file, then runs run-coverage.sh
-# with exactly that selection. A selected-only run cannot enforce the coverage
-# thresholds, so it always ends with "PARTIAL"; the full `npm run test:coverage`
-# remains mandatory once every rerun passes. Missing or unreadable results fall
-# back to the full suite instead of guessing.
+# --mode=failed-first (default, a valid gate): one FULL sweep in which the
+#   previously failed blackbox domains run first and the sweep aborts as soon as
+#   one fails again. When they pass, every other domain and unit file still runs
+#   and thresholds are enforced, so a regression elsewhere is still caught.
+# --mode=subset (fast diagnosis only, NOT a gate): run just the failed blackbox
+#   domains and unit files. It cannot enforce thresholds and ends "PARTIAL";
+#   a full sweep remains mandatory afterwards.
+# Missing or unreadable failure records fall back to the plain full suite.
 #
-# Usage: bash scripts/coverage-rerun-failed.sh [failure-evidence-dir]
+# Usage: bash scripts/coverage-rerun-failed.sh [--mode=failed-first|subset] [failure-evidence-dir]
 #   failure-evidence-dir defaults to the newest
 #   .context/test-runs/backend-coverage-failed-* directory.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
-EVIDENCE_DIR="${1:-}"
+MODE=failed-first
+EVIDENCE_DIR=""
+for arg in "$@"; do
+  case "$arg" in
+    --mode=failed-first | --mode=subset) MODE="${arg#--mode=}" ;;
+    --*)
+      echo "Unknown option: $arg" >&2
+      exit 2
+      ;;
+    *) EVIDENCE_DIR="$arg" ;;
+  esac
+done
 if [[ -z "$EVIDENCE_DIR" ]]; then
   EVIDENCE_DIR="$(ls -1dt "$ROOT_DIR"/.context/test-runs/backend-coverage-failed-* 2>/dev/null | head -1 || true)"
 fi
@@ -37,7 +50,7 @@ selection="$(
       console.log("FULL");
       process.exit(0);
     }
-    const domains = blackbox.results.filter((r) => !r.passed).map((r) => r.domain);
+    const domains = blackbox.results.filter((r) => !r.passed && !r.aborted).map((r) => r.domain);
     console.log(`DOMAINS=${domains.join(",")}`);
     console.log(`UNITS=${unit.failed.join(",")}`);
   '
@@ -52,6 +65,11 @@ UNITS="$(sed -n 's/^UNITS=//p' <<<"$selection")"
 if [[ -z "$DOMAINS" && -z "$UNITS" ]]; then
   echo "The previous run recorded no failed tests; running the full coverage suite."
   exec bash "$SCRIPT_DIR/run-coverage.sh"
+fi
+if [[ "$MODE" == "failed-first" ]]; then
+  echo "Full coverage sweep; previously failed blackbox domains first: ${DOMAINS:-<none>}"
+  exec env BLACKBOX_TEST_PRIORITY_DOMAINS="$DOMAINS" BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE=1 \
+    bash "$SCRIPT_DIR/run-coverage.sh"
 fi
 echo "Rerunning failed blackbox domains: ${DOMAINS:-<none>}"
 echo "Rerunning failed unit files: ${UNITS:-<none>}"

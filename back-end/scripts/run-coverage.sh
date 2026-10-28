@@ -832,6 +832,14 @@ fi
 if [[ -n "$BLACKBOX_PID" ]]; then
   wait "$BLACKBOX_PID" || TEST_EXIT=$?
   BLACKBOX_PID=""
+  # Early-abort retry (previously failed domains first, stop when one fails
+  # again): the run can no longer pass, so stop the unit lane too.
+  if [[ "$TEST_EXIT" -ne 0 && "${BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE:-0}" == "1" &&
+    -n "$UNIT_PID" ]] &&
+    grep -q '^PRIORITY FAILURE:' "$BLACKBOX_ARTIFACT_DIR/runner.log" 2>/dev/null; then
+    echo "Previously failed blackbox domain failed again; stopping the unit lane early."
+    kill -TERM -- "-$UNIT_PID" >/dev/null 2>&1 || true
+  fi
 fi
 if [[ -n "$UNIT_PID" ]]; then
   wait "$UNIT_PID" || UNIT_EXIT=$?
