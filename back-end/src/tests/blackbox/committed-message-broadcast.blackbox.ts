@@ -602,13 +602,8 @@ async function main() {
       for (const [index, chunk] of chunks.entries()) {
         await publisher.broadcastAssistantStream(agentId, 'burst-stream', chunk, false, index + 1);
       }
-      await publisher.broadcastAssistantStream(
-        agentId,
-        'burst-stream',
-        '',
-        true,
-        chunks.length + 1
-      );
+      const finalSequence = chunks.length + 1;
+      await publisher.broadcastAssistantStream(agentId, 'burst-stream', '', true, finalSequence);
       await publisher.broadcastMessageInsert(agentId, message('burst-final'));
       await publisher.__flushBroadcastQueueForTests();
 
