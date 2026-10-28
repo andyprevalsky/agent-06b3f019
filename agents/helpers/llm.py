@@ -17,7 +17,7 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, create_model, model_validator
+from pydantic import BaseModel, Field, StrictBool, ValidationError, create_model, model_validator
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -4638,7 +4638,8 @@ async def _call_llm_verifier(
         f"all verifier paths must go through check_progress, which forces rose-1-ultra."
     )
 
-    response_model = _build_verifier_response_model(response_schema)
+    require_task_completion = _browser_task_completion_required(call_site)
+    response_model = _build_verifier_response_model(response_schema, require_task_completion=require_task_completion)
 
     accumulated_reasoning = ""
     accumulated_json = ""
@@ -4839,7 +4840,7 @@ async def _call_llm_verifier(
     verdict_model = (
         response_model
         if _verifier_verdict_claims_completion(parsed_json)
-        else _build_verifier_response_model(response_schema, completion_verdict=False)
+        else _build_verifier_response_model(response_schema, completion_verdict=False, require_task_completion=require_task_completion)
     )
     parsed = _validate_verifier_response(verdict_model, parsed_json)
 
@@ -5534,10 +5535,46 @@ def _completed_child_task_structured_response(
     return handoff[0] if handoff else None
 
 
+_BROWSER_COMPLETION_CALL_SITES = frozenset({"verifier_browser", "verifier_browser_max_steps"})
+_BROWSER_TASK_COMPLETION_DIRECTIVE = """
+# Browser task completion verdict
+The numeric score continues to measure how completely the required output can
+be extracted. Separately return task_completed as a boolean: true only when
+grounded evidence establishes that the user's requested work is completed.
+Assess the original goal and later task updates, not output truthiness or field
+coverage. A correct negative answer can complete an information request; a
+field accurately reporting that a requested action was not done does not make
+that action complete. Preserve the existing explicit user-refusal rule.
+Keep accurate partial or negative output even when task_completed is false.
+""".strip()
+
+
+def _browser_task_completion_required(call_site: str) -> bool:
+    return call_site in _BROWSER_COMPLETION_CALL_SITES
+
+
+def _admit_browser_task_completion(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep extraction data while requiring the separate completion verdict."""
+    admitted = dict(result)
+    extraction_score = result["score"]
+    verdict = result.get("task_completed")
+    completed = verdict is True
+    admitted["extraction_score"] = extraction_score
+    admitted["task_completed"] = verdict if type(verdict) is bool else None
+    if not completed:
+        admitted["score"] = min(float(extraction_score), 0.5)
+        admitted["reasoning"] = (
+            str(result.get("reasoning") or "")
+            + "\n\nThe separate browser task-completion verdict is not true; extracted output alone does not complete the task."
+        ).strip()
+    return admitted
+
+
 def _build_verifier_response_model(
     response_schema: Optional[Dict[str, Any]] = None,
     *,
     completion_verdict: bool = True,
+    require_task_completion: bool = False,
 ) -> Type[BaseModel]:
     """Build the verifier's Pydantic contract for RoseClient.complete.
 
@@ -5581,6 +5618,10 @@ def _build_verifier_response_model(
             ),
         ),
     )
+    if require_task_completion:
+        fields["task_completed"] = (
+            StrictBool, Field(..., description="Whether the requested browser task was completed, independently of output extraction completeness."),
+        )
     fields["score"] = (
         float,
         Field(..., description="Final numeric commitment from 0.0 to 1.0."),
@@ -5816,9 +5857,11 @@ def _validate_verifier_response(response_model: Type[BaseModel], parsed_json: An
             or any(not error.get("loc") or error["loc"][0] != "output" for error in errors)
         ):
             raise
-        verdict = _build_verifier_response_model(None).model_validate(
-            {"reasoning": parsed_json.get("reasoning"), "score": parsed_json.get("score")}
-        )
+        require_task_completion = "task_completed" in response_model.model_fields
+        verdict_fields = {"reasoning": parsed_json.get("reasoning"), "score": parsed_json.get("score")}
+        if require_task_completion:
+            verdict_fields["task_completed"] = parsed_json.get("task_completed")
+        verdict = _build_verifier_response_model(None, require_task_completion=require_task_completion).model_validate(verdict_fields)
         violations = "; ".join(f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in errors)
         logger.warning(
             "Verifier output violates the response schema; treating as rejection", violations=violations[:300]
@@ -5829,10 +5872,11 @@ def _validate_verifier_response(response_model: Type[BaseModel], parsed_json: An
                 f"output schema ({violations}), so completion cannot pass yet."
             ),
             "score": min(float(verdict.score), 0.5),
+            **({"task_completed": verdict.task_completed} if require_task_completion else {}),
         }
 
 
-def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None, *, require_task_completion: bool = False) -> Dict[str, Any]:
     """
     Build a JSON schema for the verifier response.
 
@@ -5904,6 +5948,12 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     }
     required.append("reasoning")
 
+    if require_task_completion:
+        properties["task_completed"] = {
+            "type": "boolean",
+            "description": "Whether the requested browser task was completed, independently of output extraction completeness.",
+        }
+        required.append("task_completed")
     properties["score"] = {
         "type": "number",
         "description": "Final numeric commitment from 0.0 to 1.0.",
@@ -5968,6 +6018,24 @@ VERIFIER_ATTEMPT_DEADLINE_S = 180.0
 VERIFIER_TTFT_TIMEOUT_S = 60.0
 VERIFIER_IDLE_TIMEOUT_S = 90.0
 VERIFIER_TOTAL_TIMEOUT_S = 420.0
+
+
+def _browser_verifier_text_evidence(messages: list, call_site: str) -> dict:
+    """Pair a browser judgment with its already-admitted textual input only."""
+    if call_site not in {"verifier_browser", "verifier_browser_max_steps"}:
+        return {}
+    texts = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(block["text"] for block in content
+                         if isinstance(block, dict) and block.get("type") == "text"
+                         and isinstance(block.get("text"), str))
+    return {"browser_verifier_input": {"call_site": call_site, "texts": texts}} if texts else {}
 
 
 @activity.defn
@@ -6072,6 +6140,7 @@ async def check_progress(
     # Fast Mode: set the cache context so the verifier's Rose call (via
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
+    require_task_completion = _browser_task_completion_required(call_site)
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
     demo_cache_should_write = fast_mode_cache_enabled or write_through_enabled
     if fast_mode_goal and demo_cache_should_write:
@@ -6192,7 +6261,10 @@ async def check_progress(
                 }
 
         config = load_config()
+        require_task_completion = _browser_task_completion_required(call_site)
         system_prompt = verifier_system_prompt
+        if require_task_completion:
+            system_prompt += "\n\n" + _BROWSER_TASK_COMPLETION_DIRECTIVE
         verifier_dump_extra = {
             **_extract_browser_recording_dump_extra(context),
             **(dump_extra or {}),
@@ -6278,6 +6350,7 @@ async def check_progress(
                     _ctx = _fm_ctx()
                     if (
                         fast_mode_cache_enabled
+                        and not require_task_completion
                         and soft_complete_on_miss(call_site) is not None
                         and (_ctx.soft_complete_allowed if _ctx is not None else False)
                     ):
@@ -6328,6 +6401,8 @@ async def check_progress(
                 else:
                     raise last_error
 
+        if require_task_completion:
+            result = _admit_browser_task_completion(result)
         score = result["score"]
         # C3: score_reasoning is gone. Read only `reasoning` now.
         reasoning = result.get("reasoning", "")
@@ -6355,7 +6430,7 @@ async def check_progress(
         # agent loops until the activity times out (verify18 leaves). Promote
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
-        if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
+        if not require_task_completion and fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.demo_cache.context import current_context as _fm_ctx
             from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
@@ -6383,11 +6458,13 @@ async def check_progress(
                 }
 
         return {
+            **_browser_verifier_text_evidence(messages, call_site),
             "score": score,
             "reasoning": reasoning,
             "message": f"{reasoning}\n\nScore: {score}",
             "usage": usage,
             "structured_response": structured_response,
+            **({"task_completed": result["task_completed"], "extraction_score": result["extraction_score"]} if require_task_completion else {}),
         }
     except Exception as e:
         error_message = extract_error_message(e)
@@ -6401,6 +6478,7 @@ async def check_progress(
         _ctx = _fm_ctx()
         if (
             fast_mode_cache_enabled
+            and not require_task_completion
             and _fm_soft(call_site) is not None
             and (_ctx.soft_complete_allowed if _ctx is not None else False)
         ):

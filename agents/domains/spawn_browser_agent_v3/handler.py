@@ -11142,6 +11142,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         agent_id=agent_id,
                         title=progress_title,
                         task_id=task_id,
+                        extra_metadata={"browser_verifier_input": progress_result["browser_verifier_input"]}
+                        if isinstance(progress_result.get("browser_verifier_input"), dict) else None,
                         message=v_reasoning,
                         status=MessageStatus.FINISHED,
                         browser_url=browser_url,
@@ -11162,7 +11164,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             action="verify",
                         )
 
-                    if score >= 1.0:
+                    if score >= 1.0 and progress_result.get("task_completed") is True:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
                         # A passing verifier call may omit the output it already

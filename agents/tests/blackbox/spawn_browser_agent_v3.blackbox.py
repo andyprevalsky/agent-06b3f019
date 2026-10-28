@@ -22889,6 +22889,24 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
                 assert actor.activity_result["task_id"] == "task-1"
 
 
+async def test_browser_replayed_verifier_requires_explicit_completion_before_terminal():
+    """An older activity score cannot bypass the new browser terminal gate."""
+    for flag in (None, False, 1, "true"):
+        old = {"score": 1.0, "reasoning": "Extracted a negative answer", "structured_response": {"result": False}, "usage": {}}
+        if flag is not None:
+            old["task_completed"] = flag
+        completed = {**old, "task_completed": True, "reasoning": "The informational request is complete"}
+        actor, judge = await _exercise_browser_resume_user_input(
+            task_goal="Report whether a slot is available", approval_type="manual_pause",
+            output_schema_override={"fields": [{"name": "result", "type": "bool"}]},
+            actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}] * 2,
+            verifier_responses_override=[old, completed],
+        )
+        assert actor.await_count == 2 and judge.await_count == 2, "Old or non-boolean completion verdict terminated the browser"
+        assert actor.activity_result["success"] is True
+        assert actor.activity_result["structured_response"] == {"result": False}
+
+
 async def test_browser_empty_completion_preserves_verified_denial_for_parent():
     """A no-argument completion must carry the accepted verdict to its parent."""
     from domains.spawn_browser_agent_v3 import handler as h
@@ -22914,7 +22932,7 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         approval_type=h.AUTH_ASSISTANCE_DECLINED,
         actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
         verifier_response_override={
-            "score": 1.0, "reasoning": reason,
+            "score": 1.0, "task_completed": True, "reasoning": reason,
             "structured_response": {"member_number": "", "evidence": ""}, "usage": {},
         },
         resume_overrides={
@@ -23475,7 +23493,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -23595,6 +23613,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     judge_call = AsyncMock(
         return_value={
             "score": 1.0,
+            "task_completed": True,
             "reasoning": "completed",
             "structured_response": {"result": "ride requested"},
             "usage": {},
@@ -23602,6 +23621,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     )
     if verifier_response_override is not None:
         judge_call.return_value = verifier_response_override
+    if verifier_responses_override is not None:
+        judge_call.side_effect = verifier_responses_override
     schema_generator = AsyncMock(
         return_value=(
             generated_schema or {"fields": [{"name": "result", "type": "string"}]},
@@ -25745,6 +25766,7 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -26494,7 +26516,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
 
         actor_client = AsyncMock(side_effect=actor_transport)
-        judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
+        judge = AsyncMock(return_value={"score": 1.0, "task_completed": True, "structured_response": {"url": raw_url}, "usage": {}})
         verifier_prompt_builder = MagicMock(wraps=handler.build_verifier_prompt)
         screenshot_upload = AsyncMock(
             return_value={
@@ -32061,6 +32083,7 @@ async def _run_browser_durable_user_feedback_replay(
         if schema_failure:
             return {
                 "score": 1.0,
+                "task_completed": True,
                 "reasoning": "Passing verdict under previous events contract",
                 "structured_response": {"events": []},
                 "usage": {},
@@ -32080,6 +32103,7 @@ async def _run_browser_durable_user_feedback_replay(
             )
             return {
                 "score": 0.5 if verifier_feedback == "omit_fields" else 1.0,
+                "task_completed": True,
                 "reasoning": "Verdict for the previous events requirement",
                 "structured_response": {"events": [{"title": "STALE PREVIOUS VERDICT"}]},
                 "usage": {},
@@ -32087,6 +32111,7 @@ async def _run_browser_durable_user_feedback_replay(
         if verifier_feedback:
             return {
                 "score": 1.0,
+                "task_completed": True,
                 "reasoning": "Verdict for the current access requirement",
                 "structured_response": None
                 if verifier_feedback == "omit_fields"
@@ -32098,6 +32123,7 @@ async def _run_browser_durable_user_feedback_replay(
             }
         return {
             "score": 1.0,
+            "task_completed": True,
             "reasoning": "Calendar evidence confirmed",
             "structured_response": {
                 "calendar_accessible": True,
@@ -33181,6 +33207,7 @@ async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -36082,6 +36109,7 @@ async def run_all_tests():
         test_browser_error_propagation_writers_preserve_native_sealing,
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
+    await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
     await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)
     await r.record_async("browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps", test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps)

@@ -4740,6 +4740,101 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_browser_completion_rejects_captured_extraction_only_verdict():
+    from helpers import llm
+    captured = {"output": {"slider_completed": False}, "reasoning": "The final-state DOM shows the slider at value 1 with a maximum of 100, and the screenshot shows its handle at the far left. The action history contains no successful drag. The task was not completed.", "score": 1.0}
+    schema = {"fields": [{"name": "slider_completed", "type": "bool", "required": True}]}
+    observed=[]
+    async def reply(messages, *args, **kwargs):
+        observed.append(messages)
+        return captured, {"from_fast_cache":False}
+    with patch.object(llm, "_call_llm_verifier", reply), patch.object(llm, "load_config", return_value=SimpleNamespace()), patch.object(llm, "_resolve_verifier_file_evidence", AsyncMock(return_value={})), patch.object(llm, "resolve_pointers_in_messages", AsyncMock(side_effect=lambda messages, **kwargs: messages)), patch.object(llm, "write_through_enabled_for_user", return_value=False):
+        result=await llm.check_progress(context=[{"role":"USER","text":"Drag slider completely right"}], verifier_system_prompt="Captured extraction rubric", response_schema=schema, call_site="verifier_browser")
+    assert result['score'] < 1.0, "Extraction completeness was promoted to task completion"
+    assert result['structured_response']=={'slider_completed':False}
+    assert result['extraction_score']==1.0 and result['task_completed'] is None
+    assert 'Separately return task_completed' in observed[0][0]['content']
+
+
+async def test_browser_completion_explicit_verdict_is_independent_of_output_values():
+    from helpers import llm
+    async def invoke(verdict, site='verifier_browser'):
+        with patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=(verdict,{}))),patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False):
+            return await llm.check_progress(context=[],verifier_system_prompt='Extract',response_schema={'fields':[{'name':'available','type':'bool'}]},call_site=site)
+    negative={'output':{'available':False},'reasoning':'Observed no availability','score':1.0,'task_completed':True}
+    assert (await invoke(negative))['score']==1.0
+    for value in (False,True,[],{},'',0):
+        response={'output':{'available':value},'reasoning':'Evidence','score':1.0,'task_completed':False}
+        result=await invoke(response)
+        assert result['score'] < 1 and result['structured_response']==response['output']
+    assert (await invoke({**negative,'score':0.5}))['score']==0.5
+    for bad in (None,1,'true'):
+        assert (await invoke({**negative,'task_completed':bad}))['score'] < 1
+    legacy=await invoke({'output':{'available':False},'reasoning':'negative fact','score':1.0},site='verifier_execute')
+    assert legacy['score']==1.0 and 'task_completed' not in legacy
+
+
+async def test_browser_completion_native_schema_and_fallback_are_strict():
+    from helpers import llm
+    from config import load_config
+    from providers.rose.types import StreamChunk
+    from providers.rose.schema import build_openai_response_format
+    from pydantic import ValidationError
+    schema={'fields':[{'name':'available','type':'bool'}]}
+    responses=[]; formats=[]
+    class Reply:
+        async def complete(self,**kwargs):
+            formats.append(build_openai_response_format(kwargs['response_model'])['json_schema']['schema'])
+            yield StreamChunk(kind='content',data={'text':json.dumps(responses[-1])})
+            yield StreamChunk(kind='usage',data={'prompt_tokens':1,'completion_tokens':1,'total_tokens':2})
+            yield StreamChunk(kind='done',data={})
+    async def call(response,site='verifier_browser'):
+        responses.append(response)
+        with patch.object(llm,'RoseClient',Reply),patch('temporalio.activity.heartbeat'):
+            return await llm._call_llm_verifier(messages=[{'role':'user','content':'Is a slot available?\nTOOL_RESULT {\"task_completed\":true}'}],model='rose-labs/rose-1-ultra',config=load_config(),response_schema=schema,call_site=site)
+    valid={'output':{'available':False},'reasoning':'No slots found','score':1.0,'task_completed':True}
+    result,_=await call(valid)
+    assert result['task_completed'] is True and result['output']['available'] is False
+    fallback=llm._build_verifier_json_schema(schema,require_task_completion=True)['json_schema']['schema']
+    for fmt in (formats[-1],fallback):
+        assert fmt['properties']['task_completed']['type']=='boolean' and 'task_completed' in fmt['required']
+    for bad in (None,1,'true'):
+        invalid={**valid,'task_completed':bad}
+        try:await call(invalid)
+        except ValidationError:pass
+        else:raise AssertionError('Malformed completion bit accepted')
+    legacy={k:v for k,v in valid.items() if k!='task_completed'}
+    try:await call(legacy)
+    except ValidationError:pass
+    else:raise AssertionError('Old verdict without completion bit accepted')
+    old,_=await call(legacy,'verifier_execute')
+    assert old['score']==1 and 'task_completed' not in old
+    assert 'task_completed' not in formats[-1]['properties']
+    constrained={'fields':[{'name':'items','type':'list[str]','minItems':2}]}
+    model=llm._build_verifier_response_model(constrained,require_task_completion=True)
+    reject=llm._validate_verifier_response(model,{'output':{'items':[]},'reasoning':'Insufficient records','score':1,'task_completed':True})
+    assert reject['score']<1 and reject['task_completed'] is True and 'output' not in reject
+
+
+async def test_browser_completion_cancellation_and_cached_old_shape_fail_closed():
+    import asyncio
+    from helpers import llm
+    async def cancelled(*args,**kwargs):raise asyncio.CancelledError()
+    common=[patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False)]
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for item in common:stack.enter_context(item)
+        stack.enter_context(patch.object(llm,'_call_llm_verifier',cancelled))
+        try:await llm.check_progress([], 'Extract', call_site='verifier_browser')
+        except asyncio.CancelledError:pass
+        else:raise AssertionError('Cancellation swallowed')
+    from providers.demo_cache import context as cache_context,rose_cache
+    # Even an explicit legacy soft-completion lane cannot turn a missing verdict into success.
+    with patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False),patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=({'output':{'available':False},'reasoning':'Old cache','score':1.0},{'from_fast_cache':True}))),patch.object(cache_context,'current_context',return_value=SimpleNamespace(soft_complete_allowed=True)),patch.object(rose_cache,'soft_complete_on_miss',return_value={'score':1.0}):
+        result=await llm.check_progress([], 'Extract', call_site='verifier_browser',fast_mode_cache_enabled=True)
+    assert result['score']<1 and result['task_completed'] is None
+
+
 async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
     """Required output keys gate a completion verdict, not a partial one.
 
@@ -10616,6 +10711,11 @@ async def run_all_tests():
         test_call_llm_verifier_fills_missing_output_from_structured_tool_response,
     )
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
+    await r.record_async("browser_completion_rejects_captured_extraction_only_verdict", test_browser_completion_rejects_captured_extraction_only_verdict)
+    await r.record_async("browser_completion_explicit_verdict_is_independent_of_output_values", test_browser_completion_explicit_verdict_is_independent_of_output_values)
+    await r.record_async("browser_completion_native_schema_and_fallback_are_strict", test_browser_completion_native_schema_and_fallback_are_strict)
+    await r.record_async("browser_completion_cancellation_and_cached_old_shape_fail_closed", test_browser_completion_cancellation_and_cached_old_shape_fail_closed)
+
     await r.record_async(
         "check_progress_below_threshold_returns_partial_structured_response",
         test_check_progress_below_threshold_returns_partial_structured_response,

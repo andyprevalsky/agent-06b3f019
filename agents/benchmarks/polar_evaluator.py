@@ -259,6 +259,16 @@ def build_polar_trajectory(
             observation = metadata.get("browser_observation")
             if isinstance(observation, str) and observation:
                 action_bits.append("Recorded browser observation: " + observation)
+            verifier_input = metadata.get("browser_verifier_input")
+            if (isinstance(verifier_input, dict)
+                    and verifier_input.get("call_site") in {"verifier_browser", "verifier_browser_max_steps"}
+                    and isinstance(verifier_input.get("texts"), list)
+                    and all(isinstance(item, str) for item in verifier_input["texts"])
+                    and isinstance(source_task, str) and source_task
+                    and isinstance(metadata.get("toolCallId"), str) and metadata["toolCallId"]):
+                action_bits.append("Recorded verifier input (text only) for browser task " + source_task
+                                   + ", verification call " + metadata["toolCallId"] + ":\n"
+                                   + "\n".join(verifier_input["texts"]))
             if action_bits:
                 parts.append("Action: " + " | ".join(action_bits))
         elif role == "USER" and text:

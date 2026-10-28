@@ -30,6 +30,7 @@ if __name__ == "__main__":
             "benchmarks/cloudbench_dependency_sync_test.py",
             "benchmarks/polar_browser_action_evidence_test.py",
             "benchmarks/polar_browser_action_identity_test.py",
+            "benchmarks/polar_browser_verifier_input_test.py",
             "benchmarks/cloudbench_image_dependency_contract_test.py",
             "benchmarks/cloudbench_image_dependency_contract_selection_test.py",
             "benchmarks/cloud_batch_cleanup_test.py",
