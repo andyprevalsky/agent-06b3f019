@@ -20,7 +20,10 @@ import {
   isSteelSessionRateLimited,
   runCrossProviderRotationLadder,
 } from '../blackbox/browser-provider-rotation.support';
-import { withKernelProxyCache } from '../blackbox/browser-provider-proxy-health.support';
+import {
+  withKernelProxyCache,
+  withKernelProxyCreationTransaction,
+} from '../blackbox/browser-provider-proxy-health.support';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -572,7 +575,7 @@ async function main(): Promise<void> {
   testResidentialUnchanged();
   testBenchmarkProxyReuseRequiresSameLocationAndTier();
   testRestoredProxyReuse();
-  await testPaginatedProxyReuseAndConcurrentOwnership();
+  await withKernelProxyCreationTransaction(testPaginatedProxyReuseAndConcurrentOwnership);
   await testDeletedCachedProxyKeepsLocation();
   testRotationTierLadder();
   testRotationRequestSchema();
