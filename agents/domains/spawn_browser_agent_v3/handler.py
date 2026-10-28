@@ -12057,10 +12057,13 @@ Based on this feedback, I need to continue working on the task and address the i
                             task_id=task_id,
                             checkpoint=f"after_action_{iteration}_{action_name}",
                         )
-                extra_metadata = None
+                # Preserve executed inputs alongside their acknowledged result.
+                # The persistence owner applies the same secret/privacy view as
+                # the action history; metadata does not enter planner tool text.
+                extra_metadata = {"browser_action_params": unified_action.get("params") or {}}
                 if result.get("credential_ref"):
                     auth_runtime_state.mark_credential_ref(result["credential_ref"])
-                    extra_metadata = {"credential_ref": result["credential_ref"]}
+                    extra_metadata["credential_ref"] = result["credential_ref"]
                 # Preserve the same masked observation for credential classification.
                 # Metadata is not repeated in the parent planner's tool text.
                 if action_name == "read_browser_state" and result.get("formatted_state"):

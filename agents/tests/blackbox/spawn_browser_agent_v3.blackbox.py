@@ -7288,7 +7288,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     policy.register_secret_refs({"pwd:synthetic": "secret-plaintext"})
     history.bind_dom_service(policy)
     namespace = dict(vars(handler))
-    namespace.update(result=result, action_history=history,
+    namespace.update(result=result, unified_action={"params": {}}, action_history=history,
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",

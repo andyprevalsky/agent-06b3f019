@@ -247,8 +247,14 @@ def build_polar_trajectory(
                 action_bits.append(tool_name)
             if tool_status:
                 action_bits.append(f"status={tool_status}")
+            params = metadata.get("browser_action_params")
+            if isinstance(params, dict) and params:
+                action_bits.append("Recorded action parameters: " + json.dumps(params, ensure_ascii=False, sort_keys=True))
             if text:
                 action_bits.append(text)
+            observation = metadata.get("browser_observation")
+            if isinstance(observation, str) and observation:
+                action_bits.append("Recorded browser observation: " + observation)
             if action_bits:
                 parts.append("Action: " + " | ".join(action_bits))
         elif role == "USER" and text:

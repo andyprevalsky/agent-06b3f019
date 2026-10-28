@@ -124,3 +124,63 @@ conflict and the independent no-browser cluster.
 ## Reusable lesson
 
 Preserve complete recorded tool output in a full-trajectory evaluator before judging absence of successful action evidence.
+
+## R3 recurrence: executed browser inputs and native observations
+
+Polar iteration 6 BU022 run 2 root
+`93c2b8f7-ffc1-4e83-9df2-ca1adcc6ba2a` at source
+`4c6861dcd2a9aacf22e3937cea27fae904727349` failed C1 (2/3 total).
+The external judge reported that later JavaScript results listed 2022 movies
+without showing the applied filter parameters. The saved internal verifier raw
+context contains actual action-history step 31: an executed browser evaluation
+POSTed to `/discover/movie` with `primary_release_date.gte=2022-01-01` and
+`primary_release_date.lte=2022-12-31`; its result includes HTTP 200 and movie rows.
+This original verifier context is in the saved worker log, not reconstructed
+from the final answer. The immutable failed fleet archive SHA256 is
+`e1ceea5db3befe6fe45381374d2580756e73556dc0a54eac53f1512bfc9cff7d`.
+
+The first missing-input boundary is browser success-message persistence: it
+stores `result.message` but not the executed action parameters. Separately,
+`build_polar_trajectory` ignores the already-persisted masked
+`metadata.browser_observation`. The passing BU022 sibling instead retained a
+filtered URL in completion text; that single pass does not prove causality or
+that the failed task should pass. Both external evaluations had zero attached
+screenshots. The failed internal verifier had a final screenshot, but the
+persisted message did not carry it; this candidate does not invent or recover
+missing historical images.
+
+The evidence-transport repair records successful executed parameters through
+the existing private persistence owner and includes those parameters and native
+observations in Polar's full history. It preserves task criteria, filter
+confirmation requirements, model, step budget, scoring and actor behavior.
+A recorded POST alone is not proof that the requested advanced-search UI state
+was applied and confirmed. Original BU022 FAIL remains authoritative; this
+repair has no unchanged paid-task outcome proof.
+
+The registered local reproduction executes the actual success-persistence AST
+slice and supplies the result to all three actual Polar judge inputs. Corrected
+baseline: two assertion failures and one privacy control pass. Candidate: all
+three pass. The initial double raised TypeError on existing None metadata and
+was withdrawn as invalid causal evidence; the corrected double matches the
+serializer's existing optional-metadata behavior without changing assertions.
+The judge double always returns failure, preventing score promotion. A separate
+control executes actual persistence privacy owners with real DOM secret policy,
+retains public year parameters, removes secret plaintext, and verifies metadata
+does not duplicate code into parent planner tool text.
+
+BU030 run 1 root `e44bbf5f-5a6c-46ed-a6aa-9facb8cc6205` is distinct: its internal
+verifier explicitly accepts manually excluding old listings from Newest results.
+The external C1 failure says the native last-seven-days filter is unconfirmed.
+No general actor/prompt repair or changed criterion is justified by the evidence
+transport regression. BU030 remains open. BU023 challenge handling is separate
+R4, and BU025 TLS is separate I25. No original verdict was edited; no live browser,
+paid rerun, provider/image/deploy/task/Freedom mutation was performed here.
+
+Independent reviewer `ph74rex3pescaywbxyjn3njr158h3pp9` grounded final six-path
+R3v3 patch SHA256
+`b4bc34253046a0cb15cd26cb454b11c0623ed76d04a85f2bc1eaba4165f4ea4c`
+before application. The reviewer independently ran the exact three controls
+against the candidate (3 PASS) and restored only the original runtime files
+(2 assertion FAIL, 1 PASS). Intermediate v2 approval was withdrawn after the
+invalid initial baseline was identified; only final v3 was applied. This
+appendix is truthful documentation added after protected patch review.
