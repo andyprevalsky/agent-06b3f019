@@ -4,7 +4,8 @@
  *
  * Invariants:
  *   - auth: no key, unknown key and the internal BACKEND_API_KEY are rejected (401);
- *     a Rose API key in the path or as `Authorization: Bearer` is accepted
+ *     a Rose API key in the path or as `Authorization: Bearer` is accepted, with no
+ *     subscription required (the key user here has none); waitlisted owners get 403
  *   - protocol: initialize + tools/list over Streamable HTTP expose `spawn_agent`
  *   - spawn: tools/call creates a root agent for the key's owner in plan mode on
  *     rose-labs/rose-1-ultra with the verbatim goal (or reports the start failure)
@@ -28,6 +29,8 @@ const INTERNAL_KEY = process.env.BACKEND_API_KEY || '';
 const RUN = `${Date.now()}-${randomUUID().slice(0, 8)}`;
 const userId = `mcp-bb-${RUN}`;
 const apiKey = randomUUID().replace(/-/g, '');
+const gatedUserId = `mcp-bb-gated-${RUN}`;
+const gatedKey = randomUUID().replace(/-/g, '');
 const createdAgentIds: string[] = [];
 
 function assert(cond: unknown, message: string): asserts cond {
@@ -88,6 +91,13 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       const r = await rpc(`/mcp/${INTERNAL_KEY}`, 'initialize', INIT_PARAMS);
       assert(r.status === 401, `expected 401, got ${r.status}`);
+    },
+  ],
+  [
+    'waitlisted key owner → 403',
+    async () => {
+      const r = await rpc(`/mcp/${gatedKey}`, 'initialize', INIT_PARAMS);
+      assert(r.status === 403, `expected 403, got ${r.status}`);
     },
   ],
   [
@@ -178,26 +188,23 @@ async function cleanup(): Promise<void> {
       headers: { 'X-API-Key': INTERNAL_KEY },
     }).catch(() => undefined);
   }
-  await prisma.roseApiKey.deleteMany({ where: { userId } });
-  await prisma.subscription.deleteMany({ where: { userId } });
+  await prisma.roseApiKey.deleteMany({ where: { userId: { in: [userId, gatedUserId] } } });
+  await prisma.user.deleteMany({ where: { userId: { in: [userId, gatedUserId] } } });
 }
 
 async function main(): Promise<void> {
   await prisma.user.upsert({
     where: { userId },
     update: {},
-    create: { userId, isAnonymous: true },
+    create: { userId, isAnonymous: false, usedInviteCode: 1 },
   });
-  await prisma.subscription.create({
-    data: {
-      userId,
-      subscriptionTier: 1,
-      stripeSubscriptionId: `test_sub_${RUN}`,
-      stripeCustomerId: `test_cus_${RUN}`,
-      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600 * 1000),
-    },
+  await prisma.user.upsert({
+    where: { userId: gatedUserId },
+    update: {},
+    create: { userId: gatedUserId, isAnonymous: true },
   });
   await prisma.roseApiKey.create({ data: { userId, apiKey, name: 'mcp blackbox' } });
+  await prisma.roseApiKey.create({ data: { userId: gatedUserId, apiKey: gatedKey } });
   let failed = 0;
   try {
     for (const [name, fn] of tests) {

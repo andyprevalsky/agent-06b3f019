@@ -10,9 +10,11 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { isUserGated } from '../../providers/inviteGate';
 import { createLogger } from '../../providers/logger';
 import { getAgentUrl } from '../../providers/smsTemplates';
 import * as lifecycleService from './agentLifecycleService';
+import * as repo from './repo';
 import { createAgentSchema } from './types';
 
 const log = createLogger('AgentMcp');
@@ -48,6 +50,22 @@ async function spawnAgent(goal: string, userId: string, clientIP: string | null)
     content: [{ type: 'text' as const, text: `Rose agent started: ${url}` }],
     structuredContent: { agent_id: result.agent_id, url },
   };
+}
+
+/**
+ * A Rose API key identifies the user. Like agent creation in the app, MCP needs
+ * no subscription (the API-key subscription gate is for the paid completions
+ * API) but does honor the invite waitlist.
+ */
+export async function resolveMcpUser(
+  apiKey: string
+): Promise<{ userId: string } | { status: 401 | 403; error: string }> {
+  const userId = await repo.findRoseApiKeyOwner(apiKey);
+  if (userId === null) return { status: 401, error: 'Invalid API key' };
+  if (await isUserGated(userId)) {
+    return { status: 403, error: 'Invite code required — you are on the waitlist' };
+  }
+  return { userId };
 }
 
 export function buildAgentMcpServer(userId: string, clientIP: string | null): Server {
