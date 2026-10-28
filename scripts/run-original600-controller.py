@@ -630,7 +630,7 @@ def committed_dependency_fingerprints(root, ref):
 
 def warm_proof_paths(root, runner):
     common = git_common_dir(root)
-    proof = common / ('cloudbench-warm-deps.' + runner['WARM_MACHINE_NAME'] + '.fp')
+    proof = common / Path(runner['WARM_DEPS_RELATIVE']).name
     return proof, proof.with_name(proof.name + '.ref')
 
 
@@ -755,6 +755,30 @@ def counted_fly(fly):
     return Counted()
 
 
+def select_warm_donor(runner, machines, api, selection):
+    """Resolve the ordinary fleet producer's named donor from this native inventory."""
+    name, volume_name, region = selection
+    for value, pattern in ((name, r'[a-z0-9-]+'), (volume_name, r'[a-z0-9_]+'), (region, r'[a-z0-9]+')):
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError('invalid selected warm donor')
+    matches = [m for m in machines if isinstance(m, dict) and m.get('name') == name and m.get('region') == region]
+    if len(matches) != 1:
+        raise ValueError('selected warm donor missing or ambiguous')
+    donor = matches[0]
+    mounts = (donor.get('config') or {}).get('mounts') or []
+    if len(mounts) != 1 or not re.fullmatch(r'vol_[A-Za-z0-9]+', str(mounts[0].get('volume', ''))):
+        raise ValueError('selected warm donor requires one native volume')
+    volume_id = mounts[0]['volume']
+    volume = api.api('GET', '/volumes/' + volume_id, timeout=20)
+    if (volume.get('id'), volume.get('name'), volume.get('region'), volume.get('attached_machine_id')) != (volume_id, volume_name, region, donor.get('id')):
+        raise ValueError('selected donor volume identity differs')
+    binding = runner['donor_binding'](dict(machine_id=donor['id'], machine_name=name, volume_id=volume_id,
+                                        volume_name=volume_name, region=region, image_ref=(donor.get('config') or {}).get('image')))
+    runner.update(WARM_MACHINE_ID=binding['machine_id'], WARM_MACHINE_NAME=name, WARM_VOLUME_NAME=volume_name, WARM_REGION=region)
+    runner['WARM_DEPS_RELATIVE'], runner['WARM_INVENTORY_RELATIVE'] = runner['donor_metadata_paths'](binding)
+    return binding
+
+
 def discover_inputs(args, root, runner, token, run, fly=None):
     """Resolve facts, warm proof and snapshot inventory without private hand-made files.
 
@@ -762,15 +786,18 @@ def discover_inputs(args, root, runner, token, run, fly=None):
     through the normal producer when needed, then writes the discovered inputs privately."""
     fly = counted_fly(fly or runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))['Fly'])
     ref = bound_task_ref(args, runner)
-    decision = warm_decision(root, runner, ref)
-    report = dict(action=decision['action'], reasons=list(decision['reasons']), proof=decision['proof_path'],
-                  refresh_command=decision['refresh_command'], fingerprints=decision['fingerprints'])
     def native():
         with runner['bounded'](110):
             machines = fly(runner['APP'], token).api('GET', '/machines', timeout=60)
+        binding = None
+        if getattr(args, 'warm_donor_selection', None) is not None:
+            binding = select_warm_donor(runner, machines, fly(runner['APP'], token), args.warm_donor_selection)
         donor = next((m for m in machines if isinstance(m, dict) and m.get('id') == runner['WARM_MACHINE_ID']), None) \
             if isinstance(machines, list) else None
-        return derived_facts(machines, donor, runner)
+        facts = derived_facts(machines, donor, runner)
+        if binding is not None:
+            facts['warm_donor'] = binding
+        return facts
 
     def preflight(facts):
         warm = warm_snapshot_preflight(fly, token, runner, decision['proof_raw'], None,
@@ -780,6 +807,20 @@ def discover_inputs(args, root, runner, token, run, fly=None):
         return warm
 
     facts = native()
+    selected_binding = facts.get('warm_donor')
+    decision = warm_decision(root, runner, ref)
+    report = dict(action=decision['action'], reasons=list(decision['reasons']), proof=decision['proof_path'],
+                  refresh_command=decision['refresh_command'], fingerprints=decision['fingerprints'])
+    image_receipt = image_build_receipt_input(args, runner)
+    if selected_binding is not None and image_receipt is not None:
+        check = subprocess.run(['bash', '-c', 'source "$1"; shift; cloudbench_verify_image_dependency_receipt "$@"',
+                                'image-admission', str(root/'scripts/lib/cloudbench-env.sh'), image_receipt['path'],
+                                image_receipt['sha256'], selected_binding['machine_id'],
+                                decision['fingerprints']['node'], decision['fingerprints']['python']],
+                               input=json.dumps([dict(id=selected_binding['machine_id'], config=dict(image=selected_binding['image_ref']))]),
+                               text=True, capture_output=True, timeout=20)
+        if check.returncode:
+            raise ValueError(check.stderr.strip() or 'selected donor image receipt refused')
     warm = None
     if decision['action'] == 'reuse':
         try:
@@ -805,6 +846,8 @@ def discover_inputs(args, root, runner, token, run, fly=None):
         if decision['action'] != 'reuse':
             raise ValueError('the producer did not prove a snapshot for ' + ref + ': ' + '; '.join(decision['reasons']))
         facts = native()
+        if facts.get('warm_donor') != selected_binding:
+            raise ValueError('selected donor identity changed during refresh')
         warm = preflight(facts)  # a fresh snapshot that still fails is a hard error, not another refresh
         report.update(refreshed=True, refreshed_snapshot=warm['snapshot_id'])
     inventory, donor = warm.pop('inventory'), warm.pop('donor_machine')
@@ -1079,6 +1122,13 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
         raise ValueError('capacity proof expired or insufficient')
     read, save = runner['read'], runner['save']
     facts = facts_from(read(args.facts))
+    if facts.get('warm_donor') is not None:
+        binding = runner['donor_binding'](facts['warm_donor'])
+        if (facts['image_ref'] != binding['image_ref'] or binding['machine_id'] not in facts['protected_machines']
+                or binding['volume_id'] not in facts['protected_volumes']):
+            raise ValueError('selected donor differs from launch facts')
+        runner = dict(runner)
+        runner['WARM_DEPS_RELATIVE'], runner['WARM_INVENTORY_RELATIVE'] = runner['donor_metadata_paths'](binding)
     tasks = json.loads(read(args.tasks))
     stamp = time.time() if started_at is None else started_at
     if not 0 <= time.time()-stamp < 5400:
@@ -1143,6 +1193,8 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                                   **guest_namespace_env, **image_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S=str(runner['gate_watchdog_seconds'](bound_timeouts(args, runner)[1])), PYTHONDONTWRITEBYTECODE='1'))
+    if facts.get('warm_donor') is not None:
+        config['warm_donor'] = runner['donor_binding'](facts['warm_donor'])
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if guest_env['override']:
@@ -2501,6 +2553,9 @@ def main():
     parser.add_argument('--catalog-eligibility', choices=sorted(CATALOG_ELIGIBILITY), default='live',
                         help="'live' (default): LIVE acceptance refuses zero-spend/DEMO-replay tasks; "
                              "'ordinary': a user-requested wide run admits every cloud-runnable ready task, as the ordinary fleet does")
+    parser.add_argument('--warm-machine-name', help='ordinary fleet donor name (default CLOUDBENCH_WARM_MACHINE_NAME or cloudbench-warm)')
+    parser.add_argument('--warm-volume-name', help='ordinary fleet donor volume (default CLOUDBENCH_WARM_VOLUME_NAME or cloudbench_data)')
+    parser.add_argument('--warm-region', help='ordinary fleet donor region (default CLOUDBENCH_REGION or iad)')
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")
@@ -2520,6 +2575,13 @@ def main():
             raise ValueError('--task-ref must be a full 40-hex commit')
         if args.task_ref == runner['TASK_REF']:
             args.task_ref = None  # the historical pin is encoded by absence
+    requested_donor = (args.warm_machine_name, args.warm_volume_name, args.warm_region)
+    if any(requested_donor) and (not discover or args.task_ref is None):
+        raise ValueError('donor selection requires discovered ordinary task-ref inputs')
+    if discover and args.task_ref is not None:
+        args.warm_donor_selection = (args.warm_machine_name or os.environ.get('CLOUDBENCH_WARM_MACHINE_NAME', 'cloudbench-warm'),
+                                     args.warm_volume_name or os.environ.get('CLOUDBENCH_WARM_VOLUME_NAME', 'cloudbench_data'),
+                                     args.warm_region or os.environ.get('CLOUDBENCH_REGION', 'iad'))
     if discover and bound_task_ref(args, runner) != args.source_ref:
         raise ValueError('discovered inputs bind the warm snapshot to this checkout: --task-ref must equal --source-ref')
     for name in ['agents_env', 'backend_env', 'tasks'] + ([] if discover else ['facts', 'snapshot_inventory', 'warm_deps']):

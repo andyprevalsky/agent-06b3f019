@@ -94,10 +94,24 @@ def warm_deps_proof(raw):
  need(len(fields)==4 and all(re.fullmatch('[0-9a-f]{64}',value) for value in fields[:2]) and re.fullmatch('[1-9][0-9]*',fields[2]) and re.fullmatch('vs_[A-Za-z0-9]+',fields[3]),
       'warm dependency proof is not one producer proof line')
  return dict(node=fields[0],python=fields[1],epoch=int(fields[2]),snapshot=fields[3])
-def pin_warm_snapshot(remote_env,staged):
+def donor_binding(value):
+ """Validate an explicitly selected native donor; absence preserves the historical donor."""
+ if value is None:
+  return dict(machine_id=WARM_MACHINE_ID,machine_name=WARM_MACHINE_NAME,volume_name=WARM_VOLUME_NAME,region=WARM_REGION)
+ need(isinstance(value,dict) and set(value)=={'machine_id','machine_name','volume_id','volume_name','region','image_ref'},'complete donor binding required')
+ for key,pattern in [('machine_id',r'[a-zA-Z0-9]+'),('machine_name',r'[a-z0-9-]+'),('volume_id',r'vol_[A-Za-z0-9]+'),('volume_name',r'[a-z0-9_]+'),('region',r'[a-z0-9]+')]:
+  need(isinstance(value[key],str) and re.fullmatch(pattern,value[key]),'invalid donor '+key)
+ need(isinstance(value['image_ref'],str) and re.fullmatch(r'registry\.fly\.io/navi-whisper-lux-bench[^@\s]*@sha256:[0-9a-f]{64}',value['image_ref']),'immutable donor image required')
+ return dict(value)
+
+def donor_metadata_paths(donor):
+ name=donor['machine_name']
+ return ('.git/cloudbench-warm-deps.fp' if name=='cloudbench-warm' else '.git/cloudbench-warm-deps.'+name+'.fp'),'.git/cloudbench-warm-snapshot-inventory.'+name+'.json'
+
+def pin_warm_snapshot(remote_env,staged,relative=WARM_DEPS_RELATIVE):
  """Pin the snapshot the staged, operator-preflighted producer proof names; never a constant."""
- need(WARM_DEPS_RELATIVE in staged,'authentic staged warm dependency proof required')
- snapshot=warm_deps_proof(staged[WARM_DEPS_RELATIVE])['snapshot']
+ need(relative in staged,'authentic staged warm dependency proof required')
+ snapshot=warm_deps_proof(staged[relative])['snapshot']
  need(remote_env.get('CLOUDBENCH_SNAPSHOT_ID',snapshot)==snapshot,'original warm/launch option changed: CLOUDBENCH_SNAPSHOT_ID')
  remote_env['CLOUDBENCH_SNAPSHOT_ID']=snapshot
  return snapshot
@@ -719,7 +733,15 @@ def run(config_path,config_sha,out,*,github_token=None):
  out=Path(out).absolute();out.mkdir(mode=0o700);need(out.resolve()==out,'physical new output')
  if v.get('host_operator_provenance'):save(out/'host-operator-provenance.json',v['host_operator_provenance'])
  auth=dict(authority_template,cleanup_owner_pid=os.getpid(),cleanup_owner_birth=birth(os.getpid()),output_directory=str(out/'export'));authority=out/'authority.private.json';save(authority,auth)
- fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=WARM_MACHINE_NAME,CLOUDBENCH_WARM_VOLUME_NAME=WARM_VOLUME_NAME,CLOUDBENCH_REGION='ord',**shard_placement_env(root,shard),CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ donor=donor_binding(v.get('warm_donor'))
+ if v.get('warm_donor') is not None:
+  need(shard is not None and shard.get('task_ref') is not None,'explicit donor requires a bound ordinary shard')
+  need(donor['machine_id'] in auth['protected_machines'] and donor['volume_id'] in auth['protected_volumes'],'selected donor must remain protected')
+  need(v.get('gate_env',{}).get('WARM_IMAGE_REF')==donor['image_ref'],'donor image differs from gate image')
+ proof_name,snapshot_name=donor_metadata_paths(donor)
+ fixed_env=dict(CLOUDBENCH_WARM_MACHINE_NAME=donor['machine_name'],CLOUDBENCH_WARM_VOLUME_NAME=donor['volume_name'],CLOUDBENCH_REGION=donor['region'],**shard_placement_env(root,shard),CLOUDBENCH_WARM_DEPS_AUTOREFRESH='0',CLOUDBENCH_SKIP_LOCAL_PATCH='1',CLOUDBENCH_BOOT_TRANSPORT='config',CLOUDBENCH_BOOT_LAUNCH='1')
+ if v.get('warm_donor') is not None:
+  fixed_env.update(CLOUDBENCH_EXPECTED_WARM_MACHINE_ID=donor['machine_id'],CLOUDBENCH_EXPECTED_WARM_VOLUME_ID=donor['volume_id'],CLOUDBENCH_EXPECTED_WARM_REGION=donor['region'])
  remote_env=dict(v.get('remote_env',{}))
  need(remote_env.get('CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP',policy)==policy,'infrastructure early-stop policy differs')
  remote_env['CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP']=policy
@@ -731,9 +753,8 @@ def run(config_path,config_sha,out,*,github_token=None):
   data=read(item['source_path']);need(sha(data)==item['sha256'],'remote metadata source changed')
   staged[item['relative_path']]=data
   files.append(encode_remote_file(item,data))
- pin_warm_snapshot(remote_env,staged)
+ pin_warm_snapshot(remote_env,staged,proof_name)
  pin_image_build_receipt(remote_env,staged)
- snapshot_name=WARM_INVENTORY_RELATIVE
  snapshot=next((i for i in files if i['relative_path']==snapshot_name),None);need(snapshot is not None,'authentic selected warm snapshot inventory required')
  remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE']='/tmp/gate/repo/'+snapshot_name;remote_env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256']=snapshot['sha256']
  identity_name='original600-supervisor.'+secrets.token_hex(12)+'.json';remote_env=shard_env(remote_env,shard,identity_name)

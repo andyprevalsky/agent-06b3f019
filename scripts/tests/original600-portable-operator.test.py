@@ -3778,5 +3778,127 @@ if result.returncode: raise SystemExit(result.stderr)
                     self.assertEqual(CLI.digest(staged.read_bytes()),remote['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'])
 
 
+class OrdinaryDonorBinding(unittest.TestCase):
+    IMAGE = 'registry.fly.io/navi-whisper-lux-bench:active@sha256:' + 'a'*64
+    def binding(self):
+        return dict(machine_id='683e47df5094d8', machine_name='cloudbench-warm', volume_id='vol_active',
+                    volume_name='cloudbench_data', region='iad', image_ref=self.IMAGE)
+    def native(self):
+        b=self.binding()
+        row=dict(id=b['machine_id'], name=b['machine_name'], region=b['region'],
+                 config=dict(image=b['image_ref'], mounts=[dict(volume=b['volume_id'])]))
+        volume=dict(id=b['volume_id'], name=b['volume_name'], region=b['region'], attached_machine_id=b['machine_id'])
+        return row,volume
+    def select(self, rows, volume):
+        class API:
+            def api(self, method, path, timeout):
+                assert (method,path,timeout)==('GET','/volumes/vol_active',20)
+                return volume
+        runner=dict(RUNNER)
+        binding=CLI.select_warm_donor(runner,rows,API(),('cloudbench-warm','cloudbench_data','iad'))
+        return runner,binding
+    def test_exact_native_selection_preserves_legacy_and_default_proof_path(self):
+        row,volume=self.native();runner,binding=self.select([row],volume)
+        self.assertEqual(binding,self.binding())
+        self.assertEqual(runner['WARM_MACHINE_ID'],row['id'])
+        self.assertEqual(runner['WARM_DEPS_RELATIVE'],'.git/cloudbench-warm-deps.fp')
+        self.assertEqual(RUNNER['WARM_MACHINE_ID'],'8ed16dc75ee958')
+        self.assertEqual(RUNNER['donor_binding'](None)['region'],'ord')
+    def test_ambiguous_missing_or_foreign_native_identity_refuses(self):
+        row,volume=self.native()
+        for rows,vol in [([],volume),([row,row],volume),([dict(row,region='ord')],volume),
+                         ([row],dict(volume,attached_machine_id='foreign')),([row],dict(volume,name='wrong'))]:
+            with self.subTest(rows=rows,vol=vol),self.assertRaises(ValueError):self.select(rows,vol)
+    def test_actual_prepare_runner_and_remote_binding(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);fixture=ImageProofTransport();receipt=fixture.receipt(root)
+            args,config=fixture.prepared(root,receipt,sharded=True)
+            facts=json.loads(args.facts.read_bytes());b=self.binding()
+            facts.update(image_ref=b['image_ref'],warm_donor=b,
+                         protected_machines=['m1','m2','m3',b['machine_id']],protected_volumes=[b['volume_id']])
+            args.facts.write_text(json.dumps(facts))
+            directory=root/'selected';directory.mkdir(mode=0o700)
+            old=json.loads(config.read_bytes())
+            config=CLI.prepare(args,ROOT,{n:'b'*64 for n in CLI.PINS},RUNNER,directory,Sharded().capacity(root),
+                               guest_env=dict(temporal_namespace=None,override=False),shard=old['shard'],scheduled_total=40,
+                               runtime_env=dict(CLOUDBENCH_APP_MACHINE_CEILING='1000',CLOUDBENCH_SHARED_CPU_GOVERNOR='200'))
+            value=json.loads(config.read_bytes())
+            self.assertEqual(value['warm_donor'],b)
+            self.assertEqual(CLI.admission_binding(args,RUNNER)['inputs']['facts']['sha256'],CLI.digest(args.facts.read_bytes()))
+            self.assertIn('.git/cloudbench-warm-deps.fp',[x['relative_path'] for x in value['remote_files']])
+            guest=root/'guest';(guest/'agents/benchmarks').mkdir(parents=True)
+            for catalog in ('tasks.json','polar_tasks.json'):shutil.copyfile(ROOT/'agents/benchmarks'/catalog,guest/'agents/benchmarks'/catalog)
+            (guest/'scripts').mkdir();shutil.copyfile(ROOT/'scripts/cloudbench_catalog.py',guest/'scripts/cloudbench_catalog.py')
+            subprocess.run(['git','init','-q',str(guest)],check=True)
+            (guest/'seed').write_text('fixture');subprocess.run(['git','-C',str(guest),'add','.'],check=True)
+            subprocess.run(['git','-C',str(guest),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],check=True)
+            ref=subprocess.check_output(['git','-C',str(guest),'rev-parse','HEAD'],text=True).strip()
+            value.update(source_root=str(guest),source_ref=ref);value['shard']['task_ref']=ref
+            authpath=Path(value['authority_template']);auth=json.loads(authpath.read_bytes());auth['source_ref']=ref;authpath.write_text(json.dumps(auth))
+            captured=[]
+            class AtPayload(Exception):pass
+            def capture(out,remote):captured.append(remote);raise AtPayload()
+            for fault in ('none','foreign-image','foreign-id','env-override'):
+                candidate=json.loads(json.dumps(value))
+                if fault=='foreign-image':candidate['warm_donor']['image_ref']=self.IMAGE.replace('a'*64,'d'*64)
+                if fault=='foreign-id':candidate['warm_donor']['machine_id']='foreign'
+                if fault=='env-override':candidate['remote_env']['CLOUDBENCH_WARM_MACHINE_NAME']='foreign'
+                config.write_text(json.dumps(candidate));captured.clear()
+                with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *a:None,launch_handoff=capture):
+                    with self.assertRaises(AtPayload if fault=='none' else ValueError):
+                        RUNNER['run'](config,CLI.digest(config.read_bytes()),root/('run-'+fault))
+                if fault!='none':self.assertEqual(captured,[]);continue
+                remote=captured[0];env=remote['remote_env']
+                self.assertEqual(env['CLOUDBENCH_WARM_MACHINE_NAME'],b['machine_name'])
+                self.assertEqual(env['CLOUDBENCH_EXPECTED_WARM_MACHINE_ID'],b['machine_id'])
+                self.assertEqual(env['CLOUDBENCH_EXPECTED_WARM_VOLUME_ID'],b['volume_id'])
+                self.assertEqual(env['CLOUDBENCH_REGION'],'iad')
+                self.assertEqual(env['CLOUDBENCH_SNAPSHOT_ID'],'vs_fixture')
+                self.assertEqual(env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE'],'/tmp/gate/repo/.git/cloudbench-warm-snapshot-inventory.cloudbench-warm.json')
+    def test_actual_discovery_uses_selected_producer_and_checks_image_before_refresh(self):
+        fixture=warm_fixture();row,volume=self.native();volume=dict(volume,id='vol_fixture')
+        row['config']['mounts']=[dict(volume='vol_fixture')]
+        row['config']['metadata']={k:v.replace(RUNNER['WARM_MACHINE_ID'],row['id']) for k,v in fixture['machine']['config']['metadata'].items()}
+        fixture['machine']=row
+        class Native(DiscoveryFly):
+            def api(self,method,path,**kw):
+                if (method,path)==('GET','/volumes/vol_fixture'):
+                    self.requests.append((method,path));return volume
+                return super().api(method,path,**kw)
+        for fault in ('none','wrong-image','wrong-node'):
+            with self.subTest(fault=fault),InputDiscovery().common() as common:
+                proof=common.common/'cloudbench-warm-deps.fp'
+                private(proof,fixture['warm_deps']);private(proof.with_name(proof.name+'.ref'),RUN_REF+' '+FIXTURE_SNAPSHOT+'\n')
+                receipt=private(common.common/'image.json',dict(schema='cloudbench-image-build-v1',publication_verified=True,
+                    image_ref=self.IMAGE,published_image_ref=self.IMAGE,published_digest='sha256:'+('d' if fault=='wrong-image' else 'a')*64,
+                    node_dependency_fingerprint=('e' if fault=='wrong-node' else 'a')*64,python_dependency_fingerprint='b'*64))
+                common.args.image_build_receipt=receipt;common.args.image_build_receipt_sha256=CLI.digest(receipt.read_bytes())
+                common.args.warm_donor_selection=('cloudbench-warm','cloudbench_data','iad')
+                machines=[row]+[dict(id='m'+str(i),name='protected'+str(i),config=dict(image=self.IMAGE,mounts=[])) for i in range(3)]
+                api=Native(fixture,machines)
+                with patch.object(CLI,'run_warm_refresh',side_effect=AssertionError('must not refresh')):
+                    if fault!='none':
+                        with self.assertRaisesRegex(ValueError,'image'):
+                            CLI.discover_inputs(common.args,ROOT,dict(RUNNER),'fixture',False,api)
+                    else:
+                        report,paths=CLI.discover_inputs(common.args,ROOT,dict(RUNNER),'fixture',False,api)
+                        self.assertEqual(report['action'],'reuse');self.assertIsNone(paths)
+                        self.assertEqual(report['warm_snapshot']['snapshot_id'],FIXTURE_SNAPSHOT)
+                        self.assertEqual(report['facts']['image_ref'],self.IMAGE)
+                self.assertNotIn(('GET','/machines/'+RUNNER['WARM_MACHINE_ID']),api.requests)
+
+    def test_native_fleet_guard_rejects_post_admission_identity_change(self):
+        source=Path(os.environ.get('I26_FLEET_SOURCE',ROOT/'scripts/run-bench-fleet')).read_text()
+        start=source.index('# An explicitly admitted ordinary-wide donor')
+        guard=source[start:source.index('echo "🏭 warm source machine:',start)]
+        base=dict(os.environ,WARM_ID='683e47df5094d8',WARM_VOLUME_ID='vol_active',warm_region='iad',
+                  CLOUDBENCH_EXPECTED_WARM_MACHINE_ID='683e47df5094d8',
+                  CLOUDBENCH_EXPECTED_WARM_VOLUME_ID='vol_active',CLOUDBENCH_EXPECTED_WARM_REGION='iad')
+        for key in ('none','WARM_ID','WARM_VOLUME_ID','warm_region'):
+            env=dict(base)
+            if key!='none':env[key]='foreign'
+            result=subprocess.run(['bash','-c',guard],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0 if key=='none' else 1)
+
 if __name__ == '__main__':
     unittest.main()

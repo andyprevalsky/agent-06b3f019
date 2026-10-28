@@ -16027,6 +16027,15 @@ WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $3}')"
 [ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
 # Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
 [ -n "$warm_region" ] && REGION="$warm_region"
+# An explicitly admitted ordinary-wide donor must still be the native source.
+if [ -n "${CLOUDBENCH_EXPECTED_WARM_MACHINE_ID:-}${CLOUDBENCH_EXPECTED_WARM_VOLUME_ID:-}${CLOUDBENCH_EXPECTED_WARM_REGION:-}" ]; then
+    if [ "$WARM_ID" != "${CLOUDBENCH_EXPECTED_WARM_MACHINE_ID:-}" ] \
+        || [ "$WARM_VOLUME_ID" != "${CLOUDBENCH_EXPECTED_WARM_VOLUME_ID:-}" ] \
+        || [ "$warm_region" != "${CLOUDBENCH_EXPECTED_WARM_REGION:-}" ]; then
+        echo "❌ selected warm donor identity changed after admission" >&2
+        exit 1
+    fi
+fi
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 
 # A stopped-machine config update briefly reserves both old and new CPU shapes.
