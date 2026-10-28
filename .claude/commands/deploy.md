@@ -2224,6 +2224,7 @@ if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
   exit 1
 fi
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
+python3 scripts/deploy_approval_batch.py check  # 0 = clear/covered; 1/3 hold the merge
 ```
 
 Immediately before merging, start the production-verification lifecycle:
