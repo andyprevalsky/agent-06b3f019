@@ -1,0 +1,104 @@
+[
+  {
+    "message_id": "ade44bf0-ddc3-4308-884c-fdb5a6ac4f80",
+    "timestamp": "2026-10-27T01:36:17.878Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "6e6fb277-6aa9-4ca3-a314-631b7666dbed",
+      "toolStatus": "IN_PROGRESS",
+      "action_type": "browser",
+      "browser_url": "https://browser.example/live/previous"
+    }
+  },
+  {
+    "message_id": "aade198d-b75a-4d7a-a416-aabbb3968d4f",
+    "timestamp": "2026-10-27T02:37:09.330Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "6e6fb277-6aa9-4ca3-a314-631b7666dbed",
+      "toolStatus": "FINISHED",
+      "action_type": "task_complete",
+      "browser_url": "https://browser.example/live/previous"
+    }
+  },
+  {
+    "message_id": "9eac3d75-fd1e-407c-9863-9caa5e77dd82",
+    "timestamp": "2026-10-27T02:38:11.821Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "6e6fb277-6aa9-4ca3-a314-631b7666dbed",
+      "toolStatus": "FINISHED",
+      "action_type": "task_complete",
+      "browser_url": "https://browser.example/live/previous"
+    }
+  },
+  {
+    "message_id": "8f852f7f-0d7d-4fa0-bb63-636742acff8d",
+    "timestamp": "2026-10-27T02:38:12.552Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "6e6fb277-6aa9-4ca3-a314-631b7666dbed",
+      "toolStatus": "FINISHED",
+      "action_type": "task_complete"
+    }
+  },
+  {
+    "message_id": "969e1de0-fa4f-4edb-9662-a62ca1480eef",
+    "timestamp": "2026-10-27T02:39:03.170Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "dbf27293d",
+      "toolStatus": "IN_PROGRESS",
+      "action_type": "browser",
+      "browser_url": "https://browser.example/live/current"
+    }
+  },
+  {
+    "message_id": "01a03870-3300-45de-bf41-9f601b55b354",
+    "timestamp": "2026-10-27T02:39:04.395Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "13e453f0-912d-436a-878a-1d5decc8050f",
+      "toolStatus": "FINISHED",
+      "action_type": "session_init",
+      "browser_url": "https://browser.example/live/current"
+    }
+  },
+  {
+    "message_id": "dad7ae6f-9e90-4709-815b-b6f934fa576b",
+    "timestamp": "2026-10-27T02:44:39.543Z",
+    "text": "",
+    "role": "TOOL",
+    "metadata": {
+      "task_id": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "dbf27293d",
+      "toolStatus": "IN_PROGRESS",
+      "action_type": "auth_assistance",
+      "requestUserAuthentication": {
+        "requestId": "auth-reopened",
+        "authRealm": "example.com",
+        "taskId": "e62f18ac-84fd-51c5-90d4-a2abf4c4eb09",
+        "liveViewUrl": "https://browser.example/live/current?interactive=true&showControls=true"
+      }
+    }
+  }
+]

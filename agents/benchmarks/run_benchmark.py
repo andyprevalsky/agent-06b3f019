@@ -14851,6 +14851,8 @@ async def run_single_task(
     # Re-check at dispatch so credential loss produces the deploy-approved skip
     # instead of an agent recursively retrying an impossible code session.
     if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
+        if os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() != "1":
+            raise RuntimeError(f"Claude Code credentials unavailable at task dispatch: {task.name}")
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     custody = {"task_name": task.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
@@ -16793,7 +16795,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     backend reports it configured and not on cooldown — that is the same funded
     fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
     both are missing; discovering an unfunded key mid-run burns the suite.
+
+    Deploy's explicit credential-skip mode qualifies only user/pool tokens.
+    Only the token route's 404 proves absence; other failures remain errors.
     """
+    allow_credential_skip = os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
@@ -16802,12 +16808,22 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
                 headers=headers,
                 timeout=10.0,
             )
+            if allow_credential_skip:
+                if resp.status_code == 404:
+                    return False
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("accessToken"), str) or not data["accessToken"].strip():
+                    raise RuntimeError("Claude Code credential response is invalid")
+                return True
             if resp.status_code == 200:
                 data = resp.json()
                 if bool(data.get("accessToken")):
                     return True
         return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
+        if allow_credential_skip:
+            raise
         return False
 
 
