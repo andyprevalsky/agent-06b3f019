@@ -234,7 +234,8 @@ export async function generateVideo(
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const ambiguous = billed || (err instanceof OmniVideoError && err.mayHaveBilled);
+    // Inside this try a non-OmniVideoError is thrown after the request was sent.
+    const ambiguous = billed || !(err instanceof OmniVideoError) || err.mayHaveBilled;
     log.error('[GenerateVideo] failed', {
       agent_id: agent.id,
       operation_key: key,

@@ -375,6 +375,21 @@ test('an ambiguous provider failure is never re-billed under the same key', asyn
   assert.equal(calls.length, 1);
 });
 
+test('a malformed provider response after the request was sent is never re-billed', async () => {
+  calls = [];
+  handler = (_req, respond) => respond(200, {}, Buffer.from('not json'));
+  const request = body();
+  await assert.rejects(async () => generateVideo(await ctx(), request));
+  await assert.rejects(
+    async () => generateVideo(await ctx(), request),
+    (err: unknown) =>
+      err instanceof AgentToolsError &&
+      err.status === 409 &&
+      /new idempotency_key/.test(err.message)
+  );
+  assert.equal(calls.length, 1);
+});
+
 test('a response with no video is reported, not treated as success', async () => {
   handler = (_req, respond) => respond(200, { id: 'v1_none', status: 'completed', steps: [] });
   await assert.rejects(
