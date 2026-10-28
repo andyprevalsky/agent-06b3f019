@@ -360,6 +360,7 @@ GATES = (
         ("bash", "scripts/tests/prebuild-agents-image.test.sh"),
     ),
     Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
+    Gate("backend-coverage-sharded", ("bash", "scripts/tests/backend-coverage-sharded.test.sh")),
     Gate(
         "deploy-structural-runner",
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117

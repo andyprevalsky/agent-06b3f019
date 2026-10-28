@@ -76,9 +76,16 @@ def main() -> int:
             assert f'"{name}"' in recorded, f"run-deploy-stage record missing for {name}"
 
         # Retry: the previously failed lane is admitted first; serial cap makes order observable.
+        # retry_env (backend coverage's failed-first sweep) applies only to the
+        # lane that failed in the previous receipt.
+        retry_marks = tmp / "retry-marks"
+        retry_marks.mkdir()
+        mark = f'echo "${{PIPELINE_RETRY:-0}}" > {retry_marks}/'
         write_plan(plan, [
-            {"name": "fast-a", "command": ["true"], "reuse_passed": False},
-            {"name": "fails", "command": ["true"], "reuse_passed": False},
+            {"name": "fast-a", "command": ["bash", "-c", mark + "fast-a"], "reuse_passed": False,
+             "retry_env": {"PIPELINE_RETRY": "1"}},
+            {"name": "fails", "command": ["bash", "-c", mark + "fails"], "reuse_passed": False,
+             "retry_env": {"PIPELINE_RETRY": "1"}},
         ])
         retry = subprocess.run(
             [sys.executable, str(DRIVER), "run", "--plan", str(plan), "--state-dir", str(state),
@@ -89,6 +96,15 @@ def main() -> int:
         assert receipt["order"][0] == "fails", receipt["order"]
         assert receipt["lanes"]["fails"]["started_epoch"] < receipt["lanes"]["fast-a"]["started_epoch"]
         assert (state / "history.jsonl").read_text().count("\n") == 1
+        assert (retry_marks / "fails").read_text().strip() == "1", "failed lane must get its retry_env"
+        assert (retry_marks / "fast-a").read_text().strip() == "0", "passed lane must not get retry_env"
+        standard = json.loads(subprocess.run(
+            [sys.executable, str(DRIVER), "plan", "--group", "3", "--backend"],
+            stdout=subprocess.PIPE, text=True, check=True,
+        ).stdout)
+        backend = next(lane for lane in standard["lanes"] if lane["name"] == "backend-coverage-blackbox")
+        assert backend["command"] == ["npm", "run", "test:coverage:sharded"], backend
+        assert backend["retry_env"] == {"BACKEND_COVERAGE_FAILED_FIRST": "1"}, backend
 
         # A --reuse-passed cache hit records status "reused" (exp/telemetry); the
         # shared stage waiter must treat it as a pass, never as a failed lane.

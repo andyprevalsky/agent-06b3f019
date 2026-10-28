@@ -85,6 +85,9 @@ class Lane:
     after: list[str] = field(default_factory=list)
     reuse_passed: bool = True
     group: str = ""
+    # Extra env applied only when this lane failed in the previous receipt
+    # (e.g. the backend coverage lane's failed-first full sweep).
+    retry_env: dict[str, str] = field(default_factory=dict)
 
 
 def load_plan(path: Path) -> list[Lane]:
@@ -141,6 +144,9 @@ def run(plan: Path, state_dir: Path, max_parallel: int) -> int:
             with history.open("a") as handle:
                 handle.write(json.dumps(previous, sort_keys=True) + "\n")
     order = failed_first(lanes, previous)
+    previously_failed = {
+        name for name, lane in (previous or {}).get("lanes", {}).items() if lane.get("status") == "failed"
+    }
     frozen = source_digest()
     receipt: dict = {
         "schema_version": RECEIPT_SCHEMA,
@@ -193,7 +199,11 @@ def run(plan: Path, state_dir: Path, max_parallel: int) -> int:
                     processes[lane.name] = subprocess.Popen(
                         argv,
                         cwd=ROOT / lane.cwd,
-                        env={**os.environ, **lane.env},
+                        env={
+                            **os.environ,
+                            **lane.env,
+                            **(lane.retry_env if lane.name in previously_failed else {}),
+                        },
                         stdout=log_handle,
                         stderr=subprocess.STDOUT,
                         stdin=subprocess.DEVNULL,
@@ -372,11 +382,11 @@ def standard_plan(args: argparse.Namespace) -> dict:
         lane("seed-cache-decision", ["bash", "scripts/tests/seed-cache-decision.test.sh"])
         lane("canonical-seed-whatsapp-content", ["bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"])
         if args.backend:
-            lane("backend-coverage-blackbox", ["npm", "run", "test:coverage"], "back-end", env={
+            lane("backend-coverage-blackbox", ["npm", "run", "test:coverage:sharded"], "back-end", env={
                 "BLACKBOX_TEST_CONCURRENCY": str(args.backend_blackbox_workers),
                 "CONTRACT_TEST_CONCURRENCY": str(args.backend_blackbox_workers),
                 "BACKEND_UNIT_CONCURRENCY": str(args.backend_unit_workers),
-            })
+            }, retry_env={"BACKEND_COVERAGE_FAILED_FIRST": "1"})
         if args.frontend:
             lane("frontend-coverage-blackbox",
                  ["npm", "run", "test:coverage", "--", f"--maxWorkers={args.frontend_workers}"], "front-end")

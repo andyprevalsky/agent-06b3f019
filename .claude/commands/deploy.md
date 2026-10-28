@@ -732,6 +732,7 @@ their assertions or test counts:
 `python3 scripts/tests/deploy-approval-batch.test.py`,
 `bash scripts/tests/prebuild-agents-image.test.sh`,
 `python3 scripts/tests/run-deploy-pipeline.test.py`,
+`bash scripts/tests/backend-coverage-sharded.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
@@ -864,12 +865,23 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
   env BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       CONTRACT_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       BACKEND_UNIT_CONCURRENCY="$BACKEND_UNIT_WORKERS" \
-      npm run test:coverage
+      npm run test:coverage:sharded
 ```
 
 This one command runs all 91 deterministic back-end blackbox domains plus unit
-tests under V8 coverage. It must both pass every test and meet
-`back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+tests under V8 coverage as **two shards** (`scripts/run-coverage-sharded.sh`:
+each shard has its own instrumented backend, database, port and raw V8
+directory; the worker counts apply per shard). Their raw coverage is merged
+into one `c8 report --check-coverage`, so it must both pass every test and meet
+`back-end/.c8rc.json` on the merged report; the real provider credential probe
+runs once in Step 4c.
+
+**Retry after a failure: failed-first, still a full sweep.** Rerun the same
+stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
+failed domains run first in their shard and the first repeated failure stops
+every shard; when they pass, every domain and unit file still runs and the
+merged threshold is enforced. `scripts/coverage-rerun-failed.sh --mode=subset`
+is a diagnostic only (it ends `PARTIAL`) and never satisfies this gate.
 After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
 which drives the isolated-backend runner through a normal exit and a SIGTERM and
 fails if either leaves its backend or port lock behind. It runs here, after the
