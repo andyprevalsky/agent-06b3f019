@@ -197,4 +197,74 @@ if metadata["finished_epoch"] < stage["finished_epoch"]:
     raise SystemExit("finish timestamp predates an admitted stage")
 PY
 
+# Lane-scoped reuse: a scoped lane (front-end, mac-app) survives a fix outside
+# its inputs, including the commit of that fix, but every shared input (root
+# manifest, shared contract, scripts, the benchmark catalog front-end reads,
+# an unmapped new top-level path) invalidates it. Whole-worktree lanes still
+# rerun on any change. Runs against a fixture repository so the real checkout
+# is never edited.
+LANE_REPO="$TEST_ROOT/lane-repo"
+mkdir -p "$LANE_REPO/scripts" "$LANE_REPO/back-end/src" "$LANE_REPO/front-end/src" \
+    "$LANE_REPO/agents/benchmarks" "$LANE_REPO/agents/tools" "$LANE_REPO/shared/contract" \
+    "$LANE_REPO/mac-app/main" "$LANE_REPO/docs"
+cp "$ROOT_DIR/scripts/run-deploy-stage" "$ROOT_DIR/scripts/run_deploy_stage.py" \
+    "$ROOT_DIR/scripts/deploy_stage.py" "$LANE_REPO/scripts/"
+for file in package.json back-end/src/server.ts front-end/src/app.ts agents/benchmarks/tasks.json \
+    agents/tools/base.py shared/contract/fixtures.json mac-app/main/index.ts docs/guide.txt scripts/helper.sh; do
+    printf 'original %s\n' "$file" > "$LANE_REPO/$file"
+done
+printf '.context/\n' > "$LANE_REPO/.gitignore"
+git -C "$LANE_REPO" init -q
+git -C "$LANE_REPO" add -A
+git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qm fixture
+lane_counter="$TEST_ROOT/lane-counter"
+lane_stage() {
+    (cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
+        bash scripts/run-deploy-stage "$1" --reuse-passed -- \
+        bash -c 'printf "%s\n" "$1" >> "$2"' _ "$1" "$lane_counter" >/dev/null)
+}
+lane_runs() { grep -cx "$1" "$lane_counter" 2>/dev/null || true; }
+expect_lane() {
+    local stage="$1" expected="$2" why="$3"
+    lane_stage "$stage"
+    [ "$(lane_runs "$stage")" = "$expected" ] \
+        || fail "$stage ran $(lane_runs "$stage") times after $why, expected $expected"
+}
+(cd "$LANE_REPO" && DEPLOY_RUN_ROOT="$LANE_REPO/.context/deploy-runs" \
+    bash scripts/run-deploy-stage --start --run-id lanes >/dev/null)
+for stage in frontend-coverage-blackbox mac-static typescript; do expect_lane "$stage" 1 "first run"; done
+for stage in frontend-coverage-blackbox mac-static typescript; do expect_lane "$stage" 1 "no change"; done
+# Back-end-only fix, uncommitted and then committed: only whole-worktree lanes rerun.
+printf 'fix\n' >> "$LANE_REPO/back-end/src/server.ts"
+expect_lane frontend-coverage-blackbox 1 "an uncommitted back-end fix"
+expect_lane mac-static 1 "an uncommitted back-end fix"
+expect_lane typescript 2 "an uncommitted back-end fix"
+git -C "$LANE_REPO" -c user.name=t -c user.email=t@t commit -qam "back-end fix"
+expect_lane frontend-coverage-blackbox 1 "committing the back-end fix"
+expect_lane typescript 3 "committing the back-end fix"
+printf 'agent fix\n' >> "$LANE_REPO/agents/tools/base.py"
+expect_lane frontend-coverage-blackbox 1 "an agents-only fix"
+expect_lane mac-static 1 "an agents-only fix"
+printf 'docs\n' >> "$LANE_REPO/docs/guide.txt"
+expect_lane frontend-coverage-blackbox 1 "a docs-only edit"
+# Every shared or unmapped input invalidates the scoped lanes.
+fe=1; mac=1
+for shared_edit in package.json shared/contract/fixtures.json scripts/helper.sh \
+    unmapped-top-level.json; do
+    printf 'shared edit\n' >> "$LANE_REPO/$shared_edit"
+    fe=$((fe + 1)); mac=$((mac + 1))
+    expect_lane frontend-coverage-blackbox "$fe" "editing $shared_edit"
+    expect_lane mac-static "$mac" "editing $shared_edit"
+done
+printf 'catalog edit\n' >> "$LANE_REPO/agents/benchmarks/tasks.json"
+expect_lane frontend-coverage-blackbox $((fe + 1)) "editing the benchmark catalog"
+expect_lane mac-static "$mac" "editing the benchmark catalog"
+printf 'ui edit\n' >> "$LANE_REPO/front-end/src/app.ts"
+expect_lane frontend-coverage-blackbox $((fe + 2)) "a front-end edit"
+expect_lane mac-static $((mac + 1)) "a front-end edit (mac-app consumes front-end)"
+rm "$LANE_REPO/front-end/src/app.ts"
+expect_lane frontend-coverage-blackbox $((fe + 3)) "deleting a front-end file"
+chmod +x "$LANE_REPO/shared/contract/fixtures.json"
+expect_lane frontend-coverage-blackbox $((fe + 4)) "a mode-only change"
+
 echo "run-deploy-stage regression tests passed"
