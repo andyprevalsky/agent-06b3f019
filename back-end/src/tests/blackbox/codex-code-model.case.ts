@@ -126,7 +126,11 @@ export function testCodeAgentModels_tierTableAndUnknownIsFlash() {
     );
     for (const speed of ['standard', 'fast', 'ultrafast'] as const) {
       for (const cache of [true, false]) {
-        same(storedAgentSpeed({ speed, fastModeCacheEnabled: cache }), speed, 'cache never overrides stored speed');
+        same(
+          storedAgentSpeed({ speed, fastModeCacheEnabled: cache }),
+          speed,
+          'cache never overrides stored speed'
+        );
       }
     }
     same(storedAgentSpeed(null), 'standard', 'missing agent uses standard');
@@ -251,7 +255,13 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
   headers: Record<string, string>
 ) {
   const cases = [
-    { model: 'rose-labs/rose-1-ultra', fast: false, effort: 'xhigh', speed: 'ultrafast', claude: 'fast' },
+    {
+      model: 'rose-labs/rose-1-ultra',
+      fast: false,
+      effort: 'xhigh',
+      speed: 'ultrafast',
+      claude: 'fast',
+    },
     {
       model: 'rose-labs/rose-1-flash',
       fast: true,
