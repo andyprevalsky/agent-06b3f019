@@ -681,6 +681,7 @@ their assertions or test counts:
 `bash scripts/tests/descend-command.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/jev-progress-core.test.py`,
+`python3 scripts/tests/select-affected-tests.test.py`,
 `python3 scripts/tests/benchmark-history-latest-only.test.py`,
 `python3 scripts/tests/cloudbench-full-selection.test.py`,
 `python3 -m unittest discover -s scripts/live_display -p test_*.py`,

@@ -52,6 +52,14 @@ class DomainResult:
 
 def discover_domains() -> list[str]:
     domains = sorted(path.stem.replace(".blackbox", "").replace("_", "-") for path in TESTS_DIR.glob("*.blackbox.py"))
+    # Affected-test selection (scripts/select_affected_tests.py --format
+    # lane:agents-blackbox) may narrow the run; unset or empty runs every domain.
+    selected = {d for d in os.environ.get("AGENTS_BLACKBOX_DOMAINS", "").replace(",", " ").split() if d}
+    if selected:
+        unknown = selected - set(domains)
+        if unknown:
+            raise ValueError(f"AGENTS_BLACKBOX_DOMAINS names unknown domain(s): {sorted(unknown)}")
+        domains = [d for d in domains if d in selected]
     priority = {domain: index for index, domain in enumerate(LONG_DOMAIN_ORDER)}
     return sorted(domains, key=lambda domain: (priority.get(domain, len(priority)), domain))
 
