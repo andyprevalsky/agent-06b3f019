@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import json
 import math
 import os
@@ -17,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from factory_metadata import load_metadata
+# The sibling module resolves however this file is loaded: as a script (its
+# directory is sys.path[0]) or by path from a test via importlib.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+load_metadata = importlib.import_module("factory_metadata").load_metadata
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
