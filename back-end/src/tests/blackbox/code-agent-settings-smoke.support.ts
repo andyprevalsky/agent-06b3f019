@@ -2,9 +2,9 @@
  * Live-smoke helpers: the parent agent a smoke spawns its code agent from, and
  * the CLI settings that agent really runs (served model, effort, speed).
  *
- *   smokeParentAgent ──► Agent row { model, fastModeCacheEnabled } (Rose defaults:
- *                        Ultra, Fast Mode on; CODE_SMOKE_PARENT_MODEL /
- *                        CODE_SMOKE_FAST_MODE=0 pick another tier or Normal speed)
+ *   smokeParentAgent ──► Agent row { model, speed, fastModeCacheEnabled } (Rose defaults:
+ *                        Ultra, fast; CODE_SMOKE_PARENT_MODEL / CODE_SMOKE_SPEED
+ *                        pick another tier or standard/fast/ultrafast speed)
  *   session_capabilities (turn token) ──► effective_settings + catalog speeds
  *   assertSmokeSettings ──► model + effort from the tier table, speed = the
  *                           request mapped onto that catalog (Azure: priority)
@@ -30,7 +30,9 @@ export interface SmokeParent {
 
 export async function smokeParentAgent(userId: string): Promise<SmokeParent> {
   const model = (process.env.CODE_SMOKE_PARENT_MODEL ?? '').trim() || 'rose-labs/rose-1-ultra';
-  const fastMode = process.env.CODE_SMOKE_FAST_MODE !== '0';
+  const speed = codeAgentSpeed(
+    process.env.CODE_SMOKE_SPEED ?? (process.env.CODE_SMOKE_FAST_MODE === '0' ? 'standard' : 'fast')
+  );
   await prisma.user.upsert({
     where: { userId },
     create: { userId, name: 'Code agent smoke' },
@@ -41,11 +43,12 @@ export async function smokeParentAgent(userId: string): Promise<SmokeParent> {
       userId,
       goal: 'code-agent live smoke parent',
       model,
-      fastModeCacheEnabled: fastMode,
+      speed,
+      fastModeCacheEnabled: false,
     },
     select: { id: true },
   });
-  return { agentId: agent.id, model, tier: codeAgentTier(model), speed: codeAgentSpeed(fastMode) };
+  return { agentId: agent.id, model, tier: codeAgentTier(model), speed };
 }
 
 /** Soft-deletes the parent (its code-session rows keep their agent id). */

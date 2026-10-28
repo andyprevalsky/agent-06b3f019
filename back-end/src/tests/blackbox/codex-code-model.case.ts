@@ -286,9 +286,13 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
     try {
       const stored = await prisma.agent.findUniqueOrThrow({
         where: { id: agentId },
-        select: { model: true, fastModeCacheEnabled: true },
+        select: { model: true, speed: true, fastModeCacheEnabled: true },
       });
-      same(stored, { model: c.model, fastModeCacheEnabled: c.fast }, 'the request is stored');
+      same(
+        stored,
+        { model: c.model, speed: c.speed, fastModeCacheEnabled: c.fast },
+        'the request is stored'
+      );
       const settings = await codeAgentSettingsForAgent(agentId);
       withOverrides({}, () => {
         same(
@@ -302,7 +306,7 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
             CLAUDE_CODE_MODEL: 'claude-opus-5-5',
             CLAUDE_CODE_EFFORT: c.effort,
             CLAUDE_CODE_SPEED: c.claude,
-            ...(c.fast ? CLAUDE_FAST : {}),
+            ...(c.speed !== 'standard' ? CLAUDE_FAST : {}),
           },
           `${c.model} Claude sandbox env`
         );
@@ -319,8 +323,8 @@ export async function testCodeAgentModels_createAgentRequestReachesCodeAgent(
         inspectPaths('/home/user')
       );
       assert(
-        azure.includes('service_tier="priority"') === c.fast,
-        `${c.model}: Azure priority ${c.fast ? 'on' : 'off'}`
+        azure.includes('service_tier="priority"') === (c.speed !== 'standard'),
+        `${c.model}: Azure priority ${c.speed !== 'standard' ? 'on' : 'off'}`
       );
     } finally {
       await request(`${baseUrl}/api/agents/${agentId}`, { method: 'DELETE', headers });
