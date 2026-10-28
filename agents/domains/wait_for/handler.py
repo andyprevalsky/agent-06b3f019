@@ -62,6 +62,7 @@ from helpers.wait_wake import (
     wake_source_path,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.wait_phrase import wait_target
 from utils.oai_demo import is_oai_demo_mass_agent_task
 from utils.simulated_clock import (
     advance_simulated_clock,
@@ -167,7 +168,10 @@ class WaitForManager(ToolManager):
         started = wake_mark(workflow_instance)
         until_timestamp = tool_call.get("until_timestamp")
         condition = tool_call.get("condition")
-        description = tool_call.get("description")
+        raw_description = tool_call.get("description")
+        # The UI composes "Waiting for <description>"; a model-written phrase that
+        # already says "Waiting for …" must not read "Waiting for Waiting for …".
+        description = wait_target(raw_description) if isinstance(raw_description, str) else raw_description
         # resume=True (deploy-migration re-arm): an already-elapsed target
         # completes immediately instead of erroring "in the past". Require a
         # strict boolean True so only the internal _resume_interrupted_wait path
@@ -202,7 +206,7 @@ class WaitForManager(ToolManager):
             ):
                 yield event
         elif condition:
-            if not isinstance(description, str) or not 3 <= len(description) <= 80:
+            if not isinstance(raw_description, str) or not 3 <= len(raw_description) <= 80:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="wait_for failed",
