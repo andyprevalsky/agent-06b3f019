@@ -55,10 +55,14 @@ export interface SandboxSize {
  * The template grid the sized build config produces (e2b-templates/sized-templates.json,
  * pinned equal by a structural test): 4 templates per provider. Every point is a
  * separately built E2B template, so the grid stays small.
+ *
+ * Memory stops at 8 GB: the E2B team refuses templates over 8192 MiB ("Memory
+ * can't be higher than 8192 MiB", 2026-10-28). A 16 GB size needs E2B support
+ * to raise that cap first, then a rebuild of the grid.
  */
 export const DEFAULT_SANDBOX_GRID: { cpu: number[]; memoryGb: number[] } = {
   cpu: [2, 8],
-  memoryGb: [4, 16],
+  memoryGb: [4, 8],
 };
 /** A configured grid larger than this (per provider) is refused. */
 export const MAX_GRID_POINTS = 9;
@@ -78,7 +82,7 @@ function positiveInts(value: unknown): number[] | null {
 }
 
 /**
- * CODE_SANDBOX_GRID (`{"cpu":[2,8],"memoryGb":[4,16]}`), else the default grid.
+ * CODE_SANDBOX_GRID (`{"cpu":[2,8],"memoryGb":[4,8]}`), else the default grid.
  * A grid of more than MAX_GRID_POINTS templates is refused (default grid).
  */
 export function sandboxGrid(): { cpu: number[]; memoryGb: number[] } {
