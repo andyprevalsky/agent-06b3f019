@@ -105,7 +105,8 @@ python3 scripts/cloudbench-archived-owner-stop.py \
 
 In this explicit mode, `--execute` performs GET only. It first requires a
 successful exact app identity, then exact terminal observations of the selected
-controller and once-owned guest/volume IDs. Machines require exact absence;
+controller and once-owned guest/volume IDs. Machines may return exact absence
+or destroyed with the original creation/incarnation fields and config digest.
 Volumes may instead have canonical pending_destroy/destroyed state when their
 identity and original delete authority match. Live, foreign or unknown resources
 refuse. The printed receipt path is content-bound
@@ -145,3 +146,11 @@ publication. Timeout or interruption leaves no new success projection; partial
 observation receipts may remain. Monitor the one exact command PID and its private
 log. Observations are sequential facts as of the recorded clock, not an atomic
 provider freeze or a guarantee against future resource creation.
+
+If a prior plan refused, retain its directory and raw diagnostic wires. A newly
+qualified terminal predicate changes the plan: obtain the normal fresh inventory
+and choose a new private output directory, then run plan/execute/reconcile with
+those exact inputs. Never edit an old plan to make it reusable. A native body
+validation refusal retains a bounded raw response in a private 0600
+`forensic-native-refusal-*.json`; its error exposes only subject, HTTP status and
+an allowlisted state. Raw configs remain private.

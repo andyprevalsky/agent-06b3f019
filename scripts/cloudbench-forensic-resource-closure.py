@@ -28,7 +28,7 @@ def prepare(run, inventory, owner):
     selected={}
     with S['tarfile'].open(archive,'r:gz') as stream:
         for member in stream:
-            if not member.name.startswith((prefix+'/',audit+'/')):continue
+            if not member.name.startswith((prefix+'/',audit+'/', 'git-common/cloudbench-native-effect-fences/'+owner+'/')):continue
             if member.isdir():continue
             expected=manifest['files'].get(member.name,{})
             need(member.isfile() and member.size<=1048576 and expected.get('kind')=='file' and expected.get('bytes')==member.size,'unsafe forensic member')
@@ -68,7 +68,7 @@ def prepare(run, inventory, owner):
                  and proof.get('volume')==vid and proof['native'].get('id')==vid,
                  'selected volume creation identity differs')
             identity = proof['native']
-        resources.append(dict(name=name,machine=mid,volume=vid,source=row['source_machine_id'],volume_identity=identity))
+        resources.append(dict(name=name,machine=mid,volume=vid,source=row['source_machine_id'],volume_identity=identity, machine_identity=_machine_identity(selected, owner, run_id, mid, name)))
     actual_ids={name.removeprefix(audit+'/by-machine-id/') for name in selected if name.startswith(audit+'/by-machine-id/')}
     need(actual_ids==mids,'incomplete identity index')
     for ledger in ('owned-clones.ids','owned-clones.names'):
@@ -82,8 +82,43 @@ def prepare(run, inventory, owner):
         need(sha(data)==cleanup_entry['sha256'],'cleanup proof differs')
         cleanup=json.loads(data)
     need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=False,runtime_evidence_missing=True,successful_runtime_inferred=False),'forensic failure facts differ')
-    plan.update(forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
+    controller_identity = _identity(obj(run/'export/disposable-controller.ownership.json')['machine'])
+    need(controller_identity['id'] == plan['controller'], 'controller creation identity differs')
+    plan.update(controller_identity=controller_identity,forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
     return plan
+
+
+def _identity(machine):
+    keys = ('id', 'instance_id', 'name', 'region', 'created_at')
+    need(isinstance(machine, dict) and all(isinstance(machine.get(k), str) and machine[k] for k in keys)
+         and isinstance(machine.get('config'), dict), 'complete Machine creation identity required')
+    return dict({k: machine[k] for k in keys}, config_sha256=sha(json.dumps(
+        machine['config'], sort_keys=True, separators=(',', ':'), allow_nan=False).encode()))
+
+
+def _machine_identity(records, owner, run_id, mid, name):
+    prefix = 'git-common/cloudbench-native-effect-fences/'+owner+'/'+run_id+'/'+mid+'/destroy/'
+    identities = []
+    for path, encoded in records.items():
+        if not path.startswith(prefix) or not path.endswith('/intent.json'):
+            continue
+        incarnation = path.removeprefix(prefix).removesuffix('/intent.json')
+        need(re.fullmatch('[0-9a-f]{64}', incarnation), 'invalid native destroy incarnation')
+        intent = json.loads(encoded)
+        machine = intent.get('machine')
+        need(intent.get('operation') == 'destroy', 'original native destroy operation differs')
+        identity = _identity(machine)
+        need(identity['id'] == mid and identity['name'] == name
+             and incarnation == sha(json.dumps([mid, machine['instance_id'], machine['config']],
+                        sort_keys=True, separators=(',', ':'), allow_nan=False).encode()),
+             'original native destroy identity differs')
+        # Successful effect acknowledgement belongs to this exact incarnation;
+        # no unacknowledged intent or independently supplied current identity.
+        need(json.loads(records[path.removesuffix('intent.json')+'ack.json']) == {'ok': True},
+             'original native destroy was not acknowledged')
+        identities.append(identity)
+    need(len(identities) <= 1, 'ambiguous original Machine destroy incarnation')
+    return identities[0] if identities else {}
 
 
 class Publication:
@@ -203,9 +238,9 @@ def _absence(item, path):
 
 
 def _selected_subjects(plan):
-    subjects = [dict(kind='machines', id=plan['controller'])]
+    subjects = [dict(kind='machines', id=plan['controller'], terminal_delete=True, identity=plan['controller_identity'])]
     for row in plan['forensic_resources']:
-        subjects.append(dict(kind='machines', id=row['machine']))
+        subjects.append(dict(kind='machines', id=row['machine'], terminal_delete=True, identity=row['machine_identity']))
         subjects.append(dict(kind='volumes', id=row['volume'], terminal_delete=True,
                              original_machine=row['machine'], identity=row['volume_identity']))
     return subjects
@@ -218,9 +253,9 @@ def observe(api, plan, output):
     dispositions = []
     for subject in _selected_subjects(plan):
         path = '/' + subject['kind'] + '/' + subject['id']
-        item = _request(api, path)
-        dispositions.append(_terminal(item, subject))
-        wire.append(item)
+        disposition = _observe_terminal(api, subject, output)
+        dispositions.append(disposition)
+        wire.append(disposition['wire'])
     receipt = dict(schema='cloudbench-forensic-resource-closure-v1', plan=plan, wire=wire,
                    provider_base=api.base, app=api.app, observed_at=time.time(),
                    runtime_sealed=False, original_release_epoch=None, claims_released=False,
@@ -272,7 +307,7 @@ def _archive_records(plan):
     records = {}
     with S['tarfile'].open(archive, 'r:gz') as stream:
         for member in stream:
-            if not (member.name.startswith('git-common/cloudbench-fleet-audits/')
+            if not (member.name.startswith(('git-common/cloudbench-fleet-audits/', 'git-common/cloudbench-native-effect-fences/'))
                     or (member.name.startswith('context/fleet/runs/')
                         and member.name.endswith('/execution-provenance.json'))):
                 continue
@@ -335,7 +370,7 @@ def _full_scope(admission, selected, inventory):
              'controller workspace release differs')
         for path in (ownership_path, workspace_path, release_path, delete_path):
             bindings[str(path)] = S['digest_file'](path)
-        add('machines', plan['controller'], controller=True)
+        add('machines', plan['controller'], controller=True, terminal_delete=True, identity=_identity(controller['machine']))
         add('volumes', vid, controller=True, terminal_delete=True,
             original_machine=plan['controller'], identity=workspace['native_create'])
         records = _archive_records(plan)
@@ -378,7 +413,7 @@ def _full_scope(admission, selected, inventory):
                      'admission identity index differs')
                 need(mid not in plan['protected_machines'] and volume not in plan['protected_volumes'],
                      'protected admission resource')
-                add('machines', mid, owner=owner, name=name)
+                add('machines', mid, owner=owner, name=name, terminal_delete=True, identity=_machine_identity(records,owner,run_id,mid,name))
                 # The original finalized fresh WAL is canonical delete authority for
                 # retired registries; selected retained owners additionally require
                 # their original exclusive DELETE intents in prepare().
@@ -415,8 +450,13 @@ def _terminal(item, subject):
          and item['method'] == 'GET' and item['path'] == path, 'native subject differs')
     if item['status'] == 404:
         return dict(subject=path, disposition='ABSENT', wire=item)
-    need(item['status'] == 200 and subject['kind'] == 'volumes'
-         and subject.get('terminal_delete') is True, 'native resource remains nonterminal')
+    need(item['status'] == 200 and subject.get('terminal_delete') is True, 'native resource remains nonterminal')
+    if subject['kind'] == 'machines':
+        value = _body(item)
+        need(isinstance(value, dict) and value.get('state') == 'destroyed'
+             and _identity(value) == subject.get('identity'), 'Machine is not terminal exact original incarnation')
+        return dict(subject=path, disposition='PROVIDER_TERMINAL_RETAINED', state='destroyed', wire=item)
+    need(subject['kind'] == 'volumes', 'unsupported terminal resource kind')
     value = _body(item)
     identity = subject.get('identity') or {}
     need(isinstance(value, dict) and value.get('id') == subject['id']
@@ -426,6 +466,30 @@ def _terminal(item, subject):
     need(all(key in identity and value.get(key) == identity[key] for key in keys),
          'terminal Volume creation identity differs')
     return dict(subject=path, disposition='PROVIDER_TERMINAL_RETAINED', state=value['state'], wire=item)
+
+
+def _observe_terminal(api, subject, output):
+    item = _request(api, '/' + subject['kind'] + '/' + subject['id'])
+    try:
+        return _terminal(item, subject)
+    except (ValueError, KeyError, TypeError):
+        state = None
+        try:
+            value = _body(item)
+            candidate = value.get('state') if isinstance(value, dict) else None
+            if candidate in {'created','starting','started','stopping','stopped','suspended',
+                             'destroying','destroyed','pending_destroy','waiting_for_detach'}:
+                state = candidate
+        except (ValueError, TypeError):
+            pass
+        diagnostic = dict(schema='cloudbench-forensic-native-refusal-v1',
+            subject=item['path'], status=item['status'], state=state, wire=item,
+            observed_at=time.time(), claims_released=False)
+        # Raw response/config is retained only inside the private receipt; the
+        # error contains bounded allowlisted resource identity/status/state.
+        _append(output, 'forensic-native-refusal-', diagnostic)
+        raise ValueError('native resource refused: subject='+item['path']+
+                         ' status='+str(item['status'])+' state='+str(state)) from None
 
 
 def _reconcile(admission, receipt_path, api, publication):
@@ -460,7 +524,7 @@ def _reconcile(admission, receipt_path, api, publication):
     need(original.get('checked') == current['checked'], 'original admission coverage changed')
     need(not current['present'] and not current['present_volumes'], 'owned native resources remain active')
     # List omission never proves release: exact GET every canonical once-owned ID.
-    terminal = [_terminal(_request(api, '/' + subject['kind'] + '/' + subject['id']), subject)
+    terminal = [_observe_terminal(api, subject, admission)
                 for key, subject in sorted(subjects.items())]
     for path, digest in bindings.items():
         need(S['digest_file'](path) == digest, 'admission proof changed during observation')

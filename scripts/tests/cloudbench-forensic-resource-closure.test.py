@@ -49,12 +49,20 @@ class Forensic(OLD['ArchivedStop']):
         self.members[other_prefix+'/owned-clones.ids']=(self.other_mid+'\n').encode()
         self.members[other_prefix+'/owned-clones.names']=b'cloudbench-other\n'
         self.members['context/fleet/runs/'+other_run+'/execution-provenance.json']=json.dumps(dict(base_sha='a'*40,workspace_patch_sha256='none')).encode()
+        self.machine_identity=dict(id=self.mid,name=name,region='iad',created_at='2026-10-28T02:11:59Z',instance_id='01M604F2RQVW0PYF2GQ9EYVVT5',config={'image':'image@sha256:exact','env':{'PRIVATE_TEST_VALUE':'private-config-value'}})
+        self.controller_identity=dict(self.machine_identity,id='11112222333344',name='cloudbench-gate-exact',created_at='2026-10-28T02:02:29Z',instance_id='01M603X6VBMGAKD6W8TNYMQ4CV')
+        self.other_identity=dict(self.machine_identity,id=self.other_mid,name='cloudbench-other',instance_id='other-original-instance')
+        for own,rid,machine in ((token,run_id,self.machine_identity),(other,other_run,self.other_identity)):
+            incarnation=hashlib.sha256(json.dumps([machine['id'],machine['instance_id'],machine['config']],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            fence='git-common/cloudbench-native-effect-fences/'+own+'/'+rid+'/'+machine['id']+'/destroy/'+incarnation
+            self.members[fence+'/intent.json']=json.dumps(dict(machine=machine,operation='destroy')).encode()
+            self.members[fence+'/ack.json']=b'{"ok":true}'
         self.reseal(self.members)
         export=self.run/'export'
         authority_sha=OLD['S']['digest_file'](self.run/'authority.private.json')
         workspace=dict(schema='cloudbench-controller-workspace-ownership-v1',app='navi-whisper-lux-bench',source_ref='a'*40,volume_id='vol_workspace',native_create=self.workspace_identity)
         OLD['write'](export/'workspace-volume.ownership.json',workspace)
-        OLD['write'](export/'disposable-controller.ownership.json',dict(schema='cloudbench-disposable-controller-ownership-v1',authority_sha256=authority_sha,workspace_sha256=OLD['S']['digest_file'](export/'workspace-volume.ownership.json'),machine={'id':'11112222333344'},volume={'id':'vol_workspace'}))
+        OLD['write'](export/'disposable-controller.ownership.json',dict(schema='cloudbench-disposable-controller-ownership-v1',authority_sha256=authority_sha,workspace_sha256=OLD['S']['digest_file'](export/'workspace-volume.ownership.json'),machine=self.controller_identity,volume={'id':'vol_workspace'}))
         release=dict(machine_id='11112222333344',machine_deleted=True,volume_id='vol_workspace',volume_disposition='pending_destroy')
         OLD['write'](export/'disposable-controller.release.json',release)
         OLD['write'](export/'disposable-delete-volume.intent.json',dict(authority_sha256=authority_sha,kind='volume',identifier='vol_workspace'))
@@ -86,6 +94,61 @@ class Forensic(OLD['ArchivedStop']):
         plan=F['prepare'](self.run,self.inventory,'b'*32)
         api,_=self.exact_api()
         return F['observe'](api,plan,self.out)
+
+    def test_actual_destroyed_machine_shape_preserves_terminal_not_absent(self):
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        overrides={ '/machines/'+m['id']:(200,dict(m,state='destroyed')) for m in
+                   (self.controller_identity,self.machine_identity,self.other_identity)}
+        overrides['/volumes/vol_owned']=(200,dict(self.volume_identity,state='pending_destroy',attached_machine_id=None))
+        api,calls=self.exact_api(overrides)
+        receipt=F['observe'](api,plan,self.out)
+        self.assertFalse(F['verify'](receipt)['native_resources_absent'])
+        result=F['reconcile'](self.admission,receipt,api)
+        self.assertTrue(result['current_physical_resource_release_verified'])
+        self.assertFalse(result['all_resources_absent'])
+        self.assertEqual((self.admission/'native-release-audit.json').read_bytes(),self.original_bytes)
+        self.assertIn(('GET','/machines/'+self.other_mid),calls)
+
+    def test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire(self):
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        good=dict(self.machine_identity,state='destroyed')
+        for field,value in [('id','eeeeffff000011'),('instance_id','foreign'),('created_at','foreign'),
+                            ('name','foreign'),('region','ord'),('config',{}),('state','stopped'),
+                            ('state','destroying'),('state','pending_destroy')]:
+            with self.subTest(field=field,value=value):
+                api,_=self.exact_api({'/machines/'+self.mid:(200,dict(good,**{field:value}))})
+                with self.assertRaisesRegex(ValueError,'subject=/machines/'+self.mid+' status=200 state=') as error:
+                    F['observe'](api,plan,self.out)
+                self.assertNotIn('private-config-value',str(error.exception))
+        diagnostics=list(self.out.glob('forensic-native-refusal-*.json'))
+        self.assertEqual(len(diagnostics),9)
+        for path in diagnostics:
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            value=json.loads(path.read_bytes())
+            self.assertFalse(value['claims_released']);self.assertEqual(value['subject'],'/machines/'+self.mid)
+            self.assertEqual(value['wire']['status'],200)
+        self.assertEqual(list(self.out.glob('forensic-resource-closure-*.json')),[])
+        # Same check must guard the full consumer's other, ordinarily finalized guest.
+        receipt=self.closure_receipt()
+        api,_=self.exact_api({'/machines/'+self.other_mid:(200,dict(self.other_identity,state='destroyed',instance_id='foreign'))})
+        with self.assertRaisesRegex(ValueError,'subject=/machines/'+self.other_mid):
+            F['reconcile'](self.admission,receipt,api)
+        self.assertEqual(list(self.admission.glob('forensic-release-projection-*.json')),[])
+        original=dict(self.members)
+        delete=next(k for k in self.members if k.endswith('/disposable-delete-machine-'+self.mid+'.json'))
+        del self.members[delete];self.reseal(self.members)
+        with self.assertRaises((ValueError,KeyError)):F['prepare'](self.run,self.inventory,'b'*32)
+        self.members=dict(original)
+        intent=next(k for k in self.members if k.startswith('git-common/cloudbench-native-effect-fences/'+'b'*32) and k.endswith('/intent.json'))
+        encoded=json.loads(self.members[intent]);encoded['machine']['created_at']='forged-original'
+        self.members[intent]=json.dumps(encoded).encode();self.reseal(self.members)
+        forged=F['prepare'](self.run,self.inventory,'b'*32)
+        api,_=self.exact_api({'/machines/'+self.mid:(200,good)})
+        with self.assertRaises(ValueError):F['observe'](api,forged,self.out)
+        self.members=dict(original)
+        ack=next(k for k in self.members if k.startswith('git-common/cloudbench-native-effect-fences/'+'b'*32) and k.endswith('/ack.json'))
+        del self.members[ack];self.reseal(self.members)
+        with self.assertRaises((ValueError,KeyError)):F['prepare'](self.run,self.inventory,'b'*32)
 
     # Do not inherit the unrelated previous stop suite's cases in this extension.
     def test_exact_absence_reconciles_without_rewriting_failed_original(self):
@@ -264,13 +327,15 @@ class Forensic(OLD['ArchivedStop']):
             shutil.copy2(ROOT/'scripts'/name,path)
         requests=[];late_outer=[False]
         selected_terminal=dict(self.volume_identity,state='pending_destroy',attached_machine_id=self.mid)
+        native_machines={'/v1/apps/navi-whisper-lux-bench/machines/'+m['id']:dict(m,state='destroyed') for m in (self.controller_identity,self.machine_identity,self.other_identity)}
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 requests.append(self.path)
                 app=self.path=='/v1/apps/navi-whisper-lux-bench'
                 collection=self.path in ('/v1/apps/navi-whisper-lux-bench/machines','/v1/apps/navi-whisper-lux-bench/volumes')
                 terminal=self.path=='/v1/apps/navi-whisper-lux-bench/volumes/vol_owned'
-                self.send_response(200 if app or collection or terminal else 404);self.end_headers();self.wfile.write(b'{"name":"navi-whisper-lux-bench"}' if app else b'[]' if collection else json.dumps(selected_terminal).encode() if terminal else b'{"error":"not found"}')
+                value={'name':'navi-whisper-lux-bench'} if app else [] if collection else selected_terminal if terminal else native_machines.get(self.path,{'error':'not found'})
+                self.send_response(200 if app or collection or terminal or self.path in native_machines else 404);self.end_headers();self.wfile.write(json.dumps(value).encode())
             def log_message(self,*args):pass
         server=http.server.HTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
@@ -340,6 +405,6 @@ class Forensic(OLD['ArchivedStop']):
 # Select only this extension's controls rather than inherited stop controls.
 if __name__=='__main__':
     import sys
-    names=sys.argv[1:] or ('test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
+    names=sys.argv[1:] or ('test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
     suite=unittest.TestSuite(Forensic(name) for name in names)
     raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

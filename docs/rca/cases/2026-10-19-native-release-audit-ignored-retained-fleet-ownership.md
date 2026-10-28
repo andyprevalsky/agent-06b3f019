@@ -210,3 +210,32 @@ current native closure are pending the launch owner. The worker made no provider
 calls. Historical runtime capture remains unsealed and the original INFRA stays
 authoritative. Reads are sequential, bounded by the existing 300-second operation
 deadline, and do not freeze future provider state.
+
+### I30 actual-provider terminal Machine correction
+
+The first canonical execution refused before producing a closure receipt because
+Fly returned Machine HTTP 200 with state destroyed, rather than 404. The launch
+owner captured four bounded GET responses: positive app identity, destroyed
+controller and guest Machines, and a pending_destroy Volume. The guest's original
+manifest-bound destroy fence intent and the controller's original ownership
+record contained the same creation fields, incarnation and config hashes. This
+is stronger evidence than an ID or state alone. The original audit/result inode,
+mtime and hashes remained unchanged.
+
+The narrow follow-up accepts destroyed Machine 200 only with that complete
+original identity and authenticated original delete authority. It preserves the
+PROVIDER_TERMINAL_RETAINED versus ABSENT distinction, and applies to selected
+producer, receipt verification and all full-scope Machine observations. Missing
+original identity cannot admit a 200 response. Other live/unknown states and
+foreign incarnations refuse. Bounded private refusal receipts improve future
+evidence retention without printing config or environment values.
+
+Independent exact opened-reference review GROUNDED two-path patch SHA256
+94d9425a70c72890985bb37b235025c24877f66d28d460585911569415f79b7b.
+The same actual-shape helper and canonical CLI controls refused at the intended
+nonterminal boundary on the prior runtime; all 13 controls passed on the revised
+source. Grounding includes the existing archived-stop destroyed-Machine identity
+predicate and the original leased fenced native destroy intent/ack writer.
+Current full-admission closure still requires a fresh canonical execution with a
+new private plan directory; prior failed plans and diagnostics stay immutable.
+No historical runtime, grade or epoch claim changes.
