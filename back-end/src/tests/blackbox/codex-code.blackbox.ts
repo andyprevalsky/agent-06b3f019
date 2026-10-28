@@ -11,8 +11,7 @@ import {
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
-  testResolveCodexAuthEnvs_cooldownExcludesFundedKey,
-  testResolveCodexAuthEnvs_emptyKeyThrows,
+  testResolveCodexAzureFunding_selectsWestusRegion,
   testResolveCodexAuthEnvs_noCredsNoKeyThrows,
   testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback,
   testResolveCodexAuthEnvs_oauthWithoutFundedKey,
@@ -349,7 +348,7 @@ async function testSmoke_codexCompletesE2bTask() {
         `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth unusable)'
+        '    ↳ codex smoke completed via the Azure funded runtime fallback (OAuth unusable)'
       );
     } else {
       console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
@@ -435,16 +434,20 @@ async function runAll() {
       fn: testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
     },
     {
-      name: 'auth -- OAuth primary + OPENAI_API_KEY runtime fallback injected together',
+      name: 'auth -- OAuth primary + Azure runtime fallback injected together',
       fn: async () => testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback(),
     },
     {
-      name: 'auth -- OAuth alone when no funded key configured',
+      name: 'auth -- OAuth alone when no Azure deployment configured',
       fn: async () => testResolveCodexAuthEnvs_oauthWithoutFundedKey(),
     },
     {
-      name: 'auth -- falls back to OPENAI_API_KEY when token unavailable/rate-limited',
+      name: 'auth -- falls back to the Azure deployment when token unavailable/rate-limited',
       fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'auth -- Azure funding resolves from the westus Foundry region',
+      fn: async () => testResolveCodexAzureFunding_selectsWestusRegion(),
     },
     {
       name: 'credit-skip -- live "no credits remaining" wording is recognized',
@@ -471,16 +474,8 @@ async function runAll() {
       fn: async () => testCodexCreditSkip_createUnavailableOnCooldownIsSkip(),
     },
     {
-      name: 'auth -- throws when no credential and no funded key',
+      name: 'auth -- throws when no credential and no Azure deployment',
       fn: async () => testResolveCodexAuthEnvs_noCredsNoKeyThrows(),
-    },
-    {
-      name: 'auth -- throws when funded key is empty',
-      fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
-    },
-    {
-      name: 'auth -- cooled funded key is excluded before sandbox creation',
-      fn: async () => testResolveCodexAuthEnvs_cooldownExcludesFundedKey(),
     },
     {
       name: 'feedback -- captured OAuth exhaustion cools exact credential',

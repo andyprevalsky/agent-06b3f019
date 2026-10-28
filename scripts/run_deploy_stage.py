@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Sequence
 
 from deploy_stage import LifecycleError, admit_stage, append_stage, release_stage
-
+from factory_metadata import load_metadata
 
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 CLEANUP_GRACE_SECONDS = 60
@@ -198,6 +198,12 @@ def main() -> int:
         print("run_deploy_stage.py: valid STAGE and COMMAND are required", file=sys.stderr)
         return 2
 
+    try:
+        telemetry = load_metadata()
+    except (OSError, ValueError) as error:
+        print(f"invalid factory metadata: {type(error).__name__}", file=sys.stderr)
+        return 2
+
     token = f"{args.stage}-{os.getpid()}-{secrets.token_hex(4)}"
     try:
         run_id = admit_stage(args.run_root, token=token, pid=os.getpid())
@@ -240,6 +246,7 @@ def main() -> int:
             finished_epoch=finished_epoch,
             exit_code=stage_exit,
             log=log_relative,
+            telemetry=telemetry,
         )
     except OSError as error:
         print(f"warning: could not append deploy stage record: {error}", file=sys.stderr)

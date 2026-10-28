@@ -179,6 +179,10 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
   work completes on time.
 - The user's north star goal must always take priority when assigning work,
   resolving tradeoffs, and deciding what to do next.
+- While doing your work, sync your branch with the latest `main` roughly every
+  hour so a massive merge conflict doesn't pile up at the end. Spawn a sub-agent
+  to do each sync; it must communicate with you to resolve any merge conflict
+  intelligently, preserving both sides' intent rather than blindly picking one.
 
 ### Mandatory experiment iteration loop
 
