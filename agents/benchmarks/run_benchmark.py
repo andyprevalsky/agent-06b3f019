@@ -8408,7 +8408,7 @@ def _sync_compute_tokens(
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
+        print(f"    ⚠ Compute-token sync failed (exit={result.returncode}): {_seed_sync_error_detail(result)}")
         return False
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     if explicit_codex_auth and not _refresh_local_gpt_token_from_codex_auth(database_url):

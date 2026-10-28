@@ -18302,6 +18302,46 @@ def test_runner_fixtures_retry_transient_local_database_probe_timeout():
                 os.environ[key] = value
 
 
+def test_compute_token_sync_preserves_seed_exit_status():
+    """A silent seed failure still reports its actual child status and stays failed."""
+    import io
+    from benchmarks import run_benchmark
+
+    native_run = run_benchmark._run_seed_subprocess
+    for expected, stderr in ((23, ""), (-15, ""), (1, "fixture query refused"), (0, "")):
+        with tempfile.TemporaryDirectory() as directory:
+            child = "import os,signal,sys; print('fixture seed startup',flush=True); "
+            if stderr:
+                child += f"print({stderr!r},file=sys.stderr,flush=True); "
+            child += ("os.kill(os.getpid(),signal.SIGTERM)" if expected < 0 else f"sys.exit({expected})")
+            seen = []
+            def run_seed(_command, **_kwargs):
+                result = native_run([sys.executable, "-c", child], cwd=Path(directory), env=None, timeout=5)
+                seen.append(result.returncode)
+                return result
+            output = io.StringIO()
+            with (
+                patch.object(run_benchmark, "_local_victoria_database_url", return_value="postgresql://localhost/fixture"),
+                patch.object(run_benchmark, "_compute_token_source_database_url", return_value=("postgresql://source.invalid/fixture", "fixture source")),
+                patch.object(run_benchmark, "_run_seed_subprocess", side_effect=run_seed),
+                patch.object(run_benchmark, "_withheld_compute_token_types", set()),
+                patch.dict(os.environ, {"CODEX_AUTH_PATH": ""}),
+                contextlib.redirect_stdout(output),
+            ):
+                accepted = run_benchmark._sync_compute_tokens()
+            assert seen == [expected]
+            assert accepted is (expected == 0)
+            text = output.getvalue()
+            if expected:
+                assert f"Compute-token sync failed (exit={expected}):" in text, text
+                assert "fixture seed startup" in text
+                if stderr:
+                    assert stderr in text
+            else:
+                assert "Compute-token sync failed" not in text
+                assert "Refreshed compute tokens" in text
+
+
 def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
     """A Fly guest must source live credentials from its verified backend env, not its restored target."""
     from types import SimpleNamespace
@@ -26586,6 +26626,7 @@ async def run_all_tests():
         "runner_cleanup_manifest_database_without_probe",
         test_runner_cleanup_uses_manifest_database_without_discovery_probe,
     )
+    r.record("compute_token_seed_exit_status", test_compute_token_sync_preserves_seed_exit_status)
     r.record(
         "compute_token_preflight_isolated_source",
         test_compute_token_preflight_uses_credential_source_not_restored_guest_database,
