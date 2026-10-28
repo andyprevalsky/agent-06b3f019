@@ -253,12 +253,15 @@ describe('Rose left bar (flag on)', () => {
       'agent:orphan',
       'agent:home-done',
     ]);
-    // Icons only: names faded, no + / ⚙ buttons, no + New project.
+    // Icons only: names faded, no + / ⚙ buttons. New project keeps its icon in
+    // the same top slot (label faded), so expanding never shifts the rows.
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByText('Rose').className).toContain('opacity-0');
     expect(within(project).queryByRole('button')).toBeNull();
     expect(within(screen.getByTestId('rose-home-project-row')).queryByRole('button')).toBeNull();
-    expect(screen.queryByRole('button', { name: '+ New project' })).toBeNull();
+    const newProject = screen.getByRole('button', { name: '+ New project' });
+    expect(screen.getByTestId('rose-agent-groups').firstElementChild).toBe(newProject);
+    expect(within(newProject).getByText('New project').className).toContain('opacity-0');
     const pill = screen.getAllByTestId('rose-group-divider')[0].querySelector('i')!;
     expect(pill.className).toContain('h-[3px]');
     expect(pill.className).toContain('w-[18px]');

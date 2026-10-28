@@ -18,8 +18,9 @@
  *       Home agents
  *
  * COLLAPSED (64px rail): per group the project icon, then its agent icons, then
- * an 18×3px neutral line pill before the next group; Home last.
- * "+ New project" is expanded-only.
+ * an 18×3px neutral line pill before the next group; Home last. "New project"
+ * keeps its folder-plus icon in the same top slot (label faded), so expanding
+ * never shifts the rows below.
  *
  * PENDING NEW-AGENT TARGET (pendingGroupKey, owned by RoseSidebar): the project
  * id (or "home") whose "+" was clicked; that group's icon wears the
@@ -269,8 +270,8 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
   const showHome = !isFiltering || homeView.shown.length > 0;
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
-      {isExpanded && !isFiltering && (
-        <NewProjectRow onCreate={props.projectActions.onCreateProject} />
+      {!isFiltering && (
+        <NewProjectRow onCreate={props.projectActions.onCreateProject} isExpanded={isExpanded} />
       )}
       {isExpanded && props.projectLoading && (
         <p role="status" className="px-5 py-2 text-xs text-muted-foreground">

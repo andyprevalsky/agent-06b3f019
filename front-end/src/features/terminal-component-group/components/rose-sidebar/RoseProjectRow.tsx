@@ -22,7 +22,8 @@
  * bar: Home icon · "Home" · [+ new agent in Home]; same widths, active and
  * pending rules; no menu (Home cannot be renamed or deleted).
  *
- * NewProjectRow: [IDLE] "+ New project" --click--> [EDITING] inline input
+ * NewProjectRow: [IDLE] folder-plus · "New project" (collapsed: icon only, same top
+ *   slot, so expanding never shifts the rows below) --click--> [EDITING] inline input
  *   [EDITING] --Enter (non-empty)--> [CREATING] (POST /api/projects)
  *   [CREATING] --created | other failure (toast)--> [IDLE]
  *   [CREATING] --409 duplicate name--> [EDITING + inline error] (value kept)
@@ -30,7 +31,15 @@
  *   [EDITING] --Escape | blur--> [IDLE]
  */
 
-import { Folder, Home, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react';
+import {
+  Folder,
+  FolderPlus,
+  Home,
+  Pencil,
+  Plus,
+  Settings as SettingsIcon,
+  Trash2,
+} from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import {
@@ -285,9 +294,12 @@ const NEW_PROJECT_ERROR_ID = 'rose-new-project-error';
 
 export function NewProjectRow({
   onCreate,
+  isExpanded = true,
 }: {
   /** Resolves to an inline error (duplicate name) or null when the row can close. */
   onCreate: (name: string) => Promise<string | null>;
+  /** Collapsed rail keeps the folder-plus icon in the same top slot (label faded). */
+  isExpanded?: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -299,13 +311,19 @@ export function NewProjectRow({
     return (
       <button
         type="button"
+        aria-label="+ New project"
+        tabIndex={isExpanded ? 0 : -1}
         onClick={() => {
           setError(null);
           setIsEditing(true);
         }}
-        className="flex h-[30px] flex-none items-center whitespace-nowrap pl-[54px] text-left text-[13px] text-[hsl(240_8%_45%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]"
+        className={cn(
+          ROW,
+          'w-full text-left text-[hsl(240_8%_45%)] dark:text-[#a3a39d] hover:text-[hsl(240_15%_8%)] dark:hover:text-[#ecece8]',
+        )}
       >
-        + New project
+        <FolderPlus className="h-5 w-5 flex-none" strokeWidth={1.7} />
+        <RowName isExpanded={isExpanded}>New project</RowName>
       </button>
     );
   }
