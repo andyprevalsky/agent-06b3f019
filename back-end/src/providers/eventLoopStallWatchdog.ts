@@ -7,7 +7,11 @@
  *     -> Debugger.pause (interrupts the busy isolate at its next JS boundary)
  *     -> capture the top call frames -> Debugger.resume
  *     -> one JSON line on fd 2 (bypasses the blocked loop's stdout stream)
- *   while the stall lasts: RSS line every reportEveryMs
+ *     -> while paused, read the main isolate's process.memoryUsage()
+ *        (heapUsed vs external/arrayBuffers separates JS heap from Buffers)
+ *   every line also carries anonymous RSS and the busiest threads' CPU from
+ *   /proc, which still works when the main thread is stuck in native code
+ *   while the stall lasts: the same sample (frames + memory) every reportEveryMs
  *
  * Why: the backend was OOM-killed at 16 GiB six times (2026-09-18 .. 10-27).
  * Each time the event loop froze for 40-70 s while memory climbed, and every
@@ -44,6 +48,39 @@ function rssMb() {
   return Math.round(process.memoryUsage().rss / 1048576);
 }
 
+function anonMb() {
+  try {
+    const match = /RssAnon:\\s+(\\d+)/.exec(fs.readFileSync('/proc/self/status', 'utf8'));
+    if (match) return Math.round(Number(match[1]) / 1024);
+  } catch {}
+  return undefined;
+}
+
+let lastTicks = new Map();
+let lastTicksAt = Date.now();
+function busyThreads() {
+  try {
+    const now = Date.now();
+    const ticks = new Map();
+    const rows = [];
+    for (const tid of fs.readdirSync('/proc/self/task')) {
+      const stat = fs.readFileSync('/proc/self/task/' + tid + '/stat', 'utf8');
+      const close = stat.lastIndexOf(')');
+      const name = stat.slice(stat.indexOf('(') + 1, close);
+      const fields = stat.slice(close + 2).split(' ');
+      const total = Number(fields[11]) + Number(fields[12]);
+      ticks.set(tid, total);
+      const before = lastTicks.get(tid);
+      if (before !== undefined) rows.push({ tid: Number(tid), name, cpu_pct: Math.round(((total - before) * 1000) / Math.max(1, now - lastTicksAt)) });
+    }
+    lastTicks = ticks;
+    lastTicksAt = now;
+    return rows.sort((a, b) => b.cpu_pct - a.cpu_pct).slice(0, 5);
+  } catch {
+    return undefined;
+  }
+}
+
 function emit(record) {
   try {
     fs.writeSync(2, JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', component: 'EventLoopStall', ...record }) + '\\n');
@@ -54,12 +91,12 @@ function captureMainStack() {
   return new Promise((resolve) => {
     const session = new inspector.Session();
     let settled = false;
-    const finish = (frames, error) => {
+    const finish = (frames, error, memory) => {
       if (settled) return;
       settled = true;
       try { session.post('Debugger.resume'); } catch {}
       try { session.disconnect(); } catch {}
-      resolve({ frames, error });
+      resolve({ frames, error, memory });
     };
     try {
       session.connectToMainThread();
@@ -70,7 +107,21 @@ function captureMainStack() {
           line: frame.location.lineNumber + 1,
           column: frame.location.columnNumber + 1,
         }));
-        finish(frames);
+        const top = (message.params.callFrames || [])[0];
+        if (!top) return finish(frames);
+        session.post(
+          'Debugger.evaluateOnCallFrame',
+          { callFrameId: top.callFrameId, expression: 'JSON.stringify(globalThis.process.memoryUsage())', silent: true, returnByValue: true },
+          (error, result) => {
+            let memory;
+            try {
+              const usage = JSON.parse(result.result.value);
+              memory = {};
+              for (const key of Object.keys(usage)) memory[key + '_mb'] = Math.round(usage[key] / 1048576);
+            } catch {}
+            finish(frames, undefined, memory);
+          }
+        );
       });
       session.post('Debugger.enable', () => session.post('Debugger.pause'));
       setTimeout(() => finish([], 'pause timed out'), 5000);
@@ -83,29 +134,35 @@ function captureMainStack() {
 let stalledSince = 0;
 let lastReport = 0;
 let capturing = false;
+
+async function sample(message) {
+  capturing = true;
+  const { frames, error, memory } = await captureMainStack();
+  capturing = false;
+  emit({ message, stall_ms: Date.now() - stalledSince, rss_mb: rssMb(), anon_mb: anonMb(), memory, threads: busyThreads(), frames, capture_error: error });
+}
+
 setInterval(async () => {
   const now = Date.now();
   const lag = now - beat[0];
   if (lag < stallMs) {
     if (stalledSince !== 0) {
-      emit({ message: 'event loop stall ended', stall_ms: now - stalledSince, rss_mb: rssMb() });
+      emit({ message: 'event loop stall ended', stall_ms: now - stalledSince, rss_mb: rssMb(), anon_mb: anonMb() });
     }
     stalledSince = 0;
     return;
   }
+  if (capturing) return;
   if (stalledSince === 0) {
     stalledSince = beat[0];
     lastReport = now;
-    if (capturing) return;
-    capturing = true;
-    const { frames, error } = await captureMainStack();
-    capturing = false;
-    emit({ message: 'event loop stall', stall_ms: Date.now() - stalledSince, rss_mb: rssMb(), frames, capture_error: error });
+    busyThreads();
+    await sample('event loop stall');
     return;
   }
   if (now - lastReport >= reportEveryMs) {
     lastReport = now;
-    emit({ message: 'event loop stall continues', stall_ms: now - stalledSince, rss_mb: rssMb() });
+    await sample('event loop stall continues');
   }
 }, Math.max(50, Math.min(1000, Math.floor(stallMs / 4))));
 `;
