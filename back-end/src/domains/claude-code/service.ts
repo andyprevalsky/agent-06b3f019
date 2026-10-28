@@ -19,8 +19,7 @@ import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredential
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
-export type { HealthCheckResult } from './health';
-export { checkSandboxHealth } from './health';
+export { checkSandboxHealth, type HealthCheckResult } from './health';
 
 const log = createLogger('ClaudeCode');
 
@@ -163,8 +162,9 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   }
 
   const { agentFastMode } = await import('../../providers/demoCacheStore');
+  const fastMode = await agentFastMode(agent_id);
   // Code-agent Anthropic/Codex proxy is DEMO cache replay — not the Fast Mode button.
-  const fastModeCacheEnabled = (await agentFastMode(agent_id)).enabled;
+  const fastModeCacheEnabled = fastMode.enabled;
 
   // A project session is scoped (and branched) by its project; its repo is the
   // project's repo, cut from the project's default branch.
