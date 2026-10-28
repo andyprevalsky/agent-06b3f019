@@ -199,7 +199,14 @@ export function isAllowedRedirectUrl(url: string): boolean {
 
 export const sendOAuthResult = (
   res: OAuthResponse,
-  opts: { success: boolean; message: string; returnUrl?: string | null; errorUrl?: string | null }
+  opts: {
+    success: boolean;
+    message: string;
+    returnUrl?: string | null;
+    errorUrl?: string | null;
+    /** Shown as the fallback page title, e.g. "Granola Connection". */
+    title?: string;
+  }
 ) => {
   const redirectTarget = opts.success
     ? opts.returnUrl
@@ -224,7 +231,7 @@ export const sendOAuthResult = (
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Email Connection ${escapeHtml(opts.success ? 'Success' : 'Error')}</title>
+    <title>${escapeHtml(opts.title ?? 'Email Connection')} ${escapeHtml(opts.success ? 'Success' : 'Error')}</title>
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; text-align: center; }
       .status { font-size: 18px; margin-bottom: 16px; color: ${opts.success ? '#16a34a' : '#dc2626'}; }

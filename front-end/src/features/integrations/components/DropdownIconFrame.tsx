@@ -64,6 +64,7 @@ export const DropdownIconPreset = {
   instagram: { iconScale: 100, iconFit: 'cover' },
   agentPay: { iconScale: 82, iconFit: 'contain' },
   plaid: { iconScale: 64, iconFit: 'contain' },
+  granola: { iconScale: 100, iconFit: 'cover' },
   fileSystem: { iconScale: 62, iconFit: 'contain' },
 } as const;
 

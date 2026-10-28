@@ -6,6 +6,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { GOOGLE_WORKSPACE_SOURCES } from '../../services/integrations/googleWorkspaceDocuments';
+import { GRANOLA_PROVIDER, GRANOLA_SOURCES } from '../../services/integrations/granolaDocuments';
 import { pageSize, regexPredicate } from './sharedGrepRepo';
 
 export interface DocumentGrepRow {
@@ -38,6 +39,22 @@ export interface DocumentSummaryResult {
  */
 const NOT_GOOGLE_WORKSPACE = Prisma.sql`d.source NOT IN (${Prisma.join([...GOOGLE_WORKSPACE_SOURCES])})`;
 
+/**
+ * A provider stored as several document sources: `granola` names all three
+ * Granola layers (structured note, summary, transcript); each layer's own
+ * source name still selects just that layer.
+ */
+const DOCUMENT_SOURCE_FAMILIES: Record<string, readonly string[]> = {
+  [GRANOLA_PROVIDER]: GRANOLA_SOURCES,
+};
+
+function sourceIs(documentSource: string): Prisma.Sql {
+  const family = DOCUMENT_SOURCE_FAMILIES[documentSource];
+  return family === undefined
+    ? Prisma.sql`d.source = ${documentSource}`
+    : Prisma.sql`d.source IN (${Prisma.join([...family])})`;
+}
+
 function documentFilters(params: {
   documentSource?: string;
   since?: Date;
@@ -49,13 +66,13 @@ function documentFilters(params: {
 }): Prisma.Sql {
   const parts: Prisma.Sql[] = [Prisma.sql`d."deletedAt" IS NULL`, NOT_GOOGLE_WORKSPACE];
   if (params.documentSource !== undefined) {
-    parts.push(Prisma.sql`d.source = ${params.documentSource}`);
+    parts.push(sourceIs(params.documentSource));
   }
   // `filters.path` given as a path this tool printed: `documents/<source>/<rest>`.
   // The rest is the vault+relative path (obsidian) or title+externalId, so match
   // it against the same fields those segments were built from.
   if (params.pathDocumentSource !== undefined) {
-    parts.push(Prisma.sql`d.source = ${params.pathDocumentSource}`);
+    parts.push(sourceIs(params.pathDocumentSource));
   }
   if (params.pathRest !== undefined) {
     const tail = params.pathRest.split('/');

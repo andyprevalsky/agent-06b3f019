@@ -18,6 +18,7 @@ import {
 } from './providers/smsSupervisor';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
+import { runGranolaSyncJob } from './services/integrations/granolaSync';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
 import { runMessagingUploadJobs } from './domains/integrations/uploadService.messagingJobs';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
@@ -406,6 +407,35 @@ function schedulePlaidSync(): void {
   cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
 }
 
+function scheduleGranolaSync(): void {
+  const cronLog = createLogger('Cron');
+  if (process.env.DISABLE_GRANOLA_SYNC === '1') {
+    cronLog.info('Granola sync disabled by DISABLE_GRANOLA_SYNC');
+    return;
+  }
+  // Each user's run is claimed with FOR UPDATE SKIP LOCKED (granolaSync.ts);
+  // this guard only stops one process stacking ticks.
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runGranolaSyncJob()
+      .then((claimed) => {
+        if (claimed > 0) cronLog.info('Granola sync tick', { claimed });
+      })
+      .catch((err) => {
+        cronLog.error('Granola sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  cron.schedule('*/5 * * * *', run);
+  cronLog.info('Granola sync scheduled (every 5 minutes)');
+}
+
 function schedulePurchaseHoldReconcile(): void {
   if (process.env.DISABLE_PURCHASE_HOLD_RECONCILE === '1') {
     createLogger('Cron').info(
@@ -589,6 +619,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleGoogleDataPurge();
   scheduleMessagingUploadJobs();
   schedulePlaidSync();
+  scheduleGranolaSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
   reportCoinbaseFiatRailDisabled();

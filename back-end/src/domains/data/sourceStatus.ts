@@ -23,6 +23,10 @@ const DOCUMENT_PROVIDER_CONNECTORS: Record<string, string> = {
   claude: 'claude',
   apple_notes: 'apple_notes',
   obsidian: 'obsidian',
+  granola: 'granola',
+  granola_note: 'granola',
+  granola_summary: 'granola',
+  granola_transcript: 'granola',
 };
 
 function connectorForSource(rawSource: string): string | null {
