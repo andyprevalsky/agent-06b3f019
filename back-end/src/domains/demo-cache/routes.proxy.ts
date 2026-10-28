@@ -12,6 +12,7 @@ import {
 } from '../../providers/codexProxyCore';
 import { verifyProxyTraceParam } from '../../providers/codeAgentFastModeEnv';
 import { createLogger } from '../../providers/logger';
+import { sharedTraceOrdinalReserver } from '../../providers/traceOrdinalShared';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { FAST_MODE_ANTHROPIC_UPSTREAM, FAST_MODE_CODEX_UPSTREAM } from './config';
 import { verifyDemoCacheWriteCapability } from './accountPolicy';
@@ -152,6 +153,13 @@ function verifiedTraceSegment(res: Response): string {
   return res.locals.traceSegment as string;
 }
 
+/**
+ * Call ordinals come from one Postgres sequence per trace session, so a
+ * session's calls landing on different backend instances still record and
+ * replay consecutive slots (S25).
+ */
+export const PROXY_ORDINAL_RESERVER = sharedTraceOrdinalReserver;
+
 export const anthropicProxyRouter = Router();
 anthropicProxyRouter.use('/:traceParam', requireProxyCapability);
 
@@ -161,7 +169,12 @@ async function handleAnthropic(req: Request, res: Response, mode: ProxyMode): Pr
     trace.traceHash,
     req.body,
     anthropicHeaders(req),
-    { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
+    {
+      cacheGet,
+      cacheSet,
+      fetchUpstream: fetchAnthropicUpstream,
+      reserveOrdinal: PROXY_ORDINAL_RESERVER,
+    },
     mode.readEnabled,
     { sessionId: trace.sessionId, writeEnabled: mode.writeEnabled }
   );
@@ -218,7 +231,12 @@ codexProxyRouter.use(
       pathAndQuery,
       req.body,
       codexHeaders(req),
-      { cacheGet, cacheSet, fetchUpstream: fetchCodexUpstream },
+      {
+        cacheGet,
+        cacheSet,
+        fetchUpstream: fetchCodexUpstream,
+        reserveOrdinal: PROXY_ORDINAL_RESERVER,
+      },
       resolvedPath.readEnabled,
       { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
     );

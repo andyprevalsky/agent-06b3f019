@@ -7,7 +7,6 @@
 import { createContext, useContext } from 'react';
 import type { BrowserSessionMetadata } from '../browser-status-bar/types';
 import type { Agent } from '../../hooks';
-import type { AgentDisplayEntry } from './agentDisplayEntries';
 
 /**
  * Everything that opens in the right-panel slot (one at a time):
@@ -17,7 +16,6 @@ import type { AgentDisplayEntry } from './agentDisplayEntries';
  */
 export type RoseApp =
   | 'browser'
-  | 'display'
   | 'validation'
   | 'phone'
   | 'integrations'
@@ -44,13 +42,10 @@ export interface RoseAppsValue {
   openApp: RoseApp | null;
   browserMode: 'local' | 'remote';
   setBrowserMode: (mode: 'local' | 'remote') => void;
-  displayEntries: AgentDisplayEntry[];
-  displaySelection: { agentId: string; id: string } | null;
-  registerDisplays: (entries: AgentDisplayEntry[]) => void;
-  selectDisplay: (selection: { agentId: string; id: string }) => void;
-  openAgentDisplay: (agentId: string, id: string) => void;
-  /** null = Root tab. */
+  /** null = Root tab (or NO_SESSION for a selected agent unless Root was chosen). */
   browserTabAgentId: string | null;
+  /** The user explicitly clicked Root; a selected agent's missing tab never falls back to it. */
+  browserRootChosen: boolean;
   browserTabTaskId: string | null;
   tabs: AgentBrowserTab[];
   agents: Agent[];

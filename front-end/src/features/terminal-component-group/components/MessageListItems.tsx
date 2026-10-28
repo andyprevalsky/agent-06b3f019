@@ -270,13 +270,14 @@ export function MessageListItems({
   ...itemProps
 }: MessageListItemsProps) {
   const roseDesktop = useRoseDesktop();
-  const { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups } =
-    useMessageListProjection({
+  const { visibleMessages, displayGrouping, localExchanges, workGroups } = useMessageListProjection(
+    {
       ...itemProps,
       filteredMessages,
       groupAgentMessages: itemProps.groupAgentMessages ?? false,
       compressWork: itemProps.compressWork ?? false,
-    });
+    },
+  );
   const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
   return visibleMessages.map((message) => {
     if (roseDesktop && isHiddenTrajectoryRow(message)) return null;
@@ -314,7 +315,6 @@ export function MessageListItems({
           key={message.message_id}
           message={message}
           items={displayItems}
-          onOpen={openDisplay ? () => openDisplay(message) : undefined}
           agentId={itemProps.selectedAgentId || undefined}
           shouldType={message.message_id === itemProps.currentAnimatingId}
           onTypingComplete={itemProps.onAnimationComplete}

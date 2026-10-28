@@ -30,7 +30,7 @@
 
 import { useHoverOpen } from './useHoverOpen';
 import { useQuery } from '@tanstack/react-query';
-import { Globe, Monitor, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
+import { Globe, Moon, Plug, Smartphone, Sun, type LucideIcon } from 'lucide-react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRoseTheme } from '@/features/rose-theme';
@@ -57,7 +57,6 @@ function IconButton({
   onHover,
   tooltip = label,
   alertDot = false,
-  glowing = false,
   size,
 }: {
   testId: string;
@@ -69,7 +68,6 @@ function IconButton({
   onHover?: () => void;
   tooltip?: string;
   alertDot?: boolean;
-  glowing?: boolean;
   size: number;
 }) {
   const hover = useHoverOpen(onHover);
@@ -83,7 +81,6 @@ function IconButton({
           data-testid={testId}
           aria-label={label}
           aria-pressed={pressed}
-          data-displaying={glowing || undefined}
           onPointerEnter={hover.enter}
           onPointerLeave={hover.cancel}
           onPointerDown={hover.cancel}
@@ -92,14 +89,7 @@ function IconButton({
             onClick();
           }}
           className="relative grid flex-none cursor-pointer place-items-center focus-visible:outline-none"
-          style={{
-            width: size,
-            height: size,
-            color,
-            filter: glowing
-              ? 'drop-shadow(0 0 5px #9cddff) drop-shadow(0 0 11px #83cfff80)'
-              : undefined,
-          }}
+          style={{ width: size, height: size, color }}
         >
           <Icon className="h-[21px] w-[21px]" strokeWidth={1.7} />
           {alertDot && (
@@ -125,7 +115,6 @@ function IconButton({
 }
 
 const APPS: { app: RoseApp; label: string; icon: LucideIcon }[] = [
-  { app: 'display', label: 'Agent Display', icon: Monitor },
   { app: 'browser', label: 'Browser', icon: Globe },
   { app: 'phone', label: 'Phone', icon: Smartphone },
   { app: 'integrations', label: 'Integrations', icon: Plug },
@@ -163,7 +152,6 @@ export function RoseAppIcons({ placement = 'corner' }: { placement?: 'corner' | 
         apps={apps}
         isDark={theme.isDark}
         onToggleTheme={theme.toggle}
-        showDisplay={!header}
         size={header ? HEADER_ICON_SIZE : APP_ICON_SIZE}
       />
     </nav>
@@ -175,36 +163,24 @@ function AppIconButtons({
   isDark,
   onToggleTheme,
   size,
-  showDisplay,
 }: {
-  showDisplay: boolean;
   apps: NonNullable<ReturnType<typeof useRoseApps>>;
   isDark: boolean;
   onToggleTheme: () => void;
   size: number;
 }) {
   const reconnect = useReconnectNeeded();
-  const hasDisplay = apps.displayEntries.some(
-    (entry) => entry.agentId === apps.selectedAgentId && entry.items.length > 0,
-  );
   const idle = isDark ? IDLE_COLOR_DARK : IDLE_COLOR;
   return (
     <>
-      {APPS.filter(({ app }) => showDisplay || app !== 'display').map(({ app, label, icon }) => (
+      {APPS.map(({ app, label, icon }) => (
         <IconButton
           key={app}
           testId={`rose-app-${app}`}
           label={label}
           icon={icon}
           pressed={apps.openApp === app}
-          color={
-            app === 'display' && hasDisplay
-              ? '#9cddff'
-              : apps.openApp === app
-                ? APP_ACTIVE_COLOR
-                : idle
-          }
-          glowing={app === 'display' && hasDisplay}
+          color={apps.openApp === app ? APP_ACTIVE_COLOR : idle}
           onClick={() => apps.toggleApp(app)}
           onHover={() => {
             if (apps.openApp !== app) apps.toggleApp(app);
