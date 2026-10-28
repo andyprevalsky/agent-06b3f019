@@ -345,7 +345,7 @@ fi
 
 ## Step 0p: Prompt human-approval guard (no skip — always runs)
 
-Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
+Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before the deploy merges.** Steps 0p, 0b and 0c run together once at the source freeze and deliver one batched approval packet while the gates keep running (see **Source freeze: batched approvals and first review push** below); "stop" in these steps means hold the merge, not the test lanes. This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
 
 **MANDATORY for EVERY human-approval request in this deploy (Step 0p, Step 0b, Step 0c, and any other escalation): link the file(s) under review.** Whenever you stop for human approval, present each affected item as a clickable `repo-relative/path:line` reference — one per file/hunk — so the human can open and read the exact code before approving. Pasting a snippet is not enough on its own; the link is required. An approval request without file:line links is incomplete — do not ask for approval until you have listed the precise files + line ranges to review.
 
@@ -425,10 +425,14 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
-2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once. Mutators run first so the approved bytes are the bytes that ship.
+2. **Source freeze: batched approvals and first review push** (below). Steps
+   0p, 0b and 0c run together on the frozen commit; one golden-reference review
+   and, unless it returns `GROUNDED`, one batched human packet cover every
+   approval-scoped hunk. The push that opens the PR (initial CodeRabbit review)
+   and the PR-time worker-image prebuild happen at the same moment. Group 3
+   starts immediately; approvals and review proceed in parallel with it and
+   Group 4. Only Phase 3 (merge) waits for the decision.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
    budgets computed above, except for the Step 4cb ordering rule below). Every repository
@@ -486,6 +490,82 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    unions it only once in Group 3 wall clock.
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
+
+### Source freeze: batched approvals and first review push
+
+Run this once per frozen snapshot, immediately after the mutator commit:
+
+```bash
+FREEZE_SHA=$(git rev-parse HEAD)
+python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"
+```
+
+It runs the Step 0p, 0b and 0c guards without the approval flag, records a
+per-file digest of exactly the approval-scoped diff in
+`.context/deploy-approval-batch.json`, and writes the one combined diff to
+`.context/deploy-approval-batch.diff`. Classify the flagged hunks as Steps 0p/0b/0c
+describe (code-behavior-only prompt-guard hunks pass without a human, exactly
+as before). For the remaining approval-scoped hunks, run **one**
+golden-reference review over all of them together. `GROUNDED` →
+`python3 scripts/deploy_approval_batch.py decide --decision grounded --evidence "<approval-id> reviewer <agent-id>"`.
+Otherwise send **one** batched packet in the canonical approval format that pastes
+the complete combined diff inline, and run
+`python3 scripts/record_factory_event.py deploy approval-request combined`
+immediately before it. Deliver it as the final message of the current turn,
+after Group 3 is running in the background with its event waiter (below)
+armed: boxes.dev sends the user a push notification when a turn ends, and the
+waiter's exit or the user's reply resumes the deploy. Hold a bounded
+`dvb-onbox devboxes keep-awake set` for the wait and cancel it by `holdId`.
+Never pause gates for the answer. Record the answer with
+`record_factory_event.py deploy approval-decision approved|rejected` and
+`deploy_approval_batch.py decide --decision approved|rejected --evidence "<user message>"`.
+
+Before Phase 3 (and again right before Step 12) prove the approval still
+covers the bytes being merged:
+
+```bash
+python3 scripts/deploy_approval_batch.py check
+```
+
+Exit 0 (`clear` or `covered`) → rerun each guard named in `guards_to_flag` with
+`mandatory-human-approval-retrieved=true` and record its row. Exit 3 → the
+decision is still pending; keep the merge held. Exit 1 → `re-request`: a
+post-freeze fix changed or added an approval-scoped hunk (or the user
+rejected). Freeze the new snapshot and send a fresh packet for **only** those
+files; approval is snapshot-scoped exactly as Steps 0p/0b/0c state. Post-freeze
+edits outside approval scope never re-request.
+
+At the same freeze, start the first review: commit everything intended, then
+run the Step 4d push block (ledger `start --reset --kind initial`, factory
+`stage-start code-review`, push, open the PR). Opening the PR starts both the
+initial CodeRabbit review and, for agents changes, the
+`prebuild-agents-image.yml` worker-image build. The review then overlaps Group 3
+instead of starting after it. Step 9's racing waiter runs in the background
+alongside the gates. If a Group 3 lane later needs a fix, follow the existing
+"do not push while a review cycle is open" rule: let the cycle finish, batch
+the gate fixes and review findings, and push once; the incremental cycle
+reviews them.
+
+### Event-driven gate waits
+
+Launch each long lane as `bash scripts/run-deploy-stage <stage> -- <command>`
+with the Bash tool's `run_in_background`. Before launching a group, capture
+`GROUP_SINCE=$(date +%s.%N)`. Then arm one waiter, also in the background:
+
+```bash
+bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE" --timeout 540 \
+  --stall-seconds 900 <stage> [<stage> ...]
+```
+
+The harness wakes the agent when it exits: `0` all named stages passed; `1`
+the first failure (exit immediately; the other lanes keep running and are
+never cancelled); `3` a runner died without its finish receipt; `4` a lane's
+log has not grown for `--stall-seconds`; `124` healthy lanes still running
+(inspect, then re-arm). It reads the runner's own admission and atomic
+`stages.jsonl` receipts, so it wakes within ~0.2 s instead of up to one 60 s
+poll interval, and it doubles as the rule-19 liveness/output-growth owner after
+the first 60 s (keep the 10 s early-death checks during that first minute).
+Smoke, semantic, AgentCard and E2B lanes in Group 4 use the same pattern.
 
 ## Step 1: Prettier format
 
@@ -637,6 +717,9 @@ their assertions or test counts:
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/deploy-stage-wait.test.py`,
+`python3 scripts/tests/deploy-approval-batch.test.py`,
+`bash scripts/tests/prebuild-agents-image.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
@@ -1096,8 +1179,10 @@ bash scripts/kill-services.sh                    # kills run.sh tree, preserves 
 
 ## Step 4d: Open the PR and launch parallel Group 4
 
-The read-only static, coverage, and runtime-blackbox lanes in Group 3 are now
-green. Commit all intended files. CodeRabbit automatically reviews a new PR
+The push block below normally already ran at the source freeze (before Group 3),
+so the review has been running alongside Group 3. Run it here only when this
+snapshot has not been pushed yet (for example, after a Test Loop restart that
+froze a new snapshot). CodeRabbit automatically reviews a new PR
 once, but `.coderabbit.yaml` deliberately disables review-on-every-push. `/deploy`
 owns every later review request so intermediate gate fixes cannot create an
 unbounded reviewer loop.
@@ -1122,10 +1207,10 @@ review finish, collect all Group 4 results, and batch every valid review/gate
 fix into one stabilization pass. This keeps the PR HEAD immutable while the
 exact-HEAD waiter is running.
 
-Immediately after the PR exists, launch all applicable Group 4 lanes together
+Once Group 3 is green and the PR exists, launch all applicable Group 4 lanes together
 in one assistant message with separate parallel Bash tool calls:
 
-1. Code review polling (Step 9).
+1. Code review racing waiter (Step 9; already running since the freeze push).
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
 3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
 4. Semantic tests (Step 6b; never skip).
@@ -1227,7 +1312,7 @@ Timeout history remains catalog-driven on the checked-out ref. Do not fabricate 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
 
 - **First 60 seconds:** poll every **10 seconds** (catches silent early deaths — 0-byte logs, missing-env crashes, queue-routing bugs)
-- **After 60 seconds:** poll every **60 seconds**
+- **After 60 seconds:** block on the event waiter (`bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE" --stall-seconds 900 smoke`, see **Event-driven gate waits**), which wakes on completion, the first failure, a dead runner or a silent stall; do the checks below at each wake. Only a lane not launched through `run-deploy-stage` falls back to polling every **60 seconds**
 - **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (`LOCAL_SMOKE_EXIT=`, the "RESULTS:" line, PID no longer running), stop polling and move on.
 
 At each poll, check:
@@ -1769,8 +1854,30 @@ if [ "$REVIEW_KIND_OPEN" = initial ]; then
   GRAPHIDE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr comment "$PR_NUMBER" --body '@graphide-review review' >/dev/null 2>&1 || GRAPHIDE_TS=""
 fi
-bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --timeout 600 --poll 5
+REVIEW_RACE=$(bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" \
+  --timeout 2400 --poll 5 --race-fallback-after 600)
+printf '%s\n' "$REVIEW_RACE"
 ```
+
+Run it with `run_in_background` (it starts at the freeze push and overlaps
+Group 3/4). **Race:** if CodeRabbit has no valid review within 600 s, or ends
+unsuccessfully earlier (quota, skip, failure), the waiter toggles the
+`claude-review-fallback` label exactly once (the Step 9a trigger) and keeps
+watching both; the first valid review on `REVIEW_HEAD` wins. The fallback stays
+inside the open cycle, so the bounded `deploy_review_cycle.py` state machine is
+unchanged. Its JSON names the `reviewer` (`coderabbit` or `claude-fallback`),
+`fallback_triggered_at` and `fallback_run_id`:
+
+- `coderabbit` → apply the Step 9a substantive-review check. If it is not
+  substantive and no fallback ran yet, trigger it per Step 9a.
+- `claude-fallback` → the fallback workflow already succeeded for this exact
+  HEAD. Read the three endpoints filtered at `fallback_triggered_at` (this is
+  `FALLBACK_TS`) and continue at Step 10; do not toggle the label again.
+- exit 1 (`reviewer: none`) → both ended without a valid review; use
+  `fallback_run_id` for Step 9a's repairable vs. usage-exhaustion decision.
+
+A fallback still running when CodeRabbit wins is not awaited; fold in its
+findings only if they land before the Step 10 classification.
 
 This fails if the PR HEAD changes while waiting, preventing an older success
 from satisfying the gate. **A green check alone does not prove a substantive
@@ -2079,6 +2186,7 @@ if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
   exit 1
 fi
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
+python3 scripts/deploy_approval_batch.py check  # 0 = clear/covered; 1/3 hold the merge
 ```
 
 Immediately before merging, start the production-verification lifecycle:
@@ -2130,6 +2238,27 @@ no finish event and leaves the aggregate production lifecycle incomplete:
 - Render: `deploy production-start render` → exact-SHA live poll → `deploy production-finish render`
 - Vercel: `deploy production-start vercel` → exact-SHA deployment poll → `deploy production-finish vercel`
 - Mac: `deploy production-start mac-release` → `release-mac-app.yml` watch → `deploy production-finish mac-release`
+
+**Prebuilt worker image.** For agents changes, `prebuild-agents-image.yml`
+built `registry.fly.io/<app>:prebuilt-<agents tree>` on the PR head during the
+gates. The cutover promotes it by digest when the merge commit's `agents/` tree
+is identical (log line `Promoting prebuilt worker image`) and otherwise builds
+exactly as before. Confirm the prebuild run for the final PR HEAD succeeded
+before merge when it is still running; a missing or failed prebuild only costs
+the old build time, never correctness.
+
+**Mac release is a non-blocking post-merge canary.** Start its watch with
+`run_in_background` and do not hold `production-verify`, Step 13b or the
+final handoff on it. When it finishes, record `production-finish mac-release`
+on success. On failure, report it in SHIPPED WITH as `▲ mac-release canary
+failed <run>` and fix it forward through the normal RCA/deploy loop; the
+signed Mac build is not a gate for the web/worker release.
+
+**Post-Render checks run in parallel.** As soon as Render serves the merged
+SHA (Step 13a step 1), launch the Step 13a functional probes and log scan,
+Step 13b production semantics (once Vercel/Fly surfaces it exercises are also
+live) and Step 13c in separate parallel tool calls. Each remains a hard gate
+except the Mac canary above; a red probe still blocks completion.
 
 Prefix each marker above with
 `python3 scripts/record_factory_event.py`. For example, the full Fly start is
@@ -2580,8 +2709,9 @@ task FAIL is reported, not retried into a pass.
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 
 After the changed runtime surfaces exercised by semantics are live (Fly,
-Render, and/or Vercel) and Step 13a is green when applicable, dispatch the
-trusted production semantic workflow. Do not wait for the independent Mac release lane;
+Render, and/or Vercel), dispatch the trusted production semantic workflow
+concurrently with the Step 13a probes; a red Step 13a probe still blocks
+completion. Do not wait for the independent Mac release lane;
 keep it running concurrently. This runs every frontend semantic
 spec in one job with four Playwright workers and one shared authenticated
 session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
@@ -2692,9 +2822,10 @@ another live card or require a human-saved live Stripe card merely to replace
 that waived result. If the process was forcibly killed, recover the printed
 agent's execution/browser resources before assessing the financial exception.
 
-After every applicable production deployment, health, semantic, release, and
-AgentCard gate has passed or has this explicitly permitted warning skip, close
-the production-verification lifecycle:
+After every applicable production deployment, health, semantic, and AgentCard
+gate has passed or has this explicitly permitted warning skip, close the
+production-verification lifecycle. The Mac release is a non-blocking canary
+(Step 13) and is reported separately:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish production-verify

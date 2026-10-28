@@ -1,0 +1,41 @@
+name: Prebuild Agents Image
+
+# Build the worker image for a PR's exact agents tree while the /deploy gates
+# run, so the post-merge cooperative cutover promotes it by digest instead of
+# rebuilding (scripts/prebuild-agents-image.sh). Build-only + push: no Fly
+# Machine is created and no release changes. A later agents change on main
+# changes the tree hash, so the cutover then builds as before.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - "agents/**"
+      - "!agents/tests/**"
+      - "!agents/benchmarks/**"
+      - "!agents/**/*.md"
+      - "scripts/prebuild-agents-image.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prebuild-agents-image-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prebuild:
+    # Same-repository PRs only: fork PRs never receive the Fly token.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Build and push prebuilt-<agents tree>
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/prebuild-agents-image.sh build --sha "$HEAD_SHA"
