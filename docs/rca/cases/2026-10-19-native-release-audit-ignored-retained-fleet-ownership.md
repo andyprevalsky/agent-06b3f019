@@ -239,3 +239,29 @@ predicate and the original leased fenced native destroy intent/ack writer.
 Current full-admission closure still requires a fresh canonical execution with a
 new private plan directory; prior failed plans and diagnostics stay immutable.
 No historical runtime, grade or epoch claim changes.
+
+### I30 reporting consumer follow-through
+
+The canonical owner operation later produced projection
+f8a525507ed0d8021dfd2c38503796cba3fd305ccb3864c3a67c5c1d9dd4fcd8:
+92 terminal subjects, with all_resources_absent=false. The worker verified
+projection bytes and flags; the launch owner performed the native reads. The
+original historical card still selected an exact-owner recovery action because
+its reader only consumed the original failed native audit.
+
+The reporting follow-up displays a separate as-of physical closure and preserves
+39/40 historical release, 38/40 lifecycle, INCOMPLETE, INFRA and unsealed runtime
+evidence. Missing or invalid proof retains the old action. The first reader
+draft was NOT_GROUNDED: deleting a changed writer-join input from a supplied map
+could hide that mutation. Final review requires the actual canonical prepare and
+full-scope validators plus exact required input/binding equality; no duplicate
+partial authority validator is trusted. The permanent control reproduces five
+wrong acceptances on the rejected reader and rejects them in the final source.
+
+Independent final exact three-path review GROUNDED patch SHA256
+91054bc1e1ef1bd20a8e8f91fc68f80d340c910878197388867c103eefdb82b5.
+Post-application gates passed 16 closure/reporting controls, all 50 scorecard
+controls including I29, 12 archived-stop tests and 14 runner self-tests. Actual
+full-case read-only reader replay and local render latency remain pending the
+launch owner before integration. Active campaign source was not changed. The
+reader makes no native calls; historical release and runtime claims stay false.

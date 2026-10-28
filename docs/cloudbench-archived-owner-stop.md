@@ -154,3 +154,24 @@ those exact inputs. Never edit an old plan to make it reusable. A native body
 validation refusal retains a bounded raw response in a private 0600
 `forensic-native-refusal-*.json`; its error exposes only subject, HTTP status and
 an allowlisted state. Raw configs remain private.
+
+### Scorecard reporting of recorded physical closure
+
+A sharded admission card can display a separate **Physical resources terminal
+(as of)** row from the canonical forensic projection. The reader makes no native
+requests: it verifies content-bound projection/observation bytes, original audit,
+complete canonical input set, original joined-writer/export relationships and
+full subject identity using the same prepare/full-scope/terminal validators.
+Missing, modified, foreign or incomplete proof keeps the original recovery action.
+
+An authenticated as-of row suppresses only the obsolete physical recovery action.
+Historical guest-release evidence, counts, runtime gaps, INFRA and the original
+observation/end clocks remain unchanged. INCOMPLETE may remain the correct card
+state. Terminal provider-retained objects are not labelled absent, and an as-of
+observation does not certify future provider state.
+
+Revalidation streams pinned local files and parses the original archives; its
+local cost grows with archive bytes and subjects. Keep original private inputs
+reachable. This introduces no render-time provider fanout. Validate a new reader
+from an isolated source snapshot and write its card only to a new private output
+directory; do not replace an active campaign checkout or original artifacts.

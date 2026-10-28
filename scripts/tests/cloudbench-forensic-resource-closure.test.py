@@ -150,6 +150,100 @@ class Forensic(OLD['ArchivedStop']):
         del self.members[ack];self.reseal(self.members)
         with self.assertRaises((ValueError,KeyError)):F['prepare'](self.run,self.inventory,'b'*32)
 
+    def reporting_card(self):
+        card=runpy.run_path(str(ROOT/'scripts/cloudbench-scorecard.py'))
+        audit=json.loads((self.admission/'native-release-audit.json').read_bytes())
+        report_path=ROOT/'scripts/cloudbench-resource-closure-report.py'
+        closure=runpy.run_path(str(report_path))['load'](self.admission,audit) if report_path.exists() else None
+        row=dict(task='BU027',status='failed',task_status='INFRA_ERROR',infra_failure=True,released=False,lifecycle=False)
+        (self.admission/'coordination.json').write_text(json.dumps(dict(controllers=1,finished_at=1,released_at=1,scheduled_total=40,shards={'0':{'out':str(self.admission/'shard-00/run')}})))
+        (self.admission/'result.json').write_text(json.dumps(dict(jobs=[dict(task='other-'+str(i),status='passed',task_status='PASSED',infra_failure=False,released=True,lifecycle=i<38) for i in range(39)]+[row],hub_group_final_published=True)))
+        exp=card['load_sharded'](self.admission,deep=False)
+        return exp,card['_issues'](exp)
+
+    def test_reporting_asof_closure_removes_only_obsolete_recovery_action(self):
+        receipt=self.closure_receipt();api,_=self.exact_api()
+        F['reconcile'](self.admission,receipt,api)
+        exp,issues=self.reporting_card()
+        self.assertTrue(exp.get('physical_closure_asof'), 'Canonical physical closure is lost before card action selection')
+        self.assertEqual(exp['released'],{'yes':39,'of':40})
+        self.assertEqual(exp['lifecycle_verified'],{'yes':38,'of':40})
+        self.assertEqual(exp['state'],'INCOMPLETE')
+        self.assertEqual(exp['outcomes']['INFRA'],1)
+        self.assertFalse(any('exact-owner' in x['action'] for x in issues),'Card still instructs redundant physical recovery')
+        self.assertTrue(any('historical' in x['action'].lower() for x in issues))
+        self.assertTrue(any(x['label']=='Physical resources terminal (as of)' for x in exp['lifecycle']))
+        self.assertEqual((self.admission/'native-release-audit.json').read_bytes(),self.original_bytes)
+
+    def test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action(self):
+        exp,issues=self.reporting_card()
+        self.assertFalse(exp.get('physical_closure_asof'))
+        self.assertTrue(any('exact-owner' in x['action'] for x in issues))
+        receipt=self.closure_receipt();api,_=self.exact_api();F['reconcile'](self.admission,receipt,api)
+        projection=next(self.admission.glob('forensic-release-projection-*.json'))
+        original=json.loads(projection.read_bytes());projection.unlink()
+        for key,value in [('original_audit_sha256','f'*64),('scope','foreign-admission'),
+                          ('checked_subjects',original['checked_subjects'][:-1]),('observed_at',float('inf')),('observed_at',__import__('time').time()+3600),
+                          ('claims_released',True),('verified_exports',2),('observation','/missing/foreign.json')]:
+            with self.subTest(key=key):
+                changed=dict(original,**{key:value});encoded=json.dumps(changed,sort_keys=True,separators=(',',':')).encode()
+                wrong=self.admission/('forensic-release-projection-'+hashlib.sha256(encoded).hexdigest()+'.json')
+                wrong.write_bytes(encoded);wrong.chmod(0o600)
+                exp,issues=self.reporting_card()
+                self.assertFalse(exp.get('physical_closure_asof'))
+                self.assertTrue(any('exact-owner' in x['action'] for x in issues))
+                wrong.unlink()
+        observation_path=Path(original['observation']);observed=json.loads(observation_path.read_bytes())
+        for changed in [dict(observed,terminal=observed['terminal'][:-1]),dict(observed,app='foreign-app'),
+                        dict(observed,source_ref='f'*40),dict(observed,current_native_audit=dict(observed['current_native_audit'],retained_owners=['f'*32]))]:
+            encoded=json.dumps(changed,sort_keys=True,separators=(',',':')).encode()
+            changed_path=self.admission/('current-resource-observation-'+hashlib.sha256(encoded).hexdigest()+'.json')
+            changed_path.write_bytes(encoded);changed_path.chmod(0o600)
+            value=dict(original,observation=str(changed_path),observation_sha256=hashlib.sha256(encoded).hexdigest())
+            encoded=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+            changed_projection=self.admission/('forensic-release-projection-'+hashlib.sha256(encoded).hexdigest()+'.json')
+            changed_projection.write_bytes(encoded);changed_projection.chmod(0o600)
+            exp,issues=self.reporting_card();self.assertFalse(exp.get('physical_closure_asof'))
+            self.assertTrue(any('exact-owner' in x['action'] for x in issues))
+            changed_projection.unlink();changed_path.unlink()
+        # An unchanged receipt cannot conceal mutation of an original pinned input.
+        canonical=json.dumps(original,sort_keys=True,separators=(',',':')).encode()
+        projection.write_bytes(canonical);projection.chmod(0o600)
+        inventory_bytes=self.inventory.read_bytes();self.inventory.write_bytes(inventory_bytes+b' ')
+        exp,_=self.reporting_card();self.assertFalse(exp.get('physical_closure_asof'))
+        self.inventory.write_bytes(inventory_bytes);projection.unlink()
+        projection.write_text(json.dumps(original));projection.chmod(0o600)
+        exp,_=self.reporting_card();self.assertFalse(exp.get('physical_closure_asof'),'Replaced bytes retained filename-only trust')
+
+    def test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse(self):
+        receipt=self.closure_receipt();api,_=self.exact_api();F['reconcile'](self.admission,receipt,api)
+        projection=next(self.admission.glob('forensic-release-projection-*.json'))
+        original=json.loads(projection.read_bytes());projection.unlink()
+        observation_path=Path(original['observation']);original_observation=json.loads(observation_path.read_bytes())
+        inputs=original_observation['export_inputs']
+        for suffix in ('cleanup-call.intent.json','authority.private.json','terminal.json','inventory.json','cleanup-kept.json'):
+            with self.subTest(suffix=suffix):
+                filename=next(name for name in inputs if name.endswith('cleanup-call.intent.json' if suffix=='cleanup-kept.json' else suffix)) if suffix!='inventory.json' else str(self.inventory)
+                path=Path(filename);saved=path.read_bytes()
+                if suffix in ('cleanup-call.intent.json','cleanup-kept.json'):
+                    changed=json.loads(saved);changed['supervisor_joined']=False;path.write_text(json.dumps(changed))
+                else:path.write_bytes(b'{}')
+                changed_inputs={k:v for k,v in inputs.items() if k!=filename}
+                if suffix=='cleanup-kept.json':changed_inputs[filename]=hashlib.sha256(path.read_bytes()).hexdigest()
+                changed=dict(original_observation,export_inputs=changed_inputs)
+                encoded=json.dumps(changed,sort_keys=True,separators=(',',':')).encode()
+                observation=self.admission/('current-resource-observation-'+hashlib.sha256(encoded).hexdigest()+'.json')
+                observation.write_bytes(encoded);observation.chmod(0o600)
+                changed=dict(original,observation=str(observation),observation_sha256=hashlib.sha256(encoded).hexdigest())
+                encoded=json.dumps(changed,sort_keys=True,separators=(',',':')).encode()
+                bad=self.admission/('forensic-release-projection-'+hashlib.sha256(encoded).hexdigest()+'.json')
+                bad.write_bytes(encoded);bad.chmod(0o600)
+                try:
+                    exp,issues=self.reporting_card()
+                    self.assertFalse(exp.get('physical_closure_asof'),'Omitted altered original authority still suppresses recovery action')
+                    self.assertTrue(any('exact-owner' in x['action'] for x in issues))
+                finally:path.write_bytes(saved);bad.unlink();observation.unlink()
+
     # Do not inherit the unrelated previous stop suite's cases in this extension.
     def test_exact_absence_reconciles_without_rewriting_failed_original(self):
         if F is None:
@@ -405,6 +499,6 @@ class Forensic(OLD['ArchivedStop']):
 # Select only this extension's controls rather than inherited stop controls.
 if __name__=='__main__':
     import sys
-    names=sys.argv[1:] or ('test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
+    names=sys.argv[1:] or ('test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
     suite=unittest.TestSuite(Forensic(name) for name in names)
     raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

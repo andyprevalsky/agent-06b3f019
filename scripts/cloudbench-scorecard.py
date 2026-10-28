@@ -21,6 +21,7 @@ import html
 import json
 import math
 import re
+import runpy
 import shlex
 import sys
 import tarfile
@@ -697,7 +698,7 @@ def started_terminal(row) -> bool:
                                                and not row.get("attempts") and row.get("started_at") is None)
 
 
-def _job_lifecycle(exp, audit=None, finished_after=None):
+def _job_lifecycle(exp, audit=None, finished_after=None, physical_closure=None):
     rows = exp["rows"]
     terminal = [r for r in rows if started_terminal(r)]
     if not terminal:
@@ -713,13 +714,19 @@ def _job_lifecycle(exp, audit=None, finished_after=None):
               and (not finished_after or (audit.get("observed_at") or 0) >= finished_after))
     lingering = (audit["present"] + (audit.get("present_volumes") or [])) if usable else []
     retained = (audit.get("retained_owners") or []) if usable else []
+    if physical_closure:
+        exp["physical_closure_asof"] = physical_closure
+        lifecycle_item(exp, "ok", "Physical resources terminal (as of)",
+            f"{pacific(physical_closure['observed_at'])}: {physical_closure['subjects']} subjects; "
+            + ("all absent" if physical_closure["all_resources_absent"] else "provider-retained terminal objects; not all absent")
+            + "; historical runtime evidence unchanged")
     if usable and (lingering or retained):
         detail = []
         if lingering:
             detail.append(f"still present: {', '.join(str(m.get('name') or m.get('id')) for m in lingering[:4])}")
         if retained:
             detail.append(f"retained owners: {', '.join(token[:12] for token in retained[:4])}")
-        lifecycle_item(exp, "fail", "Guests released (native audit)", " · ".join(detail))
+        lifecycle_item(exp, "fail", "Historical guest release evidence (native audit)" if physical_closure else "Guests released (native audit)", " · ".join(detail), issue=not bool(physical_closure))
     elif usable and audit.get("released") is False:
         # Nothing listed, but the audit did not check every shard's export.
         lifecycle_item(exp, "warn", "Guests released (native audit incomplete)",
@@ -884,7 +891,10 @@ def load_sharded(run_dir: Path, deep: bool = True, raw: bool = False) -> dict:
     elif exp.get("never_started"):
         lifecycle_item(exp, "ok", "No task started", f"barrier ABORT delivered to {len(outs)}/{controllers} shards; never released")
     else:
-        _job_lifecycle(exp, read_json(run_dir / "native-release-audit.json"), finished_after=coordination.get("finished_at"))
+        audit = read_json(run_dir / "native-release-audit.json")
+        closure = runpy.run_path(str(HERE / "cloudbench-resource-closure-report.py"))["load"](
+            run_dir, audit, coordination.get("finished_at")) if isinstance(audit, dict) else None
+        _job_lifecycle(exp, audit, finished_after=coordination.get("finished_at"), physical_closure=closure)
     statuses_seen = sorted({t.get("status") if t.get("status") != "CANONICAL_RELEASE_RECEIPT" else
                             "canonical release receipts (volume " + t["volume_disposition"] + ")" for t in released})
     lifecycle_item(exp, "ok" if len(released) == controllers else "fail" if failed else "pending",
@@ -1192,10 +1202,13 @@ def _issues(exp: dict) -> list[dict]:
         out.append({"severity": "amber", "text": "No recorded task result: "
                     + ", ".join(job or "job ID UNRECORDED" for job in exp["unknown_jobs"]) + ".",
                     "owner": "parent", "action": "/RCA from the job log and controller receipts"})
-    if exp.get("unreleased_jobs") and not exp.get("native_audit"):
+    if exp.get("unreleased_jobs") and not exp.get("native_audit") and not exp.get("physical_closure_asof"):
         out.append({"severity": "amber", "text": "Release unverified: "
                     + ", ".join(job or "job ID UNRECORDED" for job in exp["unreleased_jobs"]) + ".",
                     "owner": "parent", "action": "native exact-owner audit before the next launch"})
+    if exp.get("physical_closure_asof"):
+        out.append({"severity": "amber", "text": "Historical release/runtime evidence remains incomplete; separate physical closure is recorded as of its observation clock.",
+                    "owner": "parent", "action": "retain original INFRA, runtime capture gaps and historical release counts; no historical success credit"})
     for item in exp["lifecycle"]:
         if item["state"] == "fail" and item.get("issue", True):
             out.append({"severity": "red", "text": f"{item['label']}: {item['detail']}.", "owner": "parent",
