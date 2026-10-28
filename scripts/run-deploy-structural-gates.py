@@ -550,7 +550,7 @@ def run_gates(gates: Sequence[Gate], max_workers: int, reuse_passes: bool = Fals
             while (running or pending) and not received_signal:
                 while pending and len(running) < max_workers and not received_signal:
                     job = pending.popleft()
-                    output_path = output_root / f"{job.label}.log"
+                    output_path = output_root / (job.label.replace("/", "-of-") + ".log")
                     output = output_path.open("wb")
                     process = subprocess.Popen(
                         job.gate.command,

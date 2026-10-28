@@ -1270,6 +1270,29 @@ class StructuralGateSchedulingTests(unittest.TestCase):
         expected = [job.expected_seconds for job in jobs]
         self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
 
+    def test_sharded_gate_runs_every_shard_through_the_runner(self) -> None:
+        module = _load_runner("deploy_runner_shard_run")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-shard-run-") as temporary:
+            seen = Path(temporary) / "seen"
+            gates = (
+                module.Gate(
+                    "split",
+                    ("bash", "-c", f'echo "$DEPLOY_GATE_SHARD" >> {seen}; [ "$DEPLOY_GATE_SHARD" != 2/3 ]'),
+                    expected_seconds=30,
+                    shards=3,
+                ),
+                module.Gate("whole", ("bash", "-c", f'echo "whole:${{DEPLOY_GATE_SHARD:-none}}" >> {seen}')),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = module.run_gates(gates, max_workers=2)
+            self.assertEqual(result, 1, "one failing shard fails the gate")
+            self.assertEqual(
+                sorted(seen.read_text().split()), ["1/3", "2/3", "3/3", "whole:none"]
+            )
+            self.assertIn("split[2/3]", stderr.getvalue())
+            self.assertIn("== split[1/3]: exit=0", stdout.getvalue())
+
     def test_hung_gate_is_killed_with_its_process_group_and_fails_by_name(self) -> None:
         module = _load_runner("deploy_runner_timeout")
         with tempfile.TemporaryDirectory(prefix="deploy-runner-timeout-") as temporary:
