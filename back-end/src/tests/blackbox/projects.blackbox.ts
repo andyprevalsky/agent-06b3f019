@@ -44,11 +44,13 @@ import { deleteEnvFile, listEnvFiles } from '../../domains/projects/envFileServi
 import {
   applyRoseProjectSetup,
   planRoseProjectSetup,
+  ROSE_PROJECT_STARTUP_TIMEOUT_S,
   type RoseSetupDeps,
 } from '../../domains/projects/roseProject';
 import { listProjects, updateProject } from '../../domains/projects/service';
 import { decryptCredentialEnvelope } from '../../providers/claudeCredentials';
 import { prisma } from '../../providers/database';
+import { registerRoseStartupUpgradeCases } from './projects-rose-startup-upgrade.cases';
 
 const SECRET = `pj-secret-${randomBytes(12).toString('hex')}`;
 const SECRET2 = `pj-rotated-${randomBytes(12).toString('hex')}`;
@@ -499,7 +501,10 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     assert(rose.repoUrl === ROSE_REPO, `repo ${rose.repoUrl}`);
     assert(rose.defaultBranch === 'main', `branch ${rose.defaultBranch}`);
     assert(rose.startupScript === ROSE_STARTUP, 'startup script = PJ4 fixture');
-    assert(rose.startupTimeoutS === 120, `timeout ${rose.startupTimeoutS}`);
+    assert(
+      rose.startupTimeoutS === ROSE_PROJECT_STARTUP_TIMEOUT_S,
+      `timeout ${rose.startupTimeoutS}`
+    );
     assert(rose.githubConnected === true, 'GitHub connected via a repo grant');
     assert(rose.envFileCount === 6, `env files ${rose.envFileCount}`);
     assert(owner.githubReads.length === 1, `one GitHub read, got ${owner.githubReads.length}`);
@@ -536,6 +541,8 @@ test('Rose out of the box: a name-only Rose project is configured on the next li
     await owner.cleanup();
   }
 });
+
+registerRoseStartupUpgradeCases({ roseOwner, roseRepo: ROSE_REPO, roseStartup: ROSE_STARTUP });
 
 test('Rose out of the box: a stale pristine plan never fills a project that gained an env file or a sync', async () => {
   // The planner read a pristine "Rose"; before the setup write, the user added

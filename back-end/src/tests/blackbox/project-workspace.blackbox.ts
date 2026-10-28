@@ -17,7 +17,8 @@
  *     commits as rose-sync/<branch>; uncommitted work as a stash + patch
  *   - startup: runs in the repo before the CLI; ok / failed / timeout are
  *     reported to the CLI prompt and by runProjectStartup(); the timeout is
- *     enforced (the session does not hang)
+ *     enforced (the session does not hang); the runner also runs under the E2B
+ *     templates' HOME, whose package.json declares "type": "module"
  *   - secret-leak scan: the fixture secret never appears in API responses,
  *     CLI output, DB rows, startup log/report or the backend log
  *
@@ -27,6 +28,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -46,7 +48,13 @@ import {
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
 import { prepareSessionProject } from '../../providers/projects/session';
-import { restoreWorkspace, runProjectStartup } from '../../providers/projects/workspace';
+import {
+  localWorkspaceExecutor,
+  registerWorkspaceExecutor,
+  restoreWorkspace,
+  runProjectStartup,
+  unregisterWorkspaceExecutor,
+} from '../../providers/projects/workspace';
 import {
   anonymousSession,
   assert,
@@ -422,7 +430,7 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   );
   assert(rose, 'Rose project created');
   assert(rose.startupScript === fixtureScript, 'startup script is the checked-in fixture');
-  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 120, 'Rose defaults');
+  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 900, 'Rose defaults');
   const files = await call(`/api/projects/${String(rose.id)}/env-files`, { auth: s.token });
   leakTexts.push(['Rose env-files response', files.text]);
   const byPath = new Map(
@@ -495,6 +503,47 @@ test('startup failure and timeout are reported, and the timeout is enforced', as
   assert(Date.now() - t0 < 15_000, 'runProjectStartup enforced the timeout');
   assert(!report.outputTail.includes('never'), 'the script was stopped before finishing');
 });
+
+for (const template of ['claude-code', 'codex-code']) {
+  test(`startup runner runs under the ${template} E2B HOME ("type": "module" package.json)`, async () => {
+    // The E2B templates copy their package.json ("type": "module") into
+    // /home/user; Node then loaded an extensionless CommonJS runner as an ES
+    // module and every E2B project startup failed with "no report".
+    const home = mkdtempSync(join(fixture, `${template}-home-`));
+    copyFileSync(
+      join(REPO_ROOT, 'e2b-templates', template, 'package.json'),
+      join(home, 'package.json')
+    );
+    const sessionId = `e2b-home-${randomUUID()}`;
+    registerWorkspaceExecutor(sessionId, localWorkspaceExecutor(home, process.env));
+    try {
+      await restoreWorkspace(sessionId, {
+        project: {
+          id: `${template}-home`,
+          name: 'PJ-E2B-Home',
+          repoUrl: null,
+          defaultBranch: 'main',
+          startupScript: 'echo started under the module-type home',
+          startupTimeoutS: 30,
+        },
+        revision: 0,
+        manifest: null,
+        files: [],
+        gitBundle: null,
+        uncommittedPatch: null,
+        redactions: [],
+      });
+      const report = await runProjectStartup(sessionId);
+      assert(
+        report.status === 'ok' && report.exitCode === 0,
+        `startup ok under ${template} HOME: ${JSON.stringify(report)}`
+      );
+      assert(report.outputTail.includes('started under the module-type home'), 'script output');
+    } finally {
+      unregisterWorkspaceExecutor(sessionId);
+    }
+  });
+}
 
 test('secret-leak scan: fixture secret absent from every surface', async () => {
   const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;

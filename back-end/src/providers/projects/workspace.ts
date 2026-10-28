@@ -9,7 +9,7 @@
  *     │    rose-sync/<branch>     unpushed local commits from the synced bundle
  *     │    git stash              uncommitted work from the synced patch (+ patch file)
  *     │    env/config files       0600; external links → ~/.rose/project/files/<path> + symlink
- *     │    ~/.rose/bin/rose-project-startup + ~/.rose/project/startup.{json,sh}
+ *     │    ~/.rose/bin/rose-project-startup.cjs + ~/.rose/project/startup.{json,sh}
  *     └─ runProjectStartup(sessionId)   (ws-server.mjs runs the same runner on every boot)
  *
  * Secrets: decrypted content is written only into the session (0600) and is
@@ -49,7 +49,9 @@ const log = createLogger('ProjectWorkspace');
 export const PROJECT_REPO_DIRNAME = 'workspace';
 const ROSE_DIR = '.rose';
 const PROJECT_DIR = `${ROSE_DIR}/project`;
-export const STARTUP_RUNNER_REL = `${ROSE_DIR}/bin/rose-project-startup`;
+// `.cjs`: the E2B code templates put a `"type": "module"` package.json in
+// HOME, which would make Node load an extensionless runner as ESM and crash.
+export const STARTUP_RUNNER_REL = `${ROSE_DIR}/bin/rose-project-startup.cjs`;
 const GIT_TIMEOUT_MS = 10 * 60_000;
 const SHORT_TIMEOUT_MS = 60_000;
 const GIT_IDENTITY = '-c user.name="Rose Agent" -c user.email=agent@roselabs.ai';
