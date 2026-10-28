@@ -5,6 +5,8 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
+import { reconcileOrphanedTilionSessions } from './browser/tilionReaper';
+import { abortRecoverySearchesFor } from './browser/challengeRecoveryLaneSearch';
 import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
@@ -55,6 +57,8 @@ interface TerminalBrowserReleaseLeaseDependencies {
   acquireLease: (ownerId: string) => Promise<boolean>;
   releaseLease: (ownerId: string) => Promise<void>;
   reconcile: typeof reconcileTerminalAgentBrowserSessions;
+  /** Owned-only Tilion orphan release (tilionReaper.ts); never throws into the lease. */
+  reapTilion: () => Promise<unknown>;
 }
 
 export const TERMINAL_BROWSER_RELEASE_LEASE_KEY = 'scheduled-job:terminal-browser-release';
@@ -252,6 +256,7 @@ function terminalBrowserReleaseLeaseDependencies(): TerminalBrowserReleaseLeaseD
     acquireLease: acquireTerminalBrowserReleaseLease,
     releaseLease: releaseTerminalBrowserReleaseLease,
     reconcile: reconcileTerminalAgentBrowserSessions,
+    reapTilion: reconcileOrphanedTilionSessions,
   };
 }
 
@@ -265,7 +270,15 @@ export async function runTerminalAgentBrowserReleaseReconcileWithLease(
     return { acquired: false, summary: null };
   }
   try {
-    return { acquired: true, summary: await dependencies.reconcile({}, options) };
+    const summary = await dependencies.reconcile({}, options);
+    // Terminal rows were just released through their provider; a Tilion session
+    // whose row is CLOSED/ERROR yet still live remotely is reaped here.
+    await dependencies.reapTilion().catch((error: unknown) => {
+      log.error('Tilion orphan reaper failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { acquired: true, summary };
   } finally {
     try {
       await dependencies.releaseLease(ownerId);
@@ -302,6 +315,7 @@ export async function releaseAgentBrowserSessions(
   options: { retire?: boolean } = {}
 ): Promise<number> {
   const dependencies = { ...browserSessionReleaseDependencies(options.retire), ...overrides };
+  abortRecoverySearchesFor(agentId);
   let released = 0;
   const failures: unknown[] = [];
   let activeBrowserSessions: Array<{ id?: string; sessionId: string | null }>;

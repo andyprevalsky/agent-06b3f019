@@ -11,20 +11,25 @@ import type {
 import {
   applyConfigBlacklist,
   runLaneConfigSearch,
+  withProviderProbeLimits,
   type ConfigSearchDependencies,
 } from './challengeRecoveryLaneSearch';
 import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
 import {
-  alternateProviderFirst,
   bestSpecificity,
   availableBrowserRecoveryCandidates,
   shouldPreferSteelForChallengeTarget,
+  lockCandidatesToProvider,
+  tilionRecoveryAvailable,
+  transportFailureOrder,
 } from './challengeRecoveryCandidates';
 import type { FingerprintInjectionData } from './fingerprintInjection';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
   browserConfigSearchRuntimeDependencies,
   ChallengeConfigSearchExhaustedError,
+  createTilionRecoveryCandidate,
+  releaseRecoveryProviderSession,
   recoveryConfigKeyForSession,
   sameSiteNavigationUrl,
   type BrowserConfigSearchRuntimeDependencies,
@@ -94,14 +99,19 @@ export async function searchAndPromoteBrowserConfig(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
-  const candidates = availableBrowserRecoveryCandidates(proxyLocation, { preferSteel });
+  const candidates = lockCandidatesToProvider(
+    availableBrowserRecoveryCandidates(proxyLocation, { preferSteel }),
+    current.provider,
+    { taskId: input.taskId, phase: 'config_search' }
+  );
   const transportFailure =
     /^(?:critical third-party resource blocked|first-party request blocked by proxy tunnel)$/i.test(
       (input.recoveryReason ?? '').trim()
     ) || /\bERR_(?:TUNNEL|PROXY)_CONNECTION_(?:FAILED|REFUSED)\b/i.test(input.recoveryReason ?? '');
   const configs =
-    transportFailure && (current.provider === 'kernel' || current.provider === 'steel')
-      ? alternateProviderFirst(candidates, current.provider)
+    transportFailure &&
+    (current.provider === 'kernel' || current.provider === 'steel' || current.provider === 'tilion')
+      ? transportFailureOrder(candidates, current.provider, sessionAvoidConfigKey)
       : candidates;
   const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const searchableConfigs = blacklist.configs;
@@ -169,6 +179,19 @@ export async function searchAndPromoteBrowserConfig(
         }
         return { provider: 'browser-use', ...session };
       }
+      if (config.provider === 'tilion') {
+        const session = await createTilionRecoveryCandidate(
+          dependencies,
+          proxyLocation,
+          config.tilionProxyType ?? 'residential'
+        );
+        if (signal.aborted) {
+          await closeValidationBrowser(session);
+          await dependencies.releaseTilion(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
+        return session;
+      }
       const session = await dependencies.createSteel({
         proxyLocation,
         proxyMode: config.steelProxyMode ?? 'managed',
@@ -210,6 +233,13 @@ export async function searchAndPromoteBrowserConfig(
       if (config.provider === 'browser-use' && !browserUseEnabled()) {
         throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
       }
+      if (config.provider === 'tilion' && !tilionRecoveryAvailable()) {
+        throw new Error('Tilion is disabled by BROWSER_AGENT_TILION_ENABLED or has no API key');
+      }
+      // The worker reattaches with the returned URL; hand it a freshly minted one.
+      if (config.provider === 'tilion' && dependencies.refreshTilionConnectUrl) {
+        session.wsUrl = await dependencies.refreshTilionConnectUrl(session.sessionId);
+      }
       const updated = await runTransactionWithRetry(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },
@@ -241,35 +271,54 @@ export async function searchAndPromoteBrowserConfig(
         return true;
       });
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
-      await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
-      if (current.sessionId === null) return;
-      if (current.provider === 'kernel') {
-        await dependencies.releaseKernel(current.sessionId).catch(() => {});
-      } else if (current.provider === 'browser-use') {
-        await dependencies.releaseBrowserUse(current.sessionId).catch(() => {});
-      } else {
-        await dependencies.releaseSteel(current.sessionId).catch(() => {});
+      // Tilion accepts one CDP client per session: the probe's client must be
+      // gone before the agent reattaches to the promoted winner.
+      if (session.provider === 'tilion') {
+        const closeStarted = Date.now();
+        await closeValidationBrowser(session);
+        // Evidence for T74 (worker reattach refused 4409 after promotion): the
+        // promoted Tilion session must have no backend CDP client left.
+        const stillConnected = session.validationBrowser?.isConnected?.() ?? null;
+        (stillConnected ? log.error : log.info).call(
+          log,
+          'Closed the promoted Tilion candidate CDP client before handing the session to the worker',
+          {
+            taskId: input.taskId,
+            sessionId: session.sessionId,
+            closeMs: Date.now() - closeStarted,
+            stillConnected,
+          }
+        );
       }
+      await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
+      // An unmaterialized logical browser had no provider session to release.
+      if (current.sessionId === null) return;
+      await releaseRecoveryProviderSession(dependencies, current.provider, current.sessionId).catch(
+        () => {}
+      );
     },
     release: async (_config, session) => {
       await closeValidationBrowser(session).catch(() => {});
-      if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
-      else if (session.provider === 'browser-use')
-        await dependencies.releaseBrowserUse(session.sessionId);
-      else await dependencies.releaseSteel(session.sessionId);
+      await releaseRecoveryProviderSession(dependencies, session.provider, session.sessionId);
     },
   };
 
   let winner: Awaited<ReturnType<typeof runLaneConfigSearch>>;
   try {
-    winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
-      avoidConfigKey: sessionAvoidConfigKey,
-      blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
-      // Two transport-dead provider candidates get 90s each. The full search
-      // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
-      // for promotion, old-session release, and the response.
-      ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
-    });
+    winner = await runLaneConfigSearch(
+      searchableConfigs,
+      lanes,
+      withProviderProbeLimits(searchDependencies),
+      {
+        avoidConfigKey: sessionAvoidConfigKey,
+        ownerKey: current.agentId,
+        blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
+        // Two transport-dead provider candidates get 90s each. The full search
+        // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline
+        // for promotion, old-session release, and the response.
+        ...(transportFailure ? { candidateDeadlineMs: 90_000, searchDeadlineMs: 210_000 } : {}),
+      }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new ChallengeConfigSearchExhaustedError(message, [...failedConfigKeys]);

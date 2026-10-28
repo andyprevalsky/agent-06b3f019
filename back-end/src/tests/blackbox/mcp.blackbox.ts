@@ -15,7 +15,7 @@
  * Index 01 webhook (POST /api/index01/webhook, Bearer key):
  *   - no/unknown key → 401; JSON transcript (nested too) → 201 plan-mode agent
  *   - multipart "Both" (audio + transcription field) → 201, audio archived best-effort
- *   - no transcript (test event) → 200 spawned:false, no agent
+ *   - app test event (test=true) or no transcript → 200 spawned:false, no agent
  *
  * Usage: npx tsx src/tests/blackbox/mcp.blackbox.ts
  */
@@ -250,6 +250,21 @@ tests.push(
       const r = await webhook(form, { Authorization: `Bearer ${apiKey}` });
       await assertSpawned(r, goal);
       assert(Array.isArray(r.body.recordings), 'recordings must be an array');
+    },
+  ],
+  [
+    'webhook: app test event (multipart, test=true) parses but spawns nothing',
+    async () => {
+      const before = await prisma.agent.count({ where: { userId } });
+      const form = new FormData();
+      form.append('transcription', 'Index webhook test event');
+      form.append('test', 'true');
+      form.append('recordedAt', new Date().toISOString());
+      form.append('client', 'index-app');
+      const r = await webhook(form, { Authorization: `Bearer ${apiKey}` });
+      assert(r.status === 200 && r.body.spawned === false, JSON.stringify(r));
+      assert(r.body.transcript === 'Index webhook test event', 'transcript not parsed');
+      assert((await prisma.agent.count({ where: { userId } })) === before, 'agent was created');
     },
   ],
   [

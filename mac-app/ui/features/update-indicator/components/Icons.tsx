@@ -5,7 +5,7 @@
 
 export const GiftIcon = (): React.ReactElement => (
   <svg
-    className="h-3.5 w-3.5 text-neutral-600"
+    className="h-3.5 w-3.5 text-neutral-600 dark:text-[#e4e4df]"
     fill="none"
     viewBox="0 0 24 24"
     stroke="currentColor"
@@ -21,7 +21,7 @@ export const GiftIcon = (): React.ReactElement => (
 
 export const CheckIcon = (): React.ReactElement => (
   <svg
-    className="h-3.5 w-3.5 text-neutral-600"
+    className="h-3.5 w-3.5 text-neutral-600 dark:text-[#e4e4df]"
     fill="none"
     viewBox="0 0 24 24"
     stroke="currentColor"
@@ -33,7 +33,7 @@ export const CheckIcon = (): React.ReactElement => (
 
 export const WarningIcon = (): React.ReactElement => (
   <svg
-    className="h-3.5 w-3.5 text-neutral-600"
+    className="h-3.5 w-3.5 text-neutral-600 dark:text-[#e4e4df]"
     fill="none"
     viewBox="0 0 24 24"
     stroke="currentColor"

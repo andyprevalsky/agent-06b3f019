@@ -17,6 +17,7 @@ import os
 import ssl
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -35,7 +36,7 @@ async def test_rose_local_loopback_and_no_fallback():
                 'data: {"choices":[{"index":0,"delta":{"content":"local ok"},"finish_reason":null}]}\n\n'
                 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
                 '"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
-                'data: [DONE]\n\n'
+                "data: [DONE]\n\n"
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -50,18 +51,29 @@ async def test_rose_local_loopback_and_no_fallback():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with patch.dict(os.environ, {
-            "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
-            "ROSE_LOCAL_MODEL": "test-local-model",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "ROSE_LOCAL_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                "ROSE_LOCAL_MODEL": "test-local-model",
+            },
+        ):
             with patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")):
-                chunks = [chunk async for chunk in RoseClient().complete(
-                    pool="rose-local", messages=[{"role": "user", "content": "hello"}], dump_context=False,
-                )]
+                chunks = [
+                    chunk
+                    async for chunk in RoseClient().complete(
+                        pool="rose-local",
+                        messages=[{"role": "user", "content": "hello"}],
+                        dump_context=False,
+                    )
+                ]
             assert requests[0][0] == "/v1/chat/completions"
             assert requests[0][1]["model"] == "test-local-model"
             assert requests[0][1]["messages"][-1]["content"] == "hello"
-            assert next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata") == "local/test-local-model"
+            assert (
+                next(chunk.data["actual_model"] for chunk in chunks if chunk.kind == "metadata")
+                == "local/test-local-model"
+            )
             assert "".join(chunk.data["text"] for chunk in chunks if chunk.kind == "content") == "local ok"
             assert any(chunk.kind == "done" for chunk in chunks)
         with patch.dict(os.environ, {"ROSE_LOCAL_BASE_URL": "https://api.openrouter.ai/v1", "ROSE_LOCAL_MODEL": "x"}):
@@ -75,6 +87,7 @@ async def test_rose_local_loopback_and_no_fallback():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 from _rose_stream_progress_fixture import single_step_waterfall
@@ -414,7 +427,12 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
         effort=None,
     )
     props = body["tools"][0]["function"]["parameters"]["properties"]
-    for name, kind in (("sources", "array"), ("head_limit", "integer"), ("filters", "object")):
+    for name, kind in (
+        ("sources", "array"),
+        ("head_limit", "integer"),
+        ("multiline", "boolean"),
+        ("filters", "object"),
+    ):
         assert props[name].get("type") == kind, f"{name} must be a plain {kind}: {props[name]}"
         assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
     # String slots keep their null branch: without it qwen writes the literal
@@ -440,6 +458,79 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
     assert sent.get("description") == field["description"], sent.get("description")
     assert "anyOf" not in sent
     assert GrepTool.model_validate({"tool": "grep", "pattern": "x"}).sources is None
+
+
+def test_cerebras_tools_keep_null_for_omittable_string_optionals():
+    """An omittable Optional[str] (or enum) reaches Cerebras as anyOf[string, null].
+
+    Captured smoke browser-auth-assistance-declined (2026-10-27, explore task
+    80e12b33): with every Optional collapsed to its plain type, qwen-3.8-27b
+    filled all optional fields and wrote the string "null" for string ones:
+    list_agents cursor/query/path_prefix="null" (backend 400 -> tool ERROR) and
+    grep role/surface="null" (enum validation re-generation), page_after="null"
+    (InvalidGrepParamError). Replay of that exact request on cerebras-direct:
+    plain string 4/5 responses carried "null" strings; anyOf[string, null] 0/8,
+    with literal null validating to None and sources/head_limit still typed.
+    """
+    from copy import deepcopy
+
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import GrepTool, ListAgentsTool, create_agent_action_model
+
+    def sent(registry: dict) -> dict:
+        tools = build_anthropic_tools_from_response_model(
+            create_agent_action_model(list(registry), tool_registry=registry)
+        )
+        original = deepcopy(tools)
+        body = build_cerebras_body(
+            model="qwen-3.8-27b",
+            messages=[],
+            tools=tools,
+            tool_choice="any",
+            response_format=None,
+            temperature=None,
+            max_tokens=64,
+            effort=None,
+        )
+        assert tools == original, "caller tool schemas must not be mutated"
+        return {tool["function"]["name"]: tool["function"] for tool in body["tools"]}
+
+    def keeps_null(prop: dict, name: str) -> dict:
+        branches = prop.get("anyOf")
+        assert isinstance(branches, list) and {"type": "null"} in branches, f"{name} lost null: {prop}"
+        (kept,) = [branch for branch in branches if branch != {"type": "null"}]
+        assert kept.get("type") == "string", f"{name} must stay a string: {prop}"
+        assert "default" not in prop or prop["default"] is None
+        return kept
+
+    # Strict toolset (no open maps): the null branch is kept in the grammar.
+    strict = sent({"list_agents": ListAgentsTool})["list_agents"]
+    assert strict["strict"] is True
+    for name in ("node", "cursor", "query", "path_prefix"):
+        keeps_null(strict["parameters"]["properties"][name], name)
+        assert name not in strict["parameters"]["required"]
+    depth = strict["parameters"]["properties"]["depth"]
+    assert depth.get("type") == "integer" and "anyOf" not in depth, f"non-strings stay collapsed: {depth}"
+
+    # The captured explore toolset is non-strict (grep's open filters map).
+    functions = sent({"grep": GrepTool, "list_agents": ListAgentsTool})
+    grep = functions["grep"]["parameters"]["properties"]
+    for name in ("pattern", "page_after", "person", "since", "until", "trace_path"):
+        keeps_null(grep[name], name)
+    for name in ("role", "surface", "record_kind", "source", "order"):
+        assert keeps_null(grep[name], name).get("enum"), f"{name} lost its enum: {grep[name]}"
+    for name in ("cursor", "query", "path_prefix"):
+        keeps_null(functions["list_agents"]["parameters"]["properties"][name], name)
+
+    # A literal null is the declared spelling of "no value" and reaches the tool as None.
+    calls = ListAgentsTool.model_validate(
+        {"tool": "list_agents", "node": "/root/member_lookup", "depth": 3, "cursor": None, "query": None}
+    )
+    assert (calls.cursor, calls.query, calls.path_prefix) == (None, None, None)
+    grep_call = GrepTool.model_validate(
+        {"tool": "grep", "pattern": "401", "sources": ["agent_trajectories"], "role": None, "page_after": None}
+    )
+    assert (grep_call.role, grep_call.page_after) == (None, None)
 
 
 def test_cerebras_string_optionals_keep_null_branch():
@@ -7257,6 +7348,107 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_opaque_reasoning_stall_uses_next_leg():
+    """A Foundry leg that stalls before any answer output uses the next leg.
+
+    2026-10-27 browser-auth-assistance-declined: with the compute token leased
+    elsewhere, root execute_loop calls used Foundry gpt-6.1-sol, which streamed
+    hundreds of small reasoning items and some summary text, but no tool call,
+    until the 590s deadline or its output limit. Reasoning is not a reply for a
+    tool-call request, so the stalled leg uses the pool's next leg, and none of
+    its metadata, reasoning text or items reaches the consumer. A leg that does
+    answer still delivers its reasoning first, in order. Held reasoning text that
+    keeps arriving is not answer output either, so it cannot keep the idle
+    window open until the deadline (CodeRabbit #1604, b5d2c5af9).
+    """
+    calls: list[str] = []
+
+    def foundry_leg(opening_text: bool, answers: bool = False, leaks_text: bool = False):
+        async def source(**kwargs):
+            calls.append("foundry")
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-6.1-sol-foundry", "pool_name": "foundry"})
+            if opening_text:
+                yield StreamChunk(kind="reasoning", data={"text": "Considering the declined sign-in"})
+            if answers:
+                yield StreamChunk(kind="codex_reasoning_item", data={"id": "rs_1", "encrypted_content": "x"})
+                yield StreamChunk(
+                    kind="tool_call", data={"id": "call_f", "name": "attempt_completion", "arguments": "{}"}
+                )
+                yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1})
+                yield StreamChunk(kind="done", data={})
+                return
+            index = 0
+            while True:
+                index += 1
+                item = {"id": f"rs_{index}", "encrypted_content": "opaque", "summary": []}
+                yield StreamChunk(kind="codex_reasoning_item", data=item)
+                if leaks_text and index % 5 == 0:
+                    yield StreamChunk(kind="reasoning", data={"text": f" step {index}"})
+                await asyncio.sleep(0.01)
+
+        return source
+
+    async def next_leg(**kwargs):
+        calls.append("waterfall")
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-6-sol", "pool_name": "rose-1-ultra"})
+        yield StreamChunk(kind="tool_call", data={"id": "call_1", "name": "attempt_completion", "arguments": "{}"})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "stop"})
+        yield StreamChunk(kind="done", data={})
+
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    outcomes = {}
+    for opening_text, answers, leaks_text in (
+        (False, False, False),
+        (True, False, False),
+        (True, False, True),
+        (True, True, False),
+    ):
+        calls.clear()
+        chunks: list[StreamChunk] = []
+        error = None
+        started = time.monotonic()
+        with (
+            patch.dict(os.environ, env),
+            patch("providers.rose.client.foundry_complete", foundry_leg(opening_text, answers, leaks_text)),
+            patch("providers.rose.client.waterfall_complete", single_step_waterfall(next_leg)),
+        ):
+            try:
+                async for chunk in RoseClient(openrouter_key="ork-x").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "Tell me my member number"}],
+                    tools=[{"name": "attempt_completion", "description": "Finish", "input_schema": {"type": "object"}}],
+                    _exclude_anthropic_family=True,
+                    call_site="test-foundry-opaque-reasoning-stall",
+                    deadline_s=5.0,
+                    ttft_timeout_s=1.0,
+                    idle_timeout_s=0.2,
+                ):
+                    chunks.append(chunk)
+            except RoseDeadlineError as exc:
+                error = str(exc)
+        outcomes[(opening_text, answers, leaks_text)] = (list(calls), [c.kind for c in chunks], chunks, error)
+        assert time.monotonic() - started < 2.0, "the 5s deadline must not bound a stalled leg"
+
+    for stalled in ((False, False, False), (True, False, False), (True, False, True)):
+        calls_seen, kinds, chunks, error = outcomes[stalled]
+        assert error is None, (stalled, error)
+        assert calls_seen == ["foundry", "waterfall"], (stalled, calls_seen)
+        assert kinds == ["metadata", "tool_call", "usage", "done"], (stalled, kinds)
+        assert chunks[0].data["actual_model"] == "openai/gpt-6-sol"
+        assert chunks[1].data["name"] == "attempt_completion"
+
+    calls_seen, kinds, chunks, error = outcomes[(True, True, False)]
+    assert error is None and calls_seen == ["foundry"], (error, calls_seen)
+    assert kinds == ["metadata", "reasoning", "codex_reasoning_item", "tool_call", "usage", "done"], kinds
+    assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"
+
+
 async def test_browser_use_dump_records_foundry_wire_effort_and_temperature():
     """The browser-use dump must record what the Foundry route actually sent (descend R13).
 
@@ -9200,6 +9392,40 @@ async def test_client_buffered_progress_keeps_silence_and_outer_bounds():
     await assert_progress_case(mode="reasoning")
 
 
+async def test_client_opaque_reasoning_items_do_not_refresh_idle_window():
+    """Encrypted reasoning items alone are not progress (2026-10-27 recurrence).
+
+    Foundry gpt-6.1-sol streamed 805 back-to-back empty reasoning items over
+    590s with no text or tool call (browser-auth-assistance-declined). Each
+    `codex_reasoning_item` restarted the 120s idle window, so only the whole-call
+    deadline ended it. Real summary text and tool output remain progress.
+    """
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    idle = "rose.complete idle for 120.0s (deadline 590.0s)"
+    # After visible reasoning text, the idle window runs from that text.
+    await assert_progress_case(
+        protocol="responses", mode="opaque_reasoning", seconds=600, expected_error=idle, expected_time=122.55
+    )
+    # As the first output, an item ends TTFT and opens the idle window.
+    await assert_progress_case(
+        protocol="responses", mode="opaque_reasoning", prelude=0, seconds=600, expected_error=idle, expected_time=121.0
+    )
+    # Consumer backpressure after an item is still not provider silence.
+    await assert_progress_case(
+        protocol="responses",
+        mode="opaque_reasoning",
+        prelude=0,
+        seconds=600,
+        consumer_pause=100,
+        pause_at=2,
+        expected_error=idle,
+        expected_time=221.0,
+    )
+    # Items that carry growing summary text keep a long stream alive.
+    await assert_progress_case(protocol="responses", mode="summarized_reasoning", seconds=150)
+
+
 async def test_client_parser_only_progress_preserves_ttft_without_idle_timeout():
     from _rose_stream_progress_fixture import assert_progress_case
 
@@ -10969,6 +11195,10 @@ async def run_all_tests():
         test_cerebras_tools_send_omittable_optionals_as_their_type,
     )
     r.record(
+        "cerebras_tools_keep_null_for_omittable_string_optionals",
+        test_cerebras_tools_keep_null_for_omittable_string_optionals,
+    )
+    r.record(
         "cerebras_string_optionals_keep_null_branch",
         test_cerebras_string_optionals_keep_null_branch,
     )
@@ -11075,7 +11305,9 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_transport_client_version", test_anthropic_transport_accepts_captured_client_version_requirement
     )
-    await r.record_async("claude_auth_client_version_rejection_surfaced", test_claude_auth_surfaces_client_version_rejection)
+    await r.record_async(
+        "claude_auth_client_version_rejection_surfaced", test_claude_auth_surfaces_client_version_rejection
+    )
     await r.record_async(
         "provider_transport_error_body", test_provider_transports_preserve_error_body_for_classification
     )
@@ -11489,6 +11721,14 @@ async def run_all_tests():
     await r.record_async(
         "client_buffered_progress_keeps_silence_and_outer_bounds",
         test_client_buffered_progress_keeps_silence_and_outer_bounds,
+    )
+    await r.record_async(
+        "client_opaque_reasoning_items_do_not_refresh_idle_window",
+        test_client_opaque_reasoning_items_do_not_refresh_idle_window,
+    )
+    await r.record_async(
+        "client_foundry_opaque_reasoning_stall_uses_next_leg",
+        test_client_foundry_opaque_reasoning_stall_uses_next_leg,
     )
     await r.record_async(
         "client_buffered_progress_resets_for_new_waterfall_attempt",

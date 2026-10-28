@@ -9,6 +9,7 @@ import {
   assert,
   encryptPayload,
   crypto,
+  prisma,
 } from './integrations.context';
 import {
   ErrorResponse,
@@ -400,6 +401,71 @@ export async function testIndexedDBUpload_erroredOriginsFiltered() {
   const body = res.data as { originCount: number };
   // errored origin should be filtered out → only 1 remains
   assert(body.originCount === 1, `Expected originCount=1 after filter, got ${body.originCount}`);
+}
+
+/**
+ * indexedDB values containing NUL must not 500 the whole batch (prod 22P05
+ * "unsupported Unicode escape sequence", 2026-10-15..10-28). jsonb cannot
+ * store U+0000, so it is dropped like the cookie/localStorage paths do; a
+ * literal backslash-u0000 text and the client hash are preserved.
+ */
+export async function testIndexedDBUpload_nulCharactersStripped() {
+  const origin = `https://nul-${crypto.randomBytes(4).toString('hex')}.example`;
+  const value = { a: 'x\u0000y', b: 'raw\u0000nul', literal: 'keep\\u0000text' };
+  const payload = {
+    origins: [
+      { origin, databases: [{ name: 'db', objectStores: [{ name: 's', records: [value] }] }] },
+    ],
+    hashes: { [origin]: 'nul-hash-1' },
+    batchIndex: 0,
+    totalBatches: 1,
+  };
+  // JSON.stringify writes the NUL char as the escape sequence \u0000; also splice a
+  // raw NUL char into a string to cover both encodings.
+  const json = JSON.stringify(payload).replace('raw\\u0000nul', 'raw\u0000nul');
+  const upload = async (plaintext: string) => {
+    // Encrypt the exact text (not a re-serialized object) so a raw NUL survives.
+    const aesKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);
+    const data = cipher.update(plaintext, 'utf8', 'hex') + cipher.final('hex');
+    return request(`${BASE_URL}/api/integrations/indexedDB/upload`, {
+      method: 'POST',
+      headers: authHeaders(ctx.accessToken1!),
+      body: JSON.stringify({ data, iv: iv.toString('hex'), key: aesKey.toString('hex') }),
+    });
+  };
+  const res = await upload(json);
+  assertStatus(res.status, 200, res.data);
+  assert((res.data as { originCount: number }).originCount === 1, 'NUL origin must be ingested');
+
+  const row = await prisma.indexedDBOrigin.findUnique({
+    where: { userId_origin: { userId: ctx.userId1!, origin } },
+    select: { databases: true, hash: true, updatedAt: true },
+  });
+  assert(row !== null, 'NUL origin row must be stored');
+  const stored = JSON.stringify(row!.databases);
+  assert(
+    stored.includes('"xy"') && stored.includes('"rawnul"'),
+    `NUL must be dropped, got ${stored}`
+  );
+  assert(
+    stored.includes('keep\\\\u0000text'),
+    `literal backslash-u0000 text must survive, got ${stored}`
+  );
+  assert(row!.hash === 'nul-hash-1', 'client hash must be stored unchanged');
+
+  const again = await upload(json);
+  assertStatus(again.status, 200, again.data);
+  const after = await prisma.indexedDBOrigin.findUnique({
+    where: { userId_origin: { userId: ctx.userId1!, origin } },
+    select: { updatedAt: true },
+  });
+  assert(
+    after!.updatedAt.getTime() === row!.updatedAt.getTime(),
+    'same-hash re-upload must stay a no-op'
+  );
+  await prisma.indexedDBOrigin.deleteMany({ where: { userId: ctx.userId1!, origin } });
 }
 
 // ---------- /fingerprint/upload ----------

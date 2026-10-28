@@ -1,36 +1,11 @@
 /**
  * Configuration constants for the launcher feature.
  *
- * Config layer: imports own types only. Holds tuning knobs for the liquid-
- * metal shader backdrop, the pill-shaped launcher geometry, and the global
- * stylesheet that resets the Quick-Query window's chrome.
+ * Config layer: imports own types only. Holds the pill-shaped launcher
+ * geometry and the global stylesheet that resets the Quick-Query window's
+ * chrome and defines its light/dark palette. The liquid-metal ring lives in
+ * `ui/shared/liquid-metal` (shared with the update chip).
  */
-
-/**
- * Uniforms passed to the liquid-metal fragment shader that paints the
- * launcher's backdrop. Pulled out of the component so the shader can be
- * retuned without touching render code.
- */
-export const LAUNCHER_SHADER_UNIFORMS = {
-  u_repetition: 0.5,
-  u_softness: 0.8,
-  u_shiftRed: 0.15,
-  u_shiftBlue: 0.15,
-  u_distortion: 0,
-  u_contour: 0,
-  u_angle: 90,
-  u_scale: 1.5,
-  u_shape: 0,
-  u_offsetX: 0,
-  u_offsetY: 0,
-};
-
-/**
- * Device-pixel-ratio multiplier for the shader mount. Kept at 0.5 to save
- * GPU work on high-DPI displays — the launcher is a small pill and full DPR
- * adds no perceptible quality.
- */
-export const LAUNCHER_SHADER_DPR = 0.5;
 
 /**
  * Pixel height of the launcher pill. The shader fills the inner container
@@ -133,6 +108,44 @@ export const LAUNCHER_GLOBAL_CSS = `
     -webkit-app-region: no-drag;
   }
   .placeholder-input::placeholder {
-    color: rgba(39, 39, 37, 0.5);
+    color: var(--launcher-placeholder);
+  }
+  :root {
+    --launcher-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+    --launcher-fill: #f5f5f5;
+    --launcher-fill-shadow: none;
+    --launcher-text: #272725;
+    --launcher-muted: rgba(39, 39, 37, 0.55);
+    --launcher-placeholder: rgba(39, 39, 37, 0.5);
+    --launcher-chip-bg: rgba(39, 39, 37, 0.08);
+    --launcher-error: #b91c1c;
+    --launcher-drop-bg: rgba(245, 245, 245, 0.92);
+    --launcher-drop-text: #1d4ed8;
+    --launcher-submit-border: 1px solid rgba(255, 255, 255, 0.85);
+    --launcher-submit-bg: linear-gradient(180deg, #f4f4f4 0%, #cfcfcf 45%, #9f9f9f 100%);
+    --launcher-submit-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), inset 0 1px 2px rgba(255, 255, 255, 0.8);
+    --launcher-submit-icon: #ffffff;
+  }
+  /* Dark: html.dark mirrored from the main window (ui/shared/theme-sync).
+     Palette matches the main query box's dark mode; the send button is its
+     black-glass face inside the same liquid-metal gradient ring. */
+  html.dark {
+    color-scheme: dark;
+    --launcher-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.3);
+    --launcher-fill: #262624;
+    --launcher-fill-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --launcher-text: #f2f2ef;
+    --launcher-muted: rgba(236, 236, 234, 0.6);
+    --launcher-placeholder: #8c8c86;
+    --launcher-chip-bg: rgba(255, 255, 255, 0.08);
+    --launcher-error: #f87171;
+    --launcher-drop-bg: rgba(38, 38, 36, 0.94);
+    --launcher-drop-text: #8fcfff;
+    --launcher-submit-border: 2px solid transparent;
+    --launcher-submit-bg:
+      radial-gradient(circle at 50% 115%, rgba(58, 58, 62, 0.95), rgba(6, 6, 8, 1) 62%) padding-box,
+      linear-gradient(180deg, #f4f4f4 0%, #cfcfcf 45%, #9f9f9f 100%) border-box;
+    --launcher-submit-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.35);
+    --launcher-submit-icon: #fbfbf9;
   }
 `;

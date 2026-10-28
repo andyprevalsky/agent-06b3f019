@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Actual local owned Hub process retirement; no provider operations."""
+
+import runpy as _pidfd_runpy
+from pathlib import Path as _PidfdPath
+# Guest payloads use pidfd; run under a python3 that has it (see pidfd_interpreter.py).
+_pidfd_runpy.run_path(str(_PidfdPath(__file__).resolve().with_name("pidfd_interpreter.py")))["require_pidfd_interpreter"](__file__)
 import hashlib,json,os,runpy,shlex,subprocess,sys,tempfile,time,types,unittest
 from pathlib import Path
 from unittest.mock import patch

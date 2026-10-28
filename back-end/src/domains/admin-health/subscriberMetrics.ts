@@ -14,6 +14,8 @@ export interface SubscriberSeriesPoint {
   userCount: number;
   newUsers: number;
   userIds: Set<string>;
+  /** Stripe subscribers only (no invite-code redeemers or core-team additions). */
+  subscribedUserIds: Set<string>;
 }
 
 export interface AdditionalUserLifecycle {
@@ -65,6 +67,7 @@ export function buildSubscriberSeries(
         .filter((lifecycle) => wasIncludedAt(lifecycle, end))
         .flatMap((lifecycle) => (lifecycle.userId === null ? [] : [lifecycle.userId]))
     );
+    const subscribedUserIds = new Set(userIds);
     for (const user of additionalUsers) {
       if (user.startedAt.getTime() < end) userIds.add(user.userId);
     }
@@ -76,6 +79,6 @@ export function buildSubscriberSeries(
     for (const userId of newUserIds) {
       if (!userIds.has(userId)) newUserIds.delete(userId);
     }
-    return { userCount: userIds.size, newUsers: newUserIds.size, userIds };
+    return { userCount: userIds.size, newUsers: newUserIds.size, userIds, subscribedUserIds };
   });
 }

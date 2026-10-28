@@ -7,14 +7,6 @@
  */
 
 /**
- * Props for the shader backdrop tile. `size` is the pixel height of the
- * pill-shaped launcher so the shader can fill its container exactly.
- */
-export interface ShaderTileProps {
-  size: number;
-}
-
-/**
  * Local (not-yet-uploaded) file held in the launcher until submit.
  * Upload happens in the main window after IPC — the launcher has no HTTP boundary.
  *
