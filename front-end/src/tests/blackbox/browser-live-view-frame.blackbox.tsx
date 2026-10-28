@@ -87,19 +87,17 @@ describe('live-view iframe containment', () => {
   });
 
   it('renders the Kernel viewer at native 1280x800 scaled to the clip (its player never upscales)', () => {
-    const rect = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockReturnValue({
-        width: 1920,
-        height: 1200,
-        x: 0,
-        y: 0,
-        top: 0,
-        left: 0,
-        right: 1920,
-        bottom: 1200,
-        toJSON: () => ({}),
-      });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 1920,
+      height: 1200,
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1920,
+      bottom: 1200,
+      toJSON: () => ({}),
+    });
     try {
       renderWithProviders(
         <BrowserAgentPane
