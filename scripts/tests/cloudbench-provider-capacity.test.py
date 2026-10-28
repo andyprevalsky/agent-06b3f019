@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/cloudbench-provider-capacity.py"
@@ -347,7 +348,7 @@ class ProviderCapacityCampaignTests(unittest.TestCase):
         self.assertEqual(width(50, 600, None), 50)  # bounded sliding campaign
         self.assertEqual(width(100, 10, None), 10)  # fewer jobs than width
         self.assertEqual(width(70, 70, None), 70)
-        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+        with patch.dict(os.environ, clean_env(), clear=True), contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(refusal(70), 0)
             self.assertEqual(refusal(71), 78)
         self.assertIn("requested 71 concurrent benches, maximum 70.", stderr.getvalue())
