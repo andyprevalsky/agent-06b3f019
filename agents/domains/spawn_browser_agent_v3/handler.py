@@ -263,6 +263,41 @@ AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
+def _browser_has_unresolved_file_outputs(response: Any, schema: Any) -> bool:
+    """A durable file output must resolve before this browser activity completes.
+
+    Explicit session_file_pointer fields retain their remote-session contract.
+    Optional absent files and ordinary values do not require artifact delivery.
+    """
+    def unresolved(value: Any, field: Dict[str, Any]) -> bool:
+        kind = field.get("type")
+        if kind in {"file_pointer", "list[file_pointer]"}:
+            if value is None:
+                return field.get("required", True) is not False and field.get("nullable") is not True
+            values = value if kind == "list[file_pointer]" and isinstance(value, list) else [value]
+            return any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str) or not item["id"].strip()
+                or not isinstance(item.get("storage_path"), str) or not item["storage_path"].strip()
+                for item in values
+            )
+        if kind == "object" and isinstance(value, dict):
+            return object_has_unresolved(value, field.get("properties"))
+        if kind == "list[object]" and isinstance(value, list):
+            return any(object_has_unresolved(item, field.get("properties")) for item in value if isinstance(item, dict))
+        return False
+
+    def object_has_unresolved(value: Dict[str, Any], fields: Any) -> bool:
+        return any(
+            unresolved(value.get(field.get("name")), field)
+            for field in fields or [] if isinstance(field, dict)
+        )
+
+    return isinstance(schema, dict) and object_has_unresolved(
+        response if isinstance(response, dict) else {}, schema.get("fields")
+    )
+
+
 def _browser_instruction_receipt(state: Dict[str, Any]) -> Dict[str, Any]:
     """Terminal evidence of the native browser's acknowledged input boundary."""
     return {
@@ -11750,7 +11785,9 @@ async def _spawn_browser_agent_activity_v3_real(
                             action="verify",
                         )
 
-                    if score >= 1.0 and progress_result.get("task_completed") is True:
+                    completion_ready = score >= 1.0 and progress_result.get("task_completed") is True
+                    file_delivery_incomplete = False
+                    if completion_ready:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
                         # A passing verifier call may omit the output it already
@@ -11811,6 +11848,17 @@ async def _spawn_browser_agent_activity_v3_real(
                                 file_count=len(output_files),
                             )
 
+                        file_delivery_incomplete = _browser_has_unresolved_file_outputs(
+                            structured_response, response_schema
+                        )
+                        if file_delivery_incomplete:
+                            completion_ready = False
+                            v_reasoning = (
+                                "Required file outputs could not be delivered. Save the requested file "
+                                "in the browser session, then try completion again."
+                            )
+
+                    if completion_ready:
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         await _disconnect_browser(dom_service)
                         _tilion_leave_session()
@@ -11908,7 +11956,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     continuing_tool_call_id = str(uuid_module.uuid4())
                     await _save_browser_action_message(
                         agent_id=agent_id,
-                        title=f"⚖️ Verifier rejected ({score:.0%}) — continue task",
+                        title=("⚖️ File delivery incomplete — continue task" if file_delivery_incomplete
+                               else f"⚖️ Verifier rejected ({score:.0%}) — continue task"),
                         task_id=task_id,
                         message=(
                             f"Verifier score: {score:.0%}\n\n"
@@ -11936,7 +11985,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                     rejection_result = {
                         "success": False,
-                        "error": "Verifier rejected completion.",
+                        "error": "Required file outputs were not delivered." if file_delivery_incomplete else "Verifier rejected completion.",
                         "score": score,
                         "reasoning": v_reasoning,
                     }

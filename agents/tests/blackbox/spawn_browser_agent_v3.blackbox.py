@@ -23540,6 +23540,86 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
                 assert actor.activity_result["task_id"] == "task-1"
 
 
+
+
+async def test_browser_required_file_delivery_retries_before_completion():
+    """A verified remote path cannot complete before the requested file is delivered."""
+    # Exact schema/output/resolver attachments from BU034 run SHA b69afd0d...5d6607.
+    partial = {'apa_databases_file': {'path': '/files/response-headers'}}
+    schema = {'fields': [{'description': 'File containing every available APA research database with its name and brief description.', 'name': 'apa_databases_file', 'nullable': False, 'required': True, 'type': 'file_pointer'}]}
+    original_attachments = [{'created_at': '2026-10-28T08:22:40.792670Z', 'id': 'e06d10c5-4d34-44d9-8fd2-26ba2f076a6f', 'mime_type': 'image/png', 'original_filename': 'screenshot_final.png', 'size_bytes': 268107, 'storage_path': '1f85ff25-6e29-4c1b-8739-f917bd101a30/e06d10c5-4d34-44d9-8fd2-26ba2f076a6f_screenshot_final.png'}]
+    pointer = {"id": "delivered-file", "storage_path": "user/delivered-file", "original_filename": "response-headers", "mime_type": "application/json", "size_bytes": 2079}
+    verdict = {"score": 1.0, "task_completed": True, "reasoning": "The requested content exists in a session file", "structured_response": partial, "usage": {}}
+    actor, judge = await _exercise_browser_resume_user_input(
+        task_goal="List the databases and descriptions",
+        output_schema_override=schema,
+        actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}] * 2,
+        verifier_responses_override=[verdict, verdict],
+        extraction_results=[original_attachments, [pointer]],
+    )
+    assert actor.await_count == 2 and judge.await_count == 2, "Unresolved required output completed the activity"
+    assert actor.activity_result["success"] is True
+    assert actor.close_call.await_count == 1
+    assert actor.activity_result["structured_response"]["apa_databases_file"]["id"] == pointer["id"]
+    assert any("Required file outputs" in str(turn) for turn in actor.captured_turns[1])
+    assert "/files/response-headers" not in str([turn for turn in actor.captured_turns[1] if "Required file outputs" in str(turn)])
+
+
+async def test_browser_nullable_file_outputs_preserve_native_contract():
+    """Explicit null accepted by the native schema needs no artifact delivery."""
+    from helpers import llm
+    from helpers.file_resolution import transform_schema_for_remote_session
+    for kind in ("file_pointer", "list[file_pointer]"):
+        schema = {"fields": [{"name": "report", "type": kind, "required": True, "nullable": True}]}
+        model = llm._build_verifier_response_model(
+            transform_schema_for_remote_session(schema), require_task_completion=True
+        )
+        validated = model.model_validate({"output": {"report": None}, "reasoning": "No report applies", "score": 1.0, "task_completed": True}).model_dump()
+        response = {"score": validated["score"], "task_completed": validated["task_completed"],
+                    "reasoning": validated["reasoning"], "structured_response": validated["output"], "usage": {}}
+        actor, judge = await _exercise_browser_resume_user_input(
+            output_schema_override=schema,
+            actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+            verifier_response_override=response, extraction_results=[[]],
+        )
+        assert actor.await_count == 1 and judge.await_count == 1
+        assert actor.activity_result["structured_response"] == {"report": None}
+        assert actor.activity_result["success"] is True
+
+
+async def test_browser_required_file_delivery_cancellation_propagates():
+    """Cancellation during extraction cannot become successful completion."""
+    verdict = {"score": 1.0, "task_completed": True, "reasoning": "complete", "structured_response": {"report": {"path": "/files/report"}}, "usage": {}}
+    actor, _ = await _exercise_browser_resume_user_input(
+        output_schema_override={"fields": [{"name": "report", "type": "file_pointer", "required": True}]},
+        actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+        verifier_response_override=verdict, extraction_results=[asyncio.CancelledError()],
+        expected_activity_status="cancelled",
+    )
+    assert actor.activity_result["status"] == "cancelled"
+    assert actor.activity_result.get("success") is not True
+
+
+
+def test_browser_file_delivery_schema_boundaries():
+    from domains.spawn_browser_agent_v3.handler import _browser_has_unresolved_file_outputs as missing
+    fp = {"id": "file", "storage_path": "user/file"}
+    for schema, value, expected in [
+        ({"type": "file_pointer", "required": True}, {"path": "/private/never-echo"}, True),
+        ({"type": "file_pointer", "required": True}, fp, False),
+        ({"type": "file_pointer", "required": False}, None, False),
+        ({"type": "file_pointer", "required": True}, None, True),
+        ({"type": "file_pointer", "required": True, "nullable": True}, None, False),
+        ({"type": "list[file_pointer]", "required": True, "nullable": True}, None, False),
+        ({"type": "session_file_pointer", "required": True}, {"path": "/files/remote"}, False),
+        ({"type": "str", "required": True}, "/files/plain-text", False),
+        ({"type": "list[file_pointer]", "required": True}, [fp, {"path": "/files/missing"}], True),
+        ({"type": "list[file_pointer]", "required": True}, [fp], False),
+        ({"type": "object", "properties": [{"name": "nested", "type": "file_pointer", "required": True}]}, {"nested": {"path": "/files/missing"}}, True),
+        ({"type": "list[object]", "properties": [{"name": "nested", "type": "file_pointer", "required": True}]}, [{"nested": fp}], False),
+    ]:
+        assert missing({"result": value}, {"fields": [{"name": "result", **schema}]}) is expected
+
 async def test_browser_replayed_verifier_requires_explicit_completion_before_terminal():
     """An older activity score cannot bypass the new browser terminal gate."""
     for flag in (None, False, 1, "true"):
@@ -24144,7 +24224,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed"):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -24261,6 +24341,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     actor_call.captured_turns = captured_turns
     actor_call.captured_system_context = captured_system_context
     actor_call.decision_order = decision_order
+    actor_call.close_call = close_mock
     judge_call = AsyncMock(
         return_value={
             "score": 1.0,
@@ -24371,7 +24452,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             reconnect_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity", judge_call),
-        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files",
+              AsyncMock(side_effect=extraction_results) if extraction_results is not None else AsyncMock(return_value=[])),
         patch(
             "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
             AsyncMock(),
@@ -24436,7 +24518,11 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         message_binding.assert_awaited_once()
     if actor_responses_override is not None:
         assert actor_call.await_count, "auth denial terminalized the browser before its next model decision"
-        assert result["status"] == "completed" and result["success"]
+        assert result["status"] == expected_activity_status
+        if expected_activity_status == "completed":
+            assert result["success"]
+        else:
+            assert result.get("success") is not True
         assert result["session_id"] == "session-1"
         restart_mock.assert_not_awaited()
         reconnect_mock.assert_not_awaited()
@@ -36935,6 +37021,10 @@ async def run_all_tests():
         test_browser_error_propagation_writers_preserve_native_sealing,
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
+    await r.record_async("browser_required_file_delivery_retries", test_browser_required_file_delivery_retries_before_completion)
+    await r.record_async("browser_nullable_file_outputs_native_contract", test_browser_nullable_file_outputs_preserve_native_contract)
+    await r.record_async("browser_required_file_delivery_cancellation", test_browser_required_file_delivery_cancellation_propagates)
+    r.record("browser_file_delivery_schema_boundaries", test_browser_file_delivery_schema_boundaries)
     await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
     await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
     await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)
