@@ -270,6 +270,16 @@ describe('Rose Desktop query box: bottom row (#32)', () => {
     expect(stock.className).toContain('bg-gray-100');
     expect(stock.className).toContain('w-8');
   });
+  it('attach sits immediately left of the model name in the same row (desktop and stock)', () => {
+    for (const roseDesktop of [true, false]) {
+      const { unmount } = renderWithProviders(<QueryInput {...queryProps} />, { roseDesktop });
+      const attach = paperclip();
+      const model = screen.getByTestId('query-model-selector');
+      expect(attach.parentElement).toBe(model.parentElement);
+      expect(attach.nextElementSibling).toBe(model);
+      unmount();
+    }
+  });
 });
 
 describe('Rose Desktop query box: write lock (#40) and tooltips (#43)', () => {

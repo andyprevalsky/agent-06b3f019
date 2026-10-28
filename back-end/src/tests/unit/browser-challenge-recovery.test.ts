@@ -45,6 +45,10 @@ function testCandidateMatrix(): void {
       'steel_managed',
       'browser_use_residential_country',
       'kernel_isp',
+      // Tilion exits come after the existing catalog so Kernel/Steel order is unchanged.
+      'tilion_residential',
+      'tilion_mobile',
+      'tilion_direct',
     ]
   );
   const previousKey = process.env.BROWSER_USE_API_KEY;

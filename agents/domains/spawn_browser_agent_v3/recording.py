@@ -35,6 +35,7 @@ import structlog
 import helpers.trace_archive as trace_archive
 from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
@@ -1696,7 +1697,7 @@ class BrowserAgentRecorder:
                     "agent_id": self.agent_id,
                     "task_id": self.task_id,
                     "session_id": self.session_id,
-                    "browser_url": self.browser_url,
+                    "browser_url": redact_url_secrets(self.browser_url),
                     "browser_session_metadata": self.session_metadata,
                     "recording_source": recording_source,
                     "steel_recording": steel_media,
