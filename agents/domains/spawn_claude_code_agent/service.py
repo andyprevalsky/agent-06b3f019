@@ -382,7 +382,6 @@ def build_durable_terminal_transcript(
     return formatted_events
 
 
-
 def safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
     try:
@@ -1304,7 +1303,10 @@ async def _run_agentic_loop(
                         unchanged_output_count = 0
                         last_filtered_output = filtered_output
 
-                    fatal_error = check_fatal_errors(filtered_output)
+                    # A structured usage limit (incl. out of credits) saves the
+                    # session for a retry; its printed banner is not a fatal error.
+                    usage_limited = loop_outcome is not None and bool(loop_outcome.get("usage_limit"))
+                    fatal_error = None if usage_limited else check_fatal_errors(filtered_output)
                     if fatal_error:
                         logger.error(
                             "[ClaudeCode] Fatal error detected in output, aborting",
@@ -2809,6 +2811,11 @@ def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         info = message.get("rate_limit_info") if isinstance(message.get("rate_limit_info"), dict) else {}
         if info.get("status") == "rejected":
             return {"provider": "claude", "resets_at": info.get("resetsAt"), "limit_type": info.get("rateLimitType")}
+    if event.get("type") == "cli_message" and event.get("raw_type") == "assistant.api_error":
+        # Out of credits: the SDK's structured ``billing_error`` on an assistant message.
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        if message.get("error") == "billing_error":
+            return {"provider": "claude", "resets_at": None, "limit_type": "billing"}
     if event.get("type") == "error" and isinstance(event.get("usage_limit"), dict):
         usage = event["usage_limit"]
         return {"provider": "codex", "resets_at": usage.get("resets_at"), "limit_type": usage.get("reached_type")}
@@ -2848,21 +2855,78 @@ def _usage_accounts_block(accounts: Optional[List[Dict[str, Any]]]) -> str:
     return "\nConnected accounts:\n" + "\n".join(_account_line(account) for account in accounts)
 
 
-def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool) -> str:
-    """What a respawn leases: an account that is not rate-limited, else the earliest reset."""
-    then = "continues from the files in that folder" if local else "resumes from the latest checkpoint"
-    free = "one of your own logins" if local else "an account"
-    verb = "uses" if local else "leases"
-    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
-        return f"the respawn {verb} {free} that is not rate-limited and {then}."
-    provider = _provider_label(str(next_lease["provider"]))
+def _shared_path_line(path: Dict[str, Any]) -> str:
+    """``- shared Codex subscriptions: 2 of 3 available`` / ``- funded Anthropic API key: available``."""
+    status = path.get("status")
+    until = path.get("limited_until")
+    if path.get("kind") == "pool":
+        total = path.get("total_count") or 0
+        if status == "unconfigured":
+            state = "none connected"
+        elif status == "available":
+            state = f"{path.get('available_count') or 0} of {total} available"
+        else:
+            state = f"all {total} limited" + (f" until {until}" if until else "")
+    elif status == "unconfigured":
+        state = "not configured"
+    elif status == "available":
+        state = "available"
+    else:
+        state = "limited" + (f" until {until}" if until else "")
+    return f"- {path.get('label')}: {state}"
+
+
+def _shared_paths_block(paths: Optional[List[Dict[str, Any]]]) -> str:
+    """Shared subscription pools and funded keys (stored state only; no usage estimates)."""
+    if not paths:
+        return ""
+    return "\nShared credential paths:\n" + "\n".join(_shared_path_line(path) for path in paths)
+
+
+def _lease_name(next_lease: Dict[str, Any]) -> str:
+    """An own account reads ``Codex me@x``; a shared path's label already names its provider."""
+    provider = _provider_label(str(next_lease.get("provider")))
+    if next_lease.get("kind") in ("pool", "funded"):
+        return str(next_lease.get("label"))
     label = next_lease.get("label")
-    if next_lease.get("available_now"):
-        now = f"now {provider} {label}" if label else f"now a shared {provider} account"
-        return f"the respawn {verb} {free} that is not rate-limited ({now}) and {then}."
+    return f"{provider} {label}" if label else f"a shared {provider} account"
+
+
+def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool, from_provider: Optional[str] = None) -> str:
+    """What a retry leases and how it continues: native resume, provider handoff, or nothing yet."""
+    if local:
+        then = "continues from the files in that folder"
+        if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+            return f"the respawn uses one of your own logins that is not rate-limited and {then}."
+        provider = _provider_label(str(next_lease["provider"]))
+        label = next_lease.get("label")
+        if next_lease.get("available_now"):
+            now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+            return f"the respawn uses one of your own logins that is not rate-limited ({now}) and {then}."
+        return (
+            f"no login is free until {next_lease.get('available_at')} "
+            f"(the earliest reset: {provider} {label}); a respawn after that uses it and {then}."
+        )
+    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+        return "the retry leases an account that is not rate-limited and resumes the paused session."
+    provider = _provider_label(str(next_lease["provider"]))
+    if not next_lease.get("available_now"):
+        return (
+            f"no credential is free until {next_lease.get('available_at')} "
+            f"(the earliest reset: {_lease_name(next_lease)}); a retry before that stays paused and "
+            "starts nothing."
+        )
+    label = next_lease.get("label")
+    now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+    if from_provider is None or next_lease["provider"] == from_provider:
+        return (
+            f"the retry leases an account that is not rate-limited ({now}), resumes the paused "
+            f"sandbox and continues the same {provider} conversation."
+        )
     return (
-        f"no {'login' if local else 'account'} is free until {next_lease.get('available_at')} "
-        f"(the earliest reset: {provider} {label}); a respawn after that {verb} it and {then}."
+        f"no {_provider_label(from_provider)} credential is left, so the retry continues this session on "
+        f"{provider} ({now}) from the latest checkpoint, with a handoff prompt that points it at the "
+        "previous agent's trajectory."
     )
 
 
@@ -2874,12 +2938,14 @@ def format_usage_limit_message(
     local_place: Optional[str] = None,
     accounts: Optional[List[Dict[str, Any]]] = None,
     next_lease: Optional[Dict[str, Any]] = None,
+    paths: Optional[List[Dict[str, Any]]] = None,
+    limit_type: Optional[str] = None,
 ) -> str:
-    """The parent's tool error for a usage limit (C15): what stopped, every account, the respawn.
+    """The parent's tool error for a usage limit (C15): what stopped, every path, the retry.
 
-    The activity never fails over on its own: the parent decides. ``accounts``
-    and ``next_lease`` are the backend's stored view (no provider calls), so a
-    respawn leases an account that is not rate-limited, else the earliest reset.
+    The activity never fails over on its own: the parent retries with the
+    session id and the next spawn re-credentials. ``accounts``, ``paths`` and
+    ``next_lease`` are the backend's stored view (no provider calls).
     ``local_place`` (a Mac run): the work stays in that folder and the run used
     the user's own CLI login, so the respawn targets the Mac again.
     """
@@ -2900,11 +2966,44 @@ def format_usage_limit_message(
         saved += f" on branch {facts['branch']}"
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
+    stopped = (
+        f"the {_provider_label(code_provider)} credential{' ' + on_account.strip() if on_account else ''} "
+        f"ran out of credits{resets}"
+        if limit_type == "billing"
+        else f"the {_provider_label(code_provider)} usage limit was reached"
+        f"{' on' + on_account if on_account else ''}{resets}"
+    )
     return (
-        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached"
-        f"{' on' + on_account if on_account else ''}{resets}. {saved}.{block}\n"
-        f"Respawn with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
-        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False)
+        f"Code agent stopped: {stopped}. {saved}; the sandbox is paused, not killed."
+        f"{block}{_shared_paths_block(paths)}\n"
+        f"Retry with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False, from_provider=code_provider)
+    )
+
+
+def format_no_credential_message(
+    *,
+    code_session_id: str,
+    accounts: Optional[List[Dict[str, Any]]] = None,
+    paths: Optional[List[Dict[str, Any]]] = None,
+    next_lease: Optional[Dict[str, Any]] = None,
+) -> str:
+    """The parent's tool error for a retry that can lease nothing (C15): nothing started, the earliest reset."""
+    retry = f"spawn_agent(type='code', code_session_id='{code_session_id}', goal=<the same goal>)"
+    if isinstance(next_lease, dict) and next_lease.get("available_at"):
+        when = (
+            f"The earliest reset is {next_lease['available_at']} ({_lease_name(next_lease)}). "
+            f"Retry with {retry} after that."
+        )
+    else:
+        when = (
+            "No reset time is known: an account must be reconnected or a funded key refilled "
+            f"before {retry} can continue."
+        )
+    return (
+        "Code agent not resumed: no Claude Code or Codex credential can be leased right now, so no "
+        f"agent was started. Code session {code_session_id} stays paused with its work saved."
+        f"{_usage_accounts_block(accounts)}{_shared_paths_block(paths)}\n{when}"
     )
 
 
@@ -2964,6 +3063,71 @@ def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
     if facts.get("branch"):
         lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
     return "\n".join(lines)
+
+
+def _no_credential_result(
+    *,
+    available: Dict[str, Any],
+    code_session_id: str,
+    code_provider: str,
+    code_agent_meta: Dict[str, Any],
+    started_at: float,
+) -> Dict[str, Any]:
+    """A retry with no leasable credential anywhere (C15): nothing created, the session stays paused."""
+    outlook = available.get("outlook") if isinstance(available.get("outlook"), dict) else {}
+    accounts = outlook.get("accounts") if isinstance(outlook.get("accounts"), list) else None
+    paths = outlook.get("paths") if isinstance(outlook.get("paths"), list) else None
+    next_lease = outlook.get("next_lease") if isinstance(outlook.get("next_lease"), dict) else None
+    reset_iso = (next_lease or {}).get("available_at")
+    reset = _reset_label(reset_iso, safe_time())
+    user_message = (
+        f"Paused: no Claude or Codex credential is available{f' (earliest reset {reset})' if reset else ''}. "
+        "Work is saved."
+    )
+    facts = {"code_session_id": code_session_id, "state": "PAUSED"}
+    logger.warning(
+        "[ClaudeCode] Retry has no leasable credential; the session stays paused",
+        code_session_id=code_session_id,
+        earliest_reset=reset_iso,
+    )
+    return {
+        "status": CODE_AGENT_USAGE_LIMIT_STATUS,
+        "success": False,
+        "failure_kind": "no_credentials",
+        "retryable": True,
+        "message": format_no_credential_message(
+            code_session_id=code_session_id, accounts=accounts, paths=paths, next_lease=next_lease
+        ),
+        "usage_limit": {
+            "provider": code_provider,
+            "resets_at": reset_iso,
+            "limit_type": None,
+            "credential_marked": None,
+            "accounts": accounts,
+            "paths": paths,
+            "next_lease": next_lease,
+        },
+        "retry": {"tool": "spawn_agent", "type": "code", "code_session_id": code_session_id},
+        "task_id": None,
+        "ws_url": None,
+        "execution_time_ms": (safe_time() - started_at) * 1000,
+        "usage_items": [],
+        "structured_response": None,
+        "output_files": [],
+        "code_provider": code_provider,
+        "code_session": facts,
+        "code_agent": build_code_agent_metadata(
+            target_meta=code_agent_meta,
+            task_id=None,
+            provider=code_provider,
+            state="paused",
+            started_at=started_at,
+            ended_at=safe_time(),
+            facts=facts,
+            failure_message=user_message,
+        ),
+        "completed_turns": None,
+    }
 
 
 def _raise_bounded_activity_error(error: BaseException) -> None:
@@ -3180,21 +3344,52 @@ async def spawn_claude_code_activity(
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
 
         if attached is None:
-            # C15: continue on the other provider when this one has no
-            # leasable credential left (the session itself is provider-neutral).
+            # C15 re-credentialing. A resumed session (a retry after a usage
+            # limit, or the root passing its code_session_id) prefers its own
+            # provider: same harness, native resume of its conversation. Only
+            # when that provider has no leasable credential does the session
+            # continue on the other one (provider handoff in the backend). A
+            # retry that can lease nothing stays paused and starts nothing.
             # A Mac run only ever gets the user's own CLI login, never a pool token.
-            available = await fetch_code_credential_availability(user_id, own_only=target == "local")
-            other_provider = "codex" if code_provider == "claude" else "claude"
-            if available is not None and not available.get(code_provider) and available.get(other_provider):
+            resuming = code_session_id if target != "local" else None
+            available = await fetch_code_credential_availability(
+                user_id,
+                own_only=target == "local",
+                code_session_id=resuming,
+                prefer=code_provider,
+            )
+            session_provider = (available or {}).get("session_provider")
+            preferred = session_provider if session_provider in ("claude", "codex") else code_provider
+            other_provider = "codex" if preferred == "claude" else "claude"
+            if available is not None and available.get(preferred):
+                if preferred != code_provider:
+                    logger.info(
+                        "[ClaudeCode] Resuming the code session on its own provider",
+                        agent_id=agent_id,
+                        requested_provider=code_provider,
+                        session_provider=preferred,
+                        code_session_id=code_session_id,
+                    )
+                    action_summary.append(f"Resuming code session on its own provider ({preferred})")
+                code_provider = preferred
+            elif available is not None and available.get(other_provider):
                 logger.warning(
                     "[ClaudeCode] No leasable credential for provider; continuing on the other one",
                     agent_id=agent_id,
-                    from_provider=code_provider,
+                    from_provider=preferred,
                     to_provider=other_provider,
                     code_session_id=code_session_id,
                 )
-                action_summary.append(f"No {code_provider} credential available; continuing on {other_provider}")
+                action_summary.append(f"No {preferred} credential available; continuing on {other_provider}")
                 code_provider = other_provider
+            elif available is not None and resuming:
+                return _no_credential_result(
+                    available=available,
+                    code_session_id=resuming,
+                    code_provider=preferred,
+                    code_agent_meta=code_agent_meta,
+                    started_at=start_time,
+                )
 
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
@@ -3476,6 +3671,8 @@ async def spawn_claude_code_activity(
             accounts = accounts if isinstance(accounts, list) else None
             next_lease = (marked or {}).get("next_lease")
             next_lease = next_lease if isinstance(next_lease, dict) else None
+            paths = (marked or {}).get("paths")
+            paths = paths if isinstance(paths, list) else None
             message = format_usage_limit_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
@@ -3483,6 +3680,8 @@ async def spawn_claude_code_activity(
                 local_place=local_place,
                 accounts=accounts,
                 next_lease=next_lease,
+                paths=paths,
+                limit_type=usage_limit.get("limit_type"),
             )
             user_message = format_usage_limit_user_message(
                 code_provider=code_provider,
@@ -3523,6 +3722,7 @@ async def spawn_claude_code_activity(
                     "limit_type": usage_limit.get("limit_type"),
                     "credential_marked": (marked or {}).get("marked"),
                     "accounts": accounts,
+                    "paths": paths,
                     "next_lease": next_lease,
                 },
                 # A Mac run has no code session: its retry targets the same Mac folder.

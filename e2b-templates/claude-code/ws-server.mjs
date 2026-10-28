@@ -798,6 +798,16 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "assistant") {
+    if (typeof message.error === "string" && message.error) {
+      // The SDK's structured API-error kind (billing_error = out of credits,
+      // authentication_failed, rate_limit, ...): the activity acts on this
+      // field, never on the printed banner text (C15).
+      appendEvent({
+        type: "cli_message",
+        raw_type: "assistant.api_error",
+        cli_message: { type: "assistant_api_error", error: message.error },
+      });
+    }
     const content = message.message?.content || [];
     const messageId = message.message?.id || streamMessageId || randomUUID();
     for (const [partIndex, part] of content.entries()) {
