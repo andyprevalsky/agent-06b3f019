@@ -112,6 +112,14 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
+    // Gemini calls are GET/POST only. A host port probe (the boxes.dev daemon
+    // sends `HEAD /` to every new listener) is not provider traffic: never
+    // record it or hand it to a test handler that may not be installed yet.
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end();
+      return;
+    }
     void readJson(req).then((body) => {
       const recorded: Recorded = {
         method: req.method ?? '',
