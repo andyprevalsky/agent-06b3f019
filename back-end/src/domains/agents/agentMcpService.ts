@@ -76,6 +76,13 @@ export function extractTranscript(payload: unknown): string | null {
   return null;
 }
 
+/** The app's "Send test event" posts a sample transcription with `test` set. */
+export function isIndex01TestEvent(body: unknown): boolean {
+  if (body === null || typeof body !== 'object') return false;
+  const test = (body as Record<string, unknown>).test;
+  return test === true || test === 'true' || test === '1';
+}
+
 /** Multipart text fields may carry JSON (e.g. a `metadata` field): parse those in place. */
 export function normalizeWebhookBody(body: unknown): unknown {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return body;
