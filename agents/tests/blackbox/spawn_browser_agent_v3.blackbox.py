@@ -793,6 +793,66 @@ async def test_browser_verifier_target_attempt_survives_admission_and_provider_b
         assert "Unrelated Resend code label" not in step
 
 
+async def test_browser_evaluate_receipts_survive_compact_history_truncation():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+    history = ActionHistory()
+    rows = [
+        {"step": step, "action": "evaluate", "params": {"code": f"window.rows.slice({step})"},
+         "result": {"success": True, "value": {"sentinel": f"returned-chunk-{step}", "data": "x" * 7000}}}
+        for step in range(1, 6)
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current", browser_state={"dom_tree": "Independent current page"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "not independent DOM confirmation" in body
+    assert "verifier truncated" in body
+    assert all(f"returned-chunk-{step}" in body for step in range(1, 6)), "Middle executed results were lost"
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert [m["metadata"]["browser_action_step"] for m in receipts] == [5, 4, 3, 2, 1]
+    for receipt in receipts:
+        evidence = receipt["metadata"]["structured_response"]
+        original = rows[evidence["step"] - 1]
+        assert evidence["params"] == original["params"] and evidence["result"] == original["result"]
+        assert "not independent DOM confirmation" in receipt["text"]
+    assert "Independent current page" in ctx[0]["text"]
+
+
+async def test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+    policy = DOMService("ws://unused.test")
+    policy.register_secret_refs({"secret:fixture": "private-secret-value"})
+    history = ActionHistory(); history.bind_dom_service(policy)
+    rows = [
+        {"step": 1, "action": "evaluate", "params": {"code": "private-secret-value"}, "result": {"success": False, "error": "blocked", "value": "private-secret-value"}},
+        {"step": 2, "action": "evaluate", "params": {"code": "readA()"}, "result": {"success": True, "value": {"count": 4}}},
+        {"step": 2, "action": "evaluate", "params": {"code": "readB()"}, "result": {"success": True, "value": {"count": 3}}},
+        {"step": 3, "action": "evaluate", "params": {}, "result": {"success": True}},
+        {"step": 4, "action": "evaluate", "params": {}, "result": {"success": True, "value": "z" * 20000}},
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(goal="Inspect", current_url="https://example.test/", browser_state={"dom_tree": "Native page disagrees"}, action_history=history, config=SimpleNamespace(), session_id="fixture")
+    ctx = _model_visible_browser_verifier_context(ctx, policy, {})
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert len(receipts) == 4  # Missing result is not reconstructed; duplicate/conflicting receipts remain distinct.
+    assert "private-secret-value" not in json.dumps(ctx)
+    failed = next(m for m in receipts if m["metadata"]["structured_response"]["step"] == 1)
+    assert failed["metadata"]["toolStatus"] == "ERROR" and failed["metadata"]["structured_response"]["result"]["success"] is False
+    conflicts = [m["metadata"]["structured_response"]["result"]["value"] for m in receipts if m["metadata"]["structured_response"]["step"] == 2]
+    assert conflicts == [{"count": 3}, {"count": 4}]
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "Native page disagrees" in body and "verifier truncated" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
 async def test_browser_verifier_context_grounds_in_final_state():
     """The extracted verifier-context builder (shared by attempt_completion AND
     the new max-steps final synthesis pass) grounds in final-state DOM +
@@ -35965,6 +36025,8 @@ async def run_all_tests():
         test_browser_error_propagation_writers_preserve_native_sealing,
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
+    await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
+    await r.record_async("browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps", test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps)
     await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)
     await r.record_async("phone_off_rotation_has_no_discovery_or_input_change", test_phone_off_rotation_has_no_discovery_or_input_change)
     await r.record_async("phone_off_actual_activity_never_observes_phone", test_phone_off_actual_activity_never_observes_phone)

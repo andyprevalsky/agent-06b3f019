@@ -448,6 +448,22 @@ async def build_browser_verifier_context(
     ]
 
 
+    # Executed JavaScript returns are attributable tool output, not native
+    # DOM ground truth. Keep request and returned value together per step so
+    # the compact history's cap cannot silently remove the middle results.
+    # get_entries() applies the existing history privacy projection; normal
+    # per-tool/aggregate verifier budgets still apply to these receipts.
+    evaluation_evidence = [
+        {"role": "TOOL", "text": "Recorded JavaScript request and returned value; not independent DOM confirmation.",
+         "metadata": {"toolName": "evaluate", "title": "Recorded JavaScript request and returned value; not independent DOM confirmation.", "toolStatus": "FINISHED" if entry["result"].get("success", True) else "ERROR",
+                      "browser_action_step": entry["step"],
+                      "structured_response": {"step": entry["step"], "params": entry.get("params", {}),
+                                              "result": {key: entry["result"][key] for key in ("success", "error", "value") if key in entry["result"]}}}}
+        for entry in reversed(action_entries)
+        if type(entry.get("step")) is int and entry.get("action") == "evaluate"
+        and isinstance(entry.get("result"), dict) and "value" in entry["result"]
+    ]
+
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
     pages_above = scroll_pos.get("pages_above", 0)
@@ -598,7 +614,7 @@ async def build_browser_verifier_context(
                 "screenshot_b64": final_screenshot_b64 or "",
             },
         },
-    ] + observation_evidence
+    ] + observation_evidence + evaluation_evidence
 
 
 def append_completion_evidence(
