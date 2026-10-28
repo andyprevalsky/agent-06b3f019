@@ -8501,7 +8501,7 @@ async def _spawn_browser_agent_activity_v3_real(
         *,
         require_complete_passkeys: bool = False,
     ) -> None:
-        nonlocal cleanup_failure
+        nonlocal cleanup_failure, dom_service
         try:
             if pause and exact_session_id == session_id and dom_service is not None:
                 captured = await _capture_browser_passkey_usage(
@@ -8515,6 +8515,14 @@ async def _spawn_browser_agent_activity_v3_real(
                         task_id=task_id,
                         session_id=exact_session_id,
                     )
+            if pause and exact_session_id == session_id and dom_service is not None:
+                # Tilion admits one CDP client. The backend must connect to take
+                # its logical checkpoint before releasing the native session.
+                # Keep the passkey readback above this detach.
+                if not await _disconnect_browser(dom_service):
+                    raise BrowserSessionCloseError(exact_session_id, pause)
+                _tilion_leave_session()
+                dom_service = None
             await _stop_kernel_replay_before_session_close(browser_recorder)
             options: Dict[str, Any] = {"pause": pause}
             if current_url:
@@ -11799,9 +11807,10 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
 
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
-                        await _disconnect_browser(dom_service)
-                        _tilion_leave_session()
-                        dom_service = None
+                        if dom_service is not None:
+                            await _disconnect_browser(dom_service)
+                            _tilion_leave_session()
+                            dom_service = None
                         await collect_unread_user_instructions()
 
                         context_message = build_context_summary(
@@ -12876,9 +12885,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
-        await _disconnect_browser(dom_service)
-        _tilion_leave_session()
-        dom_service = None
+        if dom_service is not None:
+            await _disconnect_browser(dom_service)
+            _tilion_leave_session()
+            dom_service = None
         await collect_unread_user_instructions()
 
         context_message = build_context_summary(

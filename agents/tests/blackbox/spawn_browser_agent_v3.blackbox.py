@@ -18133,6 +18133,8 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
         "state_prefetch =", 1
     )[0]
     assert pause_helper.index("_capture_browser_passkey_usage") < pause_helper.index(
+        "await _disconnect_browser(dom_service)"
+    ) < pause_helper.index(
         "close_browser_session(config"
     )
     assert not any("await dom_service.disconnect()" in line for line in lines)
@@ -27257,11 +27259,15 @@ async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
         and node.name == "_close_browser_with_cleanup_receipt"
     ]
     assert len(helpers) == 1, "all parking must use the existing close/checkpoint boundary"
-    factory = ast.parse("def factory():\n    cleanup_failure = None\n").body[0]
+    factory = ast.parse("def factory():\n    cleanup_failure = None\n    dom_service = object()\n").body[0]
     factory.body.extend(helpers)
     factory.body.extend(ast.parse('async def pause():\n    await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)\n    if cleanup_failure is not None:\n        raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))\nreturn pause').body)
-    for failure in (None, 500, 409, "cancelled"):
+    for failure in (None, 500, 409, "cancelled", "disconnect"):
         calls = []
+
+        async def disconnect(_service):
+            calls.append("disconnect")
+            return failure != "disconnect"
 
         async def close(config, session_id, **kwargs):
             calls.append((session_id, kwargs))
@@ -27282,7 +27288,8 @@ async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
             "logger": SimpleNamespace(info=lambda *args, **kwargs: None),
             "_capture_browser_passkey_usage": AsyncMock(return_value=True),
             "record_passkey_usage_once": AsyncMock(),
-            "dom_service": object(),
+            "_disconnect_browser": disconnect,
+            "_tilion_leave_session": lambda: calls.append("banked"),
         }
         exec(compile(ast.fix_missing_locations(ast.Module(body=[factory], type_ignores=[])), "approval-parking-helpers", "exec"), namespace)
         pause = namespace["factory"]()
@@ -27294,7 +27301,13 @@ async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
                 await pause()
         else:
             await pause()
-        assert calls == [("ephemeral-checkout", {"pause": True, "current_url": "https://shop.example/checkout"})]
+        if failure == "disconnect":
+            assert calls == ["disconnect"], "failed CDP detach must not request a checkpoint"
+        else:
+            assert calls == [
+                "disconnect", "banked",
+                ("ephemeral-checkout", {"pause": True, "current_url": "https://shop.example/checkout"}),
+            ]
 
 
 async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_probe=None):
