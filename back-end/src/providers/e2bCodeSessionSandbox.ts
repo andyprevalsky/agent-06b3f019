@@ -27,7 +27,8 @@ import {
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
-import { e2bSandboxFs } from './codeSessions/sandboxFs';
+import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
+import { writeHandoffTrajectory, type SpawnCodeSession } from './codeSessions/usageLimit';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   linkClaudeCodeSession,
@@ -193,7 +194,7 @@ async function retireReplacedSandbox(
  * The timeout is the idle window every keepalive extends, not a runtime cap.
  */
 export async function acquireCodeSandbox(
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   templateId: string,
   envs: Record<string, string>,
   label: string,
@@ -223,6 +224,12 @@ export async function acquireCodeSandbox(
       ),
     { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
   );
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (trajectory !== null) {
+    // C15 provider switch: after the checkpoint restore, so the previous CLI's
+    // session log is in the HOME the new CLI starts in, where the handoff points.
+    await writeHandoffTrajectory(e2bSandboxFs(acquired.sandbox), trajectory);
+  }
   return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
 }
 
@@ -314,7 +321,7 @@ export function codeSessionCreateOptions(codeSession: CodeSessionRow | null): {
  */
 export async function createLocalCodeSessionFallback(
   err: unknown,
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   params: {
     taskId: string;
     agentId: string;
@@ -329,6 +336,13 @@ export async function createLocalCodeSessionFallback(
 ): Promise<CodeAgentSessionResult | null> {
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;
   const localHome = codeSession !== null ? await prepareLocalCodeSessionHome(codeSession) : null;
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (localHome !== null && trajectory !== null) {
+    // C15 provider switch on this host: the log lands under the session HOME
+    // and the handoff prompt names that path instead of the sandbox one.
+    const written = await writeHandoffTrajectory(localSandboxFs(localHome.home), trajectory);
+    params = { ...params, goal: params.goal.split(trajectory.path).join(written) };
+  }
   const resumeId = localHome?.cliSessionId ?? null;
   // Same-host session: loopback tools URL, MCP path under the session HOME
   // (the persistent code-session HOME when there is one, else the task dir).

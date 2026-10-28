@@ -25,7 +25,7 @@ import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
-import { switchCodeSessionProvider } from './usageLimit';
+import { switchCodeSessionProvider, type SpawnCodeSession } from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
 import {
@@ -128,18 +128,22 @@ export async function createWithCodeSession<
   },
 >(
   params: ResolveSpawnParams,
-  create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
-  let codeSession = await resolveSpawnCodeSession(params);
+  let codeSession: SpawnCodeSession | null = await resolveSpawnCodeSession(params);
   // C15: a retry after a usage limit may run on the other provider. It keeps
-  // the session (branch, commits, files via the checkpoint) and gets a
-  // handoff summary instead of the other CLI's conversation.
+  // the session (branch, commits, files via the checkpoint) and gets a handoff
+  // prompt instead of the other CLI's conversation; the previous CLI's session
+  // log rides on the session handle, and the sandbox acquire writes it into
+  // the new sandbox at the path the prompt names.
   let handoff: string | null = null;
   if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    // A concurrent duplicate loses with CodeSessionBusyError and keeps the
+    // winner's lease (same owner), so exactly one spawn rotates the session.
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
       Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
     );
-    codeSession = switched.session;
+    codeSession = { ...switched.session, handoffTrajectory: switched.trajectory };
     handoff = switched.handoff;
   }
   let session: T;

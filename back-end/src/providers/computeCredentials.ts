@@ -609,6 +609,11 @@ const ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 // ['claude_code','gpt_code'] set, so this row is never handed out as a token.
 const ANTHROPIC_API_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
 const ANTHROPIC_API_KEY_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
+const ANTHROPIC_API_KEY_COOLDOWN_KEY = {
+  userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
+  name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+  accountId: '',
+};
 
 let cachedCooldownUntilMs = 0;
 let lastCooldownDbCheckMs = 0;
@@ -623,13 +628,7 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   lastCooldownDbCheckMs = now;
   const cacheRevision = cooldownCacheRevision;
   const row = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-        name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-        accountId: '',
-      },
-    },
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
     select: { rateLimitedUntil: true },
   });
   if (cacheRevision !== cooldownCacheRevision) {
@@ -637,6 +636,16 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   }
   cachedCooldownUntilMs = row?.rateLimitedUntil ? row.rateLimitedUntil.getTime() : 0;
   return Date.now() < cachedCooldownUntilMs;
+}
+
+/** When the shared Anthropic API key's backoff ends; null when it is not backed off. */
+export async function anthropicApiKeyCooldownUntil(now = new Date()): Promise<Date | null> {
+  const row = await prisma.integration.findUnique({
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
+    select: { rateLimitedUntil: true },
+  });
+  const until = row?.rateLimitedUntil ?? null;
+  return until !== null && until > now ? until : null;
 }
 
 /** Back the shared Anthropic API key off for the cooldown window (DB + cache). */
@@ -647,13 +656,7 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
   // A read issued before the upsert below commits would drop this mark.
   lastCooldownDbCheckMs = Date.now();
   await prisma.integration.upsert({
-    where: {
-      userId_name_accountId: {
-        userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-        name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-        accountId: '',
-      },
-    },
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
     create: {
       userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
       name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
