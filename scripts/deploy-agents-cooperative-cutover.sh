@@ -43,6 +43,18 @@ IMAGE_LABEL="cutover-${SURFACE_HASH}-${DEPLOYMENT_TOKEN}"
 IMAGE_REF="registry.fly.io/${APP}:${IMAGE_LABEL}"
 export IMAGE_REF
 
+# Promote the image prebuilt before merge when this commit's agents tree is
+# byte-identical to the prebuilt one (scripts/prebuild-agents-image.sh). A miss
+# or any lookup failure builds exactly as before.
+PREBUILT_REF=""
+if [ "${AGENTS_PREBUILT_REUSE:-1}" = 1 ]; then
+  PREBUILT_REF=$(APP="$APP" bash "$ROOT/scripts/prebuild-agents-image.sh" lookup --sha "$BUILD_ID") ||
+    PREBUILT_REF=""
+fi
+if [[ "$PREBUILT_REF" =~ ^registry\.fly\.io/[a-z0-9-]+@sha256:[a-f0-9]{64}$ ]]; then
+  echo "Promoting prebuilt worker image $PREBUILT_REF (agents tree $(git -C "$ROOT" rev-parse "$BUILD_ID:agents"))"
+  IMAGE_REF="$PREBUILT_REF"
+else
 mkdir -p "$ARTIFACT_DIR/worker"
 # Build from the immutable Git tree, never from files another local process can
 # change while Docker reads its context. These directories are also excluded by
@@ -60,6 +72,7 @@ if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
   exit 1
 fi
 IMAGE_REF="registry.fly.io/${APP}@${IMAGE_DIGEST}"
+fi
 export IMAGE_REF
 if [ "$(git -C "$ROOT" rev-parse HEAD)" != "$BUILD_ID" ] ||
    ! git -C "$ROOT" diff --quiet HEAD ||

@@ -259,6 +259,15 @@ GATES = (
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
     ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
+    Gate("deploy-stage-wait", ("python3", "scripts/tests/deploy-stage-wait.test.py")),
+    Gate(
+        "deploy-approval-batch",
+        ("python3", "scripts/tests/deploy-approval-batch.test.py"),
+    ),
+    Gate(
+        "prebuild-agents-image",
+        ("bash", "scripts/tests/prebuild-agents-image.test.sh"),
+    ),
     Gate(
         "deploy-structural-runner",
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),

@@ -730,5 +730,134 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertGreaterEqual(len(calls), 2)
 
 
+class RaceReviewTest(unittest.TestCase):
+    """CodeRabbit vs. Claude fallback: first valid review on the exact HEAD wins."""
+
+    HEAD = "f" * 40
+
+    def setUp(self) -> None:
+        self.now = 0.0
+        self.triggers: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(seconds, 1.0)
+
+    def payload(self, state: str, head: str | None = None, **extra: object) -> dict:
+        entry = {"__typename": "StatusContext", "context": "CodeRabbit", "state": state}
+        entry.update(extra)
+        return {"headRefOid": head or self.HEAD, "statusCheckRollup": [entry]}
+
+    def trigger(self):
+        self.triggers.append(self.now)
+        return MODULE.datetime(2026, 10, 28, tzinfo=MODULE.timezone.utc)
+
+    def race(self, loader, fallback_loader=lambda _since: None, **kwargs):
+        return MODULE.race_review(
+            pr="9",
+            expected_head=self.HEAD,
+            repo=None,
+            timeout_seconds=kwargs.pop("timeout_seconds", 3600),
+            poll_seconds=30,
+            race_after_seconds=kwargs.pop("race_after_seconds", 600),
+            loader=loader,
+            trigger=self.trigger,
+            fallback_loader=fallback_loader,
+            sleeper=self.sleep,
+            clock=self.clock,
+            **kwargs,
+        )
+
+    def test_prompt_coderabbit_review_never_starts_the_fallback(self) -> None:
+        states = iter(["PENDING", "PENDING", "SUCCESS"])
+        outcome = self.race(lambda _pr, _repo: self.payload(next(states)))
+        self.assertEqual(outcome.reviewer, "coderabbit")
+        self.assertTrue(outcome.successful)
+        self.assertEqual(self.triggers, [], "fallback spent Claude quota on a healthy review")
+
+    def test_slow_coderabbit_races_the_fallback_after_the_threshold(self) -> None:
+        def fallback(_since):
+            # The fallback completes 4 minutes after it was started.
+            if self.triggers and self.now - self.triggers[0] >= 240:
+                return {"databaseId": 77, "headSha": self.HEAD, "status": "completed", "conclusion": "success"}
+            return {"databaseId": 77, "headSha": self.HEAD, "status": "in_progress", "conclusion": ""}
+
+        outcome = self.race(lambda _pr, _repo: self.payload("PENDING"), fallback)
+        self.assertEqual(len(self.triggers), 1, "fallback must start exactly once")
+        self.assertGreaterEqual(self.triggers[0], 600)
+        self.assertLess(self.triggers[0], 660)
+        self.assertEqual(outcome.reviewer, "claude-fallback")
+        self.assertTrue(outcome.successful)
+        self.assertEqual(outcome.fallback_run["databaseId"], 77)
+
+    def test_coderabbit_still_wins_if_it_lands_before_the_fallback(self) -> None:
+        def loader(_pr, _repo):
+            return self.payload("SUCCESS" if self.now >= 700 else "PENDING")
+
+        def fallback(_since):
+            return {"databaseId": 5, "headSha": self.HEAD, "status": "in_progress", "conclusion": ""}
+
+        outcome = self.race(loader, fallback)
+        self.assertEqual(outcome.reviewer, "coderabbit")
+        self.assertEqual(len(self.triggers), 1)
+
+    def test_coderabbit_quota_failure_starts_the_fallback_immediately(self) -> None:
+        def loader(_pr, _repo):
+            return self.payload("SUCCESS", description="Review limit reached")
+
+        def fallback(_since):
+            return {"databaseId": 8, "headSha": self.HEAD, "status": "completed", "conclusion": "success"}
+
+        outcome = self.race(loader, fallback)
+        self.assertEqual(self.triggers, [0.0], "a terminal CodeRabbit failure must not wait out the race")
+        self.assertEqual(outcome.reviewer, "claude-fallback")
+        self.assertEqual(outcome.coderabbit.state, "REVIEW_RATE_LIMITED")
+
+    def test_both_reviewers_unavailable_is_unsuccessful_with_evidence(self) -> None:
+        def fallback(_since):
+            return {"databaseId": 9, "headSha": self.HEAD, "status": "completed", "conclusion": "failure"}
+
+        outcome = self.race(lambda _pr, _repo: self.payload("FAILURE"), fallback)
+        self.assertFalse(outcome.successful)
+        self.assertEqual(outcome.reviewer, "none")
+        self.assertEqual(outcome.fallback_run["conclusion"], "failure")
+
+    def test_failed_fallback_keeps_waiting_for_a_pending_coderabbit(self) -> None:
+        def loader(_pr, _repo):
+            return self.payload("SUCCESS" if self.now >= 1500 else "PENDING")
+
+        def fallback(_since):
+            return {"databaseId": 3, "headSha": self.HEAD, "status": "completed", "conclusion": "failure"}
+
+        outcome = self.race(loader, fallback)
+        self.assertEqual(outcome.reviewer, "coderabbit")
+        self.assertTrue(outcome.successful)
+
+    def test_head_change_aborts_the_race(self) -> None:
+        with self.assertRaises(MODULE.ReviewWaitError):
+            self.race(lambda _pr, _repo: self.payload("PENDING", head="0" * 40))
+
+    def test_race_times_out_without_a_valid_review(self) -> None:
+        with self.assertRaises(TimeoutError):
+            self.race(
+                lambda _pr, _repo: self.payload("PENDING"),
+                timeout_seconds=900,
+            )
+        self.assertEqual(len(self.triggers), 1)
+
+    def test_fallback_run_lookup_binds_exact_head_and_trigger_time(self) -> None:
+        since = MODULE.datetime(2026, 10, 28, 12, 0, tzinfo=MODULE.timezone.utc)
+        runs = [
+            {"databaseId": 1, "headSha": self.HEAD, "createdAt": "2026-10-28T11:59:59Z", "status": "completed", "conclusion": "success"},
+            {"databaseId": 2, "headSha": "e" * 40, "createdAt": "2026-10-28T12:01:00Z", "status": "completed", "conclusion": "success"},
+            {"databaseId": 3, "headSha": self.HEAD, "createdAt": "2026-10-28T12:00:05Z", "status": "queued", "conclusion": ""},
+        ]
+        with patch.object(MODULE, "_gh_json", return_value=runs):
+            run = MODULE.fallback_run_for(self.HEAD, since, None)
+        self.assertEqual(run["databaseId"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
