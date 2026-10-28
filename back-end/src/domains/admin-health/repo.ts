@@ -1,4 +1,4 @@
-import { IntegrationStatus, PurchaseSpendStatus, type AgentStatus } from '@prisma/client';
+import { IntegrationStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 import { isRealWaitlistPerson } from '../../providers/waitlistIdentity';
@@ -33,6 +33,8 @@ export interface GmvRecord {
   totalCents: number;
   createdAt: Date;
   provider: string;
+  /** Andy, Tamara or Aman; everyone else counts only while a Stripe subscriber. */
+  coreTeam: boolean;
 }
 
 export interface SubscriptionUserRecord {
@@ -146,28 +148,6 @@ export async function findSubscriptionUsersByCustomerIds(
   return prisma.subscription.findMany({
     where: { stripeCustomerId: { in: stripeCustomerIds } },
     select: { userId: true, stripeCustomerId: true },
-  });
-}
-
-/**
- * Platform GMV ledger rows: every CLEARED PurchaseSpend in the window.
- * Includes AgentCard mint clearances and order_confirmation rows harvested from
- * agent/browser structured outputs (amount + confirmation id).
- * Attribution uses createdAt (order initiation / confirmation capture time).
- */
-export async function findClearedGmvBetween(start: Date, end: Date): Promise<GmvRecord[]> {
-  return prisma.purchaseSpend.findMany({
-    where: {
-      status: PurchaseSpendStatus.CLEARED,
-      createdAt: { gte: start, lt: end },
-    },
-    select: {
-      userId: true,
-      agentId: true,
-      totalCents: true,
-      createdAt: true,
-      provider: true,
-    },
   });
 }
 

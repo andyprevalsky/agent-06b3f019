@@ -1,7 +1,8 @@
 /**
- * Report Bug section in AgentSettingsDialog.
+ * Report Bug panel body for ReportBugDialog (its own control, outside Agent
+ * Settings).
  *
- * Admin-only: expands into a description textarea that runs the boxes.dev
+ * Admin-only: a description textarea that runs the boxes.dev
  * Bug Report automation, titled from the description, to /rca the Rose agent.
  *
  * Screenshots dragged onto or pasted into the textarea upload immediately and
@@ -66,7 +67,7 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
   const isUploading = flow.uploadingScreenshots > 0;
   if (flow.launched !== null) {
     return (
-      <div className="space-y-3 pt-4 border-t border-border/60" data-testid="report-bug-launched">
+      <div className="space-y-3" data-testid="report-bug-launched">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm font-medium">
             <Check className="h-4 w-4 text-emerald-500" />
@@ -121,79 +122,64 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
   }
 
   return (
-    <div className="space-y-3 pt-4 border-t border-border/60">
-      {!flow.showComposer ? (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <Label htmlFor="report-bug-description">Describe the bug</Label>
+        <Textarea
+          id="report-bug-description"
+          data-testid="report-bug-description"
+          value={flow.description}
+          onChange={(e) => flow.setDescription(e.target.value)}
+          placeholder="What went wrong? Include expected vs actual behavior."
+          rows={5}
+          disabled={flow.isSubmitting}
+          className={cn(
+            'resize-y min-h-[100px]',
+            isDragOver && 'border-primary ring-2 ring-primary/40',
+          )}
+          {...dropHandlers}
+        />
+        <p className="text-xs text-muted-foreground" data-testid="report-bug-screenshot-hint">
+          {isUploading
+            ? `Uploading ${flow.uploadingScreenshots} screenshot${flow.uploadingScreenshots === 1 ? '' : 's'}…`
+            : 'Drag, drop or paste screenshots into the description.'}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Launches a boxes.dev agent to investigate. After it launches you can copy or open the
+          link.
+        </p>
+      </div>
+      <div className="flex gap-2">
         <Button
           type="button"
-          onClick={flow.start}
+          onClick={flow.cancel}
           variant="outline"
-          className="w-full"
-          data-testid="report-bug-open"
+          className="flex-1"
+          disabled={flow.isSubmitting}
+          data-testid="report-bug-cancel"
         >
-          <Bug className="h-4 w-4 mr-2" />
-          Report Bug
+          Cancel
         </Button>
-      ) : (
-        <div className="space-y-3">
-          <div className="space-y-2">
-            <Label htmlFor="report-bug-description">Describe the bug</Label>
-            <Textarea
-              id="report-bug-description"
-              data-testid="report-bug-description"
-              value={flow.description}
-              onChange={(e) => flow.setDescription(e.target.value)}
-              placeholder="What went wrong? Include expected vs actual behavior."
-              rows={5}
-              disabled={flow.isSubmitting}
-              className={cn(
-                'resize-y min-h-[100px]',
-                isDragOver && 'border-primary ring-2 ring-primary/40',
-              )}
-              {...dropHandlers}
-            />
-            <p className="text-xs text-muted-foreground" data-testid="report-bug-screenshot-hint">
-              {isUploading
-                ? `Uploading ${flow.uploadingScreenshots} screenshot${flow.uploadingScreenshots === 1 ? '' : 's'}…`
-                : 'Drag, drop or paste screenshots into the description.'}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Launches a boxes.dev agent to investigate. After it launches you can copy or open the
-              link.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              onClick={flow.cancel}
-              variant="outline"
-              className="flex-1"
-              disabled={flow.isSubmitting}
-              data-testid="report-bug-cancel"
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void flow.submit()}
-              className="flex-1"
-              disabled={flow.isSubmitting || isUploading || flow.description.trim() === ''}
-              data-testid="report-bug-submit"
-            >
-              {flow.isSubmitting ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Submitting...
-                </>
-              ) : (
-                <>
-                  <Bug className="h-4 w-4 mr-2" />
-                  Submit
-                </>
-              )}
-            </Button>
-          </div>
-        </div>
-      )}
+        <Button
+          type="button"
+          onClick={() => void flow.submit()}
+          className="flex-1"
+          disabled={flow.isSubmitting || isUploading || flow.description.trim() === ''}
+          data-testid="report-bug-submit"
+        >
+          {flow.isSubmitting ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              Submitting...
+            </>
+          ) : (
+            <>
+              <Bug className="h-4 w-4 mr-2" />
+              Submit
+            </>
+          )}
+        </Button>
+      </div>
     </div>
   );
 }

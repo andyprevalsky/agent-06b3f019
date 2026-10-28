@@ -56,7 +56,7 @@ import {
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
-import { isRoseDesktopUser } from '@/lib/roseDesktop';
+import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
@@ -121,21 +121,26 @@ export function TerminalContent() {
 
 /** The per-user UI belongs to the signed-in session user only. */
 function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): string | null {
-  if (!isRoseDesktopAccount(agents) || isBenchmarkArchiveMode()) return null;
-  return agents.user?.id ?? null;
+  if (isBenchmarkArchiveMode()) return null;
+  return roseDesktopAccountId(agents);
 }
 
 /** Rose Desktop chrome is on only for flagged, signed-in accounts (lib/roseDesktop.ts). */
 function isRoseDesktopAccount(agents: ReturnType<typeof useTerminalAgents>): boolean {
-  return !agents.isAnonymous && isRoseDesktopUser(agents.user);
+  return isRoseDesktopSession(agents);
 }
 
 function TerminalLayout(props: TerminalLayoutProps) {
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
   const roseDesktop = isRoseDesktopAccount(props.agents);
+  // Same identity that turns Rose Desktop on, so the theme/apps never flip when
+  // the async invite check resolves (stock accounts keep the invite-gated user).
+  const accountUserId = roseDesktop
+    ? roseDesktopAccountId(props.agents)
+    : (props.agents.user?.id ?? null);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseThemeProvider userId={props.agents.user?.id ?? null} darkOnLogin>
+      <RoseThemeProvider userId={accountUserId} darkOnLogin>
         <RoseAppsProvider
           agents={props.agents.agents}
           selectedAgentId={props.agents.selectedAgentId}
@@ -144,7 +149,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           onLogout={() => void props.agents.handleLogout()}
           onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
         >
-          <AppViewProvider userId={props.agents.user?.id ?? null}>
+          <AppViewProvider userId={accountUserId}>
             <CodeAgentViewProvider
               enabled={roseDesktop}
               selectedAgentId={props.agents.selectedAgentId}

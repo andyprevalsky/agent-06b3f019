@@ -70,10 +70,14 @@ export function buildSeries(
     const periodTasks = dedupeInternalRepeatTasks(
       tasksByPeriod[index].filter((task) => subscriberPoint.userIds.has(task.userId))
     );
-    // Platform GMV is total facilitated commerce (not cohort-filtered): AgentCard
-    // clearances + structured-output order confirmations. Per-task efficiency uses
-    // the same subscriber task denominator as outputTokensPerTask.
-    const gmvCents = sumGmvCents(gmvByPeriod[index]);
+    // Platform GMV: real purchases (live AgentCard + verified order confirmations,
+    // see repoProductGmv) by the core team or this period's Stripe subscribers —
+    // the completion-rate population. Per-task uses the subscriber task count.
+    const gmvCents = sumGmvCents(
+      gmvByPeriod[index].filter(
+        (record) => record.coreTeam || subscriberPoint.subscribedUserIds.has(record.userId)
+      )
+    );
     return {
       ...period,
       ...revenue[index],

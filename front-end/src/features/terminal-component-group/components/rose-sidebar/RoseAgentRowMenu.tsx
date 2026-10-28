@@ -10,8 +10,9 @@
  * Order (boxes.dev thread-menu style: icon + label rows, dividers, destructive red):
  *   Archive agent | Pin/Unpin agent · Rename agent | Copy ›
  * (UI #26 removed New agent in this branch, Mark unread, Mute notifications,
- * Share agent, Delete agent and Schedule a prompt…; Delete Agent stays in the
- * Agent Settings panel.)
+ * Share agent, Delete agent and Schedule a prompt…; Archive agent calls the
+ * same delete endpoint. The stock Agent Settings gear keeps Delete Agent; the
+ * Rose Desktop query-box drawer's settings panel has none.)
  */
 
 import * as ContextMenuPrimitive from '@radix-ui/react-context-menu';

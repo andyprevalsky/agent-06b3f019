@@ -168,6 +168,8 @@ function scoreAmountKey(key: string): number {
   ) {
     return 95;
   }
+  // An explicit USD order total beats a unit price_usd in the same output.
+  if (leaf === 'total_usd' || leaf === 'order_total_usd' || leaf === 'grand_total_usd') return 82;
   if (leaf.includes('total') && (leaf.includes('paid') || leaf.includes('charged'))) {
     return 88;
   }
@@ -188,6 +190,20 @@ function scoreConfirmationKey(key: string): number {
   if (leaf === 'order_number' || leaf === 'ordernumber') return 85;
   if (CONFIRMATION_KEY_RE.test(leaf)) return 70;
   return 0;
+}
+
+function isEntryOfMultiItemList(root: Record<string, unknown>, path: string): boolean {
+  const parts = path.split('.');
+  let node: unknown = root;
+  for (const part of parts) {
+    if (Array.isArray(node)) {
+      if (node.length > 1) return true;
+      node = node[Number(part)];
+    } else {
+      node = asRecord(node)?.[part];
+    }
+  }
+  return false;
 }
 
 /**
@@ -232,6 +248,9 @@ export function extractStructuredGmv(structured: unknown): StructuredGmvCapture 
   }
 
   if (bestAmount === null || bestConfirmation === null) return null;
+  // An amount taken from one entry of a multi-entry list (items.N.order_total)
+  // describes one of several orders — an order-history lookup, not a checkout.
+  if (isEntryOfMultiItemList(root, bestAmount.key)) return null;
 
   return {
     totalCents: bestAmount.cents,

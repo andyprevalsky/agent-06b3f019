@@ -160,7 +160,17 @@ async function main(): Promise<void> {
 
     // The real proxy routers against a 2xx fake upstream and the runner DB:
     // a forged or absent capability must never store a slot; a signed one does.
-    const upstream = http.createServer((_req, res) => {
+    // Like Cloudflare in front of chatgpt.com: a request still carrying another
+    // edge's client headers (Render adds them to every inbound request) is 403.
+    const upstream = http.createServer((req, res) => {
+      const edge = Object.keys(req.headers).filter((h) =>
+        /^(cf-|x-forwarded-|true-client-ip$)/.test(h)
+      );
+      if (edge.length > 0) {
+        res.writeHead(403, { 'content-type': 'text/html' });
+        res.end(`edge headers forwarded upstream: ${edge.join(',')}`);
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.end('data: {"live":true}\n\n');
     });
@@ -200,11 +210,24 @@ async function main(): Promise<void> {
               : `${base}/anthropic-proxy/${signProxyTraceSegment(trace)}/${mode}v1/messages`;
           const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', authorization: 'Bearer test' },
+            headers: {
+              'Content-Type': 'application/json',
+              authorization: 'Bearer test',
+              // What Render's edge adds before the request reaches the proxy.
+              'cf-connecting-ip': '203.0.113.7',
+              'cf-visitor': '{"scheme":"https"}',
+              'cf-ray': '0000000000000000-SJC',
+              'x-forwarded-for': '203.0.113.7',
+              'x-forwarded-proto': 'https',
+              'true-client-ip': '203.0.113.7',
+            },
             body: JSON.stringify({ model: 'm', input: [], messages: [] }),
           });
-          await res.text();
-          assert(res.status === 200, `${kind} ${c.name} status ${res.status}`);
+          const text = await res.text();
+          assert(
+            res.status === 200,
+            `${kind} ${c.name} status ${res.status}: ${text.slice(0, 120)}`
+          );
           const key =
             kind === 'codex' ? codeAgentSlotKey('codex', trace, 0) : anthropicSlotKey(trace, 0);
           const row = await prisma.fastModeCacheEntry.findUnique({ where: { key } });

@@ -9,13 +9,15 @@
  *         --cropped iframe--> native 1288x891 canvas,
  *                             translate(-4*s, -91*s) scale(s)
  *                             s = clipWidth/1280 so Amazon cart stays in frame
- *                             Kernel 1280x800 inset-0 (no chrome)
+ *                             Kernel native 1280x800, scale(s) (its player
+ *                             never upscales; Chrome UI stays visible)
  *                             Tilion viewer page inset-0 (page-only stream)
  *
  * LOAD STATE: [LOADING] (LiveViewLoading covers the iframe)
  *   --iframe load for this url--> [STREAMING]; a new url restarts at LOADING.
  *   live=false (bound session closed/ended) --> [NOT_LIVE] LiveViewLoading and
  *   no iframe, so a provider "session closed" page is never shown.
+ *   ended=true (owning agent finished) --> [ENDED] LiveViewEnded, no iframe.
  *
  * INPUT STATE: interactive=true -> the provider viewer receives real mouse
  *   and keyboard (Tilion /live-view sends them as page input);
@@ -28,18 +30,23 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import {
+  isKernelLiveViewUrl,
+  kernelLiveViewIframeStyle,
+  kernelLiveViewScaledStyle,
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
 } from './liveViewDisplay';
-import { LiveViewLoading } from './LiveViewLoading';
+import { LiveViewEnded, LiveViewLoading } from './LiveViewLoading';
 import { useLiveViewLoaded } from './useLiveViewLoaded';
 
 interface LiveViewFrameProps {
   url: string;
   /** False when the bound session is closed or ended. */
   live?: boolean;
+  /** Owning agent finished: [ENDED] terminal state, no iframe, never "Connecting…". */
+  ended?: boolean;
   title: string;
   /** The provider viewer may itself accept input; gate it while the agent owns control. */
   interactive?: boolean;
@@ -52,6 +59,7 @@ interface LiveViewFrameProps {
 export function LiveViewFrame({
   url,
   live = true,
+  ended = false,
   title,
   interactive = true,
   iframeKey,
@@ -61,7 +69,8 @@ export function LiveViewFrame({
 }: LiveViewFrameProps) {
   const display = resolveLiveViewDisplaySize(url);
   const crop = resolveLiveViewChromeCrop(url);
-  const needsClipMeasure = crop !== null;
+  const kernel = crop === null && isKernelLiveViewUrl(url);
+  const needsClipMeasure = crop !== null || kernel;
   const streamRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [clipWidth, setClipWidth] = useState(0);
@@ -85,11 +94,14 @@ export function LiveViewFrame({
     observer.observe(el);
     return () => observer.disconnect();
   }, [needsClipMeasure]);
-  const iframeStyle = crop
-    ? clipWidth > 0
-      ? steelLiveViewScaledCropStyle(clipWidth)
-      : steelLiveViewIframeCropStyle()
-    : undefined;
+  let iframeStyle: CSSProperties | undefined;
+  if (crop) {
+    iframeStyle =
+      clipWidth > 0 ? steelLiveViewScaledCropStyle(clipWidth) : steelLiveViewIframeCropStyle();
+  } else if (kernel) {
+    iframeStyle =
+      clipWidth > 0 ? kernelLiveViewScaledStyle(clipWidth) : kernelLiveViewIframeStyle();
+  }
   return (
     <div
       data-testid="live-view-pane"
@@ -109,14 +121,14 @@ export function LiveViewFrame({
           height: `min(100cqh, calc(100cqw * ${display.height} / ${display.width}))`,
         }}
       >
-        {live && (
+        {live && !ended && (
           <iframe
             ref={iframeRef}
             key={iframeKey ?? `${title}:${url}`}
             src={url}
             title={title}
             className={cn(
-              crop ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
+              iframeStyle ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
               !interactive && 'pointer-events-none',
             )}
             style={iframeStyle}
@@ -126,7 +138,7 @@ export function LiveViewFrame({
             onLoad={onLoad}
           />
         )}
-        {(!live || !isLoaded) && <LiveViewLoading />}
+        {ended ? <LiveViewEnded /> : (!live || !isLoaded) && <LiveViewLoading />}
         {children}
       </div>
     </div>

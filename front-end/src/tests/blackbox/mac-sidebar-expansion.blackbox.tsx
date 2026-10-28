@@ -2,6 +2,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import { defaultProps } from './app-sidebar.fixtures';
+import { createAgentButton } from './rose-sidebar.fixtures';
 import { renderWithProviders } from './test-wrapper';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -32,7 +33,7 @@ describe('Mac sidebar hover and explicit close', () => {
       }
       fireEvent.mouseEnter(bar);
       expect(bar).toHaveAttribute('data-expanded', 'true');
-      fireEvent.click(screen.getByRole('button', { name: 'New agent in Home' }));
+      fireEvent.click(createAgentButton('home'));
       expect(create).toHaveBeenCalledOnce();
     },
   );

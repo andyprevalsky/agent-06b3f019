@@ -12,6 +12,7 @@ import {
 } from '../../providers/codexProxyCore';
 import { verifyProxyTraceParam } from '../../providers/codeAgentFastModeEnv';
 import { createLogger } from '../../providers/logger';
+import { sharedTraceOrdinalReserver } from '../../providers/traceOrdinalShared';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { FAST_MODE_ANTHROPIC_UPSTREAM, FAST_MODE_CODEX_UPSTREAM } from './config';
 import { verifyDemoCacheWriteCapability } from './accountPolicy';
@@ -59,11 +60,20 @@ function anthropicHeaders(req: Request): Record<string, string> {
   return headers;
 }
 
+/**
+ * Headers our own edge (Render behind Cloudflare) adds to every inbound request.
+ * Forwarded to chatgpt.com, Cloudflare there rejects cf-connecting-ip/cf-visitor
+ * with a 403 page, so every proxied Codex call failed once the proxy URL moved
+ * from a dev tunnel to production (2026-10-28).
+ */
+const EDGE_HEADER =
+  /^(cf-|x-forwarded-|forwarded$|true-client-ip$|x-real-ip$|cdn-loop$|via$|rndr-|render-|x-request-start$)/;
+
 function codexHeaders(req: Request): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [rawKey, rawValue] of Object.entries(req.headers)) {
     const key = rawKey.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    if (HOP_BY_HOP_HEADERS.has(key) || EDGE_HEADER.test(key)) continue;
     if (rawValue === undefined) continue;
     headers[rawKey] = Array.isArray(rawValue) ? rawValue.join(', ') : rawValue;
   }
@@ -152,6 +162,13 @@ function verifiedTraceSegment(res: Response): string {
   return res.locals.traceSegment as string;
 }
 
+/**
+ * Call ordinals come from one Postgres sequence per trace session, so a
+ * session's calls landing on different backend instances still record and
+ * replay consecutive slots (S25).
+ */
+export const PROXY_ORDINAL_RESERVER = sharedTraceOrdinalReserver;
+
 export const anthropicProxyRouter = Router();
 anthropicProxyRouter.use('/:traceParam', requireProxyCapability);
 
@@ -161,7 +178,12 @@ async function handleAnthropic(req: Request, res: Response, mode: ProxyMode): Pr
     trace.traceHash,
     req.body,
     anthropicHeaders(req),
-    { cacheGet, cacheSet, fetchUpstream: fetchAnthropicUpstream },
+    {
+      cacheGet,
+      cacheSet,
+      fetchUpstream: fetchAnthropicUpstream,
+      reserveOrdinal: PROXY_ORDINAL_RESERVER,
+    },
     mode.readEnabled,
     { sessionId: trace.sessionId, writeEnabled: mode.writeEnabled }
   );
@@ -218,7 +240,12 @@ codexProxyRouter.use(
       pathAndQuery,
       req.body,
       codexHeaders(req),
-      { cacheGet, cacheSet, fetchUpstream: fetchCodexUpstream },
+      {
+        cacheGet,
+        cacheSet,
+        fetchUpstream: fetchCodexUpstream,
+        reserveOrdinal: PROXY_ORDINAL_RESERVER,
+      },
       resolvedPath.readEnabled,
       { sessionId: trace.sessionId, writeEnabled: resolvedPath.writeEnabled }
     );

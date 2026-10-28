@@ -259,6 +259,32 @@ check('template CLAUDE.md carries exactly the stock table of contents', () => {
   );
 });
 
+check('talk-to-user documents every `rose video` option, its cost and the commentary loop', () => {
+  const skill = installedRoseSkills(false).find((entry) => entry.name === 'talk-to-user');
+  const doc = skill?.files.find((file) => file.path === 'video.md')?.content.toString('utf8') ?? '';
+  const pointer = skill?.files.find((file) => file.path === ROSE_SKILL_FILE)?.content.toString();
+  assert.match(String(pointer), /read `video\.md` beside this file/, 'SKILL.md points to video.md');
+  assert.match(String(skill?.description), /video/, 'the TOC line names video');
+  const help = cliHelp(false).rose;
+  const usage = help.slice(help.indexOf('rose video'), help.indexOf('rose env'));
+  const flags = [...new Set(usage.match(/--[a-z-]+/g) ?? [])];
+  assert.ok(flags.length >= 12, `rose video flags in --help: ${flags.join(' ')}`);
+  for (const flag of flags) assert.ok(doc.includes(`\`${flag}\``), `video.md documents ${flag}`);
+  for (const rate of [
+    '360p about $0.034',
+    '720p about $0.10',
+    '1080p about $0.15',
+    '4k about $0.30',
+  ]) {
+    assert.ok(doc.includes(rate), `video.md states the cost: ${rate}`);
+  }
+  assert.match(doc, /3-10/, 'clip length range');
+  assert.match(doc, /--caption`, which also shows the clip/, 'each clip is shown as it is made');
+  assert.match(doc, /commentary: what this shot is and what comes\s+next/, 'with commentary');
+  assert.match(doc, /rose display final\.mp4/, 'the final cut is displayed');
+  assert.match(doc, /ffmpeg/, 'edit and stitch in the sandbox');
+});
+
 check('the CLI help probes ran', () => {
   const help = cliHelp(false);
   for (const cli of CLIS) assert.match(help[cli], /usage/i, `${cli} printed no usage`);
