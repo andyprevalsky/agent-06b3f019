@@ -541,6 +541,53 @@ async function main() {
       assert.equal(peak, 4);
       assert([...attempts.values()].every((count) => count === 2));
     });
+    await test('a same-tick burst of stream deltas reaches the client whole, and the turn INSERT still sends', async () => {
+      // Prod 2026-10-27/28: a generator emitted ~240 ASSISTANT_STREAM deltas for one
+      // agent inside one event-loop tick, before the drain timer could run. The
+      // 64-message topic queue rejected the rest ("capacity"), the client's text
+      // lost those chunks, and the turn's committed INSERT was refused too.
+      const sent: WireMessage[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        sent.push(...bodyMessages(init));
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      const agentId = 'burst-agent-0001';
+      const chunks = Array.from({ length: 240 }, (_, index) => `w${index} `);
+      for (const [index, chunk] of chunks.entries()) {
+        await publisher.broadcastAssistantStream(agentId, 'burst-stream', chunk, false, index + 1);
+      }
+      await publisher.broadcastAssistantStream(
+        agentId,
+        'burst-stream',
+        '',
+        true,
+        chunks.length + 1
+      );
+      await publisher.broadcastMessageInsert(agentId, message('burst-final'));
+      await publisher.__flushBroadcastQueueForTests();
+
+      // Apply frames exactly as realtimeHandlers.handleAssistantStream does.
+      let text = '';
+      let sequence = 0;
+      let done = false;
+      for (const frame of sent.filter((wire) => wire.event === 'ASSISTANT_STREAM')) {
+        const record = frame.payload.record as { delta: string; sequence: number; done: boolean };
+        if (record.sequence < sequence) continue;
+        text += record.delta;
+        sequence = record.sequence;
+        done = record.done;
+      }
+      assert.equal(
+        text,
+        chunks.join(''),
+        'every streamed character must reach the client in order'
+      );
+      assert.equal(done, true, 'the stream must end with its done frame');
+      assert(
+        sent.some((wire) => wire.event === 'INSERT' && wire.payload.record.id === 'burst-final'),
+        'the committed INSERT after the burst must be sent'
+      );
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
