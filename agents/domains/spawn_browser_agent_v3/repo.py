@@ -29,6 +29,7 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from utils.url_redaction import redact_url_secrets
 
 logger = structlog.get_logger()
 
@@ -178,7 +179,7 @@ async def save_browser_action_message(
             "toolStatus": status.value,
             "title": title,
             "task_id": task_id,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "action_type": action_type,
             "auxiliary": auxiliary or {},
         }
@@ -307,7 +308,7 @@ async def save_browser_credential_ref_message(
             "credential_ref": credential_ref,
         }
         if browser_url:
-            metadata["browser_url"] = browser_url
+            metadata["browser_url"] = redact_url_secrets(browser_url)
         if role == "TOOL":
             metadata.update(
                 {
@@ -571,8 +572,17 @@ async def resume_browser_session(
     task_id: str,
     *,
     force_fresh_profile: bool = False,
+    storage_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Resume a paused browser session by asking backend/Steel for a fresh session."""
+    """Resume a paused browser session by asking backend/Steel for a fresh session.
+
+    ``storage_state`` (cookies, origins with localStorage/IndexedDB, current_url)
+    is the worker's own capture of a LIVE single-CDP-client (Tilion) session:
+    the backend cannot connect to that browser while the worker holds CDP.
+    """
+    body: Dict[str, Any] = {"task_id": task_id, "force_fresh_profile": force_fresh_profile}
+    if storage_state is not None:
+        body["storage_state"] = storage_state
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
@@ -581,7 +591,7 @@ async def resume_browser_session(
                 "Content-Type": "application/json",
                 **workflow_generation_headers(),
             },
-            json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
+            json=body,
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -816,7 +826,9 @@ async def create_user_auth_assistance_request(
         "authRealm": auth_realm,
         "browserSessionId": browser_session_id,
         "steelSessionId": steel_session_id,
-        "browserUrl": browser_url,
+        # Tilion: the backend mints the handoff live view server-side (A2), so
+        # the worker never sends the live-view token.
+        "browserUrl": redact_url_secrets(browser_url),
         "currentUrl": current_url,
         "mode": mode,
     }

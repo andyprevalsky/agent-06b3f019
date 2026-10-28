@@ -146,7 +146,8 @@ works in the real world over long horizons on the user's behalf. Judge every
 design, UI and harness decision by whether it makes Rose a better RWLH.
 
 - Production: https://roselabs.ai
-- Backend API: https://navi-j9a9.onrender.com
+- Backend API: https://api.roselabs.ai (custom domain on Render service `Navi`; `https://navi-j9a9.onrender.com` is the same service and still works)
+- Index 01: webhook `POST https://api.roselabs.ai/api/index01/webhook` (`Authorization: Bearer <rose-api-key>`, JSON or multipart; transcript → plan-mode rose-1-ultra agent, audio archived as `index01-recording_*`) or MCP `https://api.roselabs.ai/mcp` (Streamable, same Bearer)
 - API Docs: https://docs.roselabs.ai
 
 ## Sub-agent delegation
@@ -179,6 +180,10 @@ design, UI and harness decision by whether it makes Rose a better RWLH.
   work completes on time.
 - The user's north star goal must always take priority when assigning work,
   resolving tradeoffs, and deciding what to do next.
+- While doing your work, sync your branch with the latest `main` roughly every
+  hour so a massive merge conflict doesn't pile up at the end. Spawn a sub-agent
+  to do each sync; it must communicate with you to resolve any merge conflict
+  intelligently, preserving both sides' intent rather than blindly picking one.
 
 ### Mandatory experiment iteration loop
 

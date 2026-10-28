@@ -16,12 +16,12 @@ async function replay(event) {
     ${producer}
     let runs = 0;
     let usingApiKey = false;
-    const OPENAI_API_KEY = "offline-fixture";
+    const FUNDED_PROVIDER = true;
     const codexHome = "/unused";
     const log = () => {};
     const rmSync = () => {};
     const join = (...parts) => parts.join("/");
-    const loginWithApiKey = async () => true;
+    const useFundedProvider = () => true;
     const buildCodexArgs = () => [];
     const runCodex = async () => {
       if (++runs === 1) {

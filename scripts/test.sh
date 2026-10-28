@@ -315,6 +315,7 @@ else
 fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
 run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
+run_suite "Factory Metadata" python3 scripts/tests/factory-metadata.test.py
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Biz Review Card" python3 scripts/biz_review.py self-test
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
@@ -354,6 +355,7 @@ run_suite "Cloud Benchmark Recovered Reservations" python3 scripts/tests/cloudbe
 run_suite "Cloud Benchmark Closed Transition Reservations" python3 scripts/tests/cloudbench-closed-transition-reservations.test.py
 run_suite "Cloud Benchmark Pre-Reservation Preparation" python3 scripts/tests/cloudbench-prepare-admission.test.py
 run_suite "Cloud Benchmark Reuse Index" python3 scripts/tests/cloudbench-reuse-index.test.py
+run_suite "Cloud Benchmark Guest pidfd Interpreter" python3 scripts/tests/pidfd-interpreter.test.py
 run_suite "Cloud Benchmark Registered Orphan Drain" python3 scripts/tests/cloudbench-controller-orphan-drain.test.py
 run_suite "Cloud Benchmark Relay Bootstrap Retirement" python3 scripts/tests/cloudbench-controller-relay-retire.test.py
 run_suite "Cloud Benchmark Recovered Controller Export" python3 scripts/tests/cloudbench-resume-controller-export.test.py

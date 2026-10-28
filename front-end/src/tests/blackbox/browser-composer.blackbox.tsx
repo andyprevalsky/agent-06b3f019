@@ -66,7 +66,10 @@ it('shows only text, files, Send and an honest read-only model label in the owne
   expect(box.queryByRole('combobox')).toBeNull();
   expect(box.queryByText('root-model-must-not-be-displayed')).toBeNull();
   expect(box.getByText('Model unavailable')).toBeVisible();
-  expect(box.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+  const attach = box.getByRole('button', { name: 'Attach files' });
+  expect(attach).toBeEnabled();
+  // Attach sits immediately left of the model name in the same row.
+  expect(attach.nextElementSibling).toBe(box.getByTestId('browser-model-label'));
   const buttons = box.getAllByRole('button');
   expect(buttons).toHaveLength(2);
   fireEvent.click(box.getByRole('button', { name: 'Send' }));

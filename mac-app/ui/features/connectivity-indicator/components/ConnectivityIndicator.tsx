@@ -14,8 +14,8 @@ import { useConnectivityStatus } from '../hooks';
 import { WifiOffIcon } from './WifiOffIcon';
 
 const OFFLINE_CHIP =
-  'flex items-center rounded-full bg-red-50 border border-red-200 px-3 py-1.5 shadow-sm gap-2';
-const OFFLINE_LABEL = 'text-xs font-medium text-red-700';
+  'flex items-center rounded-full bg-red-50 border border-red-200 px-3 py-1.5 shadow-sm gap-2 dark:bg-red-900/20 dark:border-red-800';
+const OFFLINE_LABEL = 'text-xs font-medium text-red-700 dark:text-red-400';
 
 export default function ConnectivityIndicator(): React.ReactElement | null {
   const { isOnline } = useConnectivityStatus();

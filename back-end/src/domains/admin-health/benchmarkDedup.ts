@@ -9,9 +9,11 @@ import type { RootTaskRecord } from './repo';
  * accounts so that pre-flag benchmark repetition can't inflate task metrics. Real
  * customer accounts are never deduped — every task they issue counts.
  */
-export function dedupeInternalRepeatTasks(tasks: RootTaskRecord[]): RootTaskRecord[] {
+export function dedupeInternalRepeatTasks<T extends Pick<RootTaskRecord, 'userId' | 'goal'>>(
+  tasks: T[]
+): T[] {
   const seen = new Set<string>();
-  const deduped: RootTaskRecord[] = [];
+  const deduped: T[] = [];
   for (const task of tasks) {
     if (ADMIN_USER_IDS.has(task.userId)) {
       const key = `${task.userId} ${task.goal}`;

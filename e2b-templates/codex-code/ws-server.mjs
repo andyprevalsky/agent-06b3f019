@@ -34,7 +34,14 @@ function log(level, message, data = {}) {
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const GOAL = process.env.CODEX_GOAL;
 const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// Funded fallback: our Azure OpenAI deployment (Responses API), selected with
+// -c model_provider flags; the key is read from AZURE_OPENAI_API_KEY by Codex.
+const AZURE_OPENAI_API_KEY = process.env.AZURE_OPENAI_API_KEY || "";
+const CODEX_AZURE_BASE_URL = process.env.CODEX_AZURE_BASE_URL || "";
+const CODEX_AZURE_MODEL = process.env.CODEX_AZURE_MODEL || "";
+const FUNDED_PROVIDER = Boolean(
+  AZURE_OPENAI_API_KEY && CODEX_AZURE_BASE_URL && CODEX_AZURE_MODEL,
+);
 const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.6-terra";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 // Backend-provided Mobbin MCP bearer (design references); unset = no Mobbin server.
@@ -50,8 +57,8 @@ if (!GOAL) {
   log("error", "CODEX_GOAL not set");
   process.exit(1);
 }
-if (!CODEX_AUTH_JSON && !OPENAI_API_KEY) {
-  log("error", "Neither CODEX_AUTH_JSON nor OPENAI_API_KEY set");
+if (!CODEX_AUTH_JSON && !FUNDED_PROVIDER) {
+  log("error", "Neither CODEX_AUTH_JSON nor the Azure funded provider set");
   process.exit(1);
 }
 
@@ -707,24 +714,37 @@ mkdirSync(codexHome, { recursive: true });
 mkdirSync(join(home, "attachments"), { recursive: true });
 mkdirSync(join(home, "output"), { recursive: true });
 
-async function loginWithApiKey() {
-  const login = spawn("codex", ["login", "--with-api-key"], {
-    env: { ...process.env, CODEX_HOME: codexHome, HOME: home },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  login.stdin.end(`${OPENAI_API_KEY}\n`);
-  login.stdout.on("data", (data) => appendOutput("stdout", data.toString()));
-  login.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
-  const loginCode = await new Promise((resolve) => login.on("close", resolve));
-  if (loginCode !== 0) {
-    log("error", "Codex API-key login failed", { loginCode });
-    return false;
+// The funded provider needs no login: Codex reads AZURE_OPENAI_API_KEY via the
+// provider's env_key. Dropping the ChatGPT auth.json keeps OAuth out of the run.
+function useFundedProvider() {
+  try {
+    rmSync(join(codexHome, "auth.json"), { force: true });
+  } catch {
+    // Best-effort: the azure provider never reads auth.json.
   }
-  log("info", "Logged in to Codex with OpenAI API key");
+  log("info", "Using the Azure OpenAI funded provider", {
+    model: CODEX_AZURE_MODEL,
+  });
   return true;
 }
 
-// usingApiKey tracks whether the ACTIVE credential is the funded OpenAI key
+/** Codex -c flags that select the Azure OpenAI funded provider. */
+function fundedProviderArgs() {
+  return [
+    "-c",
+    'model_provider="azure"',
+    "-c",
+    'model_providers.azure.name="Azure OpenAI"',
+    "-c",
+    `model_providers.azure.base_url=${JSON.stringify(CODEX_AZURE_BASE_URL)}`,
+    "-c",
+    'model_providers.azure.env_key="AZURE_OPENAI_API_KEY"',
+    "-c",
+    'model_providers.azure.wire_api="responses"',
+  ];
+}
+
+// usingApiKey tracks whether the ACTIVE credential is the funded Azure provider
 // (vs. the ChatGPT OAuth token). It gates the one-shot runtime fallback below.
 let usingApiKey = false;
 if (CODEX_AUTH_JSON) {
@@ -737,7 +757,7 @@ if (CODEX_AUTH_JSON) {
     process.exit(1);
   }
 } else {
-  if (!(await loginWithApiKey())) process.exit(1);
+  useFundedProvider();
   usingApiKey = true;
 }
 
@@ -926,7 +946,7 @@ appendEvent({
   type: "session",
   status: "starting",
   cwd: workDir,
-  model: CODEX_MODEL,
+  model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
   prompt_version:
     CODE_AGENT_SYSTEM_PROMPT.match(
       /Rose Labs code-agent instructions \(([^)]+)\)/,
@@ -959,7 +979,7 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     "--cd",
     workDir,
     "-m",
-    CODEX_MODEL,
+    usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
     // A queued inbound turn continues the current thread; otherwise a
     // persistent code session continues its previous Codex conversation.
     ...(resume
@@ -972,6 +992,7 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
   // session create). --ignore-user-config skips config.toml, so register it
   // with -c. The tool call deadline is set past any real upload (C11: no
   // code-agent timeouts).
+  if (usingApiKey) args.splice(1, 0, ...fundedProviderArgs());
   const roseCli = join(home, ".rose", "bin", "rose");
   if (existsSync(roseCli)) {
     args.splice(
@@ -1017,7 +1038,7 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
 function runCodex(args) {
   return new Promise((resolve) => {
     log("info", "Starting Codex exec", {
-      model: CODEX_MODEL,
+      model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
       workDir,
       usingApiKey,
       goal: sanitizedGoal.slice(0, 120),
@@ -1697,25 +1718,25 @@ async function runCodexAppServer() {
       }
     : null;
   const settings = {
-    model: CODEX_MODEL,
+    model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
     effort: process.env.CODEX_REASONING_EFFORT || null,
     speed: process.env.CODEX_SPEED || null,
   };
   nativeCodex = new CodexAppServer(child, appendEvent, settings, handoff);
   // Runtime fallback, as in the exec transport: a turn that failed because the
   // ChatGPT OAuth credential is unusable is re-sent ONCE on the same thread with
-  // the funded OpenAI API key (default endpoint, no ChatGPT proxy).
+  // the funded Azure OpenAI provider (no ChatGPT proxy).
   let fallback = null;
   nativeCodex.recoverFailedTurn = (turn, error) => {
     const reason = classifyOAuthFallbackReason(error?.message || "");
-    if (fallback || usingApiKey || !OPENAI_API_KEY || !reason) return false;
+    if (fallback || usingApiKey || !FUNDED_PROVIDER || !reason) return false;
     const failed = nativeCodex;
     const turnStart = failed.turnStarts.get(turn.id) ?? failed.pendingTurnStart;
     const threadId = failed.threadId;
     if (!turnStart || !threadId) return false;
     oauthFallbackReason = reason;
     fallback = (async () => {
-      log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
+      log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
         reason,
       });
       appendOutput(
@@ -1726,26 +1747,19 @@ async function runCodexAppServer() {
         type: "auth_fallback",
         from: "chatgpt_oauth",
         to: "openai_api_key",
+        funded_provider: "azure",
         reason,
       });
       failed.child.kill("SIGTERM");
       await closed;
-      try {
-        rmSync(join(codexHome, "auth.json"), { force: true });
-      } catch {
-        // Best-effort: a stale auth.json only matters if the API-key login fails.
-      }
-      if (!(await loginWithApiKey())) {
-        appendEvent({ type: "error", message: "Codex API-key login failed" });
-        return null;
-      }
+      useFundedProvider();
       usingApiKey = true;
       oauthFallbackReason = null;
       const next = spawnCodexAppServer();
       const resumed = new CodexAppServer(
         next.child,
         appendEvent,
-        failed.settings,
+        { ...failed.settings, model: CODEX_AZURE_MODEL },
         handoff,
       );
       nativeCodex = resumed;
@@ -1802,12 +1816,12 @@ if (CODEX_TRANSPORT === "app-server") {
     buildCodexArgs({ useFastModeProxy: !usingApiKey }),
   );
 
-  // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Re-login
-  // with the funded OpenAI API key and retry ONCE against the default OpenAI
-  // endpoint (no ChatGPT proxy). Mirrors the Rose compute-token→API-key fallback.
-  if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
+  // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Retry
+  // ONCE on the funded Azure OpenAI provider (no ChatGPT proxy). Mirrors the
+  // Rose compute-token→funded fallback.
+  if (code !== 0 && !usingApiKey && FUNDED_PROVIDER && oauthFallbackReason) {
     const fallbackReason = oauthFallbackReason;
-    log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
+    log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
       reason: fallbackReason,
     });
     appendOutput(
@@ -1818,20 +1832,15 @@ if (CODEX_TRANSPORT === "app-server") {
       type: "auth_fallback",
       from: "chatgpt_oauth",
       to: "openai_api_key",
+      funded_provider: "azure",
       reason: fallbackReason,
     });
-    try {
-      rmSync(join(codexHome, "auth.json"), { force: true });
-    } catch {
-      // Best-effort: a stale auth.json only matters if the API-key login fails.
-    }
-    if (await loginWithApiKey()) {
-      usingApiKey = true;
-      oauthFallbackReason = null;
-      ({ code, signal } = await runCodex(
-        buildCodexArgs({ useFastModeProxy: false }),
-      ));
-    }
+    useFundedProvider();
+    usingApiKey = true;
+    oauthFallbackReason = null;
+    ({ code, signal } = await runCodex(
+      buildCodexArgs({ useFastModeProxy: false }),
+    ));
   }
 
   // Delivered user turns run, in order, as resumed turns of the same thread.

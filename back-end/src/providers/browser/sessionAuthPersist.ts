@@ -1,5 +1,5 @@
 /**
- * Persist a Kernel/Steel sign-in before its session ends so the next
+ * Persist a Kernel/Steel/Tilion sign-in before its session ends so the next
  * browser-agent call — including the other provider — injects it through the
  * existing CookieBundle / LocalStorageOrigin path.
  *
@@ -24,6 +24,7 @@ import { createOriginPayloadWriter } from '../steel/injectionOriginPage';
 import { steelCdpConnectionUrl } from '../steel/urls';
 import { BrowserStateInjectionTimeout, withTimeout } from '../steel/injectionTimeouts';
 import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
+import { mintTilionConnectUrl } from './tilionClient';
 import { storedBrowserProvider } from './types';
 
 const log = createLogger('BrowserSessionAuthPersist');
@@ -50,7 +51,7 @@ export const CLOUD_PERSISTENT_BROWSER_PROFILE = 'cloud_persistent';
 type LocalStorageEntry = { name: string; value: string };
 type OriginLocalStorage = { origin: string; localStorage: LocalStorageEntry[] };
 type HarvestContext = Pick<BrowserContext, 'pages' | 'newPage' | 'newCDPSession'>;
-type HarvestBudget = { remainingMs: () => number; spent: () => boolean };
+export type HarvestBudget = { remainingMs: () => number; spent: () => boolean };
 
 export type PersistSignedInBrowserStateResult = {
   persisted: boolean;
@@ -124,7 +125,10 @@ export function shouldPersistSignedInBrowserState(session: {
     return { persist: false, reason: 'benchmark_isolated_profiles' };
   }
   const provider = storedBrowserProvider(session.provider);
-  if (provider !== 'kernel' && provider !== 'steel') {
+  // Browser Use is not harvested. Tilion is: its single CDP slot is free once
+  // the worker detaches before close (ordering documented in index.ts); a 4409
+  // collision fails the harvest within budget and the release still runs.
+  if (provider !== 'kernel' && provider !== 'steel' && provider !== 'tilion') {
     return { persist: false, reason: 'unsupported_provider' };
   }
   if (session.providerProfileSource?.startsWith('benchmark_anon') === true) {
@@ -169,7 +173,7 @@ async function writeWithinBudget(
   await withTimeout(write(), budget.remainingMs(), message);
 }
 
-async function persistHarvestedCookies(
+export async function persistHarvestedCookies(
   userId: string,
   browserSource: string,
   cookies: Cookie[],
@@ -255,7 +259,7 @@ async function persistHarvestedCookies(
   return { cookieCount, realmCount };
 }
 
-async function persistHarvestedLocalStorage(
+export async function persistHarvestedLocalStorage(
   userId: string,
   origins: OriginLocalStorage[],
   budget: HarvestBudget
@@ -425,9 +429,16 @@ export async function persistSignedInBrowserState(
   try {
     if (browser === undefined) {
       const { chromium } = await import('playwright');
-      const connecting = chromium.connectOverCDP(steelCdpConnectionUrl(session.wsUrl ?? ''), {
-        timeout: remainingMs(),
-      });
+      // Tilion connect tokens last 1800 s, far shorter than a session: mint a fresh one.
+      const wsUrl =
+        browserSource === 'tilion'
+          ? await withTimeout(
+              mintTilionConnectUrl(sessionId),
+              remainingMs(),
+              'Timed out minting a Tilion connect URL to harvest signed-in browser state'
+            )
+          : steelCdpConnectionUrl(session.wsUrl ?? '');
+      const connecting = chromium.connectOverCDP(wsUrl, { timeout: remainingMs() });
       browser = await withTimeout(
         connecting,
         remainingMs(),

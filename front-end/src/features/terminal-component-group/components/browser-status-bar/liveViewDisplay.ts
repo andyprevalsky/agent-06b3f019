@@ -19,6 +19,9 @@
  * 1280x800 content + 4px side borders + 91px toolbar. Showing that window
  * in the FE makes page content look off-center / hanging outside the window.
  * Kernel sessions are created at 1280x800 (no FE chrome crop).
+ * Tilion's viewer page (`/v1/session/{id}/live-view?token=…`) streams the
+ * page at the session viewport with no window chrome, so it is uncropped too.
+ * Its view token expires after 1800 s (see the Tilion helpers below).
  *
  * Neither surface may resize the remote viewport to the FE pane: that
  * desyncs the fingerprint (spoofed outer/screen vs real inner).
@@ -66,6 +69,71 @@ export function isSteelLiveViewUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Tilion view tokens last 1800 s from mint (Tilion API reference, section 11). */
+export const TILION_LIVE_VIEW_TOKEN_TTL_MS = 1_800_000;
+/**
+ * Re-mint 5 minutes before expiry. The token is checked when the viewer opens
+ * its stream, so a reconnect after expiry would be refused with 403.
+ */
+export const TILION_LIVE_VIEW_REFRESH_MS = TILION_LIVE_VIEW_TOKEN_TTL_MS - 300_000;
+
+const TILION_LIVE_VIEW_PATH = /^\/v1\/session\/([^/]+)\/live-view$/;
+
+/** Tilion session id for a Tilion viewer-page URL, else null. Never returns the token. */
+export function tilionLiveViewSessionId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname !== 'tilion.dev' && !hostname.endsWith('.tilion.dev')) return null;
+    const match = TILION_LIVE_VIEW_PATH.exec(parsed.pathname);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isTilionLiveViewUrl(url: string): boolean {
+  return tilionLiveViewSessionId(url) !== null;
+}
+
+/** The Tilion viewer URL currently shown, and when its token was adopted. */
+export interface HeldTilionLiveView {
+  sessionId: string;
+  url: string;
+  adoptedAtMs: number;
+}
+
+/**
+ * Every backend live-view read mints a fresh Tilion token, so the URL string
+ * changes on each focus/visibility read. Keep showing the adopted URL for the
+ * same session until it is due for refresh; adopt immediately on a new session.
+ */
+export function nextHeldTilionLiveView(
+  held: HeldTilionLiveView | null,
+  boundUrl: string | null,
+  nowMs: number,
+): HeldTilionLiveView | null {
+  const sessionId = boundUrl === null ? null : tilionLiveViewSessionId(boundUrl);
+  if (boundUrl === null || sessionId === null) return null;
+  if (
+    held !== null &&
+    held.sessionId === sessionId &&
+    nowMs - held.adoptedAtMs < TILION_LIVE_VIEW_REFRESH_MS
+  ) {
+    return held;
+  }
+  return { sessionId, url: boundUrl, adoptedAtMs: nowMs };
+}
+
+/** URL to present: the held Tilion URL for the bound session, else the bound URL. */
+export function presentHeldLiveViewUrl(
+  held: HeldTilionLiveView | null,
+  boundUrl: string | null,
+): string | null {
+  if (boundUrl === null || held === null) return boundUrl;
+  return tilionLiveViewSessionId(boundUrl) === held.sessionId ? held.url : boundUrl;
 }
 
 /** Remote player canvas size — Steel includes window chrome. */

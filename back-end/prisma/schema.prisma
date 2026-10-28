@@ -644,6 +644,11 @@ model BrowserSession {
   // The managed Kernel proxy that actually resolved. Resume must keep its tier
   // and location specificity even if a more specific proxy becomes available.
   kernelProxySource      String?
+  // Browser state captured when a provider without server-side profiles
+  // (Tilion) pauses: Playwright storageState (cookies, localStorage,
+  // IndexedDB), size-bounded. Read and cleared by the next resume of this task,
+  // on whichever backend instance serves it.
+  pausedBrowserState     Json?
   context                BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
   siteForks              BrowserSiteFork[]
 

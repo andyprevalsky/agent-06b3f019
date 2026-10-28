@@ -9,7 +9,6 @@ import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
-import { createGithubRepo } from '../../providers/github';
 import { assertCodeSessionShareTarget, recordCodeSessionShare } from './agentCodeSessionShare';
 import { createLogger } from '../../providers/logger';
 import { originDeviceFields } from './agentOriginService';
@@ -112,31 +111,11 @@ async function startDirectWorkflow(
 async function startChatMode(
   body: CreateAgentBody,
   agentDbId: string,
-  agentId: string,
   userId: string
 ): Promise<void> {
-  const repoName = `agent-${agentId.substring(0, 8)}`;
-  createGithubRepo(repoName)
-    .then(async (repoUrl) => {
-      if (repoUrl !== null && repoUrl !== undefined) {
-        try {
-          await repo.updateAgent(agentDbId, { githubRepoUrl: repoUrl });
-          await repo.createGithubRepoAccess(userId, repoUrl);
-        } catch (err: unknown) {
-          log.error('Failed to persist repo URL', {
-            agent_id: agentDbId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    })
-    .catch((err: unknown) => {
-      log.error('Repo creation failed', {
-        agent_id: agentDbId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-
+  // The tree's GitHub repo is created when it first starts a code session
+  // (ensureAgentTreeRepo), not for every chat: most chats never write code, and
+  // every create shares one account-wide GitHub rate limit.
   handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
     void recoverChatHandlerFailure({
       agentId: agentDbId,
@@ -318,7 +297,7 @@ async function launchAgentWorkflow(
     return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
-  void startChatMode(body, agent.agent.id, agentId, userId);
+  void startChatMode(body, agent.agent.id, userId);
   return null;
 }
 /* c8 ignore stop */

@@ -9,7 +9,9 @@
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
  *         -> Stripe charges + Prisma waitlist/task/user/GMV metrics + Linear/GitHub velocity
- *         -> customer product completion excludes benchmarks, tests, simulations, and operators
+ *         -> completion = completed / resolved real agent runs by the core team (Andy,
+ *            Tamara, Aman) + that period's Stripe subscribers (core retries collapsed); running
+ *            or archived-while-running tasks have no outcome; null -> "No finished tasks"
  *         -> real root-loop runs (live + archived telemetry), excluding child agents
  *         -> current model/cache pricing -> three cost-per-run scenarios + sample size
 
@@ -18,12 +20,15 @@
  *      metrics request: the hook lives here, not in the post-load users section
  *      -> Primary: Revenue
  *      -> Secondary: people/tasks + GMV + GMV/task (next to output tokens/task) + funnels
+ *         -> metric tile [IDLE] --hover/focus--> [CHART: MetricAreaChart of that
+ *            metric's series, same periods as Revenue] --leave/blur/Escape--> [IDLE]
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *      -> root-agent-run cost summary cards -> three-line history chart
  *
  * GMV SOURCES:
- *   PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
+ *   PurchaseSpend CLEARED: live AgentCard + finished-task order confirmations,
+ *   core team + Stripe subscribers only (back-end repoProductGmv)
  *
  * LAYOUT: standalone view pads pt-20 under the stock top header; `embedded`
  * (the Rose Desktop Biz health panel, which has its own header) does not.
@@ -68,10 +73,10 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 import { useAdminHealthData, useUserDirectory } from '../hooks';
+import { MetricAreaChart, type SeriesNumberKey } from './MetricAreaChart';
 import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import ConnectorAdoptionSection from './ConnectorAdoptionSection';
-import EfficiencyCharts from './EfficiencyCharts';
 import GmvSection from './GmvSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import TaskCostSection from './TaskCostSection';
@@ -126,21 +131,50 @@ const PERIOD_COPY: Record<AdminHealthTimeSlice, { title: string; range: string }
   yearly: { title: '365 Days', range: 'last 365 complete UTC days' },
 };
 
+interface MetricHoverChart {
+  dataKey: SeriesNumberKey;
+  formatValue: (value: number) => string;
+  domain?: [number, number];
+}
+
+/** Secondary metric tile; hover or keyboard focus shows its over-time chart. */
 function MetricPanel({
   title,
   value,
   detail,
   icon,
   change,
+  series,
+  chart,
 }: {
   title: string;
   value: string;
   detail?: string;
   icon: React.ReactNode;
   change: React.ReactNode;
+  series: AdminHealthData['series'];
+  chart: MetricHoverChart;
 }) {
+  const [showChart, setShowChart] = useState(false);
   return (
-    <div className="rounded-lg border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md">
+    <div
+      role="group"
+      tabIndex={0}
+      aria-label={`${title}: ${value}. Hover or focus to see it over time.`}
+      onMouseEnter={() => setShowChart(true)}
+      onMouseLeave={() => setShowChart(false)}
+      onFocus={() => setShowChart(true)}
+      onBlur={() => setShowChart(false)}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setShowChart(false);
+      }}
+      // backdrop-blur makes every tile its own stacking context, so the hovered
+      // tile itself must sit above its neighbours for the popover to show.
+      className={cn(
+        'relative rounded-lg border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        showChart && 'z-30',
+      )}
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="text-sm text-muted-foreground">{title}</p>
@@ -152,6 +186,24 @@ function MetricPanel({
         </div>
       </div>
       {detail && <p className="mt-4 text-xs leading-5 text-muted-foreground">{detail}</p>}
+      {showChart && (
+        <div
+          role="img"
+          aria-label={`${title} over time`}
+          className="absolute inset-x-0 top-full z-30 mt-2 rounded-lg border border-border/60 bg-popover p-3 text-popover-foreground shadow-lg"
+        >
+          <p className="mb-1 text-xs font-medium">{title} over time</p>
+          <div className="h-[160px] w-full min-w-0">
+            <MetricAreaChart
+              series={series}
+              dataKey={chart.dataKey}
+              name={title}
+              formatValue={chart.formatValue}
+              domain={chart.domain}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -406,6 +458,8 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
       <MetricPanel
         title="# of People in App"
+        series={data.series}
+        chart={{ dataKey: 'userCount', formatValue: formatNumber }}
         value={formatNumber(data.summary.userCount)}
         detail={`${formatNumber(newUsers)} new ${userNoun(newUsers)} this period.`}
         icon={<Users className="h-5 w-5" />}
@@ -415,6 +469,8 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       />
       <MetricPanel
         title={`Avg Tasks / User / ${period.title}`}
+        series={data.series}
+        chart={{ dataKey: 'tasksIssuedPerUser', formatValue: formatNumber }}
         value={formatNumber(data.summary.tasksIssuedPerUser)}
         detail={`${formatNumber(data.summary.taskCount)} root tasks in the ${period.range} / ${formatNumber(data.summary.userCount)} ${userNoun(data.summary.userCount)}.`}
         icon={<TrendingUp className="h-5 w-5" />}
@@ -427,6 +483,8 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       />
       <MetricPanel
         title="Output Tokens / Task"
+        series={data.series}
+        chart={{ dataKey: 'outputTokensPerTask', formatValue: formatNumber }}
         value={formatNumber(data.summary.outputTokensPerTask)}
         detail="Target is value per task; output tokens are a weak proxy signal."
         icon={<Zap className="h-5 w-5" />}
@@ -439,8 +497,10 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       />
       <MetricPanel
         title="GMV / Task"
+        series={data.series}
+        chart={{ dataKey: 'gmvPerTask', formatValue: formatCurrency }}
         value={formatCurrency(data.summary.gmvPerTask)}
-        detail="Cleared platform GMV (AgentCard + confirmed orders) / root tasks."
+        detail="GMV (live AgentCard charges + orders from finished tasks, by Andy, Tamara, Aman and subscribers) / root tasks."
         icon={<ShoppingBag className="h-5 w-5" />}
         change={
           <MetricChange value={seriesMetricChange(data, 'gmvPerTask')} timeSlice={data.timeSlice} />
@@ -448,8 +508,14 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       />
       <MetricPanel
         title="Task Completion Rate"
-        value={formatPercent(data.summary.taskCompletionRate)}
-        detail="Completed customer product root tasks / all customer product root tasks issued in the selected period. Excludes benchmarks, tests, simulations, and operator accounts."
+        series={data.series}
+        chart={{ dataKey: 'taskCompletionRate', formatValue: formatPercent, domain: [0, 1] }}
+        value={
+          data.summary.taskCompletionRate === null
+            ? 'No finished tasks'
+            : formatPercent(data.summary.taskCompletionRate)
+        }
+        detail="Completed / finished agent runs by Andy, Tamara, Aman and subscribed users in the selected period; a core-team retry of the same goal counts once. Running or archived-while-running tasks have no outcome yet; chat-only questions, benchmarks, test accounts and simulations are excluded."
         icon={<CircleCheckBig className="h-5 w-5" />}
         change={
           <MetricChange
@@ -553,7 +619,6 @@ export default function AdminHealth({ embedded = false }: { embedded?: boolean }
               <SecondaryMetricGrid data={data} />
               <GmvSection data={data} />
               <TaskCostSection data={data} />
-              <EfficiencyCharts data={data} />
               <ConnectorAdoptionSection adoption={data.connectorAdoption} />
               <FunnelSection data={data} />
               <RetentionChart data={data} />

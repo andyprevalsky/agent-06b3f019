@@ -14,6 +14,8 @@ import {
   type SteelLifecycleMutation,
 } from '../steel/lifecycleClaim';
 
+export type HydrationTarget = { targetId: string; urlHash: string; seedUrlHash?: string };
+
 const RESUME_TYPE = 'browser_task_resume';
 const RESUME_WAIT_MS = 30_000;
 const keyFor = (taskId: string) => `steel-browser-task-lifecycle:${taskId}`;
@@ -28,7 +30,7 @@ type Request = {
   nativeId?: string;
   nativeOutstanding: boolean;
   compatibility: string;
-  hydrationTargets?: Array<{ targetId: string; urlHash: string }>;
+  hydrationTargets?: HydrationTarget[];
 };
 type Scope = {
   taskId: string;
@@ -39,8 +41,9 @@ type Scope = {
   assertOwned(transaction?: Prisma.TransactionClient): Promise<void>;
   beforeHydration(expectedSessionId: string): Promise<void>;
   assertHydrationOwned(): Promise<void>;
+  hydrationTransportOpened(): void;
   hydrationTransportClosed(): void;
-  recordHydrationTargets(targets: Array<{ targetId: string; urlHash: string }>): Promise<void>;
+  recordHydrationTargets(targets: HydrationTarget[]): Promise<void>;
   nativeCreate<T>(create: () => Promise<T>): Promise<T>;
   settleCreate(nativeId: string): Promise<void>;
   recovering(): boolean;
@@ -96,10 +99,7 @@ type ResumeBinding = {
 export interface ResumeLifecycleDependencies<T> {
   readBinding(): Promise<ResumeBinding>;
   resume(): Promise<T>;
-  retryHydration?(
-    nativeId: string,
-    targets: Array<{ targetId: string; urlHash: string }>
-  ): Promise<T>;
+  retryHydration?(nativeId: string, targets: HydrationTarget[]): Promise<T>;
   follow(): Promise<T>;
   compatibility: string;
   canFollow(): Promise<boolean>;
@@ -126,6 +126,7 @@ export async function withBrowserResumeLifecycle<T>(
   let recoveredId: string | undefined;
   let joinedInFlight = false;
   let retryHydration = false;
+  let retryReceipt: Prisma.InputJsonObject | undefined;
   let expectedRetryBinding: unknown;
   let hydrationSnapshot: ReturnType<typeof hydrationBinding> | undefined;
   const hydrationBinding = (binding: ResumeBinding) => ({
@@ -267,6 +268,7 @@ export async function withBrowserResumeLifecycle<T>(
           recoveredId = native.id;
           retryHydration = true;
           expectedRetryBinding = failed.binding;
+          retryReceipt = row.response as Prisma.InputJsonObject;
           return { kind: 'claimed' };
         }
         if (row.operationType !== RESUME_TYPE || Date.parse(held.expiresAt) > Date.now()) {
@@ -356,6 +358,7 @@ export async function withBrowserResumeLifecycle<T>(
       throw new Error('Browser resume lifecycle ownership lost');
     }
   };
+  let hydrationTransportOpened = false;
   let hydrationTransportClosed = false;
   let createEntered = false;
   let createRejected = false;
@@ -391,6 +394,9 @@ export async function withBrowserResumeLifecycle<T>(
         });
         if (changed.count !== 1)
           throw new Error('Browser resume lifecycle ownership lost before hydration');
+      },
+      hydrationTransportOpened: () => {
+        hydrationTransportOpened = true;
       },
       hydrationTransportClosed: () => {
         hydrationTransportClosed = true;
@@ -477,6 +483,25 @@ export async function withBrowserResumeLifecycle<T>(
           ? await deps.retryHydration!(recoveredId!, request.hydrationTargets!)
           : await deps.resume();
       } catch (error) {
+        if (
+          retryReceipt &&
+          !hydrationSnapshot &&
+          (!hydrationTransportOpened || hydrationTransportClosed)
+        ) {
+          // No restoration began. Preserve the settled predecessor's exact receipt.
+          await prisma.toolSideEffect
+            .updateMany({
+              where: {
+                operationKey,
+                operationType: RESUME_TYPE,
+                externalId: owner,
+                status: 'STARTED',
+                request: { equals: request as unknown as Prisma.InputJsonObject },
+              },
+              data: { response: retryReceipt },
+            })
+            .catch(() => {});
+        }
         if (
           deps.retryHydration &&
           hydrationTransportClosed &&

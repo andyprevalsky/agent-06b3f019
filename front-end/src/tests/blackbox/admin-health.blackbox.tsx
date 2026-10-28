@@ -89,12 +89,14 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GMV')).toBeInTheDocument();
     expect(screen.getByText('$256.00')).toBeInTheDocument();
     expect(screen.getByText('$2.00')).toBeInTheDocument();
-    expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
+    // Standalone per-metric charts folded into the secondary tiles' hover charts.
+    expect(screen.queryByText('GMV Per Task')).not.toBeInTheDocument();
+    expect(screen.queryByText('Output Tokens Per Task')).not.toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
     expect(
       screen.getByText(
-        'Completed customer product root tasks / all customer product root tasks issued in the selected period. Excludes benchmarks, tests, simulations, and operator accounts.',
+        'Completed / finished agent runs by Andy, Tamara, Aman and subscribed users in the selected period; a core-team retry of the same goal counts once. Running or archived-while-running tasks have no outcome yet; chat-only questions, benchmarks, test accounts and simulations are excluded.',
       ),
     ).toBeInTheDocument();
     // Cost labels/values appear in both the summary strip and chart legend.
@@ -161,6 +163,56 @@ describe('AdminHealth page', () => {
     expect(screen.getAllByText('Volume')).toHaveLength(10);
     expect(screen.getAllByText('Conversion')).toHaveLength(10);
     expect(screen.getAllByLabelText(/vs prior 30 days/).length).toBeGreaterThan(10);
+  });
+
+  it('shows "No finished tasks" instead of 0% when no task in the period has an outcome', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health`, () => {
+        const payload = adminHealthPayload('monthly');
+        return HttpResponse.json({
+          ...payload,
+          summary: { ...payload.summary, taskCompletionRate: null },
+          series: payload.series.map((point, index) =>
+            index === payload.series.length - 1 ? { ...point, taskCompletionRate: null } : point,
+          ),
+        });
+      }),
+    );
+    renderWithProviders(<AdminHealth />);
+
+    const value = await screen.findByText('No finished tasks');
+    // The tile's value slot (directly under its title) reads the empty state, not 0%.
+    expect(value.previousElementSibling?.textContent).toBe('Task Completion Rate');
+  });
+
+  it('hovering or focusing a secondary metric shows its over-time chart, like Revenue', async () => {
+    renderWithProviders(<AdminHealth />);
+    await screen.findByText('01 Primary Metric');
+
+    const titles = [
+      '# of People in App',
+      'Avg Tasks / User / 30 Days',
+      'Output Tokens / Task',
+      'GMV / Task',
+      'Task Completion Rate',
+    ];
+    for (const title of titles) {
+      const tile = screen.getByRole('group', { name: new RegExp(`^${escapeRegExp(title)}: `) });
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.mouseEnter(tile);
+      const chart = screen.getByRole('img', { name: `${title} over time` });
+      // Same shared chart as the primary metric, plotted over the response's periods.
+      expect(chart.querySelector('.recharts-responsive-container')).not.toBeNull();
+      fireEvent.mouseLeave(tile);
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.focus(tile);
+      expect(screen.getByRole('img', { name: `${title} over time` })).toBeInTheDocument();
+      // The hovered tile is lifted above later tiles/sections so the popover shows.
+      expect(tile.className).toContain('z-30');
+      fireEvent.keyDown(tile, { key: 'Escape' });
+      expect(screen.queryByRole('img', { name: `${title} over time` })).not.toBeInTheDocument();
+      fireEvent.blur(tile);
+    }
   });
 
   it('requests the selected time slice with auth', async () => {
@@ -387,3 +439,7 @@ describe('AdminHealth page', () => {
     }
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

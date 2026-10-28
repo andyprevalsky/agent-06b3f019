@@ -5,6 +5,7 @@ import { encryptProjectSecret, decryptProjectSecret } from '../projects/secrets'
 import { getCheckpointObject, putCheckpointObject } from '../codeSessions/artifactStore';
 import { prisma } from '../database';
 import { connectValidatedBrowser } from '../steel/sessionConnection';
+import type { HydrationTarget } from './resumeLifecycle';
 import type { SteelLifecycleMutation } from '../steel/lifecycleClaim';
 import { captureFrameIndexedDB, restoreFrameIndexedDB } from './checkpointIndexedDB';
 
@@ -263,9 +264,9 @@ export async function restoreLogicalBrowserCheckpoint(
   taskId: string,
   browser: Browser,
   recovery?: {
-    targets?: Array<{ targetId: string; urlHash: string }>;
+    targets?: HydrationTarget[];
     assertOwned?: () => Promise<void>;
-    prepared?: (targets: Array<{ targetId: string; urlHash: string }>) => Promise<void>;
+    prepared?: (targets: HydrationTarget[]) => Promise<void>;
   }
 ): Promise<void> {
   const { row, checkpoint } = await loadLogicalBrowserCheckpoint(taskId);
@@ -306,9 +307,18 @@ export async function restoreLogicalBrowserCheckpoint(
     )
       throw new Error('Acknowledged browser hydration pages changed');
     if (
-      recovery.targets.some((target) => {
+      recovery.targets.some((target, index) => {
         const url = existing.get(target.targetId)!.url();
-        return url !== 'about:blank' && digest(url) !== target.urlHash;
+        if (url === 'about:blank' || digest(url) === target.urlHash) return false;
+        try {
+          return (
+            !target.seedUrlHash ||
+            digest(url) !== target.seedUrlHash ||
+            new URL(url).origin !== new URL(targets[index]!.url).origin
+          );
+        } catch {
+          return true;
+        }
       })
     )
       throw new Error('Acknowledged browser hydration page navigation changed');
@@ -318,7 +328,7 @@ export async function restoreLogicalBrowserCheckpoint(
     await context.setStorageState(checkpoint.storage);
   }
   const blank = context.pages().find((page) => page.url() === 'about:blank');
-  const prepared: Array<{ page: Page; url: string }> = [];
+  const prepared: Array<{ page: Page; url: string; seedUrlHash?: string }> = [];
   for (let index = 0; index < targets.length; index++) {
     await assertRestoreBinding();
     const target = targets[index]!;
@@ -327,8 +337,12 @@ export async function restoreLogicalBrowserCheckpoint(
       : index === 0 && blank
         ? blank
         : await context.newPage();
-    await seedTabSessionStorage(page, target);
-    prepared.push({ page, url: target.url });
+    const seedUrl = await seedTabSessionStorage(page, target);
+    prepared.push({
+      page,
+      url: target.url,
+      ...(seedUrl && page.url() === seedUrl ? { seedUrlHash: digest(seedUrl) } : {}),
+    });
   }
   if (recovery?.prepared) {
     // Tracking failure never changes first-hydration semantics; it disables acknowledgement.
@@ -339,9 +353,10 @@ export async function restoreLogicalBrowserCheckpoint(
         pages.every((page) => prepared.some((p) => p.page === page))
       ) {
         const owned = await Promise.all(
-          prepared.map(async ({ page, url }) => ({
+          prepared.map(async ({ page, url, seedUrlHash }) => ({
             targetId: await targetId(page),
             urlHash: digest(url),
+            ...(seedUrlHash ? { seedUrlHash } : {}),
           }))
         );
         await recovery.prepared(owned);
@@ -385,6 +400,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
     )
   )
     return;
+  const seedUrl = `${origin}/.rose-session-restore-${randomUUID()}`;
   const cdp = await page.context().newCDPSession(page);
   const fulfill = (route: import('playwright').Route) => route.fulfill({ body: '<!doctype html>' });
   try {
@@ -392,7 +408,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
     await cdp.send('Network.enable');
     await cdp.send('Network.setBypassServiceWorker', { bypass: true });
     await page.route('**/*', fulfill);
-    await page.goto(`${new URL(target.url).origin}/.rose-session-restore-${randomUUID()}`, {
+    await page.goto(seedUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     });
@@ -408,6 +424,7 @@ async function seedTabSessionStorage(page: Page, target: BrowserCheckpoint['tabs
         if (saved.indexedDB) await restoreFrameIndexedDB(frame, saved.indexedDB);
       });
     }
+    return seedUrl;
   } finally {
     try {
       await page.unroute('**/*', fulfill);

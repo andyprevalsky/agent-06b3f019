@@ -120,16 +120,16 @@ def top_processes(previous: dict, current: dict, elapsed_s: float) -> list[dict]
     try:
         if os.environ.get("CPU_RCA_DIR") and os.environ.get("CPU_RCA_BURNER_PID"):
             global _RCA_DROPPED
-            if len(_RCA_ROWS) < 128:
-                target = int(os.environ["CPU_RCA_BURNER_PID"])
-                _RCA_ROWS.append({
-                    "pid": target, "sampler_pid": os.getpid(), "at": time.time(),
-                    "elapsed_s": elapsed_s, "clock_ticks": CLOCK_TICKS,
-                    "before": previous.get(target), "after": current.get(target),
-                    "ranked": [row for row in rows if row["pid"] == target],
-                })
-            else:
+            target = int(os.environ["CPU_RCA_BURNER_PID"])
+            if len(_RCA_ROWS) >= 128:
+                del _RCA_ROWS[0]
                 _RCA_DROPPED += 1
+            _RCA_ROWS.append({
+                "pid": target, "sampler_pid": os.getpid(), "at": time.time(),
+                "elapsed_s": elapsed_s, "clock_ticks": CLOCK_TICKS,
+                "before": previous.get(target), "after": current.get(target),
+                "ranked": [row for row in rows if row["pid"] == target],
+            })
     except Exception:
         pass  # Malformed diagnostic settings cannot affect a CPU sample.
     rows.sort(key=lambda row: row["cpu_pct"], reverse=True)

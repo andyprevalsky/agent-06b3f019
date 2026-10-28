@@ -429,6 +429,28 @@ def recovery_soft_block_still_present(
     )
 
 
+CHALLENGE_CONTEXT_READ_SECONDS = 10.0
+
+
+async def _gather_within(awaitables: Sequence[Any], timeout: float) -> List[Any]:
+    """Like gather(return_exceptions=True), but returns by ``timeout`` even if a read
+    never answers or holds its cancellation; such reads come back as TimeoutError."""
+    tasks = [asyncio.ensure_future(item) for item in awaitables]
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+        task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+    results: List[Any] = []
+    for task in tasks:
+        if task not in done:
+            results.append(asyncio.TimeoutError(f"challenge context read did not answer within {timeout:g}s"))
+        elif task.cancelled():
+            results.append(asyncio.CancelledError())
+        else:
+            results.append(task.exception() or task.result())
+    return results
+
+
 async def capture_challenge_classifier_context(
     page: Any,
     response: Any = None,
@@ -454,15 +476,19 @@ async def capture_challenge_classifier_context(
         network_entries=network_entries,
         recovery_reason=recovery_reason,
     )
-    title, cleaned_dom, network_summary = await asyncio.gather(
-        title_task, cleaned_task, network_task, return_exceptions=True
+    # Each read is bounded: a renderer busy on challenge JS never answers
+    # Runtime.evaluate / Page.captureScreenshot (T83), and an unbounded read held
+    # the challenge patience wait 15 min (kokkari 0addd068). A read that does not
+    # answer is left behind; the classifier runs on what did answer.
+    title, cleaned_dom, network_summary = await _gather_within(
+        (title_task, cleaned_task, network_task), CHALLENGE_CONTEXT_READ_SECONDS
     )
     title_s = title if isinstance(title, str) else ""
     cleaned_s = cleaned_dom if isinstance(cleaned_dom, str) else ""
     network_s = network_summary if isinstance(network_summary, str) else "(network metadata unavailable)"
     screenshot_b64: Optional[str] = None
     try:
-        raw = await page.screenshot(type="png", full_page=False)
+        raw = await page.screenshot(type="png", full_page=False, timeout=CHALLENGE_CONTEXT_READ_SECONDS * 1000)
         if isinstance(raw, (bytes, bytearray)):
             import base64
 

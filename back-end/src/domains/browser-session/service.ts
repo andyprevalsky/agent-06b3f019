@@ -1,3 +1,5 @@
+import { buildBrowserSessionMetadata } from './service.metadata';
+export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
@@ -13,7 +15,6 @@ import {
  */
 
 import type { Browser } from 'playwright';
-import { type ProxyGeoLocation } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
   getSession,
@@ -47,6 +48,7 @@ import {
   buildSessionCredentialPayload,
   preserveSessionCredentialPayload,
 } from './service.credential-error';
+import { buildTilionWorkerApplyPayload } from './service.worker-apply';
 export { SessionCredentialInjectionError } from './service.credential-error';
 export type { SessionCredentialPayload } from './service.credential-error';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
@@ -66,48 +68,6 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
   if (userId === undefined) return;
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) throw new SessionNotFoundError();
-}
-
-interface BrowserSessionMetadataInput {
-  provider: string;
-  proxySource: string;
-  proxyLocation: ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-}
-
-interface BrowserSessionInjectionMetadataInput {
-  cookies: { injected: boolean; cookieCount: number; authSource: string };
-  localStorage: { originCount: number };
-  indexedDB: { originCount: number };
-  permissions: { grantCount: number };
-  cacheStorage: { originCount: number };
-}
-
-export function buildBrowserSessionMetadata(
-  session: BrowserSessionMetadataInput,
-  injectionResult: BrowserSessionInjectionMetadataInput
-) {
-  return {
-    provider: session.provider,
-    proxy_source: session.proxySource,
-    proxy_location: session.proxyLocation,
-    profile_id: session.profileId,
-    profile_source: session.profileSource,
-    auth_source: injectionResult.cookies.authSource,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    local_storage_origin_count: injectionResult.localStorage.originCount,
-    indexed_db_origin_count: injectionResult.indexedDB.originCount,
-    permission_grant_count: injectionResult.permissions.grantCount,
-    cache_storage_origin_count: injectionResult.cacheStorage.originCount,
-    ...(session.provider === 'steel'
-      ? {
-          steel_profile_id: session.profileId,
-          steel_profile_source: session.profileSource,
-        }
-      : {}),
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +142,20 @@ export async function prepareSessionCredentials(
         permissions: { injected: false, grantCount: 0 },
         cacheStorage: { injected: false, originCount: 0 },
       },
+    };
+  }
+  if (session.provider === 'tilion' && options.browser === undefined) {
+    // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
+    // The world-state fork needs a backend CDP context, so it is not recorded here.
+    const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
+    return {
+      ...credentialPayload,
+      auth_credential_ref: injection.cookies.credentialRef,
+      cookies_injected: false,
+      cookies_count: injection.cookies.cookieCount,
+      auth_source: injection.cookies.authSource,
+      browser_state_injection: injection,
+      worker_apply: payload,
     };
   }
   const injectionResult = await preserveSessionCredentialPayload(

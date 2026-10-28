@@ -79,7 +79,8 @@ class _SchemaProjection:
         self.counted_text += sum(len(key) for key in props)
         # Cerebras supports omitted optional properties. Preserve required
         # fields and never introduce null into non-null types; omittable
-        # Optional[X] = None fields arrive here already collapsed to X.
+        # non-string Optional[X] = None fields arrive here already collapsed
+        # to X (see collapse_omittable_nulls).
         return {
             "properties": {key: self.walk(value, depth + 1) for key, value in props.items()},
             "required": list(required),
@@ -190,6 +191,11 @@ def collapse_omittable_nulls(schema: Any) -> Any:
     qwen on Cerebras serializes arrays and integers inside ``anyOf[X, null]``
     as JSON strings, with or without strict decoding. Omission already
     validates to None, so the null branch adds nothing for these properties.
+
+    String properties (including enums) keep ``anyOf[string, null]``. Encoding
+    a string value as a string is harmless, and when qwen fills every optional
+    field a plain ``string`` leaves no way to write "no value": it sends the
+    string ``"null"`` instead (list_agents cursor/query, grep page_after/role).
     Required or non-null-default properties keep their union.
     """
     return _collapse_node(deepcopy(schema))

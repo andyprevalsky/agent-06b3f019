@@ -18,7 +18,11 @@ require(require.resolve('tsx/cjs'));
 const src = root + '/back-end/src/providers',
   candidate = src;
 const load = Module._load;
-let failClose = false;
+let failClose = false,
+  failConnect = false,
+  onConnect,
+  failGotoBeforeCommit = false;
+const artifacts = new Map();
 let prisma,
   lifecycle,
   creates = 0,
@@ -45,8 +49,14 @@ const browser = (id) => {
       newPage: async () => makePage(),
       newCDPSession: async (page) => ({
         send: async (method) => {
-          assert.equal(method, 'Target.getTargetInfo');
-          return { targetInfo: { targetId: page.targetId } };
+          if (method === 'Target.getTargetInfo') {
+            assert.equal(method, 'Target.getTargetInfo');
+            return { targetInfo: { targetId: page.targetId } };
+          }
+          assert(
+            ['Page.enable', 'Network.enable', 'Network.setBypassServiceWorker'].includes(method)
+          );
+          return {};
         },
         detach: async () => {},
       }),
@@ -56,6 +66,10 @@ const browser = (id) => {
       let url = 'about:blank';
       const page = {
         targetId: randomUUID(),
+        context: () => context,
+        route: async () => {},
+        unroute: async () => {},
+        evaluate: async () => {},
         url: () => url,
         setURL: (value) => (url = value),
         close: async () => {
@@ -63,13 +77,18 @@ const browser = (id) => {
           pages.splice(pages.indexOf(page), 1);
         },
         goto: async (next, opts) => {
+          if (new URL(next).pathname.startsWith('/.rose-session-restore-')) {
+            assert.equal(new URL(next).origin, 'http://127.0.0.1:22441');
+            url = next;
+            return;
+          }
           assert.equal(
             next,
             'http://127.0.0.1:22441/test_payment?token=synthetic-redaction-check#fixture'
           );
           assert.deepEqual(opts, { waitUntil: 'domcontentloaded', timeout: 30000 });
           gotocalls++;
-          url = next;
+          if (!failGoto || !failGotoBeforeCommit) url = next;
           if (pendingGoto) await pendingGoto;
           if (failGoto) {
             failGoto = false;
@@ -132,6 +151,13 @@ const nativeResume = async (taskId) => {
 };
 Module._load = function (id, parent, isMain) {
   const owner = parent?.filename ?? '';
+  if (owner === candidate + '/browser/checkpoint.ts' && id === '../projects/secrets')
+    return { encryptProjectSecret: (value) => value, decryptProjectSecret: (value) => value };
+  if (owner === candidate + '/browser/checkpoint.ts' && id === '../codeSessions/artifactStore')
+    return {
+      putCheckpointObject: async (key, value) => artifacts.set(key, value),
+      getCheckpointObject: async (key) => artifacts.get(key) ?? null,
+    };
   if (id.endsWith('/browser/resumeLifecycle') || id.endsWith('/browser/resumeLifecycle.ts'))
     return load.call(this, candidate + '/browser/resumeLifecycle.ts', parent, isMain);
   if (owner === candidate + '/browserSessionResume.ts' && id === './browser/checkpoint')
@@ -170,6 +196,8 @@ Module._load = function (id, parent, isMain) {
     return {
       connectValidatedBrowser: async (id) => {
         assert(nativeIds.has(id));
+        if (onConnect) await onConnect();
+        if (failConnect) return null;
         return browser(id);
       },
     };
@@ -184,7 +212,7 @@ const { resumeBrowserSession } = require(candidate + '/browserSessionResume.ts')
 const userIds = [],
   rowIds = [];
 const key = (id) => 'steel-browser-task-lifecycle:' + id;
-async function fixture() {
+async function fixture(withStorage = false) {
   const userId = 'hydrate-' + randomUUID();
   userIds.push(userId);
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -204,6 +232,22 @@ async function fixture() {
     },
   });
   rowIds.push(row.id);
+  if (withStorage) {
+    const { writeBrowserCheckpoint } = require(candidate + '/browser/checkpoint.ts');
+    const ref = await writeBrowserCheckpoint({
+      version: 1,
+      userId,
+      sourceLogicalId: row.id,
+      sourceRevision: 0,
+      storage: { cookies: [], origins: [] },
+      tabs: [1, 2].map((index) => ({
+        url: row.currentUrl,
+        sessionStorage: [{ name: 'fixture-session-' + index, value: 'private-fixture' }],
+      })),
+      limitations: ['no_external_action_replay', 'no_websocket_or_heap_state'],
+    });
+    await prisma.browserSession.update({ where: { id: row.id }, data: { checkpointRef: ref } });
+  }
   return row;
 }
 async function failed(row) {
@@ -498,12 +542,199 @@ async function run() {
   pendingGoto = undefined;
   await work;
   prisma.toolSideEffect.updateMany = origUpdate;
-  receipts.push({ kind: 'no-ack-inflight', passed: true });
+  receipts.push({ kind: 'no-ack-inflight', passed: true }); // Carried state is outside the encrypted checkpoint receipt: do not acknowledge it.
+  const carried = { cookies: [], origins: [{ origin: 'https://carry.invalid', localStorage: [] }] };
+  const carryPending = await fixture();
+  failGoto = true;
+  const pendingCreates = creates;
+  await prisma.browserSession.update({
+    where: { id: carryPending.id },
+    data: { provider: 'tilion', pausedBrowserState: carried },
+  });
+  const tilionEnabledBefore = process.env.BROWSER_AGENT_TILION_ENABLED;
+  process.env.BROWSER_AGENT_TILION_ENABLED = 'false';
+  try {
+    // The caller supplied no carry: main loads it from the paused Tilion row.
+    await assert.rejects(
+      resumeBrowserSession(carryPending.id),
+      /page.goto: Timeout 30000ms exceeded/
+    );
+  } finally {
+    if (tilionEnabledBefore === undefined) delete process.env.BROWSER_AGENT_TILION_ENABLED;
+    else process.env.BROWSER_AGENT_TILION_ENABLED = tilionEnabledBefore;
+  }
+  const pendingHeld = await prisma.toolSideEffect.findUniqueOrThrow({
+    where: { operationKey: key(carryPending.id) },
+  });
+  assert.equal(pendingHeld.status, 'STARTED');
+  assert.equal(pendingHeld.request.phase, 'hydrating');
+  assert.equal(
+    pendingHeld.response,
+    null,
+    'pending carry cannot become a checkpoint-only retry receipt'
+  );
+  assert.equal(creates, pendingCreates + 1);
+  receipts.push({ kind: 'carry-pending-suppresses-ack', passed: true });
+
+  // A new carry must not consume a prior checkpoint-only failure acknowledgement.
+  const newCarry = await fixture();
+  const priorCarryAck = await failed(newCarry);
+  assert.equal(priorCarryAck.held.response.phase, 'hydration_failed');
+  const beforeCarry = { creates, gotocalls, storageWrites, connectionCloses };
+  await assert.rejects(
+    resumeBrowserSession(newCarry.id, { carriedState: carried }),
+    /Acknowledged browser hydration binding changed/
+  );
+  assert.deepEqual({ creates, gotocalls, storageWrites, connectionCloses }, beforeCarry);
+  const afterCarryAck = await prisma.toolSideEffect.findUniqueOrThrow({
+    where: { operationKey: key(newCarry.id) },
+  });
+  assert.equal(afterCarryAck.status, 'STARTED');
+  assert.equal(afterCarryAck.externalId, priorCarryAck.held.externalId);
+  assert.deepEqual(afterCarryAck.response, priorCarryAck.held.response);
+  receipts.push({ kind: 'new-carry-cannot-adopt-old-ack', passed: true });
+}
+async function seededRetry() {
+  failGotoBeforeCommit = true;
+  const row = await fixture(true),
+    first = await failed(row);
+  const pages = contexts.get(first.binding.sessionId).pages();
+  const targetIds = pages.map((p) => p.targetId),
+    before = creates;
+  assert.equal(pages.length, 2);
+  assert(pages.every((p) => new URL(p.url()).pathname.startsWith('/.rose-session-restore-')));
+  const result = await resumeBrowserSession(row.id);
+  assert.equal(result.session_id, first.binding.sessionId);
+  assert.equal(creates, before);
+  assert.deepEqual(
+    pages.map((p) => p.targetId),
+    targetIds
+  );
+  assert(pages.every((p) => p.url() === row.currentUrl));
+  assert(first.held.request.hydrationTargets.every((t) => /^[a-f0-9]{64}$/.test(t.seedUrlHash)));
+  receipts.push({ kind: 'seed-url-before-commit-recovery', passed: true });
+  for (const control of ['same-origin-fake-seed', 'foreign-origin-exact-seed-hash']) {
+    const other = await fixture(true),
+      prior = await failed(other);
+    const page = contexts.get(prior.binding.sessionId).pages()[0];
+    const url =
+      control === 'same-origin-fake-seed'
+        ? 'http://127.0.0.1:22441/.rose-session-restore-unrecorded'
+        : 'https://foreign.invalid/.rose-session-restore-exact';
+    page.setURL(url);
+    if (control === 'foreign-origin-exact-seed-hash') {
+      const hash = require('node:crypto').createHash('sha256').update(url).digest('hex');
+      const targets = prior.held.request.hydrationTargets.map((t, i) =>
+        i ? t : { ...t, seedUrlHash: hash }
+      );
+      await prisma.toolSideEffect.update({
+        where: { id: prior.held.id },
+        data: {
+          request: { ...prior.held.request, hydrationTargets: targets },
+          response: { ...prior.held.response, targets },
+        },
+      });
+    }
+    const writes = storageWrites,
+      count = creates;
+    await assert.rejects(resumeBrowserSession(other.id), /page navigation changed/);
+    assert.equal(storageWrites, writes);
+    assert.equal(creates, count);
+    receipts.push({ kind: control, passed: true });
+  }
+  failGotoBeforeCommit = false;
+}
+async function preHydrationRetry() {
+  failGotoBeforeCommit = false;
+  const row = await fixture(),
+    prior = await failed(row);
+  const count = creates,
+    writes = storageWrites;
+  failConnect = true;
+  await assert.rejects(resumeBrowserSession(row.id), /hydration connection failed/);
+  failConnect = false;
+  const retained = await prisma.toolSideEffect.findUniqueOrThrow({
+    where: { operationKey: key(row.id) },
+  });
+  assert.deepEqual(
+    retained.response,
+    prior.held.response,
+    'pre-hydration connection failure must retain the settled receipt'
+  );
+  assert.notEqual(retained.externalId, prior.held.externalId);
+  assert.deepEqual(retained.request, prior.held.request);
+  assert.equal(storageWrites, writes);
+  assert.equal(creates, count);
+  assert.equal((await resumeBrowserSession(row.id)).session_id, prior.binding.sessionId);
+  receipts.push({ kind: 'pre-hydration-receipt-restored', passed: true });
+  for (const control of [
+    'foreign-owner',
+    'released-status',
+    'changed-request',
+    'close-unknown',
+    'hydration-started',
+  ]) {
+    const other = await fixture(),
+      first = await failed(other);
+    const before = creates;
+    if (control === 'hydration-started') {
+      failGoto = true;
+      failClose = true;
+    } else if (control === 'close-unknown') {
+      failClose = true;
+      onConnect = () =>
+        prisma.browserSession.update({ where: { id: other.id }, data: { controlState: 'USER' } });
+    } else {
+      failConnect = true;
+      onConnect = async () => {
+        const held = await prisma.toolSideEffect.findUniqueOrThrow({
+          where: { operationKey: key(other.id) },
+        });
+        await prisma.toolSideEffect.update({
+          where: { id: held.id },
+          data:
+            control === 'foreign-owner'
+              ? { externalId: 'fixture-foreign-owner' }
+              : control === 'released-status'
+                ? { status: 'RELEASED' }
+                : { request: { ...held.request, requestId: 'fixture-changed-request' } },
+        });
+      };
+    }
+    await assert.rejects(
+      resumeBrowserSession(other.id),
+      /connection failed|user control|Timeout 30000ms/
+    );
+    failConnect = false;
+    failClose = false;
+    onConnect = undefined;
+    const held = await prisma.toolSideEffect.findUniqueOrThrow({
+      where: { operationKey: key(other.id) },
+    });
+    assert.equal(held.response, null, control + ' must not restore the predecessor receipt');
+    assert.equal(creates, before);
+    receipts.push({ kind: 'pre-hydration-negative-' + control, passed: true });
+  }
 }
 (async () => {
   let error;
   try {
     await run();
+    const failures = [];
+    for (const check of [seededRetry, preHydrationRetry]) {
+      try {
+        await check();
+      } catch (error) {
+        receipts.push({ kind: 'regression-failure', check: check.name, message: error.message });
+        failures.push(error);
+      } finally {
+        failConnect = false;
+        failClose = false;
+        onConnect = undefined;
+        failGotoBeforeCommit = false;
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, 'hydration regression controls failed');
     console.log(JSON.stringify({ status: 'PASS', creates, gotos: gotocalls, receipts }, null, 2));
   } catch (e) {
     error = e;

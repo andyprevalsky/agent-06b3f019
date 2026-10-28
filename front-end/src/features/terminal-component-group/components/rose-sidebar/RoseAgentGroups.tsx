@@ -3,17 +3,29 @@
  *
  * Stateless apart from which project row is being renamed (owned by the parent).
  *
- * EXPANDED (bar hovered) — Projects on top (Andy, 2026-10-26), then Home:
+ * EXPANDED (bar hovered) — "+ New project" first, right under Back | Search,
+ * then the created projects, the Home project last (Andy, 2026-10-28); a thin
+ * divider line separates consecutive groups:
+ *   + New project  (inline: Enter creates, Escape cancels)
  *   [icon] Project A   [+ new agent here] [⚙ settings]   (right-click: rename/settings/delete)
  *       project A agents (indented)
+ *   ──────
  *   [icon] Project B   [+] [⚙]
  *   (icon = GitHub repo owner's avatar when connected to a GitHub repo, else folder)
  *       ...
- *   + New project  (inline: Enter creates, Escape cancels)
- *   Home agents
+ *   ──────
+ *   [⌂] Home   [+ new agent in Home]     (every agent without a project)
+ *       Home agents
  *
- * COLLAPSED (64px rail): project rows and "+ New project" are hidden; the
- * non-empty groups of agent icons are separated by 18×3px neutral line pills.
+ * COLLAPSED (64px rail): per group the project icon, then its agent icons, then
+ * an 18×3px neutral line pill before the next group; Home last. "New project"
+ * keeps its folder-plus icon in the same top slot (label faded), so expanding
+ * never shifts the rows below.
+ *
+ * PENDING NEW-AGENT TARGET (pendingGroupKey, owned by RoseSidebar): the project
+ * id (or "home") whose "+" was clicked; that group's icon wears the
+ * liquid-metal ring + shadow + glow in both widths until the agent is created
+ * or another agent/project is picked.
  *
  * OLD AGENTS (Andy, 2026-10-26; oldAgents.ts): per group (Home and each
  * project), finished agents last active more than 4 days ago (never pinned,
@@ -33,7 +45,7 @@
  *   --code-agent row click--> [CODE AGENT] that row is marked instead; its
  *   owner agent row (still the selected agent underneath) is not.
  *
- * While a search query is active, project groups with no matching agent drop out.
+ * While a search query is active, groups (Home included) with no matching agent drop out.
  */
 
 import { Fragment, useState } from 'react';
@@ -47,14 +59,17 @@ import { useNow } from '../useNow';
 import type { GroupedAgents } from './groupAgentsByProject';
 import RoseAgentBranch from './RoseAgentBranch';
 import type { RoseAgentMenuActions } from './RoseAgentRowMenu';
-import RoseProjectRow, { NewProjectRow } from './RoseProjectRow';
+import RoseProjectRow, { HomeProjectRow, NewProjectRow } from './RoseProjectRow';
 import { oldAgentsLabel, splitOldAgents } from './oldAgents';
 
 const OLD_AGENT_CLOCK_MS = 60_000;
-const HOME_GROUP = 'home';
+
+export const HOME_GROUP = 'home';
 
 export interface RoseProjectActions {
   onCreateAgentInProject: (project: Project) => void;
+  /** "+" on the Home project row (a new agent without a project). */
+  onCreateHomeAgent?: () => void;
   onOpenProjectSettings: (project: Project) => void;
   onStartRename: (project: Project) => void;
   onRename: (project: Project, name: string) => void;
@@ -77,6 +92,8 @@ export interface RoseAgentGroupsProps {
   /** Project whose settings panel is open (its row shows as active). */
   settingsProjectId: string | null;
   renamingProjectId: string | null;
+  /** Group (project id or HOME_GROUP) the next new agent is created in, if marked. */
+  pendingGroupKey?: string | null;
   onSelectAgent: (agentId: string) => void;
   actionsFor: (agent: Agent) => RoseAgentMenuActions;
   onMenuOpenChange: (open: boolean) => void;
@@ -91,10 +108,19 @@ export interface RoseAgentGroupsProps {
   visibleRootIds?: ReadonlySet<string>;
 }
 
-function GroupDivider() {
+function GroupDivider({ isExpanded }: { isExpanded: boolean }) {
   return (
-    <div data-testid="rose-group-divider" aria-hidden="true" className="flex justify-center py-2">
-      <i className="block h-[3px] w-[18px] rounded-[3px] bg-[hsl(240_6%_86%)] dark:bg-white/[0.07]" />
+    <div
+      data-testid="rose-group-divider"
+      aria-hidden="true"
+      className={cn('flex flex-none justify-center', isExpanded ? 'px-[22px] py-1.5' : 'py-2')}
+    >
+      <i
+        className={cn(
+          'block bg-[hsl(240_6%_86%)] dark:bg-white/[0.07]',
+          isExpanded ? 'h-px w-full' : 'h-[3px] w-[18px] rounded-[3px]',
+        )}
+      />
     </div>
   );
 }
@@ -141,6 +167,8 @@ function ProjectGroupRow({
       project={project}
       isActive={isActive}
       isRenaming={props.renamingProjectId === project.id}
+      isExpanded={props.isExpanded}
+      isPending={props.pendingGroupKey === project.id}
       onCreateAgent={() => a.onCreateAgentInProject(project)}
       onOpenSettings={() => a.onOpenProjectSettings(project)}
       onStartRename={() => a.onStartRename(project)}
@@ -238,11 +266,13 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
     view: viewOf(g.project.id, g.agents),
   }));
   const homeView = viewOf(HOME_GROUP, grouped.home);
-  const firstAgentGroup =
-    projectViews.find((g) => g.view.shown.length > 0)?.project.id ??
-    (homeView.shown.length > 0 ? HOME_GROUP : undefined);
+  // Like project groups, Home drops out of a search with no Home match.
+  const showHome = !isFiltering || homeView.shown.length > 0;
   return (
     <div data-testid="rose-agent-groups" className="flex flex-col">
+      {!isFiltering && (
+        <NewProjectRow onCreate={props.projectActions.onCreateProject} isExpanded={isExpanded} />
+      )}
       {isExpanded && props.projectLoading && (
         <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
           Loading projects…
@@ -256,12 +286,10 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           </button>
         </div>
       )}
-      {projectViews.map(({ project, view }) => (
+      {projectViews.map(({ project, view }, index) => (
         <Fragment key={project.id}>
-          {!isExpanded && view.shown.length > 0 && firstAgentGroup !== project.id && (
-            <GroupDivider />
-          )}
-          {isExpanded && <ProjectGroupRow project={project} agents={view.agents} props={props} />}
+          {index > 0 && <GroupDivider isExpanded={isExpanded} />}
+          <ProjectGroupRow project={project} agents={view.agents} props={props} />
           <div data-testid={`rose-group-${project.id}`} className="flex flex-col">
             <GroupAgents
               view={view}
@@ -273,16 +301,19 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
           </div>
         </Fragment>
       ))}
-      {isExpanded && !isFiltering && (
-        <NewProjectRow onCreate={props.projectActions.onCreateProject} />
-      )}
-      {!isExpanded && homeView.shown.length > 0 && firstAgentGroup !== HOME_GROUP && (
-        <GroupDivider />
+      {showHome && projectViews.length > 0 && <GroupDivider isExpanded={isExpanded} />}
+      {showHome && (
+        <HomeProjectRow
+          isExpanded={isExpanded}
+          isActive={homeView.agents.some((agent) => agent.agent_id === props.selectedAgentId)}
+          isPending={props.pendingGroupKey === HOME_GROUP}
+          onCreateAgent={props.projectActions.onCreateHomeAgent}
+        />
       )}
       <div data-testid="rose-group-home" className="flex flex-col">
         <GroupAgents
           view={homeView}
-          indented={false}
+          indented
           open={openOld.has(HOME_GROUP)}
           onToggle={() => toggleOld(HOME_GROUP)}
           props={props}

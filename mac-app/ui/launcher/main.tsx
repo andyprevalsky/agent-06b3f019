@@ -12,8 +12,11 @@ import '../index.css';
 import { AppDataProvider } from '@/hooks/useAppData';
 import { Launcher, LAUNCHER_GLOBAL_CSS } from '../features/launcher';
 import { initViewportScale } from '../lib/viewport-scale';
+import { followMirroredTheme } from '../shared/theme-sync';
 
 initViewportScale();
+// Separate BrowserWindow: adopt the main window's html.dark (see shared/theme-sync).
+followMirroredTheme();
 
 // Styles - must override Tailwind's bg-background
 const style = document.createElement('style');

@@ -12,7 +12,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 VALID_EVENTS = {
     "deploy": {
         "approval-request": {
@@ -104,6 +103,12 @@ def validate_event(workflow: str, event: str, value: str) -> None:
         raise ValueError(
             "invalid descend stage value; expected an uppercase state name"
         )
+    if (
+        workflow in {"deploy", "rca", "update-prompts"}
+        and event == "metadata"
+        and value == "snapshot"
+    ):
+        return
     allowed_values = VALID_EVENTS.get(workflow, {}).get(event)
     if allowed_values is not None and value in allowed_values:
         return
@@ -129,7 +134,14 @@ def factory_event_payload(
     metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the canonical factory-event envelope with optional dimensions."""
+    from factory_metadata import load_metadata, normalize_metadata
+
     validate_event(workflow, event, value)
+    metadata = dict(metadata or {})
+    metadata["telemetry"] = (
+        normalize_metadata(metadata["telemetry"])
+        if "telemetry" in metadata else load_metadata()
+    )
     epoch = time.time() if recorded_epoch is None else recorded_epoch
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -154,13 +166,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("workflow", choices=sorted(VALID_EVENTS))
     parser.add_argument("event")
     parser.add_argument("value")
+    parser.add_argument(
+        "--metadata-file",
+        help="Allowlisted evidence-backed JSON; defaults to FACTORY_METADATA_FILE",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
+    from factory_metadata import load_metadata
+
     args = parse_args()
     try:
-        payload = factory_event_payload(args.workflow, args.event, args.value)
+        payload = factory_event_payload(
+            args.workflow,
+            args.event,
+            args.value,
+            metadata={"telemetry": load_metadata(args.metadata_file)},
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
     event_log = Path(

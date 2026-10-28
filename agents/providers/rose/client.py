@@ -28,7 +28,7 @@ import ssl
 import time
 import uuid
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -76,7 +76,7 @@ from providers.rose.schema import (
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
-from providers.rose.truncation import model_key, recover_truncated
+from providers.rose.truncation import model_key, needs_result, recover_truncated
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -1262,6 +1262,7 @@ class RoseClient:
             source: AsyncIterator[StreamChunk],
             *,
             ttft_override: Optional[float] = None,
+            is_opaque: Optional[Callable[[str], bool]] = None,
         ) -> AsyncIterator[StreamChunk]:
             """Wrap an upstream generator with deadline + TTFT + idle checks.
 
@@ -1279,6 +1280,13 @@ class RoseClient:
             They refresh a configured idle window without emitting partial
             tools. When idle checks are disabled, TTFT still bounds the wait
             for the first emitted productive chunk.
+            An encrypted Responses reasoning item (`codex_reasoning_item`) is
+            opaque replay state: it ends TTFT but never refreshes the idle
+            window, so a stream of back-to-back empty reasoning items with no
+            text or tool output is idle (seen on Foundry gpt-6.x under a
+            required tool choice: 800+ items in 590s and no reply).
+            `is_opaque` lets a leg mark more kinds opaque the same way (the
+            Foundry leg's held reasoning text before any answer output).
             Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
@@ -1290,15 +1298,19 @@ class RoseClient:
             saw_emitted_productive_chunk = False
             attempt_started = time.monotonic()
             last_progress_at: Optional[float] = None
+            # Start of an idle window that opaque reasoning items keep open;
+            # None while the window restarts at each wait (backpressure-safe).
+            opaque_idle_since: Optional[float] = None
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
 
             def note_progress(kind: str, size: int) -> None:
                 nonlocal saw_productive_chunk, attempt_started, last_progress_at
                 nonlocal saw_emitted_productive_chunk
-                nonlocal buffered_tool_argument_fragments, last_tool_argument_at
+                nonlocal buffered_tool_argument_fragments, last_tool_argument_at, opaque_idle_since
                 now = time.monotonic()
                 if kind == "attempt":
                     attempt_started = now
+                    opaque_idle_since = None
                     saw_productive_chunk = False
                     saw_emitted_productive_chunk = False
                     last_progress_at = None
@@ -1334,6 +1346,7 @@ class RoseClient:
                     # The pending task inherits this request's callback; the
                     # consumer and concurrent sibling requests never do.
                     _stream_progress.reset(progress_token)
+                polled = False
                 try:
                     while True:
                         using_idle_budget = saw_productive_chunk and (
@@ -1344,8 +1357,9 @@ class RoseClient:
                             # Preserve consumer backpressure tolerance between
                             # normalized chunks, while refreshing a pending
                             # chunk only from actual parser progress.
+                            window_start = wait_started if opaque_idle_since is None else opaque_idle_since
                             progress_deadline = (
-                                max(wait_started, last_progress_at or wait_started) + progress_timeout
+                                max(window_start, last_progress_at or window_start) + progress_timeout
                                 if progress_timeout is not None
                                 else started + deadline_s
                             )
@@ -1358,10 +1372,14 @@ class RoseClient:
                             _HEARTBEAT_INTERVAL_S,
                             wait_deadline - time.monotonic(),
                         )
-                        if slice_timeout <= 0:
+                        if slice_timeout <= 0 and polled:
                             timed_out = True
                             break
-                        done, _pending = await asyncio.wait({next_item}, timeout=slice_timeout)
+                        # A window can already be spent when the wait begins
+                        # (opaque reasoning items). Poll once so the read is in
+                        # flight and cancellation runs the source's cleanup.
+                        polled = True
+                        done, _pending = await asyncio.wait({next_item}, timeout=max(slice_timeout, 0.0))
                         if next_item in done:
                             try:
                                 chunk = next_item.result()
@@ -1431,9 +1449,18 @@ class RoseClient:
                             elapsed_s=round(now - started, 3),
                             chunk_counts=dict(chunk_counts),
                         )
+                    opaque = chunk.kind == "codex_reasoning_item" or (
+                        is_opaque is not None and is_opaque(chunk.kind)
+                    )
+                    if not opaque:
+                        opaque_idle_since = None
+                        last_progress_at = now
+                    elif opaque_idle_since is None:
+                        # Keep the current idle window running; the first
+                        # productive chunk opens it at its arrival.
+                        opaque_idle_since = wait_started if saw_productive_chunk else now
                     saw_productive_chunk = True
                     saw_emitted_productive_chunk = True
-                    last_progress_at = now
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
@@ -1444,6 +1471,8 @@ class RoseClient:
                     # consumer deliberately keeps this generator suspended.
                     # The fixed whole-call deadline still includes that time.
                     attempt_started += time.monotonic() - yielded_at
+                elif opaque_idle_since is not None:
+                    opaque_idle_since += time.monotonic() - yielded_at
 
         def _with_timing_if_done(chunk: StreamChunk) -> StreamChunk:
             if chunk.kind != "done":
@@ -1987,6 +2016,40 @@ class RoseClient:
                 if foundry_configured(pool_spec) and not foundry_blind and foundry_candidates(pool_spec, _skip_models):
                     active_route = "foundry"
                     foundry_yielded_any = False
+                    # Reasoning is not a reply (see truncation.py). Hold this
+                    # leg's metadata and encrypted reasoning items, plus its
+                    # reasoning text when the call needs a tool call or
+                    # structured result, until answer output starts. A leg that
+                    # stalls first has produced no output, so it uses the
+                    # pool's next leg and none of its reasoning reaches the
+                    # consumer or a later turn.
+                    foundry_held: List[StreamChunk] = []
+                    foundry_hold_kinds = {"metadata", "codex_reasoning_item"}
+                    if needs_result(
+                        tools=gpt_api_key_tools, tool_choice=gpt_api_key_tool_choice, response_model=response_model
+                    ):
+                        foundry_hold_kinds.add("reasoning")
+
+                    def _foundry_out(chunk: StreamChunk) -> StreamChunk:
+                        nonlocal _seen_actual_model
+                        if chunk.kind == "metadata":
+                            metadata = dict(chunk.data)
+                            if claude_token_error is not None:
+                                metadata["claude_token_error"] = claude_token_error
+                            if gpt_token_error is not None:
+                                metadata["gpt_token_error"] = gpt_token_error
+                            chunk = StreamChunk(kind="metadata", data=metadata)
+                            if chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
+                            )
+                        chunk = _with_cache_sequence(chunk)
+                        _record_dump_chunk(chunk)
+                        return chunk
+
                     try:
                         async with aclosing(
                             foundry_complete(
@@ -2011,33 +2074,30 @@ class RoseClient:
                                 skip_models=_skip_models,
                             )
                         ) as foundry_source:
-                            async for chunk in _guarded(foundry_source):
+                            async for chunk in _guarded(
+                                foundry_source,
+                                # Held reasoning is not answer output, so it
+                                # must not keep the idle window open either.
+                                is_opaque=lambda kind: not foundry_yielded_any and kind in foundry_hold_kinds,
+                            ):
                                 chunk = _with_timing_if_done(chunk)
+                                if not foundry_yielded_any and chunk.kind in foundry_hold_kinds:
+                                    foundry_held.append(chunk)
+                                    continue
                                 foundry_yielded_any = True
-                                if chunk.kind == "metadata":
-                                    metadata = dict(chunk.data)
-                                    if claude_token_error is not None:
-                                        metadata["claude_token_error"] = claude_token_error
-                                    if gpt_token_error is not None:
-                                        metadata["gpt_token_error"] = gpt_token_error
-                                    chunk = StreamChunk(kind="metadata", data=metadata)
-                                    if chunk.data.get("actual_model"):
-                                        _seen_actual_model = chunk.data["actual_model"]
-                                elif chunk.kind == "usage":
-                                    _emit_llm_cache(chunk.data)
-                                    chunk = StreamChunk(
-                                        kind="usage", data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data)
-                                    )
-                                chunk = _with_cache_sequence(chunk)
-                                _record_dump_chunk(chunk)
-                                yield chunk
+                                for pending in (*foundry_held, chunk):
+                                    yield _foundry_out(pending)
+                                foundry_held.clear()
+                        for pending in foundry_held:
+                            yield _foundry_out(pending)
                         logger.info(
                             "rose.complete.foundry.done", request_id=rid, agent_id=agent_id, call_site=call_site
                         )
                         _finalize_dump()
                         return
                     except (_FallThrough, RoseStallError, RoseError) as exc:
-                        if foundry_yielded_any:
+                        # The whole-call deadline stays terminal for every leg.
+                        if foundry_yielded_any or remaining() <= 0:
                             raise
                         cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
                         logger.info(
@@ -2046,6 +2106,9 @@ class RoseClient:
                             agent_id=agent_id,
                             call_site=call_site,
                             reason=type(cause).__name__ if cause else "unknown",
+                            dropped_reasoning_items=sum(1 for c in foundry_held if c.kind == "codex_reasoning_item"),
+                            dropped_reasoning_chars=sum(len(c.data.get("text") or "") for c in foundry_held),
+                            elapsed_s=round(time.monotonic() - started, 3),
                         )
 
             active_route = "waterfall"

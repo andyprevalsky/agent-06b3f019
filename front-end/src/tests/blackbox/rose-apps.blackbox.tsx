@@ -178,7 +178,7 @@ describe('top-right app icons', () => {
     const labels = within(row)
       .getAllByRole('button')
       .map((b) => b.getAttribute('aria-label'));
-    expect(labels).toEqual(['Agent Display', 'Browser', 'Phone', 'Integrations', 'Dark mode']);
+    expect(labels).toEqual(['Browser', 'Phone', 'Integrations', 'Dark mode']);
     for (const removed of ['voice', 'files', 'terminal', 'network', 'payments', 'benchmarks']) {
       expect(screen.queryByTestId(`rose-app-${removed}`)).toBeNull();
     }
