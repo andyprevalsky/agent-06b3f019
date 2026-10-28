@@ -30,13 +30,22 @@
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
-import { claudeCodeSandboxKeyUsable, resolveCodexAzureFunding } from '../claudeCodeSandboxAuth';
+import {
+  claudeCodeSandboxKeyUsable,
+  resolveCodexAzureFunding,
+  resolveCodexCodeAuthEnvs,
+  type CodexAzureFunding,
+} from '../claudeCodeSandboxAuth';
 import {
   anthropicApiKeyCooldownUntil,
   isAnthropicApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
 } from '../computeCredentials';
-import { markGptIntegrationRateLimited } from '../gptCredentials';
+import {
+  fetchGptCodeCredentialsWithMeta,
+  markGptIntegrationRateLimited,
+  type GptCodeCredentialEnvelopeResult,
+} from '../gptCredentials';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { checkpointKey, getCheckpointObject } from './artifactStore';
 import { CLI_LOG_ARTIFACT } from './checkpoint';
@@ -202,8 +211,44 @@ export async function __resetCodexFundedCooldown(): Promise<void> {
   });
 }
 
+/** The funded Azure Codex deployment a spawn may use now: configured and not backed off. */
+export async function usableCodexAzureFunding(now = new Date()): Promise<CodexAzureFunding | null> {
+  const funding = resolveCodexAzureFunding();
+  if (funding === null) return null;
+  return (await codexFundedCooldownUntil(now)) === null ? funding : null;
+}
+
 async function codexFundedUsable(now: Date): Promise<boolean> {
-  return resolveCodexAzureFunding() !== null && (await codexFundedCooldownUntil(now)) === null;
+  return (await usableCodexAzureFunding(now)) !== null;
+}
+
+/** Which Codex credential serves a spawn: a ChatGPT login (own or shared pool) or the funded Azure deployment. */
+export type CodexServedBy = 'user' | 'pool' | 'azure';
+
+export interface CodexSpawnAuth {
+  /** The ChatGPT login leased for the run; null when the funded Azure deployment serves it alone. */
+  credentialMeta: GptCodeCredentialEnvelopeResult | null;
+  /** Injected alongside a login for the in-sandbox runtime fallback; null when not configured or backed off. */
+  azureFunding: CodexAzureFunding | null;
+  envs: Record<string, string>;
+  servedBy: CodexServedBy;
+}
+
+/**
+ * The Codex credential a cloud spawn (E2B code agent, inspect) leases, in
+ * order: the user's own ChatGPT login, a shared pool login, then the funded
+ * Azure deployment unless it is backed off (codex_funded_cooldown). Throws
+ * CodeAgentCredentialError when none is usable; a retry then stays paused on
+ * the availability plan instead of starting a doomed run.
+ */
+export async function resolveCodexSpawnAuth(
+  userId: string,
+  now = new Date()
+): Promise<CodexSpawnAuth> {
+  const credentialMeta = await fetchGptCodeCredentialsWithMeta(userId);
+  const azureFunding = await usableCodexAzureFunding(now);
+  const envs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
+  return { credentialMeta, azureFunding, envs, servedBy: credentialMeta?.source ?? 'azure' };
 }
 
 /**

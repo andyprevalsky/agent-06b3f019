@@ -3,7 +3,10 @@ import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
-import { retryWithBackoff } from '../../providers/retry';
+import {
+  __resetCodexFundedCooldown,
+  codexFundedCooldownUntil,
+} from '../../providers/codeSessions/usageLimit';
 import {
   testPersistOutput_coolsExhaustedOAuthCredential,
   testPersistOutput_coolsFundedKeyForObservedBalanceError,
@@ -44,7 +47,6 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
-import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { assert, assertStatus, request } from './codex-sandbox.support';
 config();
 
@@ -93,6 +95,8 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
     },
   });
   const taskId = crypto.randomUUID();
+  await __resetCodexFundedCooldown();
+  const openAiKeyBefore = await openAiKeyCooldownUntil();
   await prisma.claudeCodeSession.create({
     data: {
       id: taskId,
@@ -134,36 +138,35 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
       'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
     );
 
-    const cooldown = await prisma.integration.findUnique({
-      where: {
-        userId_name_accountId: {
-          userId: '00000000-0000-0000-0000-000000000000',
-          name: 'gpt_api_key_cooldown',
-          accountId: '',
-        },
-      },
-    });
+    const fundedUntil = await codexFundedCooldownUntil();
     assert(
-      cooldown?.rateLimitedUntil instanceof Date &&
-        cooldown.rateLimitedUntil.getTime() > Date.now(),
-      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+      fundedUntil !== null && fundedUntil.getTime() > Date.now(),
+      'failed OAuth-to-Azure fallback must back off the funded Azure Codex deployment'
+    );
+    assert(
+      (await openAiKeyCooldownUntil()) === openAiKeyBefore,
+      'failed OAuth-to-Azure fallback must not cool the shared OpenAI key (Rose chat path)'
     );
   } finally {
     await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
     await prisma.integration.deleteMany({ where: { id: integration.id } });
-    await prisma.integration.deleteMany({
-      where: {
+    await __resetCodexFundedCooldown();
+  }
+}
+
+/** The shared OpenAI-key cooldown end; Codex credential feedback must never move it. */
+async function openAiKeyCooldownUntil(): Promise<number | null> {
+  const row = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
         userId: '00000000-0000-0000-0000-000000000000',
         name: 'gpt_api_key_cooldown',
+        accountId: '',
       },
-    });
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
+    },
+    select: { rateLimitedUntil: true },
+  });
+  return row?.rateLimitedUntil?.getTime() ?? null;
 }
 
 async function testPersistOutput_rejectsInvalidCredentialFeedback() {
@@ -178,54 +181,16 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
-/**
- * Feedback cases on this backend cool the shared funded key and then delete
- * its row; the backend honors that within its 15-second recheck interval.
- */
-async function waitForFundedGptKeyRestore(): Promise<void> {
-  await retryWithBackoff(
-    () =>
-      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
-        headers: apiKeyHeaders(),
-      }),
-    {
-      maxRetries: 21,
-      fixedDelays: Array.from({ length: 20 }, () => 1500),
-      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
-      component: 'CodexSmokeFundedKey',
-    }
-  );
-}
-
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
-  await waitForFundedGptKeyRestore();
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
   let closed = false;
-  const sharedCooldown = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: '00000000-0000-0000-0000-000000000000',
-        name: 'gpt_api_key_cooldown',
-        accountId: '',
-      },
-    },
-    select: { rateLimitedUntil: true },
-  });
-  if (!cooldownIsLive(sharedCooldown)) {
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -248,13 +213,8 @@ async function testSmoke_codexCompletesE2bTask() {
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
       let createSkip = detectCodexCreditExhaustion(createBody, []);
       if (!createSkip) {
-        const cooldownRes = await request(
-          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
-          {
-            headers: apiKeyHeaders(),
-          }
-        );
-        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        // The funded Codex path is the Azure deployment; its backoff is a DB row.
+        const onCooldown = (await codexFundedCooldownUntil()) !== null;
         createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
       }
       if (createSkip) {
@@ -394,9 +354,9 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}\n`);
 
   const tests: { name: string; fn: () => Promise<void> }[] = [];
-  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
-  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
-  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  // The feedback cases back the funded Azure Codex deployment off (codex_funded_cooldown) and
+  // reset it afterwards. Without a synced Codex OAuth credential the smoke depends on that
+  // deployment, so it runs first.
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
     console.log(
       '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'

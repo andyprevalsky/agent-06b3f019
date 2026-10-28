@@ -20,6 +20,8 @@
  *   (e) GET /credential-availability?code_session_id names the session's provider
  *   (f) duplicate retries: one lease holder, one provider switch
  *   (g) no credential value in any answer, handoff or log line
+ *   Codex order (code-session-codex-azure.cases.ts): own login → shared login →
+ *       funded Azure deployment → nothing; the served path is recorded
  *
  * Hermetic: local checkpoint storage, real DB rows, fake E2B over local HOMEs,
  * no E2B or provider calls.
@@ -57,6 +59,7 @@ import {
 } from '../../providers/codeSessions/usageLimit';
 import { Sandbox } from 'e2b';
 import { registerCodeSessionRotationCases } from './code-session-rotation.cases';
+import { registerCodexAzureFallbackCases } from './code-session-codex-azure.cases';
 import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
@@ -586,6 +589,7 @@ registerCodeSessionRotationCases({
   http,
   otherLeasable,
 });
+registerCodexAzureFallbackCases({ agentId, sealEnvelope, otherLeasable });
 
 async function http(method: string, path: string, body?: unknown) {
   const response = await fetch(`${baseUrl}${path}`, {

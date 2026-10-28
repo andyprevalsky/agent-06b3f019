@@ -7,10 +7,10 @@ import {
 import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import {
-  markGptApiKeyOnCooldown,
   markGptIntegrationRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
+import { markCodexFundedCooldown } from '../../providers/codeSessions/usageLimit';
 
 import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
@@ -301,9 +301,10 @@ async function detectAndMarkCodexExhaustion(
 
   if (oauthReason !== '') await markCodexOAuthFailure(taskId, session, oauthReason, oauthRevoked);
 
+  // The funded Codex path is the Azure deployment (never GPT_API_KEY): back off what spawns read.
   if (isCodexExhaustion(fundedKeyReason)) {
-    await markGptApiKeyOnCooldown('codex_code_insufficient_quota');
-    log.warn(`Codex funded API key backed off for session ${taskId}`);
+    await markCodexFundedCooldown(parseCodexResetTime(fundedKeyReason));
+    log.warn(`Codex funded Azure deployment backed off for session ${taskId}`);
   }
 }
 

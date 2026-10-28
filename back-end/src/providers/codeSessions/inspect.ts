@@ -35,13 +35,10 @@ import {
   type ClaudeCodeCredentialResult,
 } from '../claudeCredentials';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import {
   CodeAgentCredentialError,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../claudeCodeSandboxAuth';
@@ -50,7 +47,7 @@ import { applyCheckpoint } from './checkpoint';
 import { githubAuthRemoteUrl, loadNewestVerifiedCheckpoint, primaryRepoFacts } from './lifecycle';
 import { type CodeSessionFs, e2bSandboxFs } from './sandboxFs';
 import { CODE_SESSION_STATES, findOwnedCodeSession } from './store';
-import { codeCredentialAvailability, parseResetsAt } from './usageLimit';
+import { codeCredentialAvailability, parseResetsAt, resolveCodexSpawnAuth } from './usageLimit';
 import {
   claudeHomeConfig,
   envFileContent,
@@ -173,8 +170,7 @@ interface ProviderAuth {
 /** Same credential order as a code-agent spawn (user → pool → funded key), no Fast Mode. */
 async function providerAuth(provider: InspectProvider, userId: string): Promise<ProviderAuth> {
   if (provider === 'codex') {
-    const meta = await fetchGptCodeCredentialsWithMeta(userId);
-    return { envs: resolveCodexCodeAuthEnvs(meta, resolveCodexAzureFunding()), claude: null };
+    return { envs: (await resolveCodexSpawnAuth(userId)).envs, claude: null };
   }
   const meta = await fetchClaudeCodeCredentialsWithMeta(userId);
   const shared = process.env.ANTHROPIC_API_KEY;
