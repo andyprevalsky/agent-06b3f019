@@ -55,7 +55,9 @@ vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () =
 }));
 
 vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', () => ({
-  default: () => <div data-testid="browser-cursor-overlay" />,
+  default: ({ visible = true }: { visible?: boolean }) => (
+    <div data-testid="browser-cursor-overlay" data-visible={String(visible)} />
+  ),
 }));
 
 vi.mock('@/components/ThinkingAnimation', () => ({
@@ -1721,7 +1723,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.queryByRole('button', { name: 'Take control' })).toBeNull();
     expect(screen.queryByTestId('thinking-animation')).toBeNull();
     expect(screen.queryByTestId('browser-border-glow')).toBeNull();
-    expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
+    expect(screen.getByTestId('browser-cursor-overlay')).toHaveAttribute('data-visible', 'false');
     expect(resizedViewports).toEqual([]);
     const livePane = document.querySelector('[data-testid="live-view-pane"]');
     expect(livePane).toHaveClass('overflow-hidden');

@@ -57,6 +57,8 @@
  *   provider session is released). Auth handoff shows the interactive bound
  *   URL once a binding is known; user control shows the interactive bound URL.
  *   live=false (closed / provider ended) -> LiveViewLoading instead of iframe;
+ *   owning agent terminal (COMPLETED/FAILED/...) -> [ENDED] "Browser session
+ *   ended", never "Connecting…", even if the task never recorded its end;
  *   each new URL shows LiveViewLoading until its iframe loads.
  *
  * TAKE CONTROL (same live session, no reinjection):
@@ -92,6 +94,7 @@ import {
 } from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
 import type { BrowserStatusBarProps, PendingAuthAssistance } from './browser-status-bar/types';
+import { isFinishedAgentStatus } from './browser-status-bar/liveViewDisplay';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -123,7 +126,7 @@ function controlActionFor(
 function useDrawerTabRegistration(
   agentId: string | null,
   taskId: string,
-  live: boolean,
+  { browserLive: live, browserEnded: ended }: { browserLive: boolean; browserEnded: boolean },
   messages: Message[],
   { browserSessionMetadata }: ReturnType<typeof useBrowserStatusBarState>,
 ) {
@@ -143,7 +146,8 @@ function useDrawerTabRegistration(
       agentId,
       taskId,
       taskLabel,
-      live,
+      live: live && !ended,
+      ended,
       pageUrl,
       actualModel,
       rosePool,
@@ -153,6 +157,7 @@ function useDrawerTabRegistration(
     agentId,
     taskLabel,
     live,
+    ended,
     missing,
     pageUrl,
     actualModel,
@@ -213,6 +218,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const sharedViewProps = {
     browserUrl: ui.browserUrl,
     browserLive: ui.isLive,
+    browserEnded: isFinishedAgentStatus(agent?.status),
     outputSchema: vm.outputSchema,
     browserSessionMetadata: vm.browserSessionMetadata,
   };
@@ -226,7 +232,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
     isDisconnected,
   });
-  const drawer = useDrawerTabRegistration(agentId, taskId, ui.isLive, messages, vm);
+  const drawer = useDrawerTabRegistration(agentId, taskId, sharedViewProps, messages, vm);
 
   const drawerPane =
     ui.isInDrawer && drawer.slot !== null

@@ -30,6 +30,7 @@ import {
 import { prisma } from '../../providers/database';
 import { findProductRootTasksBetween } from '../../domains/admin-health/repoProductUsage';
 import { testProductCompletionCohort } from './admin-health-product-usage.cases';
+import { testProductGmvCohort } from './admin-health-product-gmv.cases';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
@@ -583,8 +584,12 @@ async function main() {
   ];
   const remainingTests = [
     {
-      name: 'completion rate counts only real customer product usage',
-      fn: testProductCompletionCohort,
+      // Sequential: both fixtures own the one unique core-team (Aman) phone row.
+      name: 'completion rate + GMV count only real product usage and purchases',
+      fn: async () => {
+        await testProductCompletionCohort();
+        await testProductGmvCohort();
+      },
     },
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },

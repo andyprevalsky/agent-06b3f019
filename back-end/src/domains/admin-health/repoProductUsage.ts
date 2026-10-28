@@ -19,6 +19,16 @@ export type ProductRootTaskRecord = Pick<
 
 const CORE_TEAM_PHONE_DIGITS = [...ADMIN_HEALTH_ADDITIONAL_PHONES].map((phone) => phone.slice(-10));
 
+/** Andy, Tamara or Aman: an admin user id, or a real (non-fixture) person on a core phone. */
+export function coreTeamSql(userIdSql: Prisma.Sql, personAlias: string): Prisma.Sql {
+  const phoneDigits = Prisma.raw(
+    `RIGHT(regexp_replace(COALESCE("${personAlias}".phone, ''), '[^0-9]', '', 'g'), 10)`
+  );
+  return Prisma.sql`(${userIdSql} IN (${Prisma.join([...ADMIN_USER_IDS])})
+    OR (${phoneDigits} IN (${Prisma.join(CORE_TEAM_PHONE_DIGITS)})
+        AND ${realWaitlistPersonSql(personAlias)}))`;
+}
+
 /**
  * Live roots + latest archived roots -> real agent runs -> completion rate.
  * Runs use the shared real-agent-run shape (providers/realAgentRuns, also used
@@ -63,10 +73,7 @@ export async function findProductRootTasksBetween(
         AND history."worldModelMode" = 'real'
     ), owners AS (
       SELECT roots.*,
-             (roots."userId" IN (${Prisma.join([...ADMIN_USER_IDS])})
-               OR (RIGHT(regexp_replace(COALESCE(person.phone, ''), '[^0-9]', '', 'g'), 10)
-                     IN (${Prisma.join(CORE_TEAM_PHONE_DIGITS)})
-                   AND ${realWaitlistPersonSql('person')})) AS "coreTeam",
+             ${coreTeamSql(Prisma.sql`roots."userId"`, 'person')} AS "coreTeam",
              ${realWaitlistPersonSql('person')} AS "realPerson"
       FROM roots
       INNER JOIN "User" person ON person."userId" = roots."userId"

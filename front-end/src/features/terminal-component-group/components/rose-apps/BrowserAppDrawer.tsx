@@ -1,10 +1,14 @@
 /**
- * STATE MACHINE: Root | browser task (agentId, taskId) selected -> one portaled pane.
+ * STATE MACHINE: Root | NO_SESSION | browser task (agentId, taskId) selected -> one pane.
  * Browser events -> task registry -> task tab + subtitle -> selected task's URL/trajectory.
  * Closing a task selects a surviving sibling; Root stays independently selectable.
+ * NO_SESSION: an agent is selected, it has no browser task and Root was not clicked
+ *   -> "No browser session" (no chrome, no live view, no Root browser fallback).
+ * Root never opens a cloud browser by itself; only "Open browser" does.
+ * ENDED tab (owning agent finished): address bar "Session ended", never "Connecting…".
  */
-import { useEffect, useRef, useMemo } from 'react';
-import { ArrowLeft, ArrowRight, RotateCw, Bot, type LucideIcon } from 'lucide-react';
+import { useMemo } from 'react';
+import { ArrowLeft, ArrowRight, RotateCw, Bot, Globe, type LucideIcon } from 'lucide-react';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { cn } from '@/lib/utils';
 import type { Agent } from '../../hooks';
@@ -116,7 +120,15 @@ function NavButton({
   );
 }
 
-function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
+function AddressBar({
+  url,
+  isRoot,
+  ended,
+}: {
+  url: string | null;
+  isRoot: boolean;
+  ended: boolean;
+}) {
   const parts = url === null ? null : addressParts(url);
   return (
     <div
@@ -131,9 +143,26 @@ function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
         </>
       ) : isRoot ? (
         <span>Your browser</span>
+      ) : ended ? (
+        <span>Session ended</span>
       ) : (
         <span>Connecting…</span>
       )}
+    </div>
+  );
+}
+
+function NoBrowserSession() {
+  return (
+    <div
+      data-testid="browser-no-session"
+      className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center"
+    >
+      <Globe className={`h-8 w-8 ${MUTED}`} strokeWidth={1.5} />
+      <div className="text-sm font-semibold">No browser session</div>
+      <p className={`max-w-xs text-xs ${MUTED}`}>
+        This agent hasn’t opened a browser. Its browser shows here when it does.
+      </p>
     </div>
   );
 }
@@ -177,21 +206,13 @@ function BrowserTabs({ apps, isRoot }: { apps: RoseAppsValue; isRoot: boolean })
 
 /**
  * Mounted only while the drawer is open on Root: closing it drops the live view.
- * With an agent selected, a closed Root opens once at that tree's default_url;
- * with none (or no default_url yet) it stays on the quiet "Open browser".
+ * A closed Root stays on the quiet "Open browser"; it never opens a cloud browser
+ * by itself. "Open browser" starts at the selected tree's default_url when known.
  */
 function RootTab({ reloadKey, agentId }: { reloadKey: number; agentId: string | null }) {
   const state = useRootBrowserState(true, agentId);
   const actions = useRootBrowserActions();
   const defaultUrl = agentId === null ? null : (state.data?.default_url ?? null);
-  const startedRef = useRef(false);
-  const { mutate: openRoot } = actions.open;
-  const rootClosed = state.data !== undefined && state.data.root === null;
-  useEffect(() => {
-    if (startedRef.current || !rootClosed || defaultUrl === null) return;
-    startedRef.current = true;
-    openRoot(defaultUrl);
-  }, [rootClosed, defaultUrl, openRoot]);
   let error: string | null = null;
   // The user's latest action speaks first: a failed open outranks the read.
   if (actions.open.isError) error = 'Couldn’t open your browser. Try again.';
@@ -234,7 +255,11 @@ function BrowserChrome({
           onClick={canReload ? apps.reloadBrowser : undefined}
         />
       </span>
-      <AddressBar url={activeTab?.pageUrl ?? null} isRoot={isRoot} />
+      <AddressBar
+        url={activeTab?.pageUrl ?? null}
+        isRoot={isRoot}
+        ended={activeTab?.ended === true}
+      />
     </div>
   );
 }
@@ -249,7 +274,9 @@ export function BrowserAppDrawer() {
   const activeTab =
     apps.tabs.find((t) => t.agentId === activeAgentId && t.taskId === apps.browserTabTaskId) ??
     null;
-  const isRoot = activeAgentId === null;
+  const noSession =
+    activeAgentId === null && apps.selectedAgentId !== null && !apps.browserRootChosen;
+  const isRoot = activeAgentId === null && !noSession;
   const waitingForPane =
     activeAgentId !== null &&
     apps.selectedAgentId !== null &&
@@ -290,8 +317,9 @@ export function BrowserAppDrawer() {
         active && <LocalPreviewPane key={apps.selectedAgentId} agentId={apps.selectedAgentId} />
       ) : (
         <>
-          <BrowserChrome apps={apps} activeTab={activeTab} isRoot={isRoot} />
+          {!noSession && <BrowserChrome apps={apps} activeTab={activeTab} isRoot={isRoot} />}
           <div className="flex min-h-0 flex-1 flex-col">
+            {noSession && <NoBrowserSession />}
             {isRoot && active && (
               <RootTab reloadKey={apps.browserReloadKey} agentId={apps.selectedAgentId} />
             )}
@@ -303,7 +331,7 @@ export function BrowserAppDrawer() {
             <div
               ref={apps.setSlot}
               data-testid="browser-drawer-slot"
-              className={cn('min-h-0 flex-1 flex-col', isRoot ? 'hidden' : 'flex')}
+              className={cn('min-h-0 flex-1 flex-col', activeAgentId === null ? 'hidden' : 'flex')}
             />
           </div>
         </>

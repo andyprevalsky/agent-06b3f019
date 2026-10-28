@@ -11,12 +11,17 @@
  *
  * ACTIONS:
  *   [IDLE] --(copy click)--> copyToClipboard(lastAssistantText) --> toast "Copied"
- *   [IDLE] --(start agent)--> startAgent(selectedAgentId)
- *                              |-- resolve --> toast "Agent mode started"
- *                              `-- reject  --> toast destructive
+ *   [IDLE] --(start agent)--> [STARTING] startAgent(selectedAgentId)
+ *            disabled "Starting agent…" at once; repeat clicks ignored (one POST)
+ *   [STARTING] --resolve--> toast "Agent mode started"; stays [STARTING] until
+ *                           chat mode ends and unmounts this: AGENT_MODE_STARTED,
+ *                           or the detail snapshot read right after the POST
+ *                           (a lost realtime frame cannot strand the button)
+ *   [STARTING] --reject--> [IDLE] + toast destructive
  */
+import { useRef, useState } from 'react';
 import { Copy } from 'lucide-react';
-import { startAgent, useToast, type Message } from '../hooks';
+import { fetchAgentDetail, startAgent, useAgentContext, useToast, type Message } from '../hooks';
 import { copyToClipboard } from '@/lib/clipboard';
 
 interface ChatModeActionsProps {
@@ -35,6 +40,10 @@ function findCopyableText(messages: Message[]): string | undefined {
 
 export function ChatModeActions({ filteredMessages, selectedAgentId }: ChatModeActionsProps) {
   const { toast } = useToast();
+  const { applyAgentDetail } = useAgentContext();
+  // Starting a workflow takes a Temporal round trip; acknowledge the click now.
+  const [isStarting, setIsStarting] = useState(false);
+  const startingRef = useRef(false);
 
   const handleCopy = () => {
     const text = findCopyableText(filteredMessages);
@@ -47,10 +56,20 @@ export function ChatModeActions({ filteredMessages, selectedAgentId }: ChatModeA
   };
 
   const handleStartAgent = () => {
-    if (!selectedAgentId) return;
-    startAgent(selectedAgentId)
-      .then(() => toast({ title: 'Agent mode started' }))
+    if (!selectedAgentId || startingRef.current) return;
+    startingRef.current = true;
+    setIsStarting(true);
+    const agentId = selectedAgentId;
+    startAgent(agentId)
+      .then(() => {
+        toast({ title: 'Agent mode started' });
+        fetchAgentDetail(agentId)
+          .then((detail) => applyAgentDetail(agentId, detail))
+          .catch((error: unknown) => console.error('Failed to refresh started agent:', error));
+      })
       .catch((error: unknown) => {
+        startingRef.current = false;
+        setIsStarting(false);
         toast({
           title: 'Failed to start agent',
           description: error instanceof Error ? error.message : 'Unknown error',
@@ -72,7 +91,9 @@ export function ChatModeActions({ filteredMessages, selectedAgentId }: ChatModeA
         <div className="w-px h-4 bg-border" />
         <button
           onClick={handleStartAgent}
-          className="flex items-center gap-2 px-2 py-1 hover:bg-muted/50 rounded transition-colors text-sm"
+          disabled={isStarting}
+          aria-busy={isStarting}
+          className="flex items-center gap-2 px-2 py-1 hover:bg-muted/50 rounded transition-colors text-sm disabled:opacity-60 disabled:hover:bg-transparent"
         >
           <svg
             className="w-4 h-4"
@@ -87,7 +108,7 @@ export function ChatModeActions({ filteredMessages, selectedAgentId }: ChatModeA
             <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
             <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
           </svg>
-          Start agent
+          {isStarting ? 'Starting agent…' : 'Start agent'}
         </button>
       </div>
     </div>
