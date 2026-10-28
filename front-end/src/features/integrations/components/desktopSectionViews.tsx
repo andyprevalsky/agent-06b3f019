@@ -48,6 +48,7 @@ import {
   DropdownIconPreset,
 } from './DropdownIconFrame';
 import { FileSystemIcon } from './FileSystemSection';
+import { PebbleIndexIcon } from './PebbleIndexSection';
 import {
   GmailIcon,
   IMessageIcon,
@@ -68,6 +69,7 @@ export interface DesktopIntegrationsProps {
   isGptCodeAvailable: boolean;
   isFileSystemAvailable: boolean;
   isFullySignedIn: boolean;
+  onPebbleIndexConnect: () => void;
   data: ReturnType<typeof useIntegrationData>;
   browser: ReturnType<typeof useBrowserSync>;
   passwords: ReturnType<typeof usePasswordSync>;
@@ -352,7 +354,20 @@ function fileSystemRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-/** Sections in the stock order; Compute and Banks need a fully signed-in account. */
+function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
+  return {
+    key: 'pebble-index',
+    name: 'Pebble Index 01',
+    icon: tile(DropdownIconPreset.pebbleIndex, <PebbleIndexIcon />),
+    accounts: [],
+    // The ring posts to Rose's webhook, so Connect opens the guided setup (no sync state).
+    availability: 'ready',
+    onConnect: p.onPebbleIndexConnect,
+  };
+}
+
+/** Sections in the stock order; Compute and Banks need a fully signed-in account.
+ * Pebble Index 01 (Wearables) is always last. */
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
@@ -377,5 +392,6 @@ export function desktopSectionViews(
   }
   sections.push({ title: 'Socials', rows: socialRows(p, removal) });
   sections.push({ title: 'File System', rows: [fileSystemRow(p)] });
+  sections.push({ title: 'Wearables', rows: [pebbleIndexRow(p)] });
   return sections;
 }

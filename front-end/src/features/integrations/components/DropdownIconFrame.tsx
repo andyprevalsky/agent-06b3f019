@@ -66,6 +66,7 @@ export const DropdownIconPreset = {
   agentPay: { iconScale: 82, iconFit: 'contain' },
   plaid: { iconScale: 64, iconFit: 'contain' },
   fileSystem: { iconScale: 62, iconFit: 'contain' },
+  pebbleIndex: { iconScale: 108, iconFit: 'cover' },
 } as const;
 
 export function BrowserDropdownIconPreset(

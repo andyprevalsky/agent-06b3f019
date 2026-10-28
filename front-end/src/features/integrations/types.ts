@@ -198,3 +198,10 @@ export interface PlaidLinkTokenResponse {
   expiration: string;
   request_id: string;
 }
+
+/** What the Index app's webhook screen needs, from POST /api/index01/credentials. */
+export interface Index01Credentials {
+  webhook_url: string;
+  header_name: string;
+  header_value: string;
+}

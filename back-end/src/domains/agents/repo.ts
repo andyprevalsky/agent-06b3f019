@@ -372,9 +372,3 @@ export async function currentAgentWorkflowGeneration(agentId: string): Promise<s
   });
   return agent?.temporalWorkflowId ?? null;
 }
-
-/** Owner of a Rose API key (Index 01 MCP auth), or null for an unknown key. */
-export async function findRoseApiKeyOwner(apiKey: string): Promise<string | null> {
-  const key = await prisma.roseApiKey.findUnique({ where: { apiKey }, select: { userId: true } });
-  return key?.userId ?? null;
-}

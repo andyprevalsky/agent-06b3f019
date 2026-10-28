@@ -3,6 +3,9 @@
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
+ * Pebble Index 01 is the last card; its plus opens the guided setup modal
+ * (state owned by Integrations).
+ *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
@@ -24,6 +27,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
+import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -34,6 +38,7 @@ interface IntegrationSectionsProps {
   isGptCodeAvailable: boolean;
   isFileSystemAvailable: boolean;
   isFullySignedIn: boolean;
+  onPebbleIndexConnect: () => void;
   accordion: ReturnType<typeof useAccordion>;
   data: ReturnType<typeof useIntegrationData>;
   browser: ReturnType<typeof useBrowserSync>;
@@ -137,6 +142,7 @@ export default function IntegrationSections({
   isGptCodeAvailable,
   isFileSystemAvailable,
   isFullySignedIn,
+  onPebbleIndexConnect,
   accordion,
   data,
   browser,
@@ -208,6 +214,8 @@ export default function IntegrationSections({
       />
 
       <FileSystemSection isAvailable={isFileSystemAvailable} />
+
+      <PebbleIndexSection onConnect={onPebbleIndexConnect} />
     </>
   );
 }
