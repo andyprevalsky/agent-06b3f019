@@ -21,7 +21,7 @@ ROOT = (
 
 
 def run_campaign(
-    tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=(), holdout_jobs=(), extra_env=None
+    tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=(), holdout_jobs=(), extra_env=None, tasks=None
 ):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -54,6 +54,7 @@ def run_campaign(
         "#!/usr/bin/env bash\nset -eu\n"
         "trap 'event teardown' EXIT\n"
         "trap 'event signalled; exit 143' TERM\n"
+        "event started\n"
         "index=${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}\nindex=$((10#$index))\n"
         "if [ $((index % 2)) -eq 0 ]; then\n"
         ' if [ "$FIXTURE_STRICT" = 0 ] && [ "$index" = 2 ]; then\n'
@@ -106,9 +107,9 @@ def run_campaign(
         str(runs),
         "--concurrency",
         str(concurrency),
-        "--task",
-        "unchanged-task",
     ]
+    for task in (tasks if tasks is not None else ("unchanged-task",)):
+        command.extend(("--task", task))
     if strict:
         command.append("--forward-arg=--strict-barrier")
         # Strict cohorts run the parent N2 preflight with cleanup tickets bound to committed source.
@@ -303,6 +304,59 @@ def test_campaign_start_barrier_bounds_and_releases_each_complete_cohort(tmp_pat
         ready = [event["at"] for event in events if event["job"] in ids and event["event"] == "ready"]
         executed = [event["at"] for event in events if event["job"] in ids and event["event"] == "execute"]
         assert min(executed) > max(ready)
+
+
+def test_campaign_start_barrier_twenty_original_polar_jobs_use_tilion_cap_in_two_strict_cohorts(tmp_path):
+    """Offline scheduling qualification only; mock workers earn no benchmark credit."""
+    from collections import Counter
+
+    tasks = [f"polar-bu-{index:03d}" for index in range(51, 61)]
+    env = dict(os.environ, CLOUDBENCH_BROWSER_PROVIDER="tilion")
+    env.pop("CLOUDBENCH_PROVIDER_LIMITS_FILE", None)
+    cap = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/cloudbench-provider-capacity.py"),
+         "cap", "--browser-provider", "tilion"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert cap.stdout.strip() == "16", cap.stdout + cap.stderr
+    result, summary, events = run_campaign(
+        tmp_path, tasks=tasks, runs=2, concurrency=int(cap.stdout.strip()),
+        extra_env={"CLOUDBENCH_BROWSER_PROVIDER": "tilion",
+                   "CLOUDBENCH_PROVIDER_LIMITS_FILE": str(ROOT / "scripts/cloudbench-provider-limits.json")},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    jobs = summary["jobs"]
+    expected = [(f"r{run:03d}-j{(run - 1) * 10 + offset:04d}", task, run)
+                for run in (1, 2) for offset, task in enumerate(tasks, 1)]
+    assert [(job["job_id"], job["task"], job["run"]) for job in jobs] == expected
+    assert Counter(job["task"] for job in jobs) == Counter({task: 2 for task in tasks})
+    assert summary["peak_concurrency"] == 16
+    assert all(job["status"] == "passed" and job["finished_at"] for job in jobs)
+    cohorts = summary["startup_cohorts"]
+    assert [cohort["expected_count"] for cohort in cohorts] == [16, 4]
+    assert [cohort["released_count"] for cohort in cohorts] == [16, 4]
+    assert [cohort["failed_count"] for cohort in cohorts] == [0, 0]
+    for kind in ("started", "ready", "execute", "teardown"):
+        assert Counter(event["job"] for event in events if event["event"] == kind) == Counter(
+            job["job_id"] for job in jobs
+        ), kind
+    first, second = {job[0] for job in expected[:16]}, {job[0] for job in expected[16:]}
+    for ids in (first, second):
+        ready = [event["at"] for event in events if event["job"] in ids and event["event"] == "ready"]
+        execute = [event["at"] for event in events if event["job"] in ids and event["event"] == "execute"]
+        assert max(ready) < min(execute), "strict cohort executed before every member was ready"
+    assert max(event["at"] for event in events if event["job"] in first and event["event"] == "teardown") < min(
+        event["at"] for event in events if event["job"] in second and event["event"] == "started"
+    ), "later cohort started before all earlier owned workers tore down"
+    active = peak = 0
+    for event in sorted(events, key=lambda event: event["at"]):
+        if event["event"] == "started":
+            active += 1
+            peak = max(peak, active)
+        elif event["event"] == "teardown":
+            active -= 1
+            assert active >= 0
+    assert active == 0 and peak <= 16
 
 
 def test_campaign_start_barrier_failed_infra_canary_runs_once_per_cohort_and_next_cohort_can_retry(tmp_path):
