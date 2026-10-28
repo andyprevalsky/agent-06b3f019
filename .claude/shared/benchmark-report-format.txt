@@ -241,16 +241,17 @@ line/title; the last ten rows and T- clocks are unchanged.
 ### All /descend scorecards: full-suite outcomes and measured telemetry
 
 For every descent, render one segmented donut (cake) for the entire persisted
-selected task order, using the most recent X scored runs per task. X is the
-acceptance goal's run count, not the current slice size. Green means all X
-historical scored results passed; red means a genuine scored FAIL is present;
-amber means a partial set or unknown evidence; gray requires an explicit
-UNTESTED row with zero known scored runs. Missing rows are unknown, never unrun.
-Label the view as historical outcomes and separately report final-source-qualified
-acceptance from the ledger. Historical green does not grant final-source credit.
+selected task order, using X individual run slots per task: N selected tasks
+multiply by X gives the denominator (200 × 2 = 400 slots). Green means that
+individual scored run passed; red means that individual scored run failed.
+Gray means no scored result in an explicitly unfilled slot; unscored infra or
+cancelled attempts may exist. Amber means missing, invalid or unknown receipt/history. One PASS plus one
+FAIL contributes one green and one red slot, never a single task-level color.
+Missing task rows are unknown, never assumed unrun. Label these historical
+outcomes; keep X/X task qualification and final-source acceptance separate.
 
-Use the full-suite historical rolling coverage as the only time graph: tasks
-with X/X PASS divided by all selected tasks, at original experiment finish
+Use individual PASS slots divided by N × X as the only global time graph,
+at original experiment finish
 clocks. Missing snapshots are gaps; do not substitute slice percentages or
 invent earlier history. Preserve the existing greater-than-three-iterations
 threshold and last-ten experiment rows. Remove current-slice outcome bars and
@@ -309,3 +310,7 @@ original replay custody handoff; never bless edited telemetry by recomputing
 a receipt in the renderer. Rendering checks the pinned receipt and costs
 without rereading large original run files every refresh. Captured embedded
 logs can be incomplete; timing coverage is per observed request, not all calls.
+
+For all /descend scorecards, publish the interactive HTML embedding only. Do
+not send, attach, or display raster images/screenshots. Private DOM inspection
+for counts, layout and overflow is permitted; do not emit screenshot output.

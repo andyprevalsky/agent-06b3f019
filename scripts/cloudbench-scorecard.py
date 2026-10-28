@@ -1794,7 +1794,7 @@ def render_text(card: dict) -> str:
     else:
         gp = card.get("global_progress")
         lines.append(f'GLOBAL latest {gp["k"] if gp else "X"} scored runs (historical outcomes): ' +
-                     (f'{gp["counts"]} / {gp["task_count"]} tasks; final-source-qualified {gp["final_source_qualified"]}/{gp["task_count"]}' if gp else "UNRECORDED"))
+                     (f'{gp["slot_counts"]} / {gp["slot_count"]} individual run slots; final-source-qualified {gp["final_source_qualified"]}/{gp["task_count"]}' if gp else "UNRECORDED"))
         lines.append("LLM latency " + global_mod.latency_text(card.get("observed_telemetry")))
         lines.append("GLOBAL SUCCESS RATE OVER TIME: " + (" · ".join(
             f'{r["id"]}: {r["rate"]*100:.1f}%' if r["rate"] is not None else f'{r["id"]}: gap'

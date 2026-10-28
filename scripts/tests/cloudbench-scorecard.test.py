@@ -238,10 +238,11 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(data["experiment"]["outcomes"], old["experiment"]["outcomes"])
         self.assertEqual(data["experiment"]["lifecycle"], old["experiment"]["lifecycle"])
         html = self.valid(data)
-        self.assertEqual(html.count('data-task="global-task-'), 6)
-        self.assertEqual(re.findall(r'data-status="([A-Z]+)"', html), ["PASS", "FAIL", "PARTIAL", "UNKNOWN", "UNKNOWN", "UNRUN"])
-        self.assertEqual(sorted(map(int, re.findall(r'data-selected-ordinal="(\d+)"', html))), list(range(1, 7)))
-        self.assertIn("1/6", html)
+        self.assertEqual(html.count('data-task="global-task-'), 12)
+        self.assertEqual(gp["slot_counts"], {"PASS": 5, "FAIL": 1, "UNKNOWN": 3, "UNRUN": 3})
+        self.assertIn("5/12", html)
+        self.assertEqual(re.findall(r'data-status="([A-Z]+)"', html), ["PASS"] * 5 + ["FAIL"] + ["UNKNOWN"] * 3 + ["UNRUN"] * 3)
+        self.assertEqual(sorted(map(int, re.findall(r'data-selected-ordinal="(\d+)"', html))), sorted(list(range(1, 7)) * 2))
         self.assertIn(".trend text{fill:var(--fg);font-size:15px}", html)
         self.assertNotIn('data-section="lifecycle"', html)
         self.assertNotIn('class="bar"', html)
@@ -253,6 +254,54 @@ class Scorecard(unittest.TestCase):
         generic = self.valid(render(run, self.f))
         self.assertIn('data-section="lifecycle"', generic)
         self.assertNotIn('data-section="global-progress"', generic)
+
+    def test_individual_slot_denominator_and_curve_do_not_collapse_task_pairs(self):
+        ledger, args = self.global_inputs(count=200)
+        for i, row in enumerate(ledger["rows"]):
+            if 17 <= i < 25:
+                row["last_scored"][1]["verdict"] = "FAIL"
+            elif 25 <= i < 35:
+                for receipt in row["last_scored"]: receipt["verdict"] = "FAIL"
+            elif i >= 35:
+                row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        write(args["global_acceptance"], ledger)
+        history = dict(schema="descend-global-history-v1", selected_tasks_sha256=args["selected_tasks_sha256"], task_count=200, k=2,
+                       snapshots=[dict(experiment_id="original-finish", finished_at=NOW - 1, acceptance_ledger=ledger)])
+        args["global_history"] = write(self.tmp / "slot-history.json", history)
+        data = render(self.f.fleet(), self.f, iterations=8, **args)
+        html = self.valid(data)
+        self.assertIn("42/400", html)
+        gp = data["global_progress"]
+        self.assertEqual(gp["slot_count"], 400)
+        self.assertEqual(gp["historical_pass_fraction"], 42 / 400)
+        self.assertEqual(gp["historical_task_pass_fraction"], 17 / 200)
+        self.assertEqual(gp["slot_counts"], dict(PASS=42, FAIL=28, UNKNOWN=0, UNRUN=330))
+        self.assertEqual(gp["history"][0]["rate"], 42 / 400)
+        self.assertEqual(gp["counts"]["PASS"], 17)  # separate task qualification, never cake denominator
+        html = self.valid(data)
+        self.assertIn("42/400", html)
+        self.assertIn("10.5%", html)
+        self.assertEqual(html.count('data-slot="'), 400)
+        self.assertIn("individual scored PASS", html)
+        self.assertNotIn("Tasks with all", html)
+        before = {p: Path(p).read_bytes() for p in (args["global_acceptance"], args["global_history"])}
+        # One verified pass with its expected companion receipt missing: green + amber.
+        ledger["rows"][0]["last_scored"].pop()
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][0]["status"], "PASS")
+        self.assertEqual(gp["slots"][1]["status"], "UNKNOWN")
+        # Explicitly one known scored run: green + gray, not amber task collapse.
+        ledger["rows"][0]["known_scored_count"] = 1
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][1]["status"], "UNRUN")
+        # An invalid actual receipt remains unknown even if its value is None.
+        ledger["rows"][0].update(last_scored=[None], known_scored_count=1)
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][0]["status"], "UNKNOWN")
+        self.assertEqual(Path(args["global_history"]).read_bytes(), before[args["global_history"]])
 
     def test_global_scope_hash_identity_and_generic_k_contract(self):
         ledger, args = self.global_inputs()
@@ -285,7 +334,9 @@ class Scorecard(unittest.TestCase):
             ledger, args = self.global_inputs(k=k)
             data = render(run, self.f, iterations=2, **args)
             self.assertEqual(data["global_progress"]["counts"]["PASS"], 6)
-            self.assertIn(f"{k}/{k} PASS", self.valid(data))
+            self.assertIn("individual scored PASS", self.valid(data))
+            self.assertNotIn("Tasks with all", self.valid(data))
+            self.assertEqual(data["global_progress"]["slot_count"], 6 * k)
             self.assertIn(f"GLOBAL latest {k} scored runs", CARD["render_text"](data))
 
     def test_global_history_never_bridges_missing_snapshots_or_uses_slice_rate(self):

@@ -39,12 +39,15 @@ rate over time above those rows; pass the iteration count with `--iterations N`
 so multiple CLI launches in one batch do not advance the threshold. For other
 goals, use more than three experiments. Leave unscored experiments as gaps and
 draw running ones hollow.
-For every `/descend` scorecard, show one full-selected-suite cake chart for
-historical outcomes over the latest X scored runs per task (X follows the goal):
-green for all X PASS, red for a genuine FAIL in the window, gray for explicitly
-unrun tasks, and amber for partial or unknown coverage. Keep final-source
-qualification separate. The time graph shows only the global fraction of the
-selected suite with all X PASS; missing snapshots remain gaps.
+For every `/descend` scorecard, show a full-selected-suite cake chart with
+N selected tasks × latest X individual scored-run slots (200 × 2 = 400).
+Green is one scored PASS, red one scored FAIL, gray no scored result in an
+explicitly unfilled slot (unscored attempts may exist), amber unknown evidence. Do not collapse a task's X results into one
+color. The global time graph is individual PASS / (N × X), using original
+finish clocks and leaving missing snapshots as gaps. Keep historical X/X task
+qualification and final-source qualification separate. Publish HTML embeddings
+only; never send, attach or display screenshots/images for these scorecards.
+Private DOM/count/overflow inspection is allowed without screenshot output.
 For measured `/descend` KPIs, color infra below 5% green using the original
 scheduled denominator; otherwise red. Use scored PASS + FAIL as the PASS
 denominator: above 95% green, above 80% yellow, otherwise red. Unknown or

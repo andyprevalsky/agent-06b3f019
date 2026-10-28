@@ -59,11 +59,12 @@ def project(ledger, names, now, expected_k):
         if not isinstance(row, dict) or row.get("task") not in selected_names or row["task"] in by_task:
             raise ValueError("global acceptance contains duplicate or foreign task identity")
         by_task[row["task"]] = row
-    rows = []
+    rows, slots = [], []
     physical_owners = {}
     for name in names:
         raw = by_task.get(name)
         status, reason, records = "UNKNOWN", "missing acceptance row", []
+        valid, count, complete = [], None, False
         if raw is not None:
             records = raw.get("last_scored", raw.get("last_two_known_scored") if expected_k == 2 else None)
             count = raw.get("known_scored_count")
@@ -105,14 +106,33 @@ def project(ledger, names, now, expected_k):
                 status, reason = "PASS", f"latest {expected_k} scored runs passed (historical outcomes)"
             else:
                 status, reason = "PARTIAL", f"{len(records)} scored PASS; {expected_k} required"
+        # Each retained result owns one slot. Missing expected receipts are
+        # unknown; only an explicitly complete shorter history proves empties.
+        for index in range(expected_k):
+            record = records[index] if index < len(records) else None
+            if index < len(records):
+                slot_status = record["verdict"] if valid[index] else "UNKNOWN"
+                slot_reason = "verified scored receipt" if valid[index] else "incomplete or unscored receipt"
+            elif complete and (count > 0 or raw.get("acceptance") == "UNTESTED"):
+                slot_status, slot_reason = "UNRUN", "no scored run recorded for this slot"
+            else:
+                slot_status, slot_reason = "UNKNOWN", "missing history or expected scored receipt"
+            slots.append({"task": name, "slot": index + 1, "selected_ordinal": len(rows) + 1,
+                          "status": slot_status, "reason": slot_reason,
+                          "records": [{key: record[key] for key in ("campaign_id", "job_id", "run", "verdict", "source_commit", "controller_terminal_at", "clock_scope", "evidence_sha256") if key in record}] if isinstance(record, dict) else [],
+                          "final_source_qualified": raw.get("green") if raw is not None and type(raw.get("green")) is bool else None})
         qualified = raw.get("green") if raw is not None and type(raw.get("green")) is bool else None
         if qualified and status != "PASS":
             raise ValueError("final-source qualification contradicts scored receipts")
         rows.append({"task": name, "status": status, "reason": reason, "records": [{key: record[key] for key in ("campaign_id", "job_id", "run", "verdict", "source_commit", "controller_terminal_at", "clock_scope", "evidence_sha256") if key in record} for record in records if isinstance(record, dict)],
                      "final_source_qualified": qualified, "acceptance": raw.get("acceptance") if raw else None})
     counts = {status: sum(row["status"] == status for row in rows) for status in COLORS}
-    return {"task_count": len(names), "k": expected_k, "rows": rows, "counts": counts,
-            "historical_pass_fraction": counts["PASS"] / len(names),
+    slot_counts = {status: sum(slot["status"] == status for slot in slots)
+                   for status in ("PASS", "FAIL", "UNKNOWN", "UNRUN")}
+    return {"slot_count": len(slots), "slots": slots, "slot_counts": slot_counts,
+            "slot_pass_fraction": slot_counts["PASS"] / len(slots), "task_count": len(names), "k": expected_k, "rows": rows, "counts": counts,
+            "historical_pass_fraction": slot_counts["PASS"] / len(slots),
+            "historical_task_pass_fraction": counts["PASS"] / len(names),
             "final_source_qualified": sum(row["final_source_qualified"] is True for row in rows),
             "final_source_unknown": sum(row["final_source_qualified"] is None for row in rows),
             "as_of": ledger.get("metadata_updated_at") or ledger.get("generated_at")}
@@ -150,17 +170,17 @@ def load(acceptance, selected, selected_sha256, history, now, expected_k=None):
             item = snapshot.get("acceptance_ledger")
             point = project(item, names, at, expected_k) if item is not None else None
             result["history"].append({"id": identity, "finished_at": at,
-                                      "rate": point["historical_pass_fraction"] if point else None})
+                                      "rate": point["slot_pass_fraction"] if point else None})
         result["history_sha256"] = history_sha
     return result
 
 
 def tooltip(row):
-    lines = [row["task"] + ": " + row["status"], row["reason"]]
+    lines = [row["task"] + f' · slot {row["slot"]}: ' + row["status"], row["reason"]]
     for r in row["records"]:
         if isinstance(r, dict):
             lines.append(f'{(r.get("verdict") or "UNKNOWN")} · {r.get("campaign_id", "UNRECORDED")}/{r.get("job_id", "UNRECORDED")} · src {(r.get("source_commit") or "UNRECORDED")} · {(r.get("controller_terminal_at") or "clock UNRECORDED")} · {r.get("clock_scope") or "clock scope UNRECORDED"} · evidence {r.get("evidence_sha256", "UNRECORDED")}')
-    lines.append("Final-source qualification: " + ("UNKNOWN" if row["final_source_qualified"] is None else str(row["final_source_qualified"])))
+    lines.append("Final-source qualification: " + ("UNKNOWN" if row.get("final_source_qualified") is None else str(row["final_source_qualified"])))
     return "\n".join(lines)
 
 
@@ -168,22 +188,24 @@ def render(progress):
     e = html.escape
     if progress is None:
         return '<section data-section="global-progress"><h2>Entire selected suite · scored-run coverage</h2><p class="warn">Global progress UNRECORDED · provide the selected scope and acceptance ledger.</p></section>'
-    n, counts, k = progress["task_count"], progress["counts"], progress["k"]
+    n, counts, k = progress["slot_count"], progress["slot_counts"], progress["k"]
+    tasks = progress["task_count"]
     circumference = 2 * math.pi * 94
     pieces = []
-    ordered = sorted(enumerate(progress["rows"]), key=lambda pair: list(COLORS).index(pair[1]["status"]))
+    ordered = sorted(enumerate(progress["slots"]), key=lambda pair: list(COLORS).index(pair[1]["status"]))
     for i, (ordinal, row) in enumerate(ordered):
         length = circumference / n
-        pieces.append(f'<circle data-task="{e(row["task"], quote=True)}" data-status="{row["status"]}" data-selected-ordinal="{ordinal + 1}" cx="132" cy="132" r="94" fill="none" stroke="{COLORS[row["status"]]}" stroke-width="34" stroke-dasharray="{length * .985:.5f} {circumference - length * .985:.5f}" stroke-dashoffset="{-i * length:.5f}" transform="rotate(-90 132 132)" tabindex="0"><title>{e(tooltip(row))}</title></circle>')
-    legend = "".join(f'<span style="color:{COLORS[k]}">■ {k} {counts[k]}</span>' for k in COLORS)
-    return (f'<section data-section="global-progress"><h2>Entire selected suite · last {k} scored runs</h2>'
+        pieces.append(f'<circle data-task="{e(row["task"], quote=True)}" data-status="{row["status"]}" data-selected-ordinal="{row["selected_ordinal"]}" data-slot="{row["slot"]}" cx="132" cy="132" r="94" fill="none" stroke="{COLORS[row["status"]]}" stroke-width="34" stroke-dasharray="{length * .985:.5f} {circumference - length * .985:.5f}" stroke-dashoffset="{-i * length:.5f}" transform="rotate(-90 132 132)" tabindex="0"><title>{e(tooltip(row))}</title></circle>')
+    labels = {"UNRUN": "NO SCORED RESULT"}
+    legend = "".join(f'<span style="color:{COLORS[k]}">■ {labels.get(k, k)} {counts[k]}</span>' for k in counts)
+    return (f'<section data-section="global-progress"><h2>Entire selected suite · {tasks} tasks × last {k} run slots</h2>'
             '<div class="global-cake"><svg viewBox="0 0 264 264" role="img" aria-label="Entire selected suite historical scored-run outcomes">'
             + ''.join(pieces) + f'<text x="132" y="123" text-anchor="middle" class="cake-count">{counts["PASS"]}/{n}</text>'
-            f'<text x="132" y="148" text-anchor="middle">tasks with {k}/{k} PASS</text></svg>'
-            f'<div><b>Historical task coverage {100 * counts["PASS"] / n:.1f}%</b><div class="legend">{legend}</div>'
-            f'<p>Final-source-qualified (ledger): {progress["final_source_qualified"]}/{n}'
+            f'<text x="132" y="148" text-anchor="middle">individual scored PASS</text></svg>'
+            f'<div><b>Historical PASS slots {100 * counts["PASS"] / n:.1f}%</b><div class="legend">{legend}</div>'
+            f'<p>Final-source-qualified (ledger): {progress["final_source_qualified"]}/{tasks}'
             + (f' · {progress["final_source_unknown"]} unknown' if progress["final_source_unknown"] else '')
-            + '</p><p class="note">Historical outcomes are not final-source acceptance. Gray = explicitly unrun; amber = partial or unknown. Hover or focus a segment for original run evidence.</p></div></div></section>')
+            + '</p><p class="note">Historical outcomes are not final-source acceptance. Gray = no scored result in slot (unscored attempts may exist); amber = unknown receipt. Hover or focus a segment for original run evidence.</p></div></div></section>')
 
 
 def clock_label(epoch):
@@ -198,7 +220,7 @@ def curve(progress):
     start, end = rows[0]["finished_at"], rows[-1]["finished_at"]
     x = lambda at: 40 + 620 * (at - start) / (end - start) if end > start else 350
     y = lambda rate: 125 - 100 * rate
-    parts.append('<svg viewBox="0 0 690 185" role="img" aria-label="Historical full-suite scored-run task coverage by original experiment finish; missing snapshots are gaps"><text x="0" y="29">100%</text><text x="10" y="129">0%</text>')
+    parts.append('<svg viewBox="0 0 690 185" role="img" aria-label="Historical full-suite individual scored-run coverage by original experiment finish; missing snapshots are gaps"><text x="0" y="29">100%</text><text x="10" y="129">0%</text>')
     for a, b in zip(rows, rows[1:]):
         if a["rate"] is not None and b["rate"] is not None:
             parts.append(f'<path class="path" d="M{x(a["finished_at"]):.2f} {y(a["rate"]):.2f} L{x(b["finished_at"]):.2f} {y(b["rate"]):.2f}"/>')
@@ -208,7 +230,7 @@ def curve(progress):
         else:
             parts.append(f'<circle cx="{x(row["finished_at"]):.2f}" cy="145" r="2" fill="none" stroke="var(--na)"><title>{e_text(row["id"])}: missing snapshot · {clock_label(row["finished_at"])}</title></circle>')
     parts.append(f'<text x="40" y="175">{clock_label(start)}</text><text x="660" y="175" text-anchor="end">{clock_label(end)}</text>')
-    return ''.join(parts) + f'</svg><p class="note">Tasks with latest {progress["k"]}/{progress["k"]} PASS / entire selected suite. Original experiment finish clocks; missing snapshots are not bridged. Hollow marks indicate missing snapshots.</p></section>'
+    return ''.join(parts) + f'</svg><p class="note">Individual PASS / ({progress["task_count"]} selected tasks × {progress["k"]} latest run slots). Original experiment finish clocks; missing snapshots are not bridged. Hollow marks indicate missing snapshots.</p></section>'
 
 
 def e_text(value):
