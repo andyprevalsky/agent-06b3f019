@@ -149,6 +149,15 @@ loosen criteria, remove a requirement, raise a timeout, or rename a task to
 make it pass. Record the verdict and evidence. CLAUDE.md rules 25 and 26a still
 require Andy's explicit keep for such changes at final review.
 
+AFTER EVERY ITERATION, REFLECT ON YOUR ITERATIONS/HOUR AND ENSURE THE NUMBER IS INCREASING OVER TIME.
+
+Compare the actual finish-to-finish rate and its last-five-run average speed
+change with the previous iteration. Record declines honestly, identify the
+critical-path cause, and implement and measure a concrete speedup for the next
+iteration; if no grounded speedup is available, record the evidence and next
+experiment. Improve the workflow, preserving original clocks, all selected
+tasks, acceptance criteria, provider caps and required verification.
+
 At `ITERATION_RETRO` after every run, read `scripts/descend_step_log.py report`
 and the iteration clocks. Name the critical-path slowest step and apply one
 concrete speedup for the next iteration (or record why none exists). Show it in
@@ -1129,6 +1138,11 @@ cannot exercise from branch source follows `/deploy` and its normal guards;
 all other fixes remain on the descent branch for FINAL_CHANGE_REVIEW.
 
 ## Response contract
+
+AFTER EVERY ITERATION, REFLECT ON YOUR ITERATIONS/HOUR AND ENSURE THE NUMBER IS INCREASING OVER TIME.
+
+Include that reflection and the measured improvement or corrective action in
+the scorecard ISSUES / NEXT ACTION; a declining rate must remain visible.
 
 Read `.claude/shared/benchmark-report-format.txt`, or retrieve it with
 `scripts/run-bench report-format`. It is the sole scorecard contract; render
