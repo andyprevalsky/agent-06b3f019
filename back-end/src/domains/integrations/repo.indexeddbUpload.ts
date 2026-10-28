@@ -29,6 +29,20 @@ function mapPostgresJsonClientFault(err: unknown): never {
   throw err;
 }
 
+/**
+ * Postgres text/jsonb cannot hold U+0000: a JSON `\u0000` escape fails the
+ * jsonb cast with 22P05 and a raw NUL fails the text bind with 22021, which
+ * 500ed every batch holding one (prod 2026-10-15..10-28). Drop NUL like the
+ * cookie/localStorage uploads already do, without parsing the document (the
+ * OOM guard above). Only an escape preceded by an even run of backslashes is
+ * a real NUL; `\\u0000` is a literal backslash followed by text and stays.
+ * The client-computed `hashes` are untouched, so skip-unchanged stays stable.
+ */
+export function stripNulFromJsonText(jsonText: string): string {
+  if (!jsonText.includes('\\u0000') && !jsonText.includes('\u0000')) return jsonText;
+  return jsonText.replaceAll('\u0000', '').replace(/(?<!\\)((?:\\\\)*)\\u0000/g, '$1');
+}
+
 interface IndexedDBUploadMeta {
   batch_index: number | null;
   total_batches: number | null;
@@ -143,7 +157,7 @@ export async function ingestIndexedDBUploadJsonDocument(
 ): Promise<{ batchIndex: number; totalBatches: number; originCount: number }> {
   return runTransactionWithRetry(
     async (tx) => {
-      await bindUploadDocument(tx, jsonString);
+      await bindUploadDocument(tx, stripNulFromJsonText(jsonString));
       const meta = await readUploadMeta(tx);
       const originCount = await upsertOrigins(tx, userId);
 
