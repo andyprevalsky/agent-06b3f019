@@ -24827,7 +24827,7 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
 
 @_in_browser_activity_context
 async def test_auth_handoff_consumes_otp_received_during_decision(
-    case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None
+    case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None, expected_speed=None
 ):
     """An inbox result received during a model call precedes handoff commit."""
     from contextlib import ExitStack
@@ -25049,6 +25049,10 @@ async def test_auth_handoff_consumes_otp_received_during_decision(
     model_contexts = []
 
     async def model_step(**kwargs):
+        if expected_speed is not None:
+            from providers.rose.speed import current_agent_speed
+
+            assert current_agent_speed() == expected_speed, "browser decision lost its stored agent speed"
         model_contexts.append(copy.deepcopy(kwargs))
         action = (
             "read_browser_state"
@@ -35896,6 +35900,13 @@ async def run_all_tests():
     await r.record_async(
         "browser_diagnostics_console_network_bundle",
         test_browser_diagnostics_capture_console_and_redacted_network_metadata,
+    )
+
+    from otp_retry_behavior import assert_browser_activity_inherits_stored_speed
+
+    await r.record_async(
+        "browser_activity_inherits_stored_speed",
+        lambda: assert_browser_activity_inherits_stored_speed(test_auth_handoff_consumes_otp_received_during_decision),
     )
 
     from cleanup_sealed_behavior import (

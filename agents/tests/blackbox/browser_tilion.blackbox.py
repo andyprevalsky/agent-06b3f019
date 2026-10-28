@@ -103,6 +103,68 @@ class FakeTilionGateway:
             await self._server.wait_closed()
 
 
+async def _chromium_endpoint(client, port: int) -> str:
+    """Use the existing polling budget, waiting for usable CDP discovery."""
+    last_observation = "no response"
+    for _ in range(100):
+        try:
+            version = await client.get(f"http://127.0.0.1:{port}/json/version")
+            version.raise_for_status()
+            payload = version.json()
+            endpoint = payload.get("webSocketDebuggerUrl") if isinstance(payload, dict) else None
+            if isinstance(endpoint, str) and endpoint.startswith(("ws://", "wss://")):
+                return endpoint
+            last_observation = f"incomplete discovery: {str(payload)[:300]}"
+        except (httpx.HTTPError, ValueError) as error:
+            last_observation = f"{type(error).__name__}: {error}"
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"/json/version on 127.0.0.1:{port} not ready: {last_observation}")
+
+
+async def test_chromium_readiness_requires_debugger_url():
+    """HTTP/JSON readiness alone must not hand an unready browser to the mux."""
+    ready = "ws://127.0.0.1:12345/devtools/browser/ready"
+    request = httpx.Request("GET", "http://127.0.0.1:12345/json/version")
+    responses = [
+        httpx.ConnectError("not listening", request=request),
+        httpx.Response(503, json={}, request=request),
+        httpx.Response(200, json={}, request=request),
+        httpx.Response(200, json={"webSocketDebuggerUrl": ""}, request=request),
+        httpx.Response(200, json={"webSocketDebuggerUrl": ready}, request=request),
+    ]
+    class Client:
+        async def get(self, url):
+            assert url == str(request.url)
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+    async def no_sleep(delay):
+        assert delay == 0.1
+    with patch("asyncio.sleep", no_sleep):
+        assert await _chromium_endpoint(Client(), 12345) == ready
+    assert not responses, "readiness must wait through every incomplete response"
+
+
+async def test_chromium_readiness_preserves_budget_and_reports_last_failure():
+    calls = 0
+    class Client:
+        async def get(self, url):
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("fixture connection refused")
+    async def no_sleep(delay):
+        assert delay == 0.1
+    with patch("asyncio.sleep", no_sleep):
+        try:
+            await _chromium_endpoint(Client(), 12345)
+        except AssertionError as error:
+            assert "ConnectError: fixture connection refused" in str(error), str(error)
+        else:
+            raise AssertionError("unready discovery must fail closed")
+    assert calls == 100, "retain the original readiness attempt budget"
+
+
 @contextlib.asynccontextmanager
 async def _chromium(full: bool = False):
     """Local Chromium with a CDP endpoint.
@@ -136,16 +198,9 @@ async def _chromium(full: bool = False):
         else:
             browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
         try:
-            payload: Dict[str, Any] = {}
             async with httpx.AsyncClient(trust_env=False) as client:
-                for _ in range(100):
-                    with contextlib.suppress(httpx.HTTPError):
-                        version = await client.get(f"http://127.0.0.1:{port}/json/version")
-                        payload = version.json()
-                        break
-                    await asyncio.sleep(0.1)
-            assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
-            yield playwright, browser, payload["webSocketDebuggerUrl"]
+                endpoint = await _chromium_endpoint(client, port)
+            yield playwright, browser, endpoint
         finally:
             if browser is not None:
                 await browser.close()
@@ -3282,6 +3337,8 @@ async def test_click_coordinates_follow_an_element_the_page_re_rendered():
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("chromium_readiness_requires_debugger_url", test_chromium_readiness_requires_debugger_url),
+        ("chromium_readiness_preserves_budget", test_chromium_readiness_preserves_budget_and_reports_last_failure),
         ("fake_gateway_rejects_second_direct_client", test_fake_gateway_rejects_second_direct_client),
         ("tilion_worker_attach_uses_one_upstream_socket", test_tilion_worker_attach_uses_one_upstream_socket),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
