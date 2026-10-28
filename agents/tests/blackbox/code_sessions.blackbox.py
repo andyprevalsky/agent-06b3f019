@@ -92,7 +92,16 @@ if resume is None and os.environ.get("STUB_MODE") == "billing":
         {"type": "text", "text": "Credit balance is too low"}]}})
     while True:
         time.sleep(0.1)
-if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit", "billing"):
+if resume is None and os.environ.get("STUB_MODE") == "login_unusable":
+    # The Codex ws-server's structured unusable-login error (app-server.test.mjs
+    # asserts this exact shape), carried through this stub as a CLI line.
+    notes.write_text("uncommitted work\n")
+    emit({"type": "codex_fixture", "event": {"type": "error", "provider": "codex",
+          "message": "Your access token could not be refreshed: refresh_token_invalidated",
+          "usage_limit": None, "login_unusable": {"reason": "oauth_refresh_invalid"}}})
+    while True:
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit", "billing", "login_unusable"):
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
@@ -216,6 +225,7 @@ class _Backend:
         self.verified_events: list[list[dict]] = []
         self.fail_first_persist = fail_first_persist
         self._persists = 0
+        self.credential_feedback: list = []
         # Keepalive number after which the backend reports a question the code
         # agent asked its (blocked) spawning agent.
         self.question_after = question_after
@@ -305,6 +315,7 @@ class _Backend:
 
     async def persist_output(self, *args, **kwargs):
         self._persists += 1
+        self.credential_feedback.append(kwargs.get("credential_feedback"))
         if self.fail_first_persist and self._persists == 1:
             raise RuntimeError("transcript store unavailable")
 
@@ -1570,6 +1581,168 @@ def test_usage_limit_clause_names_a_funded_key_on_the_other_provider():
     ), message
 
 
+def _codex_wire(event):
+    """The Codex ws-server event a ``codex_fixture`` stub line carries; any other event unchanged."""
+    if event.get("type") == "cli_message" and event.get("raw_type") == "codex_fixture":
+        return event["cli_message"]["event"]
+    return event
+
+
+@contextlib.contextmanager
+def _codex_events():
+    """Read ``codex_fixture`` stub lines as the Codex ws-server's events, through the real parsers."""
+    from domains.spawn_claude_code_agent import service
+
+    real_unusable, real_feedback = service.login_unusable_from_event, service.build_codex_credential_feedback
+    with (
+        patch.object(service, "login_unusable_from_event", lambda event: real_unusable(_codex_wire(event))),
+        patch.object(
+            service, "build_codex_credential_feedback", lambda events: real_feedback([_codex_wire(e) for e in events])
+        ),
+    ):
+        yield
+
+
+def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
+    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a revocation."""
+    from domains.spawn_claude_code_agent.service import build_codex_credential_feedback, login_unusable_from_event
+
+    event = {
+        "type": "error",
+        "provider": "codex",
+        "message": "Your access token could not be refreshed: refresh_token_invalidated",
+        "usage_limit": None,
+        "login_unusable": {"reason": "oauth_refresh_invalid"},
+    }
+    assert login_unusable_from_event(event) == {"provider": "codex", "reason": "oauth_refresh_invalid"}
+    assert login_unusable_from_event({**event, "login_unusable": None}) is None, "the switch path is not a pause"
+    # The backend reads reason oauth_refresh_invalid as a revocation: needs reconnect, never a rate limit.
+    assert build_codex_credential_feedback([event]) == [{"source": "initial", "reason": "oauth_refresh_invalid"}]
+
+
+async def _unusable_login_then_retry(availability: list):
+    """A Codex run whose login proves unusable (no Azure switch armed), then the parent's retry."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "login_unusable"})
+    backend = _Backend(session_home)
+    backend.paths = [dict(path) for path in _SHARED_PATHS]
+    backend.availability = availability
+    with backend.patched(), _codex_events():
+        first = await asyncio.wait_for(
+            ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(code_provider="codex")),
+            timeout=30,
+        )
+        retry = await asyncio.wait_for(
+            ActivityEnvironment().run(
+                service.spawn_claude_code_activity,
+                *_activity_args(
+                    code_session_request={"code_session_id": (first.get("retry") or {}).get("code_session_id")},
+                    tool_call_id="tc-retry",
+                    code_provider="codex",
+                ),
+            ),
+            timeout=30,
+        )
+    return first, retry, backend, session_home
+
+
+_REVOKED_CODEX = {
+    "provider": "codex",
+    "label": "codex@example.com",
+    "status": "reconnect",
+    "limited_until": None,
+    "this_run": False,
+}
+
+
+async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscription():
+    """Revoked Codex login, a Claude subscription left: paused (not fatal), the login marked for
+    reconnect (not rate-limited), and the retry continues the session on Claude with the handoff."""
+    claude_lease = {
+        "provider": "claude",
+        "label": "me@example.com",
+        "available_now": True,
+        "available_at": None,
+        "kind": "own",
+    }
+    accounts = [{**_ACCOUNTS[0], "status": "available", "limited_until": None, "this_run": False}, _REVOKED_CODEX]
+    after_mark = {
+        "claude": True,
+        "codex": False,
+        "session_provider": "codex",
+        "next_credential": {"provider": "claude", "tier": "subscription"},
+        "outlook": {"accounts": accounts, "next_lease": claude_lease},
+    }
+    first, retry, backend, session_home = await _unusable_login_then_retry(
+        [{"claude": True, "codex": True}, after_mark, after_mark]
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["retryable"] is True and first["success"] is False, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, first
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", "checkpoint + pause"
+        assert backend.usage_reports == [], "an unusable login is never put on a rate-limit cooldown"
+        assert {"source": "initial", "reason": "oauth_refresh_invalid"} in (backend.credential_feedback[0] or []), (
+            "the persisted feedback marks exactly that login for reconnect",
+            backend.credential_feedback,
+        )
+        assert first["usage_limit"]["credential_marked"] == "reconnect", first["usage_limit"]
+        assert first["message"] == (
+            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, "
+            "not killed.\nConnected accounts:\n"
+            "- Claude Code me@example.com: available\n"
+            "- Codex codex@example.com: disconnected (the user must reconnect it)\n"
+            + _retry_line(
+                "no Codex subscription is left, so the retry continues this session on Claude Code "
+                "(now Claude Code me@example.com) from the latest checkpoint, with a handoff prompt that points "
+                "it at the previous agent's trajectory."
+            )
+        ), first["message"]
+        assert "rate-limited" not in first["message"] and "out of quota" not in first["message"]
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert first["code_agent"]["failure_message"] == (
+            "Paused: the Codex login needs to be reconnected. Work is saved."
+        ), first["code_agent"]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_wording():
+    """Revoked Codex login and nothing else leasable: paused with the reconnect wording; the retry starts nothing."""
+    nothing = {
+        "claude": False,
+        "codex": False,
+        "session_provider": "codex",
+        "next_credential": None,
+        "outlook": {"accounts": [_REVOKED_CODEX], "next_lease": None},
+    }
+    first, retry, backend, session_home = await _unusable_login_then_retry(
+        [{"claude": True, "codex": True}, nothing, nothing]
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["message"].startswith(
+            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+        ), first["message"]
+        assert first["message"].endswith(
+            _retry_line(
+                "no other credential can be leased right now, so a retry stays paused and starts nothing until "
+                "the login is reconnected or another account is connected."
+            )
+        ), first["message"]
+        assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
+        assert retry["status"] == "usage_limit" and retry["failure_kind"] == "no_credentials", retry
+    finally:
+        session_home.cleanup()
+
+
 async def test_rotation_d_no_credential_keeps_the_session_paused_and_starts_nothing():
     """(d) Nothing leasable anywhere → no create, no resume, the earliest reset named."""
     limited_paths = [
@@ -1811,6 +1984,19 @@ async def _run_all_tests():
     )
     r.record(
         "usage_limit_clause_names_other_funded_key", test_usage_limit_clause_names_a_funded_key_on_the_other_provider
+    )
+    # An unusable Codex login with no Azure switch armed pauses like a usage limit (C15).
+    r.record(
+        "unusable_login_event_marks_login_for_reconnect",
+        test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect,
+    )
+    await r.record_async(
+        "unusable_login_pauses_retry_switches_to_claude",
+        test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscription,
+    )
+    await r.record_async(
+        "unusable_login_nothing_else_stays_paused",
+        test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_wording,
     )
     teardown_mock()
     return r.all_passed

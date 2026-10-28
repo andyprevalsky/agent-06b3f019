@@ -24,6 +24,7 @@ import {
   testCodexCreditSkip_readsNestedErrorObject,
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
+  testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
@@ -39,6 +40,7 @@ import {
   codexCreateUnavailableSkipReason,
   codexOauthRevocationSignal,
   codexSmokeCreditSkipReason,
+  codexSmokeLoginUnusableSkipReason,
   detectCodexCreditExhaustion,
   testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
@@ -261,6 +263,15 @@ async function testSmoke_codexCompletesE2bTask() {
     });
     const succeeded = turnCompleted || exitCode === 0;
     // A completed turn is the success signal; success always wins over a skip.
+    // Subscriptions first (C15): a revoked login with another subscription leasable
+    // runs without the Azure switch and pauses for the parent's retry on that
+    // subscription. The login is unavailable until reconnected: SKIP, never PASS.
+    const unusableLogin = succeeded ? null : codexSmokeLoginUnusableSkipReason(events);
+    if (unusableLogin) {
+      throw new CredentialExhaustionSkip(
+        `Codex login unusable (revoked or refresh failed) with no Azure switch armed; the run paused for a retry on the next credential. Reconnect the Codex login. Smoke SKIPPED without failing the deploy gate. Signal: ${unusableLogin}. exit=${exitCode ?? 'unknown'}`
+      );
+    }
     const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
@@ -435,6 +446,10 @@ async function runAll() {
     {
       name: 'credit-skip -- auth revocation still fails hard',
       fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
+    },
+    {
+      name: 'credit-skip -- structured unusable login paused for a retry is a skip',
+      fn: async () => testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip(),
     },
     {
       name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',

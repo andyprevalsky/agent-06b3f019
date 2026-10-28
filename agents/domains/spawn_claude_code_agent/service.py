@@ -152,6 +152,12 @@ def build_codex_credential_feedback(
             continue
         if event.get("type") != "error":
             continue
+        if isinstance(event.get("login_unusable"), dict):
+            # The ws-server's structured unusable login (no Azure switch armed): the
+            # backend marks exactly that login for reconnect, never a rate limit.
+            reason = str(event["login_unusable"].get("reason") or "oauth_refresh_invalid")
+            feedback_by_source.setdefault("funded_api_key" if fallback_seen else "initial", reason[:2000])
+            continue
 
         error = event.get("error")
         nested_message = error.get("message") if isinstance(error, dict) else None
@@ -1018,6 +1024,9 @@ async def _run_agentic_loop(
         usage_limit = usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
+        login_unusable = login_unusable_from_event(event)
+        if login_unusable is not None and loop_outcome is not None and "login_unusable" not in loop_outcome:
+            loop_outcome["login_unusable"] = login_unusable
         event_index = len(code_events) - 1
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
@@ -1173,8 +1182,18 @@ async def _run_agentic_loop(
                     )
                     raise CodeSessionDrained(drain_reason)
 
-            # C15: a provider usage limit ends this run; the session is saved
-            # and the parent retries on the next available credential.
+            # C15: a provider usage limit (or an unusable login the sandbox may
+            # not switch away from) ends this run; the session is saved and the
+            # parent retries on the next available credential.
+            if loop_outcome is not None and loop_outcome.get("login_unusable") and not loop_outcome.get("usage_limit"):
+                logger.warning(
+                    "[ClaudeCode] Provider login unusable; saving the session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    login_unusable=loop_outcome["login_unusable"],
+                )
+                action_summary.append("Provider login unusable; session saved for a retry")
+                break
             if loop_outcome is not None and loop_outcome.get("usage_limit"):
                 logger.warning(
                     "[ClaudeCode] Provider usage limit reached; saving the session",
@@ -1305,7 +1324,9 @@ async def _run_agentic_loop(
 
                     # A structured usage limit (incl. out of credits) saves the
                     # session for a retry; its printed banner is not a fatal error.
-                    usage_limited = loop_outcome is not None and bool(loop_outcome.get("usage_limit"))
+                    usage_limited = loop_outcome is not None and bool(
+                        loop_outcome.get("usage_limit") or loop_outcome.get("login_unusable")
+                    )
                     fatal_error = None if usage_limited else check_fatal_errors(filtered_output)
                     if fatal_error:
                         logger.error(
@@ -2822,6 +2843,18 @@ def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def login_unusable_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """An unusable Codex login (revoked, refresh failed) from the ws-server's structured error.
+
+    Reported only when the sandbox has no Azure switch armed (subscriptions first,
+    C15): the session pauses like a usage limit and the parent retries on the next
+    credential. No prose matching here.
+    """
+    if event.get("type") == "error" and isinstance(event.get("login_unusable"), dict):
+        return {"provider": "codex", "reason": event["login_unusable"].get("reason") or "oauth_refresh_invalid"}
+    return None
+
+
 def _provider_label(code_provider: str) -> str:
     return "Codex" if code_provider == "codex" else "Claude Code"
 
@@ -2966,6 +2999,14 @@ def format_usage_limit_message(
     limited = next((a for a in accounts or [] if a.get("this_run")), None)
     on_account = f" {limited.get('label')}" if limited else ""
     block = _usage_accounts_block(accounts)
+    unusable = limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
+    if local_place and unusable:
+        return (
+            f"Code agent stopped: your own {_provider_label(code_provider)} login{on_account} can no longer be "
+            f"used (sign in again to reconnect it). Its files and commits stay in {local_place}.{block}\n"
+            "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            + _respawn_clause(next_lease, local=True)
+        )
     if local_place:
         return (
             f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login"
@@ -2978,18 +3019,33 @@ def format_usage_limit_message(
         saved += f" on branch {facts['branch']}"
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
-    stopped = (
-        f"the {_provider_label(code_provider)} credential{' ' + on_account.strip() if on_account else ''} "
-        f"ran out of credits{resets}"
-        if limit_type == "billing"
-        else f"the {_provider_label(code_provider)} usage limit was reached"
-        f"{' on' + on_account if on_account else ''}{resets}"
-    )
+    if unusable:
+        stopped = (
+            f"the {_provider_label(code_provider)} login{on_account} can no longer be used "
+            "(sign in again to reconnect it)"
+        )
+    elif limit_type == "billing":
+        stopped = (
+            f"the {_provider_label(code_provider)} credential{' ' + on_account.strip() if on_account else ''} "
+            f"ran out of credits{resets}"
+        )
+    else:
+        stopped = (
+            f"the {_provider_label(code_provider)} usage limit was reached"
+            f"{' on' + on_account if on_account else ''}{resets}"
+        )
+    if unusable and not (isinstance(next_lease, dict) and next_lease.get("provider")):
+        clause = (
+            "no other credential can be leased right now, so a retry stays paused and starts nothing "
+            "until the login is reconnected or another account is connected."
+        )
+    else:
+        clause = _respawn_clause(next_lease, local=False, from_provider=code_provider)
     return (
         f"Code agent stopped: {stopped}. {saved}; the sandbox is paused, not killed."
         f"{block}{_shared_paths_block(paths)}\n"
         f"Retry with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
-        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False, from_provider=code_provider)
+        "goal=<the same goal>) to continue: " + clause
     )
 
 
@@ -3042,6 +3098,7 @@ def format_usage_limit_user_message(
     resets_at_iso: Optional[str],
     local_place: Optional[str] = None,
     now: Optional[float] = None,
+    limit_type: Optional[str] = None,
 ) -> str:
     """The user's one line for a usage-limit pause (``code_agent.failure_message``).
 
@@ -3051,6 +3108,8 @@ def format_usage_limit_user_message(
     provider = "Codex" if code_provider == "codex" else "Claude"
     resets = f" (resets {reset})" if reset else ""
     saved = f"Work stays in {local_place}." if local_place else "Work is saved."
+    if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE:
+        return f"Paused: the {provider} login needs to be reconnected. {saved}"
     return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
@@ -3170,6 +3229,28 @@ def _raise_bounded_activity_error(error: BaseException) -> None:
 async def resolve_code_agent_provider_activity(default_provider: str) -> str:
     """Record provider overrides in activity history for deterministic replay."""
     return resolve_code_agent_provider(default_provider)
+
+
+LOGIN_UNUSABLE_LIMIT_TYPE = "login_unusable"
+
+
+async def _unusable_login_outlook(
+    user_id: str, code_provider: str, code_session_id: Optional[str], *, local: bool
+) -> Dict[str, Any]:
+    """The stored outlook after an unusable login was marked for reconnect (C15; no lease taken).
+
+    The usage-limit report would rate-limit the login, so the plan answers instead:
+    the connected accounts (that login now reads disconnected), the shared paths
+    and the next lease in the subscription-first order.
+    """
+    available = await fetch_code_credential_availability(
+        user_id,
+        own_only=local,
+        code_session_id=None if local else code_session_id,
+        prefer=code_provider,
+    )
+    outlook = (available or {}).get("outlook")
+    return {"marked": "reconnect", "resets_at": None, **(outlook if isinstance(outlook, dict) else {})}
 
 
 def _next_code_credential(available: Optional[Dict[str, Any]], preferred: str) -> tuple[Optional[str], Optional[str]]:
@@ -3681,10 +3762,12 @@ async def spawn_claude_code_activity(
             )
 
         usage_limit = loop_outcome.get("usage_limit")
-        if isinstance(usage_limit, dict):
-            # C15: save the session (checkpoint + pause), rate-limit the token,
-            # and hand the parent the exact retry. Never a Temporal retry: the
-            # same exhausted credential would fail again.
+        login_unusable = loop_outcome.get("login_unusable") if not isinstance(usage_limit, dict) else None
+        if isinstance(usage_limit, dict) or isinstance(login_unusable, dict):
+            # C15: save the session (checkpoint + pause), rate-limit the token
+            # (an unusable login was marked for reconnect by the persisted
+            # credential feedback above), and hand the parent the exact retry.
+            # Never a Temporal retry: the same credential would fail again.
             close_data = await close_e2b_session(
                 task_id=task_id,
                 user_id=user_id,
@@ -3694,12 +3777,19 @@ async def spawn_claude_code_activity(
                 reason="usage_limit",
             )
             code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
-            marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+            local_place = local_workspace_place(code_agent_meta)
+            if isinstance(usage_limit, dict):
+                marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+                limit_type = usage_limit.get("limit_type")
+            else:
+                marked = await _unusable_login_outlook(
+                    user_id, code_provider, (code_session_facts or {}).get("code_session_id"), local=bool(local_place)
+                )
+                limit_type = LOGIN_UNUSABLE_LIMIT_TYPE
             session_heartbeats.close()
             if log_collector:
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
-            local_place = local_workspace_place(code_agent_meta)
             # The parent reads the error with every connected account and what a
             # respawn leases (the backend's stored view); the user reads a
             # resumable pause. The parent decides; nothing fails over here.
@@ -3717,12 +3807,13 @@ async def spawn_claude_code_activity(
                 accounts=accounts,
                 next_lease=next_lease,
                 paths=paths,
-                limit_type=usage_limit.get("limit_type"),
+                limit_type=limit_type,
             )
             user_message = format_usage_limit_user_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
                 local_place=local_place,
+                limit_type=limit_type,
             )
             code_agent = build_code_agent_metadata(
                 target_meta=code_agent_meta,
@@ -3736,7 +3827,11 @@ async def spawn_claude_code_activity(
             )
             await save_claude_code_message(
                 agent_id=agent_id,
-                title="Code agent hit a usage limit",
+                title=(
+                    "Code agent login needs reconnecting"
+                    if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
+                    else "Code agent hit a usage limit"
+                ),
                 task_id=task_id,
                 message=user_message,
                 status=MessageStatus.FINISHED,
@@ -3749,13 +3844,13 @@ async def spawn_claude_code_activity(
             return {
                 "status": CODE_AGENT_USAGE_LIMIT_STATUS,
                 "success": False,
-                "failure_kind": "usage_limit",
+                "failure_kind": "login_unusable" if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE else "usage_limit",
                 "retryable": True,
                 "message": message,
                 "usage_limit": {
                     "provider": code_provider,
                     "resets_at": resets_at_iso,
-                    "limit_type": usage_limit.get("limit_type"),
+                    "limit_type": limit_type,
                     "credential_marked": (marked or {}).get("marked"),
                     "accounts": accounts,
                     "paths": paths,

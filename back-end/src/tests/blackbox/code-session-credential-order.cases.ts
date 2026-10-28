@@ -9,6 +9,8 @@
  *   all subs limited ────────────► P funded key (Azure for Codex)
  *   P funded unavailable ────────► Q funded key (the Anthropic API key)
  *   nothing ─────────────────────► next_credential null: the retry stays paused
+ *   P login unusable (no Azure switch armed) ─► that login needs reconnect (not a
+ *                                  rate limit); the retry takes Q's subscription
  *
  * The same order feeds the plan's next_credential (the agents activity
  * follows it), the outlook's next_lease (the retry clause) and code inspect.
@@ -26,6 +28,7 @@ import {
   pickCodeCredential,
   type CodeCredentialTiers,
 } from '../../providers/codeSessions/credentialOrder';
+import { persistOutput } from '../../domains/codex-code/service';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
 import {
@@ -314,6 +317,105 @@ export function registerCodeSessionCredentialOrderCases(ctx: CredentialOrderCont
       if (savedKey === undefined) delete process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
       else process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = savedKey;
       await __resetCodexFundedCooldown();
+      await prisma.codeSession.deleteMany({ where: { userId: owner } });
+      await prisma.integration.deleteMany({ where: { id: { in: [codex.id, claude.id] } } });
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+      await prisma.user.deleteMany({ where: { userId: owner } });
+    }
+  });
+
+  test('an unusable Codex login is marked for reconnect, not rate-limited; the retry plan takes the Claude subscription', async () => {
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const savedKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+    process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = Buffer.from(
+      privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+    ).toString('base64');
+    const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const owner = `code-order-revoked-${randomUUID()}`;
+    const agentId = randomUUID();
+    await prisma.user.create({ data: { userId: owner, name: 'Revoked Codex Login' } });
+    await prisma.agent.create({ data: { id: agentId, userId: owner, goal: 'Ship it' } });
+    const own = (name: 'claude_code' | 'gpt_code', email: string, secret: object) =>
+      prisma.integration.create({
+        data: {
+          userId: owner,
+          type: 'TOOL_SETUP',
+          name,
+          accountId: email,
+          accountEmail: email,
+          status: 'CONNECTED',
+          isActive: true,
+          config: { encryptedCredentials: sealEnvelope(JSON.stringify(secret), pem) },
+        },
+      });
+    const codex = await own('gpt_code', 'codex@example.com', {
+      auth_mode: 'chatgpt',
+      tokens: { access_token: 'codex-access', refresh_token: 'codex-refresh', account_id: 'c1' },
+    });
+    const claude = await own('claude_code', 'me@example.com', {
+      claudeAiOauth: {
+        accessToken: 'sk-ant-oat01-revoked-case',
+        refreshToken: 'refresh-revoked-case',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    });
+    const codexSession = await prisma.codeSession.create({
+      data: {
+        userId: owner,
+        rootAgentId: agentId,
+        ownerAgentId: agentId,
+        repoKey: 'rose-project:revoked',
+        repoUrl: 'rose-project:revoked',
+        codeProvider: 'codex',
+      },
+    });
+    try {
+      // The spawn leased the own Codex login; a Claude subscription is left, so no Azure switch.
+      const served = await resolveCodexSpawnAuth(owner);
+      assert.equal(served.credentialMeta?.integrationId, codex.id);
+      assert.equal(served.azureFunding, null);
+      const task = await prisma.claudeCodeSession.create({
+        data: {
+          agentId,
+          sandboxId: `sb-${randomUUID()}`,
+          goal: 'g',
+          codeProvider: 'codex',
+          claudeTokenSource: served.servedBy,
+          claudeTokenIntegrationId: codex.id,
+        },
+      });
+      // The activity persists the structured unusable login as initial credential feedback.
+      await persistOutput(task.id, '[Codex] Turn failed: refresh_token_invalidated\n', [
+        { source: 'initial', reason: 'oauth_refresh_invalid' },
+      ]);
+      const marked = await prisma.integration.findUniqueOrThrow({ where: { id: codex.id } });
+      assert.deepEqual(
+        { status: marked.status, rateLimitedUntil: marked.rateLimitedUntil },
+        { status: 'EXPIRED', rateLimitedUntil: null },
+        'exactly that login needs reconnect; it is not put on a rate-limit cooldown'
+      );
+      const untouched = await prisma.integration.findUniqueOrThrow({ where: { id: claude.id } });
+      assert.equal(untouched.status, 'CONNECTED', 'the Claude subscription is untouched');
+      const plan = await codeSpawnCredentialPlan(owner, {
+        codeSessionId: codexSession.id,
+        prefer: 'codex',
+      });
+      const codexAccount = plan.outlook?.accounts.find((account) => account.provider === 'codex');
+      assert.equal(codexAccount?.status, 'reconnect');
+      if ((await pooledLeasable('gpt_code')) === 0) {
+        assert.deepEqual(plan.next_credential, { provider: 'claude', tier: 'subscription' });
+        assert.deepEqual(plan.outlook?.next_lease, {
+          provider: 'claude',
+          label: 'me@example.com',
+          available_now: true,
+          available_at: null,
+          kind: 'own',
+        });
+      }
+    } finally {
+      if (savedKey === undefined) delete process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+      else process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = savedKey;
+      await prisma.claudeCodeSession.deleteMany({ where: { agentId } });
       await prisma.codeSession.deleteMany({ where: { userId: owner } });
       await prisma.integration.deleteMany({ where: { id: { in: [codex.id, claude.id] } } });
       await prisma.agent.deleteMany({ where: { id: agentId } });

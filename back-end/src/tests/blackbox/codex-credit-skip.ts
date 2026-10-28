@@ -110,6 +110,30 @@ export function codexSmokeCreditSkipReason(output: string, events: unknown[]): s
   return detectCodexCreditExhaustion(output, events);
 }
 
+/**
+ * A Codex login that proved unusable (revoked, refresh failed) while the sandbox had
+ * no Azure switch armed because another subscription was leasable (subscriptions
+ * first, C15). ws-server then reports the structured `login_unusable`, and the run
+ * pauses for the parent's retry on the next credential. The login is unavailable
+ * until reconnected: the deploy-approved SKIP class for unavailable credentials.
+ * Only that structured field counts: revocation prose alone (or a run that switched
+ * to Azure) still fails hard. Returns the signal, else null.
+ */
+export function codexSmokeLoginUnusableSkipReason(events: unknown[]): string | null {
+  if (events.some((event) => (event as { type?: unknown })?.type === 'auth_fallback')) return null;
+  for (const event of events) {
+    const typed = event as { type?: unknown; login_unusable?: { reason?: unknown } | null };
+    if (
+      typed?.type === 'error' &&
+      typed.login_unusable &&
+      typeof typed.login_unusable === 'object'
+    ) {
+      return `login_unusable: ${String(typed.login_unusable.reason ?? 'unknown')}`;
+    }
+  }
+  return null;
+}
+
 const CODEX_CREATE_UNAVAILABLE_BODY =
   'Code agent credentials are unavailable; the session could not be started';
 

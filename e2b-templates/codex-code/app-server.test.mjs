@@ -40,7 +40,7 @@ const {
   handoffSchemaFromGoal,
 } = vm.runInNewContext(
   // The real credential-failure classifier and usage-limit reporter the class calls.
-  "let oauthFallbackReason = null;\nlet usingApiKey = false;\n" +
+  "let oauthFallbackReason = null;\nlet usingApiKey = false;\nconst FUNDED_PROVIDER = false;\n" +
     source.slice(
       source.indexOf("function classifyOAuthFallbackReason("),
       source.indexOf("// C15: Codex's own rate-limit snapshot"),
@@ -713,7 +713,7 @@ function freePort() {
 // Runs the real ws-server (app-server transport) over a fake Codex whose ChatGPT
 // OAuth turns fail with `oauthError` and whose Azure-provider turns succeed.
 // Returns the streamed events and the fake Codex's call journal.
-async function runOAuthFailureFixture(oauthError, settled) {
+async function runOAuthFailureFixture(oauthError, settled, { funded = true } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "rose-native-codex-fallback-"));
   const fixturePath = join(directory, "codex");
   const journal = join(directory, "journal.jsonl");
@@ -756,9 +756,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         HOME: directory,
         CODEX_AUTH_JSON: JSON.stringify({ auth_mode: "chatgpt", tokens: {} }),
         OPENAI_API_KEY: "",
-        AZURE_OPENAI_API_KEY: "azure-fixture-key",
-        CODEX_AZURE_BASE_URL: "https://azure.example/openai/v1",
-        CODEX_AZURE_MODEL: "azure-terra",
+        // Not armed (another subscription is leasable): no funded provider in the sandbox.
+        AZURE_OPENAI_API_KEY: funded ? "azure-fixture-key" : "",
+        CODEX_AZURE_BASE_URL: funded ? "https://azure.example/openai/v1" : "",
+        CODEX_AZURE_MODEL: funded ? "azure-terra" : "",
         CODEX_GOAL: "write the sentinel",
         CODEX_MODEL: "model",
         CODE_SESSION_TURN_TOKEN: "native-token",
@@ -868,8 +869,8 @@ test("app-server switches to the funded Azure OpenAI provider when the ChatGPT l
   const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
   assert.ok(oauthErrors.length > 0, "the OAuth error is still reported");
   assert.ok(
-    oauthErrors.every((e) => e.usage_limit === null),
-    "an unusable login is not a usage limit: nothing pauses",
+    oauthErrors.every((e) => e.usage_limit === null && e.login_unusable === undefined),
+    "an unusable login with the switch armed is neither a usage limit nor a pause",
   );
   const fallback = seen.find((e) => e.type === "auth_fallback");
   assert.equal(fallback?.to, "openai_api_key");
@@ -887,4 +888,31 @@ test("app-server switches to the funded Azure OpenAI provider when the ChatGPT l
   assert.deepEqual(calls[3].input, calls[1].input, "the funded retry re-sends the same turn input");
   assert.equal(calls[3].apiKey, true, "the retry selects the azure provider");
   assert.equal(calls[3].auth, false, "the ChatGPT auth.json is removed before the retry");
+});
+
+// Subscriptions first (C15): with another subscription leasable the backend does
+// not arm the Azure switch. The unusable login is reported as `login_unusable`
+// (the activity pauses, the login is marked for reconnect, the parent retries on
+// the next credential); nothing runs on Azure and nothing is a usage limit.
+test("app-server reports an unusable login for the pause when no Azure switch is armed", async () => {
+  const { seen, calls, logs } = await runOAuthFailureFixture(
+    { message: "Your access token could not be refreshed: refresh_token_invalidated" },
+    (events) => events.some((e) => e.type === "final"),
+    { funded: false },
+  );
+  assert.deepEqual(
+    seen.filter((e) => e.type === "turn_ended").map((e) => e.status),
+    ["failed"],
+    `the turn on the unusable login ends; the pause saves the session\n${logs}`,
+  );
+  const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
+  assert.ok(oauthErrors.length > 0, "the OAuth error is reported");
+  assert.ok(
+    oauthErrors.every(
+      (e) => e.login_unusable?.reason === "oauth_refresh_invalid" && e.usage_limit === null,
+    ),
+    `every OAuth error carries login_unusable, never a usage limit: ${JSON.stringify(oauthErrors)}`,
+  );
+  assert.equal(seen.some((e) => e.type === "auth_fallback"), false, "no in-sandbox switch");
+  assert.deepEqual(calls.map((c) => c.method), ["thread/start", "turn/start"], "nothing runs on Azure");
 });

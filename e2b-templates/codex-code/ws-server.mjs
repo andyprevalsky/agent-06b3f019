@@ -76,8 +76,10 @@ let stdoutLineBuffer = "";
 // structured usage_limit instead: the code-agent activity pauses the session and
 // the parent's retry rotates own login -> shared pool -> Azure (C15), so the
 // sandbox never starts an Azure continuation that the pause would throw away.
-// The sandbox cannot lease a shared pool login itself (the backend leases
-// credentials only at session create), so its own switch goes straight to Azure.
+// The sandbox cannot lease another login itself (the backend leases credentials
+// only at session create), so the backend arms the Azure switch only when no other
+// subscription is leasable; otherwise the error carries `login_unusable` and the
+// session pauses for the parent's retry (reportedLoginUnusable).
 let oauthFallbackReason = null;
 const clients = new Set();
 
@@ -133,6 +135,22 @@ function classifyOAuthFallbackReason(message) {
     return "oauth_refresh_invalid";
   }
   return null;
+}
+/**
+ * The unusable login to report on a failed Codex turn, or null. An unusable
+ * ChatGPT login (oauth_refresh_invalid: revoked, refresh failed) switches the run
+ * to Azure only when the backend armed that switch (FUNDED_PROVIDER), which it
+ * does only when no other subscription is leasable (subscriptions first, C15).
+ * Without it the error carries `login_unusable`: the code-agent activity pauses
+ * the session, the login is marked for reconnect and the parent's retry takes
+ * the next credential. The first classification decides, as for usage limits.
+ */
+function reportedLoginUnusable(message) {
+  if (FUNDED_PROVIDER || oauthFallbackReason !== "oauth_refresh_invalid")
+    return null;
+  return classifyOAuthFallbackReason(message || "") === "oauth_refresh_invalid"
+    ? { reason: "oauth_refresh_invalid" }
+    : null;
 }
 // C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
 // event: rate_limits.{primary,secondary}.used_percent / resets_at and
@@ -309,12 +327,14 @@ function renderCodexJsonLine(line) {
       event.error,
       message,
     );
+    const loginUnusable = reportedLoginUnusable(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
       ...(usageLimit ? { usage_limit: usageLimit } : {}),
+      ...(loginUnusable ? { login_unusable: loginUnusable } : {}),
     });
     return `[Codex] Turn failed: ${message}\n`;
   }
@@ -327,12 +347,14 @@ function renderCodexJsonLine(line) {
       event.error,
       message,
     );
+    const loginUnusable = reportedLoginUnusable(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
       ...(usageLimit ? { usage_limit: usageLimit } : {}),
+      ...(loginUnusable ? { login_unusable: loginUnusable } : {}),
     });
     return `[Codex] Error: ${message}\n`;
   }
@@ -1297,6 +1319,7 @@ class CodexAppServer {
             p.turn.error,
             p.turn.error?.message || "Codex turn failed",
           ),
+          ...this.loginUnusable(p.turn.error?.message || "Codex turn failed"),
         });
       this.emit({
         ...common,
@@ -1416,11 +1439,17 @@ class CodexAppServer {
         message: p.error?.message || p.message,
         error: p.error,
         usage_limit: this.usageLimit(p.error, p.error?.message || p.message),
+        ...this.loginUnusable(p.error?.message || p.message),
       });
   }
   usageLimit(error, message) {
     oauthFallbackReason ??= classifyOAuthFallbackReason(message || "");
     return reportedUsageLimit(this.rateLimitSnapshot(), error, message);
+  }
+  /** `login_unusable` for an error event (see reportedLoginUnusable); call after usageLimit. */
+  loginUnusable(message) {
+    const unusable = reportedLoginUnusable(message);
+    return unusable ? { login_unusable: unusable } : {};
   }
   rateLimitSnapshot() {
     const limits = this.rateLimits;
