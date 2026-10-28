@@ -461,7 +461,8 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
 STOCK_SPAWN_CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
-    "completion. The task should be tightly scoped and self-sufficient."
+    "completion. The task should be tightly scoped and self-sufficient. Send every video generation or "
+    "editing request to a code agent: it has the video tool (real footage) and ffmpeg."
 )
 ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
 
@@ -543,6 +544,25 @@ async def test_planner_tools_description_follows_the_workflow_account():
             async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
                 pass
     assert captured == [True, True, False]
+
+
+def test_root_agent_routes_video_requests_to_a_code_agent():
+    """User-directed (Andy, 2026-10-28): video generation/editing goes to a code agent.
+
+    The rule lives in the spawn_agent ``code`` line for both account groups, so the root
+    planner sees it; the code agent's side is the talk-to-user skill's ``video.md``
+    (`rose video`, back-end rose-skills structural test).
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts.spawn_agent import CODE_LINE, CODE_LINE_ROSE_DESKTOP, CODE_VIDEO_SENTENCE
+
+    rule = "Send every video generation or editing request to a code agent"
+    assert CODE_VIDEO_SENTENCE.startswith(rule)
+    for line in (CODE_LINE, CODE_LINE_ROSE_DESKTOP):
+        assert line.endswith(" " + CODE_VIDEO_SENTENCE), line
+    for rose_desktop in (False, True):
+        planner = get_planner_tools_description(rose_desktop=rose_desktop)
+        assert planner.count(rule) == 1, f"planner (rose_desktop={rose_desktop}) states the video rule once"
 
 
 def test_planner_spawn_aliases_documented_in_prompt():
@@ -2189,7 +2209,6 @@ def test_parent_prompts_route_browser_approval_through_commit_click():
         )
 
 
-
 # ============================================================================
 # 24. Browser sign-up identity facts
 # ----------------------------------------------------------------------------
@@ -2215,6 +2234,7 @@ def test_browser_identity_facts_in_spawn_goal_and_auth_contract():
     rule = "Sign in or sign up only with identities listed in Auth Options."
     for recover in (True, False):
         assert rule in build_authentication_contract(recover_enabled=recover)
+
 
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
@@ -2482,6 +2502,11 @@ async def run_all_tests():
     await r.record_async(
         "planner_tools_description_follows_the_workflow_account",
         test_planner_tools_description_follows_the_workflow_account,
+    )
+    # 23b. Video generation/editing routes to a code agent (user-directed 2026-10-28)
+    r.record(
+        "root_agent_routes_video_requests_to_a_code_agent",
+        test_root_agent_routes_video_requests_to_a_code_agent,
     )
     # 24. Browser sign-up identity facts (RCA Q3b, run e0c401c1)
     r.record(

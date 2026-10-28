@@ -3,13 +3,17 @@
 ``PROMPT`` is the stock prompt. ``PROMPT_ROSE_DESKTOP`` (Rose Desktop accounts,
 ``utils.rose_desktop``) differs only in the ``- code:`` line, which also says
 the code sandbox holds the user's rose_user_ui and ships viewable work as an
-inline view.
+inline view. Both code lines end with ``CODE_VIDEO_SENTENCE``: video generation
+and editing go to a code agent (the sandbox ``rose video`` tool + ffmpeg).
 """
 
+CODE_VIDEO_SENTENCE = (
+    "Send every video generation or editing request to a code agent: it has the video tool (real footage) and ffmpeg."
+)
 CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
-    "completion. The task should be tightly scoped and self-sufficient."
+    "completion. The task should be tightly scoped and self-sufficient. " + CODE_VIDEO_SENTENCE
 )
 CODE_LINE_ROSE_DESKTOP = (
     "- code: A Claude Code or Codex CLI agent in a persistent sandbox holding the user's Rose app UI; give it "
@@ -17,7 +21,7 @@ CODE_LINE_ROSE_DESKTOP = (
     "show with display html. For a game or app the user asked to play or use, "
     "have it show it in Agent Display using rose display and return the display receipt. "
     "A final file path alone does not display the result. Keep the task tightly "
-    "scoped and self-sufficient."
+    "scoped and self-sufficient. " + CODE_VIDEO_SENTENCE
 )
 
 _PROMPT_TEMPLATE = """Use this tool to launch a new agent for complex, multi-step tasks. Each agent gets an isolated context, toolset, and runtime container.
