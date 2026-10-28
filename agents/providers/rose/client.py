@@ -1220,7 +1220,12 @@ class RoseClient:
 
         eligible_claude_auth = claude_auth if model_key(pool_spec.claude_auth_model) not in _skip_models else None
         eligible_gpt_auth = gpt_auth if model_key(pool_spec.gpt_auth_model) not in _skip_models else None
-        if not pool_spec.direct_auth_enabled:
+        allow_subscriptions = (
+            pool_spec.subscription_auth_enabled
+            if pool_spec.subscription_auth_enabled is not None
+            else pool_spec.direct_auth_enabled
+        )
+        if not allow_subscriptions:
             # An open-weights-only pool must never reach a proprietary
             # direct-token provider, or the model guarantee it exists to make
             # is silently void.

@@ -378,7 +378,8 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.waterfallReasoningEffort, 'medium', 'flash waterfall effort');
   assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
-  assertEqual(lite.directAuthEnabled, false, 'flash skips Claude/GPT auth');
+  assertEqual(lite.directAuthEnabled, false, 'flash skips funded API keys');
+  assertEqual(lite.subscriptionAuthEnabled, true, 'flash permits compute tokens');
   assertEqual(lite.cerebrasModel, 'qwen-3.8-27b', 'flash Cerebras primary');
   assertEqual(lite.cerebrasReasoningEffort, 'high', 'flash Cerebras effort');
   assertEqual(
@@ -399,7 +400,8 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.claudeAuthModel, 'claude-sonnet-5', 'browserUse.claudeAuthModel');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
-  assertEqual(browserUse.directAuthEnabled, false, 'browser skips Claude/GPT auth');
+  assertEqual(browserUse.directAuthEnabled, false, 'browser skips funded API keys');
+  assertEqual(browserUse.subscriptionAuthEnabled, true, 'browser permits compute tokens');
   assertEqual(browserUse.cerebrasModel, 'qwen-3.8-27b', 'browser Cerebras primary');
   assertEqual(
     browserUse.waterfall.join(','),
@@ -1840,8 +1842,6 @@ async function testFlash_skipsAuthAndHitsCerebrasQwen() {
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'hi' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
     });
     const chunks = await collect(stream);
     assertEqual(cerebrasCalls, 1, 'direct Cerebras hop');
@@ -1879,7 +1879,6 @@ async function testFlash_cerebrasFailureFallsToOpenRouterQwen() {
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'hi' }],
-      claude_token: 'claude-oauth-must-not-run',
     });
     const chunks = await collect(stream);
     assertEqual(cerebrasCalls, 1, 'Cerebras attempted');
@@ -2272,8 +2271,6 @@ async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig
           },
         },
       },
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
       speed: 'fast',
     });
@@ -2315,8 +2312,6 @@ async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProvide
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'route this request' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
       speed: 'fast',
     });
@@ -2359,8 +2354,6 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'route this request' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
       speed: 'fast',
     });
@@ -4592,18 +4585,61 @@ async function testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotat
   });
 }
 
+async function testFlashSubscriptionsBeforeCerebras() {
+  await withFundedCredentials(async () => {
+    process.env.CEREBRAS_API_KEY = 'test-cerebras';
+    try {
+      for (const model of ['rose-labs/rose-1-flash', 'rose-labs/rose-1-browser-use']) {
+        for (const available of [true, false]) {
+          const calls: string[] = [];
+          const leases = fakeSubscriptionLeases(
+            available ? [{ type: 'gpt', accessToken: 'flash-token' }] : []
+          );
+          installFetchStub((url) => {
+            if (url === CODEX_API_URL) {
+              calls.push('subscription');
+              return sseResponse(RESPONSES_OK_SSE);
+            }
+            if (url.includes('api.cerebras.ai')) {
+              calls.push('cerebras');
+              return sseResponse(OPENROUTER_OK_SSE);
+            }
+            throw new Error(`Unexpected paid route: ${url}`);
+          });
+          const chunks = await collect(
+            await createStreamingCompletion({
+              model,
+              messages: [{ role: 'user', content: 'hi' }],
+              subscription_leases: leases.source,
+            })
+          );
+          assertEqual(
+            JSON.stringify(calls),
+            available ? '["subscription"]' : '["cerebras"]',
+            model
+          );
+          assertEqual(leases.requests.length, 1, 'one availability lookup');
+          assert(chunks.length > 0, 'selected route returns content');
+        }
+      }
+    } finally {
+      delete process.env.CEREBRAS_API_KEY;
+    }
+  });
+}
+
 async function testSubscriptionFirst_poolWithoutSubscriptionLegsNeverLeases() {
   await withFundedCredentials(async () => {
     installSubscriptionOrderStub({ foundry: 'ok' });
     const leases = fakeSubscriptionLeases([{ type: 'claude', accessToken: 'claude-a' }]);
     await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-local',
         messages: [{ role: 'user', content: 'hi' }],
         subscription_leases: leases.source,
       })
     ).catch(() => []);
-    assertEqual(leases.requests.length, 0, 'flash pool never consults the lease source');
+    assertEqual(leases.requests.length, 0, 'local pool never consults the lease source');
   });
 }
 
@@ -4782,7 +4818,7 @@ async function main(): Promise<void> {
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
     },
     {
-      name: 'flash / skips auth and hits Cerebras Qwen',
+      name: 'flash / no compute token uses Cerebras Qwen',
       fn: testFlash_skipsAuthAndHitsCerebrasQwen,
     },
     {
@@ -5031,6 +5067,10 @@ async function main(): Promise<void> {
     {
       name: 'subscription-first / tokenless caller leases once; deadline stops rotation',
       fn: testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotation,
+    },
+    {
+      name: 'subscription-first / Flash and browser try compute tokens before Cerebras',
+      fn: testFlashSubscriptionsBeforeCerebras,
     },
     {
       name: 'subscription-first / pool without subscription legs never leases',

@@ -228,7 +228,7 @@ def test_oss_pool_is_open_weights_only():
 
     assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
     assert foundry_model(oss) != oss.gpt_auth_model
-    # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
+    # Speed pools allow subscriptions while skipping funded API keys.
     # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
     auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61", "rose-local"}
     for name, spec in POOL_REGISTRY.items():
@@ -314,6 +314,7 @@ def test_pool_registry_lookup():
     assert flash.waterfall_reasoning_effort == "medium"
     assert flash.foundry_model == "gpt-6-luna"
     assert flash.direct_auth_enabled is False
+    assert flash.subscription_auth_enabled is True
     assert flash.cerebras_model == "qwen-3.8-27b"
     assert flash.cerebras_reasoning_effort == "high"
     assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
@@ -332,6 +333,7 @@ def test_pool_registry_lookup():
     assert browser_use.waterfall == ("qwen/qwen3.8-27b", "google/gemini-3.8-flash")
     assert browser_use.waterfall_reasoning_effort == "low"
     assert browser_use.direct_auth_enabled is False
+    assert browser_use.subscription_auth_enabled is True
     assert browser_use.cerebras_model == "qwen-3.8-27b"
     assert browser_use.cerebras_reasoning_effort == "high"
     assert ultra.waterfall_reasoning_effort is None
@@ -1139,7 +1141,7 @@ def test_every_browser_route_model_sees_images():
     blind = []
     for name, spec in POOL_REGISTRY.items():
         routes = [*spec.waterfall, *([spec.cerebras_model] if spec.cerebras_model else [])]
-        if spec.direct_auth_enabled:
+        if spec.direct_auth_enabled or spec.subscription_auth_enabled:
             routes += [spec.claude_auth_model, spec.gpt_auth_model]
         blind += [(name, model) for model in routes if not route_model_accepts_images(model)]
     assert blind == [], f"image-serving routes without vision: {blind}"
@@ -6352,7 +6354,7 @@ async def test_client_collect_waterfall_only_path():
 
 
 async def test_flash_skips_auth_and_hits_cerebras_qwen():
-    """rose-fast goes Cerebras qwen-3.8-27b even when Claude/GPT tokens are set."""
+    """Without a compute token, Flash uses Cerebras Qwen at high effort."""
     sse_ok = "\n".join(
         _openai_sse(
             [
@@ -6398,8 +6400,8 @@ async def test_flash_skips_auth_and_hits_cerebras_qwen():
                     },
                     {"role": "user", "content": "hi"},
                 ],
-                claude_auth=ClaudeAuthContext(token="sk-ant-oat01-test", source="user", user_id="u"),
-                gpt_auth=gpt_auth_from_token("gt-test", "acct"),
+                claude_auth=None,
+                gpt_auth=None,
             )
         )
     assert seen["cerebras"] == 1
@@ -9124,6 +9126,40 @@ async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: 
     metadata = next(c for c in chunks if c.kind == "metadata").data
     text = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
     return calls, fetches, metadata, text
+
+
+async def test_flash_and_browser_subscriptions_before_cerebras():
+    async def _ok_stream(model, pool_name, text):
+        yield StreamChunk(kind="metadata", data={"actual_model": model, "pool_name": pool_name})
+        yield StreamChunk(kind="content", data={"text": text})
+        yield StreamChunk(kind="done", data={})
+
+    for pool in ("rose-1-flash", "rose-1-browser-use"):
+        for available in (True, False):
+            calls = []
+
+            async def subscription(**kwargs):
+                calls.append("subscription")
+                async for chunk in _ok_stream(kwargs["pool_spec"].gpt_auth_model + "-gpt", "gpt-token", "ok"):
+                    yield chunk
+
+            async def cerebras(**kwargs):
+                calls.append("cerebras")
+                async for chunk in _ok_stream("qwen-3.8-27b", pool, "ok"):
+                    yield chunk
+
+            with (
+                patch("providers.rose.client.gpt_auth_complete", subscription),
+                patch("providers.rose.client.cerebras_complete", cerebras),
+                patch("providers.rose.client._cerebras_api_key", return_value="test-key"),
+                patch("providers.rose.client._openai_api_key", side_effect=AssertionError("paid key lookup")),
+            ):
+                chunks = await _drain(RoseClient().complete(
+                    pool=pool, messages=[{"role": "user", "content": "hi"}],
+                    gpt_auth=_pool_lease("gpt", "flash-token") if available else None,
+                ))
+            assert calls == (["subscription"] if available else ["cerebras"]), (pool, calls)
+            assert chunks
 
 
 async def test_client_rotates_through_every_subscription_before_funded_key():
@@ -12138,6 +12174,7 @@ async def run_all_tests():
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
     )
+    await r.record_async("flash_and_browser_subscriptions_first", test_flash_and_browser_subscriptions_before_cerebras)
     await r.record_async(
         "client_rotates_every_subscription_before_funded_key",
         test_client_rotates_through_every_subscription_before_funded_key,

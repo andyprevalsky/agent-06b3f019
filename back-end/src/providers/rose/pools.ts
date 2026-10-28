@@ -47,9 +47,11 @@ export interface PoolSpec {
    */
   waterfallReasoningEffort?: string;
   /**
-   * When false, skip Claude/GPT OAuth and funded API keys. Default true.
+   * When false, skip funded API keys and, unless overridden below, subscriptions. Default true.
    */
   directAuthEnabled?: boolean;
+  /** Permit compute subscriptions independently of funded API-key routes. */
+  subscriptionAuthEnabled?: boolean;
   /** Bare Cerebras inventory id posted to api.cerebras.ai, not OpenRouter. */
   cerebrasModel?: string;
   cerebrasReasoningEffort?: string;
@@ -82,6 +84,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     // Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
     waterfallReasoningEffort: 'medium',
     directAuthEnabled: false,
+    subscriptionAuthEnabled: true,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
     foundryEnabled: true,
@@ -106,6 +109,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     waterfall: ['qwen/qwen3.8-27b', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
     directAuthEnabled: false,
+    subscriptionAuthEnabled: true,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
     foundryEnabled: true,

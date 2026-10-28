@@ -400,7 +400,8 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     let claudeAuthFailed: RoseError | null = null;
     let gptAuthFailed: RoseError | null = null;
     let openAiApiKeyFailed: RoseError | null = null;
-    if (allowDirectAuth) {
+    const allowSubscriptions = poolSpec.subscriptionAuthEnabled ?? allowDirectAuth;
+    if (allowSubscriptions) {
       let subscriptions;
       try {
         subscriptions = yield* runSubscriptionLegs({
