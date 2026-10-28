@@ -235,7 +235,28 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/d
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'DEFAULT_MAX_WORKERS = 8' "command-structural runner must bound default host admission"
-require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=DEFAULT_MAX_WORKERS' "command-structural runner must use bounded default admission"
+# Exercise the default CLI branch; source spelling is not admission behavior.
+python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY_ADMISSION'
+import importlib.util
+import sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('structural_admission_contract', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
+spec.loader.exec_module(runner)
+assert runner.DEFAULT_MAX_WORKERS == 8
+for cpus, expected in ((None, 1), (1, 1), (8, 4), (14, 8), (128, 8)):
+    with patch.object(runner.os, 'cpu_count', return_value=cpus):
+        assert runner.default_max_workers() == expected
+        for status in (0, 1):
+            with patch.object(sys, 'argv', [str(runner.__file__)]), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=status) as run:
+                assert runner.main() == status
+                run.assert_called_once_with(runner.GATES, max_workers=expected, failure_state=runner.ROOT / runner.FAILURE_STATE)
+with patch.object(sys, 'argv', [str(runner.__file__), '--max-workers', '3']), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'run_gates', return_value=1) as run:
+    assert runner.main() == 1
+    run.assert_called_once_with(runner.GATES, max_workers=3, failure_state=runner.ROOT / runner.FAILURE_STATE)
+print('PASS: scaled bounded defaults, explicit override, full registry, failure propagation')
+PY_ADMISSION
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
@@ -250,7 +271,10 @@ require_text "$DEPLOY_COMMAND" 'BACKEND_COVERAGE_FAILED_FIRST=1' "/deploy backen
 require_text "$ROOT_DIR/back-end/package.json" '"test:coverage:sharded": "bash scripts/run-coverage-sharded.sh 2 &&' "backend sharded coverage must keep two shards and the teardown check"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" '--check-coverage' "sharded backend coverage must enforce thresholds on the merged report"
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE"' "/deploy gate waits must wake on stage receipts, not fixed polls"
-require_text "$DEPLOY_COMMAND" 'Mac release is a non-blocking post-merge canary' "/deploy must not hold production verification on the Mac release"
+require_text "$DEPLOY_COMMAND" 'The applicable Mac release remains a required production gate' "/deploy must retain required applicable Mac release completion"
+require_text "$DEPLOY_COMMAND" 'including the Mac release, remains a hard gate' "parallel production checks must retain the Mac release gate"
+require_text "$DEPLOY_COMMAND" 'never close it `clean` merely because the Claude fallback is disabled' "disabled fallback must not waive substantive CodeRabbit review"
+require_text "$ROOT_DIR/CLAUDE.md" 'Selected subsets are diagnostic-only and cannot satisfy a deploy gate' "affected subsets must not replace full deploy coverage"
 require_text "$DEPLOY_COMMAND" 'Promoting prebuilt worker image' "/deploy must document prebuilt worker-image promotion"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"

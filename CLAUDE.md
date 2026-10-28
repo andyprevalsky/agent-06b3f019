@@ -1014,8 +1014,9 @@ deploy lane, the tests a change can reach. Rules:
   subprocess paths computed at runtime, env) that the graph cannot see: add an
   `edges` entry (`from` globs → `to_files` or `to_lanes`) to
   `scripts/test-map/edges.json`, or name the path literally in the test.
-- A selected subset runs without the lane's global coverage threshold; the
-  threshold applies only when the lane runs in full.
+- Selected subsets are diagnostic-only and cannot satisfy a deploy gate. They
+  omit the lane's global coverage threshold; deployment still requires the
+  complete final suite and its unchanged global coverage thresholds.
 
 ## Deploy command regression scheduling
 

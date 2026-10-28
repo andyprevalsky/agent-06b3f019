@@ -227,7 +227,7 @@ class BlackboxResult:
         detail = type(error).__name__
         if str(error):
             detail += f": {error}"
-        self.errors.append(f"{name}: {detail}")
+        self.errors.append(f"{name}: {str(error) or type(error).__name__}")
         print(f"  ❌ {name}: {detail}")
         traceback.print_exception(type(error), error, error.__traceback__)
 

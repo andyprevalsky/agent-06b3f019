@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/cloudbench-provider-capacity.py"
@@ -300,6 +301,10 @@ class ProviderCapacityBrowserProviderTests(unittest.TestCase):
 
 class ProviderCapacityCampaignTests(unittest.TestCase):
     def setUp(self) -> None:
+        # In-process helper calls need the same isolated policy as subprocesses.
+        environment = patch.dict(os.environ, clean_env(), clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.tmp = Path(tempfile.mkdtemp(prefix="provider-capacity-campaign-"))
         self.addCleanup(shutil.rmtree, self.tmp)
         # A disposable control root: the real helper/registry and a run-bench

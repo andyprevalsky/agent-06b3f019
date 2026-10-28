@@ -185,6 +185,14 @@ async def async_main() -> int:
     }
     (artifact_dir / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Agents blackbox: {summary['passed']} passed, {summary['failed']} failed, {summary['total']} total")
+    if failures:
+        # Machine-readable terminal inventory excludes expected failures in
+        # domain logs from the factory's stage classification.
+        print("FACTORY_TEST_FAILURE " + json.dumps({
+            "runner": "agents-blackbox-domains", "passed": summary["passed"],
+            "failed": summary["failed"], "total": summary["total"],
+            "failing": [result.domain for result in failures],
+        }, sort_keys=True))
     return 1 if failures else 0
 
 

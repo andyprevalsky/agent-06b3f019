@@ -1909,8 +1909,8 @@ bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --time
 
 Run it with `run_in_background` (it starts at the freeze push and overlaps
 Group 3/4). The Claude fallback is disabled (Step 9a), so this waits only for
-CodeRabbit; there is no fallback race. If CodeRabbit ends unavailable, follow
-Step 9a's usage-exhaustion clause.
+CodeRabbit; there is no fallback race. Only confirmed usage exhaustion follows
+Step 9a's skip clause; other missing substantive reviews hold the merge.
 
 This fails if the PR HEAD changes while waiting, preventing an older success
 from satisfying the gate. **A green check alone does not prove a substantive
@@ -1939,15 +1939,15 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 
 **The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only). If someone dispatches it manually, its `Diagnose Claude failure` step classifies a failure as `CREDENTIAL_INVALID` (401, revoked secret) or `USAGE_EXHAUSTED` (429); `is_error:true`, 1 turn, ~2s and `$0` alone are not exhaustion (RCA 2026-10-28). That diagnosis never re-enables the fallback in `/deploy`.
 
-When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green) and then follow the clause below: record the `⚠️ Skipped` row, close the cycle `clean`, and proceed. Do not repeatedly request reviews during a quota window.
+When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green). Only confirmed quota, spending-cap or review-limit exhaustion follows the clause below. A missing, failed, timed-out, service-error, false-green or file-limit review without substantive results remains blocked; never close it `clean` merely because the Claude fallback is disabled. Keep the same immutable cycle open while investigating and observing provider recovery; do not consume another cycle or repeatedly request reviews during a quota window.
 
 ### Review-provider usage exhaustion: TANK THROUGH, never ask
 
 **This is pre-authorized. Do NOT stop. Do NOT ask the user for permission, approval, an override, a top-up, or a decision. Do NOT wait out a quota window. Record it and keep deploying.** The review gate exists to catch code defects, not to block on billing state; the agent cannot fix user-owned billing, so pausing to ask only stalls the deploy at zero information gain. This clause **overrides** every contrary instruction in this command — the Step 6 "Escalation is ONLY for … out of credits/funds" list, the "credential/billing escalation" halt in Step 0, and the "if the workflow fails, do not merge" line above. Escalating a review-credit block is a deploy defect, not caution.
 
-**Trigger — CodeRabbit is unavailable (the Claude fallback is disabled):**
+**Trigger — confirmed CodeRabbit usage exhaustion (the Claude fallback is disabled):**
 
-- CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
+- CodeRabbit: an explicit usage quota, spending cap, "Review limit reached", or quota comment in place of a review. A bare 429, service error, missing review or file-count limit is not proof of usage exhaustion.
 
 **What to do, mechanically:**
 
@@ -2049,12 +2049,12 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
 - **GRAPHIDE CRITICAL FINDING** (Step 9b, cycle 1 only) → treat as a valid
   finding: close as `findings` and include the fix in the same batch. Graphide
   skipped or only non-critical findings → no effect on the cycle result.
-- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check; the Claude fallback is disabled) → close the cycle `--result clean`, record the
-  `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
-  "Review-provider usage exhaustion: TANK THROUGH, never ask."
-- **REVIEW SKIPPED** (e.g., "Too many files!") → record the `⚠️ Skipped` row and close the cycle `clean` for the current
-  immutable HEAD (the Claude fallback is disabled). Do not push filter edits while the review
-  cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
+- **CODE RABBIT USAGE-EXHAUSTED** (confirmed quota, spending cap or review-limit exhaustion) → close the cycle `--result clean`, record the
+  `⚠️ Skipped` row, and keep going under Step 9a's existing usage-exhaustion exception.
+- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → keep the merge blocked and follow Step 9a's bounded retry and provider-recovery path. The disabled Claude fallback does not waive substantive review.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → keep the current immutable
+  HEAD blocked until a substantive review is obtained. Do not close it `clean`
+  or push filter edits while the review cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
   the canonical safe-filter set for a later stabilized commit because those
   paths are already gated locally:
   ```yaml
@@ -2284,18 +2284,17 @@ the serving bank passes a fresh health check, retires the old bank concurrently
 (`for_each_machine` in `scripts/worker_pool_cutover.py`); each Machine keeps its
 own native lease and ownership checks, and the cooperative drain is unchanged.
 
-**Mac release is a non-blocking post-merge canary.** Start its watch with
-`run_in_background` and do not hold `production-verify`, Step 13b or the
-final handoff on it. When it finishes, record `production-finish mac-release`
-on success. On failure, report it in SHIPPED WITH as `▲ mac-release canary
-failed <run>` and fix it forward through the normal RCA/deploy loop; the
-signed Mac build is not a gate for the web/worker release.
+**The applicable Mac release remains a required production gate.** Start its
+watch with `run_in_background` alongside the independent provider lanes and
+Step 13b. Record `production-finish mac-release` only on success. A failed or
+unverified applicable release keeps `production-verify` and deploy completion
+open; diagnose and repair it through the normal RCA/deploy loop.
 
 **Post-Render checks run in parallel.** As soon as Render serves the merged
 SHA (Step 13a step 1), launch the Step 13a functional probes and log scan,
 Step 13b production semantics (once Vercel/Fly surfaces it exercises are also
-live) and Step 13c in separate parallel tool calls. Each remains a hard gate
-except the Mac canary above; a red probe still blocks completion.
+live) and Step 13c in separate parallel tool calls. Each applicable lane,
+including the Mac release, remains a hard gate; a red probe blocks completion.
 
 Prefix each marker above with
 `python3 scripts/record_factory_event.py`. For example, the full Fly start is
@@ -2862,10 +2861,9 @@ another live card or require a human-saved live Stripe card merely to replace
 that waived result. If the process was forcibly killed, recover the printed
 agent's execution/browser resources before assessing the financial exception.
 
-After every applicable production deployment, health, semantic, and AgentCard
-gate has passed or has this explicitly permitted warning skip, close the
-production-verification lifecycle. The Mac release is a non-blocking canary
-(Step 13) and is reported separately:
+After every applicable production deployment, health, semantic, release, and
+AgentCard gate has passed or has this explicitly permitted warning skip, close
+the production-verification lifecycle:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish production-verify

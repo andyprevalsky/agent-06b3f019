@@ -192,6 +192,37 @@ def scan_log(text: str) -> dict[str, Any]:
     return detail
 
 
+def reported_test_failure(text: str) -> dict[str, Any]:
+    """Use only a terminal runner inventory, never a stale nested marker."""
+    prefix = "FACTORY_TEST_FAILURE "
+    lines = text.rstrip().splitlines()
+    if not lines or not lines[-1].startswith(prefix):
+        return {}
+    try:
+        value = json.loads(lines[-1][len(prefix):])
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(value, dict) or value.get("runner") != "agents-blackbox-domains":
+        return {}
+    counts = [value.get(key) for key in ("passed", "failed", "total")]
+    if not all(type(count) is int and count >= 0 for count in counts):
+        return {}
+    passed, failed, total = counts
+    names = value.get("failing")
+    if failed == 0 or passed + failed != total or not isinstance(names, list):
+        return {}
+    if len(names) != failed or any(
+        not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]+", name)
+        for name in names
+    ):
+        return {}
+    if len(set(names)) != failed:
+        return {}
+    return {"failure_class": "test-failure", "failure_class_source": "runner-summary",
+            "count_source": "agents-blackbox-domains", "passed_count": passed,
+            "failed_count": failed, "total_count": total, "failing": _bounded_names(names)}
+
+
 def outcome_detail(exit_code: int, log_text: str) -> dict[str, Any]:
     scanned = scan_log(log_text)
     if exit_code == 0:
@@ -209,6 +240,12 @@ def outcome_detail(exit_code: int, log_text: str) -> dict[str, Any]:
                 "selected_count", "selectable_total"):
         if key in scanned:
             out[key] = scanned[key]
+    if exit_code == 1:
+        reported = reported_test_failure(log_text)
+        if reported:
+            if scanned.get("log_failure_class"):
+                out["unverified_log_failure_hint"] = scanned["log_failure_class"]
+            out.update(reported)
     if exit_code == 0:
         out.pop("failing", None)
     return out

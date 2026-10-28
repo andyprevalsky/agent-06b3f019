@@ -265,6 +265,88 @@ class FactoryDetailTest(unittest.TestCase):
         self.assertIsNone(passed["failure_class"])
         self.assertNotIn("failing", passed)
 
+    def test_explicit_domain_failure_wins_over_expected_network_logs(self):
+        from factory_detail import outcome_detail
+
+        # A real coverage run contained expected connection failures before
+        # its terminal 121-pass/2-fail domain inventory.
+        log = 'trace_archive.backend_store_error error="Connection refused"\n'
+        log += 'Agents blackbox: 121 passed, 2 failed, 123 total\n'
+        report = {"runner": "agents-blackbox-domains", "passed": 121,
+                  "failed": 2, "total": 123,
+                  "failing": ["benchmark", "rose-browser-use"]}
+        marked = log + "FACTORY_TEST_FAILURE " + json.dumps(report) + "\n"
+        detail = outcome_detail(1, marked)
+        self.assertEqual(detail["failure_class"], "test-failure")
+        self.assertEqual(detail["failure_class_source"], "runner-summary")
+        self.assertEqual(detail["unverified_log_failure_hint"], "network")
+        self.assertEqual(detail["failing"], ["benchmark", "rose-browser-use"])
+        self.assertEqual((detail["passed_count"], detail["failed_count"], detail["total_count"]), (121, 2, 123))
+        self.assertEqual(detail["count_source"], "agents-blackbox-domains")
+        self.assertIsNone(outcome_detail(0, marked)["failure_class"])
+        self.assertEqual(outcome_detail(143, marked)["exit_code"], 143)
+        for bad in ({**report, "total": 999}, {**report, "failed": True},
+                    {**report, "failing": ["benchmark", "Authorization: Bearer secret"]}):
+            invalid = outcome_detail(1, log + "FACTORY_TEST_FAILURE " + json.dumps(bad))
+            self.assertNotIn("failure_class_source", invalid)
+
+    def test_domain_runner_publishes_failure_inventory_without_changing_exit(self):
+        import asyncio
+        import contextlib
+        import importlib.util
+        import io
+        from factory_detail import outcome_detail
+
+        path = ROOT / "agents/scripts/run_coverage_blackbox_parallel.py"
+        spec = importlib.util.spec_from_file_location("test_failure_inventory_runner", path)
+        runner = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = runner
+        spec.loader.exec_module(runner)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                output = io.StringIO()
+                root = Path(directory)
+
+                async def fake_domain(domain, semaphore, coverage, artifacts):
+                    log = artifacts / (domain + ".log")
+                    log.write_text("expected Connection refused negative control\n")
+                    return runner.DomainResult(domain, domain == "healthy", 0.1,
+                                               str(log.relative_to(root)),
+                                               0 if domain == "healthy" else 1)
+
+                with patch.object(runner, "ROOT_DIR", root), patch.object(
+                    runner, "discover_domains", return_value=["healthy", "broken"]
+                ), patch.object(runner, "run_domain", side_effect=fake_domain), patch.dict(
+                    os.environ, {"COVERAGE_BIN": sys.executable}
+                ), contextlib.redirect_stdout(output):
+                    status = asyncio.run(runner.async_main())
+                self.assertEqual(status, 1)
+                records = list((root / ".context/test-runs").glob("*/results.json"))
+                self.assertEqual(len(records), 1)
+                inventory = json.loads(records[0].read_text())
+                self.assertEqual((inventory["passed"], inventory["failed"]), (1, 1))
+                result = outcome_detail(status, output.getvalue())
+                self.assertEqual(result["failing"], ["broken"])
+                self.assertEqual(result["failure_class_source"], "runner-summary")
+                self.assertEqual(result["unverified_log_failure_hint"], "network")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_failure_inventory_must_be_terminal(self):
+        from factory_detail import outcome_detail
+
+        report = {"runner": "agents-blackbox-domains", "passed": 121,
+                  "failed": 2, "total": 123,
+                  "failing": ["benchmark", "rose-browser-use"]}
+        marker = "FACTORY_TEST_FAILURE " + json.dumps(report) + "\n"
+        for suffix in ("later command failed\n", "FACTORY_TEST_FAILURE malformed\n"):
+            result = outcome_detail(1, marker + suffix)
+            self.assertNotIn("failure_class_source", result)
+            self.assertNotIn("count_source", result)
+            self.assertNotIn("failing", result)
+        terminal = outcome_detail(1, marker + "\n  \n")
+        self.assertEqual(terminal["failure_class_source"], "runner-summary")
+
     def test_names_never_copy_secrets_or_unbounded_text(self):
         from factory_detail import MAX_TEXT, safe_text, scan_log
 

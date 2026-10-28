@@ -206,7 +206,8 @@ Module._load = function (id, parent, isMain) {
       return { closeSession: closeNative, resumeSession: resumeNative };
   }
   if (owner.endsWith('/browser/sessionCleanup.ts')) {
-    if (id === './kernel') return { releaseKernelRemoteSession: releaseNativeCandidate };
+    if (id === './kernelSessionDelete')
+      return { releaseKernelRemoteSession: releaseNativeCandidate };
     if (id === '../steel/session') return { releaseSteelRemoteSession: releaseNativeCandidate };
     if (id === './browserUse') return { releaseBrowserUseRemoteSession: releaseNativeCandidate };
     if (id === './tilion') return { releaseTilionRemoteSession: releaseNativeCandidate };
