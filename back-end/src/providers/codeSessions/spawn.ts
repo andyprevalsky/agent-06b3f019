@@ -5,6 +5,7 @@
 import { Sandbox } from 'e2b';
 import { rootPreviewPath } from '../codePreview/rootPath';
 import { prisma } from '../database';
+import { E2BSandboxCapacityError } from '../e2bSandboxCreate';
 import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
@@ -49,6 +50,9 @@ export function codeSessionHttpError(
   }
   if (error instanceof CodeSessionBusyError) {
     return { status: 409, body: { error: error.message, code: 'CODE_SESSION_BUSY' } };
+  }
+  if (error instanceof E2BSandboxCapacityError) {
+    return { status: error.statusCode, body: { error: error.message, code: error.code } };
   }
   return null;
 }

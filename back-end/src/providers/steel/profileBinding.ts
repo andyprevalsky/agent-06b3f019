@@ -1,3 +1,4 @@
+import { INVALIDATED_STEEL_PROFILE_SOURCE } from '../browser/profileBinding';
 import { benchmarkIsolatedBrowserProfilesEnabled } from '../browser/benchmarkProfileIsolation';
 import { log } from './types';
 
@@ -89,4 +90,32 @@ export function shouldWriteSteelProfileToBrowserContext(profile: {
     !profile.profileSource.startsWith('benchmark_anon') &&
     profile.profileSource !== 'steel_session_auth_read_only'
   );
+}
+
+/**
+ * The recorded provider profile id that Steel may legitimately reload.
+ *
+ * Only a prior STEEL session's recorded profile is a valid Steel profile id.
+ * On a provider switch (e.g. the rotate ladder's Kernel → Steel rung) the
+ * recorded providerProfileId belongs to the other provider — a non-UUID Kernel
+ * profile — which Steel rejects with "400 profileId must be a valid UUID".
+ * Returns null for any non-Steel-origin or unrecorded profile so the caller
+ * falls back to the context's Steel-native persisted profile (or none).
+ */
+export function reusableSteelRecordedProfileId(oldSession: {
+  provider: string;
+  providerProfileId?: string | null;
+  // Required on purpose: an object literal that omits this compiles with
+  // `undefined`, which passes the invalidated-source check below and reuses a
+  // profile that was explicitly invalidated. Every caller reads a Prisma row,
+  // so they can all supply it.
+  providerProfileSource: string | null;
+}): string | null {
+  const wasSteel = oldSession.provider === 'steel';
+  return wasSteel &&
+    oldSession.providerProfileSource !== INVALIDATED_STEEL_PROFILE_SOURCE &&
+    typeof oldSession.providerProfileId === 'string' &&
+    oldSession.providerProfileId !== ''
+    ? oldSession.providerProfileId
+    : null;
 }

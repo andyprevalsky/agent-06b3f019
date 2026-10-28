@@ -6,8 +6,13 @@ import { browserResumeScope, resumeNativeCreate } from '../steel/lifecycleClaim'
 import { randomUUID } from 'node:crypto';
 import { kernelClient } from './kernelClient';
 import { request } from './browserUseClient';
+import { steel } from '../steel/session';
 
 export async function inspectResumeCandidate(provider: string, marker: string, identity: string) {
+  if (provider === 'steel') {
+    const native = await steel.sessions.retrieve(marker);
+    return { id: native.id, status: native.status === 'live' ? 'active' : native.status };
+  }
   if (provider === 'kernel') {
     const matches = [];
     for await (const browser of kernelClient().browsers.list(

@@ -16071,6 +16071,105 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
     ]
 
 
+async def test_deploy_claude_preflight_excludes_shared_fallbacks():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    requests = []
+    def missing(request):
+        requests.append(request)
+        return httpx.Response(404, json={'error': 'NoTokensAvailable'})
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_has_usable_anthropic_api_key_fallback', new=AsyncMock(return_value=True)) as fallback, \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing), **kw)):
+        assert await bench._check_claude_code_credentials('http://fixture.invalid') is False
+        fallback.assert_not_awaited()
+    assert len(requests) == 1 and requests[0].url.path == '/api/integrations/claude-code/credentials/token'
+
+
+async def test_deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    current = {'status': 200, 'body': {'accessToken': 'fixture-token', 'source': 'pool'}}
+    def respond(request):
+        if current.get('network_error'):
+            raise httpx.ConnectError('offline', request=request)
+        return httpx.Response(current['status'], json=current['body'])
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_has_usable_anthropic_api_key_fallback', new=AsyncMock(return_value=True)) as fallback, \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for source in ('user', 'pool'):
+            current['body']['source'] = source
+            assert await bench._check_claude_code_credentials('http://fixture.invalid') is True
+        for case in [
+            {'status': 401, 'body': {}}, {'status': 500, 'body': {}},
+            {'status': 200, 'body': {}}, {'status': 200, 'body': []},
+            {'status': 200, 'body': {'accessToken': ''}},
+            {'status': 200, 'body': {'accessToken': True}},
+            {'status': 200, 'body': {}, 'network_error': True},
+        ]:
+            current.clear()
+            current.update(case)
+            try:
+                await bench._check_claude_code_credentials('http://fixture.invalid')
+            except (RuntimeError, httpx.HTTPError):
+                pass
+            else:
+                raise AssertionError(f'Unknown credential availability became skip/pass: {case}')
+        fallback.assert_not_awaited()
+
+
+async def test_normal_code_preflight_preserves_shared_fallback():
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    config = {}
+    requests = []
+    def respond(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith('/credentials/token'):
+            return httpx.Response(404, json={})
+        return httpx.Response(200, json=config)
+    with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '0'}), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for funded in [
+            {'configured': True, 'onCooldown': False, 'openrouterConfigured': False},
+            {'configured': True, 'onCooldown': True, 'openrouterConfigured': True},
+        ]:
+            config.clear()
+            config.update(funded)
+            requests.clear()
+            assert await bench._check_claude_code_credentials('http://fixture.invalid') is True
+            assert requests == ['/api/integrations/claude-code/credentials/token',
+                                '/api/integrations/compute-code/anthropic-key/cooldown']
+
+
+async def test_code_dispatch_skip_remains_opt_in():
+    import benchmarks.run_benchmark as bench
+    from unittest.mock import patch
+    task = bench.get_task_by_name('claude-code-agent')
+    with patch.object(bench, '_check_claude_code_credentials', new=AsyncMock(return_value=False)), \
+         patch.object(bench, '_run_single_task_as_run_user', new=AsyncMock(side_effect=AssertionError('task must not launch'))) as launch:
+        with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '1'}):
+            result = await bench.run_single_task('http://fixture.invalid', task)
+            assert result.status == 'SKIPPED' and not result.passed and result.agent_id == ''
+        with patch.dict(bench.os.environ, {'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP': '0'}):
+            try:
+                await bench.run_single_task('http://fixture.invalid', task)
+            except RuntimeError as exc:
+                assert 'credentials unavailable at task dispatch' in str(exc)
+            else:
+                raise AssertionError('Unapproved credential skip masked a required task')
+        launch.assert_not_awaited()
+
+
 async def test_claude_code_preflight_uses_runtime_credential_route():
     """Claude Code smoke gating must use the same credential route as session creation."""
     import benchmarks.run_benchmark as bench
@@ -26365,6 +26464,10 @@ async def run_all_tests():
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
     )
+    await r.record_async("deploy_claude_preflight_excludes_shared_fallbacks", test_deploy_claude_preflight_excludes_shared_fallbacks)
+    await r.record_async("deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence", test_deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence)
+    await r.record_async("normal_code_preflight_preserves_shared_fallback", test_normal_code_preflight_preserves_shared_fallback)
+    await r.record_async("code_dispatch_skip_remains_opt_in", test_code_dispatch_skip_remains_opt_in)
     await r.record_async(
         "claude_code_preflight_uses_runtime_credential_route",
         test_claude_code_preflight_uses_runtime_credential_route,

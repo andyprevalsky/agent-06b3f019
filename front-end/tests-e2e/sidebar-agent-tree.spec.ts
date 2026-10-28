@@ -140,18 +140,29 @@ for (const width of [320, 390, 700]) {
   test(`mobile drawer fills all ${width}px of the viewport`, async ({ page }) => {
     await openSidebarPreview(page, width);
     const header = page.getByTestId('rose-mobile-header');
+    const back = header.getByRole('button', { name: 'Back', exact: true });
     const menu = header.getByRole('button', { name: 'Open menu', exact: true });
     const rose = header.getByRole('button', { name: 'Rose', exact: true });
+    // The preview opens an agent: Back sits far left, the agents menu after it.
+    const backRect = await back.boundingBox();
     const menuRect = await menu.boundingBox();
-    const roseRect = await rose.boundingBox();
-    expect(menuRect!.x).toBeLessThan(10);
-    expect(width - (roseRect!.x + roseRect!.width)).toBeLessThan(10);
+    expect(backRect!.x).toBeLessThan(10);
+    expect(menuRect!.x).toBeGreaterThanOrEqual(backRect!.x + backRect!.width - 1);
+    if (width >= 360) {
+      const roseRect = await rose.boundingBox();
+      expect(width - (roseRect!.x + roseRect!.width)).toBeLessThan(10);
+    } else {
+      // Below 360px the Rose icon (also "home") yields its slot to Back.
+      await expect(rose).toBeHidden();
+    }
     const controls = await header.getByRole('button').all();
     const boxes = (await Promise.all(controls.map((button) => button.boundingBox())))
       .filter((box): box is NonNullable<typeof box> => box !== null)
       .sort((a, b) => a.x - b.x);
     for (let i = 1; i < boxes.length; i++)
       expect(boxes[i].x).toBeGreaterThanOrEqual(boxes[i - 1].x + boxes[i - 1].width - 1);
+    const last = boxes[boxes.length - 1];
+    expect(last.x + last.width).toBeLessThanOrEqual(width + 1);
     await menu.click();
     const drawer = page.getByRole('dialog', { name: 'Menu', exact: true });
     await expect(drawer).toBeVisible();

@@ -25,6 +25,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
+    E2B_CAPACITY_EXHAUSTED_CODE,
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from domains.spawn_claude_code_agent.service import (
@@ -199,16 +200,26 @@ def _maybe_soft_fail_session_create_result(
     return None
 
 
-def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError]:
-    """The backend's non-retryable "Mac unavailable" error, if that is what failed."""
+def _typed_application_error(error: BaseException, error_type: str) -> Optional[ApplicationError]:
+    """The backend's typed non-retryable ApplicationError in ``error``'s cause chain, if any."""
     cur: Optional[BaseException] = error
     seen: set[int] = set()
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        if isinstance(cur, ApplicationError) and cur.type == LOCAL_TARGET_UNAVAILABLE_CODE:
+        if isinstance(cur, ApplicationError) and cur.type == error_type:
             return cur
         cur = getattr(cur, "cause", None) or cur.__cause__
     return None
+
+
+def _local_target_unavailable(error: BaseException) -> Optional[ApplicationError]:
+    """The backend's non-retryable "Mac unavailable" error, if that is what failed."""
+    return _typed_application_error(error, LOCAL_TARGET_UNAVAILABLE_CODE)
+
+
+def _e2b_capacity_exhausted(error: BaseException) -> Optional[ApplicationError]:
+    """E2B's concurrent-sandbox limit refusal: a hard failure, never a soft retry hint."""
+    return _typed_application_error(error, E2B_CAPACITY_EXHAUSTED_CODE)
 
 
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
@@ -562,7 +573,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                                     )
                             soft = (
                                 None
-                                if _local_target_unavailable(e) is not None
+                                if _local_target_unavailable(e) is not None or _e2b_capacity_exhausted(e) is not None
                                 else _maybe_soft_fail_session_create_result(code_provider=code_provider, error=e)
                             )
                             if soft is not None:
@@ -777,6 +788,29 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             {**target_info, "device_name": device_name or target_info.get("device_name")},
                             local_unavailable.message,
                         ),
+                    },
+                )
+                return
+
+            capacity = _e2b_capacity_exhausted(e)
+            if capacity is not None:
+                # E2B's plan is full: fail the tool now with the backend's exact
+                # message so the shortage is visible and the plan gets scaled.
+                logger.error(
+                    "[ClaudeCode] E2B concurrent-sandbox limit reached; failing the tool call",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=capacity.message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": E2B_CAPACITY_EXHAUSTED_CODE,
+                        "code_agent": _failed_code_agent(target_info, capacity.message),
                     },
                 )
                 return

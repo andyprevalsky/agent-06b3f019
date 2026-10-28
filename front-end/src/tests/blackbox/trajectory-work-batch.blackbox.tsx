@@ -4,9 +4,11 @@ import { TrajectoryWorkGroup } from '@/features/terminal-component-group/compone
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
+import { ThinkingIndicator } from '@/features/terminal-component-group/components/ThinkingIndicator';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
+vi.mock('@/components/ThinkingAnimation', () => ({ default: () => null }));
 const start = Date.UTC(2026, 9, 21, 12);
 function activity(toolName: string, id = toolName, at = start) {
   return msg(
@@ -179,6 +181,45 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(screen.getByTestId('trajectory-work-group')).not.toHaveAttribute(
       'data-agent-start-phase',
     );
+  });
+  it('thinking always shows the ↓ token counter, live before the first byte or persisted', () => {
+    const live = msg(
+      { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
+      { message_id: 'streaming:thinking', timestamp: '' },
+    );
+    render(
+      <TrajectoryWorkGroup
+        group={group([live])}
+        renderMessage={() => null}
+        indicator={
+          <ThinkingIndicator
+            compact
+            isClaudeStreaming={false}
+            streamingTokenCount={0}
+            animatedTokenCount={0}
+          />
+        }
+      />,
+    );
+    const line = () => screen.getByTestId('trajectory-activity-line');
+    expect(line()).toHaveTextContent(/^Thinking0 tokens$/);
+    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
+    cleanup();
+    const thought = msg(
+      {},
+      {
+        role: 'ASSISTANT',
+        message_id: 'thought',
+        text: 'x'.repeat(400),
+        timestamp: new Date(start).toISOString(),
+      },
+    );
+    render(<TrajectoryWorkGroup group={group([thought])} renderMessage={() => null} />);
+    expect(line()).toHaveTextContent(/^Thinking100 tokens$/);
+    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
+    expect(
+      screen.getByTestId('trajectory-work-group').querySelector('.lucide-lightbulb'),
+    ).not.toBeNull();
   });
   it('does not invent elapsed time for a missing timestamp', () => {
     const untimed = { ...activity('read_file'), timestamp: '' };
