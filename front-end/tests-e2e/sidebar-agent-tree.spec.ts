@@ -306,15 +306,21 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(drawer.getByTestId('rose-agent-row-research')).toHaveCount(0);
 });
 for (const width of [320, 390, 1280]) {
-  test(`model picker is flush bottom left at ${width}px`, async ({ page }) => {
+  // 8f4715813: the attach paperclip sits immediately left of the model name,
+  // so the paperclip is the flush bottom-left control and the picker follows it.
+  test(`attach + model picker are flush bottom left at ${width}px`, async ({ page }) => {
     await openSidebarPreview(page, width);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     const chip = page.getByTestId('query-model-selector').filter({ visible: true }).last();
     await expect(chip).toBeVisible();
     const m = await chip.evaluate((el) => {
       const shell = el.closest('[data-testid="query-input-surface"]')!;
+      const attach = el.previousElementSibling!;
+      if (!attach.querySelector('svg.lucide-paperclip')) {
+        throw new Error('attach paperclip must immediately precede the model picker');
+      }
       const s = shell.getBoundingClientRect(),
-        c = el.getBoundingClientRect();
+        c = attach.getBoundingClientRect();
       const row = shell
           .querySelector('[data-testid="query-input-controls"]')!
           .getBoundingClientRect(),
