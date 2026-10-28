@@ -108,11 +108,14 @@ assert.deepStrictEqual(series, [
     userCount: 3,
     newUsers: 3,
     userIds: new Set(['active-user', 'ended-user', 'tamy-user']),
+    // Completion-rate subscribers: Stripe lifecycles only, no core-team additions.
+    subscribedUserIds: new Set(['active-user', 'ended-user']),
   },
   {
     userCount: 3,
     newUsers: 1,
     userIds: new Set(['active-user', 'trialing-user', 'tamy-user']),
+    subscribedUserIds: new Set(['active-user', 'trialing-user', 'tamy-user']),
   },
 ]);
 

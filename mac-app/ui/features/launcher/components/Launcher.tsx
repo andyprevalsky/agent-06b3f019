@@ -10,7 +10,10 @@
  *   [has_text|has_files] --submit--> [submitting]
  *
  * Border = pre-DnD production shell:
- *   outer + ShaderTile, 2px inset #f5f5f5
+ *   outer + LiquidMetalRing (ui/shared/liquid-metal), 2px inset fill
+ *
+ * Theme: [light] <-> [dark] follows the main window's html.dark
+ *   (ui/shared/theme-sync); palette vars live in config.ts LAUNCHER_GLOBAL_CSS.
  *   Corner radius locked to the idle pill (height/2), so expanding for
  *   files/paragraph does NOT grow into a giant stadium — same ends as before.
  *

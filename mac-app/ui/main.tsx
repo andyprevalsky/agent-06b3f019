@@ -14,8 +14,11 @@ import { getElectronApi } from './lib/electron-api';
 import { useWhatsAppConnect } from './lib/useWhatsAppConnect';
 import { initViewportScale } from './lib/viewport-scale';
 import QuickQueryListener from './features/quick-query-listener';
+import { mirrorDocumentTheme } from './shared/theme-sync';
 
 initViewportScale();
+// The Quick-Query launcher window follows this window's html.dark.
+mirrorDocumentTheme();
 
 // Electron-specific integration handlers
 const electronHandlers = {
