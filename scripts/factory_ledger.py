@@ -37,6 +37,7 @@ STAGE_FIELDS = (
     "duration_seconds",
     "status",
     "exit_code",
+    "telemetry",
 )
 RUN_FIELDS = ("git_sha", "branch")
 EVENT_FIELDS = (
@@ -48,6 +49,7 @@ EVENT_FIELDS = (
     "workspace",
     "git_sha",
     "branch",
+    "telemetry",
 )
 
 
@@ -90,6 +92,14 @@ def row_key(row: dict[str, Any]) -> tuple[Any, ...]:
             row.get("stage"),
             round(float(row.get("started_epoch") or 0.0), 3),
         )
+    if row.get("event") == "metadata" and row.get("value") == "snapshot":
+        return (
+            "factory-metadata",
+            row.get("workflow"),
+            row.get("workspace"),
+            row.get("recorded_epoch"),
+            json.dumps(row.get("telemetry"), sort_keys=True, separators=(",", ":")),
+        )
     return (
         "factory-event",
         row.get("workflow"),
@@ -114,6 +124,8 @@ def stage_rows(root: Path) -> Iterable[dict[str, Any]]:
             record: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "kind": "deploy-stage"}
             record.update({field: row.get(field) for field in STAGE_FIELDS})
             record.update({field: metadata.get(field) for field in RUN_FIELDS})
+            if record.get("telemetry") is None and metadata.get("telemetry") is not None:
+                record["telemetry"] = metadata["telemetry"]
             yield record
 
 
