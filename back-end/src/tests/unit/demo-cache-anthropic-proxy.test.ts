@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert';
+import { createInMemoryTraceOrdinalReserver } from '../../providers/traceOrdinal';
 import {
   anthropicSlotKey,
   resolveAnthropic,
@@ -34,6 +35,9 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+// One process-wide sequence, as the proxy cores had before ordinals became shared.
+const reserveOrdinal = createInMemoryTraceOrdinalReserver();
+
 function makeDeps(seed: Record<string, unknown> = {}): {
   deps: ProxyDeps;
   store: Map<string, unknown>;
@@ -42,6 +46,7 @@ function makeDeps(seed: Record<string, unknown> = {}): {
   const store = new Map<string, unknown>(Object.entries(seed));
   const stats = { cacheGets: 0, upstream: 0 };
   const deps: ProxyDeps = {
+    reserveOrdinal,
     cacheGet: async (key) => {
       stats.cacheGets += 1;
       return { hit: store.has(key), value: store.get(key) ?? null };
@@ -184,6 +189,7 @@ async function main(): Promise<void> {
   await test('secrets stripped from stored value (#26)', async () => {
     const store = new Map<string, unknown>();
     const deps: ProxyDeps = {
+      reserveOrdinal,
       cacheGet: async () => ({ hit: false, value: null }),
       cacheSet: async ({ key, value }) => {
         store.set(key, value);

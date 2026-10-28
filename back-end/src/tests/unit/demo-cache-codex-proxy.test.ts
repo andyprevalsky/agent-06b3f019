@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert';
+import { createInMemoryTraceOrdinalReserver } from '../../providers/traceOrdinal';
 import {
   canonicalizeCodexResponseRequest,
   codeAgentSlotKey,
@@ -29,6 +30,9 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+// One process-wide sequence, as the proxy cores had before ordinals became shared.
+const reserveOrdinal = createInMemoryTraceOrdinalReserver();
+
 function makeDeps(seed: Record<string, unknown> = {}): {
   deps: CodexProxyDeps;
   store: Map<string, unknown>;
@@ -37,6 +41,7 @@ function makeDeps(seed: Record<string, unknown> = {}): {
   const store = new Map<string, unknown>(Object.entries(seed));
   const stats = { cacheGets: 0, upstream: 0 };
   const deps: CodexProxyDeps = {
+    reserveOrdinal,
     cacheGet: async (key) => {
       stats.cacheGets += 1;
       return { hit: store.has(key), value: store.get(key) ?? null };
