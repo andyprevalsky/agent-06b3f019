@@ -6,6 +6,7 @@ import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
 import agentGraphRouter from './domains/agents/routes.graph';
 import agentMcpRouter from './domains/agents/routes.mcp';
+import index01WebhookRouter from './domains/agents/routes.index01';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
@@ -483,6 +484,7 @@ app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-
 app.use('/api/agents', codeAgentDirectChatRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/agent-graph', agentGraphRouter);
+app.use('/api/index01', index01WebhookRouter); // Index 01 webhook: transcript → plan-mode agent
 app.use('/mcp', agentMcpRouter); // Index 01 (Pebble) MCP: spawn_agent → plan-mode cloud agent
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
