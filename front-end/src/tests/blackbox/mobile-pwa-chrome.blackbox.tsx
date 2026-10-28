@@ -334,6 +334,27 @@ describe('Quick right-click release over a context menu item', () => {
     fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
+
+  it('a release consumes the reach, so a still item that stays mounted cannot select again', async () => {
+    // preventDefault keeps the menu (and the same mounted item) open after a select.
+    const onDelete = vi.fn((event: Event) => event.preventDefault());
+    renderWithProviders(
+      <ContextMenu>
+        <ContextMenuTrigger data-testid="row">Rose</ContextMenuTrigger>
+        <ContextMenuContent data-testid="menu">
+          <ContextMenuItem onSelect={onDelete}>Delete project</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>,
+    );
+    fireEvent.contextMenu(screen.getByTestId('row'), { clientX: 117, clientY: 107 });
+    const item = within(await screen.findByTestId('menu')).getByText('Delete project');
+    fireEvent.pointerMove(item, { pointerType: 'mouse' });
+    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    // A later release with no new travel onto the item must not select it.
+    fireEvent.pointerUp(item, { pointerType: 'mouse', button: 2 });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('Long-press release on a phone', () => {

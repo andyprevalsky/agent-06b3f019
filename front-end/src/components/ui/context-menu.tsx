@@ -23,7 +23,8 @@ const TOUCH_ANCHOR_INSET_PX = 8;
  *
  * ContextMenuItem: [OPENED] --pointer moves onto / presses item--> [REACHED]
  *   release in [OPENED] (pointer never moved onto it) never selects it;
- *   release in [REACHED] selects (press-drag-release); keyboard/click unchanged.
+ *   release in [REACHED] selects (press-drag-release) and returns to [OPENED];
+ *   keyboard/click unchanged.
  */
 const ContextMenuTrigger = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Trigger>,
@@ -185,6 +186,9 @@ const ContextMenuItem = React.forwardRef<
           // sat under a still pointer (e.g. Delete project). Only a release after
           // the pointer actually moved onto the item selects it.
           if (!reached.current) event.preventDefault();
+          // Each release consumes the reach, so a reused (force-mounted) item
+          // never carries it into the menu's next opening.
+          reached.current = false;
         }}
         {...props}
       />

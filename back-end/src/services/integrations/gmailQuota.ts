@@ -88,13 +88,14 @@ export function gmailPacerFor(mailboxKey: string): GmailQuotaPacer {
 /**
  * A mailbox's credentials for a run that can outlive one access token (a
  * quota-paced full sync of a large mailbox runs past Google's one-hour token
- * lifetime). `key` names the mailbox so the pacer budget survives a refresh;
- * `refresh` mints a new token. A plain string is a token that cannot refresh.
+ * lifetime). `key` names the mailbox so every caller and every refresh shares
+ * one pacer budget; `refresh`, when present, mints a new token. A plain string
+ * is a token with no mailbox key that cannot refresh.
  */
 export interface RefreshableGmailAccess {
   key: string;
   token: string;
-  refresh: () => Promise<string>;
+  refresh?: () => Promise<string>;
 }
 export type GmailAccess = string | RefreshableGmailAccess;
 
@@ -114,7 +115,7 @@ const refreshing = new WeakMap<RefreshableGmailAccess, Promise<string>>();
  * Returns false when the access cannot refresh.
  */
 export async function refreshGmailAccess(access: GmailAccess, rejected: string): Promise<boolean> {
-  if (typeof access === 'string') return false;
+  if (typeof access === 'string' || access.refresh === undefined) return false;
   if (access.token !== rejected) return true;
   let pending = refreshing.get(access);
   if (pending === undefined) {

@@ -28,6 +28,55 @@ const log = createLogger('GmailSync');
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 /** Refreshes a running sync's claim well inside SYNC_INTERVAL_MS. */
 const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
+/**
+ * A failed run waits this long before the next attempt: a full sync that keeps
+ * failing would otherwise re-list and re-read the whole mailbox every 5 minutes,
+ * spending the user's Gmail quota on a loop. Reconnecting resets to CONNECTED.
+ */
+const FAILED_SYNC_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Integrations a run may claim: CONNECTED, SYNC_FAILED once its cooldown has
+ * passed, or a SYNCING row whose claim went stale (crash recovery).
+ */
+function dueForSync(now = Date.now()) {
+  return [
+    { status: IntegrationStatus.CONNECTED },
+    {
+      status: IntegrationStatus.SYNC_FAILED,
+      OR: [
+        { lastFailedSyncAt: null },
+        { lastFailedSyncAt: { lt: new Date(now - FAILED_SYNC_COOLDOWN_MS) } },
+      ],
+    },
+    { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: new Date(now - SYNC_INTERVAL_MS) } },
+  ];
+}
+
+/**
+ * The mailbox access a Gmail run uses: requests refresh the token on 401, and
+ * the mailbox key keeps one quota budget across refreshes and across callers.
+ */
+export function gmailMailboxAccess(
+  credential: {
+    id: string;
+    email: string | null;
+    accessToken: string | null;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+  },
+  token: string
+): RefreshableGmailAccess {
+  return {
+    key: credential.email || credential.id,
+    token,
+    refresh: async () => {
+      const fresh = await getValidAccessToken(credential, { forceRefresh: true });
+      if (fresh === null) throw new Error('Gmail access token refresh failed');
+      return fresh;
+    },
+  };
+}
 
 // Google OAuth token endpoint
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -401,17 +450,8 @@ async function syncGmailForUser(
     log.error('Failed to get valid access token', { credentialId: credential.id });
     return { success: false, contacts: 0, messages: 0 };
   }
-  // A paced full sync can outlive the one-hour token: requests refresh on 401,
-  // and the mailbox key keeps one quota budget across the refresh.
-  const accessToken: RefreshableGmailAccess = {
-    key: credential.email || credential.id,
-    token,
-    refresh: async () => {
-      const fresh = await getValidAccessToken(credential, { forceRefresh: true });
-      if (fresh === null) throw new Error('Gmail access token refresh failed');
-      return fresh;
-    },
-  };
+  // A paced full sync can outlive the one-hour token.
+  const accessToken = gmailMailboxAccess(credential, token);
 
   // Re-fetch integration from DB to get the latest config.
   // Without this, sequential credential syncs clobber each other's historyIds
@@ -570,15 +610,8 @@ function reportGmailProgress(
  * ticks and backend instances; lastSyncAt then fences crash recovery.
  */
 export async function claimGmailIntegrationForSync(integrationId: string): Promise<boolean> {
-  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
   const claimed = await prisma.integration.updateMany({
-    where: {
-      id: integrationId,
-      OR: [
-        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
-        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
-      ],
-    },
+    where: { id: integrationId, OR: dueForSync() },
     data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
   });
   if (claimed.count === 0) {
@@ -594,20 +627,13 @@ export async function claimGmailIntegrationForSync(integrationId: string): Promi
 export async function runGmailSyncJob(options: { userIds?: string[] } = {}): Promise<void> {
   log.info('Starting sync job...');
 
-  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
-
-  // Find Gmail integrations that are due for sync.
-  // CONNECTED/SYNC_FAILED: always eligible (sync immediately)
-  // SYNCING: only re-pick if lastSyncAt > 1 hour ago (crash recovery)
+  // Find Gmail integrations that are due for sync (see dueForSync).
   const dueIntegrations = await prisma.integration.findMany({
     where: {
       name: 'gmail',
       isActive: true,
       ...(options.userIds && { userId: { in: options.userIds } }),
-      OR: [
-        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
-        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
-      ],
+      OR: dueForSync(),
     },
     include: {
       emailCredentials: {
