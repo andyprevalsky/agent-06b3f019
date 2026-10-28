@@ -10,7 +10,8 @@
  *     └─ --execute --via sdk (E2B_API_KEY, no CLI login), run against a stand-in e2b module:
  *          Template.build gets each plan entry's source dir, Dockerfile, name, cpu and memory;
  *          every size is booted and checked (nproc, MemTotal, provider CLI) and its sandbox
- *          killed; one wrong-sized template fails the run and withholds the grid go-ahead
+ *          killed; one wrong-sized template fails the run and withholds the grid go-ahead;
+ *          --missing builds only the absent sizes and still verifies every size
  *
  * Run: npx tsx src/tests/structural/sandbox-size-templates.test.ts
  */
@@ -108,12 +109,18 @@ check('no per-size template copies are committed', () => {
  * Stand-in for the e2b SDK: records Template.build / Sandbox.create / kill calls and
  * boots "sandboxes" that report the size the template was built with
  * (FAKE_E2B_BAD_NPROC=<name> makes that one report 1 vCPU; FAKE_E2B_BUILD_FAIL=<name>
- * rejects that build the way E2B rejects a size over the team's memory limit).
+ * rejects that build the way E2B rejects a size over the team's memory limit;
+ * FAKE_E2B_EXISTING=<name,…> are templates that already exist).
  */
 const FAKE_E2B_SDK = `
 import { appendFileSync } from 'node:fs';
 const record = (event) => appendFileSync(process.env.FAKE_E2B_LOG, JSON.stringify(event) + '\\n');
 const built = new Map();
+const existing = new Set((process.env.FAKE_E2B_EXISTING ?? '').split(',').filter(Boolean));
+const sizeOf = (name) => {
+  const [, cpu, memoryGb] = /-c(\\d+)-m(\\d+)$/.exec(name);
+  return { cpuCount: Number(cpu), memoryMB: Number(memoryGb) * 1024 };
+};
 export function Template(options) {
   return {
     fromDockerfile: (dockerfile) => ({ fileContextPath: String(options.fileContextPath), dockerfile }),
@@ -128,10 +135,11 @@ Template.build = async (template, name, options) => {
   built.set(name, options);
   return { name, alias: name, tags: ['default'], templateId: 'tpl-' + name, buildId: 'build-' + name };
 };
+Template.exists = async (name) => existing.has(name) || built.has(name);
 const ok = (stdout) => ({ exitCode: 0, stdout, stderr: '' });
 export const Sandbox = {
   async create(name) {
-    const size = built.get(name);
+    const size = built.get(name) ?? (existing.has(name) ? sizeOf(name) : undefined);
     if (!size) throw new Error('template ' + name + ' not found');
     record({ type: 'create', name });
     const cli = name.startsWith('codex-code') ? 'codex' : 'claude';
@@ -175,14 +183,14 @@ interface SdkRun {
       name: string;
       provider: string;
       templateId?: string;
-      built?: boolean;
+      built?: boolean | 'existing';
       verified?: boolean;
       problems?: string[];
     }>;
   };
 }
 
-function runSdkBuild(extraEnv: Record<string, string> = {}): SdkRun {
+function runSdkBuild(extraEnv: Record<string, string> = {}, extraArgs: string[] = []): SdkRun {
   const scratch = mkdtempSync(path.join(os.tmpdir(), 'sized-templates-sdk-'));
   try {
     const sdkModule = path.join(scratch, 'fake-e2b.mjs');
@@ -192,7 +200,7 @@ function runSdkBuild(extraEnv: Record<string, string> = {}): SdkRun {
     writeFileSync(log, '');
     const result = spawnSync(
       process.execPath,
-      [buildScript, '--execute', '--via', 'sdk', '--receipt', receiptPath],
+      [buildScript, '--execute', '--via', 'sdk', ...extraArgs, '--receipt', receiptPath],
       {
         encoding: 'utf8',
         env: {
@@ -281,6 +289,34 @@ check('a size E2B refuses to build fails the run but every other size is still b
     }
   }
   assert.doesNotMatch(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
+});
+
+check('--missing builds only the absent sizes and still verifies every size', () => {
+  const smallest = Math.min(...config.grid.memoryGb);
+  const present = plan.filter((entry) => entry.memoryGb === smallest).map((entry) => entry.name);
+  const run = runSdkBuild({ FAKE_E2B_EXISTING: present.join(',') }, ['--missing']);
+  assert.strictEqual(run.status, 0, run.stdout);
+  assert.deepStrictEqual(
+    run.events
+      .filter((event) => event.type === 'build')
+      .map((event) => event.name)
+      .sort(),
+    plan
+      .map((entry) => entry.name)
+      .filter((name) => !present.includes(name))
+      .sort()
+  );
+  for (const record of run.receipt.entries) {
+    const types = run.events.filter((event) => event.name === record.name).map((e) => e.type);
+    const expected = present.includes(record.name)
+      ? ['create', 'kill']
+      : ['build', 'create', 'kill'];
+    assert.deepStrictEqual(types, expected, record.name);
+    assert.strictEqual(record.built, present.includes(record.name) ? 'existing' : true);
+    assert.strictEqual(record.verified, true, record.name);
+  }
+  assert.strictEqual(run.receipt.allVerified, true);
+  assert.match(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
 });
 
 console.log(`\nsandbox-size-templates: ${checks} checks passed`);

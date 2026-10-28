@@ -23,15 +23,18 @@
 //   node e2b-templates/build-sized-templates.mjs --json         # the build plan as JSON (structural test)
 //   node e2b-templates/build-sized-templates.mjs --via sdk      # dry run of the SDK builds
 //   node e2b-templates/build-sized-templates.mjs --execute --via sdk [--provider claude|codex]
-//        [--receipt <path>]     # build + verify; receipt default .context/e2b-template-builds/
+//        [--missing] [--receipt <path>]   # build + verify; --missing builds only the sizes
+//        that do not exist yet (every size is still verified); receipt default
+//        .context/e2b-template-builds/
 //   node e2b-templates/build-sized-templates.mjs --verify [--provider …]   # verify only
 //   node e2b-templates/build-sized-templates.mjs --execute [--provider claude|codex]   # CLI login
 //
 // Only after every size verifies set E2B_SANDBOX_TEMPLATES=grid on the backend
 // (the names follow sizedTemplateName): with `grid` the default size resolves to
 // a sized template too. This is a deploy item: it creates billed templates.
-// As of 2026-10-28 the E2B team refuses templates over 8192 MiB ("Memory can't be
-// higher than 8192 MiB", raise via E2B support), so the 16 GB sizes cannot be built yet.
+// The E2B team refuses templates over 8192 MiB ("Memory can't be higher than 8192 MiB",
+// 2026-10-28), so the grid's memory stops at 8 GB; a 16 GB size needs E2B support to
+// raise that cap first.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -212,8 +215,8 @@ function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Build (unless verifyOnly) and verify every entry; providers run in parallel. */
-async function runSdk(plan, { verifyOnly, receiptPath }) {
+/** Build (unless verifyOnly; with missingOnly only absent names) and verify every entry. */
+async function runSdk(plan, { verifyOnly, missingOnly, receiptPath }) {
   if (!process.env.E2B_API_KEY) {
     console.error('E2B_API_KEY is required (the backend key: templates are private to its team)');
     return 2;
@@ -221,7 +224,7 @@ async function runSdk(plan, { verifyOnly, receiptPath }) {
   const sdk = await loadSdk();
   const receipt = {
     via: 'sdk',
-    mode: verifyOnly ? 'verify' : 'build',
+    mode: verifyOnly ? 'verify' : missingOnly ? 'build-missing' : 'build',
     startedAt: new Date().toISOString(),
     entries: plan.map((entry) => ({
       ...entry,
@@ -258,7 +261,11 @@ async function runSdk(plan, { verifyOnly, receiptPath }) {
   await Promise.all(
     providers.map(async (provider) => {
       for (const record of receipt.entries.filter((entry) => entry.provider === provider)) {
-        if (!verifyOnly) {
+        if (!verifyOnly && missingOnly && (await sdk.Template.exists(record.name))) {
+          record.built = 'existing';
+          console.log(`exists, not rebuilt: ${record.name}`);
+          save();
+        } else if (!verifyOnly) {
           console.log(
             `building (sdk): ${record.name} cpu ${record.cpu} memory ${record.memoryMB} MB`
           );
@@ -351,6 +358,7 @@ async function main(argv) {
   }
   const execute = argv.includes('--execute');
   const verifyOnly = argv.includes('--verify');
+  const missingOnly = argv.includes('--missing');
   const receiptPath = resolve(
     option(argv, '--receipt') ??
       join(
@@ -361,7 +369,9 @@ async function main(argv) {
         `sized-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
       )
   );
-  if (verifyOnly || (via === 'sdk' && execute)) return runSdk(plan, { verifyOnly, receiptPath });
+  if (verifyOnly || (via === 'sdk' && execute)) {
+    return runSdk(plan, { verifyOnly, missingOnly, receiptPath });
+  }
   if (via === 'sdk') {
     for (const entry of plan) {
       const spec = sdkBuildSpec(entry);

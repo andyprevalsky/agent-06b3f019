@@ -306,7 +306,7 @@ class _Backend:
             reply["resize_requested"] = {
                 "request_id": _RESIZE_REQUEST_ID,
                 "from": {"cpu": 2, "memory_gb": 4},
-                "to": {"cpu": 2, "memory_gb": 16},
+                "to": {"cpu": 2, "memory_gb": 8},
             }
         return reply
 
@@ -316,20 +316,20 @@ class _Backend:
         self.session_home.pause()
         self.resized_ws_url = await self.session_home.start(
             CLAUDE_CODE_RESUME_SESSION_ID=_CLI_SESSION_ID,
-            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 16 GB RAM.",
+            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 8 GB RAM.",
         )
         return {
             "task_id": "task-resized",
             "sandbox_id": "sb-resized",
             "ws_url": self.resized_ws_url,
             "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de",
-            "sandbox_size": {"cpu": 2, "memory_gb": 16},
+            "sandbox_size": {"cpu": 2, "memory_gb": 8},
             "resized": True,
             "request": {
                 "request_id": request_id,
                 "status": "done",
                 "from": {"cpu": 2, "memory_gb": 4},
-                "to": {"cpu": 2, "memory_gb": 16},
+                "to": {"cpu": 2, "memory_gb": 8},
                 "reason": "jest workers OOM-killed at 4 GB",
             },
         }
@@ -672,7 +672,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches():
         assert first["yield_reason"] == "environment_resize", first
         moved = first["code_session"]
         assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
-        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, moved
+        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, moved
         assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
         assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
         assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
@@ -680,11 +680,11 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches():
         assert len(rows) == 1, backend.messages
         row = rows[0]
         assert row["task_id"] == "task-resized" and row["ws_url"] == backend.resized_ws_url, row
-        assert row["title"] == "Environment resized to 2 vCPU, 16 GB RAM", row["title"]
-        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, row["code_agent"]
+        assert row["title"] == "Environment resized to 2 vCPU, 8 GB RAM", row["title"]
+        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, row["code_agent"]
         resize_meta = row["code_agent"]["environment_resize"]
         assert resize_meta["from_task_id"] == "task-1" and resize_meta["status"] == "done", resize_meta
-        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 16}, resize_meta
+        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 8}, resize_meta
         await _wait_until(lambda: len(session_home.runs()) >= 2, "the resumed CLI to start")
         resumed_run = session_home.runs()[-1]
         assert "--resume" in resumed_run["argv"], resumed_run
@@ -699,7 +699,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches():
         assert second["status"] == "completed" and second["success"] is True, second
         assert len(backend.created) == 1, f"the next attempt reattaches, it does not create: {backend.created}"
         assert [call.get("task_id") for call in backend.closed] == ["task-resized"], backend.closed
-        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, second["code_agent"]
+        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, second["code_agent"]
         texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
         assert "notes: uncommitted work" in texts, f"the resumed session keeps its files: {texts}"
     finally:
