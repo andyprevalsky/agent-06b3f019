@@ -22549,7 +22549,9 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
     from benchmarks.long_horizon import validate_task_contract
 
-    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent]
+    from benchmarks.polar_catalog import is_polar_bench_task
+
+    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent and not is_polar_bench_task(task)]
     assert browser_tasks
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}

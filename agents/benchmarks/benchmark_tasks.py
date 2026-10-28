@@ -268,7 +268,7 @@ def _load_tasks() -> List[BenchmarkTask]:
                 raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without browser_auth_realm")
         t.min_steps = dict(t.min_steps)
         t.max_steps = dict(t.max_steps)
-        if t.requires_browser_agent and "browser" not in t.min_steps:
+        if t.requires_browser_agent and not is_polar_bench_task(t) and "browser" not in t.min_steps:
             t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]
         if t.environment is None:
             t.environment = _default_environment()
