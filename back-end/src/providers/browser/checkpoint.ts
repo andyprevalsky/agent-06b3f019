@@ -261,30 +261,97 @@ export async function checkpointLogicalBrowser(
 /** First materialization restores a frozen Home baseline, never a mutable profile. */
 export async function restoreLogicalBrowserCheckpoint(
   taskId: string,
-  browser: Browser
+  browser: Browser,
+  recovery?: {
+    targets?: Array<{ targetId: string; urlHash: string }>;
+    assertOwned?: () => Promise<void>;
+    prepared?: (targets: Array<{ targetId: string; urlHash: string }>) => Promise<void>;
+  }
 ): Promise<void> {
   const { row, checkpoint } = await loadLogicalBrowserCheckpoint(taskId);
+  const assertRestoreBinding = async () => {
+    await assertLogicalBinding(taskId, row);
+    await recovery?.assertOwned?.();
+  };
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser checkpoint restore context missing');
-  await assertLogicalBinding(taskId, row);
-  await context.setStorageState(checkpoint.storage);
+  await assertRestoreBinding();
+  if (!recovery?.targets) await context.setStorageState(checkpoint.storage);
   const targets = checkpoint.tabs.length
     ? checkpoint.tabs
     : [row.currentUrl ?? row.startUrl]
         .filter((value): value is string => value !== null)
         .map((url) => ({ url, sessionStorage: [] }));
-  await assertLogicalBinding(taskId, row);
+  await assertRestoreBinding();
+  const targetId = async (page: Page) => {
+    const cdp = await context.newCDPSession(page);
+    try {
+      return (await cdp.send('Target.getTargetInfo')).targetInfo.targetId;
+    } finally {
+      await cdp.detach();
+    }
+  };
+  const existing = new Map<string, Page>();
+  if (recovery?.targets) {
+    if (
+      new Set(recovery.targets.map((target) => target.targetId)).size !== recovery.targets.length ||
+      recovery.targets.length !== targets.length ||
+      recovery.targets.some((target, index) => target.urlHash !== digest(targets[index]?.url ?? ''))
+    )
+      throw new Error('Acknowledged browser hydration checkpoint targets changed');
+    for (const page of context.pages()) existing.set(await targetId(page), page);
+    if (
+      existing.size !== recovery.targets.length ||
+      recovery.targets.some((target) => !existing.has(target.targetId))
+    )
+      throw new Error('Acknowledged browser hydration pages changed');
+    if (
+      recovery.targets.some((target) => {
+        const url = existing.get(target.targetId)!.url();
+        return url !== 'about:blank' && digest(url) !== target.urlHash;
+      })
+    )
+      throw new Error('Acknowledged browser hydration page navigation changed');
+  }
+  if (recovery?.targets) {
+    await assertRestoreBinding();
+    await context.setStorageState(checkpoint.storage);
+  }
   const blank = context.pages().find((page) => page.url() === 'about:blank');
   const prepared: Array<{ page: Page; url: string }> = [];
   for (let index = 0; index < targets.length; index++) {
-    await assertLogicalBinding(taskId, row);
+    await assertRestoreBinding();
     const target = targets[index]!;
-    const page = index === 0 && blank ? blank : await context.newPage();
+    const page = recovery?.targets
+      ? existing.get(recovery.targets[index]!.targetId)!
+      : index === 0 && blank
+        ? blank
+        : await context.newPage();
     await seedTabSessionStorage(page, target);
     prepared.push({ page, url: target.url });
   }
+  if (recovery?.prepared) {
+    // Tracking failure never changes first-hydration semantics; it disables acknowledgement.
+    try {
+      const pages = context.pages();
+      if (
+        pages.length === prepared.length &&
+        pages.every((page) => prepared.some((p) => p.page === page))
+      ) {
+        const owned = await Promise.all(
+          prepared.map(async ({ page, url }) => ({
+            targetId: await targetId(page),
+            urlHash: digest(url),
+          }))
+        );
+        await recovery.prepared(owned);
+      }
+    } catch {
+      /* The caller retains unknown custody if provenance cannot be recorded. */
+    }
+  }
   for (const { page, url } of prepared) {
-    await assertLogicalBinding(taskId, row);
+    await assertRestoreBinding();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
 }

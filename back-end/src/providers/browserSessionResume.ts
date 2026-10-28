@@ -17,6 +17,7 @@ import {
 } from './browser/checkpoint';
 import { isConfirmedBrowserEnd, recordEndedLogicalBrowser } from './browser/sessionPersist';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from './steel/sessionLifetime';
+import { connectValidatedBrowser } from './steel/sessionConnection';
 import { assertBrowserInitializationReady } from './browser/initialization';
 import {
   browserResumeScope,
@@ -24,7 +25,10 @@ import {
   withBrowserResumeLifecycle,
 } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
-import { withOwnedResumeTransport } from './browser/resumeTransport';
+import {
+  withOwnedResumeTransport,
+  withAcknowledgedResumeTransport,
+} from './browser/resumeTransport';
 import { iphoneCapability } from './phoneAccountPolicy';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
@@ -255,6 +259,40 @@ export async function resumeBrowserSession(
     return resume();
   return withBrowserResumeLifecycle(taskId, {
     readBinding: read,
+    retryHydration: initial.logicalOwnerKey
+      ? async (nativeId, targets) => {
+          const current = await read();
+          if (
+            (current.controlState !== 'AGENT' &&
+              (!current.controlLeaseExpiresAt ||
+                current.controlLeaseExpiresAt.getTime() > Date.now())) ||
+            current.sessionId !== nativeId ||
+            current.status !== 'PAUSED' ||
+            !current.wsUrl ||
+            !current.debugUrl
+          )
+            throw new Error('Acknowledged browser hydration transport changed');
+          await browserResumeScope()!.assertOwned();
+          const browser = await connectValidatedBrowser(current.wsUrl);
+          if (!browser) throw new Error('Acknowledged browser hydration connection failed');
+          return assembleResumeResponse(
+            taskId,
+            {
+              provider: storedBrowserProvider(current.provider),
+              sessionId: nativeId,
+              wsUrl: current.wsUrl,
+              debugUrl: current.debugUrl,
+              savedUrl: current.currentUrl ?? current.startUrl ?? undefined,
+              proxySource: current.kernelProxySource ?? 'browser_use_residential_country',
+              proxyLocation: DEFAULT_GEOLOCATION,
+              profileId: current.providerProfileId,
+              profileSource: current.providerProfileSource ?? 'session_bound',
+              validationBrowser: browser,
+            },
+            targets
+          );
+        }
+      : undefined,
     compatibility: options.forceFreshProfile ? 'fresh' : 'default',
     reuseCompleted: !options.forceFreshProfile,
     sourceEnded: () => sourceEnded,
@@ -309,16 +347,23 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
  * Shared by resume and rotate_ip — both hand back an identical response shape,
  * including when rotate_ip crosses between provider-specific profiles.
  */
-async function assembleResumeResponse(taskId: string, result: RecreatedSession) {
-  return withOwnedResumeTransport(result, () =>
-    assembleResumeResponseWithTransport(taskId, result)
+async function assembleResumeResponse(
+  taskId: string,
+  result: RecreatedSession,
+  recoveryTargets?: Array<{ targetId: string; urlHash: string }>
+) {
+  return withAcknowledgedResumeTransport(
+    result,
+    () => assembleResumeResponseWithTransport(taskId, result, false, recoveryTargets),
+    () => browserResumeScope()?.hydrationTransportClosed()
   );
 }
 
 async function assembleResumeResponseWithTransport(
   taskId: string,
   result: RecreatedSession,
-  readOnly = false
+  readOnly = false,
+  recoveryTargets?: Array<{ targetId: string; urlHash: string }>
 ) {
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
@@ -356,7 +401,11 @@ async function assembleResumeResponseWithTransport(
   if (!readOnly && session?.logicalOwnerKey) {
     if (!result.validationBrowser)
       throw new Error('Logical browser restore requires validated transport');
-    await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser);
+    await restoreLogicalBrowserCheckpoint(taskId, result.validationBrowser, {
+      targets: recoveryTargets,
+      assertOwned: recoveryTargets ? browserResumeScope()?.assertHydrationOwned : undefined,
+      prepared: browserResumeScope()?.recordHydrationTargets,
+    });
   }
   if (session?.context.userId !== undefined) {
     if (
