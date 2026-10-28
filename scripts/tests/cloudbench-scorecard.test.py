@@ -210,7 +210,7 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(data["iteration_speed"]["per_hour"], 3.6)
         self.assertEqual((data["iteration_speed"]["older_number"], data["iteration_speed"]["newer_number"]), (10, 11))
         text = CARD["render_text"](data)
-        self.assertTrue(text.startswith("Iterations/Hour 3.60"))
+        self.assertTrue(text.startswith("3.60 iter/h"))
         self.assertIn("finish-to-finish #10 → #11", text)
         self.assertIn("LAST 10 EXPERIMENTS", text)
         self.assertIn("T-RUNNING", text)
@@ -222,7 +222,7 @@ class Scorecard(unittest.TestCase):
         generic = CARD["build"](directory, ledger=self.f.ledger, history_ids=ids, now=T0 + 13000)
         self.assertEqual(len(generic["history"]), 3)
         self.assertIsNone(generic["iteration_speed"])
-        self.assertNotIn("Iterations/Hour", CARD["render_text"](generic))
+        self.assertNotIn("iter/h", CARD["render_text"](generic))
         self.assertEqual(self.f.ledger.read_bytes(), before)
         write(directory / "summary.json", {"campaign_id": ids[-1], "status": "failed",
               "started_at": "2026-10-18T22:48:52Z", "finished_at": "2026-10-18T22:55:32Z",
@@ -241,9 +241,9 @@ class Scorecard(unittest.TestCase):
         LEDGER["record"]("end", "older", ledger=self.f.ledger, ended_at=T0 - 1800, state="ABORTED")
         card = render(run, self.f, iterations=1)
         text = CARD["render_text"](card)
-        self.assertTrue(text.startswith("Iterations/Hour 1.30 · finish-to-finish #1 → #2"))
+        self.assertTrue(text.startswith("1.30 iter/h"))
         self.assertIn("T-44m00s since finish", text)
-        self.assertIn("Iterations/Hour 1.30", self.valid(card))
+        self.assertIn("1.30 iter/h", self.valid(card))
         newer = render(run, self.f, iterations=1)
         newer["generated_at"] += 3600
         self.assertIn("T-1h44m since finish", CARD["render_text"](newer))
@@ -260,7 +260,7 @@ class Scorecard(unittest.TestCase):
             self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in changed))
             card = render(run, self.f, iterations=1)
             self.assertIsNone(card["iteration_speed"])
-            self.assertTrue(CARD["render_text"](card).startswith("Iterations/Hour UNMEASURED"))
+            self.assertTrue(CARD["render_text"](card).startswith("UNMEASURED iter/h"))
             self.valid(card)
             if end is None or end == 0 or end > NOW:
                 self.assertIn("T-UNRECORDED", CARD["render_text"](card))
@@ -273,8 +273,89 @@ class Scorecard(unittest.TestCase):
         card = CARD["build"](other, ledger=self.f.ledger, goal="fleet-goal", iterations=1, now=NOW)
         self.assertFalse(card["in_ledger"])
         self.assertIsNone(card["iteration_speed"])
-        self.assertTrue(CARD["render_text"](card).startswith("Iterations/Hour UNMEASURED"))
+        self.assertIsNone(card["speed_change"])
+        self.assertTrue(CARD["render_text"](card).startswith("UNMEASURED iter/h"))
         self.valid(card)
+
+    def test_public_five_finish_speed_change(self):
+        for intervals, expected in (([800, 400, 200, 100], 100.0),
+                                    ([100, 200, 400, 800], -50.0),
+                                    ([400, 400, 400, 400], 0.0)):
+            with self.subTest(intervals=intervals):
+                self.f.ledger.unlink(missing_ok=True)
+                ends = [T0]
+                for delta in intervals:
+                    ends.append(ends[-1] + delta)
+                ids = [f"change-{i}" for i in range(1, 7)]
+                for i, ident in enumerate(ids):
+                    LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="change",
+                                     run_dir=str(self.tmp / ident), triggered_at=T0 - 10 + i)
+                    if i < 5:
+                        LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=ends[i], state="ABORTED" if i == 2 else "COMPLETE")
+                run = self.tmp / ids[-1]
+                write(run / "summary.json", {"campaign_id": ids[-1], "status": "running", "jobs": [], "total_jobs": 1})
+                before = self.f.ledger.read_bytes()
+                card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
+                text = CARD["render_text"](card)
+                label = f"{expected:+.1f}%" if expected else "0.0%"
+                self.assertIn(f"[avg Δ {label} over last 5 runs]", text)
+                self.assertAlmostEqual(card["speed_change"]["percent"], expected)
+                self.assertEqual(card["speed_change"]["runs"], 5)
+                html = self.valid(card)
+                self.assertIn('class="ok"' if expected > 0 else 'class="bad"' if expected < 0 else 'class="muted"', html)
+                self.assertIn("arithmetic mean of 3 successive", html)
+                self.assertEqual(self.f.ledger.read_bytes(), before)
+                entries = LEDGER["read"](self.f.ledger)
+                for invalid in (None, 0, T0 + 20000):
+                    changed = [dict(e, ended_at=invalid) if e.get("id") == ids[2] and e.get("event") == "end" else e for e in entries]
+                    self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in changed))
+                    invalid_card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
+                    self.assertIsNone(invalid_card["speed_change"]["percent"])
+                    self.assertIn("avg Δ UNMEASURED", CARD["render_text"](invalid_card))
+                    self.valid(invalid_card)
+
+    def test_captured_eight_experiment_speed_change(self):
+        entries = LEDGER["read"](GOLDEN / "rotating-cohort-ledger.jsonl")
+        launch_ids = [e["id"] for e in LEDGER["experiments"](entries)[-6:]]
+        # Original final It6 receipt and original observer #6->#7 interval.
+        end6 = 1793149302.101414
+        end7 = end6 + 8028.104736804962
+        for e in entries:
+            if "run_dir" in e:
+                e["run_dir"] = str(self.tmp / e["id"])
+        self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        LEDGER["record"]("end", launch_ids[-1], ledger=self.f.ledger, ended_at=end6, state="COMPLETE")
+        for i, ident in enumerate(("original600-1793152917121861690", "original600-1793163509958414749"), 7):
+            launch_ids.append(ident)
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="new-cohort",
+                             run_dir=str(self.tmp / ident), triggered_at=end7 + i)
+            if i == 7:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=end7, state="INCOMPLETE")
+        run = self.tmp / launch_ids[-1]
+        write(run / "summary.json", {"campaign_id": launch_ids[-1], "status":"running", "jobs":[]})
+        before = self.f.ledger.read_bytes()
+        card = CARD["build"](run, ledger=self.f.ledger, history_ids=launch_ids, iterations=7, now=end7+10000)
+        self.assertAlmostEqual(card["iteration_speed"]["per_hour"], .448424642929202)
+        self.assertEqual(len(card["history"]), 8)
+        intervals = [5616.887976646423, 1161.9379551410675, 6614.532918691635, 8028.104736804962]
+        rates = [3600 / interval for interval in intervals]
+        expected = sum(100*(b/a-1) for a,b in zip(rates,rates[1:]))/3
+        self.assertAlmostEqual(card["speed_change"]["percent"], expected)
+        self.assertTrue(CARD["render_text"](card).startswith(".45 iter/h [avg Δ"))
+        self.assertIn("last 5 runs", self.valid(card))
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_speed_change_requires_five_consecutive_valid_finishes(self):
+        rows = [{"id":str(i), "number":i, "state":"COMPLETE", "ended_at":1000*i} for i in range(5, 0, -1)]
+        self.assertEqual(CARD["average_speed_change"](rows, 10000)["percent"], 0)
+        self.assertIsNone(CARD["average_speed_change"](rows[:4], 10000)["percent"])
+        for value in (float("nan"), float("inf"), True, -1, 0, None, 6000):
+            broken = [dict(r) for r in rows];broken[2]["ended_at"] = value
+            self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
+        broken = [dict(r) for r in rows];broken[2]["number"] = None
+        self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
+        broken = [dict(r) for r in rows];broken[2]["state"] = "RUNNING"
+        self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
 
     def test_finish_speed_and_age_do_not_bridge_missing_or_invalid_clocks(self):
         older = {"id": "a", "number": 6, "state": "COMPLETE", "ended_at": 1000}

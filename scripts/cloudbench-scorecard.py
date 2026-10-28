@@ -1159,6 +1159,8 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
             "since": since, "experiment": exp, "history": history, "trend": trend,
             "history_limit": history_limit,
             "iteration_speed": iteration_speed,
+            "speed_change": average_speed_change(history, now, exp["id"] if exp["state"] == "RUNNING" else None)
+                            if iterations is not None and mine else None,
             "iterations": iterations, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
             "in_ledger": bool(mine)}
@@ -1201,13 +1203,58 @@ def finish_age(row: dict, now: float) -> str:
     return "T-" + duration(now - row["ended_at"]) + " since finish"
 
 
+def average_speed_change(history: list[dict], now: float, running_id: str | None = None) -> dict:
+    """Five consecutive finishes give four speeds and three percent changes."""
+    rows = list(history)
+    if rows and rows[0].get("id") == running_id and rows[0].get("state") == "RUNNING" and rows[0].get("ended_at") is None:
+        rows.pop(0)
+    rows = rows[:5]
+    valid = []
+    for row in rows:
+        if row.get("state") == "RUNNING" or not valid_finish(row.get("ended_at"), now):
+            break
+        if type(row.get("number")) is not int or row["number"] <= 0:
+            break
+        if valid and (valid[-1]["number"] != row["number"] + 1 or valid[-1]["ended_at"] <= row["ended_at"]):
+            break
+        valid.append(row)
+    result = {"runs": len(valid), "required": 5, "percent": None}
+    if len(valid) != 5:
+        return result
+    chronological = list(reversed(valid))
+    speeds = [3600 / (b["ended_at"] - a["ended_at"]) for a, b in zip(chronological, chronological[1:])]
+    if any(not math.isfinite(value) or value <= 0 for value in speeds):
+        return result
+    changes = [100 * (b / a - 1) for a, b in zip(speeds, speeds[1:])]
+    if any(not math.isfinite(value) for value in changes):
+        return result
+    mean = sum(value / 3 for value in changes)
+    if math.isfinite(mean):
+        result["percent"] = mean
+    return result
+
+
+def speed_change_text(card: dict) -> str:
+    change = card.get("speed_change") or {}
+    value = change.get("percent")
+    if value is None:
+        return f'avg Δ UNMEASURED ({change.get("runs", 0)}/5 consecutive finishes)'
+    signed = f"{value:+.1f}%" if value else "0.0%"
+    return f"avg Δ {signed} over last 5 runs"
+
+
 def iteration_speed_text(card: dict) -> str:
     speed = card.get("iteration_speed")
-    if not speed:
-        return "Iterations/Hour UNMEASURED · finish-to-finish"
-    return (f'Iterations/Hour {speed["per_hour"]:.2f} · finish-to-finish '
-            f'#{speed["older_number"]} → #{speed["newer_number"]} '
-            f'({duration(speed["seconds"])} including work between experiments)')
+    rate = f'{speed["per_hour"]:.2f}'.lstrip("0") if speed else "UNMEASURED"
+    return f'{rate} iter/h [{speed_change_text(card)}]'
+
+
+def iteration_speed_detail(card: dict) -> str:
+    speed = card.get("iteration_speed")
+    pair = (f'#{speed["older_number"]} → #{speed["newer_number"]} · {duration(speed["seconds"])}'
+            if speed else "UNMEASURED")
+    return ("Iterations/Hour: finish-to-finish " + pair + "; includes work between experiments. "
+            "Avg Δ: arithmetic mean of 3 successive speed percentage changes across 5 consecutive finishes.")
 
 
 def _from_ledger(entry: dict) -> dict:
@@ -1413,8 +1460,14 @@ def render_html(card: dict) -> str:
            f"<style>{CSS}</style></head><body><main>"]
     # Descent speed is distinct from the secondary generic launch-rate metric.
     if card.get("iterations") is not None:
-        out.append('<section data-section="iteration-speed" class="iteration-speed">'
-                   + e(iteration_speed_text(card)) + '</section>')
+        change = (card.get("speed_change") or {}).get("percent")
+        cls = "ok" if change is not None and change > 0 else "bad" if change is not None and change < 0 else "warn" if change is None else "muted"
+        speed = card.get("iteration_speed")
+        rate_text = f'{speed["per_hour"]:.2f}'.lstrip("0") if speed else "UNMEASURED"
+        out.append('<section data-section="iteration-speed" class="iteration-speed" title="'
+                   + e(iteration_speed_detail(card)) + '">' + e(rate_text) + ' iter/h '
+                   + f'<span class="{cls}">[{e(speed_change_text(card))}]</span>'
+                   + '<div class="sub">' + e(iteration_speed_detail(card)) + '</div></section>')
     # Header
     since = card.get("since") or {}
     since_html = (_span("run", "RUNNING") if since.get("state") == "RUNNING" else
@@ -1675,6 +1728,7 @@ def render_text(card: dict) -> str:
              f'Triggered {pacific(exp.get("triggered_at"))}',
              _rate_text(card)]
     if card.get("iterations") is not None:
+        lines.insert(0, iteration_speed_detail(card))
         lines.insert(0, iteration_speed_text(card))
     since = card.get("since") or {}
     lines.append("Since last benchmark ended: " + ("RUNNING" if since.get("state") == "RUNNING" else

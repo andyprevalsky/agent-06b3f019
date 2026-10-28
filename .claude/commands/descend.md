@@ -1223,3 +1223,17 @@ unavailable values stay explicitly unknown. Never guess historical settings or
 publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
 before collection, append snapshots for changes and publish the ledger. Final
 scorecards report model/effort/tier and collection gaps alongside timings.
+
+
+### Descent speed change (user clarification)
+
+The compact descent headline is `<rate> iter/h [avg Δ <signed percent> over last 5 runs]`.
+Avg Δ uses five consecutive finished recorded experiments (four finish-to-finish
+speeds), then takes the arithmetic mean of the three successive changes:
+100 * (next_speed / previous_speed - 1). It is neither mean speed nor endpoint
+change. Retain failed/cancelled finishes and all inter-experiment work. Skip only
+the latest current running experiment; never bridge missing/invalid finishes.
+Fewer than five consecutive valid finishes show UNMEASURED with n/5 coverage.
+Positive change is green with +, negative red with -, and stationary is 0.0%.
+Keep the full Iterations/Hour and finish-to-finish definition in a secondary
+line/title; the last ten rows and T- clocks are unchanged.
