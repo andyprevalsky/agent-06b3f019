@@ -1,4 +1,5 @@
 import { type Response, Router } from 'express';
+import { ZodError } from 'zod';
 import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
 import { callerCanAccessAgent, callerCanAccessCodeTask } from '../../providers/agentAccess';
 import { createLogger } from '../../providers/logger';
@@ -34,6 +35,11 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
  * POST /api/codex-code-session/:taskId/keepalive - the attached activity extends
  * the sandbox idle window and the code-session lease (internal only).
  */
+function invalidRequestBody(error: ZodError): { error: string; code: string } {
+  const detail = error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+  return { error: `Invalid request: ${detail}`, code: 'INVALID_REQUEST' };
+}
+
 router.post(
   '/:taskId/keepalive',
   authenticate,
@@ -154,6 +160,10 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
+      if (error instanceof ZodError) {
+        res.status(400).json(invalidRequestBody(error));
+        return;
+      }
       if (error instanceof LocalTargetUnavailableError) {
         res.status(409).json(localTargetUnavailableBody(error));
         return;

@@ -97,6 +97,22 @@ tool. The existing position fallback in `lookup_llm_cache` still resolves them.
 Status is `mitigated` until a /descend rerun shows zero GrepTool/WaitForTool
 re-generations.
 
+## Recurrence 2026-10-27 (prod root 942d8562, qwen-3.8-27b on Cerebras)
+
+The 10-24 collapse over-reached: string/enum omittables lost their null branch,
+so qwen wrote the literal text "null" to omit them: spawn_agent
+start_phase/items_csv/start_url/github_repo_link/code_session_id and wait_for
+condition/until_timestamp ("start_phase: Input should be 'PLAN' or 'EXECUTE'";
+wait_for "until_timestamp and condition and agents are mutually exclusive").
+JSON null already validates (tested), so "treat null as absent" was not the gap.
+Replay of captured call 0f663344fb57 (Cerebras, 'low' effort, only the encoding
+varied): collapsed 2/6 valid calls carried "null"; string slots keeping
+anyOf[string,null] 0/5 (samples small; Cerebras TPM throttled the replay).
+Fix: `collapse_omittable_nulls` skips string-typed kept branches (arrays/ints/
+objects stay collapsed). No "null"-string coercion (rule 25b; rewriting model
+output was declined above). Regression:
+rose.blackbox.py::test_cerebras_string_optionals_keep_null_branch (fails pre-fix).
+
 ## Human feedback
 
 None recorded.

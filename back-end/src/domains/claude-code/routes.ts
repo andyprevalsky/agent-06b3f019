@@ -16,6 +16,7 @@
  */
 
 import { type Response, Router } from 'express';
+import { ZodError } from 'zod';
 import { type AuthRequest, authenticate, authenticateInternal } from '../../providers/auth';
 import { callerCanAccessAgent, callerCanAccessCodeTask } from '../../providers/agentAccess';
 import { createLogger } from '../../providers/logger';
@@ -105,6 +106,15 @@ router.post(
         ...result,
       });
     } catch (error) {
+      if (error instanceof ZodError) {
+        // A malformed request is the caller's error, not a server failure: a 500
+        // here read as a transient sandbox flake to the agent (RCA 942d8562).
+        res.status(400).json({
+          error: `Invalid request: ${error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+          code: 'INVALID_REQUEST',
+        });
+        return;
+      }
       if (error instanceof LocalTargetUnavailableError) {
         res.status(409).json(localTargetUnavailableBody(error));
         return;
