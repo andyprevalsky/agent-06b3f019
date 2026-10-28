@@ -28,7 +28,7 @@ import {
   type SandboxSize,
 } from './codeSessions/sandboxSize';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
-import { createSandboxWithRetry, e2bCapacityWaitMs } from './e2bSandboxCreate';
+import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   linkClaudeCodeSession,
   markPaused,
@@ -219,8 +219,7 @@ export async function acquireCodeSandbox(
           envs,
           ...codeSessionCreateOptions(codeSession),
         },
-        label,
-        { waitMs: e2bCapacityWaitMs() }
+        label
       ),
     { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
   );

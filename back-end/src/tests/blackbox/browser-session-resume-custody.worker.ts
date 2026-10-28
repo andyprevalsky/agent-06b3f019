@@ -13,25 +13,29 @@ const recoveryPath = path.resolve(__dirname, '../../providers/browser/resumeReco
 const profileWriterPath = path.resolve(__dirname, '../../providers/browser/kernelProfileWriter.ts');
 const local = createRequire(providerPath);
 const { prisma } = local('../database');
-if (process.env.CUSTODY_OBSERVE_ACTIVE === '1') {
+if (process.env.CUSTODY_OBSERVE_INFLIGHT === '1') {
+  // Observe the real read, preserving both the query and its returned value.
   const findUnique = prisma.toolSideEffect.findUnique.bind(prisma.toolSideEffect);
-  let observed = false;
-  prisma.toolSideEffect.findUnique = async (query: unknown) => {
-    const row = await findUnique(query);
+  let notified = false;
+  prisma.toolSideEffect.findUnique = async (args: unknown) => {
+    const row = await findUnique(args);
     if (
-      !observed &&
+      !notified &&
       row?.operationKey === `steel-browser-task-lifecycle:${process.argv[2]}` &&
       row.operationType === 'browser_task_resume' &&
-      row.status === 'STARTED' &&
-      row.request?.phase === 'creating'
+      row.status === 'STARTED'
     ) {
-      observed = true;
-      process.send?.({ custodyObserved: row.operationKey, pid: process.pid });
+      notified = true;
+      process.send?.({
+        type: 'custody-inflight-observed',
+        taskId: process.argv[2],
+        status: row.status,
+        compatibility: row.request?.compatibility,
+      });
     }
     return row;
   };
 }
-
 const original = Module._load;
 const api = process.env.BROWSER_USE_API_BASE_URL;
 const browser = {
@@ -39,7 +43,9 @@ const browser = {
     {
       storageState: async () => ({ cookies: [], origins: [] }),
       setStorageState: async () => request('/restore', { method: 'POST' }),
-      pages: () => [{ url: () => 'about:blank', goto: async () => {}, close: async () => {} }],
+      pages: () => [
+        { frames: () => [], url: () => 'about:blank', goto: async () => {}, close: async () => {} },
+      ],
       newPage: async () => ({
         url: () => 'about:blank',
         goto: async () => {},
@@ -126,11 +132,17 @@ Module._load = function (id, parent, isMain) {
   return original.call(this, id, parent, isMain);
 };
 (async () => {
+  if (process.env.CUSTODY_EXIT_BEFORE_ENTRY === '1') process.exit(23);
   try {
     assert.ok(
       (await import('playwright')).chromium === playwright.chromium,
       'custody fixture must own Playwright ESM as well as CommonJS'
     );
+    if (process.env.CUSTODY_STALL === '1') {
+      // Stay connected without returning so the parent's existing deadline owns cleanup.
+      process.on('message', () => {});
+      await new Promise<never>(() => {});
+    }
     const result = await local(resumePath).resumeBrowserSession(process.argv[2], {
       forceFreshProfile: process.env.CUSTODY_FRESH === '1',
     });

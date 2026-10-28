@@ -61,6 +61,9 @@ async function renderTerminal(userId = ROSE_USER) {
   const user = userEvent.setup({ delay: null });
   renderWithProviders(<Terminal />);
   await screen.findByPlaceholderText('Enter any goal');
+  if (window.innerWidth < 768 && roseDesktopFlag.isRoseDesktopUser({ id: userId })) {
+    await screen.findByTestId('rose-mobile-header');
+  }
   return user;
 }
 
@@ -247,7 +250,11 @@ describe('all-account rollout', () => {
     setViewport(390);
     await renderTerminal('ordinary-account');
     expect(header()).toBeInTheDocument();
-    for (const label of APP_LABELS)
-      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
+    const icons = within(header()).getByRole('navigation', { name: 'Apps' });
+    expect(
+      within(icons)
+        .getAllByRole('button')
+        .map((button) => button.getAttribute('aria-label')?.replace('Light mode', 'Dark mode')),
+    ).toEqual(APP_LABELS);
   });
 });

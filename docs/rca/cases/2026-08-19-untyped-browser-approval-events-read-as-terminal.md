@@ -9,7 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py:9538 ("Payment card ready") and :9043 ("✓ Write permission granted") yield workflow-scope spawn_browser_agent events with no action_type, which front-end/src/features/terminal/hooks/derivations.ts:138-144 (isBrowserTaskTerminalMessage legacy branch) reads as a browser-task terminal
 symptoms:
   - browser agent shows as completed after the user approves the payment card
-  - live browser panel disappears after "Payment card ready" and never comes back
+  - live browser panel disappears after "Payment card ready" and never comes back; Open Browser button does nothing after a persistent BrowserSession task is reused
   - "Payment card ready" carries toolName spawn_browser_agent, task_id, toolStatus FINISHED and no action_type
   - "✓ Write permission granted" closes the browser panel on write-lock approval
   - Task Incomplete - Max Steps Reached after "Resuming from write lock approval"
@@ -24,8 +24,9 @@ sources:
   - agent 7f354640-ffab-4098-b7ae-041ddf246c6f
   - commit e5f87f9a4
   - PR #791
+  - agent 3392bb69-807b-4ef9-a671-2e5eeb92efa7
 repro: front-end/src/tests/blackbox/browser-panel-derivations.blackbox.ts (describe 'browser panel survives approval-resume handoffs')
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -204,3 +205,54 @@ Never infer that a UI element is terminal from the *absence* of a field —
 require an explicit terminal marker on the producer and enforce it with an
 invariant, or the next untyped progress event will silently close a live
 session.
+
+
+### 2026-10-27 recurrence: a completed invocation hid its reused persistent browser
+
+Agent `3392bb69-807b-4ef9-a671-2e5eeb92efa7` completed the browser invocation
+`6e6fb277-6aa9-4ca3-a314-631b7666dbed` at 02:37–02:38 UTC, then started
+`dbf27293d` on the same persistent BrowserSession task
+`e62f18ac-84fd-51c5-90d4-a2abf4c4eb09` at 02:39:03 UTC. The new invocation
+requested authentication assistance at 02:44:39 UTC. A read-only live-view GET
+returned HTTP 200, ACTIVE and live=true. The captured transcript still produced
+zero panels: the all-history `.some(isBrowserTaskTerminalMessage)` retained the
+previous invocation's legitimate completion forever. With no BrowserStatusBar
+mounted, the real Open Browser handler dispatched an event with no listener and
+the drawer stayed closed. This is the same irreversible terminal projection
+recorded above, reached through persistent resource reuse rather than an untyped
+progress event. The prior fix typed events but left this consumer assumption.
+
+The candidate replaces first-init plus any-ever-terminal scanning with one
+persisted-order lifecycle reduction. Explicit browser/session starts reopen the
+resource; the current outer invocation owns terminality. Internal session-init
+call IDs do not replace that ownership, and late previous-call terminal events
+do not close the new invocation. Verifier/recording/diagnostic events never
+reopen a closed panel. The regression fixture retains seven causal metadata
+messages with example viewer URLs and no credentials, goals or account data.
+
+Executed unchanged permanent reproduction:
+`cd front-end && bash scripts/run-blackbox-tests.sh browser-reopened-session`.
+Original production source: four failures in 5.41 seconds, including expected
+panel versus `[]` and the actual clicked drawer remaining `data-state=closed`.
+Candidate: four passes in each of five consecutive runs (6.37, 8.04, 9.28, 8.18,
+6.31 seconds). The complete front-end blackbox runner passed 223 files / 2,979
+tests in 167.19 seconds. TypeScript, scoped formatting and lint also passed.
+The file is auto-discovered by the existing blackbox runner and `/deploy`
+front-end coverage invokes that runner. These are local causal/UI proofs;
+production deployment and live-click verification remain pending.
+
+Archive searches: `Open Browser navi-open-browser`, `browser button does nothing
+auth assistance`, and `browser panels terminal reused task`. Related retry case:
+`2026-07-22-browser-chips-keyed-by-task-render-twice-on-retry`.
+Golden analogs inspected: `openclaw/ui/src/pages/chat/chat-gateway.ts:357`
+fences updates by the current run; `codex/codex-rs/tui/src/chatwidget/protocol.rs:89`
+starts current turn state; `claude-code-src/src/Task.ts:108` represents current
+execution state. No reference embeds Rose's provider viewer. The candidate
+converges on explicit current-execution lifecycle state.
+
+10k-agent behavior: O(M log M + T) for the selected transcript and T tasks,
+replacing repeated per-task scans; zero added queries, subscriptions, channels,
+locks or polling. A 70,000-event / 10,000-task local reduction yielded 10,000
+panels in 253.42 ms. This is a reducer measurement, not a production load test.
+No new human correction was recorded. User requested the button RCA and the
+independent login/provider timeline; original purchasing task was not resumed.

@@ -2,7 +2,6 @@
 import assert from 'node:assert/strict';
 import { runBrowserLazyRetirementCustodyCase } from './browser-session-lazy-retirement.cases';
 import { runBrowserResumeRetryAfterRejectedCreateCase } from './browser-session-resume-retry.cases';
-import { retryWithBackoff } from '../../providers/retry';
 import { fork, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -20,6 +19,8 @@ export async function runBrowserResumeCustodyCases() {
   const outcomes: unknown[] = [];
   for (const provider of ['browser-use', 'kernel']) {
     for (const scenario of [
+      'leader-exit',
+      'leader-exit-stalled',
       'concurrent',
       'lost-ack',
       'zero-match',
@@ -29,6 +30,7 @@ export async function runBrowserResumeCustodyCases() {
       'user-lease',
       'provider-ended',
       'incompatible',
+      'incompatible-timeout',
       'incompatible-delayed',
       'incompatible-owner-timeout',
       'manual-follow',
@@ -39,12 +41,34 @@ export async function runBrowserResumeCustodyCases() {
       'logical-pause',
       'create-rejected',
     ]) {
-      const incompatible = scenario.startsWith('incompatible');
+      const delayedIncompatible =
+        scenario === 'incompatible-delayed' || scenario === 'incompatible-owner-timeout';
+      const concurrent = [
+        'concurrent',
+        'logical-empty',
+        'fresh-concurrent',
+        'incompatible',
+        'incompatible-timeout',
+        'incompatible-delayed',
+        'incompatible-owner-timeout',
+        'leader-exit',
+        'leader-exit-stalled',
+      ].includes(scenario);
+      const leaderExit = scenario.startsWith('leader-exit');
+      const freshOperation = ['fresh-concurrent', 'incompatible', 'incompatible-timeout'].includes(
+        scenario
+      );
       const owner = `custody-${randomUUID()}`;
       const children = new Set<ChildProcess>();
-      let releaseCreate!: () => void;
-      const createHeld = new Promise<void>((resolve) => {
-        releaseCreate = resolve;
+      const childClosures: Promise<void>[] = [];
+      let forks = 0;
+      let signalProviderEntry!: () => void;
+      const providerEntry = new Promise<void>((resolve) => {
+        signalProviderEntry = resolve;
+      });
+      let releaseNative!: () => void;
+      const nativeGate = new Promise<void>((resolve) => {
+        releaseNative = resolve;
       });
       let creates = 0,
         hydrations = 0,
@@ -56,6 +80,7 @@ export async function runBrowserResumeCustodyCases() {
       let nativeVisible = true;
       let profileReads = 0;
       let nativeDead = false;
+      let manualFollowStarted = false;
       let nativeId = `native-${randomUUID()}`;
       const native = () =>
         provider === 'kernel'
@@ -81,6 +106,7 @@ export async function runBrowserResumeCustodyCases() {
         res.setHeader('Content-Type', 'application/json');
         if (req.method === 'POST' && req.url?.endsWith('/browsers')) {
           creates++;
+          signalProviderEntry();
           if (creates > 1) nativeId = `native-${randomUUID()}`;
           nativeDead = false;
           const input = JSON.parse(body);
@@ -96,9 +122,9 @@ export async function runBrowserResumeCustodyCases() {
             res.end(JSON.stringify({ message: 'Proxy health check failed' }));
             return;
           }
-          if (incompatible || scenario === 'fresh-concurrent') {
-            // Keep creation pending until the contender has observed active custody.
-            await createHeld;
+          if (concurrent) {
+            // A real follower ledger read establishes overlap; process launch does not.
+            await nativeGate;
             res.end(JSON.stringify(native()));
           } else {
             setTimeout(() => res.end(JSON.stringify(native())), 100);
@@ -113,12 +139,19 @@ export async function runBrowserResumeCustodyCases() {
         } else if (req.url?.startsWith('/profiles/')) {
           res.end(JSON.stringify({ updatedAt: `version-${++profileReads}` }));
         } else if (req.url === '/health') {
-          if (scenario === 'manual-follow')
+          if (scenario === 'manual-follow' && manualFollowStarted)
             await prisma.browserSession.update({
               where: { id: session.id },
               data: { controlState: 'USER', controlLeaseExpiresAt: new Date(Date.now() + 60000) },
             });
-          res.end(JSON.stringify({ status: nativeDead ? 'stopped' : 'active', ttlMs: null }));
+          res.end(
+            JSON.stringify({
+              provider,
+              sessionId: nativeId,
+              status: nativeDead ? 'stopped' : 'active',
+              ttlMs: null,
+            })
+          );
         } else if (req.url === '/restore') {
           const restoring = await prisma.browserSession.findUniqueOrThrow({
             where: { id: session.id },
@@ -174,7 +207,12 @@ export async function runBrowserResumeCustodyCases() {
         },
       });
       const key = `steel-browser-task-lifecycle:${session.id}`;
-      const run = (fresh = false, observeCustody = false) =>
+      const run = (
+        fresh = false,
+        observeInFlight = false,
+        stall = false,
+        exitBeforeEntry = false
+      ) =>
         new Promise<Outcome>((resolve, reject) => {
           const child = fork(
             new URL('./browser-session-resume-custody.worker.ts', import.meta.url),
@@ -186,18 +224,13 @@ export async function runBrowserResumeCustodyCases() {
                 'tsx',
                 // Force contender startup past the old one-second response window.
                 // The existing ten-second worker deadline remains unchanged.
-                ...(!fresh &&
-                (scenario === 'incompatible-delayed' || scenario === 'incompatible-owner-timeout')
+                ...(!fresh && delayedIncompatible
                   ? [
                       '--import',
                       `data:text/javascript,await new Promise(r => setTimeout(r, ${
                         scenario === 'incompatible-owner-timeout' ? 12000 : 1500
                       }))`,
                     ]
-                  : []),
-                // Keep this overlap control independent of a fast contender fork.
-                ...(observeCustody
-                  ? ['--import', 'data:text/javascript,await new Promise(r => setTimeout(r, 1500))']
                   : []),
               ],
               stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -208,7 +241,9 @@ export async function runBrowserResumeCustodyCases() {
                 CONDUCTOR_WORKSPACE_NAME: owner,
                 CUSTODY_PROVIDER: provider,
                 CUSTODY_FRESH: fresh ? '1' : '0',
-                CUSTODY_OBSERVE_ACTIVE: observeCustody ? '1' : '0',
+                CUSTODY_OBSERVE_INFLIGHT: observeInFlight ? '1' : '0',
+                CUSTODY_STALL: stall ? '1' : '0',
+                CUSTODY_EXIT_BEFORE_ENTRY: exitBeforeEntry ? '1' : '0',
                 CUSTODY_LOGICAL_PAUSE: scenario === 'logical-pause' ? '1' : '0',
                 CUSTODY_STALE: scenario === 'stale-binding' ? '1' : '0',
                 KERNEL_PROXY_ENABLED: 'false',
@@ -220,6 +255,8 @@ export async function runBrowserResumeCustodyCases() {
             }
           );
           children.add(child);
+          childClosures.push(new Promise<void>((resolve) => child.once('close', () => resolve())));
+          forks++;
           let logs = '';
           let received = false;
           const timer = setTimeout(() => {
@@ -228,20 +265,38 @@ export async function runBrowserResumeCustodyCases() {
           }, 10000);
           child.stdout!.on('data', (x) => (logs += x));
           child.stderr!.on('data', (x) => (logs += x));
-          child.on('message', (message) => {
-            if ((message as { custodyObserved?: string } | null)?.custodyObserved === key) {
-              releaseCreate();
+          child.on('message', function receive(message) {
+            const observation = message as {
+              type?: string;
+              taskId?: string;
+              status?: string;
+              compatibility?: string;
+            };
+            if (observation?.type === 'custody-inflight-observed') {
+              if (
+                !observeInFlight ||
+                observation.taskId !== session.id ||
+                observation.status !== 'STARTED' ||
+                observation.compatibility !== (freshOperation ? 'fresh' : 'default')
+              ) {
+                clearTimeout(timer);
+                reject(new Error('Unexpected fixture in-flight observation'));
+                return;
+              }
+              releaseNative();
               return;
             }
+            child.off('message', receive);
             received = true;
             clearTimeout(timer);
             resolve(message as Outcome);
           });
           child.once('error', reject);
-          child.once('exit', () => {
+          child.once('exit', (code, signal) => {
             children.delete(child);
             clearTimeout(timer);
-            if (!received) reject(new Error(logs));
+            if (!received)
+              reject(new Error(`fixture worker exited code=${code} signal=${signal}: ${logs}`));
           });
         });
       const expire = async (foreign = false) => {
@@ -259,34 +314,18 @@ export async function runBrowserResumeCustodyCases() {
       };
       try {
         let results: Outcome[];
-        if (scenario === 'concurrent' || scenario === 'logical-empty')
-          results = await Promise.all([run(), run()]);
-        else if (scenario === 'logical-pause') results = [await run()];
-        else if (scenario === 'fresh-concurrent') {
-          const first = run(true);
-          const contender = (async () => {
-            await retryWithBackoff(async () => creates > 0, {
-              maxRetries: 1000,
-              initialBackoffMs: 10,
-              fixedDelays: Array.from({ length: 999 }, () => 10),
-              shouldRetryResult: (created) => !created,
-            });
-            return run(true, true);
-          })();
-          results = await Promise.all([first, contender]);
-        } else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
-        else if (incompatible) {
+        if (delayedIncompatible) {
           let firstSettled = false;
           const first = run(true).finally(() => {
             firstSettled = true;
           });
-          await retryWithBackoff(async () => creates > 0, {
-            maxRetries: 1000,
-            initialBackoffMs: 10,
-            fixedDelays: Array.from({ length: 999 }, () => 10),
-            shouldRetryResult: (created) => !created,
-          });
-          const contender = (async () => {
+          // Use main's owned provider-entry/leader-settlement race, not a detached poll.
+          const contender = Promise.race([
+            providerEntry,
+            first.then(() => {
+              throw new Error('fixture leader completed without provider entry');
+            }),
+          ]).then(async () => {
             try {
               const second = await run();
               assert.match(
@@ -302,16 +341,63 @@ export async function runBrowserResumeCustodyCases() {
               );
               return second;
             } finally {
-              releaseCreate();
+              releaseNative();
             }
-          })();
+          });
           const combined = Promise.all([first, contender]);
           if (scenario === 'incompatible-owner-timeout') {
             await assert.rejects(combined, /^Error: fixture timeout:/);
             continue;
           }
           results = await combined;
-        } else {
+        } else if (concurrent) {
+          if (scenario === 'incompatible-timeout')
+            console.log(
+              'Custody timeout control',
+              JSON.stringify({ owner, contextId: context.id, sessionId: session.id })
+            );
+          const first = run(freshOperation, false, false, leaderExit);
+          // Provider entry and leader settlement own the complete startup lifetime.
+          // A failed leader rejects this race; there is no polling task left to fork later.
+          const second = Promise.race([
+            providerEntry,
+            first.then(() => {
+              throw new Error('fixture leader completed without provider entry');
+            }),
+          ]).then(() =>
+            run(
+              scenario === 'fresh-concurrent',
+              true,
+              scenario === 'incompatible-timeout' || scenario === 'leader-exit-stalled'
+            )
+          );
+          // Own both failures immediately, including while the follower is starting.
+          const joined = Promise.all([first, second]).finally(releaseNative);
+          if (leaderExit) {
+            await assert.rejects(joined, /fixture worker exited code=23/);
+            await Promise.allSettled([second]);
+            assert.equal(forks, 1, 'failed leader must never start a follower');
+            assert.equal(creates, 0);
+            outcomes.push({ provider, scenario, forks, creates, expectedFailure: 'leader exit23' });
+            continue;
+          }
+          if (scenario === 'incompatible-timeout') {
+            await assert.rejects(joined, /fixture timeout:/);
+            assert.equal(creates, 1);
+            assert.equal(hydrations, 0);
+            outcomes.push({
+              provider,
+              scenario,
+              creates,
+              hydrations,
+              expectedFailure: 'fixture timeout',
+            });
+            continue;
+          }
+          results = await joined;
+        } else if (scenario === 'logical-pause') results = [await run()];
+        else if (scenario === 'fresh-sequential') results = [await run(true), await run(true)];
+        else {
           results = [await run()];
           if (scenario === 'user-lease') {
             assert(!results[0]!.ok);
@@ -319,6 +405,7 @@ export async function runBrowserResumeCustodyCases() {
             assert.equal(hydrations, 0);
           } else if (['ready-ack', 'manual-follow', 'provider-ended'].includes(scenario)) {
             if (scenario === 'provider-ended') nativeDead = true;
+            if (scenario === 'manual-follow') manualFollowStarted = true;
             results.push(await run());
           } else if (scenario === 'stale-binding') {
             assert(!results[0]!.ok);
@@ -367,8 +454,12 @@ export async function runBrowserResumeCustodyCases() {
           );
           assert.equal(creates, 2);
           assert.equal(hydrations, 2);
-        } else if (incompatible || scenario === 'manual-follow') {
-          assert(results[0]!.ok);
+        } else if (
+          scenario === 'incompatible' ||
+          delayedIncompatible ||
+          scenario === 'manual-follow'
+        ) {
+          assert(results[0]!.ok, JSON.stringify({ provider, scenario, results }));
           assert(!results[1]!.ok);
           assert.equal(creates, 1);
           assert.equal(hydrations, 1);
@@ -402,18 +493,18 @@ export async function runBrowserResumeCustodyCases() {
           'ledger must not persist credential-bearing URLs'
         );
         outcomes.push({ provider, scenario, creates, hydrations, restores, stops, results });
+      } catch (error) {
+        console.error('Browser resume custody case failed', {
+          provider,
+          scenario,
+          creates,
+          hydrations,
+        });
+        throw error;
       } finally {
-        releaseCreate();
-        const childExits =
-          scenario === 'incompatible-owner-timeout'
-            ? Promise.all(
-                [...children].map(
-                  (child) => new Promise<void>((resolve) => child.once('exit', () => resolve()))
-                )
-              )
-            : null;
+        releaseNative();
         for (const child of children) child.kill('SIGTERM');
-        if (childExits) await childExits;
+        await Promise.all(childClosures);
         await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
         await prisma.browserContext.delete({ where: { id: context.id } });
         await new Promise<void>((resolve) => server.close(() => resolve()));

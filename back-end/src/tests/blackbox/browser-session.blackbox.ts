@@ -20,22 +20,14 @@ import { request, runTest, type TestResult } from './browser-session-test-suppor
  *   - idempotency: GET endpoints return same shape on repeated calls
  *   - concurrency: 10 parallel auth-check requests return consistent results
  *   - same-input reproducibility: three sequential 404s return identical status
- *   - cleanup: read-only tests (no real Steel sessions created), no state mutations
+ *   - cleanup: fixture-owned DB/browser state is retired; no paid provider sessions
  *   - harness independence: no background jobs involved
  *   - observability: covered by runner manifest and artifact directory
  *
- * Invariants not applicable:
- *   - read-after-write: cannot test without real Steel session (requires Steel SDK/billing)
- *   - state-transition: session lifecycle requires real Steel sessions
- *   - ordering/pagination: no list-all endpoint
- *   - atomicity: Steel SDK operations
- *   - referential integrity: FK relations to BrowserContext/BrowserSession
- *   - event/job cardinality: no events emitted
- *   - duplication prevention: sessions are unique by design
- *   - tenant isolation: context scoped by userId
- *   - time/clock: no timestamps in error responses
- *   - boundary param: Steel SDK calls happen inside init/close/resume (untestable without real sessions)
- *   - call ordering: Steel SDK calls are sequential
+ * Real approval E2E covers activity -> close API -> encrypted checkpoint ->
+ * destroyed Chromium -> resume API -> restored checkout -> resumed activity.
+ * Prisma, browser storage and checkpoint/restore stay real; paid native provider
+ * allocation/release and the merchant/model are local deterministic fixtures.
  *
  * Usage:
  *   npx tsx src/tests/blackbox/browser-session.blackbox.ts
@@ -48,6 +40,9 @@ import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
+import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
+import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
 import {
   runBrowserRootTeardownSavesStateCases,
   runBrowserTerminalPauseCases,
@@ -574,28 +569,29 @@ async function testReproducibility_threeSequential() {
     });
     statuses.push(res.status);
   }
-  if (new Set(statuses).size !== 1) {
-    throw new Error(`Three sequential: ${statuses.join(', ')}`);
-  }
+  if (new Set(statuses).size !== 1) throw new Error(`Three sequential: ${statuses.join(', ')}`);
 }
 
 // ==================== RUN ====================
 
 async function runAll() {
-  if (
-    process.argv.includes('--logical-browser-only') ||
-    process.argv.includes('--resume-custody-only')
-  ) {
-    await (
-      process.argv.includes('--logical-browser-only')
-        ? runLogicalBrowserCases
-        : runBrowserResumeCustodyCases
-    )();
+  const focusedCases = [
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
+    ['--approval-e2e-only', runBrowserApprovalE2ECases],
+    ['--private-restore-only', runBrowserPrivateRestoreCases],
+    ['--logical-browser-only', runLogicalBrowserCases],
+    ['--resume-custody-only', runBrowserResumeCustodyCases],
+  ] as const;
+  for (const [flag, run] of focusedCases) {
+    if (!process.argv.includes(flag)) continue;
+    await run();
     await prisma.$disconnect();
     return;
   }
   if (process.argv.includes('--pause-checkpoint-only')) {
+    await runBrowserApprovalE2ECases();
     await runBrowserPauseCheckpointCases();
+    await runBrowserPrivateRestoreCases();
     await runBrowserTerminalPauseCases();
     await runBrowserRootTeardownSavesStateCases();
     console.log(
@@ -606,7 +602,10 @@ async function runAll() {
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
   await runBrowserPauseCheckpointCases();
+  await runBrowserPrivateRestoreCases();
+  await runBrowserApprovalE2ECases();
   await runBrowserTerminalPauseCases();
+  await runBrowserProviderLifecycleCases();
   await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();

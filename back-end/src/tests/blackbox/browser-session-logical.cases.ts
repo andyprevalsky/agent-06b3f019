@@ -1,4 +1,3 @@
-import { resumeBrowserSession } from '../../providers/browserSessionResume';
 import { createAgentTransaction } from '../../domains/agents/repoMutations';
 /** Owning DB/crypto regressions for lazy logical browser identity and baselines. */
 import assert from 'node:assert/strict';
@@ -13,6 +12,7 @@ import { prisma } from '../../providers/database';
 import { ensureLogicalBrowser, logicalBrowserTaskId } from '../../providers/browser/logicalSession';
 import {
   EMPTY_BROWSER_BASELINE,
+  loadLogicalBrowserCheckpoint,
   readBrowserCheckpoint,
   writeBrowserCheckpoint,
   restoreLogicalBrowserCheckpoint,
@@ -79,7 +79,7 @@ export async function runLogicalBrowserCases() {
     assert.equal(created.sessionId, null);
     assert.equal(created.baselineCheckpointRef, EMPTY_BROWSER_BASELINE);
     await prisma.browserSession.update({ where: { id: created.id }, data: { provider: 'steel' } });
-    await assert.rejects(resumeBrowserSession(created.id), /requires durable hydration custody/);
+    assert.equal((await loadLogicalBrowserCheckpoint(created.id)).checkpoint.sourceLogicalId, null);
     assert.equal(
       (await prisma.browserSession.findUniqueOrThrow({ where: { id: created.id } })).sessionId,
       null

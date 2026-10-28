@@ -4,6 +4,8 @@ import type { Message } from '@/lib/api';
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
 
+import { registerBrowserPanelResumeCases } from './browser-panel-resume.cases';
+
 import prodChipLeakTranscriptJson from './browser-chip-leak-prod-85530622.fixture.json';
 
 const prodChipLeakTranscript = prodChipLeakTranscriptJson as Parameters<
@@ -450,10 +452,9 @@ describe('computeActiveBrowserPanels', () => {
     expect(computeActiveBrowserPanels(msgs)).toEqual([]);
   });
 
-  // Prod agent c27b4f28 (2026-08-22): user rejected a 1-item DoorDash checkout.
-  // write_lock_rejected ends the browser task but is not task_complete; without
-  // this terminal the live status chip stayed visible after rejection.
-  it('hides the panel when the user rejects a write-lock approval', () => {
+  // Rejection ends the denied action, not the browser agent. The current
+  // contract continues the same task and context with the user's feedback.
+  it('keeps the panel active when the user rejects a write-lock approval', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
       {
         message_id: 'init',
@@ -483,10 +484,15 @@ describe('computeActiveBrowserPanels', () => {
         },
       },
     ];
-    expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    expect(computeActiveBrowserPanels(msgs)).toEqual([
+      {
+        taskId: 'd398cf8a-b084-4a6b-bb86-8b05fbe36875',
+        browserUrl: 'https://connect.steel.dev/v1/sessions/live/view',
+      },
+    ]);
   });
 
-  it('hides the panel when write_lock_rejected is tool-call-scoped without task_id', () => {
+  it('keeps the panel active when write_lock_rejected is tool-call-scoped without task_id', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
       {
         message_id: 'init',
@@ -515,7 +521,12 @@ describe('computeActiveBrowserPanels', () => {
         },
       },
     ];
-    expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    expect(computeActiveBrowserPanels(msgs)).toEqual([
+      {
+        taskId: 'd398cf8a-b084-4a6b-bb86-8b05fbe36875',
+        browserUrl: 'https://connect.steel.dev/v1/sessions/live/view',
+      },
+    ]);
   });
 
   it('keeps a sibling task alive when another task pauses with a task-scoped session_paused', () => {
@@ -566,6 +577,8 @@ describe('computeActiveBrowserPanels', () => {
     ];
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'task-b', browserUrl: 'b' }]);
   });
+
+  registerBrowserPanelResumeCases();
 
   it('does not close a task when a different tool call errors', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [

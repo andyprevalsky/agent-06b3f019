@@ -13,6 +13,8 @@
  *   spinning loader for tool batches, live elapsed). EXPANDED swaps the icon for
  *   a chevron. Thinking always shows the ↓ token counter: the live stream's
  *   indicator, or the persisted thought's own size until the next stream starts.
+ *   When the latest activity is a spawned agent, a smaller line beneath rotates
+ *   through the tool(s) it is using now (SpawnedAgentToolLine).
  * DONE header: chevron + "Worked for Xs" + activity count.
  * EXPANDED: the ordered history so far (completed and in-progress activities),
  *   paged 20 at a time; opening a running batch shows its latest page, and new
@@ -27,6 +29,8 @@ import { useBatchElapsed } from './useBatchElapsed';
 import { StreamingMetric } from './StreamingMetric';
 import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
+import type { ExploreStep } from '../types';
+import { SpawnedAgentToolLine } from './SpawnedAgentToolLine';
 import { workLabel } from '../hooks/codeSessionTurns';
 const PAGE_SIZE = 20;
 /** Leaf clock: its tick re-renders only this text, never the open history rows. */
@@ -68,10 +72,12 @@ export function TrajectoryWorkGroup({
   group,
   renderMessage,
   indicator,
+  exploreStepMap,
 }: {
   group: Group;
   renderMessage: (message: Message) => ReactNode;
   indicator?: ReactNode;
+  exploreStepMap?: ReadonlyMap<string, ExploreStep[]>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(0);
@@ -164,6 +170,13 @@ export function TrajectoryWorkGroup({
           )}
         </span>
       </button>
+      {running && !expanded && latest.kind === 'work' && (
+        <SpawnedAgentToolLine
+          key={latest.key}
+          message={latest.message}
+          exploreSteps={exploreStepMap?.get(latest.message.message_id)}
+        />
+      )}
       {expanded && (
         <div
           id={historyId}

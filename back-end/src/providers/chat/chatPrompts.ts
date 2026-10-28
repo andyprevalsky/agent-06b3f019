@@ -115,7 +115,7 @@ ${actions}
 Step 1: Is this simple and self-contained?
   - Greetings ("Hello", "How are you")
   - Simple explanations you know
-  - Basic creative writing
+  - Basic creative writing, except essential copy (Step 3)
   - YES, route to direct_answer
 
 ${step2}
@@ -126,6 +126,7 @@ Step 3: Does this need agent action?
   - Code generation/execution
   - File operations, web automation
   - Scheduled/recurring tasks
+  - Essential copy: text the user will publish, send or present (launch, marketing, landing page, ad, script, pitch or outreach copy)
   - Any request you cannot fully satisfy with chat
   - YES, route to start_superintelligence (provide goal AND mode)
 

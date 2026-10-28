@@ -15,6 +15,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_RESIZE_ATTEMPTS,
     CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
     CODE_SESSION_RESIZE_TIMEOUT_S,
+    E2B_CAPACITY_EXHAUSTED_CODE,
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from helpers.workflow_generation import (
@@ -318,6 +319,11 @@ async def create_e2b_session(
                     type=LOCAL_TARGET_UNAVAILABLE_CODE,
                     non_retryable=True,
                 )
+
+        if response.status_code == 503:
+            body = _json_or_empty(response)
+            if body.get("code") == E2B_CAPACITY_EXHAUSTED_CODE and isinstance(body.get("error"), str):
+                raise ApplicationError(body["error"], type=E2B_CAPACITY_EXHAUSTED_CODE, non_retryable=True)
 
         if response.status_code not in (200, 201):
             response_text = response.text[:500]
