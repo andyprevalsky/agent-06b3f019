@@ -12,7 +12,7 @@ const TEXTAREA_STYLE: CSSProperties = {
   background: 'transparent',
   fontSize: 13,
   lineHeight: '18px',
-  color: '#272725',
+  color: 'var(--launcher-text)',
   border: 'none',
   outline: 'none',
   resize: 'none',
@@ -69,7 +69,7 @@ const QueryFormMiddle = ({
       {attachError !== null && attachError !== '' ? (
         <div
           data-testid="launcher-attach-error"
-          style={{ fontSize: 11, color: '#b91c1c', lineHeight: 1.2 }}
+          style={{ fontSize: 11, color: 'var(--launcher-error)', lineHeight: 1.2 }}
         >
           {attachError}
         </div>

@@ -3,7 +3,7 @@
  * across layers. No env reads required.
  */
 
-export { CHIP_BASE, PORTAL_ID } from '../../shared/bottom-left-chips/config';
+export { CHIP_BASE, CHIP_LABEL, PORTAL_ID } from '../../shared/bottom-left-chips/config';
 
 export const NONE_DISMISS_DELAY_MS = 3000;
 
