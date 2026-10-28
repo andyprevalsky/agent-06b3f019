@@ -85,3 +85,12 @@ Ultra would use GPT-6 Sol. The corrected test asserts GPT-6.1 for both WMH and
 production Ultra, then separately exercises GPT-6 compatibility with an explicitly
 unpinned PoolSpec. The unchanged instrumented Rose command passes 273 checks
 after this and the independently diagnosed loopback fixture repair.
+
+The full backend run found two more fixtures advertising GPT-6 after the
+production pin: compute-token-authority had no second eligible route for its
+synthetic rate-limit response, and native-schema selected an inherited region
+instead of its expected wire fixture. Both now configure GPT-6.1 explicitly;
+the authority case asserts both deployment identities, and native-schema
+isolates all nine region slots and asserts the wire model. Identical focused
+commands failed before and passed after. Proof: `/tmp/cta-pr1634-proof/handoff.md`
+and `/var/tmp/rose-native-schema-proof/handoff.txt`. No runtime logic changed.
