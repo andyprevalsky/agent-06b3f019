@@ -253,6 +253,31 @@ def test_policy_redaction_env_keys_and_escaped_quotes():
         assert redact_sensitive_text(ordinary) == ordinary, ordinary
 
 
+async def test_secret_placeholder_provenance_and_structured_redaction():
+    from browser_tools.secret_refs import secret_logging_context
+    from helpers.tool_output import bound_tool_result, preview_tool_text, read_tool_output
+    from utils.secret_text_redaction import redact_sensitive_text
+
+    owner = dict(user_id="redaction-user", agent_id="redaction-agent")
+    untrusted = "password={{secret:password=hunter2}}"
+    assert "hunter2" not in await preview_tool_text(untrusted, **owner)
+    with secret_logging_context({"pwd:issued": "activity-only-secret"}, fresh=True):
+        assert "{{secret:pwd:issued}}" in await preview_tool_text("ref: {{secret:pwd:issued}}", **owner)
+        assert "hunter2" not in await preview_tool_text(untrusted, **owner)
+
+    nested = json.dumps('{"password":"hunter2"}')
+    assert "hunter2" not in redact_sensitive_text(nested)
+    assert json.loads(json.loads(redact_sensitive_text(nested)))["password"] == "[REDACTED]"
+
+    small = await bound_tool_result({"api_key": "hunter2", "nested": nested}, **owner)
+    assert small["api_key"] == "[REDACTED]" and "hunter2" not in json.dumps(small)
+    with fake_output_storage():
+        large = await bound_tool_result({"api_key": "hunter2", "body": "x" * 150_000}, **owner)
+        assert "hunter2" not in json.dumps(large)
+        read = await read_tool_output(**owner, output_id=large["retained_output"]["output_id"])
+        assert "hunter2" not in read["content"]
+
+
 async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("main_retained_protocol_survives_redaction", test_main_retained_protocol_survives_redaction)
@@ -266,6 +291,7 @@ async def run_all_tests():
     await r.record_async("forged_marker_is_not_appended_to_summary", test_forged_marker_is_not_appended_to_summary)
     await r.record_async("expected_read_failures_are_not_retried", test_expected_read_failures_are_not_retried)
     r.record("policy_redaction_covers_auth_schemes_and_json", test_policy_redaction_covers_auth_schemes_and_json)
+    await r.record_async("secret_placeholder_provenance_and_structured_redaction", test_secret_placeholder_provenance_and_structured_redaction)
     await r.record_async("retention_failure_keeps_stated_cut_at_boundaries", test_retention_failure_keeps_stated_cut_at_boundaries)
     await r.record_async("missing_retained_output_404_is_file_not_found", test_missing_retained_output_404_is_file_not_found)
     r.record("policy_redaction_env_keys_and_escaped_quotes", test_policy_redaction_env_keys_and_escaped_quotes)

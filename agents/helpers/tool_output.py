@@ -63,12 +63,13 @@ def _storage_path(owner: tuple[str, str, str], output_id: str) -> str:
 
 
 def _safe_text(text: str) -> str:
-    from browser_tools.secret_refs import redact_current_secret_values
+    from browser_tools.secret_refs import current_secret_placeholders, redact_current_secret_values
 
     # Do not let the generic key=value matcher consume a trusted placeholder
     # and the unrelated source text immediately following its closing braces.
+    trusted = current_secret_placeholders()
     pieces = re.split(r"(\{\{secret:[^}]+\}\})", redact_current_secret_values(text))
-    return "".join(piece if piece.startswith("{{secret:") else redact_sensitive_text(piece) for piece in pieces)
+    return "".join(piece if piece in trusted else redact_sensitive_text(piece) for piece in pieces)
 
 
 async def _safe_text_async(text: str) -> str:
@@ -254,20 +255,20 @@ async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_i
 
 
 async def bound_tool_result(value: Any, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS) -> Any:
-    """Keep small native JSON values; retain oversized JSON in a valid envelope.
+    """Keep small redacted native JSON values; retain oversized JSON in a valid envelope.
 
     Callers must remove binary/media fields before calling this helper.
     """
     if isinstance(value, str):
         return await preview_tool_text(value, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit)
     serialized = await asyncio.to_thread(json.dumps, value, ensure_ascii=False, allow_nan=False)
-    if len(serialized) <= limit:
-        return value
     text = await _safe_text_async(serialized)
+    if len(serialized) <= limit:
+        return value if text == serialized else json.loads(text)
     output_id = await _persist(text, _owner(user_id, agent_id, session_id))
     flags = {key: value[key] for key in ("success", "error", "status") if isinstance(value, dict) and key in value and isinstance(value[key], (bool, int, float, type(None)))}
     if isinstance(value, dict) and isinstance(value.get("status"), str) and len(value["status"]) <= 100:
-        flags["status"] = value["status"]
+        flags["status"] = await _safe_text_async(value["status"])
     if isinstance(value, dict) and isinstance(value.get("error"), str) and value["error"]:
         flags["error"] = True
     # JSON escaping can expand text sixfold. Reserve room for the envelope and

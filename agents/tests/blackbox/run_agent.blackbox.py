@@ -2692,6 +2692,38 @@ async def test_workflow_marker_verification_uses_activity():
     assert "preview_tool_output_activity" in calls, calls
 
 
+async def test_workflow_preview_timeout_keeps_stated_cut():
+    import loop.run_agent as loop
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+    from temporalio.exceptions import ActivityError, RetryState, TimeoutError as TemporalTimeoutError, TimeoutType
+    from tools.read_tool_output import preview_tool_output_activity
+
+    async def execute_activity(fn, *, args, **kwargs):
+        if fn is loop.call_llm_activity:
+            return {"response": "", "tool_calls": [{"tool": "grep", "pattern": "x"}],
+                    "detected_tools_ordered": [("grep", "tc-timeout", 1.0)], "usage": {}}
+        assert fn is preview_tool_output_activity
+        error = ActivityError("preview timed out", scheduled_event_id=1, started_event_id=2,
+                              identity="test", activity_type="preview", activity_id="preview",
+                              retry_state=RetryState.TIMEOUT)
+        error.__cause__ = TemporalTimeoutError("start-to-close", type=TimeoutType.START_TO_CLOSE,
+                                               last_heartbeat_details=[])
+        raise error
+
+    async def long_tool(*args):
+        return {"success": True, "message": "TIMED_OUT_OUTPUT " * 10_000 + "EXACT_TAIL_SENTINEL"}
+
+    with retained_tool_output_fixture(), patch.object(loop.workflow, "execute_activity", execute_activity):
+        result, _, _ = await _run_single_iteration(
+            [{"tool": "grep", "pattern": "x"}], [("grep", "tc-timeout", 1.0)],
+            execute_tool_override=long_tool, is_inside_temporal_activity=False,
+            skip_verification=True, max_iterations=1,
+        )
+    text = [m["text"] for m in result["context"] if m["role"] == "TOOL"][-1]
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80
+    assert "preview timeout" in text and "EXACT_TAIL_SENTINEL" not in text
+
+
 async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
     """A batch of grep results must not trip the explore compaction check.
 
@@ -4061,6 +4093,7 @@ async def run_all_tests():
     await r.record_async("jev_schedules_every_turn", test_jev_schedules_every_turn_without_changing_decisions)
     await r.record_async("workflow_output_retention_activity", test_workflow_output_retention_uses_activity)
     await r.record_async("workflow_marker_verification_activity", test_workflow_marker_verification_uses_activity)
+    await r.record_async("workflow_preview_timeout_stated_cut", test_workflow_preview_timeout_keeps_stated_cut)
     await r.record_async("activity_preview_retention_failure_stated_cut", test_activity_preview_retention_failure_keeps_stated_cut)
     await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(

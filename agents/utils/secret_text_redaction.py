@@ -1,5 +1,6 @@
 """Policy redaction of credential-shaped values in free text (stdlib only)."""
 
+import json
 import re
 
 # Includes env-style suffixes such as SECRET_KEY, SECRET_ACCESS_KEY and PRIVATE_KEY.
@@ -7,6 +8,7 @@ _KEY = (
     r"(?:api[_-]?key|(?:access|refresh|id|auth)[_-]?token|token|authorization|passwd|password"
     r"|private[_-]?key|(?:client[_-]?)?secret(?:[_-]?(?:access[_-]?)?key)?)"
 )
+_SENSITIVE_KEY = re.compile(rf"(?i)^{_KEY}$")
 
 SECRET_PATTERNS = [
     # Optional quotes around the key (JSON), an optional auth scheme word
@@ -14,7 +16,7 @@ SECRET_PATTERNS = [
     # stay inside it) or a bare value.
     re.compile(
         rf"(?i)(['\"]?{_KEY}['\"]?\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?"
-        r"(\"[^\"\\]*(?:\\.[^\"\\]*)*\"|'[^'\\]*(?:\\.[^'\\]*)*'|[^\s,;]+)"
+        r"(\"[^\"\\]*(?:\\.[^\"\\]*)*\"|'[^'\\]*(?:\\.[^'\\]*)*'|[^\s,;}]+)"
     ),
     re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
 ]
@@ -28,8 +30,59 @@ def _replace_value(match: re.Match) -> str:
     return f"{match.group(1)}{quote}[REDACTED]{quote}" if quote in "\"'" else f"{match.group(1)}[REDACTED]"
 
 
-def redact_sensitive_text(text: str) -> str:
+def _redact_patterns(text: str) -> str:
     redacted = text
     for pattern in SECRET_PATTERNS:
         redacted = pattern.sub(_replace_value, redacted)
     return redacted
+
+
+def _redact_json_value(value: object, depth: int = 0) -> tuple[object, bool]:
+    """Scrub JSON fields, including JSON serialized inside a string value."""
+    if isinstance(value, dict):
+        result = {}
+        changed = False
+        for key, item in value.items():
+            if _SENSITIVE_KEY.fullmatch(key):
+                result[key] = "[REDACTED]"
+                changed = changed or item != "[REDACTED]"
+            else:
+                result[key], item_changed = _redact_json_value(item, depth + 1)
+                changed = changed or item_changed
+        return result, changed
+    if isinstance(value, list):
+        result = []
+        changed = False
+        for item in value:
+            clean, item_changed = _redact_json_value(item, depth + 1)
+            result.append(clean)
+            changed = changed or item_changed
+        return result, changed
+    if isinstance(value, str):
+        clean = _redact_patterns(value)
+        if depth < 8 and clean.lstrip().startswith(("{", "[", '"')):
+            try:
+                nested = json.loads(clean)
+            except (ValueError, TypeError):
+                pass
+            else:
+                if isinstance(nested, (dict, list, str)):
+                    nested_clean, nested_changed = _redact_json_value(nested, depth + 1)
+                    if nested_changed:
+                        return json.dumps(nested_clean, ensure_ascii=False), True
+        return clean, clean != value
+    return value, False
+
+
+def redact_sensitive_text(text: str) -> str:
+    if text.lstrip().startswith(("{", "[", '"')):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            pass
+        else:
+            if isinstance(parsed, (dict, list, str)):
+                clean, changed = _redact_json_value(parsed)
+                if changed:
+                    return json.dumps(clean, ensure_ascii=False)
+    return _redact_patterns(text)

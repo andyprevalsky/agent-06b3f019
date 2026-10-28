@@ -3,7 +3,7 @@ import json
 import re
 
 from utils.browser_result_limits import BROWSER_STATE_MAX_CHARS, EVALUATE_RESULT_MAX_CHARS
-from helpers.tool_output import bound_tool_result, preview_tool_text
+from helpers.tool_output import _safe_text, bound_tool_result, preview_tool_text
 
 
 class BrowserModelResult(dict):
@@ -37,11 +37,19 @@ async def prepare_browser_result(action_name: str, result: dict, *, user_id: str
     elif action_name == "read_browser_state" and isinstance(view.get("formatted_state"), str):
         view["formatted_state"] = await preview_tool_text(view["formatted_state"], limit=BROWSER_STATE_MAX_CHARS, **owner)
     field = "value" if action_name == "evaluate" else "formatted_state"
+    issued_retained = False
     if isinstance(view.get(field), str):
         match = re.search(r'\n\[Retained tool output: read_tool_output output_id="([a-f0-9]{32})" offset=(\d+) limit=20000; total_chars=(\d+); Unicode characters; originating agent/session only; expires after 24h\.\]$', view[field])
         if match and view[field] != result.get(field):
             view["retained_output"] = {"output_id": match[1], "offset": int(match[2]), "total_chars": int(match[3]), "field": field}
-    view = await bound_tool_result(view, **owner)
+            issued_retained = True
+    bounded = await bound_tool_result(view, **owner)
+    # Generated readback IDs are protocol addresses, not page text. An activity
+    # secret can coincidentally occur inside a random ID; keep only the ID we
+    # just issued while redacting the page-derived preview prefix.
+    # An oversized structured result has its own readback envelope. Preserve
+    # the inner handle only when the bounded result still contains that field.
+    view = preserve_output_protocol(view, bounded, action_name, _safe_text) if issued_retained and field in bounded else bounded
     # Keep typed operational receipts (payment/write-lock) and canonical raw
     # action data; only the model serializer selects this private attribute.
     if not hasattr(result, "__dict__"):

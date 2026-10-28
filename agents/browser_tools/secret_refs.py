@@ -596,6 +596,11 @@ def redact_current_secret_values(value: Any) -> Any:
     return mask_secret_values(value, _LOG_SECRET_REFS.get())
 
 
+def current_secret_placeholders() -> frozenset[str]:
+    """Only placeholders issued by this activity may bypass generic redaction."""
+    return frozenset(secret_placeholder(ref) for ref in (_LOG_SECRET_REFS.get() or {}))
+
+
 def redact_secret_log_values(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Shared structlog/stdlib processor for execution-scoped credential logs."""
     refs = _LOG_SECRET_REFS.get()

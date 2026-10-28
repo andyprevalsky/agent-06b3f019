@@ -26,7 +26,7 @@ from pydantic import BaseModel
 # All imports at module level - no inline imports to avoid workflow sandbox issues
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, TimeoutError as TemporalTimeoutError
 
 from helpers.attachment_context import attachment_request_overhead
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
@@ -412,12 +412,14 @@ async def run_agent(
                 text, user_id=user_id, agent_id=agent_id, session_id=task_id or "", limit=TOOL_RESULT_HARD_CAP_CHARS,
             )
         except (RetentionError, ActivityError) as error:
-            if isinstance(error, ActivityError) and getattr(error.cause, "type", None) != RetentionError.__name__:
+            preview_timeout = isinstance(error, ActivityError) and isinstance(error.cause, TemporalTimeoutError)
+            if isinstance(error, ActivityError) and not preview_timeout and getattr(error.cause, "type", None) != RetentionError.__name__:
                 raise
             # A storage failure must not turn a tool result into a loop error.
             logger.warning("[run_agent] Tool output retention failed; keeping a stated cut", agent_id=agent_id, error=str(error))
             return stated_cut(text, limit=TOOL_RESULT_HARD_CAP_CHARS,
-                              reason="retained readback unavailable after a storage failure")
+                              reason=("retained readback unavailable after a preview timeout" if preview_timeout
+                                      else "retained readback unavailable after a storage failure"))
 
     # Handle tool event wrapper - used by all tools
     async def _handle_tool_event(event, tool_call_id: str, tool_name: str):

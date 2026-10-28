@@ -14336,7 +14336,7 @@ async def test_browser_retained_handle_survives_native_redaction(objects):
     projected = _model_visible_browser_turn_messages(turns, lambda value: mask_secret_values(value, refs), secret_values_used=True)
     messages = build_browser_use_messages(task="Read the result", browser_state={}, action_history=[], available_actions=["read_tool_output"], turn_messages=projected)
     payload = json.loads(next(m for m in messages if m.get("role") == "tool")["content"])
-    assert payload["retained_output"]["output_id"] == handle
+    assert payload["retained_output"]["output_id"] == handle, (payload["retained_output"]["output_id"], handle)
     assert f'output_id="{handle}"' in payload["value"]
     action = {"action": "read_tool_output", "params": {"output_id": handle, "offset": 29_998, "limit": 100}}
     call_turns = []
@@ -30584,6 +30584,13 @@ async def _drive_browser_write_pause_archive_boundary(
             assert len(starts) == (1 if abandoned else 2), "explicit PAUSE resumed an abandoned browser"
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+            pause_rows = [row for row in rows if row.get("metadata", {}).get("userPauseRequested") is True]
+            if wf.is_paused and getattr(wf, "_user_pause_active", False):
+                assert len(pause_rows) == 1, "user pause lacked a qualifying parent write"
+                assert pause_rows[0]["metadata"]["toolStatus"] == "FINISHED"
+                assert pause_rows[0]["metadata"].get("excludeFromModel") is not True
+            else:
+                assert not pause_rows, "non-user handoff invented a user pause"
             if abandoned:
                 assert terminals[0]["metadata"]["excludeFromModel"] is True
                 assert all(
@@ -30705,6 +30712,27 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
         inspect.signature(_request_browser_write_approval_until_paused).parameters["pause_sequence"].default
         is inspect.Parameter.empty
     ), "approval caller can silently omit its original pause sequence"
+
+
+def test_abandoned_resume_user_pause_writes_qualifying_parent_terminal():
+    from domains.spawn_browser_agent_v3.handler import _browser_abandoned_resume_events
+
+    user_pause = SimpleNamespace(is_paused=True, _user_pause_active=True)
+    events = _browser_abandoned_resume_events(user_pause, "task-owned", "Paused while awaiting approval")
+    assert len(events) == 2
+    assert events[0].metadata["excludeFromModel"] is True
+    assert events[0].metadata["action_type"] == "task_complete"
+    terminal = events[1].metadata
+    assert terminal["task_id"] == "task-owned"
+    assert terminal["toolName"] == "spawn_browser_agent"
+    assert terminal["toolStatus"] == "FINISHED"
+    assert terminal["userPauseRequested"] is True
+    assert terminal.get("excludeFromModel") is not True
+    for workflow in (
+        SimpleNamespace(is_paused=False, _user_pause_active=True),
+        SimpleNamespace(is_paused=True, _user_pause_active=False),
+    ):
+        assert len(_browser_abandoned_resume_events(workflow, "task-owned", "handoff")) == 1
 
 
 async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
@@ -36216,6 +36244,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_write_pause_seals_persisted_browser_for_archive",
         test_manager_write_pause_seals_persisted_browser_for_archive,
+    )
+    r.record(
+        "abandoned_resume_user_pause_qualifying_terminal",
+        test_abandoned_resume_user_pause_writes_qualifying_parent_terminal,
     )
     await r.record_async(
         "manager_payment_pause_seals_persisted_browser_for_archive",

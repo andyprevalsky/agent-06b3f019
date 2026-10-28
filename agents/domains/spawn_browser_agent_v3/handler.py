@@ -12716,6 +12716,28 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
     )
 
 
+def _browser_abandoned_resume_events(workflow_instance: Any, task_id: str, reason: str) -> tuple[ToolEvent, ...]:
+    """Close the panel and durably annotate an actual user-requested pause."""
+    events = [_browser_abandoned_resume_event(task_id, reason)]
+    if workflow_instance.is_paused and getattr(workflow_instance, "_user_pause_active", False):
+        # The excluded panel-close event cannot qualify for the backend's
+        # userPause.recordedAt write. This visible parent terminal does.
+        events.append(ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Browser Session Paused",
+            message="User paused the browser agent.",
+            status=MessageStatus.FINISHED,
+            metadata={
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "user_pause_recorded",
+                "task_id": task_id,
+                "userPauseRequested": True,
+            },
+        ))
+    return tuple(events)
+
+
 def _browser_resume_was_paused(workflow_instance: Any, pause_sequence: Optional[int] = None) -> bool:
     return workflow_instance.is_paused or (
         pause_sequence is not None and getattr(workflow_instance, "_pause_signal_sequence", 0) != pause_sequence
@@ -13138,10 +13160,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             resume_request=approval_resume,
                         )
                         if approval_response is None:
-                            yield _browser_abandoned_resume_event(
+                            for terminal_event in _browser_abandoned_resume_events(
+                                workflow_instance,
                                 result.get("task_id") or known_task_id,
                                 "Browser paused while awaiting write approval.",
-                            )
+                            ):
+                                yield terminal_event
                             return
 
                         if approval_response.get("rejected"):
@@ -13224,10 +13248,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             workflow_instance.is_paused
                             or getattr(workflow_instance, "_pause_signal_sequence", 0) != write_pause_sequence
                         ):
-                            yield _browser_abandoned_resume_event(
+                            for terminal_event in _browser_abandoned_resume_events(
+                                workflow_instance,
                                 result.get("task_id") or known_task_id,
                                 "Browser paused before resuming the approved action.",
-                            )
+                            ):
+                                yield terminal_event
                             return
 
                         continue
@@ -13315,10 +13341,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         resume_request=approval_resume,
                     )
                     if approval_response is None:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting payment approval.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     if approval_response.get("rejected"):
                         write_lock_resume_state = _rejected_browser_resume_state(result, write_lock_resume_state)
@@ -13777,10 +13805,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         },
                     )
                     if _browser_resume_was_paused(workflow_instance, payment_pause_sequence):
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused before resuming the approved payment.",
-                        )
+                        ):
+                            yield terminal_event
                         return
 
                     continue
@@ -13843,10 +13873,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     workflow_instance.is_paused = True
                     if hasattr(workflow_instance, "_update_tree_state"):
@@ -13875,10 +13907,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
                         raise
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused while awaiting authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
                     user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
@@ -13944,10 +13978,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         },
                     )
                     if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
-                        yield _browser_abandoned_resume_event(
+                        for terminal_event in _browser_abandoned_resume_events(
+                            workflow_instance,
                             result.get("task_id") or known_task_id,
                             "Browser paused before resuming authentication assistance.",
-                        )
+                        ):
+                            yield terminal_event
                         return
 
                     continue
@@ -14032,10 +14068,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
         except _BrowserPaymentResumeAbandoned:
-            yield _browser_abandoned_resume_event(
+            for terminal_event in _browser_abandoned_resume_events(
+                workflow_instance,
                 result.get("task_id") or known_task_id,
                 "Browser paused before resuming the approved payment.",
-            )
+            ):
+                yield terminal_event
         except GenerationHandoffRequested as exc:
             if not exc.parked:
                 yield ToolEvent(
