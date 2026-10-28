@@ -62,6 +62,13 @@ export interface ProjectWorkspaceFile {
   linkTarget: string | null;
 }
 
+/** A project's published template snapshot (providers/projects/maintenanceRunner.ts). */
+export interface ProjectTemplateSnapshot {
+  id: string;
+  /** {cpu, memoryGb} of the template sandbox it was taken from; null when unknown. */
+  size: { cpu: number; memoryGb: number } | null;
+}
+
 /** Everything a code session needs to materialize a project (decrypted, in memory only). */
 export interface ProjectWorkspace {
   project: {
@@ -73,7 +80,11 @@ export interface ProjectWorkspace {
     startupTimeoutS: number;
     /** Default code-sandbox size {cpu, memoryGb} for new sessions (C16); null = deployment default. */
     sandboxSize?: unknown;
+    /** Latest published template snapshot (null/absent: none); new Claude sessions start from it. */
+    templateSnapshot?: ProjectTemplateSnapshot | null;
   };
+  /** The session sandbox was created from the project's template snapshot (checkout already present). */
+  startedFromSnapshot?: boolean;
   revision: number;
   manifest: ProjectSyncManifest | null;
   files: ProjectWorkspaceFile[];
@@ -109,7 +120,7 @@ export interface ProjectRestoreReport {
     branch: string | null;
     headSha: string | null;
     cloned: boolean;
-    source: 'remote' | 'bundle' | 'empty' | 'existing';
+    source: 'remote' | 'bundle' | 'empty' | 'existing' | 'snapshot';
     error?: string;
   };
   localWork: { stash: string | null; branches: string[]; patchPath: string | null };

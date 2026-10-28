@@ -89,14 +89,14 @@ export function projectSessionEnv(paths: ProjectSessionPaths, projectName: strin
   };
 }
 
-function redactor(values: string[]): (text: string) => string {
+export function redactor(values: string[]): (text: string) => string {
   const sorted = [...new Set(values.filter((v) => v.length >= 6))].sort(
     (a, b) => b.length - a.length
   );
   return (text) => sorted.reduce((out, value) => out.split(value).join('[REDACTED]'), text);
 }
 
-function tokenOf(url: string | null | undefined): string[] {
+export function tokenOf(url: string | null | undefined): string[] {
   if (!url) return [];
   try {
     const parsed = new URL(url);
@@ -169,6 +169,38 @@ async function readHead(ctx: RestoreContext): Promise<void> {
 }
 
 /**
+ * A sandbox created from the project's template snapshot already holds the
+ * checkout the sync script built (deps installed beside it). Bring it to the
+ * default branch's current head with one fetch + fast-forward, using the
+ * token URL only for this command (the snapshot's origin is token-free).
+ * Never fails the session: a stale checkout is reported as a warning.
+ * Returns true: this is a brand-new session sandbox, so synced local commits
+ * and uncommitted work are restored on top exactly as after a fresh clone.
+ */
+async function refreshSnapshotCheckout(ctx: RestoreContext): Promise<boolean> {
+  const { ws, report } = ctx;
+  const branch = ws.project.defaultBranch;
+  const source = ws.cloneUrl ?? ws.project.repoUrl;
+  report.checkout.source = 'snapshot';
+  if (source) {
+    const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+    const fetched = await git(ctx, `fetch --quiet ${shq(source)} ${shq(refspec)}`, GIT_TIMEOUT_MS);
+    if (fetched.exitCode === 0) {
+      const moved =
+        (await git(ctx, `checkout --quiet ${shq(branch)}`)).exitCode === 0 &&
+        (await git(ctx, `merge --ff-only --quiet ${shq(`origin/${branch}`)}`)).exitCode === 0;
+      if (!moved) {
+        report.warnings.push(`Snapshot checkout could not be fast-forwarded to ${branch}`);
+      }
+    } else {
+      report.warnings.push(`Snapshot checkout is not refreshed: ${fetched.stderr.slice(-300)}`);
+    }
+  }
+  await readHead(ctx);
+  return true;
+}
+
+/**
  * Fresh workspace: clone (remote, else full bundle, else empty repo) and check
  * out the default branch. An existing workspace (resume) is left exactly as
  * the session left it. Returns false for an existing workspace.
@@ -176,6 +208,7 @@ async function readHead(ctx: RestoreContext): Promise<void> {
 async function restoreCheckout(ctx: RestoreContext, bundlePath: string | null): Promise<boolean> {
   const { ws, report } = ctx;
   if (await repoExists(ctx)) {
+    if (ws.startedFromSnapshot === true) return refreshSnapshotCheckout(ctx);
     report.checkout.source = 'existing';
     report.warnings.push('Workspace already present; kept its branch and local work');
     await readHead(ctx);
@@ -530,7 +563,7 @@ export async function restoreRegistered(
   }
 }
 
-const E2B_HOME = '/home/user';
+export const E2B_HOME = '/home/user';
 
 /**
  * E2B: restore `workspace` into the sandbox HOME and return the ws-server env
@@ -540,12 +573,13 @@ const E2B_HOME = '/home/user';
 export async function restoreSandboxProject(
   sessionId: string,
   sandbox: E2bSandboxLike & { kill(): Promise<unknown> },
-  workspace: ProjectWorkspace | null
+  workspace: ProjectWorkspace | null,
+  startedFromSnapshot = false
 ): Promise<{ envs: Record<string, string> | null; report: ProjectRestoreReport | null }> {
   if (!workspace) return { envs: null, report: null };
   registerWorkspaceExecutor(sessionId, e2bWorkspaceExecutor(sandbox, E2B_HOME));
   try {
-    const report = await restoreRegistered(sessionId, workspace);
+    const report = await restoreRegistered(sessionId, { ...workspace, startedFromSnapshot });
     return {
       envs: projectSessionEnv(projectSessionPaths(E2B_HOME), workspace.project.name),
       report,
