@@ -1,49 +1,43 @@
 /**
- * BrowserCursorOverlay - Renders cursor on top of browser view
+ * BrowserCursorOverlay - Renders the agent's cursor on top of the live browser
  *
  * STATE MACHINE:
  * [MOUNTED] -> subscribe to agent:{agentId} BROWSER_CURSOR broadcast
  *    |
- *    +--> [STREAMING] first realtime sample initializes cursor
- *    |        |
+ *    +--> [TARGET] realtime sample (or saved action coords before any sample)
+ *    |        |  (page CSS px); a CSS transition glides the track there
  *    |        v
- *    |     [INTERPOLATING] later samples become animation targets; RAF blends between points
+ *    |     [TARGET] later samples retarget the same glide (no remount/restart)
  *    |
- *    +--> [MESSAGE_FALLBACK] saved browser action coordinates update position
+ *    +--> visible=false (user/assist control) -> hidden; target + bob kept
  *    |
  *    v
  * [UNMOUNTED] -> unsubscribe from realtime channel
+ *
+ * GEOMETRY: the overlay fills the letterboxed 1280x800 stream box. Page
+ * coordinates map through resolveLiveViewPageRect (Kernel: Chrome UI above the
+ * page) to fractions of that box, applied as a % translate on a full-size
+ * track, so alignment holds at any pane size, aspect ratio, zoom or DPR without
+ * measuring. MOTION: the track glides; an inner element runs one constant,
+ * slow bob loop that new samples never restart. Reduced motion disables both.
  *
  * Realtime samples mirror BrowserHumanizer cursor motion. Browser action message
  * coordinates remain the durable fallback for reloads and completed runs.
  */
 
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  useMemo,
-  useCallback,
-  type MutableRefObject,
-  type RefObject,
-} from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, type MutableRefObject } from 'react';
 import { extractRecord, subscribeToChannel, unsubscribe } from '@/lib/realtime';
 import { recordAgentScopeDiscard } from '@/lib/agentScopeDiagnostics';
 import type { Message } from '../hooks';
+import { useCursorTarget, type BrowserCursorPayload, type CursorPosition } from './useCursorTarget';
 import {
-  useCursorAnimation,
-  type BrowserCursorPayload,
-  type CursorPosition,
-} from './useCursorAnimation';
-import {
-  LIVE_VIEW_CONTENT_VIEWPORT,
-  computeLiveViewLetterbox,
+  liveViewPointFraction,
+  resolveLiveViewPageRect,
 } from './browser-status-bar/liveViewDisplay';
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.
-// Tip is on right edge after flip; translateX(-28px) aligns tip with click point.
+// Tip is at the top-right corner after the flip; left: -28px puts it on the point.
 const CURSOR_SVG = `<svg width="28" height="28" viewBox="0 0 427 427" xmlns="http://www.w3.org/2000/svg">
   <g transform="translate(427, 0) scale(-1, 1)">
     <g transform="translate(-43, 470) scale(0.1, -0.1)">
@@ -57,13 +51,10 @@ interface BrowserCursorOverlayProps {
   agentId?: string | null;
   taskId: string;
   messages: Message[];
-}
-
-interface ViewportBounds {
-  offsetX: number;
-  offsetY: number;
-  width: number;
-  height: number;
+  /** Live-view URL: selects where the page viewport sits inside the stream. */
+  browserUrl?: string | null;
+  /** Hide without unmounting, so the glide position and bob survive control flips. */
+  visible?: boolean;
 }
 
 function isBrowserCursorPayload(value: unknown): value is BrowserCursorPayload {
@@ -77,46 +68,6 @@ function isBrowserCursorPayload(value: unknown): value is BrowserCursorPayload {
   );
 }
 
-function computeViewportBounds(container: HTMLDivElement): ViewportBounds {
-  const box = computeLiveViewLetterbox(
-    container.clientWidth,
-    container.clientHeight,
-    LIVE_VIEW_CONTENT_VIEWPORT.width,
-    LIVE_VIEW_CONTENT_VIEWPORT.height,
-  );
-  return {
-    offsetX: box.offsetX,
-    offsetY: box.offsetY,
-    width: box.width,
-    height: box.height,
-  };
-}
-
-function useViewportBounds(containerRef: RefObject<HTMLDivElement | null>): ViewportBounds {
-  const [viewportBounds, setViewportBounds] = useState<ViewportBounds>({
-    offsetX: 0,
-    offsetY: 0,
-    width: 0,
-    height: 0,
-  });
-
-  const updateViewportBounds = useCallback(() => {
-    if (!containerRef.current) return;
-    setViewportBounds(computeViewportBounds(containerRef.current));
-  }, [containerRef]);
-
-  useEffect(() => {
-    updateViewportBounds();
-    const observer = new ResizeObserver(updateViewportBounds);
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
-    }
-    return () => observer.disconnect();
-  }, [updateViewportBounds, containerRef]);
-
-  return viewportBounds;
-}
-
 function useCursorPosition(
   agentId: string | null | undefined,
   taskId: string,
@@ -125,28 +76,21 @@ function useCursorPosition(
   const lastProcessedMessageRef = useRef<string | null>(null);
   const liveAgentIdRef = useRef(agentId);
   liveAgentIdRef.current = agentId;
-  const {
-    cursorPos,
-    lastRealtimeSampleRef,
-    updateCursorPos,
-    stopAnimation,
-    animateCursorTo,
-    resetCursor,
-  } = useCursorAnimation(agentId);
+  const { cursorPos, lastRealtimeSampleRef, updateCursorPos, applyRealtimeSample, resetCursor } =
+    useCursorTarget(agentId);
 
   useLayoutEffect(() => {
     lastProcessedMessageRef.current = null;
     resetCursor(agentId);
   }, [agentId, resetCursor]);
 
-  useRealtimeCursor(agentId, liveAgentIdRef, taskId, animateCursorTo, stopAnimation);
+  useRealtimeCursor(agentId, liveAgentIdRef, taskId, applyRealtimeSample);
   useMessageCursor(
     agentId,
     messages,
     taskId,
     lastProcessedMessageRef,
     lastRealtimeSampleRef,
-    stopAnimation,
     updateCursorPos,
   );
   return cursorPos;
@@ -156,8 +100,10 @@ function useRealtimeCursor(
   agentId: string | null | undefined,
   liveAgentIdRef: MutableRefObject<string | null | undefined>,
   taskId: string,
-  animateCursorTo: (record: BrowserCursorPayload, ownerScopeId: string | null | undefined) => void,
-  stopAnimation: () => void,
+  applyRealtimeSample: (
+    record: BrowserCursorPayload,
+    ownerScopeId: string | null | undefined,
+  ) => void,
 ) {
   useEffect(() => {
     if (!agentId) return;
@@ -179,7 +125,7 @@ function useRealtimeCursor(
             }
             return;
           }
-          animateCursorTo(record, agentId);
+          applyRealtimeSample(record, agentId);
         },
       },
       'Browser cursor',
@@ -197,10 +143,9 @@ function useRealtimeCursor(
 
     return () => {
       disposed = true;
-      stopAnimation();
       unsubscribe(channel);
     };
-  }, [agentId, animateCursorTo, liveAgentIdRef, stopAnimation, taskId]);
+  }, [agentId, applyRealtimeSample, liveAgentIdRef, taskId]);
 }
 
 function useMessageCursor(
@@ -209,7 +154,6 @@ function useMessageCursor(
   taskId: string,
   lastProcessedMessageRef: MutableRefObject<string | null>,
   lastRealtimeSampleRef: MutableRefObject<BrowserCursorPayload | null>,
-  stopAnimation: () => void,
   updateCursorPos: (next: CursorPosition, ownerScopeId: string | null | undefined) => void,
 ) {
   const latestWithCoords = useMemo(() => {
@@ -226,67 +170,69 @@ function useMessageCursor(
     if (messageId === lastProcessedMessageRef.current) return;
     lastProcessedMessageRef.current = messageId;
 
+    // Live samples are the truth once streaming; a late-saved action message
+    // must not glide the cursor back to an earlier click.
+    if (lastRealtimeSampleRef.current) return;
     const coords = latestWithCoords.metadata?.auxiliary?.coordinates as CursorPosition | undefined;
-    if (coords?.x !== undefined && coords?.y !== undefined) {
-      lastRealtimeSampleRef.current = null;
-      stopAnimation();
+    if (typeof coords?.x === 'number' && typeof coords?.y === 'number') {
       updateCursorPos({ x: coords.x, y: coords.y }, agentId);
     }
-  }, [
-    agentId,
-    lastProcessedMessageRef,
-    lastRealtimeSampleRef,
-    latestWithCoords,
-    stopAnimation,
-    updateCursorPos,
-  ]);
+  }, [agentId, lastProcessedMessageRef, lastRealtimeSampleRef, latestWithCoords, updateCursorPos]);
 }
 
 export default function BrowserCursorOverlay({
   agentId,
   taskId,
   messages,
+  browserUrl,
+  visible = true,
 }: BrowserCursorOverlayProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const viewportBounds = useViewportBounds(containerRef);
   const cursorPos = useCursorPosition(agentId, taskId, messages);
-
-  const cursorLeft =
-    viewportBounds.offsetX +
-    (cursorPos.x / LIVE_VIEW_CONTENT_VIEWPORT.width) * viewportBounds.width;
-  const cursorTop =
-    viewportBounds.offsetY +
-    (cursorPos.y / LIVE_VIEW_CONTENT_VIEWPORT.height) * viewportBounds.height;
+  const fraction = liveViewPointFraction(resolveLiveViewPageRect(browserUrl), cursorPos);
 
   return (
     <div
       data-testid="browser-cursor-overlay"
-      ref={containerRef}
+      aria-hidden="true"
       style={{
         position: 'absolute',
         inset: 0,
-        width: '100%',
-        height: '100%',
         pointerEvents: 'none',
         overflow: 'visible',
         zIndex: 10,
+        visibility: visible ? 'visible' : 'hidden',
       }}
     >
+      {/* Full-size track: a % translate is relative to its own (= stream) size. */}
       <div
-        data-testid="browser-cursor"
+        data-testid="browser-cursor-track"
+        className="browser-cursor-track"
+        data-cursor-x={cursorPos.x}
+        data-cursor-y={cursorPos.y}
         style={{
           position: 'absolute',
-          left: cursorLeft,
-          top: cursorTop,
-          width: 28,
-          height: 28,
-          pointerEvents: 'none',
-          filter: 'drop-shadow(2px 3px 3px rgba(0, 0, 0, 0.5))',
-          transform: 'translateX(-28px)',
-          willChange: 'left, top',
+          left: 0,
+          top: 0,
+          width: '100%',
+          height: '100%',
+          transform: `translate(${fraction.x * 100}%, ${fraction.y * 100}%)`,
+          willChange: 'transform',
         }}
-        dangerouslySetInnerHTML={{ __html: CURSOR_SVG }}
-      />
+      >
+        <div
+          data-testid="browser-cursor"
+          className="browser-cursor-bob"
+          style={{
+            position: 'absolute',
+            left: -28,
+            top: 0,
+            width: 28,
+            height: 28,
+            filter: 'drop-shadow(2px 3px 3px rgba(0, 0, 0, 0.5))',
+          }}
+          dangerouslySetInnerHTML={{ __html: CURSOR_SVG }}
+        />
+      </div>
     </div>
   );
 }

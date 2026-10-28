@@ -4,7 +4,8 @@
  *
  * Frames the content viewport (1280x800). Steel streams are the 1288x891
  * computer window, so the iframe is translated to hide toolbar/borders.
- * A compact LiveViewLoading covers the iframe until its URL loads.
+ * A compact LiveViewLoading covers the iframe until its URL loads; a finished
+ * agent (ended) shows LiveViewEnded instead and never mounts the iframe.
  */
 
 import { useLayoutEffect, useRef, type MouseEvent } from 'react';
@@ -16,13 +17,15 @@ import {
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
 } from './liveViewDisplay';
-import { LiveViewLoading } from './LiveViewLoading';
+import { LiveViewEnded, LiveViewLoading } from './LiveViewLoading';
 import { useLiveViewLoaded } from './useLiveViewLoaded';
 
 export interface BrowserThumbnailProps {
   browserUrl: string;
   /** False when the bound session is closed or ended: loading, no iframe. */
   live?: boolean;
+  /** Owning agent finished: terminal "ended" state, no iframe, no loading. */
+  ended?: boolean;
   /** Outer wrapper dimensions in px. */
   width: number;
   height: number;
@@ -35,6 +38,7 @@ export interface BrowserThumbnailProps {
 export function BrowserThumbnail({
   browserUrl,
   live = true,
+  ended = false,
   width,
   height,
   wrapperClassName,
@@ -65,7 +69,7 @@ export function BrowserThumbnail({
       className={wrapperClassName}
       style={{ width: `${width}px`, height: `${height}px`, marginBottom: '8px' }}
     >
-      {live && (
+      {live && !ended && (
         <iframe
           ref={iframeRef}
           src={browserUrl}
@@ -81,7 +85,7 @@ export function BrowserThumbnail({
           onLoad={onLoad}
         />
       )}
-      {(!live || !isLoaded) && <LiveViewLoading compact />}
+      {ended ? <LiveViewEnded compact /> : (!live || !isLoaded) && <LiveViewLoading compact />}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-black/10 to-black/30 opacity-0 group-hover:opacity-100 transition-opacity" />
       <div className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-1 rounded-md bg-black/70 text-white px-2 py-1 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
         <Maximize2 className="h-3.5 w-3.5" />
