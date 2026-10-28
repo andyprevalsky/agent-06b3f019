@@ -827,6 +827,13 @@ class WaitForManager(ToolManager):
                 yield _wait_for_error(f"Cannot wait on {address}: {error}")
                 return
             targets.append(target)
+        # Name the waited-on agents by their task names ("Waiting for chase_balances"),
+        # the same names the agents panel shows; the model's description is the fallback.
+        names = [_wait_target_name(target) for target in targets]
+        if not any_agent and names and all(names):
+            label = ", ".join(str(name) for name in names)
+            base_meta["description"] = label
+            base_meta["targetNames"] = names
 
         now = _utc_now()
         resume = take_tool_resume(workflow_instance, tool_call_id)
@@ -952,6 +959,7 @@ async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[di
             "agent_ids": children,
             "background_task_id": own.get("background_task_id"),
             "path": own.get("path"),
+            "task_name": own.get("task_name"),
             "own": True,
             "status": own.get("status"),
         }, None
@@ -975,6 +983,18 @@ async def _resolve_wait_target(workflow_instance: Any, address: str) -> tuple[di
         "status": node.get("status"),
         "node": target_id or address,
     }, None
+
+
+def _wait_target_name(target: dict[str, Any]) -> Optional[str]:
+    """A waited-on agent's task name: its spawn task_name, else its path's last segment."""
+    name = target.get("task_name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    path = target.get("path")
+    if isinstance(path, str) and "/" in path:
+        segment = path.rstrip("/").rsplit("/", 1)[-1]
+        return segment or None
+    return None
 
 
 def _agent_event_matches(event: dict[str, Any], targets: Optional[list[dict[str, Any]]]) -> bool:

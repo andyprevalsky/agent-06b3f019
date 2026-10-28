@@ -10,9 +10,9 @@ first_bad_boundary: back-end/src module-level Maps and promise chains (agentcard
 symptoms:
   - "Unknown or expired OAuth state"
   - "AgentCard token request failed (invalid_grant)"
-  - "commits overlapped: second entered"
-  - connect modal poll returns state unknown after a load-balancer hop
-  - Gmail and Plaid sync run twice for the same integration
+  - "creates overlapped across instances" (E2B Claude Code creates, "redis: connection pool timeout")
+  - "Unique constraint failed on the fields" at boot catalog seed / x402 first payment (P2002)
+  - each #errors alert posted once per backend instance; messaging upload part attempts 2
 tags:
   - multi-instance
   - scale-out
@@ -113,7 +113,47 @@ proactive-SMS advisory-locked lease). It was not generalized.
   patterns; none apply. The fix follows this repo's own proactive-SMS lease
   (`providers/smsSupervisor/proactiveOutreach.ts`).
 
+### 2026-10-28 recurrence: lane S26 (N=2 low-severity sweep)
+
+Five more single-process assumptions turned up before scaling prod from 1 to 2
+instances. Each one now has a two-process case in `multi-instance.blackbox.ts`.
+All five failed on the unchanged main (`cbe2ed413`) and pass after the fix
+(24/24, then 5 consecutive runs):
+
+- `providers/e2bCreateSlot.ts`: the per-process promise chain serialized creates
+  only within one instance (`creates overlapped across instances`). It now keeps
+  the per-process queue (one waiter per instance polls) in front of
+  `withSerializedLock('e2b-claude-code-create', 15 min wait)`. #1615's
+  capacity fail-fast still propagates from inside the slot.
+- `uploadService.messagingJobs.ts`: a part's 10-minute claim was never renewed,
+  so a slow part was reclaimed and re-run by another drain (`attempts 2`).
+  `holdPartClaim` now renews the claim every lease/3 with a compare-and-set on
+  the exact `claimedUntil` it set (`renewMessagingUploadJobClaim`), and stops
+  once the claim is lost.
+- `hubCatalogSeed.ts`: two instances seeding at boot hit P2002 on
+  `benchmarkTask.create`. The seed now calls `insertTaskIfAbsent`
+  (`createMany skipDuplicates`) and updates the row when another instance won.
+- `errorAlert.ts`: dedupe was per process, so each alert posted once per
+  instance. A shared TTL lease (`error-alert` namespace) now spans instances
+  behind the in-process throttle. It fails open within 1.5 s, so a DB outage can
+  double an alert but never silence one.
+- `hybridAuth.ts getOrCreateWalletUser`: find-then-create raced on the unique
+  `userId` (P2002 → 500 on concurrent first x402 payments). The create is now
+  an upsert (INSERT ... ON CONFLICT).
+
+Left per-process on purpose (user decision): the video per-user in-flight cap
+and the A2A send budget. Doubling those at N=2 is acceptable, and per-user caps
+are rejected.
+
+Why the 2026-10-26 sweep missed them: it targeted Maps/Sets used as flows,
+locks and dedupe, and cron claims. These were a promise-chain mutex, a job lease
+without renewal, a boot-time find-then-insert, and a find-then-create on a
+unique key, i.e. the same class in shapes that sweep's grep didn't cover.
+
 ## Human feedback
+
+Andy (2026-10-28, via parent): do NOT make the video per-user in-flight cap or
+the A2A send budget global; per-user caps are rejected and doubling is fine.
 
 Parent: do not turn on a second Render instance or autoscaling (spend). Report
 it as an approval item with the exact setting and pool math. Andy: no breach
@@ -121,4 +161,4 @@ or exposure forensics; contain and fix only.
 
 ## Reusable lesson
 
-Never let a module-level Map, Set or promise chain be the source of truth for a flow, lock, dedupe or job claim on the backend; put it in Postgres keyed per flow so any instance can complete it.
+Never let a module-level Map, Set or promise chain be the source of truth for a flow, lock, dedupe or job claim on the backend; put it in Postgres keyed per flow, renew any lease a slow holder keeps, and write find-then-create as an atomic upsert or skipDuplicates.

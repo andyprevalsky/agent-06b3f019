@@ -152,7 +152,11 @@ describe('light mode is unchanged (markup frozen before dark mode existed)', () 
   it('desktop background renders the stock markup byte-for-byte', async () => {
     renderWithProviders(themed(backgroundElement()));
     await screen.findByTestId('terminal-small-tile-animation-canvas', {}, { timeout: 15000 });
-    expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop'));
+    // The layer canvases get their pixel size in a later effect; under suite load
+    // the tile canvas can mount first, so wait for the frozen markup to settle.
+    await waitFor(() => expect(themedMarkup()).toBe(readLightMarkup('backgroundDesktop')), {
+      timeout: 15000,
+    });
     expect(htmlIsDark()).toBe(false);
   }, 20000);
 
@@ -170,7 +174,9 @@ describe('light mode is unchanged (markup frozen before dark mode existed)', () 
   it('without a theme provider (shared/benchmark views) everything is stock', async () => {
     const { container } = renderWithProviders(backgroundElement());
     await screen.findByTestId('terminal-small-tile-animation-canvas');
-    expect(`${container.innerHTML}\n`).toBe(readLightMarkup('backgroundDesktop'));
+    await waitFor(() =>
+      expect(`${container.innerHTML}\n`).toBe(readLightMarkup('backgroundDesktop')),
+    );
   });
 
   it('toggling dark then back to light restores the exact stock markup', async () => {
