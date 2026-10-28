@@ -11,7 +11,10 @@
  *      buffering the metadata chunk so a pre-content failure can fall through
  *      cleanly.
  *   4. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
- *      using the same pre-content fall-through contract.
+ *      using the same pre-content fall-through contract. On a usage-limit,
+ *      out-of-credits or auth failure it leases every other untried
+ *      subscription from `options.subscription_leases` (subscriptionLegs.ts)
+ *      before any funded key below.
  *   5. Tries the shared OpenAI API key path when configured.
  *   6. Tries the shared Anthropic API key path when configured.
  *   7. Tries GPT-6 Sol through Microsoft Foundry for ultra when configured.
@@ -37,8 +40,8 @@ import {
   markGptApiKeyOnCooldown,
 } from '../computeCredentials';
 import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
-import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
-import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
+import { openAiApiKeyComplete } from './gptAuth';
+import { runSubscriptionLegs } from './subscriptionLegs';
 import { getPool, poolForModel } from './pools';
 import { localCompletion } from './local';
 import { buildOpenAiResponseFormat } from './schema';
@@ -391,76 +394,34 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       return;
     }
 
-    // 1. claudeAuth attempt (with fall-through buffering)
+    // 1-2. Subscription legs: the caller's Claude/Codex tokens, then every other
+    // leasable subscription, before any funded key below.
     const allowDirectAuth = poolSpec.directAuthEnabled !== false;
     let claudeAuthFailed: RoseError | null = null;
     let gptAuthFailed: RoseError | null = null;
     let openAiApiKeyFailed: RoseError | null = null;
-    if (allowDirectAuth && opts.options.claude_token) {
-      const failure = yield* attemptClaudeAuthWithRecovery({
-        poolSpec,
-        options: opts.options,
-        requestId: opts.requestId,
-        callSite: opts.callSite,
-        emit: emitChunk,
-        log,
-      });
-      if (failure === null) {
-        log.info('claude_auth.done', {
-          request_id: opts.requestId,
-          pool: opts.pool,
-          elapsed_ms: Date.now() - startedAt,
-        });
-        finalizeDump();
-        return;
-      }
-      claudeAuthFailed = failure;
-      log.info('fall_through_from_claude_auth', {
-        request_id: opts.requestId,
-        reason: failure.name,
-      });
-    }
-
-    // 2. gptAuth attempt (with fall-through buffering)
-    if (allowDirectAuth && opts.options.gpt_token) {
+    if (allowDirectAuth) {
+      let subscriptions;
       try {
-        yield* runWithFallThrough({
-          produce: () =>
-            gptAuthComplete({
-              poolSpec,
-              messages: opts.options.messages,
-              ...openAiToolFields,
-              temperature: opts.options.temperature,
-              effort: opts.options.effort,
-              gptToken: opts.options.gpt_token!,
-              accountId: opts.options.gpt_account_id,
-              requestId: opts.requestId,
-              callSite: opts.callSite,
-              providerFastMode: opts.options.provider_fast_mode,
-              abortSignal: opts.options.abort_signal,
-            }),
+        subscriptions = yield* runSubscriptionLegs({
+          poolSpec,
+          options: opts.options,
+          openAiToolFields,
+          requestId: opts.requestId,
+          callSite: opts.callSite,
           emit: emitChunk,
+          log,
         });
-        log.info('gpt_auth.done', {
-          request_id: opts.requestId,
-          pool: opts.pool,
-          elapsed_ms: Date.now() - startedAt,
-          claude_auth_failed: claudeAuthFailed?.name ?? null,
-        });
+      } catch (err) {
+        finalizeDump(err);
+        throw err;
+      }
+      if (subscriptions.served) {
         finalizeDump();
         return;
-      } catch (err) {
-        if (err instanceof PreContentFallThroughError) {
-          gptAuthFailed = err.cause;
-          log.info('fall_through_from_gpt_auth', {
-            request_id: opts.requestId,
-            reason: err.cause.name,
-          });
-        } else {
-          finalizeDump(err);
-          throw err;
-        }
       }
+      claudeAuthFailed = subscriptions.claudeAuthFailed;
+      gptAuthFailed = subscriptions.gptAuthFailed;
     }
 
     // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages

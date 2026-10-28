@@ -21,6 +21,9 @@ export type {
   CompletionOptions,
   ContentBlock,
   ResponseFormat,
+  SubscriptionCredential,
+  SubscriptionLeaseFailure,
+  SubscriptionLeases,
 } from './types';
 export {
   RoseAllFailed,

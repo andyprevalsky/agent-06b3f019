@@ -1507,6 +1507,9 @@ class RoseClient:
 
         try:
             direct_rotations = 0
+            stall_rotations = 0
+            # A credential served twice in one call means its mark did not land.
+            tried_tokens = {direct_auth.token} if direct_auth is not None else set()
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
                 candidate = (
@@ -1699,21 +1702,40 @@ class RoseClient:
                         raise deadline_error
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
 
-                # Stalls are rotation-eligible immediately: cold-start jitter
-                # is absorbed by the 90s TTFT, and Anthropic's batched-response
-                # silences are absorbed by the 120s idle window. A stall here
-                # means the token/route itself is unhealthy, so rotate.
-                can_rotate = (
-                    token_error in ("auth_error", "rate_limit", "stall")
-                    and direct_rotations < direct_auth.max_rotations
-                    and direct_auth.fetch_fresh is not None
-                )
+                # Every subscription before any funded key (Andy, 2026-10-28): a
+                # usage-limit or auth failure rotates through every lease the
+                # backend still has. Each failed lease is marked, so the store
+                # shrinks; a lease already tried in this call ends rotation, and
+                # so does the call deadline. Stalls are rotation-eligible
+                # immediately (cold-start jitter is absorbed by the 90s TTFT and
+                # batched-response silences by the 120s idle window) but keep the
+                # per-call max_rotations budget. max_rotations=0 means the caller
+                # owns rotation.
+                if token_error == "stall":
+                    within_budget = stall_rotations < direct_auth.max_rotations
+                else:
+                    within_budget = token_error in ("auth_error", "rate_limit") and direct_auth.max_rotations > 0
+                can_rotate = within_budget and direct_auth.fetch_fresh is not None and remaining() > 0
                 if not can_rotate:
                     break
                 fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
                 if fresh is None:
                     break
+                if fresh.token in tried_tokens:
+                    logger.info(
+                        "rose.complete.direct_auth.rotation_repeated",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        token_type=fresh.token_type,
+                        source=fresh.source,
+                        rotations=direct_rotations,
+                    )
+                    break
+                tried_tokens.add(fresh.token)
                 direct_rotations += 1
+                if token_error == "stall":
+                    stall_rotations += 1
                 direct_auth = fresh
                 logger.info(
                     "rose.complete.direct_auth.rotated",

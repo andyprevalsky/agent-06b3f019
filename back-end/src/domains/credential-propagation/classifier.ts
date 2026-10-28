@@ -1,5 +1,5 @@
 import { createLogger } from '../../providers/logger';
-import { fetchComputeTokenForUser } from '../../providers/computeCredentials';
+import { computeSubscriptionLeases } from '../../providers/computeSubscriptionLeases';
 import { createStreamingCompletion } from '../../providers/rose/client';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
 import type {
@@ -182,27 +182,13 @@ function parseClassifierResponse(content: string): {
 }
 
 /* c8 ignore start -- live classifier auth/streaming path requires real compute credentials/LLM */
-async function directAuthForClassifier(agent: AgentForPropagation) {
+/**
+ * The judge's subscriptions. Rose leases one only when the classifier's pool runs
+ * subscription legs, and rotates through the rest before any funded key.
+ */
+function directAuthForClassifier(agent: AgentForPropagation) {
   if (agent.userId === undefined || agent.userId === '') return {};
-
-  try {
-    const token = await fetchComputeTokenForUser(agent.userId);
-    if (token === null) return {};
-    log.info('Failure classifier using compute token', {
-      agent_id: agent.id,
-      type: token.type,
-      source: token.source,
-      poolTokenId: token.poolTokenId,
-    });
-    if (token.type === 'claude') return { claude_token: token.accessToken };
-    return { gpt_token: token.accessToken, gpt_account_id: token.accountId };
-  } catch (error) {
-    log.warn('Failure classifier could not load compute token; falling back to Rose waterfall', {
-      agent_id: agent.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return {};
-  }
+  return { subscription_leases: computeSubscriptionLeases({ userId: agent.userId }) };
 }
 /* c8 ignore stop */
 
@@ -217,7 +203,7 @@ export async function classifyFailureBestEffort(
 
   /* c8 ignore start -- live classifier streaming path requires real LLM provider */
   try {
-    const directAuth = await directAuthForClassifier(agent);
+    const directAuth = directAuthForClassifier(agent);
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       temperature: 0,
