@@ -21,8 +21,11 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-import { expandBar, makeProject, mockProjectsApi } from './rose-sidebar.fixtures';
+import { expandBar, makeProject, mockProjectsApi, roseBar } from './rose-sidebar.fixtures';
 import Terminal from '@/pages/Terminal';
+import { RoseAppsProvider } from '@/features/terminal-component-group';
+import { QueryInputLayer } from '@/features/terminal-component-group/components/query-input/QueryInputLayer';
+import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { PopularGoalsCarousel } from '@/features/terminal/components/PopularGoalsCarousel';
 import {
   POPULAR_GOALS,
@@ -422,6 +425,10 @@ function rootLayerZ(element: Element): number {
   return z;
 }
 
+function openPanelById(testId: string): HTMLElement | undefined {
+  return screen.getAllByTestId(testId).find((drawer) => drawer.dataset.state === 'open');
+}
+
 describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14)', () => {
   beforeEach(() => {
     setViewport(1280, 800);
@@ -460,6 +467,51 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     expect(rootLayerZ(panel)).toBeGreaterThan(composer);
     // The top-right icon row that toggles it stays above its corner.
     expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(panel));
+  });
+
+  it('Feedback opened from the left bar stacks above the floating query box', async () => {
+    const user = userEvent.setup({ delay: null });
+    await renderTerminal(true);
+    expandBar();
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    await user.click(within(roseBar()).getByRole('button', { name: 'Feedback' }));
+    const panel = openPanelById('rose-app-panel');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-feedback')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
+    expect(rootLayerZ(screen.getByTestId('rose-app-icons'))).toBeGreaterThan(rootLayerZ(panel));
+  });
+
+  it('the Benchmarks panel stacks above the floating query box', async () => {
+    const user = userEvent.setup({ delay: null });
+    // Benchmarks has no Rose Desktop trigger: open it through the apps context.
+    function BenchmarksOpener() {
+      const apps = useRoseApps();
+      return (
+        <button type="button" onClick={() => apps?.toggleApp('benchmarks')}>
+          Open Benchmarks for test
+        </button>
+      );
+    }
+    renderWithProviders(
+      <RoseAppsProvider>
+        <BenchmarksOpener />
+        <QueryInputLayer enabled>
+          <textarea aria-label="Composer for test" />
+        </QueryInputLayer>
+      </RoseAppsProvider>,
+    );
+    const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
+    expect(composer).toBe(100);
+    await user.click(screen.getByRole('button', { name: 'Open Benchmarks for test' }));
+    const panel = openPanelById('rose-app-panel');
+    expect(panel).toBeDefined();
+    if (panel === undefined) return;
+    expect(within(panel).getByTestId('rose-app-panel-benchmarks')).toBeInTheDocument();
+    expect(panel.parentElement).toBe(document.body);
+    expect(rootLayerZ(panel)).toBeGreaterThan(composer);
   });
 
   it('an app opened while project settings is open covers the drawer, not the reverse', async () => {

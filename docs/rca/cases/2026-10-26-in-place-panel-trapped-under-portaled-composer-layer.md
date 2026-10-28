@@ -23,7 +23,7 @@ sources:
   - commit a70049483
   - commit 8ceb1008c
   - commit d80ff1e4c
-repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("Rose Desktop stacking order and composer continuity", incl. "Settings opened from the account row stacks above the floating query box"), front-end/src/tests/blackbox/rose-sidebar.blackbox.tsx ("Biz health covers the query box full width like Browser")
+repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("Rose Desktop stacking order and composer continuity", incl. the Settings, Feedback and Benchmarks "stacks above the floating query box" cases), front-end/src/tests/blackbox/rose-sidebar.blackbox.tsx ("Biz health covers the query box full width like Browser")
 status: fixed
 ---
 
@@ -83,9 +83,11 @@ describe block opens Settings from the account row of a just-onboarded account
 (label "Account") and failed on 9974a5ce0 with `expected 66 to be greater than
 100`. Fix: `coversComposer()` includes `settings`, so the panel takes
 coverPanel (102) and the icon row coverIcons (103), above the composer and an
-open project settings drawer, and the same test passes. Feedback and Benchmarks
-remain at appPanel by the existing per-app design and have the same geometric
-overlap; extend the one list if they should cover the composer too.
+open project settings drawer, and the same test passes. Feedback and
+Benchmarks are the same right panel with the same overlap; their cases failed
+identically (`expected 66 to be greater than 100`) and pass now that
+`coversComposer()` lists every right panel. appPanel keeps only the floating
+Phone and the full-width Agent Display / validation criteria views.
 
 Lesson: a "beside" tier is only valid when the layout reserves the space; an
 overlay that overlaps the composer without a reserved inset must sit above it.

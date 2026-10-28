@@ -25,11 +25,19 @@ export const CHAT_MIN_WIDTH = 320;
 /**
  * Apps whose panel covers the floating query box (ROSE_LAYER.coverPanel, with
  * the icon row at coverIcons above it). Browser and Biz health are also full
- * width: from the left bar to the window's right edge. Settings (the account
- * row's panel) is the 560px right panel: nothing insets the chat column, so it
- * overlaps the centered query box and would otherwise sit under it.
+ * width: from the left bar to the window's right edge. Every right panel
+ * (Integrations, Feedback, Benchmarks, Settings) is here too: nothing insets
+ * the chat column, so a right panel overlaps the centered query box and would
+ * otherwise sit under it.
  */
-const COMPOSER_COVERING_APPS: readonly string[] = ['browser', 'integrations', 'health', 'settings'];
+const COMPOSER_COVERING_APPS: readonly string[] = [
+  'browser',
+  'integrations',
+  'health',
+  'feedback',
+  'benchmarks',
+  'settings',
+];
 
 export function coversComposer(app: string | null | undefined): boolean {
   return app != null && COMPOSER_COVERING_APPS.includes(app);

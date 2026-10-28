@@ -6,16 +6,17 @@
  * Lowest first:
  *
  *   page content   main row z-[4]: chat column, in-flow chrome
- *   appPanel       right app panels that sit beside the composer
- *                  (Feedback, Benchmarks) and the floating Phone
+ *   appPanel       the floating Phone and the full-width Agent Display /
+ *                  validation criteria views (the query box floats over them)
  *   left bar       collapsed z-[70] (RoseSidebar)
- *   appIcons       top-right app icons, over an appPanel's corner
+ *   appIcons       top-right app icons, over an appPanel
  *   composer       the floating query box (QueryInputLayer) and the
  *                  agents-running pane attached to its top
  *   leftPanel      project settings beside the left bar; covers the composer
  *                  but stays open under an app the user opens afterwards
- *   coverPanel     app panels that cover the composer: Browser, Integrations,
- *                  Settings and Biz health (right / full width)
+ *   coverPanel     app panels that cover the composer: Browser and Biz
+ *                  health (full width) and every right panel (Integrations,
+ *                  Feedback, Benchmarks, Settings), which overlaps it
  *   coverIcons     top-right app icons, over a coverPanel's corner
  *   left bar       hover-expanded z-[110] (RoseSidebar), over a full panel
  *   modal          ui/dialog and ui/sheet (e.g. the file viewer, the mobile
