@@ -54,9 +54,11 @@ def source_digest(root: Path = ROOT) -> dict[str, str]:
     digest = hashlib.sha256()
     head = git("rev-parse", "HEAD").strip()
     digest.update(head + b"\0")
-    digest.update(git("diff", "--no-ext-diff", "--binary", "HEAD") + b"\0")
+    digest.update(git("diff", "--no-ext-diff", "--binary", "HEAD", "--", ".", ":(exclude)agents/benchmarks/history") + b"\0")
     untracked = git("ls-files", "--others", "--exclude-standard", "-z")
     for raw in sorted(path for path in untracked.split(b"\0") if path):
+        if raw.startswith(b"agents/benchmarks/history/"):
+            continue  # append-only ledger data written by the smoke lane
         path = root / os.fsdecode(raw)
         digest.update(raw + b"\0")
         try:
