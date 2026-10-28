@@ -635,6 +635,8 @@ their assertions or test counts:
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/run-deploy-pipeline.test.py`,
+`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,

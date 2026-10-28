@@ -260,6 +260,7 @@ GATES = (
         "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
     ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
+    Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
     Gate(
         "deploy-structural-runner",
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
