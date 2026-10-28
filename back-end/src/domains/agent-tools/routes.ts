@@ -8,6 +8,7 @@
  * A user session JWT is refused: these tools speak FOR an agent.
  */
 import { Router, type NextFunction, type Response } from 'express';
+import { CliIntegrationError } from '../../providers/cliIntegrations';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { isAgentToolsToken, verifyAgentToolsToken } from '../../providers/agentTools/token';
 import { createLogger } from '../../providers/logger';
@@ -31,11 +32,12 @@ import {
   type AgentToolsCaller,
 } from './types';
 import { REQUEST_WAIT_MAX_SECONDS } from './config';
+import { mountCliToolRoutes } from './routes.cli';
 
 const log = createLogger('AgentToolsRoutes');
 const router = Router();
 
-interface AgentToolsRequest extends HybridAuthRequest {
+export interface AgentToolsRequest extends HybridAuthRequest {
   agentToolsToken?: {
     userId: string;
     agentId: string;
@@ -100,6 +102,10 @@ function callerFor(req: AgentToolsRequest, res: Response): AgentToolsCaller | nu
 }
 
 function sendError(res: Response, err: unknown): void {
+  if (err instanceof CliIntegrationError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
   if (err instanceof AgentToolsError) {
     res
       .status(err.status)
@@ -120,6 +126,8 @@ function invalidBody(res: Response, issues: { path: (string | number)[]; message
     details: issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
   });
 }
+
+mountCliToolRoutes(router, agentToolsAuth, callerFor, sendError);
 
 router.post(
   '/:agentId/display',

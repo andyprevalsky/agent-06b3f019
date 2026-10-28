@@ -8,6 +8,7 @@ import { http, HttpResponse } from 'msw';
 const API_BASE = 'http://localhost:3001/api';
 
 export const handlers = [
+  http.get(`${API_BASE}/integrations/cli`, () => HttpResponse.json({ integrations: [] })),
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),

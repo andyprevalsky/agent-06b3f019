@@ -24,11 +24,13 @@ import {
   heldSandboxSize,
   resolveSpawnSandbox,
   sameSize,
+  defaultSandboxSize,
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
 import { e2bSandboxFs } from './codeSessions/sandboxFs';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { NATIVE_CLI_PATH, resolveNativeCliTemplate } from './nativeCliTemplateBuilder';
 import {
   linkClaudeCodeSession,
   markPaused,
@@ -210,17 +212,28 @@ export async function acquireCodeSandbox(
       : null;
   const acquired = await acquireCodeSessionSandbox(
     codeSession,
-    () =>
-      createSandboxWithRetry(
-        sized?.templateId ?? templateId,
+    async () => {
+      const baseTemplateId = sized?.templateId ?? templateId;
+      const selectedTemplateId =
+        codeSession?.userId && sizing.provider
+          ? await resolveNativeCliTemplate(
+              codeSession.userId,
+              sizing.provider,
+              sized?.size ?? defaultSandboxSize(),
+              baseTemplateId
+            )
+          : baseTemplateId;
+      return createSandboxWithRetry(
+        selectedTemplateId,
         {
           apiKey: process.env.E2B_API_KEY,
           timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs,
+          envs: { ...envs, PATH: NATIVE_CLI_PATH },
           ...codeSessionCreateOptions(codeSession),
         },
         label
-      ),
+      );
+    },
     { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
   );
   return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };

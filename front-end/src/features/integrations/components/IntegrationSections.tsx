@@ -2,6 +2,7 @@
  * STATE MACHINE: IntegrationSections
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
+ * Signed-in accounts also get CLI setup, with backend-verified connection state.
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
@@ -24,6 +25,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
+import CliIntegrationsSection from './CliIntegrationsSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -208,6 +210,7 @@ export default function IntegrationSections({
       />
 
       <FileSystemSection isAvailable={isFileSystemAvailable} />
+      {isFullySignedIn && <CliIntegrationsSection />}
     </>
   );
 }

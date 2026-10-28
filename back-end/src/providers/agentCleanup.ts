@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Sandbox } from 'e2b';
+import { isCliTemplateSession } from './cliTemplateReferences';
+import { closeClaudeCodeSession } from './e2bCloseSession';
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { createLogger } from './logger';
@@ -25,6 +27,7 @@ export interface BrowserSessionReleaseDependencies {
 interface ActiveCodeSession {
   id: string;
   sandboxId: string;
+  codeSessionId?: string | null;
 }
 
 export interface CodeSessionReleaseDependencies {
@@ -108,7 +111,7 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
     findActiveCodeSessions: async (agentId: string) =>
       prisma.claudeCodeSession.findMany({
         where: { agentId, status: 'ACTIVE' },
-        select: { id: true, sandboxId: true },
+        select: { id: true, sandboxId: true, codeSessionId: true },
       }),
     killSandbox: async (session) => {
       if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
@@ -118,6 +121,16 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
       if (isLocalDeviceSandboxId(session.sandboxId)) {
         await closeLocalDeviceCodeSession(session.id, session.sandboxId);
         return;
+      }
+      if (session.codeSessionId) {
+        const persistent = await prisma.codeSession.findUnique({
+          where: { id: session.codeSessionId },
+          select: { userId: true },
+        });
+        if (persistent && (await isCliTemplateSession(persistent.userId, session.codeSessionId))) {
+          await closeClaudeCodeSession(session.id);
+          return;
+        }
       }
       // false means E2B no longer has the sandbox, which is as released as a kill.
       await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });

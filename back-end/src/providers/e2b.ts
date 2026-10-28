@@ -413,11 +413,15 @@ async function createClaudeCodeSessionUnlocked(
   // Start the WebSocket server (runs Claude Code internally)
   // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
   // envs: a resumed sandbox keeps its creation env; pass this spawn's explicitly.
+  // Filesystem snapshots default commands to root; the coding harness requires
+  // the user account and its home even when the source template defaulted to user.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
+      user: 'user',
+      cwd: '/home/user',
       background: true,
       timeoutMs: 0,
-      envs: sessionEnvs,
+      envs: { ...sessionEnvs, HOME: '/home/user' },
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -645,11 +649,14 @@ export async function createCodexCodeSession(
   const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
   const wsLaunchedAt = Date.now();
 
+  // Filesystem snapshots do not preserve the base template's default command user.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
+      user: 'user',
+      cwd: '/home/user',
       background: true,
       timeoutMs: 0,
-      envs,
+      envs: { ...envs, HOME: '/home/user' },
     })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {

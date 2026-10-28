@@ -18,6 +18,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { isCliTemplateSession } from '../cliTemplateReferences';
 
 const log = createLogger('CodeSessionStore');
 
@@ -194,7 +195,8 @@ export async function resolveCodeSession(
     params.ownerAgentId,
     params.repoUrl
   )) {
-    if (isExpired(candidate, now)) await markRetired(candidate.id, now);
+    if (isExpired(candidate, now) && !(await isCliTemplateSession(candidate.userId, candidate.id)))
+      await markRetired(candidate.id, now);
     else live.push(candidate);
   }
   for (const candidate of live) {
@@ -319,15 +321,21 @@ export async function findExpiredCodeSessions(
   limit = 5,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
-  return prisma.codeSession.findMany({
-    where: {
-      userId,
-      state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
-      lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
-    },
-    orderBy: { lastActiveAt: 'asc' },
-    take: limit,
-  });
+  return prisma.$queryRaw<CodeSessionRow[]>(Prisma.sql`
+    SELECT session.* FROM "CodeSession" AS session
+    WHERE session."userId" = ${userId}
+      AND session.state IN ('PAUSED', 'ACTIVE')
+      AND session."lastActiveAt" < ${new Date(now.getTime() - codeSessionTtlMs())}
+      AND NOT EXISTS (
+        SELECT 1 FROM "Integration" AS integration
+        WHERE integration."userId" = ${userId}
+          AND integration.name = 'cli'
+          AND integration.type = 'TOOL_SETUP'
+          AND integration.config->>'code_session_id' = session.id
+      )
+    ORDER BY session."lastActiveAt" ASC
+    LIMIT ${limit}
+  `);
 }
 
 export async function linkClaudeCodeSession(taskId: string, codeSessionId: string): Promise<void> {

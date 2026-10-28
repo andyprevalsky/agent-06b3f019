@@ -26,6 +26,27 @@ import {
   roseSkillWorkspaceFiles,
 } from '../../providers/roseSkills/skills';
 
+test('all coding sessions know their Rose parent owns browser authentication', () => {
+  for (const roseDesktop of [false, true]) {
+    for (const prompt of [
+      buildCodeAgentSystemPrompt({ roseDesktop }),
+      buildLocalCodeAgentSystemPrompt({ roseDesktop }),
+    ]) {
+      assert.match(prompt, /part of the Rose agent ecosystem/);
+      assert.match(prompt, /parent Rose agent/);
+      assert.match(prompt, /rose-agents send parent/);
+      assert.match(prompt, /saved authentication/);
+      assert.doesNotMatch(prompt, /or start any interactive authentication flow/);
+    }
+    const graph = installedRoseSkills(roseDesktop).find((skill) => skill.name === 'agent-graph');
+    const text =
+      graph?.files.find((file) => file.path === 'SKILL.md')?.content.toString('utf8') ?? '';
+    assert.match(text, /device code/);
+    assert.match(text, /login process/);
+    assert.match(text, /passwords|refresh tokens/);
+  }
+});
+
 const savedGithubApi = process.env.GITHUB_API_BASE_URL;
 
 after(() => {

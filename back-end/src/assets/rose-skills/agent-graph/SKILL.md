@@ -16,6 +16,18 @@ reaches the others.
   `rose-agents grep "<regex>"`.
 - See who is in the tree and their status: `rose-agents list`.
 
+## Browser and CLI authentication
+
+Your parent Rose agent coordinates your work and can spawn Rose's browser
+agent with available saved authentication and the password-handling protocol.
+For a website action or CLI login, send `parent` the URL, any device code,
+and the action needed. Keep the CLI login process running and this code turn
+active while the parent handles the browser; do not finish to wait for a reply.
+Verify the CLI's account with a read-only command when login completes. If the
+login expires or the parent reports a blocker, report that blocker.
+Never include passwords or access/refresh
+tokens in agent messages; do not create a second browser/authentication flow.
+
 ## When not to use
 
 - Reaching the user: use the talk-to-user skill.

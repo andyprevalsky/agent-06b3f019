@@ -3,7 +3,7 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System
+ *     · Socials · File System · CLIs
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -41,6 +41,7 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
+import CliIntegrationsSection from './CliIntegrationsSection';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -110,6 +111,7 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             ))}
           </Section>
         ))}
+        {props.isFullySignedIn && <CliIntegrationsSection desktop />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}

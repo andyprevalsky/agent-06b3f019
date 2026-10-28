@@ -8,6 +8,7 @@
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
  *   [ANY] --another trigger--> that app
+ *   [ANY] --open-agent navigation--> [CLOSED], revealing the selected agent
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
@@ -53,6 +54,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
 import type { Agent } from '../../hooks';
 import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
 import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
@@ -258,6 +260,11 @@ export function RoseAppsProvider({
     [openApp, selectedAgentId],
   );
   const closeApp = useCallback(() => setOpenApp(null), []);
+
+  useEffect(() => {
+    window.addEventListener(OPEN_AGENT_EVENT, closeApp);
+    return () => window.removeEventListener(OPEN_AGENT_EVENT, closeApp);
+  }, [closeApp]);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {

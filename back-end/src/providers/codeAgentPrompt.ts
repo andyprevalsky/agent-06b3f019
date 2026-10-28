@@ -2,9 +2,9 @@ import { isRoseRepoUrl } from './codePreview/preview';
 import { installedRoseSkills, roseSkillsTableOfContents } from './roseSkills/skills';
 
 /** Rose Desktop accounts: every Rose skill in the table of contents (C17). */
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-24.code-agent-rose-skills.v9';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-10-28.code-agent-rose-skills.v10';
 /** Every other account: the same contract with the stock skill set. */
-export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-24.code-agent-skills.v9';
+export const CODE_AGENT_STOCK_INSTRUCTIONS_VERSION = '2026-10-28.code-agent-skills.v10';
 export const CODEX_HARNESS_INSTRUCTIONS_VERSION = '2026-08-25.codex-rose-harness.v1';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
@@ -44,6 +44,14 @@ export function codeAgentSkillLines(roseDesktop: boolean): string[] {
   return toc.length > 0 ? [...toc, ''] : [];
 }
 
+/** Shared by cloud and local coding sessions; browser work stays with Rose. */
+function roseArchitectureLines(): string[] {
+  return [
+    'You are part of the Rose agent ecosystem. Your parent Rose agent coordinates work and browser tasks with available saved authentication. Ask it via `rose-agents send parent` (agent-graph skill).',
+    '',
+  ];
+}
+
 /** Rose uses its existing deploy coordinator and repository release workflow. */
 function roseRepoLines(args: BuildCodeAgentPromptArgs): string[] {
   if (args.roseDesktop !== true) return [];
@@ -77,9 +85,9 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
   return [
     `Rose Labs code-agent instructions (${roseDesktop ? CODE_AGENT_INSTRUCTIONS_VERSION : CODE_AGENT_STOCK_INSTRUCTIONS_VERSION})`,
     '',
-    'You are running inside a persistent E2B sandbox for a parent agent. Your files, commits and conversation are kept between sessions.',
-    'Complete the requested coding or file task autonomously.',
+    'Your E2B sandbox persists between sessions. Complete the assigned coding or file task autonomously.',
     '',
+    ...roseArchitectureLines(),
     'File contract:',
     `- User attachments are in ${CODE_AGENT_ATTACHMENTS_DIR}. Inspect them before transforming or referencing them.`,
     `- Put every user-facing output file in ${CODE_AGENT_OUTPUT_DIR}. Files outside this directory are not returned to the user.`,
@@ -100,7 +108,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Surface real configuration or credential failures directly.',
     '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
     '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
-    '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
+    '- You are the requested code agent. Do not start another coding-agent CLI or authenticate Claude/Codex again.',
     ...(args.mobbin === true
       ? [
           '- Before you build a visual for the Agent Display, search the mobbin MCP tools for real app and website references and follow their layout and style.',
@@ -166,6 +174,7 @@ export function buildLocalCodeAgentSystemPrompt(args: { roseDesktop?: boolean } 
     "You are running on the user's own Mac, in a folder they shared with Rose. That folder is your working directory.",
     'Complete the requested coding or file task autonomously.',
     '',
+    ...roseArchitectureLines(),
     'File contract:',
     '- Work only inside the working directory. Do not read or change files outside it, except that you may read the Rose skills in ~/.rose/skills.',
     '- Leave results in the folder. In your final response, name the exact paths of files you created or changed.',
@@ -178,6 +187,6 @@ export function buildLocalCodeAgentSystemPrompt(args: { roseDesktop?: boolean } 
     '- Surface real configuration or credential failures directly.',
     '- You must complete the applicable branch-join or deploy skill and verify its receipt before reporting work as published; a local commit or open PR is not sufficient.',
     '- For top-level publication to all agents, read the deploy skill and follow the repository release workflow to its shared GitHub branch; create a repo-local deploy skill if missing. Independent sub-agents stack their own branch/worktree on the parent commit and use branch-join to the immediate parent branch. Internal coding workers share this worktree with coordinated edits and Git operations.',
-    '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
+    '- You are the requested code agent. Do not start another coding-agent CLI or authenticate Claude/Codex again.',
   ].join('\n');
 }
