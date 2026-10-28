@@ -9,8 +9,8 @@
  *   [OPEN] --Escape | its trigger again (icon / left-bar row)--> [CLOSING]
  *
  * Geometry/layer: Biz health is full width (variant 'full', like Browser);
- * the others are the resizable right panel. Integrations and Biz health cover
- * the floating query box (coversComposer → ROSE_LAYER.coverPanel).
+ * the others are the resizable right panel. Every panel here covers the
+ * floating query box (coversComposer → ROSE_LAYER.coverPanel).
  *
  * Header = icon + title; no close X (the triggers toggle, UI ledger row 67).
  * Bodies reuse existing pages (loaded lazily through the pages layer; features
