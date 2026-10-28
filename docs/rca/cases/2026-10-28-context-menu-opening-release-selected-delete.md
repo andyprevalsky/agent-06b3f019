@@ -101,6 +101,62 @@ This draft remains open for root application, full affected frontend coverage
 acceptance and archive validation.
 The original fullG4failure remains recorded. No production or Mac claim.
 
+## Recurrence: an earlier release timer cleared a later opening press
+
+On source `440d5beb35c1482e709accc2e4a214dbb5274f85`, the fresh full frontend
+native run passed 4,016 tests and failed the existing mouse-button-2 opening
+release case. Its owner 28271 exited 1 and was joined; that failed aggregate is
+retained. This is distinct from the original menu-placement failure above.
+
+The historical broad non-primary guard above was superseded when upstream main
+introduced coordinate-scoped opening-press tracking, preserving intentional
+right-button drag selection. That merged implementation stored the current
+press globally but an earlier release's zero-delay callback cleared it
+unconditionally. If another contextmenu event installed a new press before
+that callback ran, the old callback removed the newer press's protection.
+
+The corrective runtime patch captures the press object and clears the shared
+slot only when it still contains that same object. Capture-phase handling,
+once-only listener, zero-delay scheduling, four-pixel slop, caller cancellation,
+keyboard selection and intentional moved-right-drag behavior are unchanged.
+The permanent registered test rapidly closes/reopens, flushes the prior
+release timer, requires the new opening release to remain unselected, and then
+requires a subsequent primary click to select normally.
+
+Exact formatted patch SHA:
+`3e8d6cb7504c375958241ee79300dd3d0f61d5e1a427f6588b146b5721269ace`.
+Runtime SHA:
+`3df9f01e31ac0fb412d06ad3d2640cce2de866395ea1a44be00d026439d50743`.
+Registered test SHA:
+`203dc2d7b25293c8620c1f248add12cdea74447f7d6d460e31719ce7ceaa6a73`.
+
+Identical native command in the original and candidate private directories:
+`node /home/boxes/rose/node_modules/vitest/vitest.mjs run --config vitest.config.ts --maxWorkers=1 --reporter=verbose`.
+The formatted original passed seven and failed two cases in 12.576s; the
+candidate passed all nine in 11.135s. The existing button-2 failure and new
+rapid-reopen control both failed on the original. All seven existing local
+expect-call ASTs and the complete three-case upstream opening/drag fixture
+were preserved. Both owners were joined and all four known owner PIDs from
+the formatted and earlier unformatted pairs are absent. There was no separate
+complete descendant birth census. No provider, model, DB or service calls
+were used by these isolated native tests.
+
+Independent review was GROUNDED for that exact patch, report SHA
+`ad7634d7f26c07cf4e3b8f3ed45e689bad5c96d6bdba191c03b5f3b972a98a25`.
+Root applied the two-file correction in
+`7947dcf36a4b6382de7d879cdc73d292e9f5c81f`. Fresh full frontend owner 77314 completed with native/outer exit 0: all
+247 files and 4,018 tests passed. Coverage was statements 85.37%, branches
+79.24%, functions 86.08%, and lines 87.71%, with unchanged thresholds.
+Real Group 4 UI acceptance on the merged source has not started. This case stays open
+until that final-source acceptance and archive validation complete. Evidence:
+`.context/deploy-fresh-20261027/rca-context-menu-stale-release-440d/`.
+
+The coordinator requested this bounded recurrence investigation, preserved
+existing assertions and drag semantics, and retained sole canonical editing
+and native deployment ownership. Those instructions are coordination, not
+additional direct human feedback. The Human feedback section below remains
+unchanged.
+
 ## Design constraints
 
 The coordinator required original15s/60s clocks, case behavior and all
