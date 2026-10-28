@@ -279,17 +279,16 @@ async function testSmoke_codexCompletesE2bTask() {
       `Expected normalized Codex session event, got: ${JSON.stringify(events).slice(0, 500)}`
     );
 
-    // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
-    // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise the completed turn above
-    // could never have been produced on an exhausted token. This is exactly the
-    // failure that stalled deploy; it passes trivially when the OAuth token is
-    // healthy (no usage-limit event → no requirement).
+    // Runtime-fallback invariant: if the ChatGPT login proved unusable (revoked,
+    // refresh failed) mid-run, the sandbox MUST switch to the funded Azure
+    // deployment (auth_fallback event) rather than giving up. A usage limit is not
+    // switched in the sandbox: it pauses for the parent's retry (C15), so a limited
+    // run never completes here and is a credit SKIP above.
     const sawRecoverableOAuthFailure = events.some((event) => {
       const typed = event as { type?: string; message?: string };
       return (
         typed.type === 'error' &&
-        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
+        /refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
           String(typed.message ?? '')
         )
       );

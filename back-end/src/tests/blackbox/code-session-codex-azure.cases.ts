@@ -24,6 +24,8 @@ import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
   CodeAgentCredentialError,
 } from '../../providers/claudeCodeSandboxAuth';
+import { persistOutput } from '../../domains/codex-code/service';
+import { CODEX_AZURE_SWITCH_LINE } from '../../domains/codex-code/credentialFeedback';
 import {
   __resetCodexFundedCooldown,
   codeCredentialAvailability,
@@ -180,6 +182,88 @@ export function registerCodexAzureFallbackCases(ctx: CodexAzureFallbackContext):
       else process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = savedKey;
       await __resetCodexFundedCooldown();
       await prisma.integration.deleteMany({ where: { id: { in: [own.id, shared.id] } } });
+    }
+  });
+
+  test('after an in-sandbox switch to Azure a limit marks the Azure deployment, never the original login', async () => {
+    const owner = `codex-switch-${randomUUID()}`;
+    const login = await prisma.integration.create({
+      data: {
+        userId: owner,
+        type: 'TOOL_SETUP',
+        name: 'gpt_code',
+        status: 'CONNECTED',
+        isActive: true,
+      },
+    });
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    const leasedTask = () =>
+      prisma.claudeCodeSession.create({
+        data: {
+          agentId,
+          sandboxId: `sb-${randomUUID()}`,
+          goal: 'g',
+          codeProvider: 'codex',
+          claudeTokenSource: 'user',
+          claudeTokenIntegrationId: login.id,
+        },
+      });
+    await __resetCodexFundedCooldown();
+    try {
+      // Structured feedback: the worker saw auth_fallback (the login proved unusable).
+      const switchedTask = await leasedTask();
+      await persistOutput(switchedTask.id, 'terminal output', [
+        { source: 'oauth', reason: 'oauth_refresh_invalid' },
+      ]);
+      const recorded = await prisma.claudeCodeSession.findUniqueOrThrow({
+        where: { id: switchedTask.id },
+        select: { claudeTokenSource: true, claudeTokenIntegrationId: true },
+      });
+      assert.deepEqual(recorded, {
+        claudeTokenSource: 'azure',
+        claudeTokenIntegrationId: login.id,
+      });
+      // The revoked login itself is marked by the feedback; reset it to isolate the limit mark.
+      await prisma.integration.update({
+        where: { id: login.id },
+        data: { rateLimitedUntil: null },
+      });
+      assert.deepEqual(await markCodeTaskUsageLimited(switchedTask.id, 'codex', later), {
+        marked: 'codex_funded',
+      });
+      assert.equal((await codexFundedCooldownUntil())?.toISOString(), later.toISOString());
+      const untouched = await prisma.integration.findUniqueOrThrow({ where: { id: login.id } });
+      assert.equal(untouched.rateLimitedUntil, null, 'the original ChatGPT login is never marked');
+
+      // Legacy terminal-only feedback: the exact switch line records the same switch.
+      await __resetCodexFundedCooldown();
+      const legacyTask = await leasedTask();
+      await persistOutput(
+        legacyTask.id,
+        `[Codex] Error: token_revoked\n${CODEX_AZURE_SWITCH_LINE}\n`
+      );
+      const legacy = await prisma.claudeCodeSession.findUniqueOrThrow({
+        where: { id: legacyTask.id },
+        select: { claudeTokenSource: true },
+      });
+      assert.equal(legacy.claudeTokenSource, 'azure');
+      // A near-miss of the line is not a switch: no loose string matching.
+      const nearMiss = await leasedTask();
+      await persistOutput(nearMiss.id, `${CODEX_AZURE_SWITCH_LINE}.\n`);
+      const kept = await prisma.claudeCodeSession.findUniqueOrThrow({
+        where: { id: nearMiss.id },
+        select: { claudeTokenSource: true },
+      });
+      assert.equal(kept.claudeTokenSource, 'user');
+
+      // Without a switch the limit marks the login the run leased.
+      const ownTask = await leasedTask();
+      assert.deepEqual(await markCodeTaskUsageLimited(ownTask.id, 'codex', later), {
+        marked: `gpt_integration:${login.id}`,
+      });
+    } finally {
+      await __resetCodexFundedCooldown();
+      await prisma.integration.deleteMany({ where: { id: login.id } });
     }
   });
 }

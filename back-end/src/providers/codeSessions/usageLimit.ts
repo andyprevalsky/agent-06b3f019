@@ -97,6 +97,11 @@ export async function markCodeTaskUsageLimited(
   const integrationId = task.claudeTokenIntegrationId ?? '';
   const until = resetsAt ?? undefined;
   if (provider === 'codex') {
+    // 'azure': the funded deployment serves the run (alone, or after an in-sandbox switch).
+    if (source === 'azure' && !macSession) {
+      await markCodexFundedCooldown(resetsAt);
+      return { marked: 'codex_funded' };
+    }
     if (integrationId !== '') {
       await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: until });
       return { marked: `gpt_integration:${integrationId}` };
@@ -527,7 +532,12 @@ export async function codeUsageOutlookForTask(
 ): Promise<CodeUsageOutlook | null> {
   const task = await prisma.claudeCodeSession.findUnique({
     where: { id: taskId },
-    select: { agentId: true, sandboxId: true, claudeTokenIntegrationId: true },
+    select: {
+      agentId: true,
+      sandboxId: true,
+      claudeTokenSource: true,
+      claudeTokenIntegrationId: true,
+    },
   });
   if (task === null) return null;
   const agent = await prisma.agent.findUnique({
@@ -538,7 +548,8 @@ export async function codeUsageOutlookForTask(
   return codeUsageOutlook(agent.userId, {
     prefer: provider,
     ownOnly: isLocalDeviceSandboxId(task.sandboxId),
-    thisRunIntegrationId: task.claudeTokenIntegrationId,
+    // After a switch to Azure the limited run no longer used the login.
+    thisRunIntegrationId: task.claudeTokenSource === 'azure' ? null : task.claudeTokenIntegrationId,
   });
 }
 

@@ -33,6 +33,14 @@ export async function persistSessionOutput(taskId: string, output: string) {
   });
 }
 
+/** The run switched from its ChatGPT login to the funded Azure deployment (C15 marks follow it). */
+export async function markSessionServedByAzure(taskId: string) {
+  await prisma.claudeCodeSession.update({
+    where: { id: taskId },
+    data: { claudeTokenSource: 'azure' },
+  });
+}
+
 export async function findSessionById(taskId: string) {
   return prisma.claudeCodeSession.findUnique({
     where: { id: taskId },

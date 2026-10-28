@@ -50,7 +50,7 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
   assert(
     codexSmokeCreditSkipReason(
       '[Codex] Error: Your access token could not be refreshed because your refresh token was revoked.\n' +
-        '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n' +
+        '[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n' +
         'You have no credits remaining. Add credits to continue.',
       [
         { type: 'auth_fallback', reason: 'oauth_refresh_invalid' },
