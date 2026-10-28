@@ -173,6 +173,18 @@ WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120
 STEEL_COST_CENTS_PER_MS = 100 / 3_600_000  # ~0.00002778
 KERNEL_COST_CENTS_PER_MS = float(os.getenv("KERNEL_COST_CENTS_PER_HOUR", "48")) / 3_600_000
 BROWSER_USE_COST_CENTS_PER_MS = float(os.getenv("BROWSER_USE_COST_CENTS_PER_HOUR", "2")) / 3_600_000
+# Tilion credit prices ($0.002/credit = 0.2 cents). GET /v1/credits `cost` plus
+# the premium rate measured from /v1/usage deltas on 2026-10-22 (lane A2): the
+# month-to-date model 2/create + 1/min + 1/action + 1/MB direct egress +
+# 3/MB premium egress (residential/ISP/mobile: page AND CDP bytes) + 20/solve
+# reproduced the wallet to 5 credits in 28,668. Bytes, not minutes, dominate.
+TILION_CENTS_PER_CREDIT = 0.2
+TILION_COST_CENTS_PER_MS = TILION_CENTS_PER_CREDIT / 60_000
+TILION_CREATE_COST_CENTS = 2 * TILION_CENTS_PER_CREDIT
+TILION_DIRECT_CREDITS_PER_MB = float(os.getenv("TILION_DIRECT_CREDITS_PER_MB", "1"))
+TILION_PREMIUM_CREDITS_PER_MB = float(os.getenv("TILION_RESIDENTIAL_CREDITS_PER_MB", "3"))
+TILION_ACTION_CREDITS = 1
+TILION_CAPTCHA_CREDITS = 20
 
 # Browser supervisor watchdogs. These must be longer than browser-use's own
 # per-event caps because those EventBus requests are not reliably cancellable

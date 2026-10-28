@@ -81,8 +81,14 @@ def max_tasks_within(free_slots: int, max_copies: int, runs: int, tasks: Sequenc
 
 
 def provider_copy_cap() -> int:
-    """Maximum concurrent benches the provider rate-limit registry admits."""
-    return int(runpy.run_path(str(ROOT / "scripts/cloudbench-provider-capacity.py"))["load_registry"]()["cap"])
+    """Maximum concurrent benches the provider rate-limit registry admits for this fleet's browser provider.
+
+    Provider-scoped rows (Tilion's one shared account) bind only fleets on that provider, exactly as
+    the capacity check that admits the fleet applies them.
+    """
+    capacity = runpy.run_path(str(ROOT / "scripts/cloudbench-provider-capacity.py"))
+    registry = capacity["for_browser_provider"](capacity["load_registry"](), capacity["resolve_browser_provider"]())
+    return int(registry["cap"])
 
 
 def operator_eligible(repo_root: Path = ROOT) -> set[str]:

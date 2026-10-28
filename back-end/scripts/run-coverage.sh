@@ -40,7 +40,7 @@ export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmar
 # like "browserbase" wins over back-end/.env ("kernel") and the live
 # browser-provider blackbox 500s on /init. Force a supported provider here.
 case "${BROWSER_PROVIDER:-}" in
-  kernel|steel) ;;
+  tilion|kernel|steel) ;;
   *)
     echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
     export BROWSER_PROVIDER=kernel

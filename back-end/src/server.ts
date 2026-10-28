@@ -79,6 +79,7 @@ import downloadTelemetryRouter from './domains/download-telemetry/routes';
 import computeGrantsRouter from './domains/compute-grants/routes';
 import { installGrantRecovery } from './domains/compute-grants/service';
 import { releaseAllConnectSessions } from './domains/compute-grants/connectSession.shutdown';
+import { releaseAllRecoveryProbeSessions } from './providers/browser/challengeRecoveryLaneSearch';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
@@ -645,7 +646,19 @@ attachLocalDeviceServer(server, [HOLD_STREAM_PATH]);
 const shutdown = async (signal: string) => {
   log.info(`${signal} received, closing server...`);
   // Remote browsers bill until released and are tracked in memory, so exiting
-  // without this strands every in-flight connect session.
+  // without this strands every in-flight connect session (every provider,
+  // Tilion included: release is a provider-bound closure). Agent browser
+  // sessions are deliberately NOT closed here: a deploy drain resumes the same
+  // session, and terminal/orphaned rows are released by the per-minute
+  // terminal-browser reconcile and its owned-only Tilion reaper. Tilion keeps
+  // no benchmark profiles, so it has no profile cleanup step below.
+  // Challenge-recovery candidate sessions are rented browsers no agent row owns
+  // yet, so no reconcile would ever release them (T107).
+  await releaseAllRecoveryProbeSessions().catch((err: unknown) => {
+    log.warn('recovery_probe_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   await releaseAllConnectSessions().catch((err: unknown) => {
     log.warn('connect_session_cleanup_failed', {
       error: err instanceof Error ? err.message : String(err),

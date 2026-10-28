@@ -355,6 +355,7 @@ run_suite "Cloud Benchmark Recovered Reservations" python3 scripts/tests/cloudbe
 run_suite "Cloud Benchmark Closed Transition Reservations" python3 scripts/tests/cloudbench-closed-transition-reservations.test.py
 run_suite "Cloud Benchmark Pre-Reservation Preparation" python3 scripts/tests/cloudbench-prepare-admission.test.py
 run_suite "Cloud Benchmark Reuse Index" python3 scripts/tests/cloudbench-reuse-index.test.py
+run_suite "Cloud Benchmark Guest pidfd Interpreter" python3 scripts/tests/pidfd-interpreter.test.py
 run_suite "Cloud Benchmark Registered Orphan Drain" python3 scripts/tests/cloudbench-controller-orphan-drain.test.py
 run_suite "Cloud Benchmark Relay Bootstrap Retirement" python3 scripts/tests/cloudbench-controller-relay-retire.test.py
 run_suite "Cloud Benchmark Recovered Controller Export" python3 scripts/tests/cloudbench-resume-controller-export.test.py

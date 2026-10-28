@@ -386,6 +386,29 @@ async function main(): Promise<void> {
     assert.strictEqual(controlRuns, 0, 'non-Steel failures must not consult the control');
   });
 
+  await test('a CDP connect that lands after the timeout is closed (single-client providers)', async () => {
+    // Tilion admits one CDP client per session: an orphaned late connect would
+    // keep the slot and every retry, and the agent's attach, would get 4409.
+    let lateClosed = false;
+    let attempts = 0;
+    const validation = await validateBrowserConnection('wss://single-client.invalid/cdp', {
+      connect: async () => {
+        attempts += 1;
+        if (attempts > 1) return fakeBrowser();
+        await new Promise((resolve) => setTimeout(resolve, 10_300));
+        return {
+          contexts: () => [{ pages: () => [{}] }],
+          close: async () => {
+            lateClosed = true;
+          },
+        } as unknown as Browser;
+      },
+    });
+    assert.notStrictEqual(validation.browser, null, 'the retry after the timeout succeeds');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.strictEqual(lateClosed, true, 'the late connection still holds the CDP slot');
+  });
+
   if (failures.length > 0) {
     process.stderr.write(`\n${failures.length} failure(s):\n${failures.join('\n')}\n`);
     process.exit(1);
