@@ -65,7 +65,6 @@ export function DisplayMediaListItem({
         aria-expanded={expanded}
         aria-controls={bodyId}
         aria-label={expanded ? `Collapse display: ${label}` : `Expand display: ${label}`}
-        title={label}
         onClick={() => setExpanded((open) => !open)}
         className="flex min-h-8 w-full min-w-0 items-center gap-2 py-1 text-left text-sm text-muted-foreground hover:text-foreground"
       >
