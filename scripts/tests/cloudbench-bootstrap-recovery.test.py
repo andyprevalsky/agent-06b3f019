@@ -4130,4 +4130,7 @@ gosu(){ shift; python3 -c 'import os,sys;os.setgid(1001);os.setuid(1001);os.exec
 
 
 if __name__ == "__main__":
-    unittest.main()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from deploy_gate_shard import run_unittest_module
+
+    run_unittest_module()

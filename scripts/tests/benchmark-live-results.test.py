@@ -17,6 +17,11 @@ if __name__ == "__main__":
         env["PATH"] = (
             str(Path(interpreter).parent) + ":/opt/homebrew/bin:" + env.get("PATH", "")
         )
+    # DEPLOY_GATE_SHARD=i/N (set by run-deploy-structural-gates.py) makes this
+    # process run every N-th selected test; the plugin is inert without it.
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(Path(__file__).resolve().parent), env.get("PYTHONPATH", "")) if part
+    )
     # Replace this wrapper with pytest: a signal sent to the gate's PID then
     # reaches the test process itself instead of orphaning a child pytest.
     os.chdir(AGENTS)
@@ -27,6 +32,8 @@ if __name__ == "__main__":
             "-m",
             "pytest",
             "-q",
+            "-p",
+            "deploy_gate_shard",
             "benchmarks/cloudbench_dependency_sync_test.py",
             "benchmarks/cloud_batch_cleanup_test.py",
             "benchmarks/worker_capacity_loop_test.py",

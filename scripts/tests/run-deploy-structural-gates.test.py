@@ -1215,6 +1215,174 @@ Path(sys.argv[2]).touch();time.sleep(30)
         finally:
             writer.terminate();writer.wait(timeout=10)
 
+def _load_runner(name: str):
+    spec = importlib.util.spec_from_file_location(name, RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class StructuralGateSchedulingTests(unittest.TestCase):
+    """Sharding, longest-first admission, hard timeouts and pass reuse."""
+
+    def test_shards_partition_the_selection_exactly_once(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts" / "tests"))
+        try:
+            import deploy_gate_shard as shard
+        finally:
+            sys.path.pop(0)
+        items = list(range(1117))
+        for count in (1, 2, 4, 6, 7):
+            union = []
+            for index in range(1, count + 1):
+                with patch.dict(os.environ, {shard.ENV: f"{index}/{count}"}):
+                    kept, dropped = shard.select(items)
+                self.assertTrue(kept)
+                self.assertEqual(sorted(kept + dropped), items)
+                union += kept
+            self.assertEqual(sorted(union), items, f"{count} shards")
+        with patch.dict(os.environ, {shard.ENV: "3/2"}), self.assertRaises(ValueError):
+            shard.select(items)
+        env = dict(os.environ)
+        env.pop(shard.ENV, None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(shard.select(items), (items, []))
+
+    def test_registered_shards_expand_with_their_environment(self) -> None:
+        module = _load_runner("deploy_runner_shards")
+        sharded = [gate for gate in module.GATES if gate.shards > 1]
+        self.assertTrue(sharded, "the long suites must stay sharded")
+        jobs = module.expand_jobs(module.GATES)
+        self.assertEqual(
+            len(jobs), sum(max(gate.shards, 1) for gate in module.GATES)
+        )
+        for gate in sharded:
+            specs = sorted(
+                job.environment()[module.SHARD_ENV] for job in jobs if job.gate is gate
+            )
+            self.assertEqual(
+                specs, sorted(f"{i}/{gate.shards}" for i in range(1, gate.shards + 1))
+            )
+        unsharded = next(job for job in jobs if job.gate.shards == 1)
+        with patch.dict(os.environ, {module.SHARD_ENV: "1/9"}):
+            self.assertNotIn(module.SHARD_ENV, unsharded.environment())
+        expected = [job.expected_seconds for job in jobs]
+        self.assertEqual(expected, sorted(expected, reverse=True), "longest first")
+
+    def test_hung_gate_is_killed_with_its_process_group_and_fails_by_name(self) -> None:
+        module = _load_runner("deploy_runner_timeout")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-timeout-") as temporary:
+            child_pid = Path(temporary) / "child.pid"
+            gates = (
+                module.Gate(
+                    "hangs-forever",
+                    (
+                        "bash",
+                        "-c",
+                        f"trap '' TERM; sleep 300 & echo $! > {child_pid}; wait",
+                    ),
+                ),
+                module.Gate("quick", ("bash", "-c", "exit 0")),
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            started = time.monotonic()
+            with (
+                patch.object(module, "DEFAULT_GATE_TIMEOUT_SECONDS", 2.0),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = module.run_gates(gates, max_workers=2)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result, 1)
+            self.assertLess(elapsed, 60, "the hung gate must not hold the runner")
+            self.assertIn("hangs-forever (timed out)", stderr.getvalue())
+            self.assertIn("TIMEOUT: deploy structural gate hangs-forever", stderr.getvalue())
+            self.assertIn("== hangs-forever: exit=124", stdout.getvalue())
+            self.assertIn("== quick: exit=0", stdout.getvalue())
+            pid = int(child_pid.read_text())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the hung gate's background child survived the timeout")
+
+    def test_timeout_scales_with_recorded_cost(self) -> None:
+        module = _load_runner("deploy_runner_timeout_scale")
+        quick = module.Job(module.Gate("quick", ("true",)), 0)
+        slow = module.Job(module.Gate("slow", ("true",), expected_seconds=700, shards=2), 1)
+        self.assertEqual(quick.timeout_seconds, module.DEFAULT_GATE_TIMEOUT_SECONDS)
+        self.assertEqual(slow.timeout_seconds, max(module.DEFAULT_GATE_TIMEOUT_SECONDS, 3 * 350))
+
+    def test_reuse_reruns_only_failures_and_everything_when_inputs_change(self) -> None:
+        module = _load_runner("deploy_runner_reuse")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-reuse-") as temporary:
+            root = Path(temporary)
+            fail_flag = root / "fail"
+            fail_flag.touch()
+
+            def counting(name: str, fails: bool) -> object:
+                body = f"echo run >> {root / name}"
+                if fails:
+                    body += f"; test ! -e {fail_flag}"
+                return module.Gate(name, ("bash", "-c", body))
+
+            gates = (counting("passes", False), counting("flaky", True))
+
+            def runs(name: str) -> int:
+                path = root / name
+                return len(path.read_text().splitlines()) if path.exists() else 0
+
+            def run(fingerprint: str | None, reuse: bool = True) -> int:
+                with (
+                    patch.object(module, "PASS_CACHE", root / "cache.json"),
+                    patch.object(module, "input_fingerprint", return_value=fingerprint),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    return module.run_gates(gates, max_workers=2, reuse_passes=reuse)
+
+            self.assertEqual(run("inputs-a"), 1)
+            self.assertEqual((runs("passes"), runs("flaky")), (1, 1))
+            fail_flag.unlink()
+            self.assertEqual(run("inputs-a"), 0, "retry of the failure must pass")
+            self.assertEqual((runs("passes"), runs("flaky")), (1, 2), "only the failure reran")
+            self.assertEqual(run("inputs-a"), 0)
+            self.assertEqual((runs("passes"), runs("flaky")), (1, 2), "all passes reused")
+            self.assertEqual(run("inputs-b"), 0)
+            self.assertEqual((runs("passes"), runs("flaky")), (2, 3), "changed inputs rerun all")
+            self.assertEqual(run(None), 0)
+            self.assertEqual((runs("passes"), runs("flaky")), (3, 4), "unknown inputs rerun all")
+            self.assertEqual(run("inputs-b", reuse=False), 0)
+            self.assertEqual((runs("passes"), runs("flaky")), (4, 5), "reuse is opt-in")
+
+    def test_input_fingerprint_tracks_worktree_content(self) -> None:
+        module = _load_runner("deploy_runner_fingerprint")
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-fingerprint-") as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "tracked.txt").write_text("a")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                check=True,
+            )
+            with patch.object(module, "ROOT", root):
+                clean = module.input_fingerprint()
+                (root / "tracked.txt").write_text("b")
+                edited = module.input_fingerprint()
+                (root / "tracked.txt").write_text("c")
+                edited_again = module.input_fingerprint()
+                (root / "untracked.txt").write_text("u")
+                untracked = module.input_fingerprint()
+            self.assertEqual(len({clean, edited, edited_again, untracked}), 4)
+            with patch.object(module, "ROOT", root / "missing"):
+                self.assertIsNone(module.input_fingerprint(), "unknown inputs never reuse")
+
 
 if __name__ == "__main__":
     unittest.main()
