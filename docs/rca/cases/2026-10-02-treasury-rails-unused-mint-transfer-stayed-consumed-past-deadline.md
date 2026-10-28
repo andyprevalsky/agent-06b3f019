@@ -292,3 +292,31 @@ provides recorded identity, not a newly observed close. No provider mutation
 or read was performed during this reconciliation. Private evidence is under
 `.context/deploy-fresh-20261027/batch8-treasury/`; the failed native artifact is
 `.context/test-runs/backend-coverage-failed-20261027-203940-1417183/`.
+
+
+## October 28 one-run overdue notification on an earlier sandbox mint
+
+On unchanged source `48ccad7bb3e56a889d9294e46f57448991d3145a`, the
+backend recovery command passed Kernel parity and all 326 unit files but
+reported treasury-rails as its sole failing domain (233 siblings passed).
+The exact pending journal entry binds card `card_74d6c21643a4620b9a4b6a91`
+and transfer `owt_6dff8c4ea0096d0983af3f6a`, 1300 sandbox cents, minted
+October 27 at 01:25:26.163 UTC. At October 28 01:33:14.912 UTC, the normal
+checker found no matching transfer row after 24.1 hours, appended its ordinary
+resolved/overdue acknowledgement, and then reported the failed check.
+
+This is the existing deliberate one-run reporting contract described above;
+no checker, deadline, credential scope, journal entry or skip flag was changed.
+The return remains UNKNOWN, not repaid, refunded or proven consumed. This
+1300 sandbox-cent exposure is separate from the October 27 1300-cent entry and
+from the payment-abandonment 4396-cent warning. Neither a later normal gate
+PASS nor a journal `resolved` event establishes financial recovery.
+
+The original failed native artifact is
+`.context/test-runs/backend-coverage-failed-20261028-013814-2220742/`.
+Exact event projections and the source-contract review are preserved under
+`.context/deploy-fresh-20261027/batch11-treasury/`. No new provider request was
+made during reconciliation; original card-specific closure evidence was not
+newly recovered. The existing 24-hour rule and one-run acknowledgement remain
+in force. The pipeline's next ordinary canonical coverage attempt preserves
+this original failure and the unrecovered sandbox liability.
