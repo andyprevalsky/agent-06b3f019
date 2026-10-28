@@ -25927,6 +25927,185 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     )
 
 
+async def test_credential_reload_failure_preserves_pending_ack_and_shared_recovery():
+    """Execute the original activity's realm/reload block with only I/O faked."""
+    import ast
+    import asyncio
+    import textwrap
+    from pathlib import Path
+    from types import SimpleNamespace
+    source = Path(__file__).resolve().parents[2] / 'domains/spawn_browser_agent_v3/handler.py'
+    source = globals().get('RELOAD_SOURCE', source)
+    text = Path(source).read_text()
+    start = text.index('            observed_auth_realm = auth_realm_from_url(current_url)')
+    stop = text.index('\n            if current_url and (not visited_urls', start)
+    nodes = ast.parse(textwrap.dedent(text[start:stop])).body
+    # Replace only the imported event constructor with the harness dependency.
+    nodes = [node for node in nodes if not isinstance(node, ast.ImportFrom)]
+    for node in ast.walk(ast.Module(body=nodes, type_ignores=[])):
+        if isinstance(node, ast.ImportFrom):
+            node.names = []
+    block = ast.unparse(ast.Module(body=nodes, type_ignores=[]))
+    block = '\n'.join(line for line in block.splitlines() if not line.strip().startswith('from browser_use.browser.events import'))
+    prolog = '''
+async def run(mode, pending='new.example', current_url='https://new.example/login', auth_realm='new.example', binding_changed=False, preparation_error=False):
+    events = []
+    failures = 0
+    active_credential_binding = ('old',)
+    def _credential_binding():
+        return ('new',) if binding_changed else active_credential_binding
+    async def _prepare_credentials_for_url(url):
+        nonlocal auth_realm
+        events.append(('prepare', url))
+        if mode == 'preparation_failure': raise RuntimeError('credential preparation failed')
+        if mode == 'preparation_none': return None
+        if mode == 'preparation_quarantined': return {'credential_preparation_error':'quarantined'}
+        auth_realm = auth_realm_from_url(url)
+        return {'credential_preparation_error': 'fixture'} if preparation_error else {'auth_realm': auth_realm}
+    pending_credential_reload_realm = pending
+    async def _recover_browser_step(reason, *, reload_page):
+        events.append(('recover', pending_credential_reload_realm, reason, reload_page))
+        return mode != 'exhausted'
+    class Event:
+        def __await__(self):
+            async def ready():
+                if mode == 'cancel': raise asyncio.CancelledError()
+                if mode == 'sealed': raise WorkflowGenerationSealed()
+            return ready().__await__()
+        async def event_result(self, **kwargs):
+            nonlocal failures
+            events.append(('event_ack', pending_credential_reload_realm))
+            if mode in ('event_failure', 'exhausted') and failures == 0:
+                failures += 1
+                raise RuntimeError('Page.navigate() timed out after 300.0s (60001ms)')
+    def dispatch(event):
+        events.append(('dispatch', event.url, pending_credential_reload_realm))
+        return Event()
+    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)))
+    async def wait_for_navigation_ready(*args, **kwargs):
+        nonlocal failures
+        events.append(('ready_ack', pending_credential_reload_realm))
+        if mode == 'readiness_failure' and failures == 0:
+            failures += 1
+            raise RuntimeError('readiness failed')
+    for tick in range(5):
+'''
+    code = prolog + textwrap.indent(block, '        ') + '''
+        events.append(('model', pending_credential_reload_realm))
+        break
+    return events
+'''
+    env = {'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
+           'auth_realm_from_url': lambda u: u.split('/')[2] if '://' in u else '',
+           'auth_realm_matches_url': lambda realm,u: bool(realm) and realm == (u.split('/')[2] if '://' in u else ''),
+           'NavigateToUrlEvent': lambda **kw: SimpleNamespace(**kw),
+           'logger': SimpleNamespace(info=lambda *a, **k: None),
+           'WorkflowGenerationSealed': type('WorkflowGenerationSealed', (RuntimeError,), {})}
+    exec(compile(code, str(source), 'exec'), env)
+    run = env['run']
+    for mode in ('event_failure', 'readiness_failure', 'success'):
+        events = await run(mode)
+        assert events[-1] == ('model', None), events
+        recoveries = [x for x in events if x[0] == 'recover']
+        assert len(recoveries) == (mode != 'success'), events
+        assert all(x[1] == 'new.example' and x[3] is True for x in recoveries), events
+        assert all(x[1] == 'new.example' for x in events if x[0] in ('event_ack','ready_ack')), events
+        assert len([x for x in events if x[0] == 'dispatch']) == (1 if mode == 'success' else 2), events
+    try:
+        await run('exhausted')
+    except RuntimeError as exc:
+        assert '60001ms' in str(exc)
+    else:
+        raise AssertionError('exhausted shared recovery swallowed the original failure')
+    try:
+        await run('cancel')
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError('reload swallowed cancellation')
+    for kwargs in ({'pending':'old.example'}, {'pending':None}, {'pending':None,'current_url':'about:blank','auth_realm':''}, {'pending':None,'binding_changed':True,'preparation_error':True}):
+        events = await run('success', **kwargs)
+        assert not any(x[0] == 'dispatch' for x in events), events
+
+    events = await run('success', pending=None, auth_realm='old.example')
+    assert events.index(('prepare', 'https://new.example/login')) < next(i for i,x in enumerate(events) if x[0] == 'dispatch')
+    events = await run('success', pending=None, binding_changed=True)
+    assert events[0] == ('prepare', 'https://new.example/login')
+    assert not any(x[0] == 'dispatch' for x in events)
+    try:
+        await run('preparation_failure', pending=None, auth_realm='old.example')
+    except RuntimeError as exc:
+        assert str(exc) == 'credential preparation failed'
+    else:
+        raise AssertionError('credential preparation error entered reload recovery')
+
+    try:
+        await run('sealed')
+    except env['WorkflowGenerationSealed']:
+        pass
+    else:
+        raise AssertionError('reload swallowed sealed generation')
+    tree = ast.parse(text)
+    durable_values = [v for node in ast.walk(tree) if isinstance(node, ast.Dict) for k,v in zip(node.keys,node.values) if isinstance(k,ast.Constant) and k.value == 'credential_reload_pending']
+    assert len(durable_values) == 1
+    value_code = compile(ast.Expression(body=durable_values[0]), str(source), 'eval')
+    for pending, expected in ((None,False), ('new.example',True)):
+        value = eval(value_code, {'pending_credential_reload_realm':pending})
+        assert value is expected
+        assert 'new.example' not in str({'credential_reload_pending':value})
+    restore_nodes = [n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='pending_credential_reload_realm' for t in n.targets) and isinstance(n.value,ast.IfExp)]
+    assert len(restore_nodes)==1
+    restore_code=compile(ast.Expression(body=restore_nodes[0].value), str(source), 'eval')
+    for flag in (True,False,None,'true'):
+        restored=eval(restore_code, {'auth_realm':'current.example','durable_browser_runtime':{'credential_reload_pending':flag}})
+        assert restored == ('current.example' if flag is True else None)
+
+    import json
+    continuity = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_browser_resume_continuity_state')
+    continuity_env = {'_browser_turn_messages_for_resume':lambda x:list(x or []), 'is_inter_agent_message':lambda x:False}
+    exec(compile('from __future__ import annotations\n'+ast.unparse(continuity), str(source), 'exec'), continuity_env)
+    state=continuity_env['_browser_resume_continuity_state'](action_history=SimpleNamespace(get_entries=lambda:[]),visited_urls=[],verifier_checkpoints=[],durable_runtime_state={'credential_reload_pending':True})
+    roundtrip=json.loads(json.dumps(state))
+    assert eval(restore_code,{'auth_realm':'resumed.example','durable_browser_runtime':roundtrip['durable_browser_runtime']})=='resumed.example'
+
+    events = await run('success', pending='new.example', binding_changed=True)
+    assert events[-1] == ('model', None), events
+    assert events.index(('prepare', 'https://new.example/login')) < next(i for i,x in enumerate(events) if x[0] == 'dispatch')
+    assert any(x[0] == 'ready_ack' for x in events), events
+    for kwargs in (
+        {'pending':'new.example','binding_changed':True,'preparation_error':True},
+        {'pending':'old.example','auth_realm':'old.example','preparation_error':True},
+    ):
+        events = await run('success', **kwargs)
+        assert events[-1] == ('model', None), events
+        assert events[0][0] == 'prepare', events
+        assert not any(x[0] in ('dispatch','recover') for x in events), events
+
+    for mode in ('preparation_none','preparation_quarantined'):
+        events = await run(mode, pending='new.example', binding_changed=True)
+        assert events[-1] == ('model', None), events
+        assert not any(x[0] in ('dispatch','ready_ack','recover') for x in events), events
+    helper = next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='prepare_optional_realm_credentials')
+    helper_env = dict(env, extract_error_message=str)
+    helper_env['logger'] = SimpleNamespace(warning=lambda *a,**k:None)
+    exec(compile('from __future__ import annotations\n'+ast.unparse(helper), str(source), 'exec'), helper_env)
+    calls=[]
+    async def prepare(url):
+        calls.append(url)
+        return {'auth_realm':'new.example'}
+    fn=helper_env['prepare_optional_realm_credentials']
+    assert await fn(target_url='https://new.example/login',current_auth_realm='new.example',failed_realms={},prepare_credentials=prepare) is None
+    assert not calls
+    assert (await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms={},prepare_credentials=prepare))['auth_realm']=='new.example'
+    calls.clear()
+    quarantined=await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms={'new.example':'prior failure'},prepare_credentials=prepare)
+    assert quarantined['credential_preparation_error']=='prior failure' and not calls
+    async def failed(url): raise RuntimeError('fixture preparation failure')
+    failures={}
+    rejected=await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms=failures,prepare_credentials=failed)
+    assert rejected['credential_preparation_error'] and 'new.example' in failures
+
+
 async def _run_realm_transition_action_fixture(
     action_name,
     *,
@@ -36733,6 +36912,7 @@ async def run_all_tests():
         "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
+    await r.record_async("credential_reload_failure_preserves_pending_ack_and_shared_recovery", test_credential_reload_failure_preserves_pending_ack_and_shared_recovery)
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
         test_activity_redirected_goto_reloads_prepared_realm_once,

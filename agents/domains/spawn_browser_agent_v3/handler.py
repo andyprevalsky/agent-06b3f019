@@ -7974,6 +7974,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
     private_browser_runtime: Dict[str, Any] = {}
     durable_browser_runtime: Dict[str, Any] = {}
+    pending_credential_reload_realm: Optional[str] = None
     # The latest challenge episode whose recovery did not resolve it (antibot.stuck);
     # defined before any early exit so the activity's finally can always read it.
     antibot_unresolved: Dict[str, Any] = {}
@@ -8145,6 +8146,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 ),
             },
             durable_runtime_state={
+                "credential_reload_pending": bool(pending_credential_reload_realm),
                 # Tilion downloads are durable in attachment storage; the
                 # resumed activity (maybe on another worker) extracts them.
                 "tilion_downloads": durable_tilion_downloads(session_id),
@@ -9768,7 +9770,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 raise RuntimeError("Approved payment card has no pending browser tool result to complete")
         failed_credential_prep_realms: Dict[str, str] = {}
         credential_preparation_error: Optional[str] = None
-        pending_credential_reload_realm: Optional[str] = None
+        pending_credential_reload_realm = (
+            auth_realm if durable_browser_runtime.get("credential_reload_pending") is True else None
+        )
         action_redaction_refs: Optional[List[Dict[str, str]]] = None
 
         def _credential_binding() -> tuple:
@@ -10292,23 +10296,41 @@ async def _spawn_browser_agent_activity_v3_real(
             reload_prepared_realm = bool(
                 pending_credential_reload_realm and auth_realm_matches_url(pending_credential_reload_realm, current_url)
             )
-            pending_credential_reload_realm = None
+            if pending_credential_reload_realm and not reload_prepared_realm:
+                pending_credential_reload_realm = None
             if _credential_binding() != active_credential_binding or observed_realm_changed:
                 prepared_realm = await _prepare_credentials_for_url(current_url)
-                reload_prepared_realm = bool(
-                    observed_realm_changed
-                    and prepared_realm is not None
+                preparation_succeeded = bool(
+                    prepared_realm is not None
                     and not prepared_realm.get("credential_preparation_error")
                 )
+                reload_prepared_realm = bool(
+                    (reload_prepared_realm or observed_realm_changed) and preparation_succeeded
+                )
+                if not preparation_succeeded:
+                    pending_credential_reload_realm = None
             if reload_prepared_realm:
                 from browser_use.browser.events import NavigateToUrlEvent
 
-                reload_event = dom_service.session.event_bus.dispatch(
-                    NavigateToUrlEvent(url=current_url, wait_until="commit")
-                )
-                await reload_event
-                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                await wait_for_navigation_ready(dom_service, url=current_url)
+                pending_credential_reload_realm = observed_auth_realm
+                try:
+                    reload_event = dom_service.session.event_bus.dispatch(
+                        NavigateToUrlEvent(url=current_url, wait_until="commit")
+                    )
+                    await reload_event
+                    await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                    await wait_for_navigation_ready(dom_service, url=current_url)
+                except (asyncio.CancelledError, WorkflowGenerationSealed):
+                    raise
+                except Exception as reload_error:
+                    recovered = await _recover_browser_step(
+                        f"credential_reload_error:{type(reload_error).__name__}",
+                        reload_page=True,
+                    )
+                    if recovered:
+                        continue
+                    raise
+                pending_credential_reload_realm = None
                 logger.info(
                     "Reloaded page after redirected realm credential preparation",
                     auth_realm=auth_realm,
