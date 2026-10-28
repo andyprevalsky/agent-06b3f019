@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 import type { Page, Response } from 'playwright';
 
+import { computeSubscriptionLeases } from '../computeSubscriptionLeases';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { createStreamingCompletion } from '../rose/client';
@@ -488,6 +489,10 @@ export async function classifyChallengeWithLlm(
       max_tokens: 200,
       temperature: 0,
       response_model: responseModel('ChallengePageClassification', ChallengeClassificationSchema),
+      // The user's and shared subscriptions serve before any funded key.
+      ...(billing.userId
+        ? { subscription_leases: computeSubscriptionLeases({ userId: billing.userId }) }
+        : {}),
       dump_context: {
         call_site: 'challenge_llm_classifier',
         agent_id: billing.agentId,

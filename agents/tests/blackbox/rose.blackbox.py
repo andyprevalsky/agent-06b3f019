@@ -8579,6 +8579,136 @@ async def test_client_completion_never_serializes_compute_credentials():
     }
 
 
+# ── Subscription-first order (Andy, 2026-10-28) ─────────────────────────────
+# Every Claude/Codex lease before any funded credential; the old fixed cap of
+# two rotations let the OpenAI key serve while subscriptions were still free.
+
+
+def _subscription_order_fakes(limited: set[str], calls: list[str]):
+    """Fake Claude/Codex/OpenAI-key legs that record the order they ran in."""
+
+    def _ok_stream(model: str, pool_name: str, text: str):
+        async def _gen():
+            yield StreamChunk(kind="metadata", data={"actual_model": model, "pool_name": pool_name})
+            yield StreamChunk(kind="content", data={"text": text})
+            yield StreamChunk(
+                kind="usage",
+                data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "finish_reason": "stop"},
+            )
+            yield StreamChunk(kind="done", data={})
+
+        return _gen()
+
+    async def claude(**kwargs):
+        token = kwargs["auth"].token
+        calls.append(f"claude:{token}")
+        if token in limited:
+            raise RoseRateLimitError("Claude 429", status=429)
+        async for chunk in _ok_stream("claude-opus-5-5-claude", "claude-token", token):
+            yield chunk
+
+    async def gpt(**kwargs):
+        token = kwargs["auth"].token
+        calls.append(f"codex:{token}")
+        if token in limited:
+            raise RoseRateLimitError("Codex 429", status=429)
+        async for chunk in _ok_stream("gpt-6-sol-gpt", "gpt-token", token):
+            yield chunk
+
+    async def openai_key(**_kwargs):
+        calls.append("openai-key")
+        async for chunk in _ok_stream("gpt-6-sol-openai", "openai-api-key", "paid"):
+            yield chunk
+
+    async def waterfall(**_kwargs):
+        calls.append("openrouter")
+        if False:
+            yield StreamChunk(kind="done", data={})
+        raise RoseServerError("waterfall must not run", status=500)
+
+    return claude, gpt, openai_key, waterfall
+
+
+def _pool_lease(token_type: str, name: str, **kwargs):
+    cls = ClaudeAuthContext if token_type == "claude" else GptAuthContext
+    extra = {} if token_type == "claude" else {"account_id": f"acct-{name}"}
+    return cls(token=name, source="pool", user_id="user-1", pool_token_id=f"pool-{name}", **extra, **kwargs)
+
+
+async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: list):
+    calls: list[str] = []
+    fetches: list[str] = []
+    claude, gpt, openai_key, waterfall = _subscription_order_fakes(limited, calls)
+
+    async def fetch_fresh(user_id):
+        fetches.append(user_id)
+        return fetch_fresh_leases.pop(0) if fetch_fresh_leases else None
+
+    first.fetch_fresh = fetch_fresh
+    for lease in fetch_fresh_leases:
+        lease.fetch_fresh = fetch_fresh
+    with (
+        patch("providers.rose.client.claude_auth_complete", claude),
+        patch("providers.rose.client.gpt_auth_complete", gpt),
+        patch("providers.rose.client._openai_api_key", return_value="sk-test-funded"),
+        patch("providers.rose.client._gpt_api_key_on_cooldown", AsyncMock(return_value=False)),
+        patch("providers.rose.client.openai_api_key_complete", openai_key),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(waterfall)),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                **({"claude_auth": first} if first.token_type == "claude" else {"gpt_auth": first}),
+                call_site="test-subscription-first",
+            )
+        )
+    metadata = next(c for c in chunks if c.kind == "metadata").data
+    text = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    return calls, fetches, metadata, text
+
+
+async def test_client_rotates_through_every_subscription_before_funded_key():
+    """Four leases, three limited: the fourth serves; the OpenAI key never runs."""
+    leases = [_pool_lease("gpt", "b"), _pool_lease("claude", "c"), _pool_lease("gpt", "d")]
+    calls, fetches, metadata, text = await _run_subscription_order(_pool_lease("claude", "a"), {"a", "b", "c"}, leases)
+    assert calls == ["claude:a", "codex:b", "claude:c", "codex:d"], calls
+    assert len(fetches) == 3
+    assert metadata["actual_model"] == "gpt-6-sol-gpt"
+    assert metadata["pool_name"] == "gpt-token"
+    assert text == "d"
+
+
+async def test_client_funded_key_only_after_every_subscription_is_limited():
+    """All leases limited: OpenAI key serves, and only after the last lease."""
+    leases = [_pool_lease("gpt", "b"), _pool_lease("claude", "c")]
+    calls, fetches, metadata, _text = await _run_subscription_order(_pool_lease("claude", "a"), {"a", "b", "c"}, leases)
+    assert calls == ["claude:a", "codex:b", "claude:c", "openai-key"], calls
+    assert len(fetches) == 3, "the store reports no further lease before the funded key"
+    assert metadata["actual_model"] == "gpt-6-sol-openai"
+    assert metadata["pool_name"] == "openai-api-key"
+    assert metadata["claude_token_error"] == "rate_limit"
+
+
+async def test_client_rotation_stops_when_a_tried_lease_comes_back():
+    """A lease whose mark did not stick is not retried; the call moves on."""
+    repeated = _pool_lease("gpt", "b")
+    leases = [repeated, _pool_lease("gpt", "b")]
+    calls, fetches, metadata, _text = await _run_subscription_order(_pool_lease("claude", "a"), {"a", "b"}, leases)
+    assert calls == ["claude:a", "codex:b", "openai-key"], calls
+    assert len(fetches) == 2
+    assert metadata["pool_name"] == "openai-api-key"
+
+
+async def test_client_max_rotations_zero_leaves_rotation_to_the_caller():
+    """max_rotations=0 is the caller-owned contract: one attempt, no lease lookup."""
+    first = _pool_lease("claude", "a", max_rotations=0)
+    calls, fetches, metadata, _text = await _run_subscription_order(first, {"a"}, [_pool_lease("gpt", "b")])
+    assert calls == ["claude:a", "openai-key"], calls
+    assert fetches == []
+    assert metadata["pool_name"] == "openai-api-key"
+
+
 async def test_client_rotation_preserves_native_tool_contract_across_provider_types():
     """A Claude->GPT rotation must retain AgentAction native tools."""
     AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
@@ -11437,6 +11567,22 @@ async def run_all_tests():
     await r.record_async(
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
+    )
+    await r.record_async(
+        "client_rotates_every_subscription_before_funded_key",
+        test_client_rotates_through_every_subscription_before_funded_key,
+    )
+    await r.record_async(
+        "client_funded_key_after_every_subscription_limited",
+        test_client_funded_key_only_after_every_subscription_is_limited,
+    )
+    await r.record_async(
+        "client_rotation_stops_on_repeated_lease",
+        test_client_rotation_stops_when_a_tried_lease_comes_back,
+    )
+    await r.record_async(
+        "client_max_rotations_zero_is_caller_owned",
+        test_client_max_rotations_zero_leaves_rotation_to_the_caller,
     )
     await r.record_async(
         "client_completion_never_serializes_compute_credentials",
