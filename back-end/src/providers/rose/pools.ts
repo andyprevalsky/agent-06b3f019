@@ -6,7 +6,7 @@
  *
  * claudeAuth = direct Anthropic Messages API call (user/pool OAuth token).
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
- * foundry    = funded Azure fallback for the pool's gptAuthModel (GPT-6.1/6 Sol for
+ * foundry    = funded Azure fallback for the pool's gptAuthModel (GPT-6.1 Sol for
  *              ultra, GPT-6 Luna for flash, GPT-5.6 Luna for mini/browser-use). It follows
  *              direct credentials and the direct Cerebras hop.
  * waterfall  = OpenRouter sequential fallback after the direct routes.
@@ -94,6 +94,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     claudeAuthModel: 'claude-opus-5-5',
     gptAuthModel: 'gpt-6.1-sol',
     foundryEnabled: true,
+    foundryModel: 'gpt-6.1-sol',
     // Opus 5.5 leads AA v4.3.2 (58) at $4/$20. Paid waterfall is gpt-6.1-sol
     // then kimi-k3.
     waterfall: ['openai/gpt-6.1-sol', 'moonshotai/kimi-k3'],

@@ -1,7 +1,7 @@
 """Model pool registry — single source of truth for Rose's pool definitions.
 
 Both rose-1-flash and rose-1-ultra share the same router; ultra adds a
-GPT-6 Sol Foundry fallback after direct credentials and before OpenRouter.
+GPT-6.1 Sol Foundry fallback after direct credentials and before OpenRouter.
 
 Model contract — 2026-09-27 live stream bench plus Artificial Analysis
 Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
@@ -40,7 +40,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-opus-5-5
         gptAuth    = gpt-6.1-sol
-        foundry    = gpt-6.1-sol or gpt-6-sol (when configured)
+        foundry    = gpt-6.1-sol only (when configured)
         waterfall  = openai/gpt-6.1-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:  (same rose-fast hop as flash; browser agents normally
@@ -193,6 +193,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         claude_auth_model="claude-opus-5-5",
         gpt_auth_model="gpt-6.1-sol",
         foundry_enabled=True,
+        foundry_model="gpt-6.1-sol",
         # Opus 5.5 is the AA v4.3.2 leader (58) and cheaper than Fable 5.1
         # ($4/$20 vs $10/$50). Paid waterfall starts at GPT-6.1 Sol,
         # then kimi-k3. Fable stays off this waterfall.

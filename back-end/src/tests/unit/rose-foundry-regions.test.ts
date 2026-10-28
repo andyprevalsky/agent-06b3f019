@@ -39,7 +39,7 @@ const KEYS: Record<string, string> = {
   [R2]: 'key-region-2',
   [R3]: 'key-region-3',
 };
-const ULTRA = POOL_REGISTRY['rose-1-ultra'];
+const UNPINNED_SOL = { ...POOL_REGISTRY['rose-1-ultra'], foundryModel: undefined };
 
 const sse = (...events: Array<Record<string, unknown>>): string =>
   events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n';
@@ -140,7 +140,7 @@ function keyWithPrimary(endpoint: string): string {
 async function drain(routeKey: string): Promise<RoseStreamChunk[]> {
   const chunks: RoseStreamChunk[] = [];
   for await (const chunk of foundryComplete({
-    poolSpec: ULTRA,
+    poolSpec: UNPINNED_SOL,
     messages: [{ role: 'user', content: 'Say hi' }],
     effort: 'high',
     requestId: `region-${routeKey}`,
@@ -305,14 +305,14 @@ async function main(): Promise<void> {
     key = keyWithPrimary(R2);
     assert.equal(text(await drain(key)), 'Hi');
     assert.equal(attempts[0]?.[0], R2);
-    assert(foundryConfigured(ULTRA), 'other regions stay configured');
+    assert(foundryConfigured(UNPINNED_SOL), 'other regions stay configured');
     attempts.length = 0;
     await drain(key);
     assert(attempts.every(([region]) => region !== R2));
     attempts = configure(() => new Response('', { status: 403 }), [R1]);
     await assert.rejects(drain('agent-auth'), RoseAuthError);
     assert.equal(attempts.length, 1);
-    assert(!foundryConfigured(ULTRA), 'single region auth failure still disables Foundry');
+    assert(!foundryConfigured(UNPINNED_SOL), 'single region auth failure still disables Foundry');
     process.stdout.write('Foundry regions: auth failure cools only that region\n');
 
     // Stable primary per route key, balanced primaries, overflow spread evenly,
@@ -368,7 +368,7 @@ async function main(): Promise<void> {
       assert.deepEqual(planRegions(routeKey, 'gpt-5.6-luna'), [R1]);
     delete process.env.AZURE_FOUNDRY_ENDPOINT;
     delete process.env.AZURE_FOUNDRY_API_KEY;
-    assert(foundryConfigured(ULTRA));
+    assert(foundryConfigured(UNPINNED_SOL));
     assert(!foundryConfigured(POOL_REGISTRY['rose-1-mini']));
     delete process.env.AZURE_FOUNDRY_API_KEY_2;
     assert.deepEqual(
@@ -394,10 +394,10 @@ async function main(): Promise<void> {
     );
     process.stdout.write('Foundry regions: a model listed elsewhere skips region 1\n');
 
-    // GPT-6 Sol and GPT-6.1 Sol stand in for each other: ultra may use either.
+    // GPT-6 Sol and GPT-6.1 Sol stand in for each other: a custom unpinned pool may use either.
     configure(ok, [R1, R2]);
     process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
-    const ultraModels = foundryModels(ULTRA);
+    const ultraModels = foundryModels(UNPINNED_SOL);
     assert.deepEqual(ultraModels, ['gpt-6.1-sol', 'gpt-6-sol']);
     assert.deepEqual(foundryModels(POOL_REGISTRY['rose-1-flash']), ['gpt-6-luna']);
     let r2First = 0;
@@ -411,7 +411,10 @@ async function main(): Promise<void> {
       if (plan[0]?.region.endpoint === R2) r2First++;
       else r1FirstKey ||= `agent-${i}`;
     }
-    assert(r2First > 70 && r2First < 130, `ultra spreads over both Sol regions (${r2First}/200)`);
+    assert(
+      r2First > 70 && r2First < 130,
+      `unpinned pool spreads over both Sol regions (${r2First}/200)`
+    );
     attempts = configure(
       (region) =>
         region === R1 ? new Response('', { status: 429, headers: { 'retry-after': '5' } }) : ok(),
@@ -428,7 +431,7 @@ async function main(): Promise<void> {
       'gpt-6.1-sol-foundry',
       'reports the served model'
     );
-    process.stdout.write('Foundry regions: ultra fails over between Sol versions\n');
+    process.stdout.write('Foundry regions: unpinned pool fails over between Sol versions\n');
 
     // A non-HTTPS optional region is dropped (one warning naming its slot); the
     // healthy regions keep serving and foundryConfigured agrees with routing.
@@ -438,7 +441,7 @@ async function main(): Promise<void> {
     process.env.AZURE_FOUNDRY_DEPLOYMENTS_7 = 'gpt-6-sol';
     {
       const { result, output } = await captureOutput(async () => {
-        const configured = foundryConfigured(ULTRA);
+        const configured = foundryConfigured(UNPINNED_SOL);
         const served = text(await drain('agent-insecure-optional'));
         await drain('agent-insecure-optional-2');
         return { configured, served };
@@ -460,7 +463,7 @@ async function main(): Promise<void> {
     process.env.AZURE_FOUNDRY_API_KEY_3 = 'key-region-3';
     process.env.AZURE_FOUNDRY_DEPLOYMENTS_3 = 'gpt-6-sol';
     await captureOutput(async () =>
-      assert.equal(foundryConfigured(ULTRA), false, 'routing would never use slot 3')
+      assert.equal(foundryConfigured(UNPINNED_SOL), false, 'routing would never use slot 3')
     );
     // No HTTPS region left at all: the configuration is rejected.
     delete process.env.AZURE_FOUNDRY_ENDPOINT_2;
@@ -473,7 +476,7 @@ async function main(): Promise<void> {
     // A non-HTTPS region 1 still rejects the whole configuration.
     attempts = configure(() => ok(), [R1, R2]);
     process.env.AZURE_FOUNDRY_ENDPOINT = 'http://a-4989-resource.openai.azure.com';
-    assert.equal(foundryConfigured(ULTRA), true, 'routing surfaces the config error');
+    assert.equal(foundryConfigured(UNPINNED_SOL), true, 'routing surfaces the config error');
     await assert.rejects(
       drain('agent-insecure-primary'),
       (error: unknown) =>
@@ -556,6 +559,10 @@ async function main(): Promise<void> {
     key = 'agent-client-regions';
     const order = planRegions(key);
     limited.add(order[0] as string);
+    for (const name of FOUNDRY_REGION_ENV_NAMES) {
+      if (name.startsWith('AZURE_FOUNDRY_DEPLOYMENTS') && process.env[name])
+        process.env[name] = 'gpt-6.1-sol';
+    }
     const collect = async (): Promise<unknown[]> => {
       const out: unknown[] = [];
       const stream = await createStreamingCompletion({
@@ -572,7 +579,7 @@ async function main(): Promise<void> {
       attempts.map(([region]) => region),
       order.slice(0, 2)
     );
-    assert(served.includes('Hi') && served.includes('gpt-6-sol-foundry'));
+    assert(served.includes('Hi') && served.includes('gpt-6.1-sol-foundry'));
     attempts.length = 0;
     for (const region of order) limited.add(region);
     served = await collect();

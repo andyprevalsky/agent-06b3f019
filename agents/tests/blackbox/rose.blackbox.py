@@ -5639,7 +5639,7 @@ async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundr
             "ANTHROPIC_API_KEY": "",
             "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
             "AZURE_FOUNDRY_API_KEY": "foundry-test-key",
-            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
         },
     ):
         try:
@@ -7255,7 +7255,7 @@ async def test_client_foundry_stream_exit_closes_http_owner():
                 {
                     "AZURE_FOUNDRY_ENDPOINT": "https://foundry.invalid",
                     "AZURE_FOUNDRY_API_KEY": "offline-fake",
-                    "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+                    "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
                 },
             ),
         ):
@@ -7332,7 +7332,7 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
         {
             "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
             "AZURE_FOUNDRY_API_KEY": "test-key",
-            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
             "GPT_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
         },
@@ -7566,7 +7566,7 @@ async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
     for host, (suffix, key) in regions.items():
         env[f"AZURE_FOUNDRY_ENDPOINT{suffix}"] = f"https://{host}"
         env[f"AZURE_FOUNDRY_API_KEY{suffix}"] = key
-        env[f"AZURE_FOUNDRY_DEPLOYMENTS{suffix}"] = "gpt-6-sol"
+        env[f"AZURE_FOUNDRY_DEPLOYMENTS{suffix}"] = "gpt-6.1-sol"
 
     async def run(agent_id: str) -> list:
         return await _drain(
@@ -7587,12 +7587,12 @@ async def test_client_foundry_region_rate_limit_fails_over_before_openrouter():
         patch.object(foundry, "_auth_cooldown_until", {}),
     ):
         agent_id = "agent-region-failover"
-        plan = [r.host for r, _ in foundry._route_plan(foundry.foundry_regions(), "gpt-6-sol", agent_id)]
+        plan = [r.host for r, _ in foundry._route_plan(foundry.foundry_regions(), "gpt-6.1-sol", agent_id)]
         assert sorted(plan) == sorted(regions)
         limited.add(plan[0])
         chunks = await run(agent_id)
         assert attempted == plan[:2], attempted
-        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6.1-sol-foundry"
         assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
 
         attempted.clear()
@@ -7638,7 +7638,7 @@ async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving(
             "CEREBRAS_API_KEY": "",
             "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
             "AZURE_FOUNDRY_API_KEY": "key-1",
-            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
             "AZURE_FOUNDRY_ENDPOINT_7": "http://typo-region.openai.azure.com",
             "AZURE_FOUNDRY_API_KEY_7": "key-7",
             "AZURE_FOUNDRY_DEPLOYMENTS_7": "gpt-6-sol",
@@ -7668,7 +7668,7 @@ async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving(
             assert foundry.foundry_configured(get_pool("rose-1-ultra"))
             for _ in range(2):
                 chunks = await run()
-                assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6-sol-foundry"
+                assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6.1-sol-foundry"
                 assert any(c.kind == "content" and c.data.get("text") == "region ok" for c in chunks)
         assert attempted == ["https://a-4989-resource.openai.azure.com"] * 2, attempted
         warnings = [entry for entry in logs if entry["event"] == "rose.foundry.region_not_https"]
@@ -7802,7 +7802,7 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
     env = {
         "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "test-key",
-        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
         "GPT_API_KEY": "",
         "ANTHROPIC_API_KEY": "",
     }
@@ -7827,7 +7827,7 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
             )
             usages.append(next(c.data for c in chunks if c.kind == "usage"))
 
-    assert [body["model"] for body in bodies] == ["gpt-6.1-sol", "gpt-6-sol"]
+    assert [body["model"] for body in bodies] == ["gpt-6.1-sol", "gpt-6.1-sol"]
     for body in bodies:
         marked = [part.get("prompt_cache_breakpoint") for item in body["input"] for part in item["content"]]
         assert marked == [{"mode": "explicit"}, {"mode": "explicit"}, None]
@@ -8067,7 +8067,7 @@ async def test_speed_reaches_foundry_as_priority_only():
     env = {
         "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "foundry-test-key",
-        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
     }
     with patch.dict(os.environ, env):
         for speed, expected in (("standard", None), ("fast", "priority"), ("ultrafast", "priority")):
@@ -8284,7 +8284,7 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
     env = {
         "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "test-key",
-        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
         "CEREBRAS_API_KEY": "csk-test",
         "GPT_API_KEY": "",
         "ANTHROPIC_API_KEY": "",
@@ -8376,7 +8376,7 @@ async def test_text_only_foundry_skipped_for_image_requests():
     env = {
         "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
         "AZURE_FOUNDRY_API_KEY": "test-key",
-        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
         "GPT_API_KEY": "",
         "ANTHROPIC_API_KEY": "",
     }
@@ -8393,7 +8393,7 @@ async def test_text_only_foundry_skipped_for_image_requests():
 
         attempted.clear()
         await run("rose-1-ultra", image_message)
-        assert attempted == ["foundry:gpt-6-sol"], attempted
+        assert attempted == ["foundry:gpt-6.1-sol"], attempted
 
 
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
@@ -10667,7 +10667,7 @@ async def test_wmh_native_response_model_reaches_foundry_http():
     env = {
         "AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid",
         "AZURE_FOUNDRY_API_KEY": "offline-test",
-        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6.1-sol",
     }
     with (
         patch.object(
@@ -11547,9 +11547,70 @@ async def test_truncation_retains_incoming_candidate_exclusions():
     assert all("candidatea" in excluded for excluded in seen)
 
 
+async def test_ultra_foundry_pinned_production_model():
+    """Real Ultra never borrows GPT-6 Sol; missing/failed 6.1 keeps normal fallback."""
+    from providers.rose import foundry
+
+    r1 = "https://ultra-old.openai.azure.com"
+    r2 = "https://ultra-current.openai.azure.com"
+    env = {name: "" for name in foundry.FOUNDRY_REGION_ENV_NAMES}
+    env.update({
+        "GPT_API_KEY": "", "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "",
+        "AZURE_FOUNDRY_ENDPOINT": r1, "AZURE_FOUNDRY_API_KEY": "test-old",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "AZURE_FOUNDRY_ENDPOINT_2": r2, "AZURE_FOUNDRY_API_KEY_2": "test-current",
+        "AZURE_FOUNDRY_DEPLOYMENTS_2": "gpt-6.1-sol",
+    })
+    calls = []
+    failed = False
+
+    def handler(req):
+        if req.url.host.endswith(".openai.azure.com"):
+            assert req.url.host == "ultra-current.openai.azure.com"
+            assert json.loads(req.content)["model"] == "gpt-6.1-sol"
+            calls.append("foundry")
+            if failed:
+                return httpx.Response(500, text="unavailable")
+            return httpx.Response(200, text=(
+                'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+                'data: [DONE]\n\n'
+            ))
+        if req.url.host == "openrouter.ai":
+            calls.append("openrouter")
+            return httpx.Response(200, text=(
+                'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                'data: [DONE]\n\n'
+            ))
+        raise AssertionError(str(req.url))
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, env):
+        models = foundry.foundry_models(get_pool("rose-1-ultra"))
+        for i in range(200):
+            plan = foundry._route_plan(foundry.foundry_regions(), models, f"ultra-pin-{i}")
+            assert [(r.endpoint, d) for r, d in plan] == [(r2, "gpt-6.1-sol")]
+
+        async def run():
+            return await _drain(RoseClient(openrouter_key="ork-test").complete(
+                pool="rose-1-ultra", messages=[{"role": "user", "content": "hi"}],
+                agent_id="ultra-pin", dump_context=False, _exclude_anthropic_family=True,
+            ))
+
+        chunks = await run()
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-6.1-sol-foundry"
+        failed = True
+        calls.clear()
+        await run()
+        assert calls == ["foundry", "openrouter"]
+        os.environ["AZURE_FOUNDRY_DEPLOYMENTS_2"] = "gpt-6-sol"
+        plan = foundry._route_plan(foundry.foundry_regions(), models, "unlisted-6.1")
+        assert [(r.endpoint, d) for r, d in plan] == [(r1, "gpt-6.1-sol")]
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("ultra_foundry_pinned_production_model", test_ultra_foundry_pinned_production_model)
     await r.record_async("rose_local_loopback_no_fallback", test_rose_local_loopback_and_no_fallback)
     await r.record_async(
         "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions

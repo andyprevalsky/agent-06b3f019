@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   });
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol,gpt-6-sol-b';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol,gpt-6.1-sol-b';
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const attempts: string[] = [];
@@ -76,20 +76,20 @@ async function main(): Promise<void> {
     const chunks = [];
     for await (const chunk of stream) chunks.push(chunk);
     assert.equal(attempts.length, 2);
-    assert.equal(attempts[0], orderedFoundryDeployments('gpt-6-sol', 'agent-1')[0]);
+    assert.equal(attempts[0], orderedFoundryDeployments('gpt-6.1-sol', 'agent-1')[0]);
     assert.notEqual(attempts[0], attempts[1]);
-    assert.equal(chunks[0]?.actual_model, 'gpt-6-sol-foundry');
+    assert.equal(chunks[0]?.actual_model, 'gpt-6.1-sol-foundry');
     assert.equal(chunks[0]?.pool_name, 'foundry');
     assert.equal(chunks[0]?.choices[0]?.delta.content, 'Hi');
-    assert.deepEqual(orderedFoundryDeployments('gpt-6-sol', 'agent-1').sort(), [
-      'gpt-6-sol',
-      'gpt-6-sol-b',
+    assert.deepEqual(orderedFoundryDeployments('gpt-6.1-sol', 'agent-1').sort(), [
+      'gpt-6.1-sol',
+      'gpt-6.1-sol-b',
     ]);
     process.stdout.write('Foundry fallback: 429 spill, Responses shape and provenance passed\n');
 
     // Compare the complete HTTP body against the GPT compute-token builder,
     // including instructions, input, cache key, tools/JSON, effort and tier.
-    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-parity';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol-parity';
     const poolSpec = POOL_REGISTRY['rose-1-ultra'];
     const messages: CompletionMessage[] = [
       { role: 'system', content: 'Follow the supplied response contract.' },
@@ -158,7 +158,7 @@ async function main(): Promise<void> {
         captured,
         buildCodexResponsesBody({
           ...opts,
-          modelOverride: 'gpt-6-sol-parity',
+          modelOverride: 'gpt-6.1-sol-parity',
           ...(scenario.fast ? { serviceTier: 'priority' as const } : {}),
         })
       );
@@ -166,7 +166,7 @@ async function main(): Promise<void> {
     }
     process.stdout.write('Foundry payload: exact GPT compute body parity passed\n');
 
-    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-third';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol-third';
     process.env.OPENROUTER_API_KEY = 'test-openrouter';
     const hosts: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -190,7 +190,7 @@ async function main(): Promise<void> {
     assert.equal(fallbackChunks[0]?.choices[0]?.delta.content, 'OpenRouter');
     process.stdout.write('Foundry ceiling: pre-content 429 falls through to OpenRouter\n');
 
-    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-reader-a,gpt-6-sol-reader-b';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol-reader-a,gpt-6.1-sol-reader-b';
     const readerAttempts: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       readerAttempts.push(String((JSON.parse(String(init?.body)) as { model: string }).model));
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
     assert.equal(recovered.find((chunk) => chunk.kind === 'content')?.data.text, 'Recovered');
     process.stdout.write('Foundry reader: pre-content failure tries next deployment\n');
 
-    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-partial-a,gpt-6-sol-partial-b';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol-partial-a,gpt-6.1-sol-partial-b';
     const partialAttempts: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       partialAttempts.push(String((JSON.parse(String(init?.body)) as { model: string }).model));
@@ -269,7 +269,7 @@ async function main(): Promise<void> {
       await assert.rejects(async () => {
         for await (const _ of openAiApiKeyComplete({
           poolSpec: POOL_REGISTRY['rose-1-ultra'],
-          model: 'gpt-6-sol',
+          model: 'gpt-6.1-sol',
           messages: [{ role: 'user', content: 'hi' }],
           openAiKey: 'test-key',
           requestId: `credit-${code}`,
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
     await assert.rejects(async () => {
       for await (const _ of openAiApiKeyComplete({
         poolSpec: POOL_REGISTRY['rose-1-ultra'],
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         messages: [{ role: 'user', content: 'hi' }],
         openAiKey: 'test-key',
         requestId: 'in-band-credit',
@@ -303,7 +303,7 @@ async function main(): Promise<void> {
     await assert.rejects(async () => {
       for await (const _ of openAiApiKeyComplete({
         poolSpec: POOL_REGISTRY['rose-1-ultra'],
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         messages: [{ role: 'user', content: 'hi' }],
         openAiKey: 'test-key',
         requestId: 'ordinary-rate-limit',
@@ -319,7 +319,7 @@ async function main(): Promise<void> {
     await assert.rejects(async () => {
       for await (const _ of openAiApiKeyComplete({
         poolSpec: POOL_REGISTRY['rose-1-ultra'],
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         messages: [{ role: 'user', content: 'hi' }],
         openAiKey: 'test-key',
         requestId: 'non-object-rate-limit',

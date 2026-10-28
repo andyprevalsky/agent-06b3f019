@@ -7,7 +7,6 @@
  * test growth pushes file lines past the 600 default. See e.g.
  * agents.blackbox.ts, integrations.blackbox.ts which use the same disable.
  */
-/* eslint-disable max-lines */
 /**
  * Module-level black-box tests for back-end/src/providers/rose/.
  *
@@ -31,6 +30,7 @@
  */
 
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -57,7 +57,12 @@ import {
   type SubscriptionLeases,
 } from '../../providers/rose';
 import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
-import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
+import {
+  foundryModels,
+  foundryRegions,
+  foundryRoutePlan,
+  FOUNDRY_REGION_ENV_NAMES,
+} from '../../providers/rose/foundry';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
@@ -1989,7 +1994,7 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   const seen = { openai: 0, foundry: 0, openrouter: 0 };
   installFetchStub((url) => {
     if (url === OPENAI_RESPONSES_API_URL) {
@@ -2170,7 +2175,7 @@ async function testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites() {
   process.env.GPT_API_KEY = '';
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   const bodies: Array<Record<string, unknown>> = [];
   const usages = [
     '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":900,"cache_write_tokens":0}}',
@@ -4383,7 +4388,7 @@ async function withFundedCredentials(fn: () => Promise<void>): Promise<void> {
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   process.env.OPENROUTER_API_KEY = 'or-test-key';
   try {
     await fn();
@@ -4480,7 +4485,7 @@ async function testSubscriptionFirst_everySubscriptionBeforeEachPaidTier() {
     },
     {
       legs: { openAiKey: 'credits', anthropicKey: 'credits', foundry: 'ok' },
-      model: 'gpt-6-sol-foundry',
+      model: 'gpt-6.1-sol-foundry',
       route: 'foundry',
       tail: ['openai-key', 'anthropic-key', 'foundry'],
     },
@@ -4601,8 +4606,82 @@ async function testSubscriptionFirst_poolWithoutSubscriptionLegsNeverLeases() {
   });
 }
 
+async function testUltraFoundryPinnedModel() {
+  const originalFindMany = prisma.integration.findMany;
+  prisma.integration.findMany = (async () => []) as typeof originalFindMany;
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  process.env.GPT_API_KEY = '';
+  process.env.OPENAI_API_KEY = '';
+  process.env.ANTHROPIC_API_KEY = '';
+  const r1 = 'https://ultra-old.openai.azure.com';
+  const r2 = 'https://ultra-current.openai.azure.com';
+  process.env.AZURE_FOUNDRY_ENDPOINT = r1;
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-old';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_ENDPOINT_2 = r2;
+  process.env.AZURE_FOUNDRY_API_KEY_2 = 'test-current';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+  const models = foundryModels(getPool('rose-1-ultra'));
+  for (let i = 0; i < 200; i++) {
+    const plan = foundryRoutePlan(foundryRegions(), models, `ultra-pin-${i}`);
+    assertEqual(
+      JSON.stringify(plan.map(({ region, deployment }) => [region.endpoint, deployment])),
+      JSON.stringify([[r2, 'gpt-6.1-sol']]),
+      'production Ultra uses only explicit 6.1 region'
+    );
+  }
+  const calls: string[] = [];
+  let failed = false;
+  installFetchStub((url, init) => {
+    if (url.startsWith(r1) || url.startsWith(r2)) {
+      const body = JSON.parse(String(init?.body));
+      assertEqual(body.model, 'gpt-6.1-sol', 'Ultra never posts GPT-6 Sol');
+      assert(url.startsWith(r2), 'explicit 6.1 region owns Ultra');
+      calls.push('foundry');
+      return failed ? errorResponse(500, 'unavailable') : sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      calls.push('openrouter');
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`unexpected provider ${url}`);
+  });
+  try {
+    const run = async () =>
+      collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [{ role: 'user', content: 'hi' }],
+          route_key: 'ultra-pin',
+        })
+      );
+    const chunks = await run();
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-foundry', 'Ultra serving model');
+    failed = true;
+    calls.length = 0;
+    await run();
+    assertEqual(
+      calls.join(','),
+      'foundry,openrouter',
+      '6.1 failure falls to waterfall, never 6 Sol'
+    );
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6-sol';
+    const fallback = foundryRoutePlan(foundryRegions(), models, 'unlisted-6.1');
+    assertEqual(
+      JSON.stringify(fallback.map(({ region, deployment }) => [region.endpoint, deployment])),
+      JSON.stringify([[r1, 'gpt-6.1-sol']]),
+      'unlisted 6.1 retains region-1 deploymentless fallback'
+    );
+  } finally {
+    restoreFetch();
+    prisma.integration.findMany = originalFindMany;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  }
+}
+
 async function main(): Promise<void> {
   const tests: { name: string; fn: () => Promise<void> }[] = [
+    { name: 'Ultra Foundry pinned production model', fn: testUltraFoundryPinnedModel },
     { name: 'pool / isRoseModel variants', fn: testPool_isRoseModelVariants },
     { name: 'pool / poolForModel fuzzy', fn: testPool_forModelFuzzy },
     { name: 'local / loopback only', fn: testRoseLocalOnlyCallsLoopback },
