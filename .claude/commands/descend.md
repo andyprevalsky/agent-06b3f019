@@ -207,6 +207,21 @@ this command are superseded by this policy.
    Give each cluster its own available sub-agent running **`/RCA`**, an exemplar,
    exact evidence, fixed milestones and a time budget. Queue excess clusters;
    one fix owner per cause does not mean one author for all causes.
+   **Parent supervision and normal one-hour repair target:** The parent must
+   review each active RCA/fix assignment every 10–15 minutes using concrete
+   evidence, the exact diff or test results, and its next deliverable. Record
+   the original assignment start and elapsed time; follow-ups, handoffs and
+   session restarts do not reset that clock. Normally complete RCA, the scoped
+   fix, necessary verification and independent review within one hour. By
+   30 minutes, reassess whether the evidence supports the proposed cause and
+   narrow, split, reassign or stop investigation that is not converging. By
+   45 minutes, decide whether to finish the bounded repair or preserve an
+   OPEN finding with the exact missing evidence and the next discriminating
+   step. An exception past one hour requires the parent's recorded reason,
+   concrete new evidence and a bounded next checkpoint; it must not become
+   repeated speculative exploration or optional testing. Queue unrelated work
+   separately. This target does not waive causal proof, independent review,
+   original verdicts, experiment deadlines or required resource cleanup.
 3. **Reproduce, fix and verify.** Require the owning local failure, the identical
    test passing after the fix, a registered regression and unchanged affected
    outcome proof. A passing diagnostic is not proof that the original failure
@@ -1241,12 +1256,21 @@ scorecards report model/effort/tier and collection gaps alongside timings.
 
 ### Descent speed change (user clarification)
 
-The compact descent headline is `<rate> iter/h [avg Δ <signed percent> over last 5 runs]`.
+Every scorecard build recomputes the running headline from its actual `generated_at`:
+`LIVE ≤<3600 / (generated_at - latest consecutive producer finish)> iter/h`.
+This is a provisional upper bound for one future completion, not an added
+completed iteration. Include inter-experiment work and current running time.
+Show the last measured completed finish-to-finish rate separately; a terminal
+current experiment uses that measured rate as its headline. Missing, invalid,
+future, nonpositive or nonconsecutive clocks remain UNMEASURED; never bridge a
+gap, invent a finish or reset producer clocks to a render timestamp.
+The compact headline retains `[avg Δ <signed percent> over last 5 completed runs]`.
 Avg Δ uses five consecutive finished recorded experiments (four finish-to-finish
 speeds), then takes the arithmetic mean of the three successive changes:
 100 * (next_speed / previous_speed - 1). It is neither mean speed nor endpoint
-change. Retain failed/cancelled finishes and all inter-experiment work. Skip only
-the latest current running experiment; never bridge missing/invalid finishes.
+change. Retain failed/cancelled finishes and all inter-experiment work. For
+completed-rate and Avg Δ calculations only, skip the latest current running
+experiment; never bridge missing/invalid finishes.
 Fewer than five consecutive valid finishes show UNMEASURED with n/5 coverage.
 Positive change is green with +, negative red with -, and stationary is 0.0%.
 Keep the full Iterations/Hour and finish-to-finish definition in a secondary

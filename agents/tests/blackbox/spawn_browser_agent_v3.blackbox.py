@@ -31474,6 +31474,125 @@ def test_challenge_recovery_call_keywords_match_callee_contract():
     )
 
 
+async def test_browser_tab_rebind_preserves_provider_keyboard_transport():
+    """Exercise actual activity call kwargs, focus rebinding, and humanizer dispatch."""
+    import ast
+    import inspect
+    import textwrap
+    import browser_tools.humanizer as hm
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.tilion_worker import is_single_cdp_client_provider
+
+    # Resolve the actual activity call expression, so omitting its policy keyword
+    # cannot be hidden by a test that passes the new helper argument itself.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real)))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == '_rebind_browser_tab_runtime']
+    assert len(calls) == 2
+
+    class Gateway:
+        def __init__(self, target):
+            self.target = target
+            self.in_flight = 0
+            self.delivered = []
+            self.timestamps = []
+            self.cancelled = 0
+        async def send(self, method, params=None):
+            if method == 'Target.getTargetInfo':
+                return {'targetInfo': {'targetId': self.target}}
+            assert method == 'Input.dispatchKeyEvent'
+            if self.in_flight:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+                    raise
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.01)
+                self.timestamps.append(params['timestamp'])
+                if params['type'] == 'char':
+                    self.delivered.append(params['text'])
+                return {}
+            finally:
+                self.in_flight -= 1
+        async def detach(self):
+            pass
+
+    class Page:
+        def __init__(self, target):
+            self.gateway = Gateway(target)
+            self.front_calls = 0
+            self.viewport_size = {'width': 1280, 'height': 800}
+            self.keyboard = SimpleNamespace()
+        async def bring_to_front(self):
+            self.front_calls += 1
+
+    async def exercise(call, provider, same_page=False, cancel=False):
+        a, b = Page('a'), Page('b')
+        context = SimpleNamespace(pages=[a, b])
+        async def new_cdp_session(page):
+            return page.gateway
+        context.new_cdp_session = new_cdp_session
+        a.context = b.context = context
+        closed = []
+        async def close():
+            closed.append(True)
+        old = SimpleNamespace(close=close)
+        recorder = SimpleNamespace(page=a)
+        observer = lambda *_: None
+        scope = dict(dom_service=SimpleNamespace(session=SimpleNamespace(agent_focus_target_id='a' if same_page else 'b')),
+                     dom_page=None, playwright_browser=SimpleNamespace(contexts=[context]),
+                     input_page=a, humanizer=old, browser_recorder=recorder, observe_cursor=observer,
+                     tab_focus_cache=None, browser_session_metadata={'provider': provider},
+                     is_single_cdp_client_provider=is_single_cdp_client_provider)
+        kwargs = {k.arg: eval(compile(ast.Expression(k.value), '<actual-call-keyword>', 'eval'), scope)
+                  for k in call.keywords}
+        # Cursor initialization is unrelated I/O; all ownership and typing code is real.
+        with patch.object(hm.BrowserHumanizer, 'initialize_cursor', new=AsyncMock()):
+            selected, rebound = await handler._rebind_browser_tab_runtime(**kwargs)
+        if same_page:
+            assert selected is a and rebound is old and not closed and recorder.page is a
+            return
+        assert selected is b and recorder.page is b and closed == [True]
+        assert a.front_calls == 0 and b.front_calls == 1
+        assert rebound._cursor_observer is observer
+        expected_serial = provider == 'tilion'
+        # Type before checking policy so baseline proves the actual lost-key path.
+        rebound._keycap = SimpleNamespace(next=lambda _: SimpleNamespace(dwell_s=0.001, interval_s=0.001))
+        if expected_serial:
+            if cancel:
+                started = asyncio.Event()
+                async def blocked(method, params=None):
+                    started.set()
+                    await asyncio.Event().wait()
+                b.gateway.send = blocked
+                task = asyncio.create_task(rebound.type_text('ab'))
+                await started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert not rebound._movement_lock.locked()
+            else:
+                await rebound.type_text('ab')
+                assert ''.join(b.gateway.delivered) == 'ab'
+                assert b.gateway.timestamps == sorted(b.gateway.timestamps)
+                assert b.gateway.in_flight == 0
+        assert rebound._serial_cdp_keyboard is expected_serial
+        await rebound.close()
+
+    with patch.dict(os.environ, {'BROWSER_AGENT_CDP_MOUSE_TRANSPORT':'0',
+                                'BROWSER_AGENT_IDLE_MOUSE_ENABLED':'0',
+                                'BROWSER_AGENT_VISUAL_CURSOR_ENABLED':'0'}), \
+         patch.object(hm, 'CDP_INPUT_DRAIN_TIMEOUT_SECONDS', 1.0):
+        for call in calls:
+            await exercise(call, 'tilion')
+            await exercise(call, 'kernel')
+            await exercise(call, 'steel')
+            await exercise(call, 'tilion', same_page=True)
+            await exercise(call, 'tilion', cancel=True)
+
+
 async def test_playwright_page_tracks_browser_use_tab_focus():
     """Humanized clicks, recorder, and live view must follow browser-use focus."""
     import inspect
@@ -35031,6 +35150,10 @@ async def run_all_tests():
     r.record(
         "challenge_recovery_call_contract",
         test_challenge_recovery_call_keywords_match_callee_contract,
+    )
+    await r.record_async(
+        "browser_tab_rebind_preserves_provider_keyboard_transport",
+        test_browser_tab_rebind_preserves_provider_keyboard_transport,
     )
     await r.record_async(
         "playwright_page_tracks_browser_use_tab_focus",

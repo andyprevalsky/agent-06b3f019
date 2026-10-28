@@ -73,8 +73,8 @@ links. A file pointer never substitutes for the diff.
 
 - Every future CLI benchmark uses the shared scorecard: headline **QUEUED / IN_PROGRESS / COMPLETED**, then **PASS / HARNESS FAILURE / INFRA FAILURE**; preserve genuine agent failures, cancellations and unknowns separately, keep the infra threshold in a minor note, and refresh on agent starts/completions, every fixed 15 minutes and benchmark-state changes. Follow `.claude/shared/report-display-format.md` and the CLI-emitted `.claude/shared/benchmark-report-format.txt`.
 - Use actual text colors, latest **3** generic runs (**10** for `/descend`),
-  Experiment # and secondary launches/day; descent leads with finish-to-finish
-  **Iterations/Hour**,
+  Experiment # and secondary launches/day; descent recomputes provisional live
+  **Iterations/Hour** on every scorecard, retaining measured finish-to-finish pace,
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
 - At the top, show elapsed time since the latest actual benchmark ended, from
   its producer terminal timestamp. Diagnostics, cleanup and card renders never
@@ -1713,12 +1713,21 @@ missing traces or timestamps were evaluated.
 
 ### Descent speed change (user clarification)
 
-The compact descent headline is `<rate> iter/h [avg Δ <signed percent> over last 5 runs]`.
+Every scorecard build recomputes the running headline from its actual `generated_at`:
+`LIVE ≤<3600 / (generated_at - latest consecutive producer finish)> iter/h`.
+This is a provisional upper bound for one future completion, not an added
+completed iteration. Include inter-experiment work and current running time.
+Show the last measured completed finish-to-finish rate separately; a terminal
+current experiment uses that measured rate as its headline. Missing, invalid,
+future, nonpositive or nonconsecutive clocks remain UNMEASURED; never bridge a
+gap, invent a finish or reset producer clocks to a render timestamp.
+The compact headline retains `[avg Δ <signed percent> over last 5 completed runs]`.
 Avg Δ uses five consecutive finished recorded experiments (four finish-to-finish
 speeds), then takes the arithmetic mean of the three successive changes:
 100 * (next_speed / previous_speed - 1). It is neither mean speed nor endpoint
-change. Retain failed/cancelled finishes and all inter-experiment work. Skip only
-the latest current running experiment; never bridge missing/invalid finishes.
+change. Retain failed/cancelled finishes and all inter-experiment work. For
+completed-rate and Avg Δ calculations only, skip the latest current running
+experiment; never bridge missing/invalid finishes.
 Fewer than five consecutive valid finishes show UNMEASURED with n/5 coverage.
 Positive change is green with +, negative red with -, and stationary is 0.0%.
 Keep the full Iterations/Hour and finish-to-finish definition in a secondary

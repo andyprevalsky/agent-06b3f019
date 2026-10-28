@@ -3065,6 +3065,7 @@ async def _rebind_browser_tab_runtime(
     cursor_observer: Any,
     humanizer_factory: Any = None,
     focus_cache: Optional[TabFocusCache] = None,
+    serial_cdp_keyboard: bool = False,
 ) -> Tuple[Any, Any]:
     """Atomically move live view, recorder, and synthesized input to agent focus."""
     focused_page = await _synchronize_playwright_page_with_agent_focus(
@@ -3084,7 +3085,10 @@ async def _rebind_browser_tab_runtime(
         from browser_tools.humanizer import BrowserHumanizer
 
         factory = BrowserHumanizer
-    rebound_humanizer = factory(dom_page=dom_page, input_page=focused_page, fast=False)
+    rebound_humanizer = factory(
+        dom_page=dom_page, input_page=focused_page, fast=False,
+        **({"serial_cdp_keyboard": True} if serial_cdp_keyboard else {}),
+    )
     await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
     rebound_humanizer.set_cursor_observer(cursor_observer)
     return focused_page, rebound_humanizer
@@ -10167,6 +10171,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
                 focus_cache=tab_focus_cache,
+                serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
             )
             step_timer.mark("tab_rebind")
 
@@ -12265,6 +12270,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             browser_recorder=browser_recorder,
                             cursor_observer=observe_cursor,
                             focus_cache=tab_focus_cache,
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                         )
                 result = {
                     "success": False,

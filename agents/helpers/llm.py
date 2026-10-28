@@ -7160,6 +7160,11 @@ async def set_response_schema_activity(
                         {"schema": schema, "title": title, "usage": usage},
                         goal=goal,
                     )
+            # Persist/return the public schema vocabulary; remote verifiers apply
+            # their own public-to-session conversion after dispatch.
+            from helpers.file_resolution import restore_schema_from_remote_session
+
+            schema = restore_schema_from_remote_session(schema)
             title = mass_agent_root_title(goal, include_title, title)
             generate_elapsed = time.perf_counter() - generate_start
             logger.info(

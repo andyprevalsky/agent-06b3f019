@@ -590,8 +590,8 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(data["iteration_speed"]["per_hour"], 3.6)
         self.assertEqual((data["iteration_speed"]["older_number"], data["iteration_speed"]["newer_number"]), (10, 11))
         text = CARD["render_text"](data)
-        self.assertTrue(text.startswith("3.60 iter/h"))
-        self.assertIn("finish-to-finish #10 → #11", text)
+        self.assertTrue(text.startswith("LIVE ≤1.89 iter/h"))
+        self.assertIn("Last completed finish-to-finish: #10 → #11", text)
         self.assertIn("LAST 10 EXPERIMENTS", text)
         self.assertIn("T-RUNNING", text)
         self.assertIn("T-31m40s since finish", text)
@@ -613,6 +613,52 @@ class Scorecard(unittest.TestCase):
                           finished["iteration_speed"]["newer_number"]), (11, 12))
         self.assertAlmostEqual(finished["iteration_speed"]["per_hour"], 3600 / 1300)
         self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_live_iteration_pace_updates_per_build_without_fabricating_finish(self):
+        ids = [f"live-{i}" for i in range(1, 7)]
+        for i, ident in enumerate(ids, 1):
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="live-pace",
+                             run_dir=str(self.tmp / ident), triggered_at=T0 + i * 100)
+            if i < 6:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger,
+                                 ended_at=T0 + i * 100 + 20, state="COMPLETE")
+        run = self.tmp / ids[-1]
+        write(run / "summary.json", {"campaign_id": ids[-1], "status": "running",
+                                    "started_at": T0 + 600, "jobs": [], "total_jobs": 1})
+        before = self.f.ledger.read_bytes()
+        early = CARD["build"](run, ledger=self.f.ledger, history_ids=ids, iterations=6, now=T0 + 700)
+        later = CARD["build"](run, ledger=self.f.ledger, history_ids=ids, iterations=6, now=T0 + 880)
+        self.assertEqual(early["live_iteration_speed"]["per_hour"], 20)
+        self.assertEqual(later["live_iteration_speed"]["per_hour"], 10)
+        self.assertEqual(early["iteration_speed"], later["iteration_speed"])
+        self.assertEqual(early["speed_change"], later["speed_change"])
+        self.assertEqual(later["iteration_speed"]["per_hour"], 36)
+        self.assertIsNone(later["experiment"]["ended_at"])
+        self.assertEqual(early["history"], later["history"])
+        for data, label in ((early, "LIVE ≤20.00 iter/h"), (later, "LIVE ≤10.00 iter/h")):
+            text = CARD["render_text"](data)
+            self.assertTrue(text.startswith(label))
+            self.assertIn(label, self.valid(data))
+            self.assertIn("Last completed finish-to-finish: #4 → #5", text)
+            self.assertIn("over last 5 completed runs", text)
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_live_iteration_pace_rejects_unknown_or_nonconsecutive_clocks(self):
+        rows = [{"id":"live", "number":3, "state":"RUNNING", "ended_at":None, "triggered_at":200},
+                {"id":"last", "number":2, "state":"COMPLETE", "ended_at":100}]
+        self.assertEqual(CARD["live_iteration_speed"](rows, 300, "live")["per_hour"], 18)
+        for now in (0, float("nan"), float("inf"), True, 100):
+            self.assertIsNone(CARD["live_iteration_speed"](rows, now, "live"))
+        for field, value in (("number",1), ("number",True), ("triggered_at",None),
+                             ("triggered_at",99), ("triggered_at",301), ("ended_at",250),
+                             ("state","COMPLETE")):
+            changed=[dict(row) for row in rows];changed[0][field]=value
+            self.assertIsNone(CARD["live_iteration_speed"](changed,300,"live"))
+        for value in (None, 0, float("nan"), float("inf"), True, 301):
+            changed=[dict(row) for row in rows];changed[1]["ended_at"]=value
+            self.assertIsNone(CARD["live_iteration_speed"](changed,300,"live"))
+        self.assertIsNone(CARD["live_iteration_speed"](rows[:1],300,"live"))
+        self.assertIsNone(CARD["live_iteration_speed"](rows,300,"other"))
 
     def test_descent_public_render_speed_and_finish_age(self):
         run = self.f.fleet()
@@ -678,7 +724,7 @@ class Scorecard(unittest.TestCase):
                 card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
                 text = CARD["render_text"](card)
                 label = f"{expected:+.1f}%" if expected else "0.0%"
-                self.assertIn(f"[avg Δ {label} over last 5 runs]", text)
+                self.assertIn(f"[avg Δ {label} over last 5 completed runs]", text)
                 self.assertAlmostEqual(card["speed_change"]["percent"], expected)
                 self.assertEqual(card["speed_change"]["runs"], 5)
                 html = self.valid(card)
@@ -721,8 +767,9 @@ class Scorecard(unittest.TestCase):
         rates = [3600 / interval for interval in intervals]
         expected = sum(100*(b/a-1) for a,b in zip(rates,rates[1:]))/3
         self.assertAlmostEqual(card["speed_change"]["percent"], expected)
-        self.assertTrue(CARD["render_text"](card).startswith(".45 iter/h [avg Δ"))
-        self.assertIn("last 5 runs", self.valid(card))
+        self.assertTrue(CARD["render_text"](card).startswith("LIVE UNMEASURED iter/h [avg Δ"))
+        self.assertIn("0.45 iter/h", CARD["render_text"](card))
+        self.assertIn("last 5 completed runs", self.valid(card))
         self.assertEqual(self.f.ledger.read_bytes(), before)
 
     def test_speed_change_requires_five_consecutive_valid_finishes(self):

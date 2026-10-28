@@ -1169,7 +1169,9 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
             "since": since, "experiment": exp, "history": history, "trend": trend,
             "history_limit": history_limit,
-            "iteration_speed": iteration_speed, "global_progress": global_progress, "observed_telemetry": observed_telemetry,
+            "iteration_speed": iteration_speed,
+            "live_iteration_speed": live_iteration_speed(history, now, exp["id"]) if iterations is not None and mine and exp["state"] == "RUNNING" else None,
+            "global_progress": global_progress, "observed_telemetry": observed_telemetry,
             "speed_change": average_speed_change(history, now, exp["id"] if exp["state"] == "RUNNING" else None)
                             if iterations is not None and mine else None,
             "iterations": iterations, "agents": agents,
@@ -1214,6 +1216,28 @@ def finish_age(row: dict, now: float) -> str:
     return "T-" + duration(now - row["ended_at"]) + " since finish"
 
 
+def live_iteration_speed(history: list[dict], now: float, running_id: str) -> dict | None:
+    """Upper bound for the next completion, not an additional completed iteration."""
+    if not valid_finish(now, now) or len(history) < 2:
+        return None
+    current, previous = history[:2]
+    if (current.get("id") != running_id or current.get("state") != "RUNNING"
+            or current.get("ended_at") is not None
+            or type(current.get("number")) is not int or current["number"] <= 0
+            or type(previous.get("number")) is not int or previous["number"] <= 0
+            or current["number"] != previous["number"] + 1
+            or previous.get("state") == "RUNNING"
+            or not valid_finish(previous.get("ended_at"), now)
+            or not valid_finish(current.get("triggered_at"), now)
+            or current["triggered_at"] < previous["ended_at"]):
+        return None
+    elapsed = now - previous["ended_at"]
+    if elapsed <= 0 or not math.isfinite(3600 / elapsed):
+        return None
+    return {"per_hour": 3600 / elapsed, "seconds": elapsed,
+            "previous_number": previous["number"], "running_number": current["number"]}
+
+
 def average_speed_change(history: list[dict], now: float, running_id: str | None = None) -> dict:
     """Five consecutive finishes give four speeds and three percent changes."""
     rows = list(history)
@@ -1251,21 +1275,35 @@ def speed_change_text(card: dict) -> str:
     if value is None:
         return f'avg Δ UNMEASURED ({change.get("runs", 0)}/5 consecutive finishes)'
     signed = f"{value:+.1f}%" if value else "0.0%"
-    return f"avg Δ {signed} over last 5 runs"
+    return f"avg Δ {signed} over last 5 completed runs"
+
+
+def iteration_speed_label(card: dict) -> str:
+    if card.get("experiment", {}).get("state") == "RUNNING":
+        speed = card.get("live_iteration_speed")
+        return (f'LIVE ≤{speed["per_hour"]:.2f}'.replace("≤0.", "≤.")
+                if speed else "LIVE UNMEASURED")
+    speed = card.get("iteration_speed")
+    return f'{speed["per_hour"]:.2f}'.lstrip("0") if speed else "UNMEASURED"
 
 
 def iteration_speed_text(card: dict) -> str:
-    speed = card.get("iteration_speed")
-    rate = f'{speed["per_hour"]:.2f}'.lstrip("0") if speed else "UNMEASURED"
-    return f'{rate} iter/h [{speed_change_text(card)}]'
+    return f'{iteration_speed_label(card)} iter/h [{speed_change_text(card)}]'
 
 
 def iteration_speed_detail(card: dict) -> str:
     speed = card.get("iteration_speed")
     pair = (f'#{speed["older_number"]} → #{speed["newer_number"]} · {duration(speed["seconds"])}'
             if speed else "UNMEASURED")
-    return ("Iterations/Hour: finish-to-finish " + pair + "; includes work between experiments. "
-            "Avg Δ: arithmetic mean of 3 successive speed percentage changes across 5 consecutive finishes.")
+    measured = (f'{speed["per_hour"]:.2f} iter/h' if speed else "UNMEASURED")
+    live = card.get("live_iteration_speed")
+    prefix = (f'LIVE provisional upper bound: one future completion / {duration(live["seconds"])} '
+              f'since #{live["previous_number"]} finished; #{live["running_number"]} still running. '
+              if live else "LIVE provisional upper bound UNMEASURED. "
+              if card.get("experiment", {}).get("state") == "RUNNING" else "")
+    return (prefix + "Last completed finish-to-finish: " + pair + " · " + measured
+            + "; includes work between experiments. "
+            "Avg Δ: arithmetic mean of 3 successive speed percentage changes across 5 consecutive completed finishes.")
 
 
 def _from_ledger(entry: dict) -> dict:
@@ -1481,8 +1519,7 @@ def render_html(card: dict) -> str:
     if card.get("iterations") is not None:
         change = (card.get("speed_change") or {}).get("percent")
         cls = "ok" if change is not None and change > 0 else "bad" if change is not None and change < 0 else "warn" if change is None else "muted"
-        speed = card.get("iteration_speed")
-        rate_text = f'{speed["per_hour"]:.2f}'.lstrip("0") if speed else "UNMEASURED"
+        rate_text = iteration_speed_label(card)
         out.append('<section data-section="iteration-speed" class="iteration-speed" title="'
                    + e(iteration_speed_detail(card)) + '">' + e(rate_text) + ' iter/h '
                    + f'<span class="{cls}">[{e(speed_change_text(card))}]</span>'
