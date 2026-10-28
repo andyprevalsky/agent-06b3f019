@@ -236,6 +236,39 @@ describe('committed INSERT delivery', () => {
     hook.unmount();
   });
 
+  it('INSERTs broadcast from two backend instances render in timestamp order, not arrival order', async () => {
+    let handlers: Handlers = {};
+    vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
+      handlers = next;
+      return fakeChannel();
+    });
+    let messages: Message[] = [];
+    const deps = makeDeps({
+      setMessages: (action) => {
+        messages = typeof action === 'function' ? action(messages) : action;
+      },
+    });
+    const hook = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
+    const assistant = (id: string, timestamp: string, text: string): InsertMessagePayload => ({
+      agentId: 'agent-1',
+      id,
+      timestamp,
+      text,
+      role: 'ASSISTANT',
+      metadata: {},
+    });
+    // Instance B's broadcast of the later message reaches the client first.
+    act(() => {
+      handlers.onInsert?.(assistant('second', '2026-10-28T01:00:00.200Z', 'second'));
+      handlers.onInsert?.(assistant('first', '2026-10-28T01:00:00.100Z', 'first'));
+    });
+    expect(messages.map((m) => m.message_id)).toEqual(['second', 'first']);
+    const [rendered] = deduplicateToolMessages(messages);
+    expect(rendered.map((m) => m.message_id)).toEqual(['first', 'second']);
+    hook.unmount();
+  });
+
   const blockedRow: Message = {
     message_id: '75e5af12-8b66-4b72-b061-3be30ce4308d',
     timestamp: '2026-10-23T23:18:43.499Z',
