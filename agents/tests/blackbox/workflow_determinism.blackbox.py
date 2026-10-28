@@ -175,6 +175,8 @@ def test_sandbox_instance_does_not_reload_dotenv():
     importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
     with importer.applied():
         builtins.__import__("workflows.agent_workflow")
+        # Exercise this declared dependency even when workflow imports do not need it.
+        builtins.__import__("config")
     sandbox_modules = importer.new_modules
     assert sandbox_modules.get("workflows.agent_workflow") is not sys.modules["workflows.agent_workflow"], (
         "sandbox did not re-import the workflow module"

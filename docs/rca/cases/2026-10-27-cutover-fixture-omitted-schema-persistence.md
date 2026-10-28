@@ -22,6 +22,8 @@ sources:
   - plan:.context/deploy-fresh-20261027/rca-workflow-cutover/REPORT.md
   - plan:.context/deploy-fresh-20261027/rca-workflow-cutover/REPORT-extension.md
   - plan:.context/deploy-fresh-20261027/workflow-v4-peer-review/REPORT.md
+  - commit 4c118e0de38c3a0c3f3b1dd93d3b30d89d099608
+  - plan:.context/deploy-fresh-20261027/rca-workflow-terminal-batch12/recurrence-940d/REPORT.md
 repro: agents/tests/blackbox/workflow.blackbox.py::_run_parked_tool_cutover_tests
 status: open
 ---
@@ -73,3 +75,86 @@ Ten focused fake-handle controls preserve the original failure and cleanup despi
 The new capture excludes the old missing-schema cause: both generation turns occurred, persisted schema matches, completion was requested and the script is exhausted. mark_finished completed at02:44:13.924; the next workflow task started then, only613ms before the unchanged60s client deadline. No durable close had occurred. The retained28 completed workflow tasks total26.422s, median943ms; the last10 median1049ms. This does not establish a stalled final task or a generic host-load cause.
 
 One unchanged isolated foreground control passes19.740s with both workers uncached and every assertion intact. Its final78 event metadata records match the failure through event291; subsequent events are explicit COMPLETED tree update293, completion SMS299 and durable WorkflowExecutionCompleted305. It is baseline evidence, not a repair. The original concurrent delivery/create/replay/ack wall versus thread-CPU split remains missing. Preserve max_cached_workflows=0 and60s; no workflow correction was proposed. Full evidence and joined-process receipt: plan:.context/deploy-fresh-20261027/rca-workflow-terminal-batch12/REPORT.md.
+
+
+## October28 source940d recurrence — replay import cost measured, timeout cause OPEN
+
+The fresh940d workflow domain again failed the foreground cutover at its
+unchanged60-second wait. Its other three native cutover siblings passed.
+The aggregate launch omitted ROSE_CUTOVER_FAILURE_DIR, so this occurrence has
+no retained remote history. Old batch12 history must not be attributed to it;
+repeated run_agent logs during uncached replay are not evidence of duplicate
+model calls. The cause of this full-run timeout remains OPEN.
+
+A separate measured boundary defect was identified: importing the pure
+helpers.wmh_activity_policy outside the existing activity pass-through block
+executes eager helpers/__init__.py in every new sandbox, including pricing,
+provider and Pydantic activity imports. Move only that immutable policy import
+inside the existing block; do not add a pass-through namespace or change sandbox
+restrictions. The policy module bytes, every workflow function/class AST and all
+1251 prior assertions are unchanged. A new registered workflow blackbox control
+uses the actual SDK prepare_workflow method, observes module execution, checks
+the exact exported function, real/simulate/shadow/unknown policy outputs, and
+fresh returned dictionaries.
+
+Separate original/candidate processes each prepared ten fresh SDK sandboxes,
+then executed the same registered regression. Original initialized the activity
+package10/10 times and failed the guard; candidate initialized it0/10 times and
+passed. Median thread CPU108.203ms became36.638ms; total guard/profile elapsed
+1.324s versus0.415s. A first scratch import-path setup error and path-invalid
+comparison were retained and excluded; the valid driver asserts the actual
+workflow module origin after the test utility changes sys.path.
+
+After root authorized fresh owned local Temporal servers, the unchanged native
+foreground case ran once per variant, sequentially, with60s, two workers,
+max_cached_workflows=0 and capture enabled. Original passed in10.930479s;
+candidate passed in7.530650s. The same original completion, same-step handoff,
+chip and once-only generation usage assertions passed. Both exact server PID
+births were absent after join. This is a focused compatibility result; the
+original passing means it does not reproduce or fix the historical60s expiry.
+No repeated isolated green is labeled a timeout repair.
+
+The two-file proposal e6dd788bc14e76205f193e7d420f2a4f4825e257fc6c0aab407ba8b5e4a5aea9
+was reviewed and applied in4c118e0d. Native commands, source and log hashes,
+invalid-attempt retention and cleanup are in the recurrence-940d REPORT.md and
+native-proof.json. The4c118 full native workflow domain subsequently passed in220.664s.
+The overall123-domain run remained failed at the separate config fixture.
+Keep this case open until actual completion/history timing demonstrates the
+60-second cause and the unchanged affected outcome is verified. No new human
+feedback was recorded for this recurrence.
+
+
+### Follow-up fixture dependency guard on4c118
+
+The fresh workflow-determinism domain then failed its config identity assertion.
+The actual sandbox map contained no config entry (NoneType), while config
+passthrough remained declared and no dotenv module was loaded. The import
+optimization removed the guard's incidental dependency; this was not a runtime
+config re-import. The test now explicitly imports config inside its existing
+importer.applied context before checking the unchanged identity and dotenv
+assertions. No production policy changes.
+
+All seven original assertions remain. The complete seven-case owner ran against
+both test sources: original6PASS/1FAIL in2.4595s; candidate7PASS in2.3980s. A
+negative that removes only config from the returned passthrough set fails the
+same identity assertion in2.5136s, with6PASS/1FAIL. The candidate returns the exact
+host config module; the negative returns a distinct module. Neither control
+loads dotenv, which config loads lazily. All offline commands joined and no
+service was started. The initial proof wrapper's summary-dict exit-decoding
+mistake is retained and excluded; authoritative runs use one corrected driver.
+Exact fixture proposal and native records are in
+plan:.context/deploy-fresh-20261027/rca-workflow-determinism-config/FINAL.json.
+This fixture correction does not change this case's OPEN timeout status.
+
+
+The corrected config owner subsequently ran through the actual canonical
+blackbox CLI under coverage:7PASS, process exit0, with one coverage7.16.2 branch
+chunk containing350 canonical agents paths and no thin-tree aliases. Root's
+explicit122-passed-domain plus fresh-owner composition, followed by the normal
+214 DEMO-cache and173 unit tests and coverage report, completed0 at85percent.
+The failed original aggregate remains failed. The composition is still pending
+application of the exact reviewed canonical test bytes c41d3f6c8e34b708c6af63361afc7a7ded58f9fe43bded066d65f95305c1ffcd.
+Receipts are in plan:.context/deploy-fresh-20261027/rca-workflow-determinism-config/native-coverage/coverage-proof.json
+and plan:.context/deploy-fresh-20261027/recovery-4c118-agents/finalized/receipt.json.
+Neither the passing current workflow owner nor this composition proves the
+cause of the earlier60-second expiry; the case remains OPEN.
