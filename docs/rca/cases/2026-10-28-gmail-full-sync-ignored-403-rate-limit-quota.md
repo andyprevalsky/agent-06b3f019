@@ -104,6 +104,20 @@ Open follow-ups:
 - Messages dropped before this fix (06:50 run, a@roselabs.ai incremental) need
   a forced full resync of affected integrations.
 
+Verification:
+- Regression: `bash back-end/scripts/run-blackbox-tests.sh integration-accounts`.
+  On the buggy services code the three quota-wall cases (profile, metadata,
+  batch sub-requests) FAIL with "run synced past the quota wall, got failed".
+  On the fix all 35 cases PASS.
+- Outcome: the same instrumented local run of the fixed `fetchGmailEmails`
+  against the real 30,693-message mailbox gave `metadata:200 30693`, zero 403s
+  and 2,034 full emails, with no error.
+  - Batch sub-requests answered 429 "Too many concurrent requests" (268) or
+    503 (14); all were recovered by single re-fetches.
+  - Wall time was 18.4 min (quota-bound).
+- The buggy run of the same command: 20,280 metadata 403s, 0 full emails,
+  `Gmail API error: 403`.
+
 Golden reference: not applicable (no approval-gated hunk).
 
 ## Human feedback
