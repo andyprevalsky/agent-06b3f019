@@ -9,8 +9,17 @@
  *                                              --Escape | blur--> [REST]
  *   [MENU] --Delete--> onRequestDelete (parent confirms in a dialog)
  *
- * Shown only while the bar is expanded. Active (its settings open, or it holds
- * the selected agent) = rose color + semibold; no fills.
+ * Shown in both bar widths: collapsed (64px) keeps only the icon at the agent
+ * icons' x (name faded out, no buttons), expanded shows the full row. Active
+ * (its settings open, or it holds the selected agent) = rose color + semibold.
+ *
+ * PENDING (owned by RoseSidebar): after its "+" the next new agent is created in
+ * this project; the icon wears the liquid-metal ring + shadow + glow (ProjectIcon)
+ *   [REST] --"+"--> [PENDING] --agent created | another agent / project picked--> [REST]
+ *
+ * HomeProjectRow: the Home project (every agent without a project), last in the
+ * bar: Home icon · "Home" · [+ new agent in Home]; same widths, active and
+ * pending rules; no menu (Home cannot be renamed or deleted).
  *
  * NewProjectRow: [IDLE] "+ New project" --click--> [EDITING] inline input
  *   [EDITING] --Enter (non-empty)--> [CREATING] (POST /api/projects)
@@ -20,8 +29,8 @@
  *   [EDITING] --Escape | blur--> [IDLE]
  */
 
-import { Folder, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { Folder, Home, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import {
   ContextMenu,
@@ -33,7 +42,7 @@ import {
 import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
 
-import ProjectIcon from './ProjectIcon';
+import ProjectIcon, { PendingProjectFrame } from './ProjectIcon';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 
 const MENU_SURFACE =
@@ -102,6 +111,10 @@ export interface RoseProjectRowProps {
   project: Project;
   isActive: boolean;
   isRenaming: boolean;
+  /** Collapsed rail keeps only the icon; defaults to expanded (mobile list). */
+  isExpanded?: boolean;
+  /** The next new agent is created in this project (its "+" was clicked). */
+  isPending?: boolean;
   onCreateAgent: () => void;
   onOpenSettings: () => void;
   onStartRename: () => void;
@@ -143,21 +156,56 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
   );
 }
 
+function RowName({ isExpanded, children }: { isExpanded: boolean; children: ReactNode }) {
+  return (
+    <span
+      className={cn(
+        'min-w-0 flex-1 truncate transition-opacity duration-200',
+        isExpanded ? 'opacity-100' : 'opacity-0',
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function rowTone(isActive: boolean) {
+  return {
+    className: isActive ? 'font-semibold' : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d]',
+    style: isActive ? { color: ROSE_ACTIVE_COLOR } : undefined,
+  };
+}
+
+function NewAgentHereButton({ name, onClick }: { name: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={`New agent in ${name}`}
+      title={`New agent in ${name}`}
+      onClick={onClick}
+      className={ICON_BUTTON}
+    >
+      <Plus className="h-[15px] w-[15px]" strokeWidth={1.7} />
+    </button>
+  );
+}
+
 export default function RoseProjectRow(props: RoseProjectRowProps) {
   const { project, isActive } = props;
+  const isExpanded = props.isExpanded ?? true;
+  const isPending = props.isPending ?? false;
+  const tone = rowTone(isActive);
   return (
     <ContextMenu onOpenChange={props.onMenuOpenChange}>
       <ContextMenuTrigger asChild>
         <div
           data-testid={`rose-project-row-${project.id}`}
-          className={cn(
-            ROW,
-            isActive ? 'font-semibold' : 'text-[hsl(240_8%_40%)] dark:text-[#a3a39d]',
-          )}
-          style={isActive ? { color: ROSE_ACTIVE_COLOR } : undefined}
+          data-pending={isPending}
+          className={cn(ROW, tone.className)}
+          style={tone.style}
         >
-          <ProjectIcon repoUrl={project.repoUrl} />
-          {props.isRenaming ? (
+          <ProjectIcon repoUrl={project.repoUrl} pending={isPending} />
+          {props.isRenaming && isExpanded ? (
             <InlineNameInput
               label={`Rename ${project.name}`}
               initial={project.name}
@@ -165,30 +213,58 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
               onCancel={props.onCancelRename}
             />
           ) : (
-            <span className="min-w-0 flex-1 truncate">{project.name}</span>
+            <RowName isExpanded={isExpanded}>{project.name}</RowName>
           )}
-          <button
-            type="button"
-            aria-label={`New agent in ${project.name}`}
-            title={`New agent in ${project.name}`}
-            onClick={props.onCreateAgent}
-            className={ICON_BUTTON}
-          >
-            <Plus className="h-[15px] w-[15px]" strokeWidth={1.7} />
-          </button>
-          <button
-            type="button"
-            aria-label={`${project.name} project settings`}
-            title="Project settings"
-            onClick={props.onOpenSettings}
-            className={cn(ICON_BUTTON, 'ml-1')}
-          >
-            <SettingsIcon className="h-[15px] w-[15px]" strokeWidth={1.7} />
-          </button>
+          {isExpanded && (
+            <>
+              <NewAgentHereButton name={project.name} onClick={props.onCreateAgent} />
+              <button
+                type="button"
+                aria-label={`${project.name} project settings`}
+                title="Project settings"
+                onClick={props.onOpenSettings}
+                className={cn(ICON_BUTTON, 'ml-1')}
+              >
+                <SettingsIcon className="h-[15px] w-[15px]" strokeWidth={1.7} />
+              </button>
+            </>
+          )}
         </div>
       </ContextMenuTrigger>
       <ProjectRowMenu {...props} />
     </ContextMenu>
+  );
+}
+
+/** The Home project: every agent without a project; always last. */
+export function HomeProjectRow({
+  isExpanded,
+  isActive,
+  isPending,
+  onCreateAgent,
+}: {
+  isExpanded: boolean;
+  isActive: boolean;
+  isPending: boolean;
+  /** Absent (e.g. the mobile list, which has its own New Super Agent): no "+". */
+  onCreateAgent?: () => void;
+}) {
+  const tone = rowTone(isActive);
+  return (
+    <div
+      data-testid="rose-home-project-row"
+      data-pending={isPending}
+      className={cn(ROW, tone.className)}
+      style={tone.style}
+    >
+      <PendingProjectFrame pending={isPending}>
+        <Home className="h-5 w-5 flex-none" strokeWidth={1.7} />
+      </PendingProjectFrame>
+      <RowName isExpanded={isExpanded}>Home</RowName>
+      {isExpanded && onCreateAgent !== undefined && (
+        <NewAgentHereButton name="Home" onClick={onCreateAgent} />
+      )}
+    </div>
   );
 }
 

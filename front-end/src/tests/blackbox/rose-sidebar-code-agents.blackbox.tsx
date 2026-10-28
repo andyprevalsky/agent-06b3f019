@@ -373,8 +373,9 @@ describe('Rose left bar code agents (flag on)', () => {
     );
     // Initially ungrouped roots can remount once when their projects arrive.
     expect(treeRequests().length).toBeLessThanOrEqual(AGENTS.length * 2);
-    // One level under the parent: Home agent rows sit at 22px, project agent rows at 34px.
-    expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveStyle({ paddingLeft: '38px' });
+    // One level under the parent: Home is a project too (Andy, 2026-10-28), so
+    // Home and project agent rows both sit at 34px and their children one level in.
+    expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveStyle({ paddingLeft: '50px' });
     expect(screen.getByTestId('rose-code-agent-row-cc-sub')).toHaveStyle({ paddingLeft: '66px' });
     expect(screen.getByTestId('rose-code-agent-row-cc-build')).toHaveTextContent(
       'Build the widget',
