@@ -75,11 +75,13 @@ CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
 # Tool result status for an idle session that was paused (resumable).
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
 
-# C15: the CLI stopped on a provider usage limit (structured signal). The
-# session is saved and paused; the parent gets the error with the user's
-# connected accounts and decides. A respawn with the same code_session_id
-# leases an account that is not rate-limited (the other provider when the
-# session's has none) and resumes from the latest checkpoint.
+# C15: the CLI stopped on a provider usage limit or ran out of credits
+# (structured signals only). The session is saved and its sandbox paused; the
+# parent gets the error with every credential path and the exact retry. A retry
+# with the same code_session_id prefers the session's own provider (paused
+# sandbox + the CLI's native resume), switches provider with a trajectory
+# handoff only when that provider has nothing leasable, and starts nothing
+# (same status, failure_kind "no_credentials") when no path is leasable.
 CODE_AGENT_USAGE_LIMIT_STATUS: Final[str] = "usage_limit"
 
 # Structured transcript rows (utils/code_transcript.py) are persisted in batches at most

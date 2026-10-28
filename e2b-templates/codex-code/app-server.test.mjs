@@ -15,6 +15,7 @@ import vm from "node:vm";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 const require = createRequire(
   new URL("../../back-end/package.json", import.meta.url),
 );
@@ -38,7 +39,17 @@ const {
   handoffFromFinalMessage,
   handoffSchemaFromGoal,
 } = vm.runInNewContext(
-  block +
+  // The real credential-failure classifier and usage-limit reporter the class calls.
+  "let oauthFallbackReason = null;\nlet usingApiKey = false;\nconst FUNDED_PROVIDER = false;\n" +
+    source.slice(
+      source.indexOf("function classifyOAuthFallbackReason("),
+      source.indexOf("// C15: Codex's own rate-limit snapshot"),
+    ) +
+    source.slice(
+      source.indexOf("function reportedUsageLimit("),
+      source.indexOf("function codexUsageLimit() {"),
+    ) +
+    block +
     "\n({ Native: CodexAppServer, strictOutputSchema, handoffFromFinalMessage, handoffSchemaFromGoal })",
   sandbox,
 );
@@ -688,13 +699,21 @@ test("open-object schemas cannot be strict: no outputSchema, no written handoff"
   assert.equal(handoffFromFinalMessage("not json", HANDOFF_SCHEMA), null);
 });
 
-// 2026-10-27: the ChatGPT OAuth account hit its usage limit and every app-server
-// session ended failed; the OpenAI GPT_API_KEY behind the funded fallback is
-// not funded either (2026-10-28). The funded path is our Azure OpenAI
-// deployment: report the OAuth error, switch Codex to the azure provider (no
-// login; the key is read from AZURE_OPENAI_API_KEY) and resume the thread with
-// the same turn input on the Azure deployment.
-test("app-server falls back to the funded Azure OpenAI provider when ChatGPT OAuth hits its usage limit", async () => {
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+// Runs the real ws-server (app-server transport) over a fake Codex whose ChatGPT
+// OAuth turns fail with `oauthError` and whose Azure-provider turns succeed.
+// Returns the streamed events and the fake Codex's call journal.
+async function runOAuthFailureFixture(oauthError, settled, { funded = true } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "rose-native-codex-fallback-"));
   const fixturePath = join(directory, "codex");
   const journal = join(directory, "journal.jsonl");
@@ -716,7 +735,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  send({id:m.id,result});
  if(m.method!=='turn/start')return;
  const id=result.turn.id;send({method:'turn/started',params:{threadId:'thread',turn:{id}}});
- if(!apiKey){const error={message:'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 2nd, 2026 7:25 AM.',codexErrorInfo:'usageLimitExceeded'};
+ if(!apiKey){const error=JSON.parse(process.env.FIXTURE_OAUTH_ERROR);
   send({method:'error',params:{threadId:'thread',turnId:id,error}});
   send({method:'turn/completed',params:{threadId:'thread',turn:{id,status:'failed',error}}});return;}
  send({method:'item/agentMessage/delta',params:{threadId:'thread',turnId:id,itemId:'answer',delta:'CODEX_E2B_OK'}});
@@ -725,7 +744,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 `,
   );
   chmodSync(fixturePath, 0o755);
-  const port = 43000 + Math.floor(Math.random() * 10000);
+  // A port the OS just handed out: a random pick can collide with a live listener.
+  const port = await freePort();
   const child = spawn(
     process.execPath,
     [new URL("./ws-server.mjs", import.meta.url).pathname],
@@ -736,9 +756,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         HOME: directory,
         CODEX_AUTH_JSON: JSON.stringify({ auth_mode: "chatgpt", tokens: {} }),
         OPENAI_API_KEY: "",
-        AZURE_OPENAI_API_KEY: "azure-fixture-key",
-        CODEX_AZURE_BASE_URL: "https://azure.example/openai/v1",
-        CODEX_AZURE_MODEL: "azure-terra",
+        // Not armed (another subscription is leasable): no funded provider in the sandbox.
+        AZURE_OPENAI_API_KEY: funded ? "azure-fixture-key" : "",
+        CODEX_AZURE_BASE_URL: funded ? "https://azure.example/openai/v1" : "",
+        CODEX_AZURE_MODEL: funded ? "azure-terra" : "",
         CODEX_GOAL: "write the sentinel",
         CODEX_MODEL: "model",
         CODE_SESSION_TURN_TOKEN: "native-token",
@@ -746,10 +767,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         GITHUB_REPO_URL: "",
         ROSE_PROJECT_WORKDIR: "",
         CODEX_FAST_MODE_PROXY_URL: "",
+        FIXTURE_OAUTH_ERROR: JSON.stringify(oauthError),
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  // Registered at spawn: an early exit (e.g. a failed listen) must not hang cleanup.
+  const closed = new Promise((resolve) => child.once("close", resolve));
   let logs = "";
   child.stdout.on("data", (d) => (logs += d));
   child.stderr.on("data", (d) => (logs += d));
@@ -779,68 +803,116 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             : [],
       );
     for (let i = 0; i < 500; i++) {
-      if (
-        events().some(
-          (e) => e.type === "turn_ended" && e.status === "completed",
-        )
-      )
-        break;
+      if (settled(events())) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    const seen = events();
-    const ended = seen.filter((e) => e.type === "turn_ended");
-    assert.deepEqual(
-      ended.map((e) => e.status),
-      ["completed"],
-      `the OAuth failure must not end the run before the funded retry\n${logs}\n${JSON.stringify(seen)}`,
-    );
-    assert.ok(
-      seen.some(
-        (e) =>
-          e.type === "error" && /hit your usage limit/.test(e.message ?? ""),
-      ),
-      "the OAuth usage-limit error is still reported",
-    );
-    const fallback = seen.find((e) => e.type === "auth_fallback");
-    assert.equal(fallback?.to, "openai_api_key");
-    assert.equal(fallback?.funded_provider, "azure");
-    assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
-    assert.equal(fallback?.reason, "usage_limit_reached");
     const calls = readFileSync(journal, "utf8")
       .trim()
       .split("\n")
       .map((l) => JSON.parse(l));
-    assert.deepEqual(
-      calls.map((c) => c.login ?? c.method),
-      ["thread/start", "turn/start", "thread/resume", "turn/start"],
-      "no codex login: the azure provider reads its key from the environment",
-    );
-    assert.equal(calls[0].apiKey, false, "user OAuth is tried first");
-    assert.equal(
-      calls[2].threadId,
-      "thread",
-      "the funded retry resumes the same thread",
-    );
-    assert.equal(
-      calls[2].model,
-      "azure-terra",
-      "the retry runs on the Azure deployment",
-    );
-    assert.deepEqual(
-      calls[3].input,
-      calls[1].input,
-      "the funded retry re-sends the same turn input",
-    );
-    assert.equal(calls[3].apiKey, true, "the retry selects the azure provider");
-    assert.equal(
-      calls[3].auth,
-      false,
-      "the ChatGPT auth.json is removed before the retry",
-    );
+    return { seen: events(), calls, logs };
   } finally {
     ws?.terminate();
     child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("close", resolve));
+    await closed;
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+// C15 (2026-10-28): a usage limit or out of credits pauses the session; the
+// parent's retry rotates own login -> shared pool -> Azure. The sandbox reports
+// the structured limit and must not start an Azure continuation the pause would
+// throw away (the earlier in-sandbox switch also skipped the shared pool).
+test("app-server reports a ChatGPT usage limit for the pause and does not switch to Azure in the sandbox", async () => {
+  const { seen, calls, logs } = await runOAuthFailureFixture(
+    {
+      message:
+        "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 2nd, 2026 7:25 AM.",
+      codexErrorInfo: "usageLimitExceeded",
+    },
+    (events) => events.some((e) => e.type === "final"),
+  );
+  assert.deepEqual(
+    seen.filter((e) => e.type === "turn_ended").map((e) => e.status),
+    ["failed"],
+    `the limited turn ends; the pause saves the session\n${logs}`,
+  );
+  const limits = seen.filter((e) => e.type === "error").map((e) => e.usage_limit);
+  assert.ok(limits.length > 0, "the usage-limit error is reported");
+  assert.ok(
+    limits.every((limit) => limit?.reached_type === null && limit?.resets_at === null),
+    `every error carries the structured limit the activity pauses on: ${JSON.stringify(limits)}`,
+  );
+  assert.equal(seen.some((e) => e.type === "auth_fallback"), false, "no in-sandbox switch");
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["thread/start", "turn/start"],
+    "nothing runs on Azure: the parent's retry rotates the credential",
+  );
+});
+
+// An unusable login (revoked / refresh failed) is not a pause: report the OAuth
+// error, switch Codex to the azure provider (no login; the key is read from
+// AZURE_OPENAI_API_KEY) and resume the thread with the same turn input on the
+// Azure deployment. The sandbox cannot lease a shared pool login (the backend
+// leases credentials only at session create), so this switch goes to Azure.
+test("app-server switches to the funded Azure OpenAI provider when the ChatGPT login is unusable", async () => {
+  const { seen, calls, logs } = await runOAuthFailureFixture(
+    { message: "Your access token could not be refreshed: refresh_token_invalidated" },
+    (events) => events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+  );
+  assert.deepEqual(
+    seen.filter((e) => e.type === "turn_ended").map((e) => e.status),
+    ["completed"],
+    `the OAuth failure must not end the run before the funded retry\n${logs}\n${JSON.stringify(seen)}`,
+  );
+  const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
+  assert.ok(oauthErrors.length > 0, "the OAuth error is still reported");
+  assert.ok(
+    oauthErrors.every((e) => e.usage_limit === null && e.login_unusable === undefined),
+    "an unusable login with the switch armed is neither a usage limit nor a pause",
+  );
+  const fallback = seen.find((e) => e.type === "auth_fallback");
+  assert.equal(fallback?.to, "openai_api_key");
+  assert.equal(fallback?.funded_provider, "azure");
+  assert.equal(fallback?.provider, "codex", "the envelope provider stays codex for the worker");
+  assert.equal(fallback?.reason, "oauth_refresh_invalid");
+  assert.deepEqual(
+    calls.map((c) => c.login ?? c.method),
+    ["thread/start", "turn/start", "thread/resume", "turn/start"],
+    "no codex login: the azure provider reads its key from the environment",
+  );
+  assert.equal(calls[0].apiKey, false, "user OAuth is tried first");
+  assert.equal(calls[2].threadId, "thread", "the funded retry resumes the same thread");
+  assert.equal(calls[2].model, "azure-terra", "the retry runs on the Azure deployment");
+  assert.deepEqual(calls[3].input, calls[1].input, "the funded retry re-sends the same turn input");
+  assert.equal(calls[3].apiKey, true, "the retry selects the azure provider");
+  assert.equal(calls[3].auth, false, "the ChatGPT auth.json is removed before the retry");
+});
+
+// Subscriptions first (C15): with another subscription leasable the backend does
+// not arm the Azure switch. The unusable login is reported as `login_unusable`
+// (the activity pauses, the login is marked for reconnect, the parent retries on
+// the next credential); nothing runs on Azure and nothing is a usage limit.
+test("app-server reports an unusable login for the pause when no Azure switch is armed", async () => {
+  const { seen, calls, logs } = await runOAuthFailureFixture(
+    { message: "Your access token could not be refreshed: refresh_token_invalidated" },
+    (events) => events.some((e) => e.type === "final"),
+    { funded: false },
+  );
+  assert.deepEqual(
+    seen.filter((e) => e.type === "turn_ended").map((e) => e.status),
+    ["failed"],
+    `the turn on the unusable login ends; the pause saves the session\n${logs}`,
+  );
+  const oauthErrors = seen.filter((e) => e.type === "error" && /refresh_token_invalidated/.test(e.message ?? ""));
+  assert.ok(oauthErrors.length > 0, "the OAuth error is reported");
+  assert.ok(
+    oauthErrors.every(
+      (e) => e.login_unusable?.reason === "oauth_refresh_invalid" && e.usage_limit === null,
+    ),
+    `every OAuth error carries login_unusable, never a usage limit: ${JSON.stringify(oauthErrors)}`,
+  );
+  assert.equal(seen.some((e) => e.type === "auth_fallback"), false, "no in-sandbox switch");
+  assert.deepEqual(calls.map((c) => c.method), ["thread/start", "turn/start"], "nothing runs on Azure");
 });

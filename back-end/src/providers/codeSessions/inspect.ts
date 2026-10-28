@@ -35,13 +35,10 @@ import {
   type ClaudeCodeCredentialResult,
 } from '../claudeCredentials';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import {
   CodeAgentCredentialError,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../claudeCodeSandboxAuth';
@@ -50,7 +47,8 @@ import { applyCheckpoint } from './checkpoint';
 import { githubAuthRemoteUrl, loadNewestVerifiedCheckpoint, primaryRepoFacts } from './lifecycle';
 import { type CodeSessionFs, e2bSandboxFs } from './sandboxFs';
 import { CODE_SESSION_STATES, findOwnedCodeSession } from './store';
-import { codeCredentialAvailability, parseResetsAt } from './usageLimit';
+import { codeProviderOrder } from './credentialOrder';
+import { codeCredentialTiers, parseResetsAt, resolveCodexSpawnAuth } from './usageLimit';
 import {
   claudeHomeConfig,
   envFileContent,
@@ -173,8 +171,7 @@ interface ProviderAuth {
 /** Same credential order as a code-agent spawn (user → pool → funded key), no Fast Mode. */
 async function providerAuth(provider: InspectProvider, userId: string): Promise<ProviderAuth> {
   if (provider === 'codex') {
-    const meta = await fetchGptCodeCredentialsWithMeta(userId);
-    return { envs: resolveCodexCodeAuthEnvs(meta, resolveCodexAzureFunding()), claude: null };
+    return { envs: (await resolveCodexSpawnAuth(userId)).envs, claude: null };
   }
   const meta = await fetchClaudeCodeCredentialsWithMeta(userId);
   const shared = process.env.ANTHROPIC_API_KEY;
@@ -218,12 +215,13 @@ async function markClaudeUsageLimited(
   }
 }
 
-/** Providers to try, preferring the one the session itself runs on (C15). */
+/**
+ * Providers to try in the C15 order (credentialOrder.ts): the session's own
+ * provider's subscriptions, the other's, then the funded keys in that order.
+ */
 async function providerOrder(userId: string, preferred: string): Promise<InspectProvider[]> {
-  const available = await codeCredentialAvailability(userId);
   const first: InspectProvider = preferred === 'codex' ? 'codex' : 'claude';
-  const second: InspectProvider = first === 'claude' ? 'codex' : 'claude';
-  return [first, second].filter((provider) => available[provider]);
+  return codeProviderOrder(await codeCredentialTiers(userId), first);
 }
 
 export interface InspectCodeParams {

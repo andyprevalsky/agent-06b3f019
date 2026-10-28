@@ -17,6 +17,7 @@ import type {
   ProjectEnvFileKind,
   ProjectEnvFileSource,
   ProjectSyncManifest,
+  ProjectTemplateSnapshot,
   ProjectWorkspace,
 } from './types';
 
@@ -34,6 +35,18 @@ export interface ProjectRecord {
   autoWake: boolean;
   /** Default code-sandbox size `{cpu, memoryGb}` (C16); null = deployment default. */
   sandboxSize: unknown;
+  maintenanceScript: string | null;
+  maintenanceTimeoutS: number;
+  maintenanceNightly: boolean;
+  maintenanceOnGithubChange: boolean;
+  maintenanceWatchedSha: string | null;
+  maintenanceWatchCheckedAt: Date | null;
+  maintenanceRunId: string | null;
+  maintenanceLeaseUntil: Date | null;
+  templateSnapshotId: string | null;
+  templateSnapshotAt: Date | null;
+  templateSnapshotSha: string | null;
+  templateSnapshotSize: unknown;
   syncSalt: string;
   syncRevision: number;
   lastSyncedAt: Date | null;
@@ -276,6 +289,25 @@ export async function writeSyncSnapshot(
 
 export class ProjectWorkspaceError extends Error {}
 
+/** The project's published template snapshot as a session start needs it, or null. */
+export function templateSnapshotOf(project: {
+  templateSnapshotId: string | null;
+  templateSnapshotSize: unknown;
+}): ProjectTemplateSnapshot | null {
+  if (project.templateSnapshotId === null) return null;
+  const { cpu, memoryGb } = (project.templateSnapshotSize ?? {}) as {
+    cpu?: unknown;
+    memoryGb?: unknown;
+  };
+  return {
+    id: project.templateSnapshotId,
+    size:
+      Number.isInteger(cpu) && Number.isInteger(memoryGb)
+        ? { cpu: cpu as number, memoryGb: memoryGb as number }
+        : null,
+  };
+}
+
 /**
  * Decrypt everything a code session needs for one project. Throws on any
  * undecryptable envelope rather than materializing a partial checkout.
@@ -321,6 +353,7 @@ export async function prepareProjectWorkspace(
       startupScript: project.startupScript,
       startupTimeoutS: project.startupTimeoutS,
       sandboxSize: project.sandboxSize ?? null,
+      templateSnapshot: templateSnapshotOf(project),
     },
     revision: project.syncRevision,
     manifest: (snapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null,

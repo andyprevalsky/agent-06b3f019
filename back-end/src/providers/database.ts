@@ -39,6 +39,12 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 // P2024 - Timed out fetching a new connection from the pool
 const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
 
+/** Transient connection/pool faults that a single query may safely retry. */
+function isRetryableQueryError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && RETRYABLE_ERROR_CODES.has(code);
+}
+
 // A retry of an interactive transaction is ONLY safe when the failure provably
 // happened BEFORE the callback body ran — otherwise a retry could double any
 // non-DB side effects the body performed. So we retry exactly two provably
@@ -312,57 +318,37 @@ export const prisma =
               'scripts/run-blackbox-tests.sh, which point DATABASE_URL at local Postgres.'
           );
         }
-        const maxRetries = 3;
-        let lastError;
-
-        // eslint-disable-next-line no-restricted-syntax -- Prisma $extends middleware can't use retryWithBackoff (wraps query(args) inside $allOperations)
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          const trace = currentTraceContext();
-          const queryStart = Date.now();
-          try {
-            const result = await query(args);
-            log.info('db.query', {
-              span_name: 'db.query',
-              parent_span_id: trace?.span_id,
-              request_id: trace?.request_id,
-              agent_id: trace?.agent_id,
-              model,
-              operation,
-              duration_ms: Date.now() - queryStart,
-              status: 'ok',
-            });
-            return result;
-          } catch (error: unknown) {
-            log.info('db.query', {
-              span_name: 'db.query',
-              parent_span_id: trace?.span_id,
-              request_id: trace?.request_id,
-              agent_id: trace?.agent_id,
-              model,
-              operation,
-              duration_ms: Date.now() - queryStart,
-              status: 'error',
-            });
-            lastError = error;
-            const prismaError = error as { code?: string };
-
-            if (
-              typeof prismaError.code === 'string' &&
-              RETRYABLE_ERROR_CODES.has(prismaError.code) &&
-              attempt < maxRetries
-            ) {
-              log.warn(
-                `${prismaError.code} on ${model}.${operation} (attempt ${attempt}/${maxRetries}), retrying...`
-              );
-              await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt - 1)));
-              continue;
+        return retryWithBackoff(
+          async () => {
+            const trace = currentTraceContext();
+            const queryStart = Date.now();
+            const logQuery = (status: 'ok' | 'error') =>
+              log.info('db.query', {
+                span_name: 'db.query',
+                parent_span_id: trace?.span_id,
+                request_id: trace?.request_id,
+                agent_id: trace?.agent_id,
+                model,
+                operation,
+                duration_ms: Date.now() - queryStart,
+                status,
+              });
+            try {
+              const result = await query(args);
+              logQuery('ok');
+              return result;
+            } catch (error: unknown) {
+              logQuery('error');
+              throw error;
             }
-
-            throw error;
+          },
+          {
+            maxRetries: 3,
+            initialBackoffMs: 100,
+            isRetryable: isRetryableQueryError,
+            component: `Prisma ${model ?? 'raw'}.${operation}`,
           }
-        }
-
-        throw lastError;
+        );
       },
     },
   });

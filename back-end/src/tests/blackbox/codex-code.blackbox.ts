@@ -3,7 +3,10 @@ import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
-import { retryWithBackoff } from '../../providers/retry';
+import {
+  __resetCodexFundedCooldown,
+  codexFundedCooldownUntil,
+} from '../../providers/codeSessions/usageLimit';
 import {
   testPersistOutput_coolsExhaustedOAuthCredential,
   testPersistOutput_coolsFundedKeyForObservedBalanceError,
@@ -21,6 +24,7 @@ import {
   testCodexCreditSkip_readsNestedErrorObject,
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
+  testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
@@ -36,6 +40,7 @@ import {
   codexCreateUnavailableSkipReason,
   codexOauthRevocationSignal,
   codexSmokeCreditSkipReason,
+  codexSmokeLoginUnusableSkipReason,
   detectCodexCreditExhaustion,
   testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
@@ -44,7 +49,6 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
-import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { assert, assertStatus, request } from './codex-sandbox.support';
 config();
 
@@ -93,6 +97,8 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
     },
   });
   const taskId = crypto.randomUUID();
+  await __resetCodexFundedCooldown();
+  const openAiKeyBefore = await openAiKeyCooldownUntil();
   await prisma.claudeCodeSession.create({
     data: {
       id: taskId,
@@ -134,36 +140,35 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
       'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
     );
 
-    const cooldown = await prisma.integration.findUnique({
-      where: {
-        userId_name_accountId: {
-          userId: '00000000-0000-0000-0000-000000000000',
-          name: 'gpt_api_key_cooldown',
-          accountId: '',
-        },
-      },
-    });
+    const fundedUntil = await codexFundedCooldownUntil();
     assert(
-      cooldown?.rateLimitedUntil instanceof Date &&
-        cooldown.rateLimitedUntil.getTime() > Date.now(),
-      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+      fundedUntil !== null && fundedUntil.getTime() > Date.now(),
+      'failed OAuth-to-Azure fallback must back off the funded Azure Codex deployment'
+    );
+    assert(
+      (await openAiKeyCooldownUntil()) === openAiKeyBefore,
+      'failed OAuth-to-Azure fallback must not cool the shared OpenAI key (Rose chat path)'
     );
   } finally {
     await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
     await prisma.integration.deleteMany({ where: { id: integration.id } });
-    await prisma.integration.deleteMany({
-      where: {
+    await __resetCodexFundedCooldown();
+  }
+}
+
+/** The shared OpenAI-key cooldown end; Codex credential feedback must never move it. */
+async function openAiKeyCooldownUntil(): Promise<number | null> {
+  const row = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
         userId: '00000000-0000-0000-0000-000000000000',
         name: 'gpt_api_key_cooldown',
+        accountId: '',
       },
-    });
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
+    },
+    select: { rateLimitedUntil: true },
+  });
+  return row?.rateLimitedUntil?.getTime() ?? null;
 }
 
 async function testPersistOutput_rejectsInvalidCredentialFeedback() {
@@ -178,54 +183,16 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
-/**
- * Feedback cases on this backend cool the shared funded key and then delete
- * its row; the backend honors that within its 15-second recheck interval.
- */
-async function waitForFundedGptKeyRestore(): Promise<void> {
-  await retryWithBackoff(
-    () =>
-      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
-        headers: apiKeyHeaders(),
-      }),
-    {
-      maxRetries: 21,
-      fixedDelays: Array.from({ length: 20 }, () => 1500),
-      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
-      component: 'CodexSmokeFundedKey',
-    }
-  );
-}
-
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
-  await waitForFundedGptKeyRestore();
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
   let closed = false;
-  const sharedCooldown = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: '00000000-0000-0000-0000-000000000000',
-        name: 'gpt_api_key_cooldown',
-        accountId: '',
-      },
-    },
-    select: { rateLimitedUntil: true },
-  });
-  if (!cooldownIsLive(sharedCooldown)) {
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -248,13 +215,8 @@ async function testSmoke_codexCompletesE2bTask() {
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
       let createSkip = detectCodexCreditExhaustion(createBody, []);
       if (!createSkip) {
-        const cooldownRes = await request(
-          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
-          {
-            headers: apiKeyHeaders(),
-          }
-        );
-        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        // The funded Codex path is the Azure deployment; its backoff is a DB row.
+        const onCooldown = (await codexFundedCooldownUntil()) !== null;
         createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
       }
       if (createSkip) {
@@ -301,6 +263,15 @@ async function testSmoke_codexCompletesE2bTask() {
     });
     const succeeded = turnCompleted || exitCode === 0;
     // A completed turn is the success signal; success always wins over a skip.
+    // Subscriptions first (C15): a revoked login with another subscription leasable
+    // runs without the Azure switch and pauses for the parent's retry on that
+    // subscription. The login is unavailable until reconnected: SKIP, never PASS.
+    const unusableLogin = succeeded ? null : codexSmokeLoginUnusableSkipReason(events);
+    if (unusableLogin) {
+      throw new CredentialExhaustionSkip(
+        `Codex login unusable (revoked or refresh failed) with no Azure switch armed; the run paused for a retry on the next credential. Reconnect the Codex login. Smoke SKIPPED without failing the deploy gate. Signal: ${unusableLogin}. exit=${exitCode ?? 'unknown'}`
+      );
+    }
     const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
@@ -319,17 +290,18 @@ async function testSmoke_codexCompletesE2bTask() {
       `Expected normalized Codex session event, got: ${JSON.stringify(events).slice(0, 500)}`
     );
 
-    // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
-    // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise the completed turn above
-    // could never have been produced on an exhausted token. This is exactly the
-    // failure that stalled deploy; it passes trivially when the OAuth token is
-    // healthy (no usage-limit event → no requirement).
+    // Runtime-fallback invariant: if the ChatGPT login proved unusable (revoked,
+    // refresh failed) mid-run and the run still completed, the sandbox switched to
+    // the funded Azure deployment (auth_fallback event). The switch is armed only
+    // when no other subscription is leasable (subscriptions first, C15); otherwise
+    // the run fails above (a revoked login stays a hard failure) and the parent's
+    // retry takes that subscription. A usage limit is not switched in the sandbox:
+    // it pauses for the parent's retry, so a limited run is a credit SKIP above.
     const sawRecoverableOAuthFailure = events.some((event) => {
       const typed = event as { type?: string; message?: string };
       return (
         typed.type === 'error' &&
-        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
+        /refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
           String(typed.message ?? '')
         )
       );
@@ -338,16 +310,30 @@ async function testSmoke_codexCompletesE2bTask() {
       const typed = event as { type?: string; to?: string };
       return typed.type === 'auth_fallback' && typed.to === 'openai_api_key';
     });
+    // The task row records what served the run at spawn: a ChatGPT login ('user' | 'pool')
+    // or the funded Azure deployment alone ('azure').
+    const servedBy = (
+      await prisma.claudeCodeSession.findUnique({
+        where: { id: taskId },
+        select: { claudeTokenSource: true },
+      })
+    )?.claudeTokenSource;
+    assert(
+      servedBy === 'user' || servedBy === 'pool' || servedBy === 'azure',
+      `Codex task must record the credential that served it, got ${String(servedBy)}`
+    );
     if (sawRecoverableOAuthFailure) {
       assert(
         sawAuthFallback,
-        `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
+        `Codex OAuth credential failed but did NOT fall back to the Azure deployment. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via the Azure funded runtime fallback (OAuth unusable)'
+        `    ↳ codex smoke completed via the Azure funded runtime fallback (${servedBy} OAuth unusable)`
       );
+    } else if (servedBy === 'azure') {
+      console.log('    ↳ codex smoke completed on the funded Azure deployment (no ChatGPT login)');
     } else {
-      console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
+      console.log(`    ↳ codex smoke completed via ${servedBy} ChatGPT OAuth (no usage limit hit)`);
     }
 
     const { Sandbox } = await import('e2b');
@@ -394,9 +380,9 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}\n`);
 
   const tests: { name: string; fn: () => Promise<void> }[] = [];
-  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
-  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
-  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  // The feedback cases back the funded Azure Codex deployment off (codex_funded_cooldown) and
+  // reset it afterwards. Without a synced Codex OAuth credential the smoke depends on that
+  // deployment, so it runs first.
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
     console.log(
       '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
@@ -460,6 +446,10 @@ async function runAll() {
     {
       name: 'credit-skip -- auth revocation still fails hard',
       fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
+    },
+    {
+      name: 'credit-skip -- structured unusable login paused for a retry is a skip',
+      fn: async () => testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip(),
     },
     {
       name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',

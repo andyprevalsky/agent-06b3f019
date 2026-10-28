@@ -15,7 +15,7 @@
  *   variant 'full':  Browser and Biz health — full height from the left bar
  *                    (64px) to the right edge; not resizable.
  * Layer: aboveQuerybox → ROSE_LAYER.coverPanel (covers the floating query box),
- * otherwise ROSE_LAYER.appPanel (beside it); see lib/roseLayers.ts.
+ * otherwise ROSE_LAYER.appPanel (the query box floats over it); see lib/roseLayers.ts.
  * Mobile (< md): full screen (edge to edge, below the status-bar safe area),
  * sliding up. It covers the mobile header and its app icons, so the sheet
  * keeps its own close X (top-right).

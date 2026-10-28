@@ -555,16 +555,30 @@ async def resize_e2b_session(task_id: str, request_id: str, code_provider: str =
     return None
 
 
-async def fetch_code_credential_availability(user_id: str, own_only: bool = False) -> Optional[dict[str, bool]]:
+async def fetch_code_credential_availability(
+    user_id: str,
+    own_only: bool = False,
+    code_session_id: Optional[str] = None,
+    prefer: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
     """Whether a Claude / Codex credential can be leased right now (no lease taken).
 
     ``own_only``: count only the user's own logins (a local Mac run never gets a
-    pool token or a funded key).
+    pool token or a funded key). ``next_credential``: the provider (and tier)
+    the spawn takes in the backend's C15 order, every subscription before any
+    funded key; ``None`` when nothing is leasable (absent from an older backend).
+    ``code_session_id`` (a retry or a resume): also the session's own provider
+    (``session_provider``, first in that order) and the stored ``outlook``
+    (accounts, shared paths, earliest reset).
     """
     config = load_config()
     params = {"user_id": user_id}
     if own_only:
         params["own_only"] = "true"
+    if code_session_id:
+        params["code_session_id"] = code_session_id
+    if prefer in ("claude", "codex"):
+        params["prefer"] = prefer
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
@@ -577,7 +591,17 @@ async def fetch_code_credential_availability(user_id: str, own_only: bool = Fals
             body = response.json()
             if not isinstance(body, dict):
                 return None
-            return {provider: body.get(provider) is True for provider in ("claude", "codex")}
+            answer: dict[str, Any] = {provider: body.get(provider) is True for provider in ("claude", "codex")}
+            if "next_credential" in body:
+                step = body.get("next_credential")
+                answer["next_credential"] = (
+                    step if isinstance(step, dict) and step.get("provider") in ("claude", "codex") else None
+                )
+            if body.get("session_provider") in ("claude", "codex"):
+                answer["session_provider"] = body["session_provider"]
+            if isinstance(body.get("outlook"), dict):
+                answer["outlook"] = body["outlook"]
+            return answer
     except WorkflowGenerationSealed:
         raise  # a replaced generation must stop, never be swallowed
     except Exception as e:

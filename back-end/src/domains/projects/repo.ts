@@ -31,11 +31,34 @@ export {
 export interface RoseProjectSetupWrite {
   createProject: boolean;
   fillProjectId: string | null;
+  /** Replace the script only while it is still exactly one of previousStartupScripts. */
+  upgradeScriptProjectId: string | null;
+  /** Fill the default sync script into this project while its column is still null. */
+  fillSyncScriptProjectId: string | null;
+  syncScript: string;
+  syncTimeoutS: number;
   name: string;
   defaultBranch: string;
   repoUrl: string;
   startupScript: string;
+  previousStartupScripts: readonly string[];
+  /** Written on create; on fill/upgrade only over a still-default previousStartupTimeoutS. */
+  startupTimeoutS: number;
+  previousStartupTimeoutS: number;
   envPaths: readonly string[];
+}
+
+/** The Rose timeout, only where the timeout was never changed from the old default. */
+async function upgradeDefaultTimeout(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  projectId: string,
+  write: RoseProjectSetupWrite
+): Promise<void> {
+  await tx.project.updateMany({
+    where: { id: projectId, userId, startupTimeoutS: write.previousStartupTimeoutS },
+    data: { startupTimeoutS: write.startupTimeoutS },
+  });
 }
 
 async function declareEnvFiles(
@@ -50,9 +73,10 @@ async function declareEnvFiles(
 }
 
 /**
- * One transaction: create-if-missing (upsert by name) or fill-if-still-pristine
- * (conditional update), plus the declared env files, so a partial failure
- * leaves the project pristine and the next list retries it.
+ * One transaction: create-if-missing (upsert by name), fill-if-still-pristine
+ * or upgrade-if-still-an-earlier-default (conditional updates), plus the
+ * declared env files, so a partial failure leaves the project as it was and
+ * the next list retries it.
  */
 export async function writeRoseProjectSetup(
   userId: string,
@@ -68,6 +92,9 @@ export async function writeRoseProjectSetup(
           name: write.name,
           defaultBranch: write.defaultBranch,
           syncSalt: newSyncSalt(),
+          startupTimeoutS: write.startupTimeoutS,
+          maintenanceScript: write.syncScript,
+          maintenanceTimeoutS: write.syncTimeoutS,
           ...settings,
         },
         update: {},
@@ -87,9 +114,34 @@ export async function writeRoseProjectSetup(
           syncRevision: 0,
           envFiles: { none: {} },
         },
-        data: settings,
+        data: { ...settings, maintenanceScript: write.syncScript },
       });
-      if (filled.count === 1) await declareEnvFiles(tx, write.fillProjectId, write.envPaths);
+      if (filled.count === 1) {
+        await declareEnvFiles(tx, write.fillProjectId, write.envPaths);
+        await upgradeDefaultTimeout(tx, userId, write.fillProjectId, write);
+      }
+    }
+    if (write.fillSyncScriptProjectId !== null) {
+      // Only while the column was never set: a script cleared on purpose is "".
+      await tx.project.updateMany({
+        where: { id: write.fillSyncScriptProjectId, userId, maintenanceScript: null },
+        data: { maintenanceScript: write.syncScript, maintenanceTimeoutS: write.syncTimeoutS },
+      });
+    }
+    if (write.upgradeScriptProjectId !== null && write.previousStartupScripts.length > 0) {
+      // Conditional on the exact earlier default: a script the user edited
+      // after the list read (or ever) is never overwritten.
+      const upgraded = await tx.project.updateMany({
+        where: {
+          id: write.upgradeScriptProjectId,
+          userId,
+          startupScript: { in: [...write.previousStartupScripts] },
+        },
+        data: { startupScript: write.startupScript },
+      });
+      if (upgraded.count === 1) {
+        await upgradeDefaultTimeout(tx, userId, write.upgradeScriptProjectId, write);
+      }
     }
   });
 }

@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict';
 
+import { prisma } from '../../providers/database';
 import { createStreamingCompletion } from '../../providers/rose';
 import {
   FOUNDRY_REGION_ENV_NAMES,
@@ -34,6 +35,15 @@ async function main(): Promise<void> {
   // Region 1 only: a developer .env may configure AZURE_FOUNDRY_*_2.._9.
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   __resetFoundryCooldowns();
+  // The 429 cases persist a deployment cooldown (up to the 5-minute rung) in the local
+  // database; clear this region's rows too, so a rerun starts from the same clean slate.
+  await prisma.integration.deleteMany({
+    where: {
+      userId: '00000000-0000-0000-0000-000000000000',
+      name: 'foundry_deployment_cooldown',
+      accountId: { startsWith: 'a-4989-resource.openai.azure.com:' },
+    },
+  });
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
   process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol,gpt-6-sol-b';

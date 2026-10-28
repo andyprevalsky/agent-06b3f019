@@ -28,6 +28,7 @@ import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFina
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
 import { runProductionSchemaDriftCheck } from './providers/schemaDrift/cron';
+import { runMaintenanceTick } from './domains/projects/maintenanceService';
 import { alertError } from './providers/errorAlert';
 
 function scheduleWorkerProcessRecovery(isProduction: boolean): void {
@@ -576,6 +577,45 @@ function scheduleSteelSessionReaper(): void {
   cronLog.info('Steel session reaper scheduled (every 5 minutes)');
 }
 
+/**
+ * Project template sync: nightly runs, GitHub default-branch change detection
+ * and abandoned-run reconciliation (domains/projects/maintenanceService.ts).
+ * Every replica ticks; the per-project lease and slot keys admit one run.
+ */
+function scheduleProjectMaintenance(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (
+    !isProduction ||
+    process.env.DISABLE_PROJECT_MAINTENANCE === '1' ||
+    !process.env.E2B_API_KEY
+  ) {
+    cronLog.info('Project template sync disabled', {
+      reason: !isProduction
+        ? 'non-production'
+        : process.env.DISABLE_PROJECT_MAINTENANCE === '1'
+          ? 'DISABLE_PROJECT_MAINTENANCE'
+          : 'E2B_API_KEY unset',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    runMaintenanceTick()
+      .catch((error: unknown) => {
+        cronLog.error('Project template sync tick failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  cron.schedule('*/5 * * * *', run);
+  cronLog.info('Project template sync scheduled (every 5 minutes)');
+}
+
 export function registerCronJobs(isProduction: boolean): void {
   scheduleWorkerProcessRecovery(isProduction);
   scheduleTraceArchiveFinalizationRetries(isProduction);
@@ -583,6 +623,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleWorkflowLivenessReconcile(isProduction);
   scheduleStuckAgentBugReports(isProduction);
   scheduleSchemaDriftCheck(isProduction);
+  scheduleProjectMaintenance(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleSteelSessionReaper();
   scheduleGmailSync();

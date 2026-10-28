@@ -12,7 +12,11 @@ import {
 } from './claudeCodeLocalSession';
 import { agentToolsForLocalHome } from './agentTools/workspace';
 import type { UserUiWorkspace } from './userUi/workspace';
-import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import type {
+  ProjectRestoreReport,
+  ProjectTemplateSnapshot,
+  ProjectWorkspace,
+} from './projects/types';
 import {
   checkpointCodeSession,
   connectPausedSandbox,
@@ -27,7 +31,8 @@ import {
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
-import { e2bSandboxFs } from './codeSessions/sandboxFs';
+import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
+import { writeHandoffTrajectory, type SpawnCodeSession } from './codeSessions/usageLimit';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
   linkClaudeCodeSession,
@@ -193,37 +198,92 @@ async function retireReplacedSandbox(
  * The timeout is the idle window every keepalive extends, not a runtime cap.
  */
 export async function acquireCodeSandbox(
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   templateId: string,
   envs: Record<string, string>,
   label: string,
-  sizing: { provider?: SandboxProvider; projectSize?: unknown; agentId?: string } = {}
+  sizing: {
+    provider?: SandboxProvider;
+    projectSize?: unknown;
+    agentId?: string;
+    /**
+     * The session's project: its default size, and its published template
+     * snapshot, which a BRAND-NEW session sandbox starts from.
+     */
+    project?: ProjectWorkspace['project'] | null;
+    snapshot?: ProjectTemplateSnapshot | null;
+  } = {}
 ): Promise<{
   sandbox: Sandbox;
   resumedFrom: ResumedFrom;
   cliSessionId: string | null;
   size?: SandboxSize;
+  /** The sandbox was created from the project's template snapshot. */
+  fromSnapshot: boolean;
 }> {
   const sized =
     sizing.provider !== undefined
-      ? await resolveSpawnSandbox(codeSession, sizing.provider, sizing.projectSize ?? null)
+      ? await resolveSpawnSandbox(
+          codeSession,
+          sizing.provider,
+          sizing.project?.sandboxSize ?? sizing.projectSize ?? null
+        )
       : null;
+  const spawnSizing: SpawnSizing = {
+    ...(sized !== null ? { size: sized.size } : {}),
+    agentId: sizing.agentId,
+  };
+  const createOptions = {
+    apiKey: process.env.E2B_API_KEY,
+    timeoutMs: SANDBOX_TIMEOUT_MS,
+    envs,
+    ...codeSessionCreateOptions(codeSession),
+  };
+  let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
     codeSession,
-    () =>
-      createSandboxWithRetry(
-        sized?.templateId ?? templateId,
-        {
-          apiKey: process.env.E2B_API_KEY,
-          timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs,
-          ...codeSessionCreateOptions(codeSession),
-        },
-        label
-      ),
-    { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
+    async () => {
+      const snapshot = sizing.snapshot ?? sizing.project?.templateSnapshot ?? null;
+      // Only a session with no sandbox of its own (a new one) starts from the
+      // snapshot; a lost sandbox being replaced or resized keeps the base path.
+      if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
+        try {
+          const sandbox = await createSandboxWithRetry(snapshot.id, createOptions, label);
+          fromSnapshot = true;
+          // The held size is the snapshot's: a later resume must not read it as a resize.
+          if (snapshot.size !== null && spawnSizing.size !== undefined) {
+            spawnSizing.size = snapshot.size;
+          }
+          return sandbox;
+        } catch (error) {
+          log.warn('Project template snapshot could not start; using the base template', {
+            snapshotId: snapshot.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return createSandboxWithRetry(sized?.templateId ?? templateId, createOptions, label);
+    },
+    spawnSizing
   );
-  return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (trajectory !== null) {
+    // C15 provider switch: after the checkpoint restore, so the previous CLI's
+    // session log is in the HOME the new CLI starts in, where the handoff points.
+    // The sandbox is new (a switch drops the old one); on a failed write it is
+    // killed and the spawn fails, so no CLI starts on a prompt naming a missing file.
+    try {
+      await writeHandoffTrajectory(e2bSandboxFs(acquired.sandbox), trajectory);
+    } catch (error) {
+      await acquired.sandbox.kill().catch(() => undefined);
+      throw error;
+    }
+  }
+  return {
+    ...acquired,
+    ...(spawnSizing.size !== undefined ? { size: spawnSizing.size } : {}),
+    fromSnapshot,
+  };
 }
 
 /** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */
@@ -314,7 +374,7 @@ export function codeSessionCreateOptions(codeSession: CodeSessionRow | null): {
  */
 export async function createLocalCodeSessionFallback(
   err: unknown,
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   params: {
     taskId: string;
     agentId: string;
@@ -329,6 +389,13 @@ export async function createLocalCodeSessionFallback(
 ): Promise<CodeAgentSessionResult | null> {
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;
   const localHome = codeSession !== null ? await prepareLocalCodeSessionHome(codeSession) : null;
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (localHome !== null && trajectory !== null) {
+    // C15 provider switch on this host: the log lands under the session HOME
+    // and the handoff prompt names that path instead of the sandbox one.
+    const written = await writeHandoffTrajectory(localSandboxFs(localHome.home), trajectory);
+    params = { ...params, goal: params.goal.split(trajectory.path).join(written) };
+  }
   const resumeId = localHome?.cliSessionId ?? null;
   // Same-host session: loopback tools URL, MCP path under the session HOME
   // (the persistent code-session HOME when there is one, else the task dir).

@@ -13,6 +13,7 @@
 
 import { createStreamingCompletion, CompletionMessage, CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
+import { computeSubscriptionLeases } from '../computeSubscriptionLeases';
 import { createLogger } from '../logger';
 import {
   SmsSupervisorResponseSchema,
@@ -129,6 +130,15 @@ export async function callSupervisorLlm(
     // Compute tokens only on benchmark overrides that need them.
     ...(sendComputeTokens && claudeToken ? { claude_token: claudeToken } : {}),
     ...(sendComputeTokens && gptToken ? { gpt_token: gptToken, gpt_account_id: gptAccountId } : {}),
+    // A limited pinned lease rotates to the pin's other subscriptions before funded keys.
+    ...(benchmarkPoolLease
+      ? {
+          subscription_leases: computeSubscriptionLeases({
+            userId,
+            leaseOptions: { tokenType: benchmarkSupervisorTokenType() },
+          }),
+        }
+      : {}),
   });
 
   let accumulatedContent = '';

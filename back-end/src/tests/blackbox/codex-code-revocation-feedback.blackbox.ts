@@ -21,13 +21,14 @@ async function historicalOutput(): Promise<string> {
 
 async function main() {
   const userId = randomUUID();
+  // The funded Codex path is the Azure deployment: its backoff row, not the OpenAI key's.
   const sharedWhere = {
     userId: '00000000-0000-0000-0000-000000000000',
-    name: 'gpt_api_key_cooldown',
+    name: 'codex_funded_cooldown',
     accountId: '',
   };
   const captured =
-    '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex] Error: You have no credits remaining.';
+    '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n[Codex] Error: You have no credits remaining.';
   const quotaCollisions = new Map(
     codexQuotaCollisions().flatMap(({ label, reason }) =>
       [false, true].map(
@@ -208,7 +209,7 @@ async function main() {
             output = '[Codex] Error: provider rejected request\n{ "error": "insufficient_quota" }';
           else if (mode === 'fallback-printed-funding')
             output =
-              '[Codex] Error: token_revoked\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex command output]\nno credits remaining\n[Codex exit_code] 0';
+              '[Codex] Error: token_revoked\n[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n[Codex command output]\nno credits remaining\n[Codex exit_code] 0';
           else if (mode === 'quota-reset')
             output = '[Codex] Error: usage_limit_reached\n  try again at Oct 16th, 2099 1:00 AM';
           else if (mode === 'structured-multiline') {
@@ -217,7 +218,7 @@ async function main() {
           } else if (mode === 'historical') output = await historicalOutput();
           if (mode === 'command-fallback-routing')
             output =
-              '[Codex command output]\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex exit_code] 0\n[Codex] Error: usage_limit_reached';
+              '[Codex command output]\n[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n[Codex exit_code] 0\n[Codex] Error: usage_limit_reached';
           else if (mode === 'same-error-quota-revoked')
             output = '[Codex] Error: usage_limit_reached invalid_grant';
           else if (mode === 'structured-same-error') {
@@ -350,7 +351,7 @@ async function main() {
             });
             assert.ok(
               cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil > new Date(),
-              'funded exhaustion still cools shared key'
+              'funded exhaustion backs off the Azure Codex deployment'
             );
           }
           if (!funded) {
@@ -359,7 +360,7 @@ async function main() {
                 where: { userId_name_accountId: sharedWhere },
               }),
               null,
-              'no funded quota event means no shared-key cooldown'
+              'no funded quota event means no Azure Codex backoff'
             );
           }
           if (mode === 'quota-reset')

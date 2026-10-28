@@ -81,6 +81,14 @@ export interface CompletionOptions {
   gpt_token?: string;
   gpt_account_id?: string;
   /**
+   * Internal, never serialized. Supplies further subscription credentials
+   * (Claude/Codex leases) inside this call. The client consults it only when a
+   * subscription leg fails with a usage-limit, out-of-credits or auth signal, or
+   * once for the first lease when no token was passed. Every subscription is
+   * tried before any funded key (OpenAI/Anthropic API key, Foundry).
+   */
+  subscription_leases?: SubscriptionLeases;
+  /**
    * Identifies WHICH grant supplied `claude_token`/`gpt_token`, so a revocation
    * observed here can be healed rather than merely reported.
    *
@@ -102,6 +110,30 @@ export interface CompletionOptions {
     config?: Record<string, unknown>;
     extra?: Record<string, unknown>;
   };
+}
+
+/** One subscription credential: a Claude or ChatGPT/Codex OAuth access token. */
+export interface SubscriptionCredential {
+  type: 'claude' | 'gpt';
+  accessToken: string;
+  accountId?: string;
+}
+
+/** Why a subscription leg stopped serving, from the typed Rose error. */
+export interface SubscriptionLeaseFailure {
+  credential: SubscriptionCredential;
+  reason: 'auth_error' | 'rate_limit';
+  /** The provider's own reset time, when it gave one. */
+  rateLimitedUntil?: string;
+}
+
+/**
+ * In-call source of subscription credentials. `next(null)` leases the first
+ * credential; `next(failure)` marks the failed credential unavailable and leases
+ * one not yet tried in this call. Returns null when none remain.
+ */
+export interface SubscriptionLeases {
+  next(failure: SubscriptionLeaseFailure | null): Promise<SubscriptionCredential | null>;
 }
 
 /**
