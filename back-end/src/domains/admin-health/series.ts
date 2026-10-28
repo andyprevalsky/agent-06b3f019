@@ -59,7 +59,12 @@ export function buildSeries(
     const index = findPeriodIndex(periods, record.createdAt);
     if (index >= 0) gmvByPeriod[index].push(record);
   }
-  const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
+  const emptySubscriber: SubscriberSeriesPoint = {
+    userCount: 0,
+    newUsers: 0,
+    userIds: new Set(),
+    subscribedUserIds: new Set(),
+  };
   return periods.map((period, index) => {
     const subscriberPoint = subscribers[index] ?? emptySubscriber;
     const periodTasks = dedupeInternalRepeatTasks(
@@ -81,20 +86,33 @@ export function buildSeries(
       tasksIssuedPerUser: tasksIssuedPerUser(periodTasks, subscriberPoint.userCount),
       outputTokensPerTask: averageOutputTokens(periodTasks),
       gmvPerTask: gmvPerTaskCents(gmvCents, periodTasks.length),
-      taskCompletionRate: taskCompletionRate(latestResolvedAttempts(productTasksByPeriod[index])),
+      taskCompletionRate: taskCompletionRate(
+        latestResolvedAttempts(
+          productTasksByPeriod[index].filter(
+            (task) => task.coreTeam || subscriberPoint.subscribedUserIds.has(task.userId)
+          )
+        )
+      ),
       costPerTask: calculateTaskCostPerTask(rootAgentRunsByPeriod[index], rootAgentRunUsage),
     };
   });
 }
 
 /**
- * An operator retrying the same goal is one task: keep its latest resolved
- * attempt so repeated test prompts neither inflate nor dilute the rate.
- * Customer tasks are never collapsed (see dedupeInternalRepeatTasks).
+ * A core-team member retrying the same goal is one task: keep its latest
+ * resolved attempt so repeated test prompts neither inflate nor dilute the
+ * rate. Subscriber tasks are never collapsed.
  */
 function latestResolvedAttempts(tasks: ProductRootTaskRecord[]): ProductRootTaskRecord[] {
   const newestFirst = tasks
     .filter(isResolvedTask)
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  return dedupeInternalRepeatTasks(newestFirst);
+  const seen = new Set<string>();
+  return newestFirst.filter((task) => {
+    if (!task.coreTeam) return true;
+    const key = `${task.userId} ${task.goal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
