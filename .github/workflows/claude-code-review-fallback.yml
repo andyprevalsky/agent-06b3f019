@@ -57,6 +57,7 @@ jobs:
           fetch-depth: 0
 
       - name: Review with Claude Code
+        id: review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -70,3 +71,13 @@ jobs:
             --model opus
             --effort high
             --max-turns 40
+
+      # The action hides CLI output, so a revoked OAuth token (401) looks
+      # identical to usage exhaustion (1 turn, ~2s, $0). Print the recorded
+      # api_error_status/error text and classify it for /deploy Step 9a.
+      - name: Diagnose Claude failure
+        if: failure() && steps.review.outcome == 'failure'
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: python3 scripts/claude_review_fallback_diagnose.py "$EXECUTION_FILE"

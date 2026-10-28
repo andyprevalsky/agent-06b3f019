@@ -253,6 +253,10 @@ GATES = (
         ("python3", "scripts/tests/wait-for-code-review.test.py"),
     ),
     Gate(
+        "claude-review-fallback-diagnose",
+        ("python3", "scripts/tests/claude-review-fallback-diagnose.test.py"),
+    ),
+    Gate(
         "read-graphide-review",
         ("python3", "scripts/tests/read-graphide-review.test.py"),
     ),

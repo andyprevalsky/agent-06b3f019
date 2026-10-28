@@ -612,6 +612,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -632,6 +633,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -1795,7 +1797,7 @@ Inspect the newest CodeRabbit-authored content from all three endpoints. Treat C
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
 - The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]`). CodeRabbit silently ignores bot-authored commands, so post `@coderabbitai full review` once from the user's account instead of re-requesting.
 
-**The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only).
+**The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only). If someone dispatches it manually, its `Diagnose Claude failure` step classifies a failure as `CREDENTIAL_INVALID` (401, revoked secret) or `USAGE_EXHAUSTED` (429); `is_error:true`, 1 turn, ~2s and `$0` alone are not exhaustion (RCA 2026-10-28). That diagnosis never re-enables the fallback in `/deploy`.
 
 When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green) and then follow the clause below: record the `⚠️ Skipped` row, close the cycle `clean`, and proceed. Do not repeatedly request reviews during a quota window.
 
