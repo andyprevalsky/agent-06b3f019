@@ -60,3 +60,9 @@ The user required preservation of original task assertions, deadlines and concur
 ## Reusable lesson
 
 Preserve complete planning inputs and final structured results while separating correct answer content, terminal persistence, and the native monotonic deadline before diagnosing a research timeout.
+
+## Later native qualification — October 28, 2026
+
+On source `292537906f13e2fbbb517edeb21454fb5d710b9a`, `spawn-sub-agents` passed in 301.7 seconds. The full native smoke command passed all ten local tasks and its shared-cache fanout; the separate payment command passed all three tasks. Both commands exited 0 and verified their owned isolated cleanup. All fourteen started roots were published through the unchanged evidence publisher. [Current native trajectory](https://www.roselabs.ai/?agent-id=00980f80-16de-411d-84dd-ba33df27c9eb#benchmark-share=9ec1289c-fa8f-4e3d-9e74-7b16de473bb5.1795764807.adbc297034dedebcd66c813d30451df0dfd69a6c1304a9c2cfd91e0de1175b23).
+
+The initial deadline boundary remains unresolved; this later qualification is not a causal repair of the original timeout. Original failures and their evidence remain unchanged; no financial return is inferred from this pass.

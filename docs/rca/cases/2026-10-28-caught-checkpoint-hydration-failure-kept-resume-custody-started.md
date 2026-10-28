@@ -284,3 +284,9 @@ with an exact durable acknowledgment; retry only the same positively identified
 resource and recorded state under unchanged ownership, before touching storage
 or tabs, and keep the original user-task acceptance separate from that mechanism
 proof.
+
+## Later native qualification — October 28, 2026
+
+On source `292537906f13e2fbbb517edeb21454fb5d710b9a`, `agent-payment-idempotent-abandonment` passed in 347.4 seconds. The full native smoke command passed all ten local tasks and its shared-cache fanout; the separate payment command passed all three tasks. Both commands exited 0 and verified their owned isolated cleanup. All fourteen started roots were published through the unchanged evidence publisher. [Current native trajectory](https://www.roselabs.ai/?agent-id=d6bcb19f-8efa-49f0-8af7-9c66b3b331dd#benchmark-share=05391bbc-a689-40b1-a1ea-a954e4b8fdce.1795764318.8512f0907b468899f88116711e5b2768c399832139bebda4b39adac681ecaa2d).
+
+The current log records healthy normal materialization (three successful resumes with new native sessions), not activation of the guarded same-native retry. The original navigation cause remains unknown; controlled failure/recovery proof is separate. Original failures and their evidence remain unchanged; no financial return is inferred from this pass.
