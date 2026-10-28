@@ -237,8 +237,24 @@ occurs once; the resumed browser calls the empty-argument completion tool, and
 the accepted verifier explanation reaches the first next root input exactly
 once. That root explicitly declines to retry authentication and uses only one
 browser invocation. The strict publisher verified104messages, terminal browser
-recordings, and the [durable Rose trajectory](https://www.roselabs.ai/?agent-id=ec2b24f3-e585-4719-bb06-0b9cd98eb428).
+recordings, and the [durable Rose trajectory](https://www.roselabs.ai/?agent-id=ec2b24f3-e585-4719-bb06-0b9cd98eb428#benchmark-share=6d0b3edb-0684-41dc-b0c4-c59f1c7df377.1795737655.4e769cf58dcf31a36c4702d14fa55ba1a4b8da189eb124276ab2523bbcc8a2b6).
 This is one passing outcome, not a controlled model comparison: the passing
 route used OpenAI GPT6 while the earlier failed sample used Foundry. The earlier
 failed root and historical October15 policy case remain recorded; neither is
 regraded or declared generally repaired by this transport correction.
+
+
+Fresh actual Rose acceptance on2026-10-28 passed184.0s/9c reported LLM,
+root4e78853f-2a4a-4109-aca5-fca905509afe. Actual root/browser models and
+Temporal produced one typed write-lock request. The ledger held zero orders
+and attempts before approval, then exactly one of each with no duplicate or
+invalid attempt. Cookie, localStorage, IndexedDB and sessionStorage checks all
+passed. The logical browser stayedfd4cf26b through native recreation and
+checkpoint revisions1→2. The original clickindex48 resolved exactly once with
+action_executed:false; the next actual actor read browser state and later chose
+clickindex45. No queued execution or target substitution occurred. All relevant
+current B1/B2 source hashes equal the recorded producer hashes, though the shared
+backend started on29e2c47e3 before the separate upstream-only main sync.
+The strict publisher verified83messages and terminal recordings in a fresh
+browser; exact root/provider cleanup was verified. [Durable Rose acceptance](https://www.roselabs.ai/?agent-id=4e78853f-2a4a-4109-aca5-fca905509afe#benchmark-share=5568a3e1-5ff9-4631-8791-3bcda22e0141.1795738953.55fb5b1c1974aece83c94e73342fc2ab17f2211d11ecc0286623606a293a8837).
+This is synthetic checkout evidence; no real charge or shipment occurred.

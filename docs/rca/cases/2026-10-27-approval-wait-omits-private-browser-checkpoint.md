@@ -292,3 +292,19 @@ only test registration: explicit child-fixture URL dependencies let the existing
 structural ratchet see imported cases. Runtime hashes are unchanged. These
 checks supplement prior actual Rose-agent evidence; current post-stabilization
 real-model acceptance and production deployment remain pending.
+
+
+Fresh actual Rose acceptance on2026-10-28 passed184.0s/9c reported LLM,
+root4e78853f-2a4a-4109-aca5-fca905509afe. Actual root/browser models and
+Temporal produced one typed write-lock request. The ledger held zero orders
+and attempts before approval, then exactly one of each with no duplicate or
+invalid attempt. Cookie, localStorage, IndexedDB and sessionStorage checks all
+passed. The logical browser stayedfd4cf26b through native recreation and
+checkpoint revisions1→2. The original clickindex48 resolved exactly once with
+action_executed:false; the next actual actor read browser state and later chose
+clickindex45. No queued execution or target substitution occurred. All relevant
+current B1/B2 source hashes equal the recorded producer hashes, though the shared
+backend started on29e2c47e3 before the separate upstream-only main sync.
+The strict publisher verified83messages and terminal recordings in a fresh
+browser; exact root/provider cleanup was verified. [Durable Rose acceptance](https://www.roselabs.ai/?agent-id=4e78853f-2a4a-4109-aca5-fca905509afe#benchmark-share=5568a3e1-5ff9-4631-8791-3bcda22e0141.1795738953.55fb5b1c1974aece83c94e73342fc2ab17f2211d11ecc0286623606a293a8837).
+This is synthetic checkout evidence; no real charge or shipment occurred.
