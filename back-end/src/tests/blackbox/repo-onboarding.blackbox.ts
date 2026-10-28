@@ -376,7 +376,9 @@ test('agent-init refuses a used code and never stores a credential inside the ch
 test('the rose package exposes the bin the onboarding prompt tells agents to install', async () => {
   const pkgDir = resolve('../scripts/lib/rose-sync');
   const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
-  assert.equal(pkg.private, true, 'publishing stays an explicit, approved change');
+  assert.equal(pkg.name, '@roselabs/cli', 'the scope Andy owns on npm');
+  assert.equal(pkg.private, undefined, 'the prompt installs it from the public registry');
+  assert.equal(pkg.publishConfig?.access, 'public', 'scoped packages publish private by default');
   assert.deepEqual(Object.keys(pkg.bin), ['rose']);
   for (const file of pkg.files) statSync(join(pkgDir, file));
   const help = await run(process.execPath, [join(pkgDir, pkg.bin.rose), 'help']);
