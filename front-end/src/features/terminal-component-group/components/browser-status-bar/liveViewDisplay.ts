@@ -18,7 +18,12 @@
  * Steel headful debug streams the full computer window (1288x891):
  * 1280x800 content + 4px side borders + 91px toolbar. Showing that window
  * in the FE makes page content look off-center / hanging outside the window.
- * Kernel sessions are created at 1280x800 (no FE chrome crop).
+ * Kernel sessions are created at 1280x800 (no FE chrome crop). That is the
+ * whole headful screen: Chrome's tab strip + toolbar fill its top 87px, so the
+ * page viewport (where agent/cursor coordinates live) is 1280x713 at y=87.
+ * Kernel's player also never upscales past native 1280x800 (it centers the
+ * native frame in a larger iframe), so the FE renders its iframe at native
+ * pixels and CSS-scales it to the clip, exactly like Steel.
  * Tilion's viewer page (`/v1/session/{id}/live-view?token=…`) streams the
  * page at the session viewport with no window chrome, so it is uncropped too.
  * Its view token expires after 1800 s (see the Tilion helpers below).
@@ -32,6 +37,13 @@ export const KERNEL_LIVE_VIEW_WINDOW = { width: 1280, height: 800 } as const;
 export const LIVE_VIEW_CONTENT_VIEWPORT = { width: 1280, height: 800 } as const;
 /** Matches Steel session create: 1280+8 by 800+91, and BrowserCursorOverlay. */
 export const STEEL_CHROME_CROP = { x: 4, y: 91 } as const;
+
+/**
+ * Kernel headful Chrome UI above the page, in stream pixels. Measured on a live
+ * 1280x800 Kernel session (2026-10-28): innerWidth 1280, innerHeight 713, and a
+ * page-space mark at (x, y) painted at stream (x, y + 87).
+ */
+export const KERNEL_PAGE_OFFSET = { x: 0, y: 87 } as const;
 
 export interface LiveViewSize {
   width: number;
@@ -92,6 +104,52 @@ export function tilionLiveViewSessionId(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+export function isKernelLiveViewUrl(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return ['kernel.sh', 'onkernel.com'].some(
+      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where the remote PAGE viewport sits inside the displayed 1280x800 stream.
+ * Browser action and BROWSER_CURSOR coordinates are page CSS pixels; the cursor
+ * overlay maps them through this rect so it lands on the action at any pane size.
+ */
+export function resolveLiveViewPageRect(url: string | null | undefined): LiveViewVisibleStreamRect {
+  const content = LIVE_VIEW_CONTENT_VIEWPORT;
+  if (url && isKernelLiveViewUrl(url)) {
+    return {
+      x: KERNEL_PAGE_OFFSET.x,
+      y: KERNEL_PAGE_OFFSET.y,
+      width: content.width - KERNEL_PAGE_OFFSET.x,
+      height: content.height - KERNEL_PAGE_OFFSET.y,
+    };
+  }
+  // Steel's chrome is cropped away and Tilion streams the page only.
+  return { x: 0, y: 0, width: content.width, height: content.height };
+}
+
+/**
+ * Page-space point -> fraction (0..1) of the displayed stream box. Fractions
+ * are size-independent, so the overlay stays aligned through any resize, DPR
+ * or letterbox without measuring the pane.
+ */
+export function liveViewPointFraction(
+  rect: LiveViewVisibleStreamRect,
+  point: { x: number; y: number },
+): { x: number; y: number } {
+  const content = LIVE_VIEW_CONTENT_VIEWPORT;
+  return {
+    x: (rect.x + point.x) / content.width,
+    y: (rect.y + point.y) / content.height,
+  };
 }
 
 export function isTilionLiveViewUrl(url: string): boolean {
@@ -236,6 +294,37 @@ export function steelLiveViewScaledCropStyle(clipWidth: number): {
     border: '0',
     transformOrigin: 'top left',
     transform: `translate(${-STEEL_CHROME_CROP.x * scale}px, ${-STEEL_CHROME_CROP.y * scale}px) scale(${scale})`,
+  };
+}
+
+/** Kernel iframe at native 1280x800, scaled to the clip (its player never upscales). */
+export function kernelLiveViewScaledStyle(clipWidth: number): {
+  position: 'absolute';
+  width: string;
+  height: string;
+  left: string;
+  top: string;
+  border: string;
+  transformOrigin: 'top left';
+  transform: string;
+} {
+  return {
+    position: 'absolute',
+    width: `${KERNEL_LIVE_VIEW_WINDOW.width}px`,
+    height: `${KERNEL_LIVE_VIEW_WINDOW.height}px`,
+    left: '0',
+    top: '0',
+    border: '0',
+    transformOrigin: 'top left',
+    transform: `scale(${clipWidth / KERNEL_LIVE_VIEW_WINDOW.width})`,
+  };
+}
+
+/** Pre-measure Kernel fallback; 100cqw is the clip box. */
+export function kernelLiveViewIframeStyle(): ReturnType<typeof kernelLiveViewScaledStyle> {
+  return {
+    ...kernelLiveViewScaledStyle(KERNEL_LIVE_VIEW_WINDOW.width),
+    transform: `scale(calc(100cqw / ${KERNEL_LIVE_VIEW_WINDOW.width}))`,
   };
 }
 

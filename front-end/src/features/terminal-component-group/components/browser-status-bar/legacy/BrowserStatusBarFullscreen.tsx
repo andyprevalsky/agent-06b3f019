@@ -189,9 +189,13 @@ function BrowserPaneBody({
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
     >
       {controlState === 'active' && !isUserControlling && <BrowserBorderGlow tone={glowTone} />}
-      {controlState === 'active' && !isUserControlling && (
-        <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
-      )}
+      <BrowserCursorOverlay
+        agentId={agentId}
+        taskId={taskId}
+        messages={messages}
+        browserUrl={browserUrl}
+        visible={controlState === 'active' && !isUserControlling}
+      />
       {!readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip
           onResume={onResume}

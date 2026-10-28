@@ -104,9 +104,14 @@ function LiveBrowser({
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
     >
       {agentDriving && <BrowserBorderGlow tone={glowTone} />}
-      {agentDriving && (
-        <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
-      )}
+      {/* Always mounted: hiding (not unmounting) keeps the cursor's glide + bob steady. */}
+      <BrowserCursorOverlay
+        agentId={agentId}
+        taskId={taskId}
+        messages={messages}
+        browserUrl={browserUrl}
+        visible={agentDriving}
+      />
       {!readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip
           onResume={onResume}
