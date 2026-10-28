@@ -4,9 +4,11 @@
  * Azure OpenAI deployment, then nothing. Registered by
  * code-session-usage-limit.blackbox.ts (its fixtures, DB rows and env).
  *
- *   own login ──────────► served 'user'; Azure injected alongside for the
- *                         in-sandbox runtime fallback
- *   own limited ────────► served 'pool' (a shared subscription)
+ *   own login ──────────► served 'user'; with the shared login still leasable
+ *                         Azure is NOT injected (subscriptions first, C15)
+ *   own limited ────────► served 'pool' (a shared subscription); Azure rides
+ *                         along for the in-sandbox switch only when no other
+ *                         subscription is left
  *   all limited ────────► served 'azure' (the deployment alone, no auth.json)
  *   Azure-served limit ─► codex_funded_cooldown until the reset; the spawn
  *                         refuses, availability is false (a retry stays paused)
@@ -104,26 +106,47 @@ export function registerCodexAzureFallbackCases(ctx: CodexAzureFallbackContext):
         (path) => path.provider === 'codex' && path.kind === 'funded'
       );
     try {
-      // 1. The user's own subscription serves first; Azure rides along for the in-sandbox fallback.
+      const injectedAzure = (envs: Record<string, string>) => ({
+        AZURE_OPENAI_API_KEY: envs.AZURE_OPENAI_API_KEY,
+        CODEX_AZURE_BASE_URL: envs.CODEX_AZURE_BASE_URL,
+        CODEX_AZURE_MODEL: envs.CODEX_AZURE_MODEL,
+      });
+      const noAzure = {
+        AZURE_OPENAI_API_KEY: undefined,
+        CODEX_AZURE_BASE_URL: undefined,
+        CODEX_AZURE_MODEL: undefined,
+      };
+      // 1. The user's own subscription serves first. The shared login is a later
+      // subscription, so no in-sandbox switch to Azure may skip it (C15 order).
       const primary = await resolveCodexSpawnAuth(codexUser);
       assert.equal(primary.servedBy, 'user');
       assert.equal(primary.credentialMeta?.integrationId, own.id);
       assert.ok(primary.envs.CODEX_AUTH_JSON, 'the own login is written as auth.json');
-      assert.deepEqual(
-        {
-          AZURE_OPENAI_API_KEY: primary.envs.AZURE_OPENAI_API_KEY,
-          CODEX_AZURE_BASE_URL: primary.envs.CODEX_AZURE_BASE_URL,
-          CODEX_AZURE_MODEL: primary.envs.CODEX_AZURE_MODEL,
-        },
-        azureEnvs,
-        'the funded deployment is injected alongside the login'
-      );
+      assert.equal(primary.azureFunding, null);
+      assert.deepEqual(injectedAzure(primary.envs), noAzure, 'a subscription is left: no Azure');
 
-      // 2. Own subscription limited → a shared subscription, still before Azure.
+      // 2. Own subscription limited → a shared subscription, still before Azure. Azure
+      // rides along for the in-sandbox switch only when no other subscription is left.
       await limit(own.id, later);
       const pooled = await resolveCodexSpawnAuth(codexUser);
       assert.equal(pooled.servedBy, 'pool');
       assert.equal(pooled.credentialMeta?.poolTokenId, shared.id);
+      // Every leasable pooled subscription in the shared test DB, the leased one aside.
+      const subscriptionsLeft =
+        (await prisma.integration.count({
+          where: {
+            name: { in: ['claude_code', 'gpt_code'] },
+            status: 'CONNECTED',
+            poolingEnabled: true,
+            id: { not: shared.id },
+            OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: new Date() } }],
+          },
+        })) > 0;
+      assert.deepEqual(
+        injectedAzure(pooled.envs),
+        subscriptionsLeft ? noAzure : azureEnvs,
+        'Azure is the next credential only after the last subscription'
+      );
 
       // 3. Every subscription limited → the funded Azure deployment alone, recorded as 'azure'.
       await limit(shared.id, later);

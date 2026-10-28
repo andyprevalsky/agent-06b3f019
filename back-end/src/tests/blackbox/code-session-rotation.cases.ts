@@ -395,7 +395,8 @@ export function registerCodeSessionRotationCases(ctx: RotationContext): void {
   });
 
   test('(d) nothing leasable: the next lease is the earliest reset of any own or shared path', () => {
-    const none = { claude: false, codex: false };
+    const off = { subscription: false, funded: false };
+    const none = { claude: off, codex: off };
     const lease = pickNextLease(
       none,
       [
@@ -450,8 +451,13 @@ export function registerCodeSessionRotationCases(ctx: RotationContext): void {
     });
     assert.equal(pickNextLease(none, [], [], 'claude'), null, 'no known reset: nothing is claimed');
     assert.deepEqual(
-      pickNextLease({ claude: false, codex: true }, [], [], 'claude'),
-      { provider: 'codex', label: null, available_now: true, available_at: null },
+      pickNextLease(
+        { claude: off, codex: { subscription: true, funded: false } },
+        [],
+        [],
+        'claude'
+      ),
+      { provider: 'codex', label: null, available_now: true, available_at: null, kind: 'pool' },
       'the other provider when the preferred one has nothing'
     );
   });

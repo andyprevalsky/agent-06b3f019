@@ -22,6 +22,8 @@
  *   (g) no credential value in any answer, handoff or log line
  *   Codex order (code-session-codex-azure.cases.ts): own login → shared login →
  *       funded Azure deployment → nothing; the served path is recorded
+ *   Subscriptions first (code-session-credential-order.cases.ts): P subscription →
+ *       Q subscription (handoff) → P funded key → Q funded key → paused
  *
  * Hermetic: local checkpoint storage, real DB rows, fake E2B over local HOMEs,
  * no E2B or provider calls.
@@ -60,6 +62,7 @@ import {
 import { Sandbox } from 'e2b';
 import { registerCodeSessionRotationCases } from './code-session-rotation.cases';
 import { registerCodexAzureFallbackCases } from './code-session-codex-azure.cases';
+import { registerCodeSessionCredentialOrderCases } from './code-session-credential-order.cases';
 import { fetchClaudeCodeCredentialsWithMeta } from '../../providers/claudeCredentials';
 import { claudeTaskIntegrationId } from '../../providers/claudeCodeSandboxAuth';
 import { localDeviceSandboxId } from '../../providers/localDevices/hub';
@@ -179,6 +182,9 @@ after(async () => {
   await prisma.$disconnect();
 });
 
+// First, before the cases below leave pooled subscriptions of their own behind.
+registerCodeSessionCredentialOrderCases({ sealEnvelope, http });
+
 test('a usage limit rate-limits exactly the task’s token until the reset; availability follows', async () => {
   const first = await poolToken('claude_code');
   const second = await poolToken('claude_code');
@@ -192,7 +198,7 @@ test('a usage limit rate-limits exactly the task’s token until the reset; avai
   assert.deepEqual(marked.data.accounts, [], 'this user has no connected accounts of its own');
   assert.deepEqual(
     marked.data.next_lease,
-    { provider: 'claude', label: null, available_now: true, available_at: null },
+    { provider: 'claude', label: null, available_now: true, available_at: null, kind: 'pool' },
     'the respawn leases a shared Claude credential that is not limited'
   );
   const firstRow = await prisma.integration.findUniqueOrThrow({ where: { id: first } });
@@ -543,6 +549,7 @@ test('a limit on one own account marks only it; the answer lists every account a
         label: spare.accountEmail,
         available_now: true,
         available_at: null,
+        kind: 'own',
       },
       `the respawn stays on Claude with the account that is not limited (${usedEmail} is)`
     );

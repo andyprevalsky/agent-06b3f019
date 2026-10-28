@@ -564,9 +564,12 @@ async def fetch_code_credential_availability(
     """Whether a Claude / Codex credential can be leased right now (no lease taken).
 
     ``own_only``: count only the user's own logins (a local Mac run never gets a
-    pool token or a funded key). ``code_session_id`` (a retry or a resume):
-    also the session's own provider (``session_provider``, preferred by the
-    retry) and the stored ``outlook`` (accounts, shared paths, earliest reset).
+    pool token or a funded key). ``next_credential``: the provider (and tier)
+    the spawn takes in the backend's C15 order, every subscription before any
+    funded key; ``None`` when nothing is leasable (absent from an older backend).
+    ``code_session_id`` (a retry or a resume): also the session's own provider
+    (``session_provider``, first in that order) and the stored ``outlook``
+    (accounts, shared paths, earliest reset).
     """
     config = load_config()
     params = {"user_id": user_id}
@@ -589,6 +592,11 @@ async def fetch_code_credential_availability(
             if not isinstance(body, dict):
                 return None
             answer: dict[str, Any] = {provider: body.get(provider) is True for provider in ("claude", "codex")}
+            if "next_credential" in body:
+                step = body.get("next_credential")
+                answer["next_credential"] = (
+                    step if isinstance(step, dict) and step.get("provider") in ("claude", "codex") else None
+                )
             if body.get("session_provider") in ("claude", "codex"):
                 answer["session_provider"] = body["session_provider"]
             if isinstance(body.get("outlook"), dict):

@@ -10,18 +10,21 @@
  *   │     markers and columns the credential pools already read. The answer
  *   │     carries the user's connected accounts and what a respawn would
  *   │     lease (codeUsageOutlook) for the parent, which decides what to do.
- *   ├─ GET /credential-availability ──► codeCredentialAvailability
- *   │     is any Claude / Codex credential leasable right now (count queries,
- *   │     no decrypt, no lease); with code_session_id also the session's own
- *   │     provider (a resume prefers the same harness) and the outlook, so a
+ *   ├─ GET /credential-availability ──► codeCredentialTiers
+ *   │     which subscription / funded credential of each provider is leasable
+ *   │     right now (count queries, no decrypt, no lease) and next_credential:
+ *   │     the provider the next spawn takes in the C15 order (credentialOrder.ts:
+ *   │     every subscription before any funded key); with code_session_id also
+ *   │     the session's own provider (P in that order) and the outlook, so a
  *   │     retry with nothing leasable stays paused and names the earliest reset
- *   └─ retry with code_session_id ──► any credential that is not
- *         rate-limited; the same provider resumes the paused sandbox and the
- *         CLI's own conversation (`claude --resume` / Codex thread resume);
- *         switchCodeSessionProvider only when that provider has none left:
- *         the new provider restores the checkpoint (same branch, commits,
- *         files), gets the previous CLI's session log as a file in the
- *         sandbox and a handoff prompt naming its path
+ *   └─ retry with code_session_id ──► next_credential; the same provider
+ *         resumes the paused sandbox and the CLI's own conversation
+ *         (`claude --resume` / Codex thread resume); switchCodeSessionProvider
+ *         when that provider has no subscription left but the other one does
+ *         (or only the other one's funded key is left): the new provider
+ *         restores the checkpoint (same branch, commits, files), gets the
+ *         previous CLI's session log as a file in the sandbox and a handoff
+ *         prompt naming its path
  *
  * 10k agents: per call one indexed session read plus a few count queries
  * (and, on a usage limit or a blocked retry, one indexed read of the user's
@@ -50,6 +53,12 @@ import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { checkpointKey, getCheckpointObject } from './artifactStore';
 import { CLI_LOG_ARTIFACT } from './checkpoint';
 import { excerpt, parseCodeEvents } from './codeEvents';
+import {
+  pickCodeCredential,
+  type CodeCredentialStep,
+  type CodeCredentialTiers,
+  type CodeProvider,
+} from './credentialOrder';
 import type { CodeSessionFs } from './sandboxFs';
 import {
   CODE_SESSION_STATES,
@@ -60,7 +69,7 @@ import {
 
 const log = createLogger('CodeSessionUsageLimit');
 
-export type CodeProvider = 'claude' | 'codex';
+export type { CodeProvider } from './credentialOrder';
 
 /** Seconds, milliseconds or an ISO string → Date; null when absent or invalid. */
 export function parseResetsAt(value: unknown): Date | null {
@@ -138,15 +147,17 @@ async function hasLeasableIntegration(
   userId: string,
   name: string,
   now: Date,
-  ownOnly: boolean
+  ownOnly: boolean,
+  excludeId?: string
 ): Promise<boolean> {
   const notLimited = [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }];
+  const excluded = excludeId !== undefined ? { id: { not: excludeId } } : {};
   const own = await prisma.integration.count({
-    where: { userId, name, status: 'CONNECTED', OR: notLimited },
+    where: { userId, name, status: 'CONNECTED', OR: notLimited, ...excluded },
   });
   if (own > 0 || ownOnly) return own > 0;
   const pooled = await prisma.integration.count({
-    where: { name, status: 'CONNECTED', poolingEnabled: true, OR: notLimited },
+    where: { name, status: 'CONNECTED', poolingEnabled: true, OR: notLimited, ...excluded },
   });
   return pooled > 0;
 }
@@ -245,35 +256,79 @@ export interface CodexSpawnAuth {
  * Azure deployment unless it is backed off (codex_funded_cooldown). Throws
  * CodeAgentCredentialError when none is usable; a retry then stays paused on
  * the availability plan instead of starting a doomed run.
+ *
+ * The in-sandbox switch to Azure (the login proves unusable mid-run) is armed
+ * only when Azure is the next credential after this login (credentialOrder.ts).
+ * The sandbox cannot lease a login itself, so while another subscription
+ * (Codex or Claude) is leasable the run fails to the parent instead, and its
+ * retry takes that subscription (a Claude one with the provider handoff).
  */
 export async function resolveCodexSpawnAuth(
   userId: string,
   now = new Date()
 ): Promise<CodexSpawnAuth> {
   const credentialMeta = await fetchGptCodeCredentialsWithMeta(userId);
-  const azureFunding = await usableCodexAzureFunding(now);
+  const funding = await usableCodexAzureFunding(now);
+  const leasedId = credentialMeta?.integrationId ?? credentialMeta?.poolTokenId;
+  const azureFunding =
+    credentialMeta !== null &&
+    funding !== null &&
+    (await otherSubscriptionLeasable(userId, leasedId, now))
+      ? null
+      : funding;
   const envs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
   return { credentialMeta, azureFunding, envs, servedBy: credentialMeta?.source ?? 'azure' };
 }
 
+/** Any Claude subscription, or a Codex one other than the leased login (own or shared). */
+async function otherSubscriptionLeasable(
+  userId: string,
+  leasedCodexId: string | undefined,
+  now: Date
+): Promise<boolean> {
+  return (
+    (await hasLeasableIntegration(userId, 'claude_code', now, false)) ||
+    (await hasLeasableIntegration(userId, 'gpt_code', now, false, leasedCodexId ?? ''))
+  );
+}
+
 /**
- * Whether a spawn could lease a Claude / Codex credential right now.
- * `ownOnly` (a Mac run) counts only the user's own logins: a local session
- * never receives a pool token or a funded key.
+ * Which subscription / funded credential of each provider a spawn could lease
+ * right now. `ownOnly` (a Mac run) counts only the user's own logins: a local
+ * session never receives a pool token or a funded key.
  */
+export async function codeCredentialTiers(
+  userId: string,
+  now = new Date(),
+  options: { ownOnly?: boolean } = {}
+): Promise<CodeCredentialTiers> {
+  const ownOnly = options.ownOnly === true;
+  return {
+    claude: {
+      subscription: await hasLeasableIntegration(userId, 'claude_code', now, ownOnly),
+      funded: !ownOnly && (await claudeCodeFundedKeyUsable()),
+    },
+    codex: {
+      subscription: await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly),
+      funded: !ownOnly && (await codexFundedUsable(now)),
+    },
+  };
+}
+
+/** Whether a spawn could lease any Claude / Codex credential right now. */
 export async function codeCredentialAvailability(
   userId: string,
   now = new Date(),
   options: { ownOnly?: boolean } = {}
 ): Promise<Record<CodeProvider, boolean>> {
-  const ownOnly = options.ownOnly === true;
-  const claude =
-    (await hasLeasableIntegration(userId, 'claude_code', now, ownOnly)) ||
-    (!ownOnly && (await claudeCodeFundedKeyUsable()));
-  const codex =
-    (await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly)) ||
-    (!ownOnly && (await codexFundedUsable(now)));
-  return { claude, codex };
+  return anyTier(await codeCredentialTiers(userId, now, options));
+}
+
+function anyTier(tiers: CodeCredentialTiers): Record<CodeProvider, boolean> {
+  return {
+    claude: tiers.claude.subscription || tiers.claude.funded,
+    codex: tiers.codex.subscription || tiers.codex.funded,
+  };
 }
 
 /** The provider a live code session the user owns last ran on; null otherwise. */
@@ -287,31 +342,42 @@ export async function codeSessionProvider(
 }
 
 /**
- * GET /credential-availability: what a spawn could lease now. With a
- * `codeSessionId` (a retry or a resume from the root) it also names the
- * session's own provider, which the retry prefers (same harness, native
- * resume), and the outlook, so a retry that can lease nothing stays paused
- * and names every path and the earliest reset instead of starting an agent.
+ * GET /credential-availability: what a spawn could lease now, and
+ * `next_credential`, the provider (and tier) the spawn takes in the C15 order
+ * (every subscription before any funded key, credentialOrder.ts). With a
+ * `codeSessionId` (a retry or a resume from the root) the session's own
+ * provider is P in that order (same harness, native resume) and the outlook
+ * comes along, so a retry that can lease nothing stays paused and names every
+ * path and the earliest reset instead of starting an agent.
  */
 export async function codeSpawnCredentialPlan(
   userId: string,
   options: { ownOnly?: boolean; codeSessionId?: string; prefer?: CodeProvider; now?: Date } = {}
 ): Promise<
   Record<CodeProvider, boolean> & {
+    next_credential: CodeCredentialStep | null;
     session_provider?: CodeProvider | null;
     outlook?: CodeUsageOutlook;
   }
 > {
   const now = options.now ?? new Date();
-  const available = await codeCredentialAvailability(userId, now, { ownOnly: options.ownOnly });
-  if (options.codeSessionId === undefined) return available;
+  const tiers = await codeCredentialTiers(userId, now, { ownOnly: options.ownOnly });
+  const available = anyTier(tiers);
+  if (options.codeSessionId === undefined) {
+    return {
+      ...available,
+      next_credential: pickCodeCredential(tiers, options.prefer ?? 'claude'),
+    };
+  }
   const sessionProvider = await codeSessionProvider(userId, options.codeSessionId);
-  const outlook = await codeUsageOutlook(userId, {
-    prefer: sessionProvider ?? options.prefer ?? 'claude',
-    now,
-    ownOnly: options.ownOnly,
-  });
-  return { ...available, session_provider: sessionProvider, outlook };
+  const prefer = sessionProvider ?? options.prefer ?? 'claude';
+  const outlook = await codeUsageOutlook(userId, { prefer, now, ownOnly: options.ownOnly });
+  return {
+    ...available,
+    next_credential: pickCodeCredential(tiers, prefer),
+    session_provider: sessionProvider,
+    outlook,
+  };
 }
 
 /** One of the user's connected Claude Code / Codex accounts, as the parent sees it. */
@@ -327,17 +393,18 @@ export interface CodeAccountUsage {
 }
 
 /**
- * What a respawn leases: any credential that is not rate-limited (the
- * session's provider first), else the account with the earliest reset.
+ * What a respawn leases: the first leasable credential in the C15 order
+ * (subscriptions before funded keys, the session's provider first), else the
+ * account with the earliest reset.
  */
 export interface CodeNextLease {
   provider: CodeProvider;
-  /** The user's own account it takes; null for a shared pool account or the funded key. */
+  /** The user's own account it takes, or the funded path's label; null for a shared pool account. */
   label: string | null;
   available_now: boolean;
   /** When nothing is available now: the earliest reset. */
   available_at: string | null;
-  /** When nothing is available now: whether that reset is an own account or a shared path. */
+  /** Own account, shared subscription pool or funded key: what it takes now, or whose reset is earliest. */
   kind?: 'own' | 'pool' | 'funded';
 }
 
@@ -462,7 +529,7 @@ export async function codeUsageOutlook(
       this_run: row.id === options.thisRunIntegrationId,
     };
   });
-  const available = await codeCredentialAvailability(userId, now, { ownOnly: options.ownOnly });
+  const tiers = await codeCredentialTiers(userId, now, { ownOnly: options.ownOnly });
   // A Mac run only ever uses the user's own logins (C14): no shared paths.
   const paths =
     options.ownOnly === true
@@ -471,28 +538,40 @@ export async function codeUsageOutlook(
   return {
     accounts,
     ...(paths !== undefined ? { paths } : {}),
-    next_lease: pickNextLease(available, accounts, paths ?? [], options.prefer),
+    next_lease: pickNextLease(tiers, accounts, paths ?? [], options.prefer),
   };
 }
 
 /**
- * What a respawn leases: the preferred provider when it has a leasable
- * credential, else the other one; with nothing leasable, the earliest reset of
- * any limited path (own account, shared pool or funded key).
+ * What a respawn leases: the first leasable credential in the C15 order
+ * (pickCodeCredential: the preferred provider's subscriptions, the other's,
+ * then the preferred funded key, then the other's); with nothing leasable, the
+ * earliest reset of any limited path (own account, shared pool or funded key).
  */
 export function pickNextLease(
-  available: Record<CodeProvider, boolean>,
+  tiers: CodeCredentialTiers,
   accounts: CodeAccountUsage[],
   paths: CodeSharedPath[],
   prefer: CodeProvider
 ): CodeNextLease | null {
-  const other: CodeProvider = prefer === 'claude' ? 'codex' : 'claude';
-  for (const provider of [prefer, other]) {
-    if (!available[provider]) continue;
+  const next = pickCodeCredential(tiers, prefer);
+  if (next !== null) {
+    const { provider } = next;
+    if (next.tier === 'funded') {
+      const funded = paths.find((path) => path.provider === provider && path.kind === 'funded');
+      const label = funded?.label ?? null;
+      return { provider, label, available_now: true, available_at: null, kind: 'funded' };
+    }
     const own = accounts.find(
       (account) => account.provider === provider && account.status === 'available'
     );
-    return { provider, label: own?.label ?? null, available_now: true, available_at: null };
+    return {
+      provider,
+      label: own?.label ?? null,
+      available_now: true,
+      available_at: null,
+      kind: own !== undefined ? 'own' : 'pool',
+    };
   }
   const limited = [
     ...accounts.map((account) => ({ ...account, kind: 'own' as const })),

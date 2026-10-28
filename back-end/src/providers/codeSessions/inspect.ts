@@ -47,7 +47,8 @@ import { applyCheckpoint } from './checkpoint';
 import { githubAuthRemoteUrl, loadNewestVerifiedCheckpoint, primaryRepoFacts } from './lifecycle';
 import { type CodeSessionFs, e2bSandboxFs } from './sandboxFs';
 import { CODE_SESSION_STATES, findOwnedCodeSession } from './store';
-import { codeCredentialAvailability, parseResetsAt, resolveCodexSpawnAuth } from './usageLimit';
+import { codeProviderOrder } from './credentialOrder';
+import { codeCredentialTiers, parseResetsAt, resolveCodexSpawnAuth } from './usageLimit';
 import {
   claudeHomeConfig,
   envFileContent,
@@ -214,12 +215,13 @@ async function markClaudeUsageLimited(
   }
 }
 
-/** Providers to try, preferring the one the session itself runs on (C15). */
+/**
+ * Providers to try in the C15 order (credentialOrder.ts): the session's own
+ * provider's subscriptions, the other's, then the funded keys in that order.
+ */
 async function providerOrder(userId: string, preferred: string): Promise<InspectProvider[]> {
-  const available = await codeCredentialAvailability(userId);
   const first: InspectProvider = preferred === 'codex' ? 'codex' : 'claude';
-  const second: InspectProvider = first === 'claude' ? 'codex' : 'claude';
-  return [first, second].filter((provider) => available[provider]);
+  return codeProviderOrder(await codeCredentialTiers(userId), first);
 }
 
 export interface InspectCodeParams {

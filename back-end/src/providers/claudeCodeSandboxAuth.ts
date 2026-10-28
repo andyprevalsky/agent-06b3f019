@@ -392,10 +392,10 @@ function codexAzureEnvs(funding: CodexAzureFunding): Record<string, string> {
  *
  * User OAuth stays first; the funded path bills to our Azure credits:
  *   1. A synced/pool ChatGPT/Codex OAuth credential → CODEX_AUTH_JSON (primary).
- *      When the Azure deployment is configured it is injected ALONGSIDE so the
- *      sandbox can switch provider and retry if OAuth hits `usage_limit_reached`
- *      or proves revoked MID-RUN (`fetchGptCodeCredentialsWithMeta` only filters
- *      tokens the DB already marked rate-limited).
+ *      When `funding` is given it is injected ALONGSIDE so the sandbox can
+ *      switch provider if the login proves unusable MID-RUN. resolveCodexSpawnAuth
+ *      passes it only when no other subscription (Codex or Claude) is leasable:
+ *      subscriptions come before funded keys (codeSessions/credentialOrder.ts).
  *   2. No OAuth credential → the Azure deployment alone.
  *   3. Otherwise throw — nothing usable.
  *

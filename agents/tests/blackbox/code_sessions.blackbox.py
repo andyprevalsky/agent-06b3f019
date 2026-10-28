@@ -1461,6 +1461,115 @@ async def test_rotation_c_only_other_provider_switches_with_a_handoff():
         session_home.cleanup()
 
 
+async def test_rotation_h_another_providers_subscription_beats_the_funded_key():
+    """(h) Subscriptions first (C15): the Claude subscriptions are limited, the funded Anthropic
+    key and a Codex subscription are both left → the retry continues on the Codex subscription
+    with the handoff, as the backend's next_credential says (not on the funded key, which the
+    old "same provider while it has any credential" choice took)."""
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={
+            "claude": True,
+            "codex": True,
+            "session_provider": "claude",
+            "next_credential": {"provider": "codex", "tier": "subscription"},
+        },
+        next_lease={**_CODEX_LEASE, "kind": "own"},
+    )
+    try:
+        assert first["message"].endswith(
+            _retry_line(
+                "no Claude Code subscription is left, so the retry continues this session on Codex "
+                "(now Codex codex@example.com) from the latest checkpoint, with a handoff prompt that points it "
+                "at the previous agent's trajectory."
+            )
+        ), first["message"]
+        assert backend.created[1]["code_provider"] == "codex", backend.created[1]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert retry["code_provider"] == "codex" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_i_only_the_funded_key_left_resumes_the_same_provider():
+    """(i) Every subscription limited: the session's own funded key, same harness, native resume."""
+    funded_lease = {
+        "provider": "claude",
+        "label": "funded Anthropic API key",
+        "available_now": True,
+        "available_at": None,
+        "kind": "funded",
+    }
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={
+            "claude": True,
+            "codex": True,
+            "session_provider": "claude",
+            "next_credential": {"provider": "claude", "tier": "funded"},
+        },
+        next_lease=funded_lease,
+    )
+    try:
+        assert first["message"].endswith(
+            _retry_line(
+                "no Claude Code subscription is left, so the retry uses the funded Anthropic API key, resumes "
+                "the paused sandbox and continues the same Claude Code conversation."
+            )
+        ), first["message"]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        runs = session_home.runs()
+        assert len(runs) == 2 and "--resume" in runs[1]["argv"], runs
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_fresh_spawn_follows_the_backends_subscription_first_choice():
+    """A fresh spawn asking for Claude takes a Codex subscription before the funded Anthropic key."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "finish"})
+    backend = _Backend(session_home)
+    backend.availability = [
+        {"claude": True, "codex": True, "next_credential": {"provider": "codex", "tier": "subscription"}}
+    ]
+    try:
+        with backend.patched():
+            result = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(code_provider="claude")),
+                timeout=30,
+            )
+        assert backend.availability_calls == [{"code_session_id": None, "prefer": "claude"}], backend.availability_calls
+        assert backend.created[0]["code_provider"] == "codex", backend.created[0]
+        assert result["code_provider"] == "codex" and result["status"] == "completed", result
+    finally:
+        session_home.cleanup()
+
+
+def test_usage_limit_clause_names_a_funded_key_on_the_other_provider():
+    """Every subscription and this provider's funded key gone: the other provider's funded key, named."""
+    from domains.spawn_claude_code_agent.service import format_usage_limit_message
+
+    message = format_usage_limit_message(
+        code_provider="codex",
+        resets_at_iso=None,
+        facts={"code_session_id": "cs-1"},
+        next_lease={
+            "provider": "claude",
+            "label": "funded Anthropic API key",
+            "available_now": True,
+            "available_at": None,
+            "kind": "funded",
+        },
+    )
+    assert message.endswith(
+        "to continue: no Codex credential is left, so the retry continues this session on Claude Code "
+        "(now the funded Anthropic API key) from the latest checkpoint, with a handoff prompt that points it "
+        "at the previous agent's trajectory."
+    ), message
+
+
 async def test_rotation_d_no_credential_keeps_the_session_paused_and_starts_nothing():
     """(d) Nothing leasable anywhere → no create, no resume, the earliest reset named."""
     limited_paths = [
@@ -1687,6 +1796,21 @@ async def _run_all_tests():
     )
     await r.record_async(
         "rotation_f_duplicate_retry_starts_one_agent", test_rotation_f_duplicate_concurrent_retry_starts_one_agent
+    )
+    # Subscriptions before funded keys (C15 order; the backend half is code-session-credential-order.cases.ts).
+    await r.record_async(
+        "rotation_h_other_subscription_beats_funded_key",
+        test_rotation_h_another_providers_subscription_beats_the_funded_key,
+    )
+    await r.record_async(
+        "rotation_i_funded_key_resumes_same_provider",
+        test_rotation_i_only_the_funded_key_left_resumes_the_same_provider,
+    )
+    await r.record_async(
+        "fresh_spawn_follows_subscription_first_choice", test_fresh_spawn_follows_the_backends_subscription_first_choice
+    )
+    r.record(
+        "usage_limit_clause_names_other_funded_key", test_usage_limit_clause_names_a_funded_key_on_the_other_provider
     )
     teardown_mock()
     return r.all_passed

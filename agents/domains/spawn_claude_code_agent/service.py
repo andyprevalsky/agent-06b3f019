@@ -2917,14 +2917,26 @@ def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool, from_p
             "starts nothing."
         )
     label = next_lease.get("label")
-    now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+    funded = next_lease.get("kind") == "funded"
+    if funded:
+        now = f"now the {label}" if label else f"now the funded {provider} key"
+    else:
+        now = f"now {provider} {label}" if label else f"now a shared {provider} account"
     if from_provider is None or next_lease["provider"] == from_provider:
+        if funded:
+            return (
+                f"no {provider} subscription is left, so the retry uses the {label or 'funded key'}, "
+                f"resumes the paused sandbox and continues the same {provider} conversation."
+            )
         return (
             f"the retry leases an account that is not rate-limited ({now}), resumes the paused "
             f"sandbox and continues the same {provider} conversation."
         )
+    # Subscriptions come first (C15): a subscription of the other provider is
+    # taken while this provider's funded key is still available.
+    left = "subscription" if next_lease.get("kind") in ("own", "pool") else "credential"
     return (
-        f"no {_provider_label(from_provider)} credential is left, so the retry continues this session on "
+        f"no {_provider_label(from_provider)} {left} is left, so the retry continues this session on "
         f"{provider} ({now}) from the latest checkpoint, with a handoff prompt that points it at the "
         "previous agent's trajectory."
     )
@@ -3160,6 +3172,26 @@ async def resolve_code_agent_provider_activity(default_provider: str) -> str:
     return resolve_code_agent_provider(default_provider)
 
 
+def _next_code_credential(available: Optional[Dict[str, Any]], preferred: str) -> tuple[Optional[str], Optional[str]]:
+    """The provider (and tier) a spawn takes: the backend's ``next_credential`` (C15 order).
+
+    An older backend without it: the preferred provider when it has any
+    credential, else the other one.
+    """
+    if available is None:
+        return None, None
+    step = available.get("next_credential")
+    if isinstance(step, dict) and step.get("provider") in ("claude", "codex"):
+        return str(step["provider"]), str(step.get("tier") or "") or None
+    if "next_credential" in available:
+        return None, None
+    other = "codex" if preferred == "claude" else "claude"
+    for provider in (preferred, other):
+        if available.get(provider):
+            return provider, None
+    return None, None
+
+
 async def _resolve_claude_token_for_activity(user_id: str, code_provider: str) -> Optional[str]:
     """Resolve Claude OAuth inside the activity so it never enters workflow history."""
     if code_provider != "claude":
@@ -3344,12 +3376,14 @@ async def spawn_claude_code_activity(
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
 
         if attached is None:
-            # C15 re-credentialing. A resumed session (a retry after a usage
+            # C15 re-credentialing, in the backend's order: every subscription
+            # before any funded key. A resumed session (a retry after a usage
             # limit, or the root passing its code_session_id) prefers its own
-            # provider: same harness, native resume of its conversation. Only
-            # when that provider has no leasable credential does the session
-            # continue on the other one (provider handoff in the backend). A
-            # retry that can lease nothing stays paused and starts nothing.
+            # provider: same harness, native resume of its conversation. With
+            # none of its subscriptions left the session continues on the other
+            # provider's subscription (provider handoff in the backend) before
+            # its own funded key. A retry that can lease nothing stays paused
+            # and starts nothing.
             # A Mac run only ever gets the user's own CLI login, never a pool token.
             resuming = code_session_id if target != "local" else None
             available = await fetch_code_credential_availability(
@@ -3360,8 +3394,8 @@ async def spawn_claude_code_activity(
             )
             session_provider = (available or {}).get("session_provider")
             preferred = session_provider if session_provider in ("claude", "codex") else code_provider
-            other_provider = "codex" if preferred == "claude" else "claude"
-            if available is not None and available.get(preferred):
+            chosen, chosen_tier = _next_code_credential(available, preferred)
+            if available is not None and chosen == preferred:
                 if preferred != code_provider:
                     logger.info(
                         "[ClaudeCode] Resuming the code session on its own provider",
@@ -3372,16 +3406,18 @@ async def spawn_claude_code_activity(
                     )
                     action_summary.append(f"Resuming code session on its own provider ({preferred})")
                 code_provider = preferred
-            elif available is not None and available.get(other_provider):
+            elif available is not None and chosen is not None:
                 logger.warning(
-                    "[ClaudeCode] No leasable credential for provider; continuing on the other one",
+                    "[ClaudeCode] No subscription left for provider; continuing on the other one",
                     agent_id=agent_id,
                     from_provider=preferred,
-                    to_provider=other_provider,
+                    to_provider=chosen,
+                    to_tier=chosen_tier,
                     code_session_id=code_session_id,
                 )
-                action_summary.append(f"No {preferred} credential available; continuing on {other_provider}")
-                code_provider = other_provider
+                left = "subscription" if chosen_tier == "subscription" else "credential"
+                action_summary.append(f"No {preferred} {left} available; continuing on {chosen}")
+                code_provider = chosen
             elif available is not None and resuming:
                 return _no_credential_result(
                     available=available,
