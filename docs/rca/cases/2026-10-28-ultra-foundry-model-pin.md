@@ -67,3 +67,15 @@ all remaining issues and including them in the deployment PR.
 Changing a pool's primary model does not pin optional fallback transports. Test
 the actual production pool across every enabled transport, alongside generic
 helper tests.
+
+## Follow-up speed-fixture regression
+
+The full backend coverage run exposed an additional stale fixture in
+`agent-speed.test.ts`: its Ultra priority-tier test configured only GPT-6 Sol,
+so the strict GPT-6.1 pool correctly found no eligible route. The unchanged
+standalone test reproduced this failure. Updating that fixture to GPT-6.1 Sol
+and asserting the actual wire model for all three speed levels makes the same
+test pass (17/17). Generic unpinned compatibility tests remain unchanged.
+Evidence: `/var/tmp/rose-agent-speed-fixture-before.log` and
+`/var/tmp/rose-agent-speed-fixture-after.log`. The original full-suite failure
+is retained; this focused pass does not relabel that run as green.
