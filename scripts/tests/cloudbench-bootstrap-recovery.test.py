@@ -1943,7 +1943,10 @@ class ControllerExportContinuationTests(unittest.TestCase):
 
     def test_exact_idle_init_permission_does_not_hide_sleep_child(self):
         self.prepare();self.module.launch(self.launch)
-        with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':self.birth(1999)}]):
+        # The writer persists, so export must wait out the whole bounded drain
+        # before refusing; a short drain proves the same refusal without 120 s.
+        with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':self.birth(1999)}]),\
+                patch.object(self.module,'EXPORT_WRITER_DRAIN_SECONDS',0.3),patch.object(self.module,'EXPORT_WRITER_POLL_SECONDS',0.01):
             self.assertEqual(self.module.export(self.types.SimpleNamespace(record=self.record,archive=self.base/'refused.tar.gz',manifest=self.base/'refused-manifest.json',pending=self.base/'pending.json')),75)
         self.assertFalse((self.base/'refused.tar.gz').exists())
 
@@ -4130,4 +4133,7 @@ gosu(){ shift; python3 -c 'import os,sys;os.setgid(1001);os.setuid(1001);os.exec
 
 
 if __name__ == "__main__":
-    unittest.main()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from deploy_gate_shard import run_unittest_module
+
+    run_unittest_module()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -65,19 +66,103 @@ DEFAULT_MAX_WORKERS = 8
 REQUIRED_HOST_TOOLS = ("lsof",)
 
 
+# A gate with no recorded cost is bounded by this wall-clock limit; one hung
+# suite once held Static verify for 689 minutes. Gates with a recorded cost get
+# TIMEOUT_FACTOR times that cost (never less than the default).
+DEFAULT_GATE_TIMEOUT_SECONDS = 600.0
+TIMEOUT_FACTOR = 3.0
+TIMEOUT_EXIT_CODE = 124
+SHARD_ENV = "DEPLOY_GATE_SHARD"
+# The CLI records which gates failed so a retry can run them first. Every
+# retry still runs the full registry; ordering never skips a gate.
+FAILURE_STATE = Path(".context") / "deploy-structural" / "last-failures.json"
+
+
 @dataclass(frozen=True)
 class Gate:
     name: str
     command: tuple[str, ...]
+    # Observed full-suite seconds on the 8-worker deploy host (unsharded).
+    # Orders the queue longest-first and derives the per-gate timeout.
+    expected_seconds: float = 0.0
+    # Split into this many processes; each gets DEPLOY_GATE_SHARD=i/N and the
+    # suite selects every N-th test (scripts/tests/deploy_gate_shard.py).
+    shards: int = 1
+
+
+@dataclass(frozen=True)
+class Job:
+    gate: Gate
+    shard: int  # 1-based; 0 means unsharded
+
+    @property
+    def label(self) -> str:
+        if not self.shard:
+            return self.gate.name
+        return f"{self.gate.name}[{self.shard}/{self.gate.shards}]"
+
+    @property
+    def expected_seconds(self) -> float:
+        return self.gate.expected_seconds / max(self.gate.shards, 1)
+
+    @property
+    def timeout_seconds(self) -> float:
+        return max(DEFAULT_GATE_TIMEOUT_SECONDS, TIMEOUT_FACTOR * self.expected_seconds)
+
+    def environment(self) -> dict[str, str]:
+        env = gate_environment()
+        if self.shard:
+            env[SHARD_ENV] = f"{self.shard}/{self.gate.shards}"
+        else:
+            env.pop(SHARD_ENV, None)
+        return env
 
 
 @dataclass
 class RunningGate:
-    gate: Gate
+    gate: Job
     process: subprocess.Popen[bytes]
     output: BinaryIO
     output_path: Path
     started: float
+    timed_out: bool = False
+
+
+def expand_jobs(gates: Sequence[Gate], first: frozenset[str] = frozenset()) -> list[Job]:
+    """Shard expansion: previously failed gates first, then longest expected
+    job first; ties keep registry order."""
+    jobs = []
+    for gate in gates:
+        if gate.shards > 1:
+            jobs.extend(Job(gate, shard) for shard in range(1, gate.shards + 1))
+        else:
+            jobs.append(Job(gate, 0))
+    return sorted(
+        jobs, key=lambda job: (job.gate.name not in first, -job.expected_seconds)
+    )
+
+
+def load_previous_failures(path: Path) -> set[str]:
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return set()
+    failed = recorded.get("failed") if isinstance(recorded, dict) else None
+    return {name for name in failed if isinstance(name, str)} if isinstance(failed, list) else set()
+
+
+def record_failures(path: Path, failed: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "failed": sorted(failed),
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+    )
+    os.replace(temporary, path)
 
 
 GATES = (
@@ -88,7 +173,7 @@ GATES = (
     ),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
-    Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh")),
+    Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh"), expected_seconds=55),
     Gate(
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
@@ -102,8 +187,8 @@ GATES = (
         "benchmark-sms-transport-mock",
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
-    Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
-    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
+    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),
     Gate(
@@ -121,7 +206,7 @@ GATES = (
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
     Gate(
         "original600-portable-operator",
-        ("python3", "scripts/tests/original600-portable-operator.test.py"),
+        ("python3", "scripts/tests/original600-portable-operator.test.py"), expected_seconds=134
     ),
     Gate(
         "benchmark-provider-capacity",
@@ -139,7 +224,7 @@ GATES = (
     ),
     Gate(
         "cloudbench-quiesced-forensic-retirement",
-        ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"),
+        ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
@@ -243,7 +328,7 @@ GATES = (
     ),
     Gate(
         "cloudbench-bootstrap-recovery",
-        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
+        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=200, shards=2
     ),
     Gate(
         "cloudbench-static-service-observation",
@@ -277,7 +362,7 @@ GATES = (
     Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
     Gate(
         "deploy-structural-runner",
-        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
@@ -288,7 +373,7 @@ GATES = (
     Gate("run-seed-exit-code", ("bash", "scripts/tests/run-seed-exit-code.test.sh")),
     Gate(
         "run-public-tunnel-routing",
-        ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"),
+        ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"), expected_seconds=76
     ),
     Gate(
         "setup-db-concurrency",
@@ -314,7 +399,7 @@ GATES = (
     # from back-end/package-lock.json alone, never the unlocked root workspace.
     Gate(
         "render-backend-build",
-        ("bash", "scripts/tests/render-backend-build.test.sh"),
+        ("bash", "scripts/tests/render-backend-build.test.sh"), expected_seconds=107
     ),
     # Agents blackbox files are not auto-discovered: an unregistered test_* never
     # runs while its domain still reports green, and no other /deploy lane runs
@@ -330,6 +415,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--max-workers", type=int)
+    parser.add_argument(
+        "--no-failed-first",
+        action="store_true",
+        help="ignore the recorded failures of the previous run when ordering",
+    )
     return parser
 
 
@@ -357,13 +447,58 @@ def _stop_running(running: Sequence[RunningGate]) -> None:
         item.output.close()
 
 
-def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
+def _enforce_timeouts(running: Sequence[RunningGate]) -> None:
+    now = time.monotonic()
+    for item in running:
+        if item.timed_out or item.process.poll() is not None:
+            continue
+        if now - item.started < item.gate.timeout_seconds:
+            continue
+        item.timed_out = True
+        print(
+            f"TIMEOUT: deploy structural gate {item.gate.label} exceeded "
+            f"{item.gate.timeout_seconds:.0f}s; terminating its process group",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            os.killpg(item.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        deadline = time.monotonic() + SIGNAL_GRACE_SECONDS
+        while item.process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        try:
+            os.killpg(item.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def run_gates(
+    gates: Sequence[Gate],
+    max_workers: int,
+    failure_state: Path | None = None,
+) -> int:
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
 
-    pending = deque(gates)
+    previously_failed = load_previous_failures(failure_state) if failure_state else set()
+    previously_failed &= {gate.name for gate in gates}
+    jobs = expand_jobs(gates, frozenset(previously_failed))
+    if previously_failed:
+        print(
+            "deploy structural gates: running previously failed gate(s) first: "
+            + ", ".join(sorted(previously_failed))
+            + "; the full registry still runs unless one fails again",
+            file=sys.stderr,
+            flush=True,
+        )
+    pending = deque(jobs)
+    began = time.monotonic()
+    repeated_failure = ""
     running: list[RunningGate] = []
     results: dict[str, tuple[int, float, str]] = {}
+    timed_out: set[str] = set()
     received_signal = 0
 
     def forward(signum: int, _frame: object) -> None:
@@ -381,22 +516,27 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="deploy-structural-") as temporary:
             output_root = Path(temporary)
-            while (running or pending) and not received_signal:
-                while pending and len(running) < max_workers and not received_signal:
-                    gate = pending.popleft()
-                    output_path = output_root / f"{gate.name}.log"
+            while (running or pending) and not received_signal and not repeated_failure:
+                while (
+                    pending
+                    and len(running) < max_workers
+                    and not received_signal
+                    and not repeated_failure
+                ):
+                    job = pending.popleft()
+                    output_path = output_root / (job.label.replace("/", "-of-") + ".log")
                     output = output_path.open("wb")
                     process = subprocess.Popen(
-                        gate.command,
+                        job.gate.command,
                         cwd=ROOT,
-                        env=gate_environment(),
+                        env=job.environment(),
                         stdout=output,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
                     running.append(
                         RunningGate(
-                            gate=gate,
+                            gate=job,
                             process=process,
                             output=output,
                             output_path=output_path,
@@ -404,6 +544,7 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
                         )
                     )
 
+                _enforce_timeouts(running)
                 completed = [
                     item for item in running if item.process.poll() is not None
                 ]
@@ -415,17 +556,39 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
                     duration = time.monotonic() - item.started
                     item.output.close()
                     rendered = item.output_path.read_text(errors="replace")
-                    results[item.gate.name] = (exit_code, duration, rendered)
+                    if item.timed_out:
+                        exit_code = TIMEOUT_EXIT_CODE
+                        timed_out.add(item.gate.label)
+                        rendered += (
+                            f"\nTIMEOUT: {item.gate.label} killed after "
+                            f"{item.gate.timeout_seconds:.0f}s\n"
+                        )
+                    results[item.gate.label] = (exit_code, duration, rendered)
                     running.remove(item)
+                    print(
+                        f"[+{time.monotonic() - began:7.1f}s] {item.gate.label} "
+                        f"exit={exit_code} duration={duration:.1f}s",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if exit_code != 0 and item.gate.gate.name in previously_failed:
+                        repeated_failure = item.gate.label
 
             if not received_signal:
-                for gate in gates:
-                    exit_code, duration, rendered = results[gate.name]
+                for job in jobs:
+                    if job.label not in results:
+                        continue
+                    exit_code, duration, rendered = results[job.label]
                     print(
-                        f"\n== {gate.name}: exit={exit_code} duration={duration:.2f}s =="
+                        f"\n== {job.label}: exit={exit_code} duration={duration:.2f}s =="
                     )
                     if rendered:
                         print(rendered, end="" if rendered.endswith("\n") else "\n")
+                print("\nSlowest deploy structural gates:")
+                for label, (_, duration, _) in sorted(
+                    results.items(), key=lambda item: -item[1][1]
+                )[:10]:
+                    print(f"  {duration:8.2f}s  {label}")
     finally:
         _stop_running(running)
         for signum, previous in previous_handlers.items():
@@ -433,8 +596,29 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
 
     if received_signal:
         return 128 + received_signal
-    failures = [name for name, (exit_code, _, _) in results.items() if exit_code != 0]
-    if failures:
+    failures = [
+        name + (" (timed out)" if name in timed_out else "")
+        for name, (exit_code, _, _) in results.items()
+        if exit_code != 0
+    ]
+    failed_gates = {
+        job.gate.name for job in jobs if results.get(job.label, (0,))[0] != 0
+    }
+    if repeated_failure:
+        failed_gates |= previously_failed
+        skipped = [job.label for job in jobs if job.label not in results]
+        print(
+            f"deploy structural gates: previously failed {repeated_failure} failed "
+            f"again; stopped early, {len(skipped)} job(s) not run. "
+            "Fix it and rerun; the gate passes only after a full sweep.",
+            file=sys.stderr,
+        )
+    if failure_state is not None:
+        try:
+            record_failures(failure_state, sorted(failed_gates))
+        except OSError as error:
+            print(f"deploy structural gates: failure record not saved: {error}", file=sys.stderr)
+    if failures or repeated_failure:
         print("failed deploy structural gates: " + ", ".join(failures), file=sys.stderr)
         return 1
     print(f"\nAll {len(gates)} deploy structural gates passed.")
@@ -458,9 +642,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    state = None if args.no_failed_first else ROOT / FAILURE_STATE
     if args.max_workers is None:
-        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS)
-    return run_gates(GATES, max_workers=args.max_workers)
+        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS, failure_state=state)
+    return run_gates(GATES, max_workers=args.max_workers, failure_state=state)
 
 
 if __name__ == "__main__":
