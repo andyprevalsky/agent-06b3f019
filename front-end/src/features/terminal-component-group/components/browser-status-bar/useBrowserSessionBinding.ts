@@ -16,15 +16,31 @@
  * already released. The transcript URL lags until the worker posts again.
  * There is no interval poll: broadcasts carry changes, and the GET only
  * recovers state after mount, a missed broadcast, or a hidden tab.
+ *
+ * TILION TOKEN STATE (bound URL is a Tilion viewer page; token lasts 1800 s):
+ * [HELD] adopted URL for session S at t0
+ *   |  a read returns S with a re-minted token  -> stay HELD (no iframe reload)
+ *   |  a read/broadcast names another session   -> HELD on the new URL at now
+ *   |  t0 + 25 min                              -> fresh GET (retried every
+ *   v                                              minute until one lands)
+ * [DUE] next URL for S is adopted -> HELD at now (iframe remounts once)
+ * Expired or closed sessions arrive as live=false and show LiveViewLoading.
+ * The URL carries a view token: never log it.
  */
 
-import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { readBrowserLiveView } from '@/lib/api';
 import {
   getBrowserSessionBinding,
   publishBrowserSessionBinding,
   subscribeBrowserSessionBinding,
 } from '@/lib/browserSessionBindings';
+import {
+  TILION_LIVE_VIEW_REFRESH_MS,
+  nextHeldTilionLiveView,
+  presentHeldLiveViewUrl,
+  type HeldTilionLiveView,
+} from './liveViewDisplay';
 
 export interface BrowserSessionBindingView {
   browserUrl: string;
@@ -98,10 +114,39 @@ export function useBrowserSessionBinding(
   }, [read]);
 
   const boundUrl = binding?.debugUrl ?? null;
+  const heldTilion = useHeldTilionLiveView(boundUrl, refresh);
+  const presentedUrl = presentHeldLiveViewUrl(heldTilion, boundUrl);
   return {
-    browserUrl: boundUrl ?? transcriptUrl,
+    browserUrl: presentedUrl ?? transcriptUrl,
     isBound: boundUrl !== null,
     isLive: binding?.live !== false,
     refresh,
   };
+}
+
+/** Retry cadence once a Tilion token is due and the refresh read has not landed. */
+const TILION_REFRESH_RETRY_MS = 60_000;
+
+/** Hold one Tilion viewer URL per session and re-mint it before the token expires. */
+function useHeldTilionLiveView(
+  boundUrl: string | null,
+  refresh: () => Promise<void>,
+): HeldTilionLiveView | null {
+  const [held, setHeld] = useState<HeldTilionLiveView | null>(null);
+  useEffect(() => {
+    setHeld((previous) => nextHeldTilionLiveView(previous, boundUrl, Date.now()));
+  }, [boundUrl]);
+  useEffect(() => {
+    if (held === null) return undefined;
+    let timer: number | undefined;
+    const schedule = (delayMs: number) => {
+      timer = window.setTimeout(() => {
+        void refresh();
+        schedule(TILION_REFRESH_RETRY_MS);
+      }, delayMs);
+    };
+    schedule(Math.max(0, held.adoptedAtMs + TILION_LIVE_VIEW_REFRESH_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [held, refresh]);
+  return held;
 }

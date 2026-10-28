@@ -612,6 +612,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -648,7 +649,8 @@ their assertions or test counts:
 `bash scripts/tests/run-port-collision.test.sh`,
 `bash scripts/tests/run-cloud-benchmark-workers.test.sh`,
 `bash scripts/tests/blackbox-archive-env.test.sh`,
-`bash scripts/tests/render-backend-build.test.sh`, and
+`bash scripts/tests/render-backend-build.test.sh`,
+`python3 scripts/tests/factory-metadata.test.py`, and
 `python3 agents/tests/structural/structural_test_registration.py`.
 
 This list is deliberately explicit, not a registry pointer: several of these

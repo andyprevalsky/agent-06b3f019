@@ -53,7 +53,7 @@ export interface AdminHealthSeriesPoint extends AdminHealthPeriod {
   tasksIssuedPerUser: number;
   outputTokensPerTask: number;
   gmvPerTask: number;
-  taskCompletionRate: number;
+  taskCompletionRate: number | null;
   costPerTask: AdminHealthTaskCostPerTask;
   andyLinearPoints: number | null;
   githubCommits: number | null;
@@ -225,7 +225,7 @@ export interface AdminHealthResponse {
     tasksIssuedPerUser: number;
     outputTokensPerTask: number;
     gmvPerTask: number;
-    taskCompletionRate: number;
+    taskCompletionRate: number | null;
     costPerTask: AdminHealthTaskCostPerTask;
   };
   series: AdminHealthSeriesPoint[];

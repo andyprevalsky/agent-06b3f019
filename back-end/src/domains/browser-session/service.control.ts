@@ -1,4 +1,5 @@
 import { getBrowserSessionHealth } from '../../providers/browser';
+import { getTilionLiveViewUrl, isTilionSessionEndedError } from '../../providers/browser/tilion';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
@@ -67,6 +68,7 @@ export interface BrowserLiveView {
 export interface BrowserLiveViewDeps {
   findRecord?: typeof repo.findBrowserLiveViewRecord;
   health?: typeof getBrowserSessionHealth;
+  mintTilionLiveViewUrl?: typeof getTilionLiveViewUrl;
 }
 
 async function providerLiveness(
@@ -78,6 +80,8 @@ async function providerLiveness(
     if (observed.ttlMs !== null && observed.ttlMs <= 0) return false;
     return isLiveBrowserStatus(observed.status);
   } catch (error) {
+    // Tilion answers 404/410 once an ended session's record ages out: it is gone, not unknown.
+    if (isTilionSessionEndedError(error)) return false;
     log.warn('Live-view provider health check failed', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
@@ -102,17 +106,44 @@ export async function getBrowserLiveView(
   if (session === null || (userId !== undefined && session.context.userId !== userId)) {
     throw new SessionNotFoundError();
   }
+  const live =
+    session.status === ACTIVE && session.sessionId !== null
+      ? await providerLiveness(session.sessionId, deps.health ?? getBrowserSessionHealth)
+      : false;
   return {
     taskId: session.id,
     sessionId: session.sessionId,
-    debugUrl: session.debugUrl,
+    debugUrl:
+      session.provider === 'tilion' && live !== false && session.sessionId !== null
+        ? await freshTilionLiveViewUrl(
+            { sessionId: session.sessionId, debugUrl: session.debugUrl },
+            deps.mintTilionLiveViewUrl ?? getTilionLiveViewUrl
+          )
+        : session.debugUrl,
     status: session.status,
-    live:
-      session.status === ACTIVE && session.sessionId !== null
-        ? await providerLiveness(session.sessionId, deps.health ?? getBrowserSessionHealth)
-        : false,
+    live,
     asOf,
   };
+}
+
+/**
+ * Tilion view tokens expire after 1800 s, so the stored debugUrl goes stale
+ * mid-run. Every live-view read mints a fresh one (token mints are free); a
+ * failed mint keeps the stored URL so the panel degrades instead of erroring.
+ */
+async function freshTilionLiveViewUrl(
+  session: { sessionId: string; debugUrl: string | null },
+  mint: typeof getTilionLiveViewUrl
+): Promise<string | null> {
+  try {
+    return await mint(session.sessionId);
+  } catch (error) {
+    log.warn('Tilion live-view token mint failed', {
+      sessionId: session.sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return session.debugUrl;
+  }
 }
 
 export async function resumeOwnedBrowserSession(

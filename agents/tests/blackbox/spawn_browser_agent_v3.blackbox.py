@@ -5268,6 +5268,220 @@ async def test_browser_humanizer_cdp_mouse_path_failure_enables_fallback():
     assert mouse.moves
     assert mouse.moves[-1] == (25, 40)
 
+async def test_browser_humanizer_single_cdp_client_types_keys_serially():
+    """Tilion drops pipelined Input.dispatchKeyEvent (live 2026-10-21: 13/18 unanswered and
+    undelivered when pipelined, 0/18 sequential). With serial_cdp_keyboard the humanizer must
+    await each key event in order, keep CDP timestamps, and deliver the whole text."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SingleClientGateway:
+        """Models Tilion: a key event sent while another is in flight is never answered or delivered."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.timestamps = []
+
+        async def send(self, method, payload):
+            assert method == "Input.dispatchKeyEvent"
+            if self.in_flight:
+                await asyncio.Event().wait()  # dropped: no response, never delivered
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.01)
+                if payload["type"] == "char":
+                    self.delivered.append(payload["text"])
+                self.timestamps.append(payload["timestamp"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    def humanizer_for(gateway, **kwargs):
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return gateway
+
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(),
+            viewport_size={"width": 1280, "height": 800},
+            context=FakeContext(),
+        )
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, **kwargs)
+        humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.001, interval_s=0.001))
+        return humanizer
+
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        serial_gateway = SingleClientGateway()
+        serial = humanizer_for(serial_gateway, serial_cdp_keyboard=True)
+        assert await serial._type_text_with_cdp_fire_and_drain("you@example.com")
+        assert "".join(serial_gateway.delivered) == "you@example.com"
+        assert serial_gateway.timestamps == sorted(serial_gateway.timestamps)
+        assert serial._cdp_keyboard_transport_enabled
+
+        # Control: the pipelined default loses keys on the same gateway model.
+        pipelined_gateway = SingleClientGateway()
+        pipelined = humanizer_for(pipelined_gateway)
+        try:
+            await pipelined._type_text_with_cdp_fire_and_drain("you@example.com")
+            raise AssertionError("pipelined key dispatch should not drain on a single-client gateway")
+        except asyncio.TimeoutError:
+            pass
+        assert "".join(pipelined_gateway.delivered) != "you@example.com"
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+
+
+async def test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift():
+    """Tilion drops a key event while ANY Input event is in flight on the same CDP
+    session (A1, live 2026-10-22: idle mouseMoved every 45-85 ms overlapped
+    type_text/press_key -> empty field, keyboard transport invalidated). With
+    serial_cdp_keyboard, typing holds the movement lock so idle drift skips."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """A key arriving while any Input.* is in flight is dropped (never answered)."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_events = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()  # dropped
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.004)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_events += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    def humanizer_for(gateway):
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return gateway
+
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(),
+            mouse=SimpleNamespace(),
+            viewport_size={"width": 1280, "height": 800},
+            context=FakeContext(),
+        )
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+        humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.002, interval_s=0.002))
+        humanizer._idle_mouse_enabled = True
+        humanizer._cdp_mouse_transport_enabled = True
+        humanizer._keyboard_synthesis_enabled = True
+        return humanizer
+
+    async def drift(humanizer, stop):
+        while not stop.is_set():  # idle drift at a tiny cadence
+            await humanizer._idle_mouse_step()
+            await asyncio.sleep(0.001)
+
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        gateway = SameSessionInputGateway()
+        humanizer = humanizer_for(gateway)
+        stop = asyncio.Event()
+        drifter = asyncio.create_task(drift(humanizer, stop))
+        await asyncio.sleep(0.05)
+        moves_before = gateway.mouse_events
+        assert moves_before > 0, "idle drift must really dispatch mouse events"
+        await humanizer.type_text("you@example.com")
+        assert "".join(gateway.delivered) == "you@example.com"
+        assert humanizer._cdp_keyboard_transport_enabled, "CDP keyboard stays enabled"
+        await asyncio.sleep(0.05)
+        assert gateway.mouse_events > moves_before, "idle drift resumes after typing"
+
+        # Control: the same typing without the movement lock loses keys to drift.
+        control_gateway = SameSessionInputGateway()
+        control = humanizer_for(control_gateway)
+        control_drifter = asyncio.create_task(drift(control, stop := asyncio.Event()))
+        await asyncio.sleep(0.05)
+        try:
+            await control._type_text_with_cdp_fire_and_drain("you@example.com")
+            raise AssertionError("keys overlapping idle drift should be dropped on this gateway model")
+        except asyncio.TimeoutError:
+            pass
+        stop.set()
+        for task in (drifter, control_drifter):
+            task.cancel()
+        await asyncio.gather(drifter, control_drifter, return_exceptions=True)
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+
+
+async def test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift():
+    """Tilion drops a key event that arrives while any other Input event is in flight on the
+    same CDP session (live 2026-10-22: same-session mouseMoved overlap lost keys; other
+    sessions did not). Idle drift sends mouseMoved on the humanizer's session every
+    45-85 ms, so with serial_cdp_keyboard typing must exclude it."""
+    import browser_tools.humanizer as humanizer_module
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class SameSessionInputGateway:
+        """Models Tilion: a key event sent while any Input event is unanswered is never answered or delivered."""
+
+        def __init__(self):
+            self.in_flight = 0
+            self.delivered = []
+            self.mouse_moves = 0
+
+        async def send(self, method, payload):
+            if method == "Input.dispatchKeyEvent" and self.in_flight:
+                await asyncio.Event().wait()
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.05 if method == "Input.dispatchMouseEvent" else 0.005)
+                if method == "Input.dispatchMouseEvent":
+                    self.mouse_moves += 1
+                elif payload.get("type") == "char":
+                    self.delivered.append(payload["text"])
+                return {}
+            finally:
+                self.in_flight -= 1
+
+    gateway = SameSessionInputGateway()
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return gateway
+
+    async def no_playwright_mouse(*_args, **_kwargs):
+        raise AssertionError("idle drift must use the CDP transport in this test")
+
+    page = SimpleNamespace(
+        keyboard=SimpleNamespace(),
+        mouse=SimpleNamespace(move=no_playwright_mouse),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True, serial_cdp_keyboard=True)
+    humanizer._keycap = SimpleNamespace(next=lambda char: SimpleNamespace(dwell_s=0.01, interval_s=0.02))
+    original_drain = humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS
+    humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = 1.0
+    try:
+        humanizer.start_idle_movement()
+        await asyncio.sleep(0.3)
+        assert gateway.mouse_moves > 0, "idle drift did not run"
+        text = "benchmark-human@example.com"
+        await asyncio.wait_for(humanizer.type_text(text), timeout=10)
+        assert "".join(gateway.delivered) == text
+        assert humanizer._cdp_keyboard_transport_enabled
+    finally:
+        humanizer_module.CDP_INPUT_DRAIN_TIMEOUT_SECONDS = original_drain
+        await humanizer.close()
+
 
 async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
     from browser_tools.humanizer import BrowserHumanizer
@@ -8509,6 +8723,42 @@ async def test_rotation_storage_capture_is_bounded_when_indexeddb_stalls():
             assert "timed out after 0.01s" in str(exc)
         else:
             raise AssertionError("expected a typed bounded storage-capture timeout")
+
+        # An empty cookie jar with no answered origin is nothing to carry: still the typed timeout.
+        async def no_cookies():
+            return []
+
+        empty = SimpleNamespace(context=SimpleNamespace(storage_state=stalled_storage_state, cookies=no_cookies))
+        try:
+            await asyncio.wait_for(_capture_rotation_storage_state(empty), timeout=1.0)
+        except BrowserStorageCaptureTimeoutError:
+            pass
+        else:
+            raise AssertionError("an empty jar must not turn the timeout into an empty carried state")
+
+        # A failed (not timed-out) full capture with cookies carries them; with none, no state.
+        async def failing_storage_state(*, indexed_db):
+            raise RuntimeError("storage read failed")
+
+        async def one_cookie():
+            return [{"name": "session", "value": "kept", "domain": "shop.example", "path": "/"}]
+
+        carried = await asyncio.wait_for(
+            _capture_rotation_storage_state(
+                SimpleNamespace(context=SimpleNamespace(storage_state=failing_storage_state, cookies=one_cookie))
+            ),
+            timeout=1.0,
+        )
+        assert carried == {"cookies": [{"name": "session", "value": "kept", "domain": "shop.example", "path": "/"}], "origins": []}, carried
+        assert (
+            await asyncio.wait_for(
+                _capture_rotation_storage_state(
+                    SimpleNamespace(context=SimpleNamespace(storage_state=failing_storage_state, cookies=no_cookies))
+                ),
+                timeout=1.0,
+            )
+            is None
+        )
     finally:
         if previous_timeout is None:
             os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
@@ -8841,6 +9091,166 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
     assert 'action_result = {"success": False, "error": error_message}' in recovery_block
     assert recovery_block.count("tool_call_id=recovery_call_id") >= 2
 
+async def test_promoted_session_reattach_retries_once_then_fails_typed():
+    """T74 (lane G bfbc983c): the attach to a challenge-recovery promoted Tilion
+    session failed (4409). The worker kept the released session ids and later
+    dereferenced dom_service=None. Now: adopt the promoted ids, retry once, and
+    otherwise end with BrowserStackUnavailableError; the step loop never uses a
+    missing browser stack."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    released = SimpleNamespace(secret_redaction_state=lambda: {}, rendered_image_state=lambda: ["https://i/1.png"])
+    replacement = {"dom_service": object()}
+    reconnect = AsyncMock(return_value=replacement)
+    kwargs = dict(
+        first_error=ConnectionError("provider CDP socket closed: code=4409"),
+        new_cdp_url="wss://tilion.invalid/v1/session/sess_promoted/cdp?token=t",
+        released_dom_service=released,
+        fingerprint_injection=None,
+        exit_geo_locale=None,
+        agent_id="agent-t74",
+        provider="tilion",
+        config=None,
+        task_id="task-t74",
+        delay_seconds=0,
+    )
+    with patch.object(handler, "_reconnect_browser_stack_after_rotation", reconnect):
+        assert await handler._retry_promoted_browser_reattach(**kwargs) is replacement
+    call = reconnect.await_args.kwargs
+    assert call["old_dom_service"] is released, "the replacement inherits redaction/image state"
+    assert call["old_playwright_browser"] is None and call["old_driver_pid"] is None
+    assert call["new_cdp_url"] == kwargs["new_cdp_url"] and call["provider"] == "tilion"
+
+    failing = AsyncMock(side_effect=ConnectionError("provider CDP socket closed: code=4409 again"))
+    with patch.object(handler, "_reconnect_browser_stack_after_rotation", failing):
+        with pytest.raises(handler.BrowserStackUnavailableError) as raised:
+            await handler._retry_promoted_browser_reattach(**kwargs)
+    assert "failed twice" in str(raised.value) and "again" in str(raised.value)
+    assert not isinstance(raised.value, AttributeError)
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    recovery = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name in ("attempt_completion", "done"):', 1
+    )[0]
+    failure = recovery.index("except Exception as reconnect_error:")
+    cleared = recovery.index("dom_service = None", failure)
+    adopted = recovery.index('session_id = config_result.get("session_id", session_id)', failure)
+    retried = recovery.index("reconnected = await _retry_promoted_browser_reattach(", failure)
+    success = recovery.index('dom_service = reconnected["dom_service"]', failure)
+    assert failure < cleared < adopted < retried < success, "adopt promoted ids before retrying"
+    loop_guard = source.index("if dom_service is None:\n                # A failed reattach left no browser stack")
+    overlays = source.index("dom_service.ensure_browser_overlays_suppressed()")
+    assert loop_guard < overlays
+    assert "raise BrowserStackUnavailableError(" in source[loop_guard:overlays]
+
+
+async def test_click_rect_relocates_when_cdp_reports_no_node_with_given_id():
+    """Webdecoy 3d714847 on Tilion: CDP answered resolveNode/scrollIntoViewIfNeeded
+    for the indexed checkbox with 'No node with given id found' (the widget had
+    re-rendered). The rect lookup re-resolves the element by xpath in a fresh
+    snapshot and retries once on the replacement node."""
+    from browser_tools.dom_service import DOMService
+
+    stale = SimpleNamespace(backend_node_id=6900, xpath="html/body/div[2]/div", attributes={"role": "checkbox"})
+    stale.compute_stable_hash = lambda: 42
+    fresh = SimpleNamespace(backend_node_id=7311, xpath="html/body/div[2]/div", attributes={"role": "checkbox"})
+    fresh.compute_stable_hash = lambda: 42
+    other = SimpleNamespace(backend_node_id=7312, xpath="html/body/p", attributes={})
+    other.compute_stable_hash = lambda: 7
+    resolved_ids = []
+
+    class _DOM:
+        async def scrollIntoViewIfNeeded(self, params=None, session_id=None):
+            if params["backendNodeId"] == 6900:
+                raise RuntimeError("{'code': -32000, 'message': 'No node found for given backend id'}")
+            return {}
+
+        async def resolveNode(self, params=None, session_id=None):
+            resolved_ids.append(params["backendNodeId"])
+            if params["backendNodeId"] == 6900:
+                raise RuntimeError("{'code': -32000, 'message': 'No node with given id found'}")
+            return {"object": {"objectId": f"obj-{params['backendNodeId']}"}}
+
+    class _Runtime:
+        async def callFunctionOn(self, params=None, session_id=None):
+            return {"result": {"value": {"visible": True, "x": 100, "y": 200, "width": 40, "height": 40,
+                                          "viewportWidth": 1280, "viewportHeight": 800}}}
+
+    cdp_session = SimpleNamespace(session_id="s", cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=_DOM(), Runtime=_Runtime())))
+
+    class _Session:
+        agent_focus_target_id = "target"
+
+        async def get_or_create_cdp_session(self, target_id=None, focus=False):
+            return cdp_session
+
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return SimpleNamespace(dom_state=SimpleNamespace(selector_map={7311: fresh, 7312: other}))
+
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service._session = _Session()
+    service._selector_map = {6900: stale}
+    rect = await service.get_element_rect(6900)
+    assert rect == {"x": 100, "y": 200, "width": 40, "height": 40}, rect
+    assert resolved_ids == [6900, 7311], resolved_ids
+
+    # No unique replacement (ambiguous xpath and hash): a clean None, no retry loop.
+    twin = SimpleNamespace(backend_node_id=7313, xpath="html/body/div[2]/div", attributes={})
+    twin.compute_stable_hash = lambda: 42
+
+    class _AmbiguousSession(_Session):
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return SimpleNamespace(dom_state=SimpleNamespace(selector_map={7311: fresh, 7313: twin}))
+
+    resolved_ids.clear()
+    service._session = _AmbiguousSession()
+    service._selector_map = {6900: stale}
+    assert await service.get_element_rect(6900) is None
+    assert resolved_ids == [6900]
+
+
+async def test_challenge_episodes_are_logged_on_every_recovery_path():
+    """Every challenge episode logs 'antibot.episode' (one greppable line with its detector,
+    provider and outcome) and a task ending unresolved logs 'antibot.stuck'. Observation
+    only: recovery itself is unchanged."""
+    import inspect
+    import re
+
+    from structlog.testing import capture_logs
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    episode = {
+        "agent_id": "agent-1",
+        "host": "shop.example",
+        "detector": "llm_classifier",
+        "recovery_reason": "Cloudflare Turnstile interstitial",
+        "waited_seconds": 0.0,
+        "cleared": False,
+        "recovery_invoked": True,
+        "recovery_outcome": "failed: no viable configuration",
+        "provider": "tilion",
+    }
+    with capture_logs() as logs:
+        handler._log_antibot_event("antibot.episode", episode)
+        handler._log_antibot_event("antibot.stuck", {**episode, "final_url_host": "shop.example"})
+    assert [entry["event"] for entry in logs] == ["antibot.episode", "antibot.stuck"]
+    assert all(entry[key] == value for entry in logs for key, value in episode.items())
+
+    # Wiring: no wait between the existing clean-page check and recovery; every
+    # recovery path logs its episode; the activity end logs 'stuck'.
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    recovery = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name in ("attempt_completion", "done"):', 1
+    )[0]
+    clean_check = recovery.index("and not await live_tab_looks_challenged(")
+    first_recovery = recovery.index("await recover_browser_challenge(")
+    assert clean_check < first_recovery
+    assert "_challenge_patience_wait" not in source
+    assert len(re.findall(r'_log_antibot_event\(\s*"antibot\.episode"', recovery)) == 2  # cleared before recovery, then recovery ran
+    assert '_log_antibot_event("antibot.stuck"' in source
 
 def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     """A failed promoted-session attach must preserve its real error result."""
@@ -11866,9 +12276,10 @@ def test_humanized_click_presses_and_releases_via_cdp_without_post_click_move():
 
     # No move may follow the release: it would race click-triggered navigation.
     assert "mouse.move(up_x, up_y)" not in source, "post-click move reintroduces the navigation race"
+    assert '_playwright_mouse("move", up_x, up_y)' not in source, "post-click move reintroduces the navigation race"
 
     # A lost CDP session must still release, or the button wedges every later click.
-    assert "await mouse.up()" in source, "fallback release missing"
+    assert 'await self._playwright_mouse("up")' in source, "fallback release missing"
 
 
 def test_network_recorder_query_requests_filters_and_shapes():
@@ -16485,6 +16896,64 @@ async def test_browser_use_oversized_page_fetch_only_blocks_missing_native_downl
     assert kept["content_type"] == "application/zip"
     assert kept["source_url"] == "https://example.com/export.zip"
     assert len(expressions) == 1 and listing.await_count == 1
+
+
+async def test_download_persister_materializes_one_download_once_under_concurrent_events():
+    """A1 (agent 85ec29b8): every download was materialised and uploaded TWICE,
+    because Chrome's downloadWillBegin and completed downloadProgress both
+    scheduled a materialize and the dedupe key was recorded only after the
+    awaits. The key is reserved first (guid-keyed; the completed event may carry
+    a different file name), and a failed first attempt still lets the second run."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    cdp_client, browser_session = _make_download_persister_cdp_harness()
+    fetches = []
+    gate = asyncio.Event()
+    outcomes = []
+
+    async def slow_page_fetch(*, session, url, session_id, config, provider=None, trust_download=False):
+        fetches.append(url)
+        await gate.wait()  # both events arrive while the first fetch is in flight
+        outcome = outcomes.pop(0) if outcomes else "ok"
+        if outcome == "fail":
+            return None
+        return {"path": "/tmp/downloads/out.zip", "size": 8, "filename": "out.zip", "mime_type": "application/zip"}
+
+    for first_outcome, expected_fetches in (("ok", 1), ("fail", 2)):
+        fetches.clear()
+        outcomes[:] = [first_outcome]
+        gate.clear()
+        # The completed event adds filePath to the shared meta; the provider file
+        # read is unavailable here, so both attempts fall through to the page fetch.
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.download_session_file", new=AsyncMock(return_value=None)
+        ), patch(
+            "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+            new=slow_page_fetch,
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=browser_session,
+                session_id="kernel-sess",
+                config=_fake_config(),
+                provider="kernel",
+            )
+            assert persister is not None
+            handlers = cdp_client.register.Browser.handlers
+            handlers["downloadWillBegin"](
+                {"guid": f"guid-{first_outcome}", "url": "https://example.com/out.zip", "suggestedFilename": "out.zip"},
+                "cdp-sess",
+            )
+            handlers["downloadProgress"](
+                {"guid": f"guid-{first_outcome}", "state": "completed", "filePath": "/tmp/downloads/out (1).zip"},
+                "cdp-sess",
+            )
+            await asyncio.sleep(0.05)
+            assert len(fetches) == 1, ("the second event must wait for the attempt in flight", fetches)
+            gate.set()
+            await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+            assert len(fetches) == expected_fetches, (first_outcome, fetches)
+            assert [item["name"] for item in persister.downloaded_files()] == ["out.zip"]
+            await persister.close()
 
 
 async def test_materialize_prefers_provider_file_path_before_page_fetch():
@@ -21960,6 +22429,188 @@ def test_extract_image_urls_from_dom_state_is_uncapped_and_keeps_every_srcset_ca
     assert len(urls) == len(set(urls)) == 19
     assert _extract_image_urls_from_dom_state(SimpleNamespace(_root=None), page_url="https://shop.example/") == []
 
+async def test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates():
+    """Eventim (agent 2cf378ca, 2026-10-21): the event page renders the seetickets image,
+    the checkout page that requests the card does not. A receipt image copied exactly from
+    an image this browser activity rendered must validate; an unrendered URL must not."""
+    from browser_tools.dom_service import DOMService
+    from utils.purchase_approval import validate_image_url_for_page
+
+    event_page = "https://wl.eventim.us/event/yaego/707562?afflky=1015Folsom"
+    checkout_page = "https://checkout.eventim.us/?afflky=1015Folsom"
+    event_image = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnt9fQ=="
+    )
+    event_image_600 = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnsicmVzaXplIjp7IndpZHRoIjo2MDB9LCJqcGVnIjp7InF1YWxpdHkiOjYwfSwicG5n"
+        "Ijp7ImNvbXByZXNzaW9uTGV2ZWwiOjksInF1YWxpdHkiOjYwfSwid2VicCI6eyJxdWFsaXR5Ijo2MH19fQ=="
+    )
+    checkout_logo = "https://checkout.eventim.us/assets/eventim-logo.png"
+
+    def img(src):
+        return SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="img", attributes={"src": src, "alt": "yaego"}, snapshot_node=None),
+            children=[],
+            should_display=True,
+        )
+
+    def state(url, images):
+        root = SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="body", attributes={}),
+            children=[img(src) for src in images],
+        )
+        return SimpleNamespace(
+            url=url,
+            title="",
+            dom_state=SimpleNamespace(_root=root, selector_map={}),
+            recent_events=None,
+            closed_popup_messages=None,
+        )
+
+    states = [state(event_page, [event_image, event_image_600]), state(checkout_page, [checkout_logo])]
+
+    class FakeSession:
+        async def get_browser_state_summary(self, include_screenshot=False):
+            return states[0]
+
+    service = DOMService(cdp_url="ws://unused.invalid/devtools/browser/x")
+    service._session = FakeSession()
+    service._page_geometry = lambda _state: {
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "scroll_x": 0,
+        "scroll_y": 0,
+        "pages_above": 0.0,
+        "pages_below": 0.0,
+        "total_pages": 1.0,
+    }
+    service._serialized_dom_tree = lambda *_args: ""
+    service._summarized_tabs = lambda _state: []
+
+    # The model reads the event page (where it copies the image URL)...
+    observed = await service.get_browser_state(include_screenshot=False)
+    assert event_image in [candidate["url"] for candidate in observed.get("media_candidates", [])]
+    # ...then requests the card on checkout, which renders only a logo.
+    states.pop(0)
+    rendered = await service.get_page_image_urls()
+
+    assert validate_image_url_for_page(event_image, rendered, checkout_page) == event_image
+    assert validate_image_url_for_page(event_image_600, rendered, checkout_page) == event_image_600
+    # The rule is unchanged for anything this browser never rendered: one drifted
+    # character, or an asset from nowhere, is still rejected.
+    drifted = event_image[:-6] + "Ab9fQ=="
+    for never_rendered in (drifted, "https://prod-images.seetickets.us/eyJmYWtlIjp0cnVlfQ=="):
+        try:
+            validate_image_url_for_page(never_rendered, rendered, checkout_page)
+        except ValueError as error:
+            assert "image_url must be copied exactly" in str(error)
+        else:
+            raise AssertionError(f"never-rendered image accepted: {never_rendered}")
+
+
+async def test_receipt_image_provenance_survives_session_switch():
+    """Eventim (agent fe68bf12, 2026-10-22): the event page rendered the seetickets image on the
+    residential session; challenge recovery switched to a tilion_direct session; the card was
+    requested from checkout on the new session. The rebind must carry the activity's
+    rendered-image provenance, and the exact-match rule still rejects anything never rendered."""
+    import browser_tools.dom_service as dom_module
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.dom_service import DOMService
+    from utils.purchase_approval import validate_image_url_for_page
+
+    event_page = "https://wl.eventim.us/event/yaego/707562?afflky=1015Folsom"
+    checkout_page = "https://checkout.eventim.us/?afflky=1015Folsom"
+    event_image = (
+        "https://prod-images.seetickets.us/eyJidWNrZXQiOiJwcm9kLXNpaC5zZWV0aWNrZXRzdXNhLnVzIiwia2V5IjoiMDBhYTY4YzMtZWU0"
+        "Ni00YjYxLTk1YTEtNmI3MmZiN2IyYjYzIiwiZWRpdHMiOnt9fQ=="
+    )
+    checkout_logo = "https://checkout.eventim.us/assets/eventim-logo.png"
+
+    def img(src):
+        return SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="img", attributes={"src": src}, snapshot_node=None),
+            children=[],
+            should_display=True,
+        )
+
+    def state(url, images):
+        root = SimpleNamespace(
+            original_node=SimpleNamespace(tag_name="body", attributes={}), children=[img(s) for s in images]
+        )
+        return SimpleNamespace(
+            url=url,
+            title="",
+            dom_state=SimpleNamespace(_root=root, selector_map={}),
+            recent_events=None,
+            closed_popup_messages=None,
+        )
+
+    def summary(states):
+        return SimpleNamespace(get_browser_state_summary=AsyncMock(side_effect=lambda **_: states[0]))
+
+    def quiet(service):
+        service._page_geometry = lambda _state: {
+            "viewport_width": 1280,
+            "viewport_height": 800,
+            "scroll_x": 0,
+            "scroll_y": 0,
+            "pages_above": 0.0,
+            "pages_below": 0.0,
+            "total_pages": 1.0,
+        }
+        service._serialized_dom_tree = lambda *_args: ""
+        service._summarized_tabs = lambda _state: []
+        return service
+
+    # Residential generation: the model reads the event page.
+    old = quiet(DOMService(cdp_url="ws://old.invalid/devtools/browser/x"))
+    old._session = summary([state(event_page, [event_image])])
+    await old.get_browser_state(include_screenshot=False)
+    old.disconnect = AsyncMock()
+
+    # Challenge recovery rebinds the worker onto the promoted session (the real handler path).
+    created = []
+
+    class ReplacementDOMService(DOMService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+        async def connect(self):
+            raise RuntimeError("stop after the replacement is built")
+
+    with patch.object(dom_module, "DOMService", ReplacementDOMService), patch.object(
+        handler, "open_browser_cdp_connection", AsyncMock(return_value=("ws://new.invalid/devtools/browser/y", None))
+    ), patch.object(handler, "_stop_playwright_resources", AsyncMock()):
+        try:
+            await handler._reconnect_browser_stack_after_rotation(
+                new_cdp_url="wss://tilion.invalid/v1/session/sess_new/cdp?token=t",
+                old_dom_service=old,
+                old_playwright_browser=None,
+                old_playwright_instance=None,
+                old_driver_pid=None,
+                fingerprint_injection=None,
+                agent_id="agent-t44",
+                provider="tilion",
+            )
+        except RuntimeError:
+            pass
+    assert created, "the rebind did not build a replacement DOMService"
+    new = quiet(created[0])
+    new._session = summary([state(checkout_page, [checkout_logo])])
+    rendered = await new.get_page_image_urls()
+
+    assert validate_image_url_for_page(event_image, rendered, checkout_page) == event_image
+    drifted = event_image[:-6] + "Ab9fQ=="
+    try:
+        validate_image_url_for_page(drifted, rendered, checkout_page)
+    except ValueError as error:
+        assert "image_url must be copied exactly" in str(error)
+    else:
+        raise AssertionError("a never-rendered image was accepted")
+
 
 async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot():
     from browser_tools.dom_service import DOMService
@@ -25821,6 +26472,141 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
     completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
     assert len(completions) == 1, _completion_messages(save_mock)
     assert completions[0]["message"] == result["message"]
+
+
+class _TilionBilledDomService(_FakeDomService):
+    # CDP bytes Tilion relayed to this worker; DOMService keeps them after disconnect.
+    cdp_bytes_received = 3 * 1_048_576
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_not_a_resume_create():
+    """PR #1604 review: an exit that clears dom_service before building the cost row
+    must still bill the live Tilion session's CDP bytes, and a same-session
+    auth-assistance resume reconnects without creating (billing) a new session."""
+    import copy
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://tilion.example/live",
+        "ws_url": "ws://session-1",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "tilion", "proxy_source": "tilion_direct"},
+        "same_session_available": True,
+    }
+    cost_rows = []
+
+    def recording_build_usage_items(*args, **kwargs):
+        cost_rows.append(kwargs)
+        return build_usage_items(*args, **kwargs)
+
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+            AsyncMock(side_effect=lambda *_args, **_kwargs: copy.deepcopy(session_info)),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.resume_browser_session",
+            AsyncMock(side_effect=AssertionError("a same-session resume must not create a session")),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                return_value={
+                    "action": {
+                        "action": "attempt_completion",
+                        "thinking": "The heading is visible.",
+                        "params": {"reasoning": "Heading reads Example Domain"},
+                    },
+                    "usage": {},
+                    "mode": "waterfall",
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "Heading confirmed",
+                    "structured_response": {"result": "Example Domain"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.build_usage_items", recording_build_usage_items),
+        patch("browser_tools.dom_service.DOMService", _TilionBilledDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser)),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    # The verified-completion exit, then the max-iterations exit.
+    for max_iterations, expected_status in ((handler.MAX_ITERATIONS, "completed"), (0, "max_iterations")):
+        cost_rows.clear()
+        with ExitStack() as stack:
+            for patch_target in patch_targets:
+                stack.enter_context(patch_target)
+            stack.enter_context(patch.object(handler, "MAX_ITERATIONS", max_iterations))
+            result = await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Open example.com and report the main heading.",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "auth_assistance",
+                    "task_id": "task-1",
+                    "session_id": "session-1",
+                    "cdp_url": "ws://session-1",
+                },
+            )
+            await handler.drain_background_browser_cleanups()
+
+        assert result["status"] == expected_status, result
+        tilion_rows = [row for row in cost_rows if row.get("provider") == "tilion"]
+        assert len(tilion_rows) == 1, cost_rows
+        assert tilion_rows[0]["session_creates"] == 0, "a same-session auth resume was billed as a session create"
+        assert tilion_rows[0]["tilion_direct_bytes"] == _TilionBilledDomService.cdp_bytes_received, (
+            f"{expected_status}: the live session's CDP bytes were dropped when dom_service was cleared"
+        )
+        assert tilion_rows[0]["tilion_premium_bytes"] == 0
 
 
 @_in_browser_activity_context
@@ -34092,6 +34878,18 @@ async def run_all_tests():
         "recovery_reconnect_failure_drops_handles",
         test_recovery_reconnect_failure_drops_disconnected_browser_handles,
     )
+    await r.record_async(
+        "promoted_session_reattach_retries_once_then_fails_typed",
+        test_promoted_session_reattach_retries_once_then_fails_typed,
+    )
+    await r.record_async(
+        "challenge_episodes_logged_on_every_recovery_path",
+        test_challenge_episodes_are_logged_on_every_recovery_path,
+    )
+    await r.record_async(
+        "click_rect_relocates_on_no_node_with_given_id",
+        test_click_rect_relocates_when_cdp_reports_no_node_with_given_id,
+    )
     r.record(
         "recovery_guest_cookie_commit_from_tool_param",
         test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal,
@@ -34771,6 +35569,10 @@ async def run_all_tests():
         "materialize_prefers_provider_file_path",
         test_materialize_prefers_provider_file_path_before_page_fetch,
     )
+    await r.record_async(
+        "download_persister_one_upload_under_concurrent_events",
+        test_download_persister_materializes_one_download_once_under_concurrent_events,
+    )
     r.record(
         "dom_service_defaults_downloads_path_from_env",
         test_dom_service_defaults_downloads_path_from_browser_provider_env,
@@ -35358,6 +36160,18 @@ async def run_all_tests():
         test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback,
     )
     await r.record_async(
+        "browser_humanizer_single_cdp_client_types_keys_serially",
+        test_browser_humanizer_single_cdp_client_types_keys_serially,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift",
+        test_browser_humanizer_single_cdp_client_keys_never_overlap_idle_drift,
+    )
+    await r.record_async(
+        "browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift",
+        test_browser_humanizer_single_cdp_client_typing_excludes_idle_mouse_drift,
+    )
+    await r.record_async(
         "browser_network_recording_captures_body",
         test_browser_network_recording_captures_response_body,
     )
@@ -35524,6 +36338,14 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_get_page_image_urls_fresh_snapshot",
         test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_screenshot,
+    )
+    await r.record_async(
+        "receipt_image_rendered_on_an_earlier_page_validates",
+        test_receipt_image_rendered_on_an_earlier_page_of_the_activity_validates,
+    )
+    await r.record_async(
+        "receipt_image_provenance_survives_session_switch",
+        test_receipt_image_provenance_survives_session_switch,
     )
     r.record(
         "write_lock_notification_prompt_media_candidates",
@@ -35741,6 +36563,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_verified_completion_message_leads_with_goal",
         test_spawn_browser_activity_verified_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_tilion_cost_row_bills_live_bytes_not_resume_create",
+        test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_not_a_resume_create,
     )
     await r.record_async(
         "activity_failure_completion_message_leads_with_goal",

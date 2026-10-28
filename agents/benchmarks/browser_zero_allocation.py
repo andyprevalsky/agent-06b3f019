@@ -50,7 +50,7 @@ def preparation_cancelled_task_receipts(messages: list[dict] | None, agent_id: s
             and isinstance(receipt.get("tool_call_id"), str) and receipt["tool_call_id"]
             and receipt["tool_call_id"] == meta.get("toolCallId")
             and isinstance(receipt.get("session_id"), str) and receipt["session_id"]
-            and receipt.get("provider") in {"kernel", "steel", "browser-use"}
+            and receipt.get("provider") in {"tilion", "kernel", "steel", "browser-use"}
             and receipt.get("phase") == "initial_session_preparation"
             and receipt.get("init_acknowledged") is True
             and receipt.get("task_actions_started") is False

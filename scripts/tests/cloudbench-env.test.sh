@@ -1027,6 +1027,24 @@ sed -i.bak 's/browserbase/kernel/' "$agents_env" "$backend_env"
 rm -f "$agents_env.bak" "$backend_env.bak"
 cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" kernel kernel >/dev/null
 
+# Tilion contract: accepted only when the guest backend env carries its key,
+# which reaches guests inside BACKEND_ENV_B64 exactly like KERNEL_API_KEY.
+sed -i.bak 's/^BROWSER_PROVIDER=kernel$/BROWSER_PROVIDER=tilion/' "$agents_env" "$backend_env"
+rm -f "$agents_env.bak" "$backend_env.bak"
+if tilion_out="$(cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion tilion 2>&1)"; then
+  fail "a tilion contract without TILION_API_KEY must fail closed"
+fi
+case "$tilion_out" in *"no TILION_API_KEY"*) ;; *) fail "missing-key failure must name TILION_API_KEY: $tilion_out" ;; esac
+printf 'TILION_API_KEY=tl_fake_contract_key\n' >> "$backend_env"
+tilion_out="$(cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion tilion)"
+case "$tilion_out" in *tl_fake_contract_key*) fail "contract output printed TILION_API_KEY" ;; esac
+if cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion kernel >/dev/null 2>&1; then
+  fail "tilion backend with kernel workers must fail as provider drift"
+fi
+sed -i.bak -e 's/^BROWSER_PROVIDER=tilion$/BROWSER_PROVIDER=kernel/' -e '/^TILION_API_KEY=/d' "$agents_env" "$backend_env"
+rm -f "$agents_env.bak" "$backend_env.bak"
+cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" kernel kernel >/dev/null
+
 agents_digest="$(cloudbench_env_sha256 "$agents_env")"
 backend_digest="$(cloudbench_env_sha256 "$backend_env")"
 [ "${#agents_digest}" -eq 64 ] || fail "agents env digest must be sha256"

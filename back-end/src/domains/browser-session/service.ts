@@ -35,7 +35,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { prepareWorldStateFork } from './service.world-fork';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
-import { storedBrowserProvider } from '../../providers/browser/types';
+import { storedBrowserProvider, type BrowserGeoTargeting } from '../../providers/browser/types';
 import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import {
@@ -47,6 +47,7 @@ import {
   buildSessionCredentialPayload,
   preserveSessionCredentialPayload,
 } from './service.credential-error';
+import { buildTilionWorkerApplyPayload } from './service.worker-apply';
 export { SessionCredentialInjectionError } from './service.credential-error';
 export type { SessionCredentialPayload } from './service.credential-error';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
@@ -70,6 +71,8 @@ async function requireSessionOwner(sessionId: string, userId?: string): Promise<
 
 interface BrowserSessionMetadataInput {
   provider: string;
+  providerSelection?: { requestedProvider: string; fallbackReason: string };
+  geoTargeting?: BrowserGeoTargeting;
   proxySource: string;
   proxyLocation: ProxyGeoLocation;
   profileId: string | null;
@@ -90,6 +93,20 @@ export function buildBrowserSessionMetadata(
 ) {
   return {
     provider: session.provider,
+    // Benchmarks and the worker tell a real run on the requested provider from a fallback.
+    requested_provider: session.providerSelection?.requestedProvider ?? session.provider,
+    provider_fallback_reason: session.providerSelection?.fallbackReason ?? null,
+    ...(session.geoTargeting !== undefined
+      ? {
+          geo_targeting: {
+            requested: session.geoTargeting.requested,
+            applied: session.geoTargeting.applied,
+            requested_location: session.geoTargeting.requestedLocation,
+            geo_applied: session.geoTargeting.geoApplied,
+            geo_unsupported: session.geoTargeting.geoUnsupported,
+          },
+        }
+      : {}),
     proxy_source: session.proxySource,
     proxy_location: session.proxyLocation,
     profile_id: session.profileId,
@@ -182,6 +199,20 @@ export async function prepareSessionCredentials(
         permissions: { injected: false, grantCount: 0 },
         cacheStorage: { injected: false, originCount: 0 },
       },
+    };
+  }
+  if (session.provider === 'tilion' && options.browser === undefined) {
+    // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
+    // The world-state fork needs a backend CDP context, so it is not recorded here.
+    const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
+    return {
+      ...credentialPayload,
+      auth_credential_ref: injection.cookies.credentialRef,
+      cookies_injected: false,
+      cookies_count: injection.cookies.cookieCount,
+      auth_source: injection.cookies.authSource,
+      browser_state_injection: injection,
+      worker_apply: payload,
     };
   }
   const injectionResult = await preserveSessionCredentialPayload(

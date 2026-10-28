@@ -26,6 +26,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { isPhoneHarnessExchange, credentialMetadataUrl } from './fetchCapturePrivacy';
+import { responseFromSerialized, type SerializedResponse } from './fetchCaptureResponse';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -71,15 +72,6 @@ export interface CapturedCall {
   error: string | null;
   cached: boolean;
   captureToken: string | null;
-}
-
-interface SerializedResponse {
-  status: number;
-  statusText: string;
-  body: string;
-  headers: Record<string, string>;
-  /** Private capture metadata — never store this in upstream HTTP headers. */
-  bodyEncoding?: 'base64';
 }
 
 /**
@@ -163,18 +155,6 @@ function isCredentialExchange(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
-  const headers: Record<string, string> = { ...serialized.headers };
-  const body =
-    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
-
-  return new globalThis.Response(body, {
-    status: serialized.status,
-    statusText: serialized.statusText,
-    headers,
-  });
 }
 
 class NonReplayableResponseError extends Error {
@@ -278,16 +258,37 @@ function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
   captures.push({ ...entry, id: nextId++ });
 }
 
+/**
+ * Tilion's API, including a TILION_BASE_URL override (staging, local fake). The
+ * override matches its whole authority (host and port): a local fake on
+ * 127.0.0.1:<port> must not exempt every other local service from replay.
+ */
+function isTilionApi(target: URL): boolean {
+  if (target.hostname.toLowerCase() === 'back.tilion.dev') return true;
+  const configured = process.env.TILION_BASE_URL?.trim();
+  if (!configured) return false;
+  try {
+    const base = new URL(configured);
+    return (
+      base.protocol === target.protocol && base.host.toLowerCase() === target.host.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
   if (isCredentialExchange(url)) return true;
   try {
-    const hostname = new URL(url).hostname.toLowerCase();
+    const target = new URL(url);
+    const hostname = target.hostname.toLowerCase();
     return (
       hostname === 'e2b.app' ||
       hostname.endsWith('.e2b.app') ||
       hostname === 'api.onkernel.com' ||
       hostname === 'api.browser-use.com' ||
+      isTilionApi(target) ||
       hostname === 'amplitude.com' ||
       hostname === 'analytics.eu.amplitude.com'
     );

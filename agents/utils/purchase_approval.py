@@ -119,19 +119,52 @@ def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any])
     return text
 
 
-def _image_asset_key(value: Any, page_url: Any) -> str:
-    """Scheme-insensitive identity of an image asset, or '' when not an http(s) URL."""
+_IMAGE_TRANSFORM_PREFIX = "/cdn-cgi/image/"
+
+
+def _transformed_image_origin(parsed: Any) -> str:
+    """The exact origin URL inside an image-resizing path ``/cdn-cgi/image/<options>/<origin>``.
+
+    The options segment only resizes/re-encodes; the embedded absolute URL names the
+    image. Returns '' for any other path shape.
+    """
+    if not parsed.path.startswith(_IMAGE_TRANSFORM_PREFIX):
+        return ""
+    rest = parsed.path[len(_IMAGE_TRANSFORM_PREFIX) :]
+    options, _, origin = rest.partition("/")
+    if not options or "=" not in options or not origin:
+        return ""
+    # A path normalizer may have collapsed the scheme's double slash ("https:/host").
+    for scheme in ("https:/", "http:/"):
+        if origin.startswith(scheme) and not origin.startswith(scheme + "/"):
+            origin = scheme + "/" + origin[len(scheme) :]
+    if not origin.startswith(("https://", "http://")):
+        return ""
+    return origin + (f"?{parsed.query}" if parsed.query else "")
+
+
+def _image_identity(value: Any, page_url: Any) -> tuple[str, str, str] | None:
+    """``(serving host, asset host, asset key)`` of an http(s) image URL, scheme-insensitive.
+
+    A resized derivative (``/cdn-cgi/image/<options>/<origin>``) is the same image
+    as its exact embedded origin, so its asset is that origin, but it is still
+    served by its own host. None when not an http(s) URL.
+    """
     try:
         parsed = urlparse(urljoin(str(page_url or ""), str(value or "").strip()))
         hostname = parsed.hostname
         port = parsed.port
     except ValueError:
-        return ""
+        return None
     if parsed.scheme not in {"http", "https"} or not hostname:
-        return ""
-    port_suffix = f":{port}" if port else ""
+        return None
+    host = f"{hostname}:{port}" if port else hostname
+    origin = _transformed_image_origin(parsed)
+    if origin:
+        embedded = _image_identity(origin, "")
+        return (host, embedded[1], embedded[2]) if embedded else None
     query = f"?{parsed.query}" if parsed.query else ""
-    return f"{hostname}{port_suffix}{parsed.path}{query}"
+    return host, host, f"{host}{parsed.path}{query}"
 
 
 def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page_url: Any = "") -> Any:
@@ -144,12 +177,20 @@ def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page
     """
     if value is None or not str(value).strip():
         return value
-    rendered = {_image_asset_key(url, page_url) for url in (page_image_urls or [])}
-    rendered.discard("")
+    # Each rendered asset may be served by the host the page loaded it from, or by
+    # the asset's own origin host. Another host's derivative of a rendered origin is
+    # not that image: the approval loads the URL as submitted, from that host.
+    rendered: set[tuple[str, str]] = set()
+    for url in page_image_urls or []:
+        identity = _image_identity(url, page_url)
+        if identity is not None:
+            serving_host, asset_host, asset_key = identity
+            rendered.update({(serving_host, asset_key), (asset_host, asset_key)})
     # A page that renders no images leaves nothing to compare against.
     if not rendered:
         return value
-    if _image_asset_key(value, page_url) not in rendered:
+    requested = _image_identity(value, page_url)
+    if requested is None or (requested[0], requested[2]) not in rendered:
         raise ValueError("image_url must be copied exactly from an image rendered on the current page, or omitted")
     return value
 

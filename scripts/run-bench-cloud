@@ -1640,7 +1640,7 @@ print(next(iter(providers)))
         local fallback
         fallback="$(cloudbench_env_value back-end/.env BROWSER_PROVIDER)"
         case "$fallback" in
-            kernel|steel|browser-use)
+            tilion|kernel|steel|browser-use)
                 echo "⚠️  production Fly worker list unauthorized for $PROD_APP; using local back-end/.env BROWSER_PROVIDER=$fallback" >&2
                 rm -f "$err"
                 printf '%s\n' "$fallback"

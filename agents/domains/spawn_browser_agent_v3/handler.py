@@ -13,6 +13,7 @@ import gc
 import html as html_module
 import importlib
 import inspect
+import io
 import json
 import math
 import os
@@ -24,7 +25,8 @@ import traceback
 import uuid as uuid_module
 import weakref
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 import structlog
 import structlog.contextvars
@@ -98,8 +100,9 @@ from .activity_heartbeat import (
     stop_browser_activity_heartbeat,
     wait_for_browser_work,
 )
-from .cdp_urls import steel_cdp_connection_url
+from .cdp_urls import open_browser_cdp_connection, redact_cdp_url, redact_url_secrets
 from .challenge_recovery import (
+    cited_first_party_transport_failure,
     commit_cookie_removals,
     live_tab_looks_challenged,
     page_looks_challenged,
@@ -229,6 +232,28 @@ from .service_crypto import (
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
+from .tilion_worker import (
+    apply_worker_state as apply_tilion_worker_state,
+)
+from .tilion_worker import (
+    durable_downloads as durable_tilion_downloads,
+)
+from .tilion_worker import (
+    is_single_cdp_client_provider,
+    tilion_emulation,
+)
+from .tilion_worker import (
+    release_session as release_tilion_session_files,
+)
+from .tilion_worker import (
+    restore_downloads as restore_tilion_downloads,
+)
+from .tilion_worker import (
+    stage_upload as stage_tilion_upload,
+)
+from .tilion_worker import (
+    worker_apply_payload as tilion_worker_apply_payload,
+)
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
@@ -1662,6 +1687,7 @@ def _browser_resume_continuity_state(
     response_schema: Optional[Dict[str, Any]] = None,
     schema_user_instruction_count: int = 0,
     private_runtime_state: Optional[Dict[str, Any]] = None,
+    durable_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -1714,6 +1740,11 @@ def _browser_resume_continuity_state(
             if privacy_state.get("secret_redaction_refs") and private_runtime_state:
                 # Only the encrypted archive may carry exact routing/grant data.
                 state["private_browser_runtime"] = private_runtime_state
+    if durable_runtime_state:
+        # Carried on EVERY pause (private_browser_runtime exists only with
+        # secret bindings): worker-memory provenance the resumed activity, maybe
+        # on another worker, needs. Large states move to the encrypted archive.
+        state["durable_browser_runtime"] = durable_runtime_state
     return state
 
 
@@ -2235,6 +2266,55 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
+_PROMOTED_REATTACH_RETRY_DELAY_SECONDS = 2.0
+
+
+class BrowserStackUnavailableError(RuntimeError):
+    """A reattach to the (promoted) browser session failed: no live browser stack."""
+
+
+async def _retry_promoted_browser_reattach(
+    *,
+    first_error: BaseException,
+    new_cdp_url: str,
+    released_dom_service: Any,
+    fingerprint_injection: Any,
+    exit_geo_locale: Optional[Dict[str, Any]],
+    agent_id: str,
+    provider: Optional[str],
+    config: Any,
+    task_id: Optional[str],
+    delay_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """One delayed retry of the attach to a promoted session, else a typed error.
+
+    The first attempt already tore down the old stack, so there is no Playwright
+    left to stop; the released DOMService still carries redaction and
+    receipt-image state for the replacement. A provider slot can free late
+    (Tilion 4409), which the delay covers.
+    """
+    await asyncio.sleep(_PROMOTED_REATTACH_RETRY_DELAY_SECONDS if delay_seconds is None else delay_seconds)
+    try:
+        return await _reconnect_browser_stack_after_rotation(
+            new_cdp_url=new_cdp_url,
+            old_dom_service=released_dom_service,
+            old_playwright_browser=None,
+            old_playwright_instance=None,
+            old_driver_pid=None,
+            fingerprint_injection=fingerprint_injection,
+            exit_geo_locale=exit_geo_locale,
+            agent_id=agent_id,
+            provider=provider,
+            config=config,
+            task_id=task_id,
+        )
+    except Exception as retry_error:
+        raise BrowserStackUnavailableError(
+            "reattach to promoted session failed twice: "
+            f"{extract_error_message(first_error)}; {extract_error_message(retry_error)}"
+        ) from retry_error
+
+
 class BrowserStorageCaptureTimeoutError(RuntimeError):
     """Raised when auth-preserving browser storage capture exceeds its hard bound."""
 
@@ -2249,24 +2329,168 @@ def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
     return min(timeout_seconds, 60.0)
 
 
+# Collects one document's own origin storage in the same shape as Playwright's
+# storage_state origins entry ({origin, localStorage, indexedDB}), read in place.
+_OPEN_ORIGIN_STORAGE_SCRIPT = """async () => {
+  if (!/^https?:$/.test(location.protocol) || !location.origin || location.origin === "null") return null;
+  const localStorageItems = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const name = localStorage.key(i);
+      localStorageItems.push({ name, value: localStorage.getItem(name) });
+    }
+  } catch {}
+  const request = (r) => new Promise((resolve, reject) => {
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  const databases = [];
+  try {
+    for (const info of (indexedDB.databases ? await indexedDB.databases() : [])) {
+      if (!info.name) continue;
+      const db = await new Promise((resolve, reject) => {
+        const open = indexedDB.open(info.name);
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+        open.onblocked = () => reject(new Error("blocked"));
+        open.onupgradeneeded = () => { open.transaction.abort(); reject(new Error("missing")); };
+      });
+      try {
+        const stores = [];
+        for (const name of Array.from(db.objectStoreNames)) {
+          const store = db.transaction(name, "readonly").objectStore(name);
+          const [keys, values] = await Promise.all([request(store.getAllKeys()), request(store.getAll())]);
+          const entry = { name, autoIncrement: store.autoIncrement, records: keys.map((key, i) => ({ key, value: values[i] })) };
+          if (store.keyPath !== null) entry.keyPath = store.keyPath;
+          stores.push(entry);
+        }
+        databases.push({ name: db.name, version: db.version, stores });
+      } finally {
+        db.close();
+      }
+    }
+  } catch {}
+  return { origin: location.origin, localStorage: localStorageItems, indexedDB: databases };
+}"""
+
+
+async def _capture_open_origin_frames(context: Any, timeout_seconds: float) -> List[Dict[str, Any]]:
+    """Storage of every origin open in an existing frame, read in place and concurrently.
+
+    Uses only targets that already exist: no page is created or navigated. A frame
+    whose main thread is busy (a Cloudflare/Turnstile challenge doing its work)
+    never answers its evaluate; that frame is skipped at the bound and the frames
+    that answered are kept.
+    """
+    frames = [frame for page in list(getattr(context, "pages", []) or []) for frame in list(getattr(page, "frames", []) or [])]
+    if not frames:
+        return []
+    tasks = [asyncio.ensure_future(frame.evaluate(_OPEN_ORIGIN_STORAGE_SCRIPT)) for frame in frames]
+    done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    for task in pending:
+        task.cancel()
+    origins: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for task in tasks:
+        if task not in done or task.cancelled() or task.exception() is not None:
+            continue
+        entry = task.result()
+        if not isinstance(entry, dict) or not entry.get("origin") or entry["origin"] in seen:
+            continue
+        seen.add(entry["origin"])
+        if entry.get("localStorage") or entry.get("indexedDB"):
+            origins.append(entry)
+    return origins
+
+
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
     Provider profiles persist within one provider. Capturing Playwright storage
     lets Kernel-to-Steel and Steel-to-Browser-Use recoveries retain the same
     cookies, localStorage, and IndexedDB across providers.
+
+    Two passes share one bound. First, cookies plus every open frame's storage
+    read in place. Then Playwright's storage_state, which also covers visited
+    origins that are no longer open. It reads those by navigating a hidden page
+    to each one. Fetch interception is meant to stop that load, but an origin's
+    service worker answers the navigation itself, so the real page loads (live
+    Tilion 2026-10-22: www.youtube.com took 37 s through the residential exit).
+    When that pass exceeds the bound, the in-place state is carried instead of
+    failing recovery.
     """
     if page is None or getattr(page, "context", None) is None:
         return None
     timeout_seconds = _rotation_storage_capture_timeout_seconds(
         os.getenv("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", "15")
     )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    context = page.context
+    # All three reads start at once and share the whole bound. Cookies come from the
+    # browser (Storage.getCookies), not from any page, so a wedged challenge page
+    # cannot block them; but on a CPU-starved provider browser (Tilion on a
+    # PerimeterX/PoW page) even that read can take 10 s or more, so it may not be
+    # cut short to leave room for the full pass (lulus 6747a6cb: the cookie read
+    # bounded at 5 s timed out three times, while the full pass, which reads the
+    # same cookies, finished within the bound twice).
+    async def read_cookies() -> Any:
+        return await context.cookies()
+
+    async def read_full_state() -> Any:
+        return await context.storage_state(indexed_db=True)
+
+    cookies_task = asyncio.ensure_future(read_cookies())
+    frames_task = asyncio.ensure_future(_capture_open_origin_frames(context, min(5.0, timeout_seconds / 3)))
+    full_task = asyncio.ensure_future(read_full_state())
+    tasks = (cookies_task, frames_task, full_task)
     try:
-        return await asyncio.wait_for(
-            page.context.storage_state(indexed_db=True),
-            timeout=timeout_seconds,
+        await asyncio.wait({full_task}, timeout=max(0.0, deadline - loop.time()))
+        if full_task.done() and not full_task.cancelled() and full_task.exception() is None:
+            state = full_task.result()
+            _remember_rotation_cookies(context, state.get("cookies"))
+            return state
+        full_error = (
+            full_task.exception()
+            if full_task.done() and not full_task.cancelled()
+            else asyncio.TimeoutError()
         )
-    except asyncio.TimeoutError:
+        await asyncio.wait({cookies_task, frames_task}, timeout=max(0.0, deadline - loop.time()))
+        cookies: Optional[List[Dict[str, Any]]] = None
+        cookie_source = "live"
+        if cookies_task.done() and not cookies_task.cancelled() and cookies_task.exception() is None:
+            cookies = cookies_task.result()
+            _remember_rotation_cookies(context, cookies)
+        else:
+            error = cookies_task.exception() if cookies_task.done() and not cookies_task.cancelled() else asyncio.TimeoutError()
+            logger.warning("Failed to capture browser cookies before IP rotation", error=f"{type(error).__name__}: {error}"[:200])
+            cached = None
+            with contextlib.suppress(TypeError):
+                cached = _ROTATION_COOKIE_CACHE.get(context)
+            if cached is not None:
+                cookies, captured_at = cached
+                cookie_source = f"cached {loop.time() - captured_at:.0f}s ago"
+        origins: List[Dict[str, Any]] = []
+        if frames_task.done() and not frames_task.cancelled() and frames_task.exception() is None:
+            origins = frames_task.result()
+        timed_out = isinstance(full_error, asyncio.TimeoutError)
+        # Carry only state that exists: an empty jar with no answered origin keeps the
+        # original outcome (typed timeout, or no state on another error).
+        if cookies or origins:
+            cookies = cookies or []
+            logger.warning(
+                "Full browser storage capture did not finish; carrying cookies and the open-origin storage that answered",
+                timeout_seconds=timeout_seconds,
+                reason="timeout" if timed_out else f"{type(full_error).__name__}: {full_error}"[:200],
+                capture_scope="cookies_open_origin_localstorage_indexeddb" if origins else "cookies_only",
+                cookie_source=cookie_source,
+                cookies=len(cookies),
+                origins=[entry["origin"] for entry in origins][:20],
+            )
+            return {"cookies": cookies, "origins": origins}
+        if not timed_out:
+            logger.warning("Failed to capture browser storage before IP rotation", error=str(full_error))
+            return None
         logger.warning(
             "Timed out capturing browser storage before IP rotation",
             timeout_seconds=timeout_seconds,
@@ -2275,9 +2499,22 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
         raise BrowserStorageCaptureTimeoutError(
             f"Browser storage capture timed out after {timeout_seconds:g}s before challenge recovery."
         )
-    except Exception as exc:
-        logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
-        return None
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+            task.add_done_callback(lambda finished: finished.cancelled() or finished.exception())
+
+
+# Last cookie jar read from each browser context, so a capture whose live read
+# misses its bound still carries the session's cookies (slightly older).
+_ROTATION_COOKIE_CACHE: "weakref.WeakKeyDictionary[Any, Tuple[List[Dict[str, Any]], float]]" = weakref.WeakKeyDictionary()
+
+
+def _remember_rotation_cookies(context: Any, cookies: Any) -> None:
+    if isinstance(cookies, list):
+        with contextlib.suppress(TypeError):
+            _ROTATION_COOKIE_CACHE[context] = (cookies, asyncio.get_running_loop().time())
 
 
 def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
@@ -2412,6 +2649,109 @@ def _updated_rotation_session_metadata(
     return updated
 
 
+class BrowserSupervisorCapExceeded(asyncio.TimeoutError):
+    """The supervisor's own action cap expired (the action did not finish)."""
+
+    def __init__(self, timeout_seconds: float, cancelled: bool):
+        super().__init__(f"browser action exceeded the {timeout_seconds:g}s supervisor cap")
+        self.timeout_seconds = timeout_seconds
+        self.cancelled = cancelled
+
+
+class BrowserActionRaisedTimeout(RuntimeError):
+    """A TimeoutError the action raised itself (e.g. the humanizer's CDP input
+    drain): an input/transport failure, not the supervisor cap."""
+
+
+_BLOCKED_ACTION_STACK_CHARS = 4096
+_CANCELLED_ACTION_DRAIN_SECONDS = 5.0
+
+
+async def _await_browser_action_within_cap(
+    action_task: "asyncio.Task[Any]",
+    *,
+    timeout: float,
+    log_context: Dict[str, Any],
+    drain_seconds: float = _CANCELLED_ACTION_DRAIN_SECONDS,
+) -> Any:
+    """Await ``action_task`` under the supervisor cap.
+
+    At the cap, log where the action is blocked (its awaiting stack) before
+    cancelling it, then wait at most ``drain_seconds`` for the cancellation.
+    Raises ``BrowserSupervisorCapExceeded`` for the cap; a TimeoutError raised
+    by the action itself becomes ``BrowserActionRaisedTimeout`` so it is handled
+    as an action error, not as a supervisor timeout. The evaluate deadline
+    (``BrowserEvaluateDeadlineExceeded``) keeps its own timeout semantics.
+    """
+    from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
+
+    try:
+        done, _ = await asyncio.wait({action_task}, timeout=timeout)
+    except BaseException:
+        # Outer cancellation (user pause, Temporal cancel): asyncio.wait leaves the
+        # action running, so cancel it rather than let it keep driving the browser.
+        action_task.cancel()
+        raise
+    if not done:
+        stack = io.StringIO()
+        action_task.print_stack(file=stack)
+        logger.error(
+            "Browser action blocked at supervisor cap",
+            cap_seconds=timeout,
+            blocked_stack=stack.getvalue()[-_BLOCKED_ACTION_STACK_CHARS:],
+            **log_context,
+        )
+        action_task.cancel()
+        await asyncio.wait({action_task}, timeout=drain_seconds)
+        raise BrowserSupervisorCapExceeded(timeout, cancelled=action_task.cancelled())
+    try:
+        return action_task.result()
+    except asyncio.TimeoutError as error:
+        if isinstance(error, BrowserEvaluateDeadlineExceeded):
+            raise
+        raise BrowserActionRaisedTimeout(extract_error_message(error) or type(error).__name__) from error
+
+
+def _tilion_egress_class(session_metadata: Dict[str, Any]) -> str:
+    """Tilion bills residential, ISP and mobile exits as premium egress."""
+    proxy_source = str((session_metadata or {}).get("proxy_source") or "").lower()
+    if any(kind in proxy_source for kind in ("residential", "isp", "mobile")):
+        return "premium"
+    if "direct" in proxy_source or "datacenter" in proxy_source:
+        return "direct"
+    return "premium"  # unknown: the higher rate, so the row errs toward a ceiling
+
+
+def _with_downloaded_files(state: Any, persister: Optional[Any]) -> Any:
+    """Attach the files this activity downloaded to the step's browser state."""
+    if not isinstance(state, dict) or persister is None:
+        return state
+    files = persister.downloaded_files()
+    return {**state, "downloaded_files": files} if files else state
+
+
+def _cdp_multiplexer_kwargs(cdp_multiplexer: Optional[Any]) -> Dict[str, Any]:
+    """DOMService kwargs: only single-CDP-client sessions hand over a multiplexer."""
+    return {"cdp_multiplexer": cdp_multiplexer} if cdp_multiplexer is not None else {}
+
+
+def _fresh_connect_url_minter(config: Any, task_id: Optional[str]) -> Optional[Callable[[], Awaitable[Optional[str]]]]:
+    """Mint a fresh provider CDP URL for an in-activity redial (Tilion tokens last 1800 s).
+
+    GET /api/browser-session/task/{task_id} returns a freshly minted ws_url for
+    ACTIVE Tilion rows; the cached URL is never reused after expiry.
+    """
+    if config is None or not task_id:
+        return None
+
+    async def mint() -> Optional[str]:
+        info = await fetch_session_info(config, task_id)
+        ws_url = info.get("ws_url") if isinstance(info, dict) else None
+        return ws_url if isinstance(ws_url, str) and ws_url else None
+
+    return mint
+
+
 async def _reconnect_browser_stack_after_rotation(
     *,
     new_cdp_url: str,
@@ -2424,6 +2764,7 @@ async def _reconnect_browser_stack_after_rotation(
     provider: Optional[str] = None,
     config: Any = None,
     task_id: Optional[str] = None,
+    exit_geo_locale: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
@@ -2448,13 +2789,24 @@ async def _reconnect_browser_stack_after_rotation(
 
     # 2. Attach DOMService + Playwright to the rotated session.
     _disable_cdp_websocket_proxy()
-    connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
+    connection_cdp_url, cdp_multiplexer = await open_browser_cdp_connection(
+        new_cdp_url,
+        label=f"rotation:{agent_id}",
+        refresh_url=_fresh_connect_url_minter(config, task_id),
+        # Tilion stays on New York/en-US whatever the exit geo; the multiplexer
+        # applies the session's timezone/locale to every target it attaches.
+        emulation=tilion_emulation(fingerprint_injection, exit_geo_locale),
+    )
     dom_service = DOMService(
         cdp_url=connection_cdp_url,
         downloads_path=browser_downloads_path_for_provider(provider),
+        **_cdp_multiplexer_kwargs(cdp_multiplexer),
     )
     if hasattr(old_dom_service, "secret_redaction_state"):
         dom_service.restore_secret_redaction_state(old_dom_service.secret_redaction_state())
+    if hasattr(old_dom_service, "rendered_image_state"):
+        # A receipt image seen before the switch stays valid provenance after it.
+        dom_service.restore_rendered_image_state(old_dom_service.rendered_image_state())
     pw_instance = None
     pw_browser = None
     driver_pid = None
@@ -2711,6 +3063,7 @@ async def _replace_browser_humanizer(
     input_page: Any,
     cursor_observer: Any,
     humanizer_factory: Any,
+    serial_cdp_keyboard: bool = False,
 ) -> Any:
     """Rebind synthesized input after a provider handoff without leaking idle work."""
     if current_humanizer is not None:
@@ -2718,7 +3071,13 @@ async def _replace_browser_humanizer(
             await current_humanizer.close()
     if not enabled:
         return None
-    rebound_humanizer = humanizer_factory(dom_page=dom_page, input_page=input_page, fast=False)
+    rebound_humanizer = humanizer_factory(
+        dom_page=dom_page,
+        input_page=input_page,
+        fast=False,
+        # Tilion drops pipelined Input.dispatchKeyEvent commands.
+        **({"serial_cdp_keyboard": True} if serial_cdp_keyboard else {}),
+    )
     await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
     rebound_humanizer.set_cursor_observer(cursor_observer)
     rebound_humanizer.start_idle_movement()
@@ -2927,6 +3286,11 @@ def _captcha_solver_wait_complete(
     if provider == "browser-use" and elapsed_seconds < 10:
         return False
     return saw_active_solver or inactive_polls >= 3
+
+
+def _log_antibot_event(event: str, episode: Dict[str, Any]) -> None:
+    """One greppable line per challenge episode ('antibot.episode') or unresolved end ('antibot.stuck')."""
+    logger.info(event, **{key: value for key, value in episode.items() if not key.startswith("_")})
 
 
 async def _wait_for_provider_captcha_solver(
@@ -7191,7 +7555,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                         "status": "completed",
                         "success": True,
                         "message": context_message,
-                        "browser_url": browser_url,
+                        "browser_url": redact_url_secrets(browser_url),
                         "current_url": browser_state.get("url", ""),
                         "task_id": task_id,
                         "session_id": world_model_session_id,
@@ -7570,6 +7934,10 @@ async def _spawn_browser_agent_activity_v3_real(
         is_resume = True
 
     private_browser_runtime: Dict[str, Any] = {}
+    durable_browser_runtime: Dict[str, Any] = {}
+    # The latest challenge episode whose recovery did not resolve it (antibot.stuck);
+    # defined before any early exit so the activity's finally can always read it.
+    antibot_unresolved: Dict[str, Any] = {}
     if write_lock_resume_state:
         try:
             hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
@@ -7581,6 +7949,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     "message": str(error), "task_id": task_id,
                     "session_id": write_lock_resume_state.get("session_id"), "usage_items": []}
         private_browser_runtime = hydrated_resume.pop("private_browser_runtime", {})
+        durable_browser_runtime = dict(hydrated_resume.pop("durable_browser_runtime", None) or {})
+        for key in ("tilion_downloads", "rendered_image_urls"):
+            # Earlier pauses carried these only in the private (secret-bound) runtime.
+            if key not in durable_browser_runtime and key in private_browser_runtime:
+                durable_browser_runtime[key] = private_browser_runtime[key]
         if "browser_output_schema" in private_browser_runtime:
             hydrated_resume["browser_output_schema"] = private_browser_runtime["browser_output_schema"]
         write_lock_resume_state = hydrated_resume
@@ -7730,6 +8103,16 @@ async def _spawn_browser_agent_activity_v3_real(
                     {"pending_action_target": approval_result["pending_action_target"]}
                     if approval_result and approval_result.get("pending_action_target")
                     else {}
+                ),
+            },
+            durable_runtime_state={
+                # Tilion downloads are durable in attachment storage; the
+                # resumed activity (maybe on another worker) extracts them.
+                "tilion_downloads": durable_tilion_downloads(session_id),
+                # Receipt-image provenance (bounded at 400 in DOMService): images
+                # this browser rendered before the pause stay valid after resume.
+                "rendered_image_urls": (
+                    dom_service.rendered_image_state() if hasattr(dom_service, "rendered_image_state") else []
                 ),
             },
         )
@@ -8231,6 +8614,42 @@ async def _spawn_browser_agent_activity_v3_real(
 
         # ===== PHASE 1: SESSION INIT =====
         t_session = time.monotonic()
+        session_worker_apply: Optional[Dict[str, Any]] = None
+        session_exit_geo_locale: Optional[Dict[str, Any]] = None
+        # Tilion bills 2 credits per session create; count this activity's creates
+        # (initial, replacement on resume, rotation/recovery) for the cost row.
+        tilion_creates = {"count": 0}
+        # CDP bytes Tilion relayed to this worker, by egress rate class, for
+        # sessions this activity has already left (rotation/recovery).
+        tilion_left_cdp_bytes = {"premium": 0, "direct": 0}
+        # The DOMService last banked, so a service is counted once even if it is
+        # still bound when the cost row is built (e.g. its disconnect failed).
+        tilion_banked_dom: Dict[str, Any] = {"service": None}
+
+        def _tilion_usage_kwargs() -> Dict[str, Any]:
+            """Cost-row inputs Tilion bills: creates and CDP bytes per rate class."""
+            totals = dict(tilion_left_cdp_bytes)
+            if browser_session_metadata.get("provider") == "tilion" and dom_service is not tilion_banked_dom["service"]:
+                current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
+                totals[_tilion_egress_class(browser_session_metadata)] += current
+            return {
+                "session_creates": tilion_creates["count"],
+                "tilion_premium_bytes": totals["premium"],
+                "tilion_direct_bytes": totals["direct"],
+            }
+
+        def _tilion_leave_session() -> None:
+            """Bank the outgoing Tilion session's CDP bytes before a rebind replaces
+            dom_service or an exit clears it ahead of the cost row."""
+            if (
+                browser_session_metadata.get("provider") == "tilion"
+                and dom_service is not None
+                and dom_service is not tilion_banked_dom["service"]
+            ):
+                current = int(getattr(dom_service, "cdp_bytes_received", 0) or 0)
+                tilion_left_cdp_bytes[_tilion_egress_class(browser_session_metadata)] += current
+                tilion_banked_dom["service"] = dom_service
+
         fingerprint_injection = None
         user_profile = {}
         # Current backends return auth_options from the same realm-preparation
@@ -8346,8 +8765,17 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passwords = session_info.get("passwords", [])
             session_passkeys = session_info.get("passkeys", [])
             session_auth_options = session_info.get("auth_options")
+            session_worker_apply = tilion_worker_apply_payload(session_info)
+            session_exit_geo_locale = session_info.get("exit_geo_locale")
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
+            if (
+                browser_session_metadata.get("provider") == "tilion"
+                and session_info.get("resume_mode") == "new_steel_session_after_unavailable"
+            ):
+                # A replacement session was created; a same-session (or backend-refreshed)
+                # auth-assistance resume reconnects without this activity creating one.
+                tilion_creates["count"] += 1
             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
             credential_target_url = (
                 session_info.get("current_url") or session_info.get("saved_url")
@@ -8429,10 +8857,17 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passwords = session_data.get("passwords", [])
             session_passkeys = session_data.get("passkeys", [])
             session_auth_options = session_data.get("auth_options")
+            session_worker_apply = tilion_worker_apply_payload(session_data)
+            session_exit_geo_locale = session_data.get("exit_geo_locale")
             session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
+            if browser_session_metadata.get("provider") == "tilion":
+                tilion_creates["count"] += 1
             user_profile = session_data.get("user_settings") or {}
         _record_timing("session_init", t_session)
+        # Durable Tilion downloads from before a write-lock/payment/auth pause,
+        # keyed by the session this activity actually runs on.
+        restore_tilion_downloads(session_id, durable_browser_runtime.get("tilion_downloads"))
 
         if not cdp_url:
             raise RuntimeError("No CDP URL provided - backend must return provider ws_url")
@@ -8486,7 +8921,7 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         _record_timing("auth_options", t_auth)
 
-        browser_activity_checkpoint(f"Connecting via CDP: {cdp_url[:50]}...")
+        browser_activity_checkpoint(f"Connecting via CDP: {redact_cdp_url(cdp_url)[:50]}...")
 
         # ===== PHASE 2: PARALLEL SETUP =====
         t_parallel = time.monotonic()
@@ -8495,10 +8930,23 @@ async def _spawn_browser_agent_activity_v3_real(
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
             nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
-            connection_cdp_url = steel_cdp_connection_url(cdp_url)
+            # Tilion admits one CDP client: browser-use and Playwright share one
+            # loopback-multiplexed socket owned (and closed) by the DOMService.
+            connection_cdp_url, _cdp_multiplexer = await open_browser_cdp_connection(
+                cdp_url,
+                label=f"session:{agent_id}",
+                refresh_url=_fresh_connect_url_minter(config, task_id),
+                # Tilion stays on New York/en-US whatever the exit geo; the
+                # multiplexer applies the session's timezone/locale to every
+                # target before it runs, including after a redial.
+                emulation=tilion_emulation(fingerprint_injection, session_exit_geo_locale),
+            )
             _dom_service = DOMService(
                 cdp_url=connection_cdp_url,
-                downloads_path=browser_downloads_path_for_provider(browser_session_metadata.get("provider")),
+                downloads_path=browser_downloads_path_for_provider(
+                    browser_session_metadata.get("provider")
+                ),
+                **_cdp_multiplexer_kwargs(_cdp_multiplexer),
             )
             if hasattr(_dom_service, "restore_secret_redaction_state"):
                 _dom_service.restore_secret_redaction_state(write_lock_resume_state or {})
@@ -8829,6 +9277,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 browser_session=dom_service.session,
                 session_id=session_id,
                 config=config,
+                user_id=user_id,
                 agent_id=agent_id,
                 task_id=task_id or "",
                 provider=browser_session_metadata.get("provider"),
@@ -8840,7 +9289,13 @@ async def _spawn_browser_agent_activity_v3_real(
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
                 logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
                 return None
-            _humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+            _humanizer = BrowserHumanizer(
+                dom_page=dom_page,
+                input_page=input_page,
+                fast=False,
+                # Tilion drops pipelined Input.dispatchKeyEvent commands.
+                serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
+            )
             await _humanizer.initialize_cursor(start_pos=(640, 400))
             logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
             return _humanizer
@@ -8952,6 +9407,16 @@ async def _spawn_browser_agent_activity_v3_real(
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
 
+        if hasattr(dom_service, "restore_rendered_image_state"):
+            # Pause/resume (write-lock, payment, auth) runs in a new activity,
+            # possibly on another worker; the resume context carries provenance.
+            dom_service.restore_rendered_image_state(durable_browser_runtime.get("rendered_image_urls"))
+
+        if session_worker_apply:
+            # Tilion: the backend returned saved state instead of connecting to
+            # the browser this worker holds; apply it over the worker's socket.
+            await apply_tilion_worker_state(playwright_browser, session_worker_apply)
+
         # Upload attachments
         if attachments:
             t = time.monotonic()
@@ -8970,13 +9435,23 @@ async def _spawn_browser_agent_activity_v3_real(
                     file_content = await download_from_storage(storage_path)
 
                     browser_activity_checkpoint(f"Uploading {filename} to browser session...")
-                    upload_result = await upload_file_to_session(
-                        config,
-                        session_id,
-                        filename,
-                        file_content,
-                        fp.get("mime_type", "application/octet-stream"),
-                    )
+                    if getattr(dom_service, "single_cdp_client", False) is True:
+                        # Tilion: the backend cannot reach the browser while the
+                        # worker holds CDP; upload_file sets these bytes itself.
+                        upload_result = stage_tilion_upload(
+                            session_id,
+                            filename,
+                            file_content,
+                            fp.get("mime_type", "application/octet-stream"),
+                        )
+                    else:
+                        upload_result = await upload_file_to_session(
+                            config,
+                            session_id,
+                            filename,
+                            file_content,
+                            fp.get("mime_type", "application/octet-stream"),
+                        )
                     if upload_result:
                         remote_path = upload_result.get("path", f"/tmp/{filename}")
                         available_file_paths[filename] = remote_path
@@ -9355,6 +9830,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
                 )
                 raise
+            realm_worker_apply = tilion_worker_apply_payload(payload)
+            if realm_worker_apply:
+                await apply_tilion_worker_state(playwright_browser, realm_worker_apply)
             realm_state = await build_realm_credential_state(
                 payload,
                 decryption_key=config.payment.decryption_key,
@@ -9601,6 +10079,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                             except Exception as e:
                                 logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                            _tilion_leave_session()
                             dom_service = None
                         browser_task_paused_for_resume = True
                         step_timer.finish()
@@ -9614,7 +10093,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 "session_id": session_id,
                                 "cdp_url": cdp_url,
                                 "task_id": task_id,
-                                "browser_url": browser_url,
+                                "browser_url": redact_url_secrets(browser_url),
                                 "auth_realm": auth_realm,
                                 "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                                 "usage_items": build_usage_items(
@@ -9625,6 +10104,8 @@ async def _spawn_browser_agent_activity_v3_real(
                                     usage_by_model,
                                     pricing_pool=browser_pool,
                                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                                    provider=browser_session_metadata.get("provider"),
+                                    **_tilion_usage_kwargs(),
                                 ),
                                 **drain_continuity,
                             }
@@ -9693,6 +10174,12 @@ async def _spawn_browser_agent_activity_v3_real(
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             browser_activity_checkpoint(f"Step {iteration} - resolving page state")
+            if dom_service is None:
+                # A failed reattach left no browser stack: end the activity with a typed
+                # error instead of AttributeError plus supervisor recovery on dead handles.
+                raise BrowserStackUnavailableError(
+                    f"browser stack unavailable for session {session_id} after a failed reattach"
+                )
             try:
                 # Kernel drops the WebAuthn VA environment ~5s after seed (agent
                 # c1ebd389 median 5.6s). Re-arm before every state observe so the
@@ -9720,6 +10207,15 @@ async def _spawn_browser_agent_activity_v3_real(
                     _observe_step_page(dom_service, needs_dom=observe_needs_dom),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                if (
+                    browser_download_persister is None
+                    and download_persister_task is not None
+                    and download_persister_task.done()
+                    and not download_persister_task.cancelled()
+                    and download_persister_task.exception() is None
+                ):
+                    browser_download_persister = download_persister_task.result()
+                observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
                 step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
@@ -10168,7 +10664,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         action_history=action_history, dom_service=dom_service,
                         unified_action=unified_action, browser_turn_messages=browser_turn_messages,
                         continuity_state=_pause_continuity_state,
-                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": browser_url,
+                        runtime={"session_id": session_id, "cdp_url": cdp_url, "browser_url": redact_url_secrets(browser_url),
                                  "step_count": iteration},
                     )
                     if native_pause.get("status") != "awaiting_auth_assistance":
@@ -10228,6 +10724,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dict(replacement),
                         )
                         browser_stack_replacement_started = True
+                        _tilion_leave_session()
                         reconnected = await _reconnect_browser_stack_after_rotation(
                             new_cdp_url=new_cdp_url,
                             old_dom_service=dom_service,
@@ -10236,6 +10733,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             old_driver_pid=playwright_driver_pid,
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
+                            exit_geo_locale=replacement.get("exit_geo_locale") or session_exit_geo_locale,
                             agent_id=agent_id,
                             provider=pending_browser_session_metadata.get("provider"),
                             config=config,
@@ -10250,6 +10748,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         session_credential_ref = pending_session_credential_ref
                         auth_realm = pending_auth_realm
                         browser_session_metadata = pending_browser_session_metadata
+                        if browser_session_metadata.get("provider") == "tilion":
+                            tilion_creates["count"] += 1
                         dom_service = reconnected["dom_service"]
                         if hasattr(dom_service, "model_visible_value"):
                             action_history.bind_dom_service(dom_service)
@@ -10281,8 +10781,10 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
+                                    provider=browser_session_metadata.get("provider"),
                                 )
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
                             dom_page=dom_page,
@@ -10441,6 +10943,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         "tool_call_id": tool_call_id,
                     },
                 )
+                _tilion_leave_session()
                 dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
@@ -10462,6 +10965,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
+                    **_tilion_usage_kwargs(),
                 )
                 await _propagate_browser_credentials_with_progress(
                     redact=_redact_activity_value,
@@ -10512,7 +11016,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     "auth_realm": auth_realm or base_site,
                     "task_id": task_id,
                     "session_id": session_id,
-                    "browser_url": browser_url,
+                    "browser_url": redact_url_secrets(browser_url),
                     "cdp_url": cdp_url,
                     "handoff_mode": "same_steel_session_live_view",
                     "step_count": iteration,
@@ -10596,6 +11100,22 @@ async def _spawn_browser_agent_activity_v3_real(
                         "recovery_action": "skipped_clean_page",
                         "current_url": current_url,
                     }
+                    _log_antibot_event(
+                        "antibot.episode",
+                        {
+                            "agent_id": agent_id,
+                            "task_id": task_id,
+                            "host": urlparse(current_url or "").hostname or "",
+                            "detector": "llm_classifier",
+                            "recovery_reason": str(recovery_reason or "")[:200],
+                            "waited_seconds": 0.0,
+                            "cleared": True,
+                            "recovery_invoked": False,
+                            "recovery_outcome": "skipped_clean_page",
+                            "provider": browser_session_metadata.get("provider"),
+                        },
+                    )
+                    antibot_unresolved.clear()
                     await _finalize_browser_recovery_action_result(
                         action_result=action_result,
                         dom_service=dom_service,
@@ -10610,6 +11130,27 @@ async def _spawn_browser_agent_activity_v3_real(
                         browser_stream=browser_stream,
                     )
                     continue
+
+                antibot_episode: Dict[str, Any] = {
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "host": urlparse(current_url or "").hostname or "",
+                    "detector": (
+                        "provider_exit_rejected"
+                        if provider_exit_rejected
+                        else "transport_failure"
+                        if cited_first_party_transport_failure(
+                            current_url or "", browser_network_recorder, recovery_reason
+                        )
+                        else "llm_classifier"
+                    ),
+                    "recovery_reason": str(recovery_reason or "")[:200],
+                    "waited_seconds": 0.0,
+                    "cleared": False,
+                    "recovery_invoked": False,
+                    "provider": browser_session_metadata.get("provider"),
+                }
+                antibot_episode["recovery_invoked"] = True
 
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
@@ -10758,6 +11299,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dict(config_result),
                         )
                         try:
+                            _tilion_leave_session()
                             reconnected = await _reconnect_browser_stack_after_rotation(
                                 new_cdp_url=new_cdp_url,
                                 old_dom_service=dom_service,
@@ -10765,16 +11307,18 @@ async def _spawn_browser_agent_activity_v3_real(
                                 old_playwright_instance=playwright_instance,
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
+                                exit_geo_locale=session_exit_geo_locale,
                                 agent_id=agent_id,
                                 provider=promoted_metadata.get("provider") or config_result.get("provider"),
                                 config=config,
                                 task_id=task_id,
                             )
-                        except Exception:
+                        except Exception as reconnect_error:
                             # The reconnect helper disconnects the old stack before attaching to
                             # the promoted session. Drop every dead handle so the error path cannot
                             # attempt a screenshot/action against the disconnected browser and mask
                             # the original reconnect failure.
+                            released_dom_service = dom_service
                             if humanizer is not None:
                                 with contextlib.suppress(Exception):
                                     await humanizer.close()
@@ -10785,7 +11329,33 @@ async def _spawn_browser_agent_activity_v3_real(
                             playwright_browser = None
                             playwright_instance = None
                             playwright_driver_pid = None
-                            raise
+                            # The backend already swapped to the promoted session and released
+                            # the old one: never keep pointing at it (a later close would 500).
+                            session_id = config_result.get("session_id", session_id)
+                            browser_url = config_result.get("debug_url", browser_url)
+                            cdp_url = new_cdp_url
+                            browser_session_metadata = promoted_metadata
+                            logger.warning(
+                                "Reattach to promoted browser session failed; retrying once",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                session_id=session_id,
+                                error=extract_error_message(reconnect_error),
+                            )
+                            # One delayed retry covers a provider slot that frees late (Tilion
+                            # 4409). The released DOMService still carries redaction and
+                            # receipt-image state for the replacement.
+                            reconnected = await _retry_promoted_browser_reattach(
+                                first_error=reconnect_error,
+                                new_cdp_url=new_cdp_url,
+                                released_dom_service=released_dom_service,
+                                fingerprint_injection=fingerprint_injection,
+                                exit_geo_locale=session_exit_geo_locale,
+                                agent_id=agent_id,
+                                provider=promoted_metadata.get("provider") or config_result.get("provider"),
+                                config=config,
+                                task_id=task_id,
+                            )
                         dom_service = reconnected["dom_service"]
                         if hasattr(dom_service, "model_visible_value"):
                             action_history.bind_dom_service(dom_service)
@@ -10798,6 +11368,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         browser_url = config_result.get("debug_url", browser_url)
                         cdp_url = new_cdp_url
                         browser_session_metadata = promoted_metadata
+                        if browser_session_metadata.get("provider") == "tilion":
+                            tilion_creates["count"] += 1
                         # Preloaded winners already applied auth/origin state during
                         # candidate probes. Re-running origin restore clears
                         # localStorage and rewrites the challenged capture onto the
@@ -10846,9 +11418,11 @@ async def _spawn_browser_agent_activity_v3_real(
                                 await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
+                                    provider=browser_session_metadata.get("provider"),
                                 )
 
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
                             dom_page=dom_page,
@@ -11004,6 +11578,18 @@ async def _spawn_browser_agent_activity_v3_real(
                             from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
                             cache_sequence_id=classifier_usage.get("cache_sequence_id"),
                         )
+
+                antibot_episode["recovery_outcome"] = (
+                    str(action_result.get("recovery_action") or "recovered")
+                    if action_result.get("success")
+                    else f"failed: {str(action_result.get('error') or '')[:160]}"
+                )
+                _log_antibot_event("antibot.episode", antibot_episode)
+                if action_result.get("success"):
+                    antibot_unresolved.clear()
+                else:
+                    antibot_unresolved.clear()
+                    antibot_unresolved.update(antibot_episode)
 
                 await _finalize_browser_recovery_action_result(
                     action_result=action_result,
@@ -11227,6 +11813,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         await _disconnect_browser(dom_service)
+                        _tilion_leave_session()
                         dom_service = None
                         await collect_unread_user_instructions()
 
@@ -11266,6 +11853,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             pricing_pool=browser_pool,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             provider=browser_session_metadata.get("provider"),
+                            **_tilion_usage_kwargs(),
                         )
                         await _propagate_browser_credentials_with_progress(
                             redact=_redact_activity_value,
@@ -11284,7 +11872,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 "success": True,
                                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                                 "message": context_message,
-                                "browser_url": browser_url,
+                                "browser_url": redact_url_secrets(browser_url),
                                 "task_id": task_id,
                                 "usage_items": usage_items,
                                 "execution_time_ms": execution_time_ms,
@@ -11513,9 +12101,16 @@ Based on this feedback, I need to continue working on the task and address the i
                             "error": "Phone outcome unconfirmed; inspect owned receipt",
                         }
                 else:
-                    result = await asyncio.wait_for(
+                    result = await _await_browser_action_within_cap(
                         action_task,
                         timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                        log_context={
+                            "agent_id": agent_id,
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "iteration": iteration,
+                            "action_name": action_name,
+                        },
                     )
             except asyncio.TimeoutError:
                 from domains.spawn_browser_agent_v3.service_actions import BrowserEvaluateDeadlineExceeded
@@ -11589,6 +12184,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                         input_page = recycled_page
                         humanizer = await _replace_browser_humanizer(
+                            serial_cdp_keyboard=is_single_cdp_client_provider(browser_session_metadata.get("provider")),
                             current_humanizer=humanizer,
                             enabled=True,
                             dom_page=dom_page,
@@ -11837,13 +12433,14 @@ Based on this feedback, I need to continue working on the task and address the i
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
                     await _disconnect_browser(dom_service)
+                    _tilion_leave_session()
                     dom_service = None
 
                 logger.info(
                     "Returning to workflow for write lock approval",
                     task_id=task_id,
                     session_id=session_id,
-                    cdp_url=cdp_url[:50] if cdp_url else None,
+                    cdp_url=redact_cdp_url(cdp_url)[:50] if cdp_url else None,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
                 resume_result = {
@@ -12000,6 +12597,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
                     await _disconnect_browser(dom_service)
+                    _tilion_leave_session()
                     dom_service = None
 
                 await browser_stream.finish_tools(status="FINISHED")
@@ -12112,7 +12710,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     message=result.get("error", "Failed"),
                     status=MessageStatus.ERROR,
-                    browser_url=browser_url,
+                    browser_url=redact_url_secrets(browser_url),
                     action_type="error",
                     tool_call_id=tool_call_id_action,
                 )
@@ -12298,6 +12896,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
         await _disconnect_browser(dom_service)
+        _tilion_leave_session()
         dom_service = None
         await collect_unread_user_instructions()
 
@@ -12334,6 +12933,7 @@ Based on this feedback, I need to continue working on the task and address the i
             pricing_pool=browser_pool,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
             provider=browser_session_metadata.get("provider"),
+            **_tilion_usage_kwargs(),
         )
         await _propagate_browser_credentials_with_progress(
             redact=_redact_activity_value,
@@ -12362,7 +12962,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 "success": False,
                 **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": context_message,
-                "browser_url": browser_url,
+                "browser_url": redact_url_secrets(browser_url),
                 "usage_items": usage_items,
                 "execution_time_ms": execution_time_ms,
                 "structured_response": latest_structured_response,
@@ -12388,7 +12988,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 browser_url = prepared.get("debug_url")
                 browser_session_metadata = prepared.get("browser_session_metadata") or {}
                 provider = browser_session_metadata.get("provider")
-                if provider in {"kernel", "steel", "browser-use"}:
+                if provider in {"kernel", "steel", "browser-use", "tilion"}:
                     preparation_cancellation = {
                         "version": 1,
                         "agent_id": agent_id,
@@ -12410,6 +13010,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await _disconnect_browser(dom_service)
+                _tilion_leave_session()
                 dom_service = None
 
         if task_id and browser_turn_messages:
@@ -12456,7 +13057,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "status": "cancelled",
             "task_id": task_id,
             "session_id": session_id,
-            "browser_url": browser_url,
+            "browser_url": redact_url_secrets(browser_url),
             "message": "Browser agent cancelled by user",
             **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             **({"unread_user_messages": list(unread_user_instructions)} if unread_user_instructions else {}),
@@ -12495,6 +13096,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await _disconnect_browser(dom_service)
+                _tilion_leave_session()
                 dom_service = None
 
         error_context = f"Failed during: {last_action}"
@@ -12578,6 +13180,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         pricing_pool=browser_pool,
                         fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                         provider=browser_session_metadata.get("provider"),
+                        **_tilion_usage_kwargs(),
                     ),
                     "execution_time_ms": execution_time_ms,
                 }
@@ -12665,6 +13268,12 @@ Based on this feedback, I need to continue working on the task and address the i
             if browser_download_persister is not None:
                 with contextlib.suppress(Exception):
                     await browser_download_persister.close()
+            if antibot_unresolved:
+                # The task ended while its last challenge was still unresolved.
+                _log_antibot_event("antibot.stuck", {**antibot_unresolved, "final_url_host": urlparse(current_url or "").hostname or ""})
+            # Worker-held Tilion uploads/downloads end with the activity that
+            # extracted them; keep worker RSS bounded.
+            release_tilion_session_files(session_id)
             owned_cleanup = _schedule_browser_cleanup(
                 agent_id=agent_id,
                 preparation_cancellation=preparation_cancellation,

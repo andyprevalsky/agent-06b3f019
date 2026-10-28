@@ -5,6 +5,8 @@ import cors from 'cors';
 import { authenticate } from './providers/auth';
 import agentsRouter from './domains/agents/routes';
 import agentGraphRouter from './domains/agents/routes.graph';
+import agentMcpRouter from './domains/agents/routes.mcp';
+import index01WebhookRouter from './domains/agents/routes.index01';
 import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import workerProcessRuntimeRouter from './domains/worker-process-runtime/routes';
 import formatRouter from './domains/format/routes';
@@ -77,6 +79,7 @@ import downloadTelemetryRouter from './domains/download-telemetry/routes';
 import computeGrantsRouter from './domains/compute-grants/routes';
 import { installGrantRecovery } from './domains/compute-grants/service';
 import { releaseAllConnectSessions } from './domains/compute-grants/connectSession.shutdown';
+import { releaseAllRecoveryProbeSessions } from './providers/browser/challengeRecoveryLaneSearch';
 import { createCloudMinter } from './domains/compute-grants/minter';
 import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/demo-cache/routes.proxy';
@@ -85,7 +88,7 @@ import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
-import { tracingMiddleware } from './providers/tracing';
+import { redactPathSecrets, tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
 import {
   blackboxTemporalSignals,
@@ -482,6 +485,8 @@ app.use('/api/agents', agentQuestionsRouter); // pinned-question answers (agent-
 app.use('/api/agents', codeAgentDirectChatRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/agent-graph', agentGraphRouter);
+app.use('/api/index01', index01WebhookRouter); // Index 01 webhook: transcript → plan-mode agent
+app.use('/mcp', agentMcpRouter); // Index 01 (Pebble) MCP: spawn_agent → plan-mode cloud agent
 app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
@@ -546,7 +551,7 @@ app.use(
       (err as Record<string, number>).statusCode ?? (err as Record<string, number>).status ?? 500;
     log.error('Error in request', {
       error: errObj.message,
-      path: req.path,
+      path: redactPathSecrets(req.path),
       method: req.method,
       ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
       stack: errObj.stack,
@@ -564,7 +569,7 @@ app.use(
     // Return appropriate status code
     res.status(statusCode).json({
       error: errObj.message || 'Internal server error',
-      path: req.path,
+      path: redactPathSecrets(req.path),
     });
   }
 );
@@ -641,7 +646,19 @@ attachLocalDeviceServer(server, [HOLD_STREAM_PATH]);
 const shutdown = async (signal: string) => {
   log.info(`${signal} received, closing server...`);
   // Remote browsers bill until released and are tracked in memory, so exiting
-  // without this strands every in-flight connect session.
+  // without this strands every in-flight connect session (every provider,
+  // Tilion included: release is a provider-bound closure). Agent browser
+  // sessions are deliberately NOT closed here: a deploy drain resumes the same
+  // session, and terminal/orphaned rows are released by the per-minute
+  // terminal-browser reconcile and its owned-only Tilion reaper. Tilion keeps
+  // no benchmark profiles, so it has no profile cleanup step below.
+  // Challenge-recovery candidate sessions are rented browsers no agent row owns
+  // yet, so no reconcile would ever release them (T107).
+  await releaseAllRecoveryProbeSessions().catch((err: unknown) => {
+    log.warn('recovery_probe_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   await releaseAllConnectSessions().catch((err: unknown) => {
     log.warn('connect_session_cleanup_failed', {
       error: err instanceof Error ? err.message : String(err),

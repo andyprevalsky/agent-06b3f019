@@ -116,8 +116,18 @@ assert_decision "an empty diff must not ship" false false no-shipped-change ''
 
 require_text "$WORKFLOW" 'scripts/mac-app-release-decision' \
   "auto-tag workflow must delegate to the shared release decision"
-require_text "$WORKFLOW" 'git diff --name-only "${MERGE_SHA}^1" "${MERGE_SHA}"' \
+require_text "$WORKFLOW" 'BASE="${MERGE_SHA}^1"' \
   "release decision must inspect exactly what the PR added to main"
+require_text "$WORKFLOW" 'git diff --name-only "$BASE" "${MERGE_SHA}"' \
+  "release decision must diff the merge/push base against the shipped commit"
+require_text "$WORKFLOW" 'BASE="$BEFORE_SHA"' \
+  "a direct push must diff every commit it added to main"
+require_text "$WORKFLOW" 'branches: [main]' \
+  "direct /push merges to main must also cut a Mac release"
+require_text "$RELEASE_WORKFLOW" 'group: release-mac-app' \
+  "Mac builds must queue so the newest pending tag builds next"
+require_text "$RELEASE_WORKFLOW" 'cancel-in-progress: false' \
+  "a newer tag must never cancel a running Mac build"
 require_text "$WORKFLOW" "steps.decide.outputs.ship == 'true'" \
   "tag creation must be gated on the shared decision"
 require_text "$WORKFLOW" 'git tag --points-at "$MERGE_SHA"' \

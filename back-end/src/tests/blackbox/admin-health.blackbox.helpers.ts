@@ -168,7 +168,7 @@ export const AdminHealthResponseSchema = z.object({
     tasksIssuedPerUser: z.number(),
     outputTokensPerTask: z.number(),
     gmvPerTask: z.number(),
-    taskCompletionRate: z.number(),
+    taskCompletionRate: z.number().nullable(),
     costPerTask: TaskCostPerTaskSchema,
   }),
   series: z.array(
@@ -185,7 +185,7 @@ export const AdminHealthResponseSchema = z.object({
       tasksIssuedPerUser: z.number(),
       outputTokensPerTask: z.number(),
       gmvPerTask: z.number(),
-      taskCompletionRate: z.number(),
+      taskCompletionRate: z.number().nullable(),
       costPerTask: TaskCostPerTaskSchema,
       andyLinearPoints: z.number().nullable(),
       githubCommits: z.number().nullable(),
