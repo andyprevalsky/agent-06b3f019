@@ -32,8 +32,15 @@ if [ -z "$APP" ]; then
   APP=$(git -C "$ROOT" show "$SHA:agents/fly.toml" | sed -nE 's/^app = "([a-z0-9-]+)"/\1/p')
 fi
 [[ "$APP" =~ ^[a-z0-9-]+$ ]] || { echo "could not resolve the Fly app" >&2; exit 2; }
-TREE=$(git -C "$ROOT" rev-parse "$SHA:agents")
-[[ "$TREE" =~ ^[a-f0-9]{40}$ ]] || { echo "commit has no agents tree" >&2; exit 2; }
+AGENTS_TREE=$(git -C "$ROOT" rev-parse "$SHA:agents")
+[[ "$AGENTS_TREE" =~ ^[a-f0-9]{40}$ ]] || { echo "commit has no agents tree" >&2; exit 2; }
+# Key = hash of exactly the Docker build context (agents/ minus benchmarks and
+# tests, the same exclusion the archive below applies). Top-level entries carry
+# their subtree hashes, so any byte change inside the context changes the key,
+# while benchmark/test-only commits keep it and still reuse the image.
+CONTEXT_ENTRIES=$(git -C "$ROOT" ls-tree "$SHA:agents" | awk -F'\t' '$2 != "benchmarks" && $2 != "tests"')
+TREE=$(printf '%s\n' "$CONTEXT_ENTRIES" | git -C "$ROOT" hash-object --stdin)
+[[ "$TREE" =~ ^[a-f0-9]{40}$ ]] || { echo "could not hash the build context" >&2; exit 2; }
 LABEL="prebuilt-${TREE}"
 TAG_REF="registry.fly.io/${APP}:${LABEL}"
 

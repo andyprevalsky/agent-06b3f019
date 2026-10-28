@@ -90,6 +90,8 @@ case "$*" in
   # Only the sparse-safe pathspec form is accepted: a bare archive would lazily
   # fetch every excluded benchmark blob in the blob-filtered workflow checkout.
   "archive $BUILD_ID:agents -- . :(exclude)benchmarks :(exclude)tests") tar -cf - --files-from /dev/null;;
+  ls-tree\ *:agents) printf '040000 tree %s\tworkflows\n' 2222222222222222222222222222222222222222;;
+  'hash-object --stdin') cat >/dev/null; [[ -n "${TEST_PREBUILT_TREE:-}" ]] || exit 95; printf '%s\n' "$TEST_PREBUILT_TREE";;
   rev-parse\ *:agents) [[ -n "${TEST_PREBUILT_TREE:-}" ]] || exit 95; printf '%s\n' "$TEST_PREBUILT_TREE";;
   *) exit 95;;
 esac

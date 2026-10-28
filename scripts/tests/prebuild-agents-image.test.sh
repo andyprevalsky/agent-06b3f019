@@ -20,7 +20,8 @@ git -C "$REPO" init -q -b main
 git -C "$REPO" -c user.email=t@e -c user.name=t add -A
 git -C "$REPO" -c user.email=t@e -c user.name=t commit -qm base
 SHA=$(git -C "$REPO" rev-parse HEAD)
-TREE=$(git -C "$REPO" rev-parse "$SHA:agents")
+ENTRIES=$(git -C "$REPO" ls-tree "$SHA:agents" | awk -F'\t' '$2 != "benchmarks" && $2 != "tests"')
+TREE=$(printf '%s\n' "$ENTRIES" | git -C "$REPO" hash-object --stdin)
 
 export JOURNAL="$TMP/journal" REGISTRY="$TMP/registry"
 mkdir -p "$REGISTRY"
@@ -80,6 +81,17 @@ git -C "$REPO" -c user.email=t@e -c user.name=t commit -qam agents
 if bash "$REPO/scripts/prebuild-agents-image.sh" lookup --sha "$(git -C "$REPO" rev-parse HEAD)" > /dev/null; then
   fail "a changed agents tree reused a stale image"
 fi
+
+# A benchmark/test-only change is outside the image context: same key, image reused.
+CTX_HEAD=$(git -C "$REPO" rev-parse HEAD)
+bash "$REPO/scripts/prebuild-agents-image.sh" build --sha "$CTX_HEAD" > /dev/null
+mkdir -p "$REPO/agents/tests" "$REPO/agents/benchmarks"
+printf 'x\n' > "$REPO/agents/tests/t.py"
+printf 'y\n' > "$REPO/agents/benchmarks/b.json"
+git -C "$REPO" -c user.email=t@e -c user.name=t add -A
+git -C "$REPO" -c user.email=t@e -c user.name=t commit -qm tests-only
+[ "$(bash "$REPO/scripts/prebuild-agents-image.sh" lookup --sha "$(git -C "$REPO" rev-parse HEAD)")" = "$DIGEST_REF" ] ||
+  fail "a tests/benchmarks-only change must reuse the image of the same build context"
 
 # Invalid input never reaches flyctl.
 : > "$JOURNAL"
