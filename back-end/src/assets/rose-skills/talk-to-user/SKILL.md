@@ -1,6 +1,6 @@
 ---
 name: talk-to-user
-description: Use whenever the user should see something (updates, results, files, visuals). They never read your terminal.
+description: Use when the user should see something (updates, results, files, visuals, video). They never read your terminal.
 ---
 
 # Talking to the user
@@ -19,6 +19,8 @@ the assumptions you made in your message or final response.
   video, a .js module), run `rose display <path>`. A .js/.mjs file runs as a
   module on a full-window page where `import * as THREE from 'three'` works;
   a default-exported function is called with a full-window element.
+- To make real video footage (people, places, products, motion) and edit it
+  with ffmpeg, read `video.md` beside this file first (`rose video`).
 
 <!-- rose-desktop -->
 

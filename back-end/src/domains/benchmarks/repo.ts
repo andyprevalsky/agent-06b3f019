@@ -28,8 +28,13 @@ export async function findTaskByName(name: string): Promise<BenchmarkTask | null
   return prisma.benchmarkTask.findUnique({ where: { name } });
 }
 
-export async function createTask(data: BenchmarkTaskCreate): Promise<BenchmarkTask> {
-  return prisma.benchmarkTask.create({ data });
+/**
+ * Insert a task unless one with that name exists. Returns false when another
+ * writer (a second backend instance seeding at boot) inserted it first.
+ */
+export async function insertTaskIfAbsent(data: BenchmarkTaskCreate): Promise<boolean> {
+  const { count } = await prisma.benchmarkTask.createMany({ data: [data], skipDuplicates: true });
+  return count === 1;
 }
 
 export async function updateTask(name: string, data: BenchmarkTaskUpdate): Promise<BenchmarkTask> {

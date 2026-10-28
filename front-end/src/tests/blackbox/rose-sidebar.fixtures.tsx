@@ -218,6 +218,21 @@ export function expandBar(): void {
   });
 }
 
+function groupRowTestId(group: string): string {
+  return group === 'home' ? 'rose-home-project-row' : `rose-project-row-${group}`;
+}
+
+/** A group's "+" (project id, or "home"): every one is named "Create Super Agent". */
+export function createAgentButton(group: string): HTMLElement {
+  const row = screen.getByTestId(groupRowTestId(group));
+  return within(row).getByRole('button', { name: 'Create Super Agent' });
+}
+
+export async function findCreateAgentButton(group: string): Promise<HTMLElement> {
+  await screen.findByTestId(groupRowTestId(group));
+  return createAgentButton(group);
+}
+
 export function collapseBar(): void {
   act(() => {
     fireEvent.mouseLeave(roseBar());

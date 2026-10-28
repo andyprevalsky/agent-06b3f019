@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -486,7 +487,12 @@ def test_deploy_summary_separates_parallel_overlap_from_gaps() -> None:
     spec = importlib.util.spec_from_file_location("deploy_stage_under_test", repo_root / "scripts/deploy_stage.py")
     assert spec is not None and spec.loader is not None
     deploy_stage = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(deploy_stage)
+    # deploy_stage imports its sibling factory_metadata as a script would.
+    sys.path.insert(0, str(repo_root / "scripts"))
+    try:
+        spec.loader.exec_module(deploy_stage)
+    finally:
+        sys.path.remove(str(repo_root / "scripts"))
 
     with tempfile.TemporaryDirectory() as raw_dir:
         run_dir = Path(raw_dir) / "interval-run"

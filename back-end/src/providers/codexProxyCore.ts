@@ -1,9 +1,9 @@
 import { maybeDumpDemoCacheRequest } from './demoCacheRequestDump';
 import { CACHE_KEY_VERSION, worldModelCacheScope } from './demoCacheNormalizeConstants';
 import { stripSecrets } from './demoCacheNormalizeCore';
+import type { ReserveTraceOrdinal } from './traceOrdinal';
 
 const CACHEABLE_CODEX_RESPONSE_PATH = '/backend-api/codex/responses';
-const traceOrdinalCounters = new Map<string, number>();
 
 export interface CachedCodexResponse {
   status: number;
@@ -25,6 +25,8 @@ export interface CodexProxyDeps {
     body: unknown,
     headers: Record<string, string>
   ) => Promise<{ status: number; contentType: string; body: string }>;
+  /** Shared across instances in production (sharedTraceOrdinalReserver). */
+  reserveOrdinal: ReserveTraceOrdinal;
 }
 
 export interface CodexProxyResult {
@@ -55,33 +57,6 @@ export function codeAgentSlotKey(
   ordinal: number
 ): string {
   return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}${kind}:${traceHash}:slot:${ordinal}`;
-}
-
-interface TraceOrdinalReservation {
-  ordinal: number;
-  rollback: () => void;
-}
-
-function reserveTraceOrdinal(
-  kind: 'codex' | 'anthropic',
-  traceHash: string,
-  sessionId?: string
-): TraceOrdinalReservation {
-  const counterKey = `${kind}:${traceHash}:${sessionId ?? 'default'}`;
-  const ordinal = traceOrdinalCounters.get(counterKey) ?? 0;
-  traceOrdinalCounters.set(counterKey, ordinal + 1);
-  return {
-    ordinal,
-    rollback: () => {
-      if (traceOrdinalCounters.get(counterKey) === ordinal + 1) {
-        if (ordinal === 0) {
-          traceOrdinalCounters.delete(counterKey);
-        } else {
-          traceOrdinalCounters.set(counterKey, ordinal);
-        }
-      }
-    },
-  };
 }
 
 export function parseTraceParam(raw: string): { traceHash: string; sessionId?: string } {
@@ -359,7 +334,7 @@ export async function resolveCodex(
   const upstreamBody = cacheable ? canonicalizeCodexResponseRequest(body) : body;
   const ordinalReservation =
     cacheable && traceContext.ordinal === undefined
-      ? reserveTraceOrdinal('codex', traceHash, traceContext.sessionId)
+      ? await deps.reserveOrdinal(`codex:${traceHash}:${traceContext.sessionId ?? 'default'}`)
       : null;
   const ordinal = cacheable ? (traceContext.ordinal ?? ordinalReservation?.ordinal ?? null) : null;
   const key = ordinal !== null ? codeAgentSlotKey('codex', traceHash, ordinal) : null;
@@ -447,7 +422,9 @@ export async function resolveCodex(
     };
   } finally {
     if (!consumedReservedOrdinal) {
-      ordinalReservation?.rollback();
+      // A failed give-back only leaves a gap in the slot sequence; never let it
+      // replace the upstream response the caller is about to receive.
+      await ordinalReservation?.rollback().catch(() => undefined);
     }
   }
 }

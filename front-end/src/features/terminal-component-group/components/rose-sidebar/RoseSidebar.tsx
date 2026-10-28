@@ -10,9 +10,10 @@
  *
  * LAYOUT (top → bottom, Andy 2026-10-28):
  *   Back (←, collapses the bar; expanded only) | Search — one row
- *   Created projects: each project row + its agents, divider lines between
- *   groups, then + New project; the Home project last (every agent without a
- *   project; its "+" = a new Home agent). RoseAgentGroups renders them, with
+ *   New project (folder-plus; collapsed keeps the icon in this top slot), then
+ *   the created projects: each project row + its agents, divider lines between
+ *   groups; the Home project last (every agent without a project). Every "+"
+ *   shows the "Create Super Agent" tooltip. RoseAgentGroups renders them, with
  *   per-agent one-layer disclosures. Collapsed: per group its icon, its agents,
  *   a divider pill; Home last.
  *   The compact rail shows active tree counts >1; code sessions retain their

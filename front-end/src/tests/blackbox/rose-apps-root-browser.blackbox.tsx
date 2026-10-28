@@ -3,8 +3,10 @@
  * row A6), on the real backend contract (back-end/src/domains/browser-world):
  *
  *   GET  /browser-world/root?agent_id=  {root|null, sites, default_url}  Root tab, drawer open only
- *   POST /browser-world/root/open       {start_url?} -> {root} quiet "Open browser", or once
- *                                       at the selected agent tree's default_url (row 87)
+ *   POST /browser-world/root/open       {start_url?} -> {root} only from "Open browser" (at
+ *                                       the selected agent tree's default_url when known)
+ *   A selected agent without a browser task shows "No browser session" (see
+ *   rose-apps-no-browser-session.blackbox.tsx).
  *   POST /browser-world/root/close      -> {root:null, world_state} merge receipt
  *   GET  /browser-world/sites           {sites}                "Sites" list shown only
  *   DELETE /browser-world/sites/:site   {forgotten}            inline confirm
@@ -20,7 +22,6 @@ import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
-import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
 import { BrowserSitesPanel } from '@/features/terminal-component-group/components/rose-apps/BrowserSitesPanel';
 import { RoseAppIcons } from '@/features/terminal-component-group/components/rose-apps/RoseAppIcons';
 import {
@@ -31,9 +32,6 @@ import {
   updatedText,
 } from '@/features/terminal-component-group/components/rose-apps/browserWorldView';
 import { RECEIPT_VISIBLE_MS } from '@/features/terminal-component-group/components/rose-apps/useBrowserWorld';
-import { AgentContext } from '@/features/agent-context';
-import type { AgentContextValue } from '@/features/agent-context/types';
-import type { Message } from '@/lib/api';
 import type {
   AgentBrowserTaskView,
   ForkView,
@@ -43,114 +41,22 @@ import type {
 
 import { capturedRequests } from './msw/capture';
 import { server } from './msw/server';
+import {
+  API,
+  BOUND_URL,
+  ROOT,
+  WORLD,
+  WRAPPER_CLASS,
+  agentBrowser,
+  boundRootFrame,
+  openBrowserDrawer,
+  rootRequests,
+  serveRoot,
+  settle,
+  worldRequests,
+} from './rose-apps-root-browser.fixtures';
 import { renderWithProviders } from './test-wrapper';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
-
-const API = 'http://localhost:3001/api';
-const WORLD = `${API}/browser-world`;
-const WRAPPER_CLASS = /\b(border|bg-|rounded|ring|shadow)/;
-const BOUND_URL = 'https://live.example/root-bound';
-
-const ROOT: RootBrowserView = {
-  task_id: 'root-task',
-  session_id: 'sess-root',
-  status: 'ACTIVE',
-  provider: 'kernel',
-  live_view_url: 'https://live.example/root-transcript',
-  forked_sites: 2,
-  live_view_path: '/api/browser-session/task/root-task/live-view',
-  control_path: '/api/browser-session/task/root-task/control',
-};
-
-const ACTION: Message = {
-  message_id: 'm-1',
-  timestamp: '2026-01-01T00:00:00Z',
-  text: '',
-  role: 'TOOL',
-  metadata: { task_id: 'task-1', action_type: 'click', title: 'Clicking around' },
-};
-
-function agentContext(agentId: string): AgentContextValue {
-  return {
-    agent: null,
-    applyAgentDetail: vi.fn(() => true),
-    selectedAgentId: agentId,
-    setSelectedAgentId: vi.fn(),
-    messages: [ACTION],
-    streamingBubbles: new Map(),
-    streamingPlan: null,
-    streamingAttention: null,
-    streamingTools: new Map(),
-    streamedTextsRef: { current: new Set<string>() },
-    registerMessageHandler: vi.fn(() => () => {}),
-    sendMessage: vi.fn(async () => {}),
-    isLoadingAgent: false,
-    forceResubscribe: vi.fn(),
-    isChatMode: false,
-    inspectionContext: null,
-    stagePendingAgentCreation: vi.fn(),
-    reconcilePendingAgentCreation: vi.fn(async () => {}),
-    rollbackPendingAgentCreation: vi.fn(() => false),
-  };
-}
-
-function agentBrowser(agentId = 'agent-a') {
-  return (
-    <AgentContext.Provider value={agentContext(agentId)}>
-      <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />
-    </AgentContext.Provider>
-  );
-}
-
-/** "METHOD /path" of every browser-world request so far. */
-function worldRequests(): string[] {
-  return capturedRequests
-    .filter((r) => r.url.includes('/browser-world/'))
-    .map((r) => `${r.method} ${new URL(r.url).pathname}`);
-}
-
-function rootRequests(): string[] {
-  return capturedRequests
-    .filter((r) => r.url.includes('/browser-session/task/root-task/'))
-    .map((r) => `${r.method} ${new URL(r.url).pathname.replace('/api/browser-session/task/', '')}`);
-}
-
-/** Let any request a render could start reach MSW. */
-async function settle() {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 60));
-  });
-}
-
-function serveRoot(root: () => RootBrowserView | null, sites: RootSiteView[] = []) {
-  server.use(
-    http.get(`${WORLD}/root`, () => HttpResponse.json({ root: root(), sites })),
-    http.get(`${API}/browser-session/task/root-task/live-view`, () =>
-      HttpResponse.json({
-        taskId: 'root-task',
-        sessionId: 'sess-root',
-        debugUrl: BOUND_URL,
-        status: 'ACTIVE',
-        live: true,
-        asOf: Date.now(),
-      }),
-    ),
-  );
-}
-
-async function openBrowserDrawer(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByTestId('rose-app-browser'));
-  const drawer = screen.getByTestId('browser-app-drawer');
-  expect(drawer).toHaveAttribute('data-state', 'open');
-  return drawer;
-}
-
-async function boundRootFrame(pane: HTMLElement) {
-  await waitFor(() =>
-    expect(within(pane).getByTitle('Root browser')).toHaveAttribute('src', BOUND_URL),
-  );
-  return within(pane).getByTitle('Root browser');
-}
 
 function fork(site: string, state: ForkView['state']): ForkView {
   return {
@@ -540,130 +446,5 @@ describe('browser world text', () => {
     expect(updatedText('2026-10-20T09:00:00.000Z', now)).toBe('3 h ago');
     expect(updatedText('2026-10-18T09:00:00.000Z', now)).toBe('Oct 18');
     expect(updatedText('not a date', now)).toBe('');
-  });
-});
-
-describe('Browser drawer: Root opens at the selected agent tree default_url (row 87)', () => {
-  const AGENT = 'agent-root-1';
-  const DEFAULT_URL = 'https://www.opentable.com/r/nopa-san-francisco';
-
-  beforeEach(() => mockSession());
-  afterEach(() => localStorage.clear());
-
-  /** GET /root answers default_url only for `?agent_id=`; POST /root/open is recorded. */
-  function serveDefaultUrl(options: { defaultUrl: string | null; root?: RootBrowserView }) {
-    const reads: (string | null)[] = [];
-    const opened: unknown[] = [];
-    let root: RootBrowserView | null = options.root ?? null;
-    serveRoot(() => root);
-    server.use(
-      http.get(`${WORLD}/root`, ({ request }) => {
-        const agentId = new URL(request.url).searchParams.get('agent_id');
-        reads.push(agentId);
-        const defaultUrl = agentId === null ? null : options.defaultUrl;
-        return HttpResponse.json({ root, sites: [], default_url: defaultUrl });
-      }),
-      http.post(`${WORLD}/root/open`, async ({ request }) => {
-        opened.push(await request.json());
-        root = ROOT;
-        return HttpResponse.json({ root: ROOT });
-      }),
-      http.post(`${WORLD}/root/close`, () => {
-        root = null;
-        return HttpResponse.json({ root: null, world_state: null });
-      }),
-    );
-    return { reads, opened };
-  }
-
-  function renderWithAgent(selectedAgentId: string | null, roseDesktop = true) {
-    return renderWithProviders(<RoseAppIcons />, { roseDesktop, selectedAgentId });
-  }
-
-  it('opening the Browser app with an agent selected starts Root at its tree default_url', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: DEFAULT_URL });
-    const user = userEvent.setup();
-    renderWithAgent(AGENT);
-    await settle();
-    // Nothing opens Root on its own: no read and no open before the drawer opens.
-    expect(worldRequests()).toEqual([]);
-
-    const drawer = await openBrowserDrawer(user);
-    const pane = await within(drawer).findByTestId('root-browser-pane');
-    expect(backend.reads).toEqual([AGENT]);
-    expect(backend.opened).toEqual([{ start_url: DEFAULT_URL }]);
-    await boundRootFrame(pane);
-    expect(within(drawer).getByTestId('browser-tab-root')).toHaveAttribute('aria-selected', 'true');
-    await settle();
-    // Opened exactly once and read once: no polling.
-    expect(backend.opened).toHaveLength(1);
-    expect(backend.reads).toEqual([AGENT]);
-  });
-
-  it('with no agent selected it shows the quiet Open browser and opens nothing by itself', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: DEFAULT_URL });
-    const user = userEvent.setup();
-    renderWithAgent(null);
-    const drawer = await openBrowserDrawer(user);
-    const open = await within(drawer).findByRole('button', { name: 'Open browser' });
-    await settle();
-    expect(backend.reads).toEqual([null]);
-    expect(backend.opened).toEqual([]);
-    expect(within(drawer).getByTestId('root-browser-empty')).toHaveTextContent('Your browser');
-
-    await user.click(open);
-    await within(drawer).findByTestId('root-browser-pane');
-    expect(backend.opened).toEqual([{}]);
-  });
-
-  it('an agent whose tree has no default_url yet keeps the quiet Open browser', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: null });
-    const user = userEvent.setup();
-    renderWithAgent(AGENT);
-    const drawer = await openBrowserDrawer(user);
-    await within(drawer).findByRole('button', { name: 'Open browser' });
-    await settle();
-    expect(backend.reads).toEqual([AGENT]);
-    expect(backend.opened).toEqual([]);
-  });
-
-  it('an already open Root is shown as is, never reopened', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: DEFAULT_URL, root: ROOT });
-    const user = userEvent.setup();
-    renderWithAgent(AGENT);
-    const drawer = await openBrowserDrawer(user);
-    await boundRootFrame(await within(drawer).findByTestId('root-browser-pane'));
-    await settle();
-    expect(backend.opened).toEqual([]);
-  });
-
-  it('closing the opened Root does not reopen it; closing the drawer stops all reads', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: DEFAULT_URL });
-    const user = userEvent.setup();
-    renderWithAgent(AGENT);
-    const drawer = await openBrowserDrawer(user);
-    const pane = await within(drawer).findByTestId('root-browser-pane');
-    await user.click(within(pane).getByRole('button', { name: 'Close browser' }));
-    await within(drawer).findByRole('button', { name: 'Open browser' });
-    await settle();
-    expect(backend.opened).toHaveLength(1);
-
-    await user.click(screen.getByTestId('rose-app-browser'));
-    expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
-    const before = capturedRequests.length;
-    await settle();
-    expect(capturedRequests.slice(before).filter((r) => r.url.includes('/browser-world/'))).toEqual(
-      [],
-    );
-  });
-
-  it('flag off: an agent selected and the drawer opened reads and opens nothing', async () => {
-    const backend = serveDefaultUrl({ defaultUrl: DEFAULT_URL });
-    const user = userEvent.setup();
-    renderWithAgent(AGENT, false);
-    await user.click(screen.getByTestId('rose-app-browser'));
-    await settle();
-    expect(backend.reads).toEqual([]);
-    expect(backend.opened).toEqual([]);
   });
 });
