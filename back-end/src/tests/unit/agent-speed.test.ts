@@ -278,7 +278,7 @@ async function main(): Promise<void> {
   await test('Azure Foundry: priority for fast and ultrafast, none for standard', async () => {
     process.env.AZURE_FOUNDRY_ENDPOINT_2 = 'https://speed-fixture-2.openai.azure.com';
     process.env.AZURE_FOUNDRY_API_KEY_2 = 'test-key';
-    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6-sol';
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
     __resetFoundryCooldowns();
     try {
       for (const speed of SPEEDS) {
@@ -291,6 +291,7 @@ async function main(): Promise<void> {
             })
           )
         );
+        assert.equal(request.body.model, 'gpt-6.1-sol', speed);
         assert.equal(
           request.body.service_tier,
           speed === 'standard' ? undefined : 'priority',
