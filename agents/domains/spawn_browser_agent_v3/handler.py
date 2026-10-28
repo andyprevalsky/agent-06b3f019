@@ -7638,6 +7638,7 @@ async def _spawn_browser_agent_activity_v3_real(
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
         trusted_credential_ref = (kwargs.get("extra_metadata") or {}).get("credential_ref")
+        trusted_action_step = (kwargs.get("extra_metadata") or {}).get("browser_action_step")
         trusted_coordinates = (kwargs.get("auxiliary") or {}).get("coordinates")
         if isinstance(current_url, str) and current_url.lower().startswith(("https://", "http://")):
             kwargs["auxiliary"] = {
@@ -7657,6 +7658,8 @@ async def _spawn_browser_agent_activity_v3_real(
         # Only these harness-selected bookkeeping fields bypass content masking.
         # Page result/message dictionaries never enter these metadata slots.
         metadata = kwargs.get("extra_metadata")
+        if isinstance(metadata, dict) and type(trusted_action_step) is int and trusted_action_step > 0:
+            metadata["browser_action_step"] = trusted_action_step
         if isinstance(metadata, dict) and isinstance(trusted_credential_ref, dict):
             visible_ref = metadata.get("credential_ref")
             if isinstance(visible_ref, dict):
@@ -9465,8 +9468,8 @@ async def _spawn_browser_agent_activity_v3_real(
             try:
                 before_actions = len(action_history)
                 result = await execute_action(*args, **kwargs)
-                if len(action_history) > before_actions:
-                    result["action_step"] = action_history.last_action_step()
+                # Only this wrapper may bind a result to a native receipt.
+                result.pop("action_step", None)
                 signed_in_realm = signed_in_realm_for_secret_refs(successful_secret_refs, credential_url or "")
                 if signed_in_realm:
                     credential_signin_realms.add(signed_in_realm)
@@ -9507,6 +9510,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         dom_service=dom_service, action="phone", thinking=safe_thinking,
                         params=safe_params, result=result,
                     )
+                if len(action_history) > before_actions:
+                    # Receipt identity belongs to the harness, after page masking.
+                    result["action_step"] = action_history.last_action_step()
                 return result
             finally:
                 action_redaction_refs = None
@@ -12061,6 +12067,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 # The persistence owner applies the same secret/privacy view as
                 # the action history; metadata does not enter planner tool text.
                 extra_metadata = {"browser_action_params": unified_action.get("params") or {}}
+                if type(result.get("action_step")) is int and result["action_step"] > 0:
+                    extra_metadata["browser_action_step"] = result["action_step"]
                 if result.get("credential_ref"):
                     auth_runtime_state.mark_credential_ref(result["credential_ref"])
                     extra_metadata["credential_ref"] = result["credential_ref"]

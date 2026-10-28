@@ -247,6 +247,10 @@ def build_polar_trajectory(
                 action_bits.append(tool_name)
             if tool_status:
                 action_bits.append(f"status={tool_status}")
+            source_step = metadata.get("browser_action_step")
+            source_task = metadata.get("task_id")
+            if type(source_step) is int and source_step > 0 and isinstance(source_task, str) and source_task:
+                action_bits.append(f"Recorded browser task {source_task}: action-history step {source_step}")
             params = metadata.get("browser_action_params")
             if isinstance(params, dict) and params:
                 action_bits.append("Recorded action parameters: " + json.dumps(params, ensure_ascii=False, sort_keys=True))
