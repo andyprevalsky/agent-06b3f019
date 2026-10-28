@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -86,7 +87,7 @@ def run_guards(repo: Path) -> dict[str, list[str]]:
 
 def _path_of(entry: str) -> str:
     # Guards annotate deletions: "path (deleted test file)".
-    return entry.split(" (", 1)[0]
+    return re.sub(r" (?:\(deleted test file\)|\(removed benchmark task: [^\n]*\))$", "", entry)
 
 
 def scoped_files(flagged: dict[str, list[str]]) -> list[str]:

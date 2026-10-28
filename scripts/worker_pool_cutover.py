@@ -30,6 +30,8 @@ MACHINE_STOP_TIMEOUT_SECONDS = 120
 # durable ownership checks, so independent Machines never wait for each other.
 # Observed serial cost (run 40615048427): ~59s prepare and ~36s retire per Machine.
 MACHINE_OPERATION_CONCURRENCY = 8
+# Recheck serving health before admitting each bounded retirement wave.
+MACHINE_RETIRE_WAVE_SIZE = 4
 
 
 def for_each_machine(operation, records):
@@ -593,11 +595,11 @@ def run(ledger=None, native_factory=NativePool):
                     raise PoolCapacityPending("Old bank remains served until its queue is certified retired")
                 print("Old bank is still draining; retaining every Machine", flush=True)
                 time.sleep(30)
-            # Fresh serving-bank health immediately precedes the retirement batch;
-            # the old Machines then retire concurrently instead of one by one.
-            if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
-                raise PoolCapacityPending("Serving bank lost health; remaining old workers are retained")
-            retired.extend(for_each_machine(lambda record: native.retire(record, previous), managed))
+            for offset in range(0, len(managed), MACHINE_RETIRE_WAVE_SIZE):
+                if not all(native.healthy(mid) for mid in job["candidateMachineIds"]):
+                    raise PoolCapacityPending("Serving bank lost health; remaining old workers are retained")
+                wave = managed[offset:offset + MACHINE_RETIRE_WAVE_SIZE]
+                retired.extend(for_each_machine(lambda record: native.retire(record, previous), wave))
             for owner in {record["managedJobId"] for record in managed}:
                 ids = [record["id"] for record in managed if record["managedJobId"] == owner]
                 ledger.release(

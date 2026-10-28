@@ -5,10 +5,16 @@ import {
   type SpawnOptionsWithoutStdio,
 } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 /** Keep process ownership, signals and coverage on the actual interpreter. */
 export function typeScriptProcess(args: string[]): [string, string[]] {
-  return [process.execPath, ['--import', require.resolve('tsx'), ...args]];
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const flag =
+    major > 20 || (major === 20 && minor >= 6) || (major === 18 && minor >= 19)
+      ? '--import'
+      : '--loader';
+  return [process.execPath, [flag, pathToFileURL(require.resolve('tsx')).href, ...args]];
 }
 
 export async function execTypeScript(args: string[], options: ExecFileOptions = {}) {

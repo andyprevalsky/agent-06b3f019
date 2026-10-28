@@ -36,3 +36,29 @@ def safe_uuid4():
 def safe_now() -> datetime:
     """`workflow.now()` in the workflow (deterministic), real UTC clock in an activity."""
     return workflow.now() if workflow.in_workflow() else datetime.now(timezone.utc)
+
+
+class ContextLogger:
+    """Route shared workflow/activity logging through the owning runtime."""
+
+    def __getattr__(self, method):
+        def emit(event, *args, **fields):
+            if workflow.in_workflow():
+                # Temporal suppresses replay before formatting or emitting.
+                logging_fields = {
+                    key: fields.pop(key)
+                    for key in ("exc_info", "stack_info", "stacklevel")
+                    if key in fields
+                }
+                return getattr(workflow.logger, method)(
+                    event, *args, extra=fields, **logging_fields
+                )
+            import structlog
+
+            return getattr(structlog.get_logger(), method)(event, *args, **fields)
+
+        return emit
+
+
+def context_logger():
+    return ContextLogger()

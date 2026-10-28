@@ -218,3 +218,15 @@ PYTEST
 grep -Fq "github.event.pull_request.head.repo.full_name == github.repository" "$WORKFLOW" ||
   fail "fork PRs must never receive the Fly token"
 echo "prebuild-agents-image: PASS"
+
+# Deployment and recovery also execute dependency code. Neither may retain the checkout token.
+python3 - "$ROOT/.github/workflows/deploy-agents.yml" <<'PY_DEPLOY_CHECKOUT'
+from pathlib import Path
+import sys
+import re
+text = Path(sys.argv[1]).read_text()
+blocks = re.findall(r"(?ms)^      - uses: actions/checkout@[^\n]+\n(.*?)(?=^      - |\Z)", text)
+assert len(blocks) == 2
+for block in blocks:
+    assert re.search(r"^          persist-credentials: false$", block, re.M), block
+PY_DEPLOY_CHECKOUT

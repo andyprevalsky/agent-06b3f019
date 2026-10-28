@@ -890,12 +890,39 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             native.machines.append(old)
         return native
 
+    def test_serving_health_loss_between_retirement_waves_retains_remaining_bank(self):
+        ledger, native = Ledger(), self.managed_bank_native()
+        retire, healthy = native.retire, native.healthy
+        lost_health = threading.Event()
+        completed = threading.Lock()
+
+        def record_retirement(expected, previous):
+            with completed:
+                result = retire(expected, previous)
+                if len(native.retired) >= 4:
+                    lost_health.set()
+                return result
+
+        native.retire = record_retirement
+        native.healthy = lambda machine_id: not lost_health.is_set() and healthy(machine_id)
+        failure = None
+        try:
+            self.run_job(ledger, native)
+        except Exception as error:
+            failure = error
+        first_wave = [f"{100 + index:014x}" for index in range(4)]
+        self.assertEqual(sorted(native.retired), first_wave)
+        self.assertIsInstance(failure, cutover.PoolCapacityPending)
+        self.assertRegex(str(failure), "remaining old workers")
+        self.assertEqual(ledger.job["stage"], "DRAINING")
+        self.assertFalse(ledger.released)
+
     def test_bank_machines_are_prepared_and_retired_concurrently(self):
-        # A serial controller cannot pass an eight-party barrier: the first
-        # Machine would wait for seven operations that have not started.
+        # Preparation admits eight peers; retirement admits four peers per
+        # health-gated wave. A serial controller cannot pass either barrier.
         ledger, native = Ledger(), self.managed_bank_native()
         prepare_barrier = threading.Barrier(8, timeout=5)
-        retire_barrier = threading.Barrier(8, timeout=5)
+        retire_barrier = threading.Barrier(4, timeout=5)
         prepare, retire = native.prepare, native.retire
 
         def concurrent_prepare(expected, previous):
@@ -944,7 +971,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         def failing_retire(expected, previous):
             if expected["id"] == f"{101:014x}":
                 raise cutover.PoolCapacityPending("Certified old bank is still stopping")
-            if expected["id"] == f"{106:014x}":
+            if expected["id"] == f"{103:014x}":
                 raise ValueError("Old bank changed before its certified retirement")
             return retire(expected, previous)
 
@@ -952,7 +979,7 @@ class WorkerPoolCutoverTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed before its certified retirement"):
             self.run_job(ledger, native)
         self.assertEqual(ledger.job["stage"], "DRAINING")
-        self.assertEqual(len(native.retired), 6)
+        self.assertEqual(sorted(native.retired), [f"{100:014x}", f"{102:014x}"])
         self.assertFalse(ledger.released)
         native.retire = retire
         self.assertEqual(self.run_job(ledger, native)["stage"], "SUCCEEDED")

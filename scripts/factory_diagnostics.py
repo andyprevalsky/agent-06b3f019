@@ -110,7 +110,7 @@ def _activity_label(row: dict[str, Any]) -> str:
 def _wait_windows(events: Sequence[dict[str, Any]]) -> list[tuple[float, float, str, str]]:
     """Paired request/finish windows: (start, end, kind, value)."""
     windows = []
-    open_starts: dict[tuple[str, str], float] = {}
+    open_starts: dict[tuple[str, str, str], float] = {}
     starts = {start: (finish, kind) for (start, finish), kind in PAIRED_EVENTS.items()}
     finishes = {finish: (start, kind) for (start, finish), kind in PAIRED_EVENTS.items()}
     for row in sorted(events, key=lambda value: float(value["recorded_epoch"])):
@@ -118,11 +118,11 @@ def _wait_windows(events: Sequence[dict[str, Any]]) -> list[tuple[float, float, 
         epoch = float(row["recorded_epoch"])
         if event in starts:
             # approval decisions carry approved/rejected, not the request value.
-            key = (event, "" if event == "approval-request" else value)
+            key = (str(row.get("branch", "")), event, "" if event == "approval-request" else value)
             open_starts[key] = epoch
         elif event in finishes:
             start_event, kind = finishes[event]
-            key = (start_event, "" if start_event == "approval-request" else value)
+            key = (str(row.get("branch", "")), start_event, "" if start_event == "approval-request" else value)
             started = open_starts.pop(key, None)
             if started is not None and epoch >= started:
                 windows.append((started, epoch, kind, value))

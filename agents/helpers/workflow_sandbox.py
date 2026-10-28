@@ -23,9 +23,7 @@ def workflow_sandbox_restrictions() -> SandboxRestrictions:
         "pygments",
         "httpx",
         "sniffio",
-        # Workflow loggers must use the worker's configured processors and
-        # contextvars, without rebuilding the logging package on every replay.
-        "structlog",
+        "structlog.dev",
         # helpers.llm uses threading.Lock via OpenAI/instructor clients
         # but workflow only calls activities via execute_activity, not directly
         "helpers.llm",

@@ -3,12 +3,11 @@
 from datetime import datetime
 from typing import Awaitable, Callable, Dict, List
 
-import structlog
-
+from helpers.workflow_safe import context_logger
 from helpers.context_pointers import annotate_with_pointer
 from helpers.context_scope import filter_internal_subagent_messages
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 
 async def poll_and_update_context(

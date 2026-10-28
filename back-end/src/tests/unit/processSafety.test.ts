@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { execTypeScript } from '../../providers/processSafety';
+import { execTypeScript, typeScriptProcess } from '../../providers/processSafety';
 
 test('TypeScript fixtures directly own their interpreter process', async () => {
   const owned = await execTypeScript(['-e', 'console.log(process.ppid)'], { timeout: 5000 });
@@ -44,4 +44,28 @@ test('a startup timeout retains killed and signal evidence without child output'
       return true;
     }
   );
+});
+
+test('TypeScript preload supports every declared Node generation and file URL encoding', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')!;
+  try {
+    for (const [version, flag] of [
+      ['18.0.0', '--loader'],
+      ['18.17.0', '--loader'],
+      ['18.18.0', '--loader'],
+      ['18.19.0', '--import'],
+      ['20.0.0', '--loader'],
+      ['20.6.0', '--import'],
+      ['22.0.0', '--import'],
+    ]) {
+      Object.defineProperty(process.versions, 'node', { ...descriptor, value: version });
+      const [command, argv] = typeScriptProcess(['-e', 'void 0']);
+      assert.equal(command, process.execPath);
+      assert.equal(argv[0], flag, version);
+      assert.equal(new URL(argv[1]).protocol, 'file:');
+      assert.deepEqual(argv.slice(2), ['-e', 'void 0']);
+    }
+  } finally {
+    Object.defineProperty(process.versions, 'node', descriptor);
+  }
 });

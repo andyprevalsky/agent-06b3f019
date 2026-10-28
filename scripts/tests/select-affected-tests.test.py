@@ -76,7 +76,9 @@ def main() -> int:
     sel = selector.select(["agents/brand_new_module_nobody_imports.py"])
     check(sel.all_lanes, "unmapped/unknown file selects every lane")
 
-    sel = selector.select(["docs/plans/completed/some-plan.md"])
+    # no_tests exempts fallback; genuine/conservative dependencies still select.
+    # Keep this inert fixture outside directories named by real source comments.
+    sel = selector.select(["docs/selector-inert-fixture.md"])
     check(not sel.all_lanes and not any(sel.selected.values()), "declared-inert docs select nothing")
 
     # Upstream: a test that imports the changed module transitively is selected.

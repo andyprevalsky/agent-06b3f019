@@ -57,6 +57,13 @@ def main() -> int:
             "COVERAGE_BIN": str(shim),
             "AGENTS_COVERAGE_CONCURRENCY": args.concurrency,
         }
+        # Refreshes must capture every registered domain, regardless of a caller's
+        # affected-test selection. Still verify the observed inventory below.
+        env.pop("AGENTS_BLACKBOX_DOMAINS", None)
+        expected_domains = {
+            path.stem.replace(".blackbox", "").replace("_", "-")
+            for path in (AGENTS / "tests" / "blackbox").glob("*.blackbox.py")
+        }
         started = time.monotonic()
         proc = subprocess.run(
             [str(AGENTS / "venv" / "bin" / "python"), "scripts/run_coverage_blackbox_parallel.py"],
@@ -81,6 +88,12 @@ def main() -> int:
                     continue
                 if "/venv/" not in f"/{rel}":
                     files[domain].add(rel)
+    if proc.returncode != 0:
+        print(f"coverage runner failed (exit {proc.returncode}); preserving existing map", file=sys.stderr)
+        return proc.returncode if proc.returncode > 0 else 1
+    if not expected_domains or set(files) != expected_domains:
+        print("coverage runner recorded incomplete domain data; preserving existing map", file=sys.stderr)
+        return 1
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "runner_exit": proc.returncode,

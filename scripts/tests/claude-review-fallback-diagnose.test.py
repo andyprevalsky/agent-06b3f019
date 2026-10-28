@@ -72,6 +72,8 @@ def test_explicit_error_evidence_supports_diagnosis(tmp: Path) -> None:
     for status, message, expected in (
         (403, "OAuth access token is invalid", "CREDENTIAL_INVALID"),
         (429, "Claude AI usage limit reached", "USAGE_EXHAUSTED"),
+        (429, "You've hit your session limit", "USAGE_EXHAUSTED"),
+        (429, "You’ve hit your session limit", "USAGE_EXHAUSTED"),
         (None, "Your credit balance is too low", "USAGE_EXHAUSTED"),
     ):
         path = tmp / "evidence.json"

@@ -356,7 +356,7 @@ class FactoryDetailTest(unittest.TestCase):
         self.assertIsNone(safe_text("ghp_" + "Ab1" * 12))
         long_test = "tests/test_attempt_ledger_records_run_id_and_outcome_class_for_every_retry"
         self.assertEqual(safe_text(long_test), long_test)
-        self.assertEqual(safe_text("0123456789abcdef0123456789abcdef01234567"), "0123456789abcdef0123456789abcdef01234567")
+        self.assertIsNone(safe_text("0123456789abcdef0123456789abcdef01234567"))
         self.assertLessEqual(len(safe_text("x " * 400)), MAX_TEXT)
         scanned = scan_log(f"FAILED tests/t.py::test_k[{token}]\nFAILED tests/t.py::ok\n")
         self.assertEqual(scanned["failing"], ["tests/t.py::ok"])

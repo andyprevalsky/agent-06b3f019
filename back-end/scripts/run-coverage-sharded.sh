@@ -43,6 +43,17 @@ if [[ -d "$MERGED_TMP" ]] && [[ -n "$(find "$MERGED_TMP" -mindepth 1 -print -qui
 fi
 mkdir -p "$MERGED_TMP"
 
+archive_merged_coverage() {
+  local reason="$1"
+  local archive="$ROOT_DIR/.context/test-runs/backend-coverage-merged-${reason}-$(date -u +%Y%m%d-%H%M%S)-$$"
+  if [[ -d "$MERGED_TMP" ]]; then
+    mkdir -p "$archive"
+    mv "$MERGED_TMP" "$archive/raw-v8"
+    echo "Merged raw coverage archived at $archive/raw-v8."
+  fi
+}
+
+
 if [[ "$FAILED_FIRST" == "1" ]]; then
   # Read the previous run's failures before the shards wipe their artifact dirs.
   PRIORITY_DOMAINS="$(
@@ -85,7 +96,7 @@ terminate_shards() {
   for pid in "${PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap 'terminate_shards; exit 130' INT TERM
+trap 'terminate_shards; archive_merged_coverage interrupted; exit 130' INT TERM
 
 # Reap shards in completion order so a failure is reported (and, in
 # failed-first mode, stops the sibling shards) as soon as it happens.
@@ -132,5 +143,9 @@ echo "=== Merged Coverage Report ($SHARDS shards) ==="
 COV_EXIT=0
 npx c8 report --temp-directory="$MERGED_TMP" --reporter=text --reporter=text-summary --reporter=json-summary \
   --check-coverage || COV_EXIT=$?
-rm -rf "$MERGED_TMP"
+if [[ "$COV_EXIT" -eq 0 ]]; then
+  rm -rf "$MERGED_TMP"
+else
+  archive_merged_coverage report-failed
+fi
 exit "$COV_EXIT"

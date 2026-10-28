@@ -316,6 +316,23 @@ def load_plan_payload(path: Path) -> tuple[list[Lane], dict]:
         for dependency in lane.after:
             if dependency not in names or dependency == lane.name:
                 raise ValueError(f"{lane.name}: invalid dependency {dependency}")
+    dependencies = {lane.name: lane.after for lane in lanes}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise ValueError(f"cyclic lane dependency: {name}")
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in dependencies[name]:
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+
+    for name in names:
+        visit(name)
     return lanes, payload
 
 
@@ -656,6 +673,9 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
         extra_event=lambda: _supervisor_event(refresh()),
     )
     while code == 0:
+        if time.monotonic() - started >= limit:
+            code, payload = deploy_stage_wait.EXIT_TIMEOUT, {"event": "timeout"}
+            break
         # Every lane passed; the supervisor still re-hashes the frozen source.
         current = refresh()
         status = current.get("status")

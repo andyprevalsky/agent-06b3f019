@@ -132,26 +132,45 @@ def test_workflow_action_model_cache_preserves_registry_and_validation():
 
 
 def test_workflow_sandbox_keeps_worker_logging_configuration():
-    """Workflow logging uses the worker's configured processors on cold replay."""
-    import builtins
+    """Workflow replay suppresses logs; activities retain configured structlog."""
+    import logging
     import structlog
-
+    from unittest.mock import patch
+    from temporalio import workflow
+    from helpers.workflow_safe import context_logger
     from helpers.workflow_sandbox import workflow_sandbox_restrictions
-    from temporalio.worker.workflow_sandbox._importer import Importer
-    from temporalio.worker.workflow_sandbox._restrictions import RestrictionContext
 
+    assert "structlog" not in workflow_sandbox_restrictions().passthrough_modules
     previous = structlog.get_config()
     was_configured = structlog.is_configured()
-    processors = [lambda logger, method, event: event]
+    activity_events, records = [], []
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    handler = Capture()
+    base = workflow.logger.base_logger
+    old_level = base.level
+    base.addHandler(handler)
+    base.setLevel(logging.DEBUG)
+    def collect(logger, method, event):
+        activity_events.append(event.copy())
+        return event
     try:
-        structlog.configure(processors=processors)
-        importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
-        with importer.applied():
-            sandbox_logging = builtins.__import__("structlog")
-        assert sandbox_logging.get_config()["processors"] is processors, (
-            "cold workflow replay rebuilt structlog and lost the worker's logging processors"
-        )
+        structlog.configure(processors=[collect], logger_factory=structlog.ReturnLoggerFactory())
+        log = context_logger()
+        with patch.object(workflow, "in_workflow", return_value=True):
+            with patch.object(workflow.unsafe, "is_replaying_history_events", return_value=True):
+                log.info("replayed", agent_id="fixture")
+            assert not activity_events and not records
+            with patch.object(workflow.unsafe, "is_replaying_history_events", return_value=False):
+                log.info("live", agent_id="fixture")
+            assert len(records) == 1 and records[0].agent_id == "fixture"
+        with patch.object(workflow, "in_workflow", return_value=False):
+            log.info("activity", agent_id="activity")
+        assert activity_events[-1]["agent_id"] == "activity"
     finally:
+        base.removeHandler(handler)
+        base.setLevel(old_level)
         if was_configured:
             structlog.configure(**previous)
         else:

@@ -126,7 +126,7 @@ def safe_text(value: object) -> str | None:
     text = " ".join(value.split())[:MAX_TEXT].strip()
     if not text or not SAFE_TEXT_RE.fullmatch(text):
         return None
-    if OPAQUE_TOKEN_RE.search(text) and not HEX_SHA_RE.fullmatch(text):
+    if OPAQUE_TOKEN_RE.search(text) or re.search(r"(?i)(?<![a-z0-9])[a-f0-9]{24,}(?![a-z0-9])", text):
         return None
     return text
 
@@ -524,7 +524,7 @@ def parse_event_detail(pairs: Sequence[str]) -> dict[str, Any]:
         else:
             if key == "fix_sha" and not HEX_SHA_RE.fullmatch(raw):
                 raise DetailError("factory detail fix_sha must be a hex commit SHA")
-            text = safe_text(raw)
+            text = raw if key == "fix_sha" else safe_text(raw)
             if text is None:
                 raise DetailError(f"factory detail {key} is not a safe bounded name")
             out[key] = text

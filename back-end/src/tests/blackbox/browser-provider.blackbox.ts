@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import nodeAssert from 'node:assert/strict';
+import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
 import { assertKernelProxyHealthFallback } from './browser-provider.kernel-health.support';
 import { createSessionWithContextUsingDependencies } from '../../providers/browser';
@@ -54,6 +55,10 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  [
+    'Browser Use missing health is terminal, while other failures remain errors',
+    assertBrowserUseMissingHealth,
+  ],
   [
     'Kernel proxy health errors preserve bounded geo fallback and cache custody',
     assertKernelProxyHealthFallback,

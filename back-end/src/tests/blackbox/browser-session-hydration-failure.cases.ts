@@ -23,6 +23,8 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
     'user-control',
     'changed-binding',
     'control-during-release',
+    'reattached-source',
+    'unknown-provider',
   ] as const) {
     const userId = `hydration-${randomUUID()}`;
     await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -78,6 +80,17 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
       resume: async () => {
         attempts++;
         const scope = browserResumeScope()!;
+        if (scenario === 'reattached-source' || scenario === 'unknown-provider') {
+          const candidate =
+            scenario === 'reattached-source' ? session.sessionId! : 'unattributed-native';
+          await prisma.browserSession.update({
+            where: { id: session.id },
+            data: { sessionId: candidate },
+          });
+          await scope.beforeHydration(candidate);
+          failedCandidate = candidate;
+          throw new Error(hydrationFailure);
+        }
         const intent = await scope.beforeCreate('kernel');
         const candidate = `native-${intent.marker}`;
         nativeStates.set(candidate, 'active');
@@ -126,7 +139,11 @@ export async function runBrowserHydrationFailureCases(): Promise<void> {
       } else {
         assert.equal(ledger.status, 'STARTED', `${scenario} must remain fenced`);
         assert.equal(attempts, 1);
-        if (scenario === 'user-control' || scenario === 'changed-binding')
+        if (
+          ['user-control', 'changed-binding', 'reattached-source', 'unknown-provider'].includes(
+            scenario
+          )
+        )
           assert.deepEqual(released, [], 'do not close a candidate whose ownership changed');
         if (scenario === 'user-control' || scenario === 'control-during-release')
           assert.equal(afterFailure.controlState, 'USER');

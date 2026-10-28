@@ -1771,6 +1771,7 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
   # cloudbench_charge_bounded_step). Ceilings are the sum of each segment's
   # fixed limits plus slack for a loaded host.
   local charged=0 stalled=0 step_started attempt_ceiling wait_ceiling=15 retire_ceiling=15
+  local wait_budget probe_budget fresh_budget probe_elapsed thaw_probe_used=0 did_thaw_probe
   settle_whole="${settle%%.*}"
   case "$settle_whole" in ''|*[!0-9]*) settle_whole=3 ;; esac
   attempt_ceiling=$(( 30 + settle_whole ))
@@ -1821,24 +1822,60 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
       # progress within the original readiness deadline; restart only on exit.
       while kill -0 "$pid" 2>/dev/null && [ "$charged" -lt "$timeout" ]; do
         step_started="$(date +%s)"
-        health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        wait_budget=$((timeout - charged))
+        [ "$wait_budget" -le "$wait_ceiling" ] || wait_budget="$wait_ceiling"
+        # Do not admit a step unless its fixed 3s probe and 1s sleep fit.
+        [ "$wait_budget" -ge 4 ] || break
+        probe_budget=3
+        [ "$probe_budget" -le "$wait_budget" ] || probe_budget="$wait_budget"
+        fresh_budget=0
+        did_thaw_probe=0
+        health_code="$(curl --noproxy '*' -sS --max-time "$probe_budget" -o /dev/null -w '%{http_code}' \
           "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code"; then
+          sleep 1
+        fi
+        probe_elapsed=$(( $(date +%s) - step_started ))
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
+          && [ "$probe_elapsed" -gt "$wait_budget" ] && [ "$thaw_probe_used" -eq 0 ]; then
+          # Reserve the first probe's fixed bound and sleep before one fresh
+          # observation. Both probes stay inside this one existing wait step.
+          fresh_budget=$((wait_budget - probe_budget - 1))
+          [ "$fresh_budget" -le 3 ] || fresh_budget=3
+          if [ "$fresh_budget" -gt 0 ]; then
+            thaw_probe_used=1
+            did_thaw_probe=1
+            health_code="$(curl --noproxy '*' -sS --max-time "$fresh_budget" -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+          else
+            fresh_budget=0
+          fi
+        fi
+        if ! cloudbench_status_proxy_lifecycle_response_accepted "$health_code"; then
+          printf '[%s] status proxy lifecycle HTTP %s not accepted; waiting on pid %s\n' \
+            "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+        fi
+        cloudbench_charge_bounded_step charged stalled "$step_started" "$wait_budget" \
+          "$log_file" "$label proxy attempt $attempt wait"
+        if [ "$did_thaw_probe" -eq 1 ]; then
+          printf 'status proxy: post-thaw probe charged=%s timeout=%s\n' "$charged" "$timeout" >> "$log_file"
+        fi
         if cloudbench_status_proxy_lifecycle_response_accepted "$health_code" \
           && kill -0 "$pid" 2>/dev/null; then
           printf -v "$pid_var" '%s' "$pid"
           return 0
         fi
-        printf '[%s] status proxy lifecycle HTTP %s not accepted; waiting on pid %s\n' \
-          "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
-        sleep 1
-        cloudbench_charge_bounded_step charged stalled "$step_started" "$wait_ceiling" \
-          "$log_file" "$label proxy attempt $attempt wait"
       done
       step_started="$(date +%s)"
       cloudbench_terminate_and_wait 5 "$pid"
     else
       step_started="$(date +%s)"
       wait "$pid" 2>/dev/null || true
+    fi
+    # Reaping makes a late lazy-start bind failure visible for port rotation.
+    if tail -n +"$attempt_first_line" "$log_file" 2>/dev/null | grep -Eiq 'listen tcp .*bind: address already in use|address already in use'; then
+      printf -v "$pid_var" '%s' ""
+      return 98
     fi
     sleep 2
     cloudbench_charge_bounded_step charged stalled "$step_started" "$retire_ceiling" \

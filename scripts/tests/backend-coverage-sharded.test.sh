@@ -82,6 +82,26 @@ grep -q -- '--check-coverage' "$TMP/rec/npx.log" || fail "merged threshold check
 [[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "merge dir left behind after success"
 records
 FAKE_C8_EXIT=1 bash "$RUNNER" 2 >"$TMP/out1b" 2>&1 && fail "merged threshold failure did not fail the gate"
+ls "$REPO"/.context/test-runs/backend-coverage-merged-report-failed-*/raw-v8/coverage-shard-1.json >/dev/null 2>&1 ||
+  fail "merged report failure deleted raw coverage"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "failed report leaves merge directory blocking retry"
+
+# Interrupt a live coordinator after one shard has handed over raw coverage.
+records
+FAKE_SHARD_2=sleep bash "$RUNNER" 2 >"$TMP/out-interrupted" 2>&1 &
+coordinator=$!
+for _ in $(seq 1 200); do
+  [[ -f "$REPO/back-end/coverage/tmp-merged/coverage-shard-1.json" && -f "$TMP/rec/shard-2.env" ]] && break
+  sleep 0.01
+done
+kill -TERM "$coordinator"
+interrupted=0
+wait "$coordinator" || interrupted=$?
+[[ "$interrupted" -eq 130 ]] || fail "interruption status changed ($interrupted)"
+ls "$REPO"/.context/test-runs/backend-coverage-merged-interrupted-*/raw-v8/coverage-shard-1.json >/dev/null 2>&1 ||
+  fail "interrupted coordinator did not preserve raw coverage"
+[[ ! -e "$REPO/back-end/coverage/tmp-merged" ]] || fail "interruption leaves merge directory blocking retry"
+
 
 # 2. One shard fails -> gate fails, no merged check, passing raw archived.
 records

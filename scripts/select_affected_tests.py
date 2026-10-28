@@ -254,8 +254,54 @@ def package_root(rel: str) -> str:
     return top if "/" in rel else ""
 
 
-_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
-_PROCESS_MATCH = re.compile(r"\b(?:pkill|pgrep|killall|ps\s+-|grep\s+-[a-zA-Z]*[fq])")
+_PROCESS_MATCH = re.compile(r"\b(?:pkill|pgrep|killall)\b|\bps\b[^\n]*\|\s*grep\b")
+
+
+def _strip_ts_comments(source: str) -> str:
+    """Scan strings/templates before removing comments; preserve line boundaries."""
+    # Template interpolation can nest JavaScript/templates. Uncertain syntax
+    # must overselect, never erase a dependency edge.
+    if "`" in source:
+        return source
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(source):
+        char = source[index]
+        pair = source[index:index + 2]
+        if quote is not None:
+            out.append(char)
+            index += 1
+            if char == "\\" and index < len(source):
+                out.append(source[index])
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in ("'", '"', "`"):
+            quote = char
+            out.append(char)
+            index += 1
+        elif pair == "/*":
+            end = source.find("*/", index + 2)
+            if end < 0:
+                # Incomplete input is uncertain: retain it rather than lose edges.
+                out.append(source[index:])
+                break
+            out.append(" " + "\n" * source[index:end + 2].count("\n"))
+            index = end + 2
+        elif pair == "//":
+            end = source.find("\n", index + 2)
+            if end < 0:
+                break
+            out.append("\n")
+            index = end + 1
+        elif char == "/":
+            # Regex-vs-division is context sensitive; preserve ambiguous input.
+            return source
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
 
 
 def strip_comments(rel: str, source: str) -> str:
@@ -266,11 +312,18 @@ def strip_comments(rel: str, source: str) -> str:
     """
     ts = PurePosixPath(rel).suffix in TS_EXT
     if ts:
-        source = _TS_BLOCK_COMMENT.sub(" ", source)
+        # Templates and JSX need a full parser; conservative over-selection is
+        # preferable to erasing dependencies from an ambiguous source file.
+        if "`" in source or PurePosixPath(rel).suffix in {".tsx", ".jsx"}:
+            return source
+        source = _strip_ts_comments(source)
     marker = "//" if ts else "#"
     kept = []
     for line in source.splitlines():
         if _PROCESS_MATCH.search(line):
+            continue
+        if ts:
+            kept.append(line)
             continue
         stripped = line.lstrip()
         if stripped.startswith(marker) and not stripped.startswith("#!"):
@@ -736,7 +789,8 @@ def changed_files(base: str | None, head: str | None) -> list[str]:
         return [line for line in out.splitlines() if line]
 
     if head:
-        return sorted(set(git("diff", "--name-only", f"{base}...{head}" if base else f"{head}^", head)))
+        revisions = [f"{base}...{head}"] if base else [f"{head}^", head]
+        return sorted(set(git("diff", "--name-only", *revisions)))
     base = base or "origin/main"
     files = set(git("diff", "--name-only", f"{base}...HEAD"))
     files |= set(git("diff", "--name-only", "HEAD"))

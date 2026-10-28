@@ -4108,3 +4108,5 @@ PYWIRE
     fail "the restart's own attempt must be appended to the retained log"
   cloudbench_terminate_and_wait 1 "$proxy_pid"
 ) || fail "status proxy restarts must retain earlier readiness evidence"
+
+python3 "$ROOT_DIR/scripts/tests/cloudbench-proxy-review.test.py"

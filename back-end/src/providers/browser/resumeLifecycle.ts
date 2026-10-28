@@ -307,6 +307,13 @@ export async function withBrowserResumeLifecycle<T>(
             binding.controlLeaseExpiresAt.getTime() > Date.now()))
       )
         throw new Error('Failed hydration candidate ownership changed');
+      if (request.provider === '' || candidate === request.source) {
+        log.error(
+          'Browser resume kept custody: failed hydration candidate is not releasable',
+          detail
+        );
+        return;
+      }
       if (!(await deps.release(request.provider, candidate))) {
         log.error(
           'Browser resume kept custody: failed hydration candidate release unconfirmed',

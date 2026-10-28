@@ -60,7 +60,10 @@ def main() -> int:
         print(f"{lane:26s} {100 * statistics.mean(ratios):21.1f}% {100 * statistics.median(ratios):6.1f}% "
               f"{100 * statistics.mean(narrowed) if narrowed else 0:19.1f}% {100 * skipped / len(valid):13.0f}%")
     total_units = [sum(r["selected_counts"].values()) / sum(r["totals"].values()) for r in valid]
-    print(f"overall unit selection: mean {100 * statistics.mean(total_units):.1f}%, median {100 * statistics.median(total_units):.1f}%")
+    if total_units:
+        print(f"overall unit selection: mean {100 * statistics.mean(total_units):.1f}%, median {100 * statistics.median(total_units):.1f}%")
+    else:
+        print("overall unit selection: unmeasured (no valid samples)")
 
     # Compare with today's /deploy path gating (Step 0 CHANGED_* lane skips) on the same input.
     base_units = sel_units = 0

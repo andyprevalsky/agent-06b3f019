@@ -79,7 +79,7 @@ def classify(result: Optional[dict]) -> str:
         r"|(?:token|api[ _-]*key)[^.;]{0,40}(?:invalid|expired|revoked)", evidence
     ):
         return CREDENTIAL_INVALID
-    if re.search(r"usage limit reached|usage[^.;]{0,40}exhausted|credit balance is too low|insufficient credits", evidence):
+    if re.search(r"you(?:'|\\u2019)ve hit your session limit|usage limit reached|usage[^.;]{0,40}exhausted|credit balance is too low|insufficient credits", evidence):
         return USAGE_EXHAUSTED
     subtype = str(result.get("subtype") or "")
     if subtype.startswith("error_") and status is None:
