@@ -118,7 +118,7 @@ async function gmailSyncReportsMessagesSaved(user: User): Promise<void> {
   await gmailCredential(session.userId, address, box.token);
   const restore = gmail.install();
   try {
-    await runGmailSyncJob();
+    await runGmailSyncJob({ userIds: [session.userId] });
   } finally {
     restore();
   }
@@ -147,7 +147,7 @@ async function gmailFailureEndsFailed(): Promise<void> {
     await gmailCredential(session.userId, address, box.token);
     const restore = gmail.install();
     try {
-      await runGmailSyncJob();
+      await runGmailSyncJob({ userIds: [session.userId] });
     } finally {
       restore();
     }
@@ -185,7 +185,7 @@ async function gmailQuotaWallStillSavesEverything(skip: number): Promise<void> {
     await gmailCredential(session.userId, address, box.token);
     const restore = gmail.install();
     try {
-      await runGmailSyncJob();
+      await runGmailSyncJob({ userIds: [session.userId] });
     } finally {
       restore();
     }

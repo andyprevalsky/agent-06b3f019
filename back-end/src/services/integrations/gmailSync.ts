@@ -570,7 +570,11 @@ export async function claimGmailIntegrationForSync(integrationId: string): Promi
   return claimed.count === 1;
 }
 
-export async function runGmailSyncJob(): Promise<void> {
+/**
+ * `userIds` narrows the run to those users' integrations (an on-demand sync of
+ * specific accounts); the cron passes nothing and syncs every due integration.
+ */
+export async function runGmailSyncJob(options: { userIds?: string[] } = {}): Promise<void> {
   log.info('Starting sync job...');
 
   const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
@@ -582,6 +586,7 @@ export async function runGmailSyncJob(): Promise<void> {
     where: {
       name: 'gmail',
       isActive: true,
+      ...(options.userIds && { userId: { in: options.userIds } }),
       OR: [
         { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
         { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },

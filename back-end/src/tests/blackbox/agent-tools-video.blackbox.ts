@@ -112,6 +112,12 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
+    // The boxes.dev host daemon probes every new listener with `HEAD /`; record
+    // only requests the Gemini client can send.
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     void readJson(req).then((body) => {
       const recorded: Recorded = {
         method: req.method ?? '',
