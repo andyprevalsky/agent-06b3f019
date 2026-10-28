@@ -5,7 +5,8 @@
  *
  * EXPANSION:
  *   [COLLAPSED] --(click header)--> [EXPANDED] --(click header)--> [COLLAPSED]
- *     - COLLAPSED: shows only the final result summary (+ status dot, step count).
+ *     - COLLAPSED: shows only the final result summary as plain text, markdown
+ *       markup stripped (+ status dot, step count).
  *     - EXPANDED:  shows a 3-tab view.
  *
  * STATUS (derived from the result text, which leads with the task goal):
@@ -70,6 +71,7 @@ import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { useAgentContext } from '../hooks';
 import type { Message, OutputSchema } from '@/lib/api';
 import { SchemaChip } from './SchemaChip';
+import { markdownPreview } from './browser-agent-chip/resultPreview';
 import {
   buildTrajectorySteps,
   findActiveStepIndex,
@@ -330,7 +332,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
       {!expanded && (
         <div className="border-t border-border px-3 py-2 text-muted-foreground">
-          <p className="line-clamp-2 whitespace-pre-wrap">{resultText}</p>
+          <p className="line-clamp-2 whitespace-pre-wrap">{markdownPreview(resultText)}</p>
         </div>
       )}
 

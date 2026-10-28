@@ -4,6 +4,7 @@ import { isUserFacingWorkBoundary } from './trajectoryUserFacingBoundary';
 import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { eventTimeMs, parseAgentToAgentMessage } from '../hooks/codeAgentContract';
 import { localizeTimestamps } from '@/lib/localDateTime';
+import { waitingTitle } from './waitForPhrase';
 
 export interface TrajectoryActivity {
   key: string;
@@ -50,7 +51,7 @@ export function trajectoryActivity(message: Message): TrajectoryActivity | null 
     key: message.message_id,
     message,
     kind: tool === 'thought' ? 'thinking' : 'work',
-    label: localizeTimestamps(title),
+    label: localizeTimestamps(tool === 'wait_for' ? waitingTitle(title) : title),
   };
 }
 

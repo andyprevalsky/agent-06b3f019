@@ -1,8 +1,9 @@
 /**
  * Blackbox tests for AgentSettingsDialog.
  * Covers open/close, no-agent state, metrics rendering, price-limit edit/save/cancel,
- * response-schema rendering, the 1.8s delete-confirmation timer, admin Report Bug
- * (including dragged / pasted screenshots), and the panel's anchor direction: the
+ * response-schema rendering, the 1.8s delete-confirmation timer (stock gear only; the
+ * Rose Desktop drawer panel has no Delete Agent), admin Report bug as its own control
+ * outside Agent Settings (including dragged / pasted screenshots), and the panel's anchor direction: the
  * Rose Desktop tab gear (left side of the query box) opens the panel rightward from
  * the gear, staying inside the viewport; the stock right-side gear opens it leftward.
  */
@@ -14,6 +15,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import AgentSettingsDialog from '@/features/terminal-component-group/components/AgentSettingsDialog';
+import ReportBugDialog from '@/features/terminal-component-group/components/ReportBugDialog';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import type { AgentDetail } from '@/lib/api';
 
@@ -309,14 +311,9 @@ describe('AgentSettingsDialog', () => {
     expect(screen.queryByText('Price Limit')).not.toBeInTheDocument();
   });
 
-  it('hides Report Bug for non-admin users', async () => {
-    const u = userEvent.setup();
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await waitFor(() => {
-      expect(screen.getByText('Metrics')).toBeInTheDocument();
-    });
-    expect(screen.queryByTestId('report-bug-open')).toBeNull();
+  it('hides the Report bug control for non-admin users', () => {
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    expect(screen.queryByTestId('report-bug-trigger')).toBeNull();
   });
 
   it('opens Report Bug composer and submits description for admins', async () => {
@@ -340,9 +337,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
 
     const textarea = await screen.findByTestId('report-bug-description');
     expect(screen.queryByText(/SMS/i)).toBeNull();
@@ -392,9 +388,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = await screen.findByTestId('report-bug-description');
     await u.type(textarea, 'Unconfigured case');
     await u.click(screen.getByTestId('report-bug-submit'));
@@ -447,9 +442,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
     expect(screen.getByTestId('report-bug-screenshot-hint')).toHaveTextContent(
       'Drag, drop or paste screenshots',
@@ -505,9 +499,8 @@ describe('AgentSettingsDialog', () => {
       }),
     );
 
-    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
-    await u.click(document.querySelector('button')!);
-    await u.click(await screen.findByTestId('report-bug-open'));
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
     const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
 
     const notes = new File(['notes'], 'notes.txt', { type: 'text/plain' });
