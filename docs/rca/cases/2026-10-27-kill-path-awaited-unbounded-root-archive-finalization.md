@@ -23,6 +23,7 @@ tags:
 sources:
   - agent 43082b47-f284-410a-a258-6fcd47651cce (SMS kill at 2026-10-27T21:07:22Z, user inbound seq 73, Render instance srv-d3jga77diees73cgrvk0-w4h75)
   - commit f9ee633d3 (inline root finalization on delete; hardened by 47d1da61a, 5c7b1752d, ab682b647)
+  - PR #1614 (fix 6eb82da43, merged 0cd8cf46d; Render live 2026-10-27T23:58Z, 15/15 prod probes, 0 post-deploy error lines)
 repro: back-end/src/tests/blackbox/archive-kill-finalize.helper.ts (archive.blackbox.ts "SMS kill_agent does not await root archive finalization")
 status: fixed
 ---
