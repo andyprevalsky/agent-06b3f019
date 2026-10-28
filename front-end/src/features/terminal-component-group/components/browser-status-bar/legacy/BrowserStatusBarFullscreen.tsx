@@ -59,6 +59,8 @@ interface FullscreenProps {
   browserUrl: string;
   /** False when the bound session is closed or ended: loading screen, no iframe. */
   browserLive?: boolean;
+  /** The owning agent finished: show a terminal "session ended" state, never "Connecting…". */
+  browserEnded?: boolean;
   messages: Message[];
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
@@ -151,6 +153,7 @@ type PaneProps = Pick<
   | 'taskId'
   | 'browserUrl'
   | 'browserLive'
+  | 'browserEnded'
   | 'messages'
   | 'authAssistanceRequest'
   | 'isResuming'
@@ -168,6 +171,7 @@ function BrowserPaneBody({
   taskId,
   browserUrl,
   browserLive = true,
+  browserEnded = false,
   messages,
   controlState,
   authAssistanceRequest,
@@ -182,19 +186,22 @@ function BrowserPaneBody({
     <LiveViewFrame
       url={browserUrl}
       live={browserLive}
+      ended={browserEnded}
       title="Browser"
       interactive={!readOnly && (isUserControlling || controlState === 'waiting')}
       iframeKey={`${taskId}:${browserUrl}`}
       className={cn('flex min-h-0 flex-col bg-white', isMobile ? 'w-full flex-none' : 'flex-1')}
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
     >
-      {controlState === 'active' && !isUserControlling && <BrowserBorderGlow tone={glowTone} />}
+      {!browserEnded && controlState === 'active' && !isUserControlling && (
+        <BrowserBorderGlow tone={glowTone} />
+      )}
       <BrowserCursorOverlay
         agentId={agentId}
         taskId={taskId}
         messages={messages}
         browserUrl={browserUrl}
-        visible={controlState === 'active' && !isUserControlling}
+        visible={!browserEnded && controlState === 'active' && !isUserControlling}
       />
       {!readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip
@@ -295,6 +302,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       taskId={props.taskId}
       browserUrl={props.browserUrl}
       browserLive={props.browserLive}
+      browserEnded={props.browserEnded}
       messages={props.messages}
       controlState={controlState}
       authAssistanceRequest={props.authAssistanceRequest}

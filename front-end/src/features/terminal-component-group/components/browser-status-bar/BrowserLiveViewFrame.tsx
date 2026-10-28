@@ -17,6 +17,7 @@
  *   --iframe load for this url--> [STREAMING]; a new url restarts at LOADING.
  *   live=false (bound session closed/ended) --> [NOT_LIVE] LiveViewLoading and
  *   no iframe, so a provider "session closed" page is never shown.
+ *   ended=true (owning agent finished) --> [ENDED] LiveViewEnded, no iframe.
  *
  * INPUT STATE: interactive=true -> the provider viewer receives real mouse
  *   and keyboard (Tilion /live-view sends them as page input);
@@ -37,13 +38,15 @@ import {
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
 } from './liveViewDisplay';
-import { LiveViewLoading } from './LiveViewLoading';
+import { LiveViewEnded, LiveViewLoading } from './LiveViewLoading';
 import { useLiveViewLoaded } from './useLiveViewLoaded';
 
 interface LiveViewFrameProps {
   url: string;
   /** False when the bound session is closed or ended. */
   live?: boolean;
+  /** Owning agent finished: [ENDED] terminal state, no iframe, never "Connecting…". */
+  ended?: boolean;
   title: string;
   /** The provider viewer may itself accept input; gate it while the agent owns control. */
   interactive?: boolean;
@@ -56,6 +59,7 @@ interface LiveViewFrameProps {
 export function LiveViewFrame({
   url,
   live = true,
+  ended = false,
   title,
   interactive = true,
   iframeKey,
@@ -117,7 +121,7 @@ export function LiveViewFrame({
           height: `min(100cqh, calc(100cqw * ${display.height} / ${display.width}))`,
         }}
       >
-        {live && (
+        {live && !ended && (
           <iframe
             ref={iframeRef}
             key={iframeKey ?? `${title}:${url}`}
@@ -134,7 +138,7 @@ export function LiveViewFrame({
             onLoad={onLoad}
           />
         )}
-        {(!live || !isLoaded) && <LiveViewLoading />}
+        {ended ? <LiveViewEnded /> : (!live || !isLoaded) && <LiveViewLoading />}
         {children}
       </div>
     </div>

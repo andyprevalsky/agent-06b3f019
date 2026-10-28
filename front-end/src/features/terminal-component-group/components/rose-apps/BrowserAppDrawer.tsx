@@ -5,6 +5,7 @@
  * NO_SESSION: an agent is selected, it has no browser task and Root was not clicked
  *   -> "No browser session" (no chrome, no live view, no Root browser fallback).
  * Root never opens a cloud browser by itself; only "Open browser" does.
+ * ENDED tab (owning agent finished): address bar "Session ended", never "Connecting…".
  */
 import { useMemo } from 'react';
 import { ArrowLeft, ArrowRight, RotateCw, Bot, Globe, type LucideIcon } from 'lucide-react';
@@ -119,7 +120,15 @@ function NavButton({
   );
 }
 
-function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
+function AddressBar({
+  url,
+  isRoot,
+  ended,
+}: {
+  url: string | null;
+  isRoot: boolean;
+  ended: boolean;
+}) {
   const parts = url === null ? null : addressParts(url);
   return (
     <div
@@ -134,6 +143,8 @@ function AddressBar({ url, isRoot }: { url: string | null; isRoot: boolean }) {
         </>
       ) : isRoot ? (
         <span>Your browser</span>
+      ) : ended ? (
+        <span>Session ended</span>
       ) : (
         <span>Connecting…</span>
       )}
@@ -244,7 +255,11 @@ function BrowserChrome({
           onClick={canReload ? apps.reloadBrowser : undefined}
         />
       </span>
-      <AddressBar url={activeTab?.pageUrl ?? null} isRoot={isRoot} />
+      <AddressBar
+        url={activeTab?.pageUrl ?? null}
+        isRoot={isRoot}
+        ended={activeTab?.ended === true}
+      />
     </div>
   );
 }

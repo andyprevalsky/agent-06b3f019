@@ -49,6 +49,8 @@ export interface BrowserAgentPaneProps {
   browserUrl: string;
   /** False when the bound session is closed or ended: loading screen, no iframe. */
   browserLive?: boolean;
+  /** The owning agent finished: show a terminal "session ended" state, never "Connecting…". */
+  browserEnded?: boolean;
   messages: Message[];
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
@@ -68,6 +70,7 @@ type LiveProps = Pick<
   | 'taskId'
   | 'browserUrl'
   | 'browserLive'
+  | 'browserEnded'
   | 'messages'
   | 'authAssistanceRequest'
   | 'isResuming'
@@ -82,6 +85,7 @@ function LiveBrowser({
   taskId,
   browserUrl,
   browserLive = true,
+  browserEnded = false,
   messages,
   controlState,
   authAssistanceRequest,
@@ -92,11 +96,12 @@ function LiveBrowser({
   readOnly = false,
 }: LiveProps) {
   const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
-  const agentDriving = controlState === 'active' && !isUserControlling;
+  const agentDriving = !browserEnded && controlState === 'active' && !isUserControlling;
   return (
     <LiveViewFrame
       url={browserUrl}
       live={browserLive}
+      ended={browserEnded}
       title="Browser"
       interactive={!readOnly && (isUserControlling || controlState === 'waiting')}
       iframeKey={`${taskId}:${browserUrl}`}
@@ -182,6 +187,7 @@ export function BrowserAgentPane(props: BrowserAgentPaneProps) {
           taskId={props.taskId}
           browserUrl={props.browserUrl}
           browserLive={props.browserLive}
+          browserEnded={props.browserEnded}
           messages={props.messages}
           controlState={controlState}
           authAssistanceRequest={props.authAssistanceRequest}

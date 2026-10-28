@@ -89,9 +89,12 @@ function browserMessage(
   } as Message;
 }
 
-function agentContext(messages: Message[]): AgentContextValue {
+function agentContext(
+  messages: Message[],
+  agent: AgentContextValue['agent'] = null,
+): AgentContextValue {
   return {
-    agent: null,
+    agent,
     applyAgentDetail: vi.fn(() => true),
     selectedAgentId: '8b4d4592-c5da-4889-8a01-52824db125d1',
     setSelectedAgentId: vi.fn(),
@@ -114,11 +117,11 @@ function agentContext(messages: Message[]): AgentContextValue {
 }
 
 /** Render exactly what the carousel renders: the transcript-derived panel URL. */
-function statusBarFor(messages: Message[]) {
+function statusBarFor(messages: Message[], agent: AgentContextValue['agent'] = null) {
   const panel = computeActiveBrowserPanels(messages).find((p) => p.taskId === TASK_ID);
   if (panel === undefined) throw new Error('browser panel is not active');
   return (
-    <AgentContext.Provider value={agentContext(messages)}>
+    <AgentContext.Provider value={agentContext(messages, agent)}>
       <BrowserStatusBar taskId={TASK_ID} browserUrl={panel.browserUrl} />
     </AgentContext.Provider>
   );
@@ -408,6 +411,38 @@ describe('live view follows the backend session binding', () => {
       'https://connect.steel.dev/v1/sessions/201b22cb-e781-4527-95f5-fb1d8571ff89/player?interactive=true&showControls=true',
     );
     releaseRefresh?.();
+  });
+
+  it.each(['COMPLETED', 'FAILED'] as const)(
+    'shows a terminal state, never "Connecting…", for a %s agent whose task never recorded an end',
+    async (status) => {
+      // Leftover card: the session_init is the task's last message (no end/result),
+      // and the binding read still reports the provider session as live.
+      serveLiveView(() => binding(PROMOTED_KERNEL, 1));
+      const finished = {
+        agent_id: '8b4d4592-c5da-4889-8a01-52824db125d1',
+        status,
+      } as NonNullable<AgentContextValue['agent']>;
+      renderWithProviders(statusBarFor([sessionInit(PROMOTED_KERNEL)], finished));
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId('live-view-ended').length).toBeGreaterThan(0),
+      );
+      expect(screen.queryByTestId('live-view-loading')).toBeNull();
+      expect(screen.queryByText(/Connecting/)).toBeNull();
+      expect(document.querySelector('iframe')).toBeNull();
+    },
+  );
+
+  it('keeps the live stream for an active agent', async () => {
+    serveLiveView(() => binding(PROMOTED_KERNEL, 1));
+    const active = {
+      agent_id: '8b4d4592-c5da-4889-8a01-52824db125d1',
+      status: 'ACTIVE',
+    } as NonNullable<AgentContextValue['agent']>;
+    renderWithProviders(statusBarFor([sessionInit(PROMOTED_KERNEL)], active));
+    await waitFor(() => expect(document.querySelector('iframe')).not.toBeNull());
+    expect(screen.queryByTestId('live-view-ended')).toBeNull();
   });
 
   it('replaces the stream with the loading screen when the bound session closes', async () => {
