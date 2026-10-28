@@ -4,8 +4,11 @@
  * Stateless layout; each item owns its own state (lock toggle, popovers,
  * price-limit edit, settings dialog, info menu). Order, left → right:
  *
- *   lock · context files* · budget · context % · settings · info
- *   (* account-gated: context files = dev/admin desktop)
+ *   lock · context files* · budget · context % · settings · report bug* · info
+ *   (* account-gated: context files = dev/admin desktop; report bug = admin)
+ *
+ * Report bug is its own item (not inside Agent Settings), and the settings
+ * panel opened from this drawer has no Delete Agent.
  *
  * Every item is a bare white 12px icon or 10px mono text with an instant
  * tooltip (NubTip). Not here: the Rose toolset (wrench) and the world
@@ -17,6 +20,7 @@
 import WriteLockToggle from '../WriteLockToggle';
 import TestPromptsSelector from '../TestPromptsSelector';
 import AgentSettingsDialog from '../AgentSettingsDialog';
+import ReportBugDialog from '../ReportBugDialog';
 import { CostIndicator } from './CostIndicator';
 import { ContextMeter } from './ContextMeter';
 import { QueryInfoMenu } from './QueryInfoMenu';
@@ -55,8 +59,8 @@ export function NubToolbar(props: TopBarProps) {
         variant="nub"
         agent={agentDetail ?? null}
         onUpdate={props.onAgentUpdate}
-        onDelete={props.onAgentDelete}
       />
+      <ReportBugDialog variant="nub" agent={agentDetail ?? null} />
       <QueryInfoMenu />
     </>
   );
