@@ -170,6 +170,36 @@ function InteractiveTerminalLayout(props: TerminalLayoutProps) {
   );
 }
 
+/** The header row; Back on mobile returns to the open agent's parent when it has one. */
+function TerminalHeaderSection({ agents, drip }: Pick<TerminalLayoutProps, 'agents' | 'drip'>) {
+  const detail = agents.agentDetail;
+  return (
+    <TerminalHeader
+      onCreateNewAgent={agents.handleCreateNewAgent}
+      onSelectAgent={agents.handleSelectAgent}
+      onLoginClick={agents.handleLoginClick}
+      onLogout={() => {
+        void agents.handleLogout();
+      }}
+      isSignedIn={agents.isFullySignedIn}
+      clientSource={agents.clientSource}
+      agents={agents.agents}
+      isLoadingAgents={agents.isLoadingAgents}
+      hasLoadedAgents={agents.hasLoadedAgents}
+      selectedAgentId={agents.selectedAgentId}
+      selectedAgentParentId={
+        detail?.agent_id === agents.selectedAgentId ? detail?.parent_agent_id : null
+      }
+      onRefreshAgents={agents.loadAgents}
+      dripStyles={drip.dripStyles}
+      blur={drip.blur}
+      backgroundColors={drip.backgroundColors}
+      borderColor={drip.borderColor}
+      shadowIntensity={drip.shadowIntensity}
+    />
+  );
+}
+
 function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   // THE app-wide attention subscription. Held here because this is the common
@@ -196,28 +226,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
           selectedAgentId={agents.selectedAgentId}
         />
 
-        {currentView !== 'browse' && (
-          <TerminalHeader
-            onCreateNewAgent={agents.handleCreateNewAgent}
-            onSelectAgent={agents.handleSelectAgent}
-            onLoginClick={agents.handleLoginClick}
-            onLogout={() => {
-              void agents.handleLogout();
-            }}
-            isSignedIn={agents.isFullySignedIn}
-            clientSource={agents.clientSource}
-            agents={agents.agents}
-            isLoadingAgents={agents.isLoadingAgents}
-            hasLoadedAgents={agents.hasLoadedAgents}
-            selectedAgentId={agents.selectedAgentId}
-            onRefreshAgents={agents.loadAgents}
-            dripStyles={drip.dripStyles}
-            blur={drip.blur}
-            backgroundColors={drip.backgroundColors}
-            borderColor={drip.borderColor}
-            shadowIntensity={drip.shadowIntensity}
-          />
-        )}
+        {currentView !== 'browse' && <TerminalHeaderSection agents={agents} drip={drip} />}
 
         {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
 

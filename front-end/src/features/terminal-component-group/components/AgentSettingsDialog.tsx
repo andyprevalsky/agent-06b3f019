@@ -28,7 +28,9 @@
  *
  * Delete-flow state is owned by useDeleteFlow; price-limit editing state is
  * owned by usePriceLimitEdit; report-bug state is owned by useReportBug;
- * anchor position is owned by useModalPosition.
+ * anchor position is owned by useModalPosition (clamped inside the viewport,
+ * height capped below the mobile header, re-fit on rotation). Phones (< md)
+ * get an opaque panel; the desktop panel stays transparent glass.
  *
  * Trigger: variant 'icon' (stock) = muted gear; variant 'nub' (Rose Desktop
  * query-box tab) = bare white gear with the instant "Agent settings" tooltip.
@@ -37,7 +39,8 @@
  *   'icon' sits at the right end of the stock TopBar -> right edges align,
  *          the panel extends leftward
  *   'nub'  sits on the tab at the query box's left edge -> left edges align,
- *          the panel extends rightward (clamped inside the viewport)
+ *          the panel extends rightward
+ *   either way the panel stays inside an 8px viewport gutter
  */
 
 import { useRef, useState, type RefObject } from 'react';
@@ -58,11 +61,7 @@ import DeleteSection from './agent-settings-dialog/DeleteSection';
 import ReportBugSection from './agent-settings-dialog/ReportBugSection';
 import { useDeleteFlow } from './agent-settings-dialog/useDeleteFlow';
 import { usePriceLimitEdit } from './agent-settings-dialog/usePriceLimitEdit';
-import {
-  PANEL_MAX_WIDTH_VW,
-  PANEL_WIDTH_PX,
-  useModalPosition,
-} from './agent-settings-dialog/useModalPosition';
+import { useModalPosition } from './agent-settings-dialog/useModalPosition';
 import { useReportBug } from './agent-settings-dialog/useReportBug';
 import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 
@@ -125,7 +124,7 @@ export default function AgentSettingsDialog({
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
       <SettingsTrigger nub={variant === 'nub'} triggerRef={triggerRef} />
       <DialogContent
-        className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden"
+        className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden bg-[#EEEFF2] dark:bg-[#262624] md:bg-transparent md:dark:bg-transparent"
         style={{
           position: 'fixed',
           bottom: modalPosition.bottom,
@@ -133,18 +132,13 @@ export default function AgentSettingsDialog({
           right: modalPosition.right,
           top: 'auto',
           transform: 'none',
-          width: PANEL_WIDTH_PX,
-          maxWidth: `${PANEL_MAX_WIDTH_VW}vw`,
-          maxHeight: '85vh',
-          backgroundColor: 'transparent',
+          width: modalPosition.width,
+          maxHeight: modalPosition.maxHeight,
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
         }}
       >
-        <div
-          className="p-6 max-h-[85vh] overflow-y-auto"
-          style={{ backgroundColor: 'transparent' }}
-        >
+        <div className="p-6 overflow-y-auto" style={{ maxHeight: modalPosition.maxHeight }}>
           <DialogHeader className="mb-4">
             <DialogTitle>Agent Settings</DialogTitle>
           </DialogHeader>

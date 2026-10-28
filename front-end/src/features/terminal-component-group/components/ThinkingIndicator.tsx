@@ -7,7 +7,8 @@
  * PROPS:
  *   isClaudeStreaming --> swap blue gradient for direct-token orange
  *   streamStartedAtMs --> elapsed timer starts at LLM request start
- *   streamingTokenCount --> drives animated token counter
+ *   streamingTokenCount --> drives animated token counter; a known count is
+ *     always shown (↓ 0 before the first byte); undefined is never invented
  */
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { cn } from '@/lib/utils';
@@ -58,6 +59,7 @@ export function ThinkingIndicator({
             animatedTokenCount={animatedTokenCount}
             className="ml-auto text-xs"
             iconClassName="h-3 w-3"
+            showZeroTokens
           />
         </div>
       </div>
