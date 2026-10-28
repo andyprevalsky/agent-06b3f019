@@ -80,9 +80,6 @@ async function main() {
     baseUrl.searchParams.set('schema', 'public');
     process.env.DATABASE_URL = baseUrl.toString();
     process.env.DIRECT_URL = baseUrl.toString();
-    // The Prisma CLI reads only PRISMA_CLI_DATABASE_URL (schema directUrl); aim the
-    // fixture push at this private local database, as run-blackbox-tests.sh does.
-    process.env.PRISMA_CLI_DATABASE_URL = baseUrl.toString();
     process.env.BACKEND_API_KEY = `e2e-${randomUUID()}`;
     process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
     process.env.CODE_SESSION_STORAGE_LOCAL_DIR = join(directory, 'checkpoints');
@@ -97,7 +94,8 @@ async function main() {
       [require.resolve('prisma/build/index.js'), 'db', 'push', '--skip-generate'],
       {
         cwd: process.cwd(),
-        env: process.env,
+        // The schema's directUrl reads PRISMA_CLI_DATABASE_URL (S21 db-push guard).
+        env: { ...process.env, PRISMA_CLI_DATABASE_URL: baseUrl.toString() },
         timeout: 120_000,
         maxBuffer: 2_000_000,
       }

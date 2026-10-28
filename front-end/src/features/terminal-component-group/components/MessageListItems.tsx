@@ -287,6 +287,7 @@ export function MessageListItems({
           key={workGroup.key}
           group={workGroup}
           indicator={itemProps.activityIndicator}
+          exploreStepMap={itemProps.exploreStepMap}
           renderMessage={(row) => (
             <MessageListItem message={row} {...itemProps} currentAnimatingId={null} />
           )}

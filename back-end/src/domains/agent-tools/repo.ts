@@ -161,3 +161,87 @@ export async function findAuthoredReply(
   });
   return row?.text ?? null;
 }
+
+// ── generate_video claims (ToolSideEffect) and usage ──
+
+export interface SideEffectRow {
+  status: string;
+  error: string | null;
+  request: unknown;
+  response: unknown;
+}
+
+const SIDE_EFFECT_SELECT = { status: true, error: true, request: true, response: true } as const;
+
+export async function findSideEffect(operationKey: string): Promise<SideEffectRow | null> {
+  return prisma.toolSideEffect.findUnique({ where: { operationKey }, select: SIDE_EFFECT_SELECT });
+}
+
+/** Insert the claim; false when another caller already created it (unique key). */
+export async function createSideEffectClaim(data: {
+  operationKey: string;
+  operationType: string;
+  externalId: string;
+  request: Record<string, unknown>;
+}): Promise<boolean> {
+  try {
+    await prisma.toolSideEffect.create({
+      data: { ...data, status: 'STARTED', request: data.request as Prisma.InputJsonObject },
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Compare-and-set re-claim of a FAILED/dead claim: true for exactly one racing caller. */
+export async function reclaimSideEffect(
+  operationKey: string,
+  from: { status: string; claimedAt: string },
+  request: Record<string, unknown>
+): Promise<boolean> {
+  const won = await prisma.toolSideEffect.updateMany({
+    where: {
+      operationKey,
+      status: from.status,
+      request: { path: ['claimedAt'], equals: from.claimedAt },
+    },
+    data: { status: 'STARTED', error: null, request: request as Prisma.InputJsonObject },
+  });
+  return won.count === 1;
+}
+
+export async function settleSideEffect(
+  operationKey: string,
+  status: 'DONE' | 'FAILED' | 'UNCERTAIN',
+  fields: { error?: string; response?: Record<string, unknown> }
+): Promise<void> {
+  await prisma.toolSideEffect.update({
+    where: { operationKey },
+    data: {
+      status,
+      error: fields.error ?? null,
+      ...(fields.response ? { response: fields.response as Prisma.InputJsonObject } : {}),
+    },
+  });
+}
+
+/** One ToolUsage row per operationKey (a retried call records its cost once). */
+export async function recordServiceUsageOnce(data: {
+  operationKey: string;
+  agentId: string;
+  userId: string;
+  toolName: string;
+  totalCostCents: number;
+  usageItems: Record<string, unknown>[];
+}): Promise<void> {
+  const row = { ...data, usageItems: data.usageItems as Prisma.InputJsonArray };
+  await prisma.toolUsage.upsert({
+    where: { operationKey: data.operationKey },
+    create: row,
+    update: {},
+  });
+}

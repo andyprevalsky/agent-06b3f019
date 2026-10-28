@@ -375,9 +375,9 @@ def test_cerebras_native_tools_enforce_representable_shapes():
     assert "minItems" not in params["properties"]["labels"]
     assert params["properties"]["count"]["minimum"] == 1
     assert params["properties"]["count"]["maximum"] == 5
-    # Omittable Optional[str] keeps null expressible under strict decoding; see
-    # test_cerebras_tools_keep_null_for_omittable_string_optionals.
-    assert params["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    # Omittable string stays nullable so the model never writes the literal text
+    # "null"; see test_cerebras_string_optionals_keep_null_branch.
+    assert {b["type"] for b in params["properties"]["note"]["anyOf"]} == {"string", "null"}
     assert "note" not in params["required"]
     assert body["tool_choice"] == "required"
     assert "response_format" not in body
@@ -435,6 +435,9 @@ def test_cerebras_tools_send_omittable_optionals_as_their_type():
     ):
         assert props[name].get("type") == kind, f"{name} must be a plain {kind}: {props[name]}"
         assert "anyOf" not in props[name], f"{name} kept the null union: {props[name]}"
+    # String slots keep their null branch: without it qwen writes the literal
+    # text "null" to omit them (prod root 942d8562 spawn_agent/wait_for).
+    assert {b.get("type") for b in props["pattern"]["anyOf"]} == {"string", "null"}, props["pattern"]
     assert props["sources"]["items"]["enum"][0] == "messages"
     assert tools == original, "caller tool schemas must not be mutated"
     # The field's own description wins over a nested model's docstring.
@@ -528,6 +531,48 @@ def test_cerebras_tools_keep_null_for_omittable_string_optionals():
         {"tool": "grep", "pattern": "401", "sources": ["agent_trajectories"], "role": None, "page_after": None}
     )
     assert (grep_call.role, grep_call.page_after) == (None, None)
+
+
+def test_cerebras_string_optionals_keep_null_branch():
+    """Omittable string/enum params must stay nullable on the Cerebras wire.
+
+    Prod root 942d8562 (2026-10-27, qwen-3.8-27b on Cerebras): after the null
+    branch was collapsed away, qwen filled omitted string slots with the literal
+    text "null" (spawn_agent start_phase/items_csv/start_url/github_repo_link/
+    code_session_id, wait_for condition/until_timestamp), which validation
+    rejected (`start_phase: Input should be 'PLAN' or 'EXECUTE'`, wait_for
+    mutual exclusion). Live replay of the captured call: 2/6 valid calls carried
+    "null" with the collapsed encoding, 0/5 with the null branch kept.
+    """
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.tool_schemas import SpawnAgentTool, WaitForTool, create_agent_action_model
+
+    tools = build_anthropic_tools_from_response_model(
+        create_agent_action_model(
+            ["spawn_agent", "wait_for"], tool_registry={"spawn_agent": SpawnAgentTool, "wait_for": WaitForTool}
+        )
+    )
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=64,
+        effort=None,
+    )
+    by_name = {t["function"]["name"]: t["function"]["parameters"]["properties"] for t in body["tools"]}
+    for tool, names in (
+        ("spawn_agent", ("start_phase", "start_url", "items_csv", "github_repo_link", "code_session_id")),
+        ("wait_for", ("condition", "until_timestamp")),
+    ):
+        for name in names:
+            branches = by_name[tool][name].get("anyOf")
+            assert branches and {b.get("type") for b in branches} == {"string", "null"}, (tool, name, by_name[tool][name])
+    # Arrays/integers stay collapsed (the 2026-10-24 fix).
+    assert "anyOf" not in by_name["wait_for"]["agents"]
+    assert by_name["wait_for"]["agents"]["type"] == "array"
 
 
 def test_cerebras_native_tools_keep_incompatible_schemas_visible():
@@ -11152,6 +11197,10 @@ async def run_all_tests():
     r.record(
         "cerebras_tools_keep_null_for_omittable_string_optionals",
         test_cerebras_tools_keep_null_for_omittable_string_optionals,
+    )
+    r.record(
+        "cerebras_string_optionals_keep_null_branch",
+        test_cerebras_string_optionals_keep_null_branch,
     )
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
