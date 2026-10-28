@@ -35,11 +35,12 @@ import {
   type ClaudeCodeCredentialResult,
 } from '../claudeCredentials';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { fetchGptCodeCredentialsWithMeta, isGptApiKeyOnCooldown } from '../gptCredentials';
+import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import {
   CodeAgentCredentialError,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
+  resolveCodexAzureFunding,
   resolveCodexCodeAuthEnvs,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldSkipSandboxAnthropicGatewayForOauth,
@@ -173,10 +174,7 @@ interface ProviderAuth {
 async function providerAuth(provider: InspectProvider, userId: string): Promise<ProviderAuth> {
   if (provider === 'codex') {
     const meta = await fetchGptCodeCredentialsWithMeta(userId);
-    const funded = process.env.GPT_API_KEY;
-    const onCooldown =
-      funded !== undefined && funded !== '' ? await isGptApiKeyOnCooldown() : false;
-    return { envs: resolveCodexCodeAuthEnvs(meta, funded, onCooldown), claude: null };
+    return { envs: resolveCodexCodeAuthEnvs(meta, resolveCodexAzureFunding()), claude: null };
   }
   const meta = await fetchClaudeCodeCredentialsWithMeta(userId);
   const shared = process.env.ANTHROPIC_API_KEY;
