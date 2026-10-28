@@ -20,6 +20,10 @@ const TOUCH_ANCHOR_INSET_PX = 8;
  * click that follows the finger lifting is swallowed so the long-press never
  * also activates the trigger (opening the pressed row). Mouse right-click is
  * unchanged.
+ *
+ * ContextMenuItem: [OPENED] --pointer moves onto / presses item--> [REACHED]
+ *   release in [OPENED] (pointer never moved onto it) never selects it;
+ *   release in [REACHED] selects (press-drag-release); keyboard/click unchanged.
  */
 const ContextMenuTrigger = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Trigger>,
@@ -147,18 +151,46 @@ ContextMenuContent.displayName = ContextMenuPrimitive.Content.displayName;
 const ContextMenuItem = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Item> & { destructive?: boolean }
->(({ className, destructive = false, ...props }, ref) => (
-  <ContextMenuPrimitive.Item
-    ref={ref}
-    className={cn(
-      'relative flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
-      'focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
-      destructive && 'text-red-600 dark:text-red-400 focus:text-red-600 dark:focus:text-red-400',
-      className,
-    )}
-    {...props}
-  />
-));
+>(
+  (
+    { className, destructive = false, onPointerMove, onPointerDown, onPointerUp, ...props },
+    ref,
+  ) => {
+    /** The pointer moved onto (or pressed) this item since the menu opened. */
+    const reached = React.useRef(false);
+    return (
+      <ContextMenuPrimitive.Item
+        ref={ref}
+        className={cn(
+          'relative flex w-full cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
+          'focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
+          destructive &&
+            'text-red-600 dark:text-red-400 focus:text-red-600 dark:focus:text-red-400',
+          className,
+        )}
+        onPointerMove={(event) => {
+          reached.current = true;
+          onPointerMove?.(event);
+        }}
+        onPointerDown={(event) => {
+          reached.current = true;
+          onPointerDown?.(event);
+        }}
+        onPointerUp={(event) => {
+          onPointerUp?.(event);
+          // Radix selects an item on a release that had no press on it (press-drag-
+          // release). Radix's first frame places the menu at its previous anchor
+          // (initially 0,0) before moving it to the pointer, so the release of a
+          // quick right-click / trackpad tap could land on whatever item briefly
+          // sat under a still pointer (e.g. Delete project). Only a release after
+          // the pointer actually moved onto the item selects it.
+          if (!reached.current) event.preventDefault();
+        }}
+        {...props}
+      />
+    );
+  },
+);
 ContextMenuItem.displayName = ContextMenuPrimitive.Item.displayName;
 
 const ContextMenuSeparator = React.forwardRef<

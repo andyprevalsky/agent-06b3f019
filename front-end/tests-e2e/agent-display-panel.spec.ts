@@ -1,4 +1,4 @@
-/** Real desktop panel + opaque WebGL iframe, with deterministic local API fixtures. */
+/** Real inline display + opaque WebGL iframe, with deterministic local API fixtures. */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { FRONTEND_URL } from './helpers';
@@ -6,7 +6,7 @@ const OWNER = 'display-preview';
 const GAME_URL = 'https://display-preview.rose.test/game.html';
 const html = readFileSync(new URL('./fixtures/agent-display-game.html', import.meta.url), 'utf8');
 
-test('desktop Agent Display opens real WebGL output and keeps controls in its sandbox', async ({
+test('desktop inline display runs real WebGL output and keeps controls in its sandbox', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -91,22 +91,28 @@ test('desktop Agent Display opens real WebGL output and keeps controls in its sa
     await route.fulfill({ json: body });
   });
   await page.goto(`${FRONTEND_URL}/?agent-id=${OWNER}`, { waitUntil: 'domcontentloaded' });
-  const icon = page.getByRole('button', { name: 'Agent Display', exact: true });
-  await expect(icon).toBeVisible();
-  await expect(page.getByRole('button', { name: /Open agent display/ })).toBeVisible();
-  const browser = page.getByRole('button', { name: 'Browser', exact: true });
-  // Agent Display comes first in the app icon row, immediately before Browser.
-  expect(await icon.evaluate((el) => el.nextElementSibling?.getAttribute('aria-label'))).toBe(
-    'Browser',
-  );
-  await expect(browser).toHaveAttribute('aria-pressed', 'false');
-  await icon.click();
-  const panel = page.getByTestId('agent-display-drawer');
-  await expect(panel).toHaveAttribute('data-state', 'open');
-  const iframe = panel.locator('iframe');
+  // 134fc78cc removed the Agent Display icon/panel: every display renders
+  // inline in the chat, collapsed to a preview with a chevron disclosure.
+  await expect(page.getByRole('button', { name: 'Browser', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Agent Display', exact: true })).toHaveCount(0);
+  await expect(page.getByTestId('agent-display-drawer')).toHaveCount(0);
+  const toggle = page.getByRole('button', { name: 'Expand display: Orbit Runner', exact: true });
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  const item = page.locator('[data-message-kind="display-media"]');
+  const iframe = item.getByTestId('display-html-frame');
   await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
-  const game = page.frameLocator('[data-testid="agent-display-drawer"] iframe');
+  const game = page.frameLocator('[data-message-kind="display-media"] iframe');
   const canvas = game.locator('canvas');
+  // The collapsed preview already runs the live frame.
+  await expect(canvas).toHaveAttribute('data-ready', 'true');
+  await iframe.evaluate((el) => el.setAttribute('data-probe', 'same-frame'));
+  await toggle.click();
+  const collapse = page.getByRole('button', { name: 'Collapse display: Orbit Runner' });
+  await expect(collapse).toHaveAttribute('aria-expanded', 'true');
+  await expect(item).toHaveAttribute('data-expanded', 'true');
+  // Expanding resizes the same frame element instead of remounting it.
+  await expect(iframe).toHaveAttribute('data-probe', 'same-frame');
   await expect(canvas).toHaveAttribute('data-ready', 'true');
   await canvas.click();
   const x = Number(await canvas.getAttribute('data-x'));
@@ -118,11 +124,16 @@ test('desktop Agent Display opens real WebGL output and keeps controls in its sa
   await expect
     .poll(async () => Number(await canvas.getAttribute('data-frames')))
     .toBeGreaterThan(3);
-  await icon.click();
-  await expect(panel.locator('iframe')).toHaveCount(0);
-  await icon.click();
-  await expect(game.locator('canvas')).toHaveAttribute('data-ready', 'true');
-  // The final segment is retained as a user-facing clip starting with the panel open.
+  // Collapsing back to the preview keeps the same live frame running.
+  await collapse.click();
+  await expect(item).toHaveAttribute('data-expanded', 'false');
+  await expect(iframe).toHaveAttribute('data-probe', 'same-frame');
+  const frames = Number(await canvas.getAttribute('data-frames'));
+  await expect
+    .poll(async () => Number(await canvas.getAttribute('data-frames')))
+    .toBeGreaterThan(frames);
+  // The final segment is retained as a user-facing clip with the display expanded.
+  await page.getByRole('button', { name: 'Expand display: Orbit Runner' }).click();
   await page.waitForTimeout(1500);
   await canvas.click();
   await page.keyboard.down('ArrowLeft');

@@ -313,22 +313,36 @@ for (const width of [320, 390, 1280]) {
     await expect(chip).toBeVisible();
     const m = await chip.evaluate((el) => {
       const shell = el.closest('[data-testid="query-input-surface"]')!;
+      // The attach paperclip sits immediately left of the model name
+      // (8f4715813), so the paperclip + model group is what sits flush left.
+      const attach = el.previousElementSibling!;
       const s = shell.getBoundingClientRect(),
-        c = el.getBoundingClientRect();
+        c = el.getBoundingClientRect(),
+        a = attach.getBoundingClientRect();
       const row = shell
           .querySelector('[data-testid="query-input-controls"]')!
           .getBoundingClientRect(),
         css = getComputedStyle(shell);
       return {
-        left: c.left - s.left,
+        attachLabel: attach.getAttribute('aria-label'),
+        attachFirst: attach.previousElementSibling === null,
+        left: a.left - s.left,
+        adjacent: c.left - a.right,
+        attachBottom: row.bottom - a.bottom,
         inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
         bottom: row.bottom - c.bottom,
         shellBottom: s.bottom - c.bottom,
         bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
       };
     });
+    expect(m.attachLabel).toBe('Attach files');
+    expect(m.attachFirst).toBe(true);
     expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
+    // Model chip immediately follows the paperclip (one gap-1.5 = 6px).
+    expect(m.adjacent).toBeGreaterThanOrEqual(0);
+    expect(m.adjacent).toBeLessThanOrEqual(8);
     expect(Math.abs(m.bottom)).toBeLessThan(1);
+    expect(Math.abs(m.attachBottom)).toBeLessThan(1);
     expect(Math.abs(m.shellBottom - m.bottomInset)).toBeLessThan(1);
     await chip.click();
     await expect(page.getByRole('dialog').last()).toBeVisible();
