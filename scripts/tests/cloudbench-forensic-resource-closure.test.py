@@ -95,6 +95,73 @@ class Forensic(OLD['ArchivedStop']):
         api,_=self.exact_api()
         return F['observe'](api,plan,self.out)
 
+    def retained_missing_guest(self):
+        prefix='git-common/cloudbench-fleet-ownership/'+'b'*32
+        self.members[prefix+'/meta']=self.members[prefix+'/meta'].replace(b'cleanup_policy=reap',b'cleanup_policy=retain')
+        self.members[prefix+'/guest-cleanup-unconfirmed']=b''
+        path='context/fleet/runs/20261028-021139-15597/_batch/disposable-cleanup.json'
+        cleanup=json.loads(self.members[path]);cleanup['guest_cleanup_missing']=True
+        self.members[path]=json.dumps(cleanup).encode()
+        self.reseal(self.members)
+        shutil.copytree(self.run,self.admission/'shard-00/run',dirs_exist_ok=True)
+
+    def test_retained_missing_guest_ack_only_observes_current_physical_state(self):
+        self.retained_missing_guest()
+        original_members=dict(self.members)
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        self.assertEqual(plan['historical_cleanup_policy'],'retain')
+        self.assertIs(plan['historical_guest_cleanup_missing'],True)
+        api,calls=self.exact_api({ '/machines/'+m['id']:(200,dict(m,state='destroyed'))
+                                 for m in (self.machine_identity,self.controller_identity,self.other_identity) })
+        receipt=F['observe'](api,plan,self.out)
+        verified=F['verify'](receipt)
+        self.assertIs(verified['claims_released'],False)
+        self.assertIs(verified['runtime_sealed'],False)
+        result=F['reconcile'](self.admission,receipt,api)
+        self.assertIs(result['current_physical_resource_release_verified'],True)
+        self.assertIs(result['claims_released'],False)
+        self.assertIs(result['old_infra_retained'],True)
+        self.assertIsNone(result['original_release_epoch'])
+        self.assertTrue(all(method=='GET' for method,path in calls))
+        exp,issues=self.reporting_card()
+        self.assertTrue(exp.get('physical_closure_asof'))
+        self.assertEqual(exp['released'],{'yes':39,'of':40})
+        self.assertEqual(exp['lifecycle_verified'],{'yes':38,'of':40})
+        self.assertFalse(any('exact-owner' in x['action'] for x in issues))
+        self.assertEqual(self.members,original_members)
+        audit=self.admission/'native-release-audit.json';info=audit.stat()
+        self.assertEqual((info.st_ino,info.st_mtime_ns,info.st_size),self.original_stat)
+        self.assertEqual(audit.read_bytes(),self.original_bytes)
+
+    def test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline(self):
+        self.retained_missing_guest()
+        self.test_canonical_cli_producer_and_consumer_use_loopback_only()
+
+    def test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts(self):
+        self.retained_missing_guest();original=dict(self.members)
+        prefix='git-common/cloudbench-fleet-ownership/'+'b'*32
+        cleanup_path='context/fleet/runs/20261028-021139-15597/_batch/disposable-cleanup.json'
+        cases=[]
+        changed=dict(original);value=json.loads(changed[cleanup_path]);value['guest_cleanup_missing']=False
+        changed[cleanup_path]=json.dumps(value).encode();cases.append(changed)
+        changed=dict(original);value=json.loads(changed[cleanup_path]);value['guest_cleanup_missing']=1
+        changed[cleanup_path]=json.dumps(value).encode();cases.append(changed)
+        changed=dict(original);del changed[prefix+'/guest-cleanup-unconfirmed'];cases.append(changed)
+        changed=dict(original);changed[prefix+'/meta']=changed[prefix+'/meta'].replace(b'cleanup_policy=retain',b'cleanup_policy=foreign');cases.append(changed)
+        changed=dict(original);del changed[prefix+'/disposable-delete-machine-'+self.mid+'.json'];cases.append(changed)
+        changed=dict(original);path=next(k for k in changed if '/destroy/' in k and k.endswith('/ack.json'));del changed[path];cases.append(changed)
+        changed=dict(original);path=next(k for k in changed if '/fresh/' in k);changed[path]=changed[path].replace(b'destroyed-provider-retained',b'retained');cases.append(changed)
+        for changed in cases:
+            with self.subTest(changed=set(changed)^set(original)):
+                self.members=changed;self.reseal(changed)
+                with self.assertRaises((ValueError,KeyError)):F['prepare'](self.run,self.inventory,'b'*32)
+        self.members=original;self.reseal(original)
+        plan=F['prepare'](self.run,self.inventory,'b'*32)
+        api,_=self.exact_api({'/machines/'+self.mid:(200,dict(self.machine_identity,state='started'))})
+        with self.assertRaisesRegex(ValueError,'state=started'):
+            F['observe'](api,plan,self.out)
+        self.assertEqual(list(self.out.glob('forensic-resource-closure-*.json')),[])
+
     def test_actual_destroyed_machine_shape_preserves_terminal_not_absent(self):
         plan=F['prepare'](self.run,self.inventory,'b'*32)
         overrides={ '/machines/'+m['id']:(200,dict(m,state='destroyed')) for m in
@@ -499,6 +566,6 @@ class Forensic(OLD['ArchivedStop']):
 # Select only this extension's controls rather than inherited stop controls.
 if __name__=='__main__':
     import sys
-    names=sys.argv[1:] or ('test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
+    names=sys.argv[1:] or ('test_retained_canonical_cli_stays_get_only_and_preserves_late_deadline','test_retained_missing_guest_ack_only_observes_current_physical_state','test_retained_observation_requires_original_terminal_delete_and_matching_failure_facts','test_reporting_omitted_changed_writer_authority_terminal_inventory_refuse','test_reporting_asof_closure_removes_only_obsolete_recovery_action','test_reporting_missing_tampered_foreign_partial_future_proofs_keep_original_action','test_actual_destroyed_machine_shape_preserves_terminal_not_absent','test_destroyed_machine_wrong_incarnation_no_delete_and_live_refuse_with_private_wire','test_exact_absence_reconciles_without_rewriting_failed_original','test_live_unknown_and_wrong_binding_refuse','test_forged_receipt_and_incomplete_cohort_refuse','test_canonical_cli_producer_and_consumer_use_loopback_only','test_fullscope_soft_deleted_workspace_is_terminal_not_absent','test_fullscope_live_other_owner_hidden_from_list_refuses','test_fullscope_incomplete_export_unjoined_writer_and_timeout_refuse','test_existing_original_epoch_is_not_replaced_with_none','test_late_publication_deadline_removes_only_uncommitted_projection','test_selected_soft_terminal_uses_same_predicate_without_absence_credit','test_alarm_at_atomic_publication_link_rolls_back_exact_inode')
     suite=unittest.TestSuite(Forensic(name) for name in names)
     raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

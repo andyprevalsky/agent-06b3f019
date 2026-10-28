@@ -38,12 +38,16 @@ def prepare(run, inventory, owner):
     def fields(name):return S['fields'](selected[name])
     meta=fields(prefix+'/meta'); shared=fields(audit+'/meta')
     need(audit+'/provider-teardown-verified.epoch' not in manifest['files'] and not any(name.startswith('context/fleet/runs/'+str(meta.get('run_id'))+'/teardown-ownership/') and name.endswith('/provider-teardown-verified.epoch') for name in manifest['files']),'historical provider epoch already exists')
-    need(meta.get('version')=='2' and meta.get('host')==plan['controller'] and meta.get('app')==plan['app'] and meta.get('fleet_owner_token')==owner and meta.get('cleanup_policy')=='reap','forensic owner differs')
+    need(meta.get('version')=='2' and meta.get('host')==plan['controller'] and meta.get('app')==plan['app'] and meta.get('fleet_owner_token')==owner and meta.get('cleanup_policy') in {'reap','retain'},'forensic owner differs')
     run_id=meta.get('run_id')
     need(isinstance(run_id,str) and re.fullmatch('[A-Za-z0-9._-]+',run_id) and shared.get('run_id')==run_id and shared.get('fleet_owner_token')==owner and shared.get('app')==plan['app'] and shared.get('status')=='incomplete','forensic audit differs')
     need(selected.get(prefix+'/disposable-resources-v1')==(owner+'\n'+plan['app']+'\n').encode(),'not disposable owner')
     need(not any(name.startswith(prefix+'/clones/') or '/archived-reuse/' in name or '/pool/' in name for name in selected),'unretired or borrowed ownership')
-    need(prefix+'/guest-cleanup-unconfirmed' not in selected,'guest cleanup unconfirmed')
+    # This GET-only forensic authority never grants the fleet reaper authority.
+    # Preserve missing guest acknowledgement rather than converting it to success.
+    guest_cleanup_missing = prefix+'/guest-cleanup-unconfirmed' in selected
+    need(not guest_cleanup_missing or selected[prefix+'/guest-cleanup-unconfirmed'] == b'',
+         'guest cleanup marker differs')
     expected={name.removeprefix(audit+'/expected-fresh/'):S['fields'](data) for name,data in selected.items() if name.startswith(audit+'/expected-fresh/')}
     fresh={name.removeprefix(audit+'/fresh/'):S['fields'](data) for name,data in selected.items() if name.startswith(audit+'/fresh/')}
     need(bool(expected) and set(expected)==set(fresh),'incomplete fresh ownership coverage')
@@ -81,10 +85,14 @@ def prepare(run, inventory, owner):
         data=stream.extractfile(member).read(1048577)
         need(sha(data)==cleanup_entry['sha256'],'cleanup proof differs')
         cleanup=json.loads(data)
-    need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=False,runtime_evidence_missing=True,successful_runtime_inferred=False),'forensic failure facts differ')
+    need(type(cleanup.get('guest_cleanup_missing')) is bool, 'guest cleanup fact must be boolean')
+    need(cleanup==dict(schema='disposable-cleanup-v1',owner=owner,guest_cleanup_missing=guest_cleanup_missing,runtime_evidence_missing=True,successful_runtime_inferred=False),'forensic failure facts differ')
     controller_identity = _identity(obj(run/'export/disposable-controller.ownership.json')['machine'])
     need(controller_identity['id'] == plan['controller'], 'controller creation identity differs')
     plan.update(controller_identity=controller_identity,forensic_owner=owner,forensic_resources=resources,run_id=run_id,runtime_sealed=False,original_release_epoch=None)
+    if meta['cleanup_policy'] == 'retain' or guest_cleanup_missing:
+        plan.update(historical_cleanup_policy=meta['cleanup_policy'],
+                    historical_guest_cleanup_missing=guest_cleanup_missing)
     return plan
 
 

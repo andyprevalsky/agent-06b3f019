@@ -265,3 +265,47 @@ controls including I29, 12 archived-stop tests and 14 runner self-tests. Actual
 full-case read-only reader replay and local render latency remain pending the
 launch owner before integration. Active campaign source was not changed. The
 reader makes no native calls; historical release and runtime claims stay false.
+
+## Polar It8 I31: retained policy is not an observation prohibition
+
+The normal shard-00 export for source ca562dd8b9a259800980bbdc2205d873bc657d5e
+contains owner 5bc56f09de69429ea0215e99e9e289bc, run
+20261028-050809-14952. Its original policy is retain, guest cleanup and runtime
+capture are unconfirmed, and the clone directory contains no files. The original
+cleanup record has guest_cleanup_missing=true, runtime_evidence_missing=true and
+successful_runtime_inferred=false (SHA256
+e65a48c9ab5e96a9b573c50bf89ffc2a11b0f798ae00363495b3aeaf2756f207).
+The first supported forensic prepare refusal was the reap-only metadata predicate;
+the separate missing-guest marker and false-only cleanup predicate would also
+refuse. This does not establish why the original guest acknowledgement failed.
+
+The supplied normal-export subset SHA256
+806c6a631fc39deffe971edc591d8ef30e71b2d2f577675e6e77d34dc3d26cf0
+binds the exact once-owned guest 83dd009cdee358 and volume
+vol_vjy7lj6jj7l90y9v. It contains a finalized destroyed-provider-retained fresh WAL,
+exclusive original delete intents and exact native destroy incarnation/ACK.
+Independent review matched 128 supplied files to the original manifest; eight
+private stderr files were not supplied. The subset is not a complete export and
+provides no current native state. The actual canonical operation still requires
+all original full archives, verified writers and private authority on the launch
+host. No worker native calls were made.
+
+The repair expands only the separate GET-only forensic observer. It preserves
+retain and the missing acknowledgement in the hash-bound plan and recomputes them
+at verification, requiring an actual boolean and equality with the original
+marker. Fleet reaper/STOP/DELETE predicates are unchanged. Original terminal WAL,
+exact creation identity/delete proof, protected-resource guards, complete fresh
+scope, positive app authority, exact GET terminal checks, operation deadline and
+owned publication rollback remain mandatory. Current terminal-resource truth is
+separate from historical ACK/runtime/epoch/grade credit.
+
+The same permanent actual producer/verify/full-consumer/report control refuses on
+baseline with `forensic owner differs` and passes the repair. The registered suite
+also exercises retained policy through the real loopback canonical CLI and late
+outer deadline; wrong cleanup facts, numeric boolean, missing marker/delete/ACK,
+nonterminal WAL and live GET fail closed. The old reap controls remain unchanged.
+Independent reviewer ph774zzc4essz3cdj3n09e0ck58h5b0b grounded exact two-path patch
+SHA2565c21265c203820c0aa833159d4cda445145f6975d8cdce26710779f0aa484d9f,
+independently running all 19 controls. This is source capability qualification,
+not proof of actual It8 physical closure or task success. Current native states
+remain UNKNOWN until the launch owner separately executes the canonical reads.

@@ -175,3 +175,16 @@ local cost grows with archive bytes and subjects. Keep original private inputs
 reachable. This introduces no render-time provider fanout. Validate a new reader
 from an isolated source snapshot and write its card only to a new private output
 directory; do not replace an active campaign checkout or original artifacts.
+
+The GET-only forensic closure path can also observe an original disposable owner
+whose cleanup policy remains `retain` and whose guest cleanup acknowledgement is
+missing. This does not authorize the reaper or any STOP/DELETE. The original
+marker and the exact boolean in the authenticated `disposable-cleanup.json` must
+agree; the plan records `historical_cleanup_policy` and
+`historical_guest_cleanup_missing` for these nondefault histories. Original
+terminal fresh WAL, exclusive delete intents, native incarnation acknowledgement,
+complete export/writer join and all current exact-ID terminal observations remain
+required. A live or unknown current response refuses closure. Historical runtime,
+cleanup acknowledgement, provider epoch and task grades receive no new credit.
+The normal commands and private input requirements above are unchanged. Always
+use a new private output directory and retain any previous refused plan/wires.
