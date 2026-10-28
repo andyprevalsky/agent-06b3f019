@@ -94,7 +94,7 @@ import {
 } from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
 import type { BrowserStatusBarProps, PendingAuthAssistance } from './browser-status-bar/types';
-import { isTerminalStatus } from '@/lib/progressEstimate';
+import { isFinishedAgentStatus } from './browser-status-bar/liveViewDisplay';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -218,7 +218,7 @@ function BrowserStatusBarImpl(props: BrowserStatusBarProps) {
   const sharedViewProps = {
     browserUrl: ui.browserUrl,
     browserLive: ui.isLive,
-    browserEnded: agent?.status !== undefined && isTerminalStatus(agent.status),
+    browserEnded: isFinishedAgentStatus(agent?.status),
     outputSchema: vm.outputSchema,
     browserSessionMetadata: vm.browserSessionMetadata,
   };

@@ -434,16 +434,33 @@ describe('live view follows the backend session binding', () => {
     },
   );
 
-  it('keeps the live stream for an active agent', async () => {
+  it('shows the ended state on the stock (non-desktop) browser card too', async () => {
     serveLiveView(() => binding(PROMOTED_KERNEL, 1));
-    const active = {
+    const finished = {
       agent_id: '8b4d4592-c5da-4889-8a01-52824db125d1',
-      status: 'ACTIVE',
+      status: 'COMPLETED',
     } as NonNullable<AgentContextValue['agent']>;
-    renderWithProviders(statusBarFor([sessionInit(PROMOTED_KERNEL)], active));
-    await waitFor(() => expect(document.querySelector('iframe')).not.toBeNull());
-    expect(screen.queryByTestId('live-view-ended')).toBeNull();
+    renderWithProviders(statusBarFor([sessionInit(PROMOTED_KERNEL)], finished), {
+      roseDesktop: false,
+    });
+    await waitFor(() => expect(screen.getAllByTestId('live-view-ended').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Connecting/)).toBeNull();
+    expect(document.querySelector('iframe')).toBeNull();
   });
+
+  it.each(['ACTIVE', 'OUT_OF_CREDITS'] as const)(
+    'keeps the live stream for a %s (resumable) agent',
+    async (status) => {
+      serveLiveView(() => binding(PROMOTED_KERNEL, 1));
+      const running = {
+        agent_id: '8b4d4592-c5da-4889-8a01-52824db125d1',
+        status,
+      } as NonNullable<AgentContextValue['agent']>;
+      renderWithProviders(statusBarFor([sessionInit(PROMOTED_KERNEL)], running));
+      await waitFor(() => expect(document.querySelector('iframe')).not.toBeNull());
+      expect(screen.queryByTestId('live-view-ended')).toBeNull();
+    },
+  );
 
   it('replaces the stream with the loading screen when the bound session closes', async () => {
     serveLiveView(() => binding(PROMOTED_KERNEL, 1));

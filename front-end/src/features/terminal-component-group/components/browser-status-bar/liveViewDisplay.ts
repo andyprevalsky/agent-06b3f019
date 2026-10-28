@@ -45,6 +45,14 @@ export const STEEL_CHROME_CROP = { x: 4, y: 91 } as const;
  */
 export const KERNEL_PAGE_OFFSET = { x: 0, y: 87 } as const;
 
+/**
+ * Agent statuses whose browser can never resume. OUT_OF_CREDITS and
+ * COST_LIMIT_REACHED are resumable pauses, so their session may still be live.
+ */
+export function isFinishedAgentStatus(status: string | null | undefined): boolean {
+  return status === 'COMPLETED' || status === 'FAILED';
+}
+
 export interface LiveViewSize {
   width: number;
   height: number;
