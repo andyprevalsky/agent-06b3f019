@@ -948,8 +948,8 @@ async def summarize_and_filter_links(
     agent_id: Optional[str] = None,
     cache_sequence_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
-    session_id: str = "",
     page_metadata: Optional[Dict[str, Any]] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.

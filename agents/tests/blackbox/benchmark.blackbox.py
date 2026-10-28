@@ -4434,6 +4434,20 @@ async def test_agentcard_release_stall_cannot_replace_an_independent_task_failur
     assert "Independent wrong output" in result.failure_reason
 
 
+def test_agentcard_release_stall_accepts_only_the_same_prior_settlement_mismatch():
+    """A pre-cleanup HELD status must not veto the approved closed-card stall."""
+    from benchmarks.run_benchmark import _agentcard_release_prior_failure_is_settlement_only
+
+    lifecycle = _agentcard_release_stall_lifecycle()
+    name = "agent-payment-abandonment"
+    mismatch = "payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'"
+    assert _agentcard_release_prior_failure_is_settlement_only(name, None, lifecycle)
+    assert _agentcard_release_prior_failure_is_settlement_only(name, mismatch, lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, mismatch + " | wrong output", lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, "Independent wrong output", lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, mismatch, {**lifecycle, "stripeRefund": {}})
+
+
 async def test_payment_browser_seal_rejects_empty_declared_browser_evidence():
     from benchmarks import run_benchmark as bench
 
@@ -26054,6 +26068,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_skip_preserves_task_failure",
         test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
+    )
+    r.record(
+        "agentcard_release_skip_prior_settlement_only",
+        test_agentcard_release_stall_accepts_only_the_same_prior_settlement_mismatch,
     )
     await r.record_async(
         "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown

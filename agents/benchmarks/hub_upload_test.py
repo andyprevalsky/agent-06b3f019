@@ -183,6 +183,27 @@ def test_oversized_bundle_is_fitted_by_dropping_oldest_worker_logs():
     assert fit_bundle_to_upload_limit(bundle, max_bytes=10_000_000) is bundle, "a bundle that fits is sent as is"
 
 
+def test_oversized_bundle_deduplicates_identical_owned_root_logs():
+    """One root's full tree is already present on its task; upload it once."""
+    logs = {"messages": [{"role": "USER", "text": "x" * 1000}], "tree": {"child": {"messages": ["y" * 1000]}}}
+    root = {"root_agent_id": "agent-1", "task_name": "mass-agent", "logs": logs}
+    bundle = {
+        "run_id": "r2",
+        "tasks": [{"name": "mass-agent", "agent_id": "agent-1", "logs": logs,
+                   "owned_roots": [root, {"root_agent_id": "agent-2", "logs": {"messages": ["other"]}}]}],
+    }
+    limit = 3200
+    assert len(json.dumps(bundle).encode()) > limit
+    fitted = fit_bundle_to_upload_limit(bundle, max_bytes=limit)
+
+    assert len(json.dumps(fitted).encode()) <= limit
+    task = fitted["tasks"][0]
+    assert task["logs"] == logs
+    assert task["owned_roots"][0] == {"root_agent_id": "agent-1", "task_name": "mass-agent"}
+    assert task["owned_roots"][1]["logs"] == {"messages": ["other"]}
+    assert bundle["tasks"][0]["owned_roots"][0]["logs"] == logs
+
+
 def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
     """Both publication and visibility use the user's route outside loopback."""
     from benchmarks.hub_upload import verify_run_visible

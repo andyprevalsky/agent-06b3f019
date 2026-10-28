@@ -258,6 +258,7 @@ async def run_all_tests():
     await r.record_async("main_retained_protocol_survives_redaction", test_main_retained_protocol_survives_redaction)
     await r.record_async("projection_identity_scope_expiry_and_failure", test_projection_identity_scope_expiry_and_failure)
     await r.record_async("concurrent_projection_shares_upload", test_concurrent_projection_shares_upload)
+    await r.record_async("cancelled_upload_owner_does_not_cancel_follower", test_cancelled_upload_owner_does_not_cancel_follower)
     await r.record_async("repeated_projection_is_stable_and_readable", test_repeated_projection_is_stable_and_readable)
     await r.record_async("scoped_output_roundtrip", test_scoped_output_roundtrip)
     await r.record_async("native_values_and_failure", test_native_values_and_failure)
@@ -339,3 +340,38 @@ async def test_concurrent_projection_shares_upload():
         assert not output._pending_outputs and len(output._persisted_outputs) == 1
         await output.preview_tool_text(text + "FAIL", **owner)
         assert objects.uploads == 2
+
+
+async def test_cancelled_upload_owner_does_not_cancel_follower():
+    import helpers.tool_output as output
+
+    owner = dict(user_id="cancelled-owner-user", agent_id="a")
+    text = "owner cancellation " * 10_000
+    first_upload_started = asyncio.Event()
+    release_first_upload = asyncio.Event()
+    calls = 0
+
+    with fake_output_storage() as objects:
+        # Capture the fixture's upload before replacing it with a stalled owner.
+        from helpers.attachments import upload_to_storage as fixture_upload
+
+        async def stalled_first_upload(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_upload_started.set()
+                await release_first_upload.wait()
+            return await fixture_upload(*args, **kwargs)
+
+        with patch("helpers.attachments.upload_to_storage", stalled_first_upload):
+            first = asyncio.create_task(output.preview_tool_text(text, **owner))
+            await first_upload_started.wait()
+            follower = asyncio.create_task(output.preview_tool_text(text, **owner))
+            await asyncio.sleep(0.05)
+            first.cancel()
+            assert isinstance((await asyncio.gather(first, return_exceptions=True))[0], asyncio.CancelledError)
+            release_first_upload.set()
+            preview = await asyncio.wait_for(follower, timeout=5)
+            assert 'read_tool_output output_id=' in preview
+            assert calls == 2 and objects.uploads == 1
+            assert not output._pending_outputs

@@ -2037,6 +2037,33 @@ def _agentcard_release_skip_lifecycle(task_name: str | None, lifecycle: object) 
     ) is None
 
 
+def _agentcard_release_prior_failure_is_settlement_only(
+    task_name: str | None, reason: str | None, lifecycle: object
+) -> bool:
+    """Permit a prior verdict only when it is this same pending settlement.
+
+    The task can finish while the purchase is still HELD, setting an evaluation
+    failure before cleanup closes the card. The later exact native stall proof
+    must be allowed to classify that one mismatch, but never a separate failure.
+    """
+    if not _agentcard_release_skip_lifecycle(task_name, lifecycle):
+        return False
+    if reason is None:
+        return True
+    task = get_task_by_name(task_name)
+    native_error = _validate_payment_lifecycle(
+        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
+    )
+    settlement_fields = (
+        "payment_lifecycle.purchase.status mismatch:",
+        "payment_lifecycle.walletFunding.status mismatch:",
+        "payment_lifecycle.orgTransfer.status mismatch:",
+        "payment_lifecycle.orgTransfer.transferredCents mismatch:",
+        "payment_lifecycle.orgTransfer.releasedCents mismatch:",
+    )
+    return reason == native_error and reason.startswith(settlement_fields)
+
+
 def _is_permitted_agentcard_release_skip(result: TaskResult) -> bool:
     return (
         result.status == "SKIPPED"
@@ -15929,7 +15956,9 @@ async def _run_single_task_as_run_user(
             and _agentcard_release_skip_lifecycle(task.name, e.lifecycle)
             and _agentcard_release_skip_enabled()
         )
-        release_skip = release_stall and evaluated_failure_reason is None
+        release_skip = release_stall and _agentcard_release_prior_failure_is_settlement_only(
+            task.name, evaluated_failure_reason, e.lifecycle
+        )
         token_skip = isinstance(e, ComputeTokenUnavailable) and evaluated_failure_reason is None
         # The two-run auth tasks' first agent failing its goal is a task verdict,
         # exactly as the graded run scores it; every other exception is untrusted.

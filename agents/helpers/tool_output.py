@@ -71,11 +71,20 @@ def _safe_text(text: str) -> str:
     return "".join(piece if piece.startswith("{{secret:") else redact_sensitive_text(piece) for piece in pieces)
 
 
+async def _safe_text_async(text: str) -> str:
+    # Retained bodies can be tens of MiB; redaction must not block the worker loop.
+    if len(text) > DEFAULT_INLINE_CHARS:
+        return await asyncio.to_thread(_safe_text, text)
+    return _safe_text(text)
+
+
 async def _persist(text: str, owner: tuple[str, str, str]) -> str:
     from helpers.attachments import upload_to_storage
 
     now = time.time()
-    key = (owner, hashlib.sha256(text.encode("utf-8")).hexdigest())
+    digest = (await asyncio.to_thread(lambda: hashlib.sha256(text.encode("utf-8")).hexdigest())
+              if len(text) > DEFAULT_INLINE_CHARS else hashlib.sha256(text.encode("utf-8")).hexdigest())
+    key = (owner, digest)
     for expired_key, (_, expires) in list(_persisted_outputs.items()):
         if expires <= now:
             del _persisted_outputs[expired_key]
@@ -86,7 +95,15 @@ async def _persist(text: str, owner: tuple[str, str, str]) -> str:
     pending = _pending_outputs.get(key)
     if pending is not None:
         # A cancelled follower must not cancel the upload another caller owns.
-        return await asyncio.shield(pending)
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling() or not pending.cancelled():
+                raise
+            # The owner was cancelled; its finally block removes this flight.
+            # Retry as the new owner without cancelling this follower.
+            await asyncio.sleep(0)
+            return await _persist(text, owner)
     pending = asyncio.get_running_loop().create_future()
     # Retrieve failures even when the owning caller has no concurrent followers.
     pending.add_done_callback(lambda future: None if future.cancelled() else future.exception())
@@ -94,7 +111,9 @@ async def _persist(text: str, owner: tuple[str, str, str]) -> str:
     try:
         output_id = uuid.uuid4().hex
         expires = now + OUTPUT_TTL_SECONDS
-        body = json.dumps({"owner": owner, "expires": expires, "text": text}, ensure_ascii=False).encode("utf-8")
+        payload = {"owner": owner, "expires": expires, "text": text}
+        body = (await asyncio.to_thread(lambda: json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                if len(text) > DEFAULT_INLINE_CHARS else json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         if len(body) > MAX_STORED_BYTES:
             raise RetentionError("Tool output exceeds retained storage limit; no preview was substituted")
         try:
@@ -179,7 +198,7 @@ async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
         raise
     if len(raw) > MAX_STORED_BYTES:
         raise ValueError("Retained output exceeds storage limit")
-    stored = json.loads(raw)
+    stored = await asyncio.to_thread(json.loads, raw) if len(raw) > DEFAULT_INLINE_CHARS else json.loads(raw)
     if tuple(stored["owner"]) != owner or stored["expires"] <= time.time():
         raise ValueError("Retained output unavailable for this scope or expired")
     if not isinstance(stored["text"], str):
@@ -190,35 +209,38 @@ async def _load_output(owner: tuple[str, str, str], output_id: str) -> dict:
 async def _redact_retained_preview(text: str, owner: tuple[str, str, str]) -> str:
     # The terminal native marker can follow page text containing forged markers.
     # Only the exact preview reconstructed from an owned artifact is trusted.
-    matches = list(_RETAINED_MARKER.finditer(text))
+    matches = (await asyncio.to_thread(lambda: list(_RETAINED_MARKER.finditer(text)))
+               if len(text) > DEFAULT_INLINE_CHARS else list(_RETAINED_MARKER.finditer(text)))
     if not matches:
-        return _safe_text(text)
+        return await _safe_text_async(text)
     marker = matches[-1]
     offset = int(marker[2])
     start = marker.start() - offset
     if start < 0:
-        return _safe_text(text)
+        return await _safe_text_async(text)
     try:
         stored = await _load_output(owner, marker[1])
     except (FileNotFoundError, KeyError, ValueError):
         # A missing forged ID is ordinary untrusted text. Real storage outages
         # remain errors, rather than silently corrupting issued handles.
-        return _safe_text(text)
+        return await _safe_text_async(text)
     preview_limit = offset + len(marker[0])
     if preview_limit < 512:
-        return _safe_text(text)
-    safe_source = _safe_text(stored["text"])
+        return await _safe_text_async(text)
+    safe_source = await _safe_text_async(stored["text"])
     if not any(_preview(source, marker[1], preview_limit) == text[start:marker.end()]
                for source in (stored["text"], safe_source)):
-        return _safe_text(text)
+        return await _safe_text_async(text)
     preview = (_preview(safe_source, marker[1], preview_limit)
                if len(safe_source) > preview_limit else safe_source)
-    return _safe_text(text[:start]) + preview + _safe_text(text[marker.end():])
+    return await _safe_text_async(text[:start]) + preview + await _safe_text_async(text[marker.end():])
 
 
 async def preview_tool_text(text: str, *, user_id: str, agent_id: str, session_id: str = "", limit: int = DEFAULT_INLINE_CHARS) -> str:
+    marker_match = (await asyncio.to_thread(_RETAINED_MARKER.search, text)
+                    if len(text) > DEFAULT_INLINE_CHARS else _RETAINED_MARKER.search(text))
     text = (await _redact_retained_preview(text, _owner(user_id, agent_id, session_id))
-            if _RETAINED_MARKER.search(text) and user_id and agent_id else _safe_text(text))
+            if marker_match and user_id and agent_id else await _safe_text_async(text))
     if len(text) <= limit:
         return text
     if limit < 512:
@@ -238,10 +260,10 @@ async def bound_tool_result(value: Any, *, user_id: str, agent_id: str, session_
     """
     if isinstance(value, str):
         return await preview_tool_text(value, user_id=user_id, agent_id=agent_id, session_id=session_id, limit=limit)
-    serialized = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    serialized = await asyncio.to_thread(json.dumps, value, ensure_ascii=False, allow_nan=False)
     if len(serialized) <= limit:
         return value
-    text = _safe_text(serialized)
+    text = await _safe_text_async(serialized)
     output_id = await _persist(text, _owner(user_id, agent_id, session_id))
     flags = {key: value[key] for key in ("success", "error", "status") if isinstance(value, dict) and key in value and isinstance(value[key], (bool, int, float, type(None)))}
     if isinstance(value, dict) and isinstance(value.get("status"), str) and len(value["status"]) <= 100:

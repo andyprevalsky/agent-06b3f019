@@ -2337,16 +2337,18 @@ async def _render_llm_messages(
         # Skip before downloads and admission so they consume no file budget.
         if role == "ASSISTANT" and not text.strip() and not metadata.get("tool_calls") and attachments_data:
             continue
-        attachment_labels = []
-        for att_data in attachments_data:
-            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
-            if fp and not fp.is_text():
-                attachment_labels.append(build_attachment_metadata_text(fp))
-
         # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
         content, metadata_texts = await resolve_message_attachments(
             msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
         )
+        attachment_labels = []
+        for att_data in attachments_data:
+            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+            if fp and not fp.is_text():
+                inline_label = build_attachment_metadata_text(fp, inlined=True)
+                attachment_labels.append(
+                    inline_label if inline_label in metadata_texts else build_attachment_metadata_text(fp)
+                )
 
         # Determine LLM role and base text
         ts_prefix = _ts_header(msg)

@@ -7392,9 +7392,10 @@ exit 143
     assert receipt["verified_state"] == initial, receipt
     assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
     if case == "stop-always-fails":
-        # Retries continue until the attempt cap or the shared deadline, whichever
-        # comes first; under host load the 6 s window can end after two requests.
-        assert len(stops) == 3 or elapsed >= 6, (stops, elapsed)
+        # Retries continue until the attempt cap or the shared deadline. Bash
+        # SECONDS has one-second granularity, so a six-tick window can consume
+        # as little as five wall-clock seconds when it begins mid-tick.
+        assert len(stops) == 3 or elapsed >= 5, (stops, elapsed)
 
 
 def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:

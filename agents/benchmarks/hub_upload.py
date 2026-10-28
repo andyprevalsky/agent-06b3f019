@@ -124,12 +124,12 @@ def _encoded_size(value) -> int:
 
 
 def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BYTES) -> dict:
-    """Keep the upload under the Hub's body limit by shortening raw worker logs.
+    """Keep the upload under the Hub's body limit by removing duplicate logs first.
 
-    Transcripts, trees and evaluator evidence are what the Hub renders, so they
-    are never touched. Worker log lines are dropped oldest-first from the task
-    that has the most, and each task records how many were left out. The full
-    record stays on disk in ``runs/*.json``.
+    An owned root can repeat its task's entire transcript and tree. Keep the
+    task's copy and the root's metadata when both refer to the same agent and
+    their logs are identical. Worker log lines are then dropped oldest-first
+    from the task that has the most. The full record stays in ``runs/*.json``.
     """
     if _encoded_size(body) <= max_bytes:
         return body
@@ -139,6 +139,18 @@ def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BY
     for task in tasks:
         if isinstance(task, dict) and isinstance(task.get("logs"), dict):
             task["logs"] = dict(task["logs"])
+        if not isinstance(task, dict) or not isinstance(task.get("owned_roots"), list):
+            continue
+        roots = []
+        for original in task["owned_roots"]:
+            root = dict(original) if isinstance(original, dict) else original
+            if (isinstance(root, dict)
+                    and root.get("root_agent_id") == task.get("agent_id")
+                    and isinstance(root.get("logs"), dict)
+                    and root["logs"] == task.get("logs")):
+                root.pop("logs")
+            roots.append(root)
+        task["owned_roots"] = roots
     while _encoded_size(fitted) > max_bytes:
         candidates = [
             task

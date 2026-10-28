@@ -462,10 +462,13 @@ async def test_rejected_completion_posts_error_in_workflow_polling_mode():
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "detected_tools_ordered": [("attempt_completion_with_result", "tc-rejected", 1.0)],
     }
-    with patch(
-        "loop.run_agent.workflow.execute_activity",
-        new=AsyncMock(return_value=workflow_llm_result),
-    ):
+    async def mock_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
+        return workflow_llm_result
+
+    with patch("loop.run_agent.workflow.execute_activity", new=AsyncMock(side_effect=mock_activity)):
         _, posted, _ = await _run_single_iteration(
             workflow_llm_result["tool_calls"],
             workflow_llm_result["detected_tools_ordered"],
@@ -2624,6 +2627,15 @@ async def test_workflow_output_retention_uses_activity():
         output_id = re.search(r'output_id="([a-f0-9]{32})"', text)[1]
         page = await read_tool_output_activity("user-test", "agent-test", "", {"output_id": output_id, "query": "WORKFLOW_TAIL"})
         assert page["content"] == "WORKFLOW_TAIL"
+        assert "preview_tool_output_activity" in calls
+
+        calls.clear()
+        async def short_failed_tool(*args):
+            raise RuntimeError("short result")
+        await _run_single_iteration(
+            [{"tool": "web_search", "query": "x"}], [("web_search", "tc-short", 1.0)],
+            execute_tool_override=short_failed_tool, is_inside_temporal_activity=False,
+        )
         assert "preview_tool_output_activity" in calls
 
 

@@ -14,7 +14,7 @@ SECRET_PATTERNS = [
     # stay inside it) or a bare value.
     re.compile(
         rf"(?i)(['\"]?{_KEY}['\"]?\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?"
-        r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s,;]+)"
+        r"(\"[^\"\\]*(?:\\.[^\"\\]*)*\"|'[^'\\]*(?:\\.[^'\\]*)*'|[^\s,;]+)"
     ),
     re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
 ]

@@ -3719,6 +3719,25 @@ async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     assert "f.png" in user["content"]
 
 
+async def test_build_llm_messages_inlined_image_has_one_label():
+    """The retained TOOL suffix must use the image's actual inline label."""
+    from helpers.attachments import FilePointer, build_attachment_metadata_text
+    from helpers.llm import build_llm_messages
+
+    fp_data = {
+        "id": "f-inline", "storage_path": "u/inline.png", "original_filename": "inline.png",
+        "mime_type": "image/png", "size_bytes": 100, "created_at": "2024-01-01T00:00:00Z",
+    }
+    inline_label = build_attachment_metadata_text(FilePointer.from_dict(fp_data), inlined=True)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}
+    context = [{"role": "TOOL", "text": "image result", "file_pointer": fp_data}]
+    with patch("helpers.llm.resolve_message_attachments", new=AsyncMock(return_value=([image], [inline_label]))):
+        messages = await build_llm_messages(context, "sys")
+    tool_text = str(next(msg for msg in messages if msg["role"] == "user")["content"])
+    assert tool_text.count("Shown inline above") == 1
+    assert "Not inlined for the parent LLM" not in tool_text
+
+
 async def test_build_llm_messages_skips_empty_file_output_assistant():
     """Empty ASSISTANT rows with only a file_pointer (browser screenshots /
     sub-agent output files posted via AssistantEvent) must be skipped, otherwise
@@ -6514,6 +6533,9 @@ async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_work
     turn4_canonical_context: list = []
 
     async def mock_execute_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
         if fn is not llm_mod.call_llm_activity:
             return {}
         scheduled.append(list(args or []))
@@ -10647,6 +10669,7 @@ async def run_all_tests():
         "build_llm_messages_attachment_large_falls_back_to_metadata",
         test_build_llm_messages_attachment_large_falls_back_to_metadata,
     )
+    await r.record_async("build_llm_messages_inlined_image_has_one_label", test_build_llm_messages_inlined_image_has_one_label)
     await r.record_async(
         "build_llm_messages_skips_empty_file_output_assistant",
         test_build_llm_messages_skips_empty_file_output_assistant,
