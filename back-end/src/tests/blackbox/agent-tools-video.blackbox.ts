@@ -99,6 +99,12 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
+    // The devbox port forwarder probes every new listener with `HEAD /`; it is not a provider call.
+    if (req.method === 'HEAD' && req.url === '/') {
+      res.statusCode = 200;
+      res.end();
+      return;
+    }
     void readJson(req).then((body) => {
       const recorded: Recorded = {
         method: req.method ?? '',
