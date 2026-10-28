@@ -96,23 +96,16 @@ function main(): void {
 
   const codexUnset = captureCredentialFailure(
     () => resolveCodexCodeAuthEnvs(null, undefined),
-    'codex/no-key'
+    'codex/no-funding'
   );
-  assertRedacted(codexUnset, 'codex/no-key');
+  assertRedacted(codexUnset, 'codex/no-funding');
   assert.ok(
-    codexUnset.detail.includes('OPENAI_API_KEY (GPT_API_KEY)'),
-    `codex/no-key: detail must name the missing fallback, got: ${codexUnset.detail}`
+    codexUnset.detail.includes('Azure Codex deployment'),
+    `codex/no-funding: detail must name the missing fallback, got: ${codexUnset.detail}`
   );
-
-  const codexCooled = captureCredentialFailure(
-    () => resolveCodexCodeAuthEnvs(null, 'sk-proj-funded-key', true),
-    'codex/cooldown'
-  );
-  assertRedacted(codexCooled, 'codex/cooldown');
-  assert.notEqual(codexUnset.detail, codexCooled.detail);
 
   // A credential value itself must never be echoed anywhere in the surfaced error.
-  for (const error of [claudeCooled, codexCooled]) {
+  for (const error of [claudeCooled, codexUnset]) {
     assert.ok(!error.message.includes('sk-'), 'a raw key prefix must never reach the client');
     assert.ok(!error.detail.includes('sk-'), 'a raw key prefix must never reach the logs either');
   }

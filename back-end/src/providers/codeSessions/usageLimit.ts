@@ -25,13 +25,9 @@
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
-import { claudeCodeSandboxKeyUsable } from '../claudeCodeSandboxAuth';
+import { claudeCodeSandboxKeyUsable, resolveCodexAzureFunding } from '../claudeCodeSandboxAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import {
-  isGptApiKeyOnCooldown,
-  markGptApiKeyOnCooldown,
-  markGptIntegrationRateLimited,
-} from '../gptCredentials';
+import { markGptApiKeyOnCooldown, markGptIntegrationRateLimited } from '../gptCredentials';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { checkpointKey, getCheckpointObject } from './artifactStore';
 import { CLI_LOG_ARTIFACT } from './checkpoint';
@@ -152,7 +148,7 @@ export async function codeCredentialAvailability(
     (!ownOnly && (await claudeCodeFundedKeyUsable()));
   const codex =
     (await hasLeasableIntegration(userId, 'gpt_code', now, ownOnly)) ||
-    (!ownOnly && Boolean(process.env.GPT_API_KEY) && !(await isGptApiKeyOnCooldown()));
+    (!ownOnly && resolveCodexAzureFunding() !== null);
   return { claude, codex };
 }
 
