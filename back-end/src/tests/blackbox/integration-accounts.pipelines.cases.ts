@@ -18,7 +18,8 @@
  *   (plaid: integration-accounts.plaid.cases.ts; Mac pipelines: mac-app blackboxes)
  *
  *   gmail at Google's per-user quota wall (403 rateLimitExceeded) waits and
- *   retries: every wanted message is still saved and the historyId recorded.
+ *   retries: every wanted message is still saved and the historyId recorded;
+ *   an access token that expires mid-sync is refreshed once and the run finishes.
  *
  * Registered by integration-accounts.blackbox.ts.
  */
@@ -84,7 +85,12 @@ function tempFile(name: string, contents: string | Buffer): string {
   return file;
 }
 
-async function gmailCredential(userId: string, address: string, token: string) {
+async function gmailCredential(
+  userId: string,
+  address: string,
+  token: string,
+  refreshToken = 'refresh-token'
+) {
   const row = await prisma.integration.create({
     data: {
       userId,
@@ -102,7 +108,7 @@ async function gmailCredential(userId: string, address: string, token: string) {
       provider: 'GMAIL',
       email: address,
       accessToken: token,
-      refreshToken: 'refresh-token',
+      refreshToken,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       scopes: [...GOOGLE_OAUTH_SCOPES],
     },
@@ -206,6 +212,47 @@ async function gmailQuotaWallStillSavesEverything(skip: number): Promise<void> {
     assert(
       historyIds?.[address] === '4242',
       `gmail: historyId recorded, got ${historyIds?.[address]}`
+    );
+  } finally {
+    const where = { userId: session.userId };
+    await prisma.messageRecord.deleteMany({ where: { person: where } });
+    await prisma.person.deleteMany({ where });
+    await prisma.integrationSyncProgress.deleteMany({ where });
+    await prisma.emailIntegrationCredential.deleteMany({ where });
+    await prisma.integration.deleteMany({ where });
+  }
+}
+
+/**
+ * A quota-paced full sync of a large mailbox outlives Google's one-hour access
+ * token. When Google starts answering 401 mid-sync, the run refreshes the token
+ * once and finishes with every wanted message on the same mailbox budget.
+ */
+async function gmailTokenExpiryMidSyncRefreshes(): Promise<void> {
+  const session = await anonymousSession();
+  try {
+    const address = `expiry.${randomUUID().slice(0, 8)}@example.com`;
+    const gmail = new FakeGmail();
+    const box = gmail.mailbox(address, 10, '5151');
+    const { selected } = fillMailbox(box, { contacts: 3, perContact: 2, newsletters: 4, tag: 'e' });
+    // The token dies after the profile, list and a few metadata reads.
+    box.tokenLifetimeRequests = 5;
+    await gmailCredential(session.userId, address, box.token, box.refreshToken);
+    const restore = gmail.install();
+    try {
+      await runGmailSyncJob({ userIds: [session.userId] });
+    } finally {
+      restore();
+    }
+    assert(box.refreshes === 1, `gmail: one token refresh for the run, got ${box.refreshes}`);
+    const row = await progressRow(session.userId, 'gmail');
+    assert(row.state === 'synced', `gmail: run synced past token expiry, got ${row.state}`);
+    const saved = await prisma.messageRecord.count({
+      where: { person: { userId: session.userId } },
+    });
+    assert(
+      saved === selected.length,
+      `gmail: saved all ${selected.length} wanted messages past token expiry, got ${saved}`
     );
   } finally {
     const where = { userId: session.userId };
@@ -566,6 +613,10 @@ export function cases(user: User): Array<{ name: string; fn: () => Promise<void>
       name: 'Gmail sync: 403 rateLimitExceeded batch sub-requests are re-fetched, nothing dropped',
       // profile + 10 metadata pass, then the wall rejects the full-content batch
       fn: () => gmailQuotaWallStillSavesEverything(11),
+    },
+    {
+      name: 'Gmail sync: an access token that expires mid-sync is refreshed once, nothing dropped',
+      fn: gmailTokenExpiryMidSyncRefreshes,
     },
     {
       name: 'LinkedIn upload: bytes received, then parsed records, ends synced',

@@ -65,7 +65,7 @@ export class GmailQuotaPacer {
 }
 
 /**
- * One pacer per mailbox token, shared by every caller in this process (a sync,
+ * One pacer per mailbox (keyed by address, or by token when no address is known), shared by every caller in this process (a sync,
  * OTP lookups, agent reads), so concurrent callers split one budget instead of
  * each spending a full one. Entries whose reservations have all elapsed are
  * dropped once the map grows, so it stays bounded by the mailboxes active now.
@@ -73,14 +73,54 @@ export class GmailQuotaPacer {
 const pacers = new Map<string, GmailQuotaPacer>();
 const PRUNE_AT = 1_000;
 
-export function gmailPacerFor(accessToken: string): GmailQuotaPacer {
-  let pacer = pacers.get(accessToken);
+export function gmailPacerFor(mailboxKey: string): GmailQuotaPacer {
+  let pacer = pacers.get(mailboxKey);
   if (pacer === undefined) {
     if (pacers.size >= PRUNE_AT) {
       for (const [token, p] of pacers) if (p.idle()) pacers.delete(token);
     }
     pacer = new GmailQuotaPacer();
-    pacers.set(accessToken, pacer);
+    pacers.set(mailboxKey, pacer);
   }
   return pacer;
+}
+
+/**
+ * A mailbox's credentials for a run that can outlive one access token (a
+ * quota-paced full sync of a large mailbox runs past Google's one-hour token
+ * lifetime). `key` names the mailbox so the pacer budget survives a refresh;
+ * `refresh` mints a new token. A plain string is a token that cannot refresh.
+ */
+export interface RefreshableGmailAccess {
+  key: string;
+  token: string;
+  refresh: () => Promise<string>;
+}
+export type GmailAccess = string | RefreshableGmailAccess;
+
+export function gmailToken(access: GmailAccess): string {
+  return typeof access === 'string' ? access : access.token;
+}
+
+export function gmailPacerForAccess(access: GmailAccess): GmailQuotaPacer {
+  return gmailPacerFor(typeof access === 'string' ? access : access.key);
+}
+
+const refreshing = new WeakMap<RefreshableGmailAccess, Promise<string>>();
+
+/**
+ * Replace a rejected token. Concurrent requests that saw the same expired token
+ * share one refresh; a request whose token was already replaced just retries.
+ * Returns false when the access cannot refresh.
+ */
+export async function refreshGmailAccess(access: GmailAccess, rejected: string): Promise<boolean> {
+  if (typeof access === 'string') return false;
+  if (access.token !== rejected) return true;
+  let pending = refreshing.get(access);
+  if (pending === undefined) {
+    pending = access.refresh().finally(() => refreshing.delete(access));
+    refreshing.set(access, pending);
+  }
+  access.token = await pending;
+  return true;
 }

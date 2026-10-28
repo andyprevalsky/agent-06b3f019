@@ -53,6 +53,16 @@ export class FakeMailbox {
   private quotaWallUntil: number | null = null;
   /** How many requests the quota wall rejected. */
   quotaRejected = 0;
+  /**
+   * Google's one-hour token lifetime: once `tokenUses` requests have used the
+   * original token it answers 401, and only a refresh-token grant for
+   * `refreshToken` mints a working one (which outlives the rest of the run).
+   */
+  tokenLifetimeRequests: number | null = null;
+  tokenUses = 0;
+  readonly refreshToken = `refresh-${randomUUID()}`;
+  /** Tokens minted by refresh-token grants. */
+  refreshes = 0;
   /** history.list answers keyed by startHistoryId. */
   history = new Map<string, { added: string[]; newHistoryId: string }>();
 
@@ -190,10 +200,13 @@ function messageResponse(box: FakeMailbox, id: string, format: string | null): R
 
 export class FakeGmail {
   private readonly boxes = new Map<string, FakeMailbox>();
+  /** Every mailbox, including ones whose current token has expired. */
+  private readonly mailboxes: FakeMailbox[] = [];
 
   mailbox(address: string, messagesTotal: number, historyId: string): FakeMailbox {
     const box = new FakeMailbox(address, `tok-${randomUUID()}`, messagesTotal, historyId);
     this.boxes.set(box.token, box);
+    this.mailboxes.push(box);
     return box;
   }
 
@@ -209,14 +222,28 @@ export class FakeGmail {
     };
   }
 
+  /** Refresh-token grant: a mailbox's own refresh token mints a new access token. */
+  private refreshGrant(init?: RequestInit): Response {
+    const refreshToken = new URLSearchParams(String(init?.body ?? '')).get('refresh_token');
+    const box = this.mailboxes.find((b) => b.refreshToken === refreshToken);
+    if (box === undefined) return json({ error: 'invalid_grant' }, 400);
+    const token = `tok-${randomUUID()}`;
+    box.refreshes += 1;
+    box.tokenLifetimeRequests = null;
+    this.boxes.set(token, box);
+    return json({ access_token: token, expires_in: 3600, token_type: 'Bearer' });
+  }
+
   fetcher: GmailFetcher = async (input, init) => {
     const url = new URL(String(input));
-    if (url.hostname === 'oauth2.googleapis.com') {
-      return json({ error: 'invalid_grant' }, 400);
-    }
+    if (url.hostname === 'oauth2.googleapis.com') return this.refreshGrant(init);
     const token = new Headers(init?.headers).get('authorization')?.replace(/^Bearer /, '') ?? '';
     const box = this.boxes.get(token);
     if (box === undefined) return json({ error: { code: 401 } }, 401);
+    if (box.tokenLifetimeRequests !== null && ++box.tokenUses > box.tokenLifetimeRequests) {
+      this.boxes.delete(token);
+      return json({ error: { code: 401, status: 'UNAUTHENTICATED' } }, 401);
+    }
     if (url.hostname === 'www.googleapis.com' && url.pathname === '/batch/gmail/v1') {
       box.batchCalls += 1;
       if (box.failBatchCall === box.batchCalls) return json({ error: { code: 400 } }, 400);

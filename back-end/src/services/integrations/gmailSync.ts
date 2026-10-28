@@ -7,6 +7,7 @@ import {
   fetchMessagesByIds,
   getGmailProfile,
   ParsedEmail,
+  type RefreshableGmailAccess,
 } from './gmailParser';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 import {
@@ -107,15 +108,19 @@ async function refreshGoogleAccessToken(
 }
 
 /**
- * Get a valid access token, refreshing if necessary
+ * Get a valid access token, refreshing if necessary. `forceRefresh` mints a new
+ * one even when the stored token looks unexpired (Google rejected it mid-run).
  */
-export async function getValidAccessToken(credential: {
-  id: string;
-  accessToken: string | null;
-  refreshToken: string | null;
-  expiresAt: Date | null;
-  scopes?: string[];
-}): Promise<string | null> {
+export async function getValidAccessToken(
+  credential: {
+    id: string;
+    accessToken: string | null;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+    scopes?: string[];
+  },
+  options: { forceRefresh?: boolean } = {}
+): Promise<string | null> {
   if (credential.scopes !== undefined && missingGoogleScopes(credential.scopes).length > 0) {
     await markCredentialFailure(credential.id, {
       state: 'needs_reconnect',
@@ -125,6 +130,7 @@ export async function getValidAccessToken(credential: {
   }
   // Check if current token is still valid (with 5 min buffer)
   if (
+    options.forceRefresh !== true &&
     credential.accessToken &&
     credential.expiresAt &&
     credential.expiresAt > new Date(Date.now() + 5 * 60 * 1000)
@@ -390,11 +396,22 @@ async function syncGmailForUser(
   log.info('Starting sync for user', { userId, credentialId: credential.id });
 
   // Get valid access token
-  const accessToken = await getValidAccessToken(credential);
-  if (!accessToken) {
+  const token = await getValidAccessToken(credential);
+  if (!token) {
     log.error('Failed to get valid access token', { credentialId: credential.id });
     return { success: false, contacts: 0, messages: 0 };
   }
+  // A paced full sync can outlive the one-hour token: requests refresh on 401,
+  // and the mailbox key keeps one quota budget across the refresh.
+  const accessToken: RefreshableGmailAccess = {
+    key: credential.email || credential.id,
+    token,
+    refresh: async () => {
+      const fresh = await getValidAccessToken(credential, { forceRefresh: true });
+      if (fresh === null) throw new Error('Gmail access token refresh failed');
+      return fresh;
+    },
+  };
 
   // Re-fetch integration from DB to get the latest config.
   // Without this, sequential credential syncs clobber each other's historyIds

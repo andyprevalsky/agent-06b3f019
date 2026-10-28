@@ -13,7 +13,17 @@ import {
   extractEmailAddresses,
 } from './gmailParser.helpers';
 import { identifyNeededMessageIds, transformEmailsToContacts } from './gmailParser.contacts';
-import { GMAIL_UNITS, GmailQuotaPacer, gmailPacerFor, isGmailRateLimited } from './gmailQuota';
+import {
+  GMAIL_UNITS,
+  GmailQuotaPacer,
+  gmailPacerForAccess,
+  gmailToken,
+  isGmailRateLimited,
+  refreshGmailAccess,
+  type GmailAccess,
+} from './gmailQuota';
+
+export type { GmailAccess, RefreshableGmailAccess } from './gmailQuota';
 
 export type {
   ParsedEmail,
@@ -37,23 +47,26 @@ const MAX_ATTEMPTS = 5;
 
 /**
  * One Gmail request: paced against the per-user quota (when a pacer is given),
- * retried on network errors, 5xx and rate limits (429 or 403 rateLimitExceeded).
+ * retried on network errors, 5xx and rate limits (429 or 403 rateLimitExceeded),
+ * and retried once with a fresh token on 401 when the access can refresh.
  * Returns the final response; callers decide what a non-OK status means.
  */
 async function fetchWithRetry(
   url: string,
-  accessToken: string,
+  access: GmailAccess,
   init?: RequestInit,
   quota?: { pacer: GmailQuotaPacer; units: number }
 ): Promise<Response> {
+  let refreshed = false;
   for (let attempt = 0; ; attempt++) {
     const last = attempt === MAX_ATTEMPTS - 1;
     if (quota) await quota.pacer.take(quota.units);
+    const token = gmailToken(access);
     let response: Response;
     try {
       response = await fetch(url, {
         ...init,
-        headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers },
+        headers: { Authorization: `Bearer ${token}`, ...init?.headers },
       });
     } catch (err) {
       if (last) throw err;
@@ -69,6 +82,13 @@ async function fetchWithRetry(
       continue;
     }
     if (last) return response;
+    if (response.status === 401 && !refreshed && (await refreshGmailAccess(access, token))) {
+      refreshed = true;
+      log.info('Access token rejected, retrying with a refreshed token', {
+        attempt: attempt + 1,
+      });
+      continue;
+    }
     if (
       (response.status === 429 || response.status === 403) &&
       isGmailRateLimited(response.status, await response.clone().text())
@@ -105,7 +125,7 @@ async function fetchWithRetry(
 /**
  * Get Gmail profile including current historyId
  */
-export async function getGmailProfile(accessToken: string): Promise<GmailProfileResponse> {
+export async function getGmailProfile(accessToken: GmailAccess): Promise<GmailProfileResponse> {
   const response = await fetchWithRetry(
     'https://gmail.googleapis.com/gmail/v1/users/me/profile',
     accessToken
@@ -126,7 +146,7 @@ export async function getGmailProfile(accessToken: string): Promise<GmailProfile
  * Returns message IDs that were added since the historyId, and the new historyId
  */
 export async function fetchGmailHistory(
-  accessToken: string,
+  accessToken: GmailAccess,
   startHistoryId: string
 ): Promise<{ addedMessageIds: string[]; newHistoryId: string }> {
   const addedMessageIds: string[] = [];
@@ -183,9 +203,9 @@ export async function fetchGmailHistory(
  * Fetch specific messages by their IDs
  */
 export async function fetchMessagesByIds(
-  accessToken: string,
+  accessToken: GmailAccess,
   messageIds: string[],
-  pacer: GmailQuotaPacer = gmailPacerFor(accessToken)
+  pacer: GmailQuotaPacer = gmailPacerForAccess(accessToken)
 ): Promise<ParsedEmail[]> {
   if (messageIds.length === 0) return [];
 
@@ -211,7 +231,7 @@ export async function fetchMessagesByIds(
  * Returns all emails (no filtering by contact) - useful for OTPs and notifications
  */
 export async function fetchGmailMessagesSince(
-  accessToken: string,
+  accessToken: GmailAccess,
   since: Date,
   limit: number = 50
 ): Promise<ParsedEmail[]> {
@@ -273,7 +293,7 @@ export async function fetchGmailMessagesSince(
  * longer exists (deleted between list and get); throws on anything else.
  */
 async function fetchMessage(
-  accessToken: string,
+  accessToken: GmailAccess,
   id: string,
   format: 'full' | 'metadata',
   pacer: GmailQuotaPacer
@@ -302,7 +322,7 @@ async function fetchMessage(
  * one at a time through the paced, retrying single GET.
  */
 async function fetchMessagesBatch(
-  accessToken: string,
+  accessToken: GmailAccess,
   messageIds: string[],
   pacer: GmailQuotaPacer
 ): Promise<(ParsedEmail | null)[]> {
@@ -404,13 +424,13 @@ async function fetchMessagesBatch(
  * Phase 2: Fetch full content only for messages involving contacts user has sent to
  */
 export async function fetchGmailEmails(
-  accessToken: string,
+  accessToken: GmailAccess,
   userEmail: string
 ): Promise<ParsedEmail[]> {
   let pageToken: string | undefined;
   let pageCount = 0;
   // The mailbox's shared budget: list, metadata and full-content requests.
-  const pacer = gmailPacerFor(accessToken);
+  const pacer = gmailPacerForAccess(accessToken);
 
   log.info('Starting to fetch all emails');
 
