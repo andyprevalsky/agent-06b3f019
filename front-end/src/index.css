@@ -1298,6 +1298,40 @@ html.rose-app-shell body {
   animation: slow-bounce-half 2s ease-in-out infinite;
 }
 
+/*
+ * Browser agent cursor (BrowserCursorOverlay). The track glides between
+ * action points; the bob is one constant-period sine-like loop on a stable
+ * element, so new cursor samples never restart it. The tip rests on the
+ * action point at the bottom of each bob.
+ */
+.browser-cursor-track {
+  /* ~30 fps samples retarget this ease-out, so it tracks as a smooth follower. */
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes browser-cursor-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.browser-cursor-bob {
+  animation: browser-cursor-bob 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-cursor-track {
+    transition: none;
+  }
+  .browser-cursor-bob {
+    animation: none;
+  }
+}
+
 /* Hero typed text small-phone override */
 @media (max-width: 390px) {
   .hero-typed-text {

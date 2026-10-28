@@ -146,4 +146,28 @@ assert.ok(totalPaid !== null);
 assert.equal(totalPaid.totalCents, 4396);
 assert.equal(totalPaid.amountKey, 'total_paid');
 
+// Prod 2026-10-07: Amazon checkout reported price_usd 14.94 + total_usd 16.23;
+// GMV is the charged total, not the unit price.
+const crest = extractStructuredGmv({
+  price_usd: 14.94,
+  tax_usd: 1.29,
+  total_usd: 16.23,
+  order_placed: true,
+  order_confirmation: '106-0856574-8904222',
+});
+assert.ok(crest !== null);
+assert.equal(crest.totalCents, 1623);
+
+// Prod 2026-09-28: an order-history lookup listed past orders; a list of
+// per-order totals is not one checkout, so it is never GMV.
+assert.equal(
+  extractStructuredGmv({
+    items: [
+      { title: 'Ice Cube Tray', order_total: '$10.85', order_id: '114-1111111-1111111' },
+      { title: 'Bath Mat', order_total: '$30.39', order_id: '114-2222222-2222222' },
+    ],
+  }),
+  null
+);
+
 process.stdout.write('structured gmv extract: passed\n');
