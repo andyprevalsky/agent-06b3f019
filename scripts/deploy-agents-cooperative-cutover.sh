@@ -59,7 +59,9 @@ mkdir -p "$ARTIFACT_DIR/worker"
 # Build from the immutable Git tree, never from files another local process can
 # change while Docker reads its context. These directories are also excluded by
 # the committed Docker ignore file; do not materialize their large test history.
-git -C "$ROOT" archive "$BUILD_ID:agents" |
+# The pathspec keeps the archive inside the workflow's sparse, blob-filtered
+# checkout: excluded blobs are never lazily fetched one by one.
+git -C "$ROOT" archive "$BUILD_ID:agents" -- . ':(exclude)benchmarks' ':(exclude)tests' |
   tar -x -C "$ARTIFACT_DIR/worker" --exclude=benchmarks --exclude=tests
 cd "$ARTIFACT_DIR/worker"
 # Local build: neither the builder nor the rollout creates a Fly Machine.

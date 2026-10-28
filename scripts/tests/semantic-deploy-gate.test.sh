@@ -186,9 +186,19 @@ require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deplo
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
-if grep -Fq "matrix:" "$WORKFLOW"; then
-  fail "production semantic gate must not split paths into separate sessions"
-fi
+# The lifecycle ratchet shards one chat path per runner (one browser, one worker
+# each). The shard list must cover every path the spec defines, exactly once, and
+# each shard must select its path; the UI job stays one four-worker session.
+LIFECYCLE_SPEC_PATHS=$(sed -nE "s/^    id: '([a-z_]+)',$/\1/p" "$LIFECYCLE_SPEC" | sort | tr '\n' ' ')
+WORKFLOW_MATRIX_PATHS=$(sed -nE 's/^        path: \[(.*)\]$/\1/p' "$WORKFLOW" | tr -d ' ' | tr ',' '\n' | sort | tr '\n' ' ')
+[ -n "$LIFECYCLE_SPEC_PATHS" ] || fail "could not read CHAT_PATHS ids from the lifecycle spec"
+[ "$LIFECYCLE_SPEC_PATHS" = "$WORKFLOW_MATRIX_PATHS" ] ||
+  fail "lifecycle shard matrix ($WORKFLOW_MATRIX_PATHS) must equal the spec's chat paths ($LIFECYCLE_SPEC_PATHS)"
+require_count "$WORKFLOW" "matrix:" "1" "only the lifecycle ratchet may shard; the UI semantic job keeps one shared session"
+require_text "$WORKFLOW" 'CHAT_LIFECYCLE_PATH: ${{ matrix.path }}' "each lifecycle shard must run exactly its own chat path"
+require_text "$WORKFLOW" "fail-fast: false" "one failing lifecycle shard must not cancel the evidence of the others"
+require_count "$WORKFLOW" "filter: blob:none" "2" "both semantic jobs must use the blob-filtered checkout"
+require_text "$WORKFLOW" "/agents/benchmarks/tasks.json" "sparse semantic checkout must keep the benchmark task catalog the specs read"
 if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND"; then
   fail "/deploy must not start a second frontend; run.sh --benchmark already owns it"
 fi

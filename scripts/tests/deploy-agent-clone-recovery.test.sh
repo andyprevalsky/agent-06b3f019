@@ -87,7 +87,9 @@ case "$*" in
   'rev-parse HEAD') printf '%s\n' "${TEST_CHECKOUT_SHA:-$BUILD_ID}";;
   'diff --quiet HEAD') exit "${TEST_DIRTY_SOURCE:-0}";;
   'ls-files --others --exclude-standard') exit 0;;
-  archive\ *:agents) tar -cf - --files-from /dev/null;;
+  # Only the sparse-safe pathspec form is accepted: a bare archive would lazily
+  # fetch every excluded benchmark blob in the blob-filtered workflow checkout.
+  "archive $BUILD_ID:agents -- . :(exclude)benchmarks :(exclude)tests") tar -cf - --files-from /dev/null;;
   rev-parse\ *:agents) [[ -n "${TEST_PREBUILT_TREE:-}" ]] || exit 95; printf '%s\n' "$TEST_PREBUILT_TREE";;
   *) exit 95;;
 esac

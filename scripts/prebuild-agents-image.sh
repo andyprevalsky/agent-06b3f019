@@ -58,7 +58,7 @@ fi
 CONTEXT=$(mktemp -d)
 trap 'rm -rf "$CONTEXT"' EXIT
 # Identical context to deploy-agents-cooperative-cutover.sh.
-git -C "$ROOT" archive "$SHA:agents" |
+git -C "$ROOT" archive "$SHA:agents" -- . ':(exclude)benchmarks' ':(exclude)tests' |
   tar -x -C "$CONTEXT" --exclude=benchmarks --exclude=tests
 cd "$CONTEXT"
 started=$(date +%s)

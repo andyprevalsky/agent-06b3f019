@@ -2283,7 +2283,11 @@ gates. The cutover promotes it by digest when the merge commit's `agents/` tree
 is identical (log line `Promoting prebuilt worker image`) and otherwise builds
 exactly as before. Confirm the prebuild run for the final PR HEAD succeeded
 before merge when it is still running; a missing or failed prebuild only costs
-the old build time, never correctness.
+the old build time, never correctness. The cutover prepares the eight reserved
+bank Machines concurrently and, after the old queue is certified retired and
+the serving bank passes a fresh health check, retires the old bank concurrently
+(`for_each_machine` in `scripts/worker_pool_cutover.py`); each Machine keeps its
+own native lease and ownership checks, and the cooperative drain is unchanged.
 
 **Mac release is a non-blocking post-merge canary.** Start its watch with
 `run_in_background` and do not hold `production-verify`, Step 13b or the
@@ -2752,7 +2756,10 @@ concurrently with the Step 13a probes; a red Step 13a probe still blocks
 completion. Do not wait for the independent Mac release lane;
 keep it running concurrently. This runs every frontend semantic
 spec in one job with four Playwright workers and one shared authenticated
-session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
+session. The four-path, five-sample, full-lifecycle chat ratchet runs as four
+concurrent one-worker jobs, one chat path per runner (`CHAT_LIFECYCLE_PATH`),
+so paths no longer wait for each other and no runner hosts two browsers. Both
+jobs use a sparse, blob-filtered checkout.
 
 ```bash
 # The boxes.dev gh wrapper replaces GH_TOKEN with an App token that cannot

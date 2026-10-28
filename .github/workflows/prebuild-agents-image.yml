@@ -33,6 +33,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          # Same sparse, blob-filtered checkout as deploy-agents.yml.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/agents/benchmarks/
+            !/front-end/public/
+            !/claude-code-src/
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Build and push prebuilt-<agents tree>
         env:
