@@ -1,17 +1,29 @@
 import { Prisma } from '@prisma/client';
 
+import { ARCHIVED_AGENT_STATUS_MESSAGE } from '../../providers/agentKill';
 import { prisma } from '../../providers/database';
-import { realWaitlistPersonSql } from '../../providers/waitlistIdentity';
-import { ADMIN_HEALTH_ADDITIONAL_PHONES, ADMIN_USER_IDS } from './config';
+import {
+  agentRanToolsSql,
+  realRootAgentSql,
+  realTaskOwnerSql,
+} from '../../providers/realAgentRuns';
 import type { RootTaskRecord } from './repo';
 
-export type ProductRootTaskRecord = Pick<RootTaskRecord, 'taskId' | 'createdAt' | 'status'>;
+export type ProductRootTaskRecord = Pick<
+  RootTaskRecord,
+  'taskId' | 'userId' | 'goal' | 'createdAt' | 'status'
+> & {
+  /** Archived while still running: FAILED by the archive, never a real outcome. */
+  archivedBeforeOutcome: boolean;
+};
 
 /**
- * Live roots + latest archived roots -> real customer usage -> completion rate.
- * Operator accounts also hold unmarked historical tests, so completion measures
- * customers only. Other health metrics (including resource costs) keep their
- * own populations. Never guess provenance from goal wording or repetitions.
+ * Live roots + latest archived roots -> real agent runs -> completion rate.
+ * Uses the shared real-agent-run definition (providers/realAgentRuns, also used
+ * by /biz-review): root, non-benchmark, real world model, operator or real
+ * person, and at least one non-chat tool call. The core team is the in-app
+ * population today, so the old customer-only cohort was empty and the rate was
+ * stuck at 0%; their repeated test goals are collapsed in series.ts instead.
  * Indexed date windows and an indexed live-ID anti-join keep this a single
  * dashboard query, with no per-agent requests or new runtime bookkeeping.
  */
@@ -22,9 +34,9 @@ export async function findProductRootTasksBetween(
   return prisma.$queryRaw<ProductRootTaskRecord[]>(Prisma.sql`
     WITH archived AS (
       SELECT DISTINCT ON (history."originalAgentId")
-             history."originalAgentId", history."userId",
-             history."agentCreatedAt", history.status,
-             history."isBenchmark", history."worldModelMode"
+             history."originalAgentId", history."userId", history.goal,
+             history."agentCreatedAt", history.status, history."statusMessage",
+             history."wasAgentRun", history."isBenchmark", history."worldModelMode"
       FROM "GoalHistory" history
       WHERE history.depth = 0
         AND history."agentCreatedAt" >= ${start} AND history."agentCreatedAt" < ${end}
@@ -32,25 +44,26 @@ export async function findProductRootTasksBetween(
       ORDER BY history."originalAgentId", history."agentUpdatedAt" DESC,
                history."archivedAt" DESC, history.id DESC
     ), roots AS (
-      SELECT id AS "taskId", "userId", "createdAt", status,
-             "isBenchmark", "worldModelMode"
-      FROM "Agent"
-      WHERE "parentAgentId" IS NULL AND depth = 0
-        AND "createdAt" >= ${start} AND "createdAt" < ${end}
+      SELECT agent.id AS "taskId", agent."userId", agent.goal, agent."createdAt",
+             agent.status, agent."statusMessage"
+      FROM "Agent" agent
+      WHERE ${realRootAgentSql('agent')}
+        AND agent."createdAt" >= ${start} AND agent."createdAt" < ${end}
+        AND ${agentRanToolsSql('agent')}
       UNION ALL
-      SELECT
-             history."originalAgentId" AS "taskId", history."userId",
-             history."agentCreatedAt" AS "createdAt", history.status,
-             history."isBenchmark", history."worldModelMode"
+      SELECT history."originalAgentId" AS "taskId", history."userId", history.goal,
+             history."agentCreatedAt" AS "createdAt", history.status, history."statusMessage"
       FROM archived history
+      -- Filter after DISTINCT ON: the latest archive row decides provenance.
+      WHERE history."wasAgentRun" = true AND history."isBenchmark" = false
+        AND history."worldModelMode" = 'real'
     )
-    SELECT roots."taskId", roots."createdAt", roots.status
+    SELECT roots."taskId", roots."userId", roots.goal, roots."createdAt", roots.status,
+           (roots.status = 'FAILED'
+             AND roots."statusMessage" IS NOT DISTINCT FROM ${ARCHIVED_AGENT_STATUS_MESSAGE})
+             AS "archivedBeforeOutcome"
     FROM roots
     INNER JOIN "User" person ON person."userId" = roots."userId"
-    WHERE roots."isBenchmark" = false AND roots."worldModelMode" = 'real'
-      AND roots."userId" NOT IN (${Prisma.join([...ADMIN_USER_IDS])})
-      AND RIGHT(regexp_replace(COALESCE(person.phone, ''), '[^0-9]', '', 'g'), 10)
-          NOT IN (${Prisma.join([...ADMIN_HEALTH_ADDITIONAL_PHONES].map((phone) => phone.slice(-10)))})
-      AND ${realWaitlistPersonSql('person')}
+    WHERE ${realTaskOwnerSql(Prisma.sql`roots."userId"`, 'person')}
   `);
 }
