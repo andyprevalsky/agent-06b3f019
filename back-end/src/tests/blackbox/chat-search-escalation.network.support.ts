@@ -6,6 +6,8 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { retryWithBackoff } from '../../providers/retry';
+
 /** A provider completion recorded for one exact request (keyed by its fingerprint). */
 export interface RecordedCall {
   kind: string;
@@ -112,7 +114,45 @@ export function stalledResponse(signal: AbortSignal | null | undefined): Respons
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
-/** Live passthrough that records the streamed content for the fixture. */
+const RECORD_ATTEMPTS = 4;
+const pendingRecordings = new Set<Promise<void>>();
+
+/** Wait for every detached recorder (including its provider re-asks) to finish. */
+export async function settleRecordings(): Promise<void> {
+  while (pendingRecordings.size > 0) await Promise.all([...pendingRecordings]);
+}
+
+/** Parse an SSE completion; `complete` only when the model stopped on its own. */
+function parseStreamedCompletion(text: string): {
+  model: string;
+  content: string;
+  complete: boolean;
+} {
+  let model = '';
+  let content = '';
+  let complete = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('data:') || line === 'data: [DONE]') continue;
+    const event = JSON.parse(line.slice('data:'.length)) as {
+      model?: string;
+      choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }>;
+    };
+    if (event.model) model = event.model;
+    content += event.choices?.[0]?.delta?.content ?? '';
+    // `length` is a token-cap cut-off (the router caps output at max_tokens), not a
+    // complete response: recording it replays truncated JSON that can never parse.
+    if (event.choices?.[0]?.finish_reason === 'stop') complete = true;
+  }
+  return { model, content, complete };
+}
+
+/**
+ * Live passthrough that records the streamed content for the fixture. The caller
+ * sees the first live response untouched; the recorder keeps only a completed
+ * response and re-asks the provider (detached from the caller's abort signal)
+ * when the first was cut off by the token cap or rejected, e.g. rate limited.
+ */
 export async function recordLiveCall(
   realFetch: typeof fetch,
   input: string | URL | Request,
@@ -122,24 +162,33 @@ export async function recordLiveCall(
   const response = await realFetch(input, init);
   if (!response.body) return response;
   const [forCaller, forRecorder] = response.body.tee();
-  void (async () => {
-    const text = await new Response(forRecorder).text();
-    let model = '';
-    let content = '';
-    let finished = false;
-    for (const raw of text.split('\n')) {
-      const line = raw.trim();
-      if (!line.startsWith('data:') || line === 'data: [DONE]') continue;
-      const event = JSON.parse(line.slice('data:'.length)) as {
-        model?: string;
-        choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }>;
-      };
-      if (event.model) model = event.model;
-      content += event.choices?.[0]?.delta?.content ?? '';
-      if (event.choices?.[0]?.finish_reason) finished = true;
-    }
-    if (finished) onRecorded({ model, content });
+  const recording = (async () => {
+    let firstText: string | undefined = response.ok
+      ? await new Response(forRecorder).text()
+      : undefined;
+    const recorded = await retryWithBackoff(
+      async () => {
+        let text = firstText;
+        firstText = undefined;
+        if (text === undefined) {
+          const retry = await realFetch(input, { ...init, signal: undefined });
+          text = retry.ok ? await retry.text() : '';
+        }
+        const parsed = parseStreamedCompletion(text);
+        if (!parsed.complete) throw new Error('recorded completion did not finish with stop');
+        return parsed;
+      },
+      {
+        maxRetries: RECORD_ATTEMPTS,
+        fixedDelays: [2_000, 4_000, 6_000],
+        isRetryable: () => true,
+        component: 'ChatSearchEscalationRecorder',
+      }
+    );
+    onRecorded({ model: recorded.model, content: recorded.content });
   })().catch(() => undefined);
+  pendingRecordings.add(recording);
+  void recording.finally(() => pendingRecordings.delete(recording));
   return new Response(forCaller, {
     status: response.status,
     statusText: response.statusText,
