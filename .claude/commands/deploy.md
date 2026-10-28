@@ -612,6 +612,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
