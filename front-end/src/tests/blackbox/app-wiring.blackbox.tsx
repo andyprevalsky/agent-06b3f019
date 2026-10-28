@@ -7,6 +7,9 @@ import { renderWithProviders } from './test-wrapper';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { ROUTE_TABLE } from '@/features/app-wiring/config';
 
+// Resolve the real lazy page with the fixture dependencies; the route still mounts it.
+import '@/features/privacy';
+
 /**
  * Renders the full route table from App.tsx inside the test wrapper's MemoryRouter.
  * This tests that the route config correctly maps paths to page components.

@@ -82,3 +82,9 @@ None recorded.
 ## Reusable lesson
 
 When a transport is replaced, port its recovery contracts with it, and keep a real-process regression for each runtime fallback.
+
+## October28 local native fixture recurrence — cause OPEN
+
+Batch12's fake-Codex fallback case failed after8153ms with no received events and no server Client-connected log. Its fake OAuth error and fake key login did occur. The connection loop discards its errors, then the later completion assertion reports an empty event list; original socket errors and the deleted fake journal are unavailable. Do not infer a funded-key/provider failure or change credentials, retry counts or deadlines.
+
+One unchanged isolated native case passes483ms with private pre-cleanup capture: five ECONNREFUSED attempts precede OPEN, then the OAuth error, same-thread/same-input key retry and successful terminal event. All6 observed processes and the exact listener/temp directory are absent afterwards. This does not reproduce or repair the original socket failure. A private opt-in observer retains the connection boundary on the next original owning run without changing its waits/assertions. Exact report: plan:.context/deploy-fresh-20261027/rca-codex-direct-chat/REPORT.md.

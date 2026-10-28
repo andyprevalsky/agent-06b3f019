@@ -148,10 +148,17 @@ export async function testMessagingUpload_largeLegacyBodyIngestsInBoundedParts()
     });
     assertStatus(res.status, 200, res.data);
     const { jobId } = res.data as { jobId: string };
-    const stored = await drainUntilStored(session.userId, 12_500);
+    const { stored, parts } = await drainUntil(
+      async () => ({
+        stored: await storedMessages(session.userId),
+        parts: await prisma.messagingUploadJob.findMany({ where: { uploadId: jobId } }),
+      }),
+      ({ stored, parts }) =>
+        stored >= 12_500 &&
+        parts.length >= 3 &&
+        parts.every((part) => part.processedAt !== null && part.payload === null)
+    );
     assert(stored === 12_500, `every message stored exactly once (stored ${stored}/12500)`);
-
-    const parts = await prisma.messagingUploadJob.findMany({ where: { uploadId: jobId } });
     assert(parts.length >= 3, `large body split into bounded parts (got ${parts.length})`);
     assert(
       parts.every((part) => part.processedAt !== null && part.payload === null),
