@@ -62,7 +62,6 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     """A CVV is masked as a numeric value, without rewriting another number."""
     from browser_tools.dom_service import DOMService
     from browser_tools.secret_refs import mask_secret_values
-    from domains.spawn_browser_agent_v3.handler import _prepare_pending_write_lock_action
     from domains.spawn_browser_agent_v3.service_actions import _browser_state_action_result
 
     refs = {"card_cvv": "234"}
@@ -93,11 +92,9 @@ async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtim
     assert observed["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}", observed
     assert "runtime_current_url" not in observed
     assert dom.runtime_current_url() == raw_url
-    pending = {"action": "click", "index": 1234, "params": {}}
-    restored_action, restored_state, restored_runtime_url = await _prepare_pending_write_lock_action(dom, pending)
-    assert restored_action == pending
+    restored_state = await dom.get_browser_state(include_screenshot=False)
     assert restored_state["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}"
-    assert restored_runtime_url == raw_url
+    assert dom.runtime_current_url() == raw_url
     await dom.get_page_identity()
     assert dom.runtime_current_url() == raw_url
     await dom.get_current_url()

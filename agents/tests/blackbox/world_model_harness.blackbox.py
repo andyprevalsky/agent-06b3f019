@@ -4747,7 +4747,8 @@ async def test_simulated_browser_preserves_user_input_queued_before_activity_exe
     await _exercise_simulated_browser_policy(startup_feedback=True)
 
 
-async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False):
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False, denied=False):
+    import copy
     from domains.spawn_browser_agent_v3 import handler as browser_handler
     from datetime import datetime, timedelta, timezone
 
@@ -4772,7 +4773,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
             assert allow_real_fallback is False
             assert tool_args["action"] == "evaluate"
             assert tool_args["approval"]["granted"] is True
-            assert tool_call_id == "place-order:approved"
+            assert tool_call_id == "policy-retry"
             executed_actions.append(tool_args["action"])
             return {
                 "success": True,
@@ -4809,13 +4810,29 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         def set_thinking_stream(self, stream):
             self.stream = stream
 
-    policy = AsyncMock(
-        return_value={
+    async def decide(**kwargs):
+        if policy.await_count == 1:
+            assert not executed_actions, "approval executed before the ordinary actor decision"
+            messages = kwargs["turn_messages"]
+            assert messages[0] == original_call
+            resolved = json.loads(messages[1]["content"])
+            assert messages[1]["tool_call_id"] == "place-order"
+            assert resolved["status"] == ("rejected" if denied else "write_permission_granted")
+            if denied:
+                assert resolved["success"] is False and resolved["error"] == "User rejected this action"
+            else:
+                assert resolved["action_executed"] is False
+            if not user_feedback and not denied:
+                assert len(messages) == 2, "approval added a separate synthetic message"
+                return {
+                    "action": copy.deepcopy(resume_state["pending_action"]),
+                    "tool_call_id": "policy-retry", "usage": {},
+                }
+        return {
             "action": {"action": "attempt_completion", "thinking": "Confirmation is visible"},
-            "tool_call_id": "policy-complete",
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "tool_call_id": "policy-complete", "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-    )
+    policy = AsyncMock(side_effect=decide)
     verifier = AsyncMock(
         return_value={
             "score": 1,
@@ -4834,7 +4851,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
             "action": "evaluate",
             "params": {"expression": "document.querySelector('#place-order').click()"},
         },
-        "approval_type": "payment",
+        "approval_type": "purchase",
         "step_count": 6,
         "task_id": "browser-task",
         "world_model_session_id": "wmh-session-approval",
@@ -4854,6 +4871,25 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         "simulated_reasoning_messages": [],
         "simulated_action_summary": ["evaluate: place order"],
     }
+    from domains.spawn_browser_agent_v3.service_actions import apply_user_write_lock_grant
+    approved_at = datetime.now(timezone.utc).timestamp()
+    resume_state["write_lock_approved_at"] = approved_at
+    resume_state["write_lock_approvals"] = apply_user_write_lock_grant(
+        {}, "purchase", checkout_state["url"], approved_at,
+    )
+    browser_handler._append_browser_turn_messages(
+        resume_state["simulated_turn_messages"], unified_action=resume_state["pending_action"],
+        result={"status": "needs_write_approval", "approval_type": "purchase"}, tool_call_id="place-order",
+    )
+    original_call = copy.deepcopy(resume_state["simulated_turn_messages"][0])
+    original_grants = copy.deepcopy(resume_state["write_lock_approvals"])
+    if denied:
+        resume_state["approval_type"] = "rejected"
+        resume_state["rejected_action"] = {
+            "tool_call_id": "place-order", "history_step": 6,
+            "approval_type": "purchase", "url": checkout_state["url"],
+        }
+        resume_state["simulated_action_entries"][0]["result"]["status"] = "needs_write_approval"
     correction = "Do not place this order. Inspect the checkout instead."
     now = datetime.now(timezone.utc)
     if not legacy_resume:
@@ -4928,6 +4964,19 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         )
 
     assert result["status"] == "completed"
+    assert resume_state["write_lock_approvals"] == original_grants
+    if denied:
+        from helpers.background_agents import build_agent_notification_text
+        reason = verifier.return_value["reasoning"]
+        assert f"**Outcome**: {reason}" in result["message"]
+        notification = build_agent_notification_text(
+            recipient="/root", sender="/root/browser", agent_type="browser", status="completed",
+            summary=result["message"], structured_response=result["structured_response"],
+        )
+        assert reason in notification
+        assert executed_actions == [], "denied simulated action executed before actor continuation"
+        assert result["current_url"] == checkout_state["url"], "denial invented a successful transition"
+        assert resume_state["simulated_action_entries"][0]["result"]["status"] == "rejected"
     if user_feedback:
         assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
         assert [message for message in policy.await_args.kwargs["turn_messages"] if message.get("role") == "user"] == [
@@ -4937,18 +4986,83 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
         assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
         generation.assert_awaited_once()
         return
-    assert executed_actions == ["evaluate"], "ordinary approval omitted its authorized queued action"
+    if denied:
+        return
+    assert executed_actions == ["evaluate"], "ordinary actor retry did not execute exactly once"
     generation.assert_not_awaited()
     assert result["current_url"] == confirmation_url
     assert confirmation_url in result["message"]
-    approval_event = next(
-        call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "place-order:approved"
-    )
-    approval_evidence = json.loads(approval_event.kwargs["message"])
-    assert approval_evidence["approved"] is True
-    assert approval_evidence["browser_state"]["url"] == confirmation_url
-    assert "Order placed, thanks Aman!" in approval_evidence["browser_state"]["dom_tree"]
-    assert approval_event.kwargs["steps_taken"] == 6
+    retry_event = next(call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "policy-retry")
+    assert retry_event.kwargs["steps_taken"] == 7
+    assert not any(str(call.kwargs.get("tool_call_id")).endswith(":approved") for call in saved_actions.await_args_list)
+
+
+async def test_simulated_status_only_write_pause_resolves_denial_and_continues():
+    """Exercise the actual WMH pause producer, not a hand-built pending result."""
+    import copy
+    from datetime import datetime, timezone
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    state = {"url": "https://example.test/checkout", "title": "Checkout", "dom_tree": "[4]<button>Submit</button>"}
+    transition = {
+        "status": "awaiting_write_approval", "approval_type": "generic_write",
+        "world_model_simulated": True, "world_model_session_id": "wmh-denial",
+        "browser_state": state, "frame": {"kind": "html", "html": "<button>Submit</button>"},
+    }
+    world = types.SimpleNamespace(world_model_name="test", session_id="wmh-denial",
+                                  execute=AsyncMock(return_value=transition))
+    captured = []
+
+    async def decide(**kwargs):
+        captured.append(copy.deepcopy(kwargs["turn_messages"]))
+        if len(captured) == 1:
+            return {"action": {"action": "evaluate", "params": {"expression": "submit()"}},
+                    "tool_call_id": "original-blocked-call", "usage": {}}
+        denied = [m for m in captured[-1] if m.get("role") == "tool"]
+        assert len(denied) == 1 and denied[0]["tool_call_id"] == "original-blocked-call"
+        assert json.loads(denied[0]["content"])["status"] == "rejected"
+        return {"action": {"action": "attempt_completion", "params": {}}, "usage": {}}
+
+    stream = types.SimpleNamespace(start=AsyncMock(), finish=AsyncMock(), finish_tools=AsyncMock())
+    verifier = AsyncMock(return_value={"score": 1, "reasoning": "The user declined the write.",
+                                       "structured_response": {"result": "declined"}})
+    common = dict(user_id="user-1", agent_id="agent-1", goal="Submit with permission",
+                  tool_call_id="browser-call", task_id="browser-task", session_id=None, cdp_url=None,
+                  is_resume=True, output_schema={"fields": [{"name": "result", "type": "str", "required": True}]},
+                  attachments=None, write_lock_enabled=True, start_url=state["url"], system_name="Rose",
+                  use_claude_mode=False, gpt_token=None, gpt_account_id=None, gpt_token_source=None,
+                  gpt_token_pool_id=None, world_model=world)
+    initial = {"task_id": "browser-task", "world_model_session_id": "wmh-denial",
+               "simulated_browser_state": state, "user_message_cursor": datetime.now(timezone.utc).isoformat(),
+               "user_message_cursor_is_task_start": True}
+    with (
+        patch.object(h, "load_config", return_value=types.SimpleNamespace()),
+        patch.object(h, "get_model_pricing_with_fallback", AsyncMock(return_value={})),
+        patch.object(h, "BrowserThinkingStream", return_value=stream),
+        patch.object(h, "BrowserStreamingRoseClient", return_value=types.SimpleNamespace(set_thinking_stream=lambda _: None)),
+        patch.object(h, "_call_browser_use_with_rotation", side_effect=decide),
+        patch.object(h, "_verify_simulated_browser_completion", verifier),
+        patch.object(h, "poll_new_messages", AsyncMock(return_value=[])),
+        patch.object(h, "save_browser_action_message", AsyncMock()),
+        patch.object(h, "save_browser_assistant_message", AsyncMock()),
+        patch.object(h.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
+    ):
+        parked = await h._spawn_browser_agent_activity_v3_simulated(**common, write_lock_resume_state=initial)
+        assert parked["status"] == "awaiting_write_approval"
+        original = json.loads(parked["simulated_turn_messages"][-1]["content"])
+        assert original["status"] == "awaiting_write_approval" and "requires_approval" not in original
+        resumed = h._rejected_browser_resume_state(parked, None)
+        result = await h._spawn_browser_agent_activity_v3_simulated(**common, write_lock_resume_state=resumed)
+    assert result["status"] == "completed" and result["success"] is True
+    assert len(captured) == 2
+    world.execute.assert_awaited_once()
+    verifier.assert_awaited_once()
+    assert parked["simulated_action_entries"][0]["result"]["status"] == "rejected"
+
+
+async def test_simulated_browser_denial_continues_original_result_without_execution():
+    await _exercise_simulated_browser_pending_approval(denied=True)
+    await _exercise_simulated_browser_pending_approval(denied=True, user_feedback=True)
 
 
 async def test_simulated_browser_persists_post_approval_confirmation_state():
@@ -6500,6 +6614,14 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_runs_five_policy_steps_then_verified_completion",
         test_simulated_browser_runs_five_policy_steps_then_verified_completion,
+    )
+    await r.record_async(
+        "simulated_status_only_write_pause_resolves_denial_and_continues",
+        test_simulated_status_only_write_pause_resolves_denial_and_continues,
+    )
+    await r.record_async(
+        "simulated_browser_denial_continues_original_result_without_execution",
+        test_simulated_browser_denial_continues_original_result_without_execution,
     )
     await r.record_async(
         "simulated_browser_persists_post_approval_confirmation_state",
