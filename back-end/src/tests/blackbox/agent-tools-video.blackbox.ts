@@ -112,6 +112,12 @@ before(async () => {
     saved[name] = process.env[name];
   }
   server = createServer((req, res) => {
+    // Local readiness probes are not Gemini API calls and must not reach a scenario handler.
+    if (!(req.url ?? '').split('?')[0].startsWith('/v1beta/')) {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
     void readJson(req).then((body) => {
       const recorded: Recorded = {
         method: req.method ?? '',
@@ -173,6 +179,14 @@ const body = (extra: Record<string, unknown> = {}) =>
   });
 const usageRows = (operationKey: string) =>
   prisma.toolUsage.findMany({ where: { operationKey: `${operationKey}:usage` } });
+
+test('non-video probes do not invoke or count as scenario requests', async () => {
+  calls = [];
+  handler = (_req, respond) => respond(500, { error: 'unexpected scenario dispatch' });
+  const response = await fetch(`${process.env.GEMINI_API_BASE_URL}/`, { method: 'HEAD' });
+  assert.equal(response.status, 404);
+  assert.equal(calls.length, 0);
+});
 
 test('request shape, inline delivery, real duration cost, storage, usage row', async () => {
   calls = [];

@@ -3012,10 +3012,15 @@ def test_native_autofill_control_fixture_matches_current_backend_dto():
     assert view["lastOperation"]["errorCode"] is None
 
 
-async def _native_autofill_record_read(history, chosen, receipt):
+async def _native_autofill_record_read(history, chosen, receipt, *, turn_messages=None, model_result=None):
     import copy
     from types import SimpleNamespace
-    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result={"success": True, "operation": copy.deepcopy(receipt)})
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_action_tool_call_id
+    result = {"success": True, "operation": copy.deepcopy(receipt)}
+    await history.record_action(SimpleNamespace(), action=chosen["action"], thinking=chosen.get("thinking"), params=copy.deepcopy(chosen.get("params")), result=result)
+    if turn_messages is not None:
+        _append_browser_turn_messages(turn_messages, unified_action=chosen, result=result,
+                                      tool_call_id=_browser_action_tool_call_id(model_result or {}))
 
 
 async def test_native_autofill_control_history_matches_real_serializer():
@@ -3025,7 +3030,8 @@ async def test_native_autofill_control_history_matches_real_serializer():
     chosen = {"action": "phone", "thinking": None, "params": {"mode": "operation", "operation": "screen.text", "args": {}}}
     receipt = {"id": "read-1", "cursor": 1, "operation": "screen.text", "status": "SUCCEEDED", "result": [{"text": "Synthetic"}]}
     history = ActionHistory()
-    await _native_autofill_record_read(history, chosen, receipt)
+    turn_messages = []
+    await _native_autofill_record_read(history, chosen, receipt, turn_messages=turn_messages, model_result={"tool_call_id": "read-tool-1"})
     actual = ActionHistory()
     from types import SimpleNamespace
     await actual.record_action(SimpleNamespace(), action="phone", thinking=None, params=chosen["params"], result={"success": True, "operation": copy.deepcopy(receipt)})
@@ -3034,12 +3040,17 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert history.get_entries()[0]["result"]["operation"]["id"] == "read-1", "Prior receipt mutated with current observation"
     rendered = _format_action_history(history.get_entries())
     assert "Step 1: phone" in rendered and "Step None" not in rendered
+    assert turn_messages[0]["tool_calls"][0]["id"] == turn_messages[1]["tool_call_id"] == "read-tool-1"
+    assert json.loads(turn_messages[0]["tool_calls"][0]["function"]["arguments"]) == chosen["params"]
+    assert json.loads(turn_messages[1]["content"])["operation"] == history.get_entries()[0]["result"]["operation"]
+    assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
     from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages, _browser_action_tool_call_id
     scenarios = {
         "available": "Apple Account synthetic@example.invalid. Password field is masked. A matching native AutoFill suggestion for synthetic@example.invalid is already visible: Use Saved Password button at center (100, 200).",
         "server_available": "Apple Account synthetic@example.invalid. Native AutoFill reports: No saved passwords found for this account. Password required to continue. No matching suggestion available.",
@@ -3054,10 +3065,14 @@ async def test_native_autofill_real_model_synthetic_controls():
     async def decide(name, screen):
         state = _native_autofill_control_state(screen, setup_projection)
         history = ActionHistory()
+        turn_messages = []
         if name == "missing":
             await history.record_action(SimpleNamespace(), action="phone", params={"mode": "operation", "operation": "credentials.fill_saved", "args": {}}, result={"success": False, "error": "phone_credential_unavailable", "operation": {"operation": "credentials.fill_saved", "status": "FAILED", "errorCode": "phone_credential_unavailable", "result": None}})
+            prior = history.get_entries()[-1]
+            _append_browser_turn_messages(turn_messages, unified_action=prior, result=prior["result"],
+                                          tool_call_id=_browser_action_tool_call_id({}))
         for observation_round in range(3):
-            result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
+            result = await RoseClient().complete_browser_use(task="Continue my authorized Apple Account sign-in. Use my already available matching saved credential if possible; ask me for the protected step only when needed.", browser_state={**_browser_state(), "phone": state}, dynamic_system_context=PHONE_GUIDANCE, action_history=history.get_entries(), turn_messages=turn_messages if observation_round else None, available_actions=["phone", "request_user_assistance_for_authentication"], include_screenshot=False, call_site="test-native-autofill-" + name, deadline_s=90, skip_cache_write=True)
             chosen = result.get("action", {})
             print("Native AutoFill actual choice:", name, observation_round, json.dumps(chosen), flush=True)
             if chosen.get("action") != "phone" or chosen.get("params", {}).get("operation") != "screen.text":
@@ -3067,7 +3082,7 @@ async def test_native_autofill_real_model_synthetic_controls():
             # substitute a desired tap/attention decision.
             receipt = copy.deepcopy(state["interaction"]["lastOperation"])
             receipt.update(id="synthetic-read-" + str(observation_round + 2), cursor=state["interaction"]["cursor"] + 1)
-            await _native_autofill_record_read(history, chosen, receipt)
+            await _native_autofill_record_read(history, chosen, receipt, turn_messages=turn_messages, model_result=result)
             state["interaction"]["cursor"] = receipt["cursor"]
             state["interaction"]["lastOperation"] = receipt
         action = result.get("action", {})
