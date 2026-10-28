@@ -58,7 +58,13 @@ async def test_rose_local_loopback_and_no_fallback():
                 "ROSE_LOCAL_MODEL": "test-local-model",
             },
         ):
-            with patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")):
+            # This test owns a real loopback server. Restore real transport only
+            # for this call; otherwise the preceding test's mock intercepts it.
+            # The local endpoint check and forbidden waterfall keep it offline.
+            with (
+                patch("helpers.httpx_capture._mock_handler", None),
+                patch("providers.rose.client.waterfall_complete", side_effect=AssertionError("remote fallback")),
+            ):
                 chunks = [
                     chunk
                     async for chunk in RoseClient().complete(
@@ -7708,11 +7714,13 @@ async def test_client_foundry_skips_non_https_optional_region_and_keeps_serving(
 async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
 
-    The production deployment list (``AZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol``) names
-    Ultra's GPT-6 deployments; it must not route a GPT-6.1 world-model request to
-    a different model. OpenRouter credit ran out mid-run on 2026-10-10 (HTTP 402).
+    A generic unpinned Sol pool can use the configured GPT-6 deployment, but
+    WMH and production Ultra must keep their explicit GPT-6.1 pins.
     """
     import providers.rose.foundry as foundry
+    from dataclasses import replace
+
+    generic_pool = replace(get_pool("rose-1-ultra"), name="test-unpinned-sol", foundry_model=None)
 
     sse = (
         b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
@@ -7732,6 +7740,7 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
 
     set_mock_handler(handler)
     with (
+        patch.dict(POOL_REGISTRY, {generic_pool.name: generic_pool}),
         patch.object(foundry, "_auth_cooldown_until", {}),
         patch.object(foundry, "_cooldown_until", {}),
         patch.dict(
@@ -7745,7 +7754,7 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
             },
         ),
     ):
-        for pool in ("rose-wmh-gpt61", "rose-1-ultra"):
+        for pool in ("rose-wmh-gpt61", "rose-1-ultra", generic_pool.name):
             chunks = await _drain(
                 RoseClient(openrouter_key="ork-x").complete(
                     pool=pool,
@@ -7756,7 +7765,7 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
             )
             assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks), (pool, chunks)
 
-    assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
+    assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
 
 
 async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes():
