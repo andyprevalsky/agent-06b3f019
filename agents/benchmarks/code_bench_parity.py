@@ -65,6 +65,8 @@ BENCH_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"  # run_benchmark.USER_ID
 # unknown-tier default e2b.ts and e2b-templates/*/ws-server.mjs use) so both
 # legs run the same model and flags.
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
+DEFAULT_EFFORT = "medium"
+EFFORT_ENV = {"claude": "CLAUDE_CODE_EFFORT", "codex": "CODEX_REASONING_EFFORT"}
 MODEL_ENV = {"claude": "CLAUDE_CODE_MODEL", "codex": "CODEX_CODE_MODEL"}
 CLAUDE_ALLOWED_TOOLS = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,LS,TodoWrite"
 CREDENTIAL_ENV = {
@@ -83,7 +85,7 @@ class CliCommand:
     stdin: Optional[str]
 
 
-def cli_command(cli: str, model: str, workdir: Path, prompt: str, *, cli_bin: Optional[str] = None) -> CliCommand:
+def cli_command(cli: str, model: str, workdir: Path, prompt: str, *, cli_bin: Optional[str] = None, effort: str = DEFAULT_EFFORT) -> CliCommand:
     """The direct CLI invocation: the template's flags without Rose's system prompt or task wrapper."""
     if cli == "claude":
         argv = [
@@ -94,6 +96,8 @@ def cli_command(cli: str, model: str, workdir: Path, prompt: str, *, cli_bin: Op
             "stream-json",
             "--model",
             model,
+            "--effort",
+            effort,
             "--permission-mode",
             "bypassPermissions",
             "--allowedTools",
@@ -110,6 +114,8 @@ def cli_command(cli: str, model: str, workdir: Path, prompt: str, *, cli_bin: Op
             "--json",
             "--cd",
             str(workdir),
+            "-c",
+            f'model_reasoning_effort={json.dumps(effort)}',
             "-m",
             model,
             prompt,
@@ -318,12 +324,15 @@ async def run_raw_attempt(
     output.mkdir(parents=True)
     archive = cb.build_fixture_archive(fixture.id, attachments)
     prompt = cb.render_code_task(fixture, str(attachments), str(output))
-    command = cli_command(cli, model, sandbox, prompt, cli_bin=cli_bin)
+    source = os.environ if source_env is None else source_env
+    effort = source.get(EFFORT_ENV[cli], "").strip() or DEFAULT_EFFORT
+    command = cli_command(cli, model, sandbox, prompt, cli_bin=cli_bin, effort=effort)
     result: dict[str, Any] = {
         "task": task_name,
         "fixture": fixture.id,
         "cli": cli,
         "model": model,
+        "effort": effort,
         "input_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -375,6 +375,11 @@ test('an inspection restores the latest checkpoint into its own sandbox and answ
     'the guard wrappers come first on PATH'
   );
   const argv = run.argv;
+  assert.equal(
+    argv[argv.indexOf('--effort') + 1],
+    'xhigh',
+    'Claude inspector inherits Ultra effort'
+  );
   assert.ok(argv.includes('--strict-mcp-config'), 'no MCP servers (Rose user-facing tools)');
   for (const denied of [
     'Write',

@@ -459,6 +459,7 @@ def test_parity_raw_leg_grades_what_the_cli_leaves(tmp_path, monkeypatch):
 
     def fake_run(argv, *, cwd, stdin, timeout, env):
         sandbox = Path(cwd)
+        assert argv[argv.index("--effort") + 1] == "xhigh"
         work = sandbox / "work"
         work.mkdir()
         archive = next((sandbox / "attachments").iterdir())
@@ -472,12 +473,12 @@ def test_parity_raw_leg_grades_what_the_cli_leaves(tmp_path, monkeypatch):
     stdin_marker = ["solve"]
     monkeypatch.setattr(parity, "_run_cli", fake_run)
     good = asyncio.run(
-        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False)
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False, source_env={"CLAUDE_CODE_EFFORT": "xhigh"})
     )
     assert good["passed"] is True, good
     stdin_marker[:] = ["noop"]
     bad = asyncio.run(
-        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False)
+        parity.run_raw_attempt("code-bench-bugfix-invoice-rounding", cli="claude", model="m", timeout=60, judge=False, source_env={"CLAUDE_CODE_EFFORT": "xhigh"})
     )
     assert bad["passed"] is False
 
@@ -919,3 +920,14 @@ def test_parity_rose_leg_reruns_only_tasks_short_of_k_verdicts(tmp_path):
     outcomes, _ = parity.rose_outcomes_from_records(records, [a, b])
     assert outcomes == {a: [True, True], b: [True, True]}
     assert parity._parse_args(["--run-rose", "local"]).rose_retry_infra == 2
+
+
+def test_parity_cli_effort_matches_flash_and_explicit_tier(tmp_path):
+    from benchmarks import code_bench_parity as parity
+    for effort in (parity.DEFAULT_EFFORT, "xhigh"):
+        claude = parity.cli_command("claude", "claude-opus-5-5", tmp_path, "task", effort=effort)
+        assert claude.argv[claude.argv.index("--effort") + 1] == effort
+        codex = parity.cli_command("codex", "gpt-6.1-sol", tmp_path, "task", effort=effort)
+        assert f'model_reasoning_effort="{effort}"' in codex.argv
+    models = (parity.REPO_ROOT / "back-end/src/providers/codeAgentModels.ts").read_text()
+    assert f"effort: '{parity.DEFAULT_EFFORT}'" in models[models.index("  flash: {"):]

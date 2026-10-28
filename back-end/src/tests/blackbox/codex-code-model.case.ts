@@ -189,6 +189,22 @@ export function testCodeAgentModels_wsServerFallbacksMatchFlash() {
 /** The Azure (and ChatGPT) exec request names priority only for a fast agent. */
 export function testCodeAgentModels_inspectAzureTierFollowsSpeed() {
   const paths = inspectPaths('/home/user');
+  for (const effort of ['medium', 'xhigh']) {
+    const claude = inspectCliArgs(
+      {
+        provider: 'claude',
+        workDir: '/home/user',
+        model: 'claude-opus-5-5',
+        timeoutS: 60,
+        claudeEffort: effort,
+      },
+      paths
+    );
+    assert(
+      claude[claude.indexOf('--effort') + 1] === effort,
+      'Claude inspector forwards tier effort'
+    );
+  }
   const args = (codexSpeed: 'standard' | 'fast' | 'ultrafast') =>
     inspectCliArgs(
       {

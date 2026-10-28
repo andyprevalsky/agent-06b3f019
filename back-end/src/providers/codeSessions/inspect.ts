@@ -65,6 +65,7 @@ import {
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
 import {
   claudeCodeModel,
+  claudeCodeEffort,
   type CodeAgentSettings,
   type CodeAgentTier,
   codeAgentSettingsForAgent,
@@ -359,7 +360,7 @@ async function inspectOnce(
             : { model: inspectModel(provider, settings.tier) }),
           ...(provider === 'codex'
             ? { codexEffort: codexCodeEffort(settings.tier), codexSpeed: settings.speed }
-            : {}),
+            : { claudeEffort: claudeCodeEffort(settings.tier) }),
         },
         paths,
         fs.home

@@ -91,6 +91,30 @@ check('every size of a provider is built from one source and one Dockerfile', ()
   }
 });
 
+check('Claude templates pin a CLI that supports Opus 5.5', () => {
+  const dockerfile = readFileSync(path.join(templatesDir, 'claude-code/e2b.Dockerfile'), 'utf8');
+  const pin = dockerfile.match(/^ARG CLAUDE_CODE_VERSION=(\S+)$/m)?.[1];
+  assert.ok(
+    pin && /^2\.1\.\d+$/.test(pin) && Number(pin.split('.')[2]) >= 280,
+    'Opus 5.5 needs CLI >= 2.1.280'
+  );
+  assert.ok(dockerfile.includes('npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"'));
+  const plan = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        path.join(templatesDir, 'build-template-version.mjs'),
+        '--source',
+        'claude-code',
+        '--name',
+        'claude-code-v21305',
+      ],
+      { encoding: 'utf8' }
+    )
+  );
+  assert.strictEqual(plan.pins.CLAUDE_CODE_VERSION, pin);
+});
+
 check('no per-size template copies are committed', () => {
   for (const spec of Object.values(config.providers)) {
     const files = readdirSync(path.join(templatesDir, spec.source));

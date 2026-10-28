@@ -260,6 +260,8 @@ export interface InspectCliParams {
   codexAzureBaseUrl?: string;
   /** Codex on Azure: the catalog at paths.codexAzureModelCatalog describes the model. */
   codexAzureModelCatalog?: boolean;
+  /** Claude reasoning effort (codeAgentModels.ts tier effort). */
+  claudeEffort?: string;
   /** Codex reasoning effort (codeAgentModels.ts tier effort). */
   codexEffort?: string;
   /** The spawning agent's speed request; fast asks Codex for its priority ("Fast") tier. */
@@ -321,6 +323,7 @@ export function inspectCliArgs(params: InspectCliParams, paths: InspectPaths): s
     'stream-json',
     '--model',
     params.model,
+    ...(params.claudeEffort ? ['--effort', params.claudeEffort] : []),
     '--permission-mode',
     'bypassPermissions',
     '--strict-mcp-config',
