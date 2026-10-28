@@ -626,10 +626,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    workers = DEFAULT_MAX_WORKERS if args.max_workers is None else args.max_workers
-    if args.no_failed_first:
-        return run_gates(GATES, max_workers=workers)
-    return run_gates(GATES, max_workers=workers, failure_state=ROOT / FAILURE_STATE)
+    state = None if args.no_failed_first else ROOT / FAILURE_STATE
+    if args.max_workers is None:
+        return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS, failure_state=state)
+    return run_gates(GATES, max_workers=args.max_workers, failure_state=state)
 
 
 if __name__ == "__main__":
