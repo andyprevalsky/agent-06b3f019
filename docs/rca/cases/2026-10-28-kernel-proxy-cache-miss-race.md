@@ -82,6 +82,15 @@ configuration returned the same upstream 403. No proxy was created. Existing
 residential and mobile configurations had worked in the earlier parity test.
 This change does not claim to restore upstream permission or clear that gate.
 
+## Live-test policy correction
+
+The user clarified that the release test must reuse existing Kernel proxies,
+rather than create and delete disposable mobile configurations. The live
+stale-proxy fault-injection step was removed; live resume still asserts the same
+proxy ID, location, tier, and profile. Deleted-cache recovery remains covered by
+local tests. The observed upstream creation 403 is retained as evidence, but
+that disposable creation is no longer a required live-test operation.
+
 ## Human feedback
 
 The user asked whether proxies should be reused and then authorized fixing all
