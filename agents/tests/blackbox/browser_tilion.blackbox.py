@@ -2927,7 +2927,19 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
 
     from domains.spawn_browser_agent_v3.handler import _capture_rotation_storage_state
 
-    busy = "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);"
+    busy_started = asyncio.Event()
+
+    async def busy_entry(request):
+        busy_started.set()
+        return web.Response()
+
+    busy = (
+        "window.startBusyRenderer = () => {"
+        "navigator.sendBeacon('/busy-entered' + location.pathname);"
+        "const end = Date.now() + 60000; while (Date.now() < end) {} };"
+        "window.addEventListener('message', (event) => {"
+        "if (event.data === 'start-busy') window.startBusyRenderer(); });"
+    )
 
     async def page(request):
         if request.path == "/turnstile":
@@ -2942,6 +2954,7 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
 
     app = web.Application()
     app.router.add_get("/{tail:.*}", page)
+    app.router.add_post("/busy-entered/{target}", busy_entry)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -2955,6 +2968,16 @@ async def test_recovery_storage_capture_carries_cookies_when_challenge_frames_ar
             tab = pw_browser.contexts[0].pages[0]
             await tab.goto(f"http://127.0.0.1:{port}/challenge", wait_until="domcontentloaded")
             await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            await tab.frames[1].wait_for_function(
+                "typeof window.startBusyRenderer === 'function'", timeout=10_000
+            )
+            # Arm both ready frames. A shared renderer serializes their loops,
+            # so observe its first blocking entry outside the renderer.
+            await tab.evaluate("""setTimeout(() => {
+                window.frames[0].postMessage('start-busy', '*');
+                window.startBusyRenderer();
+            }, 0)""")
+            await asyncio.wait_for(busy_started.wait(), 10)
             await asyncio.sleep(1)
             started = time.monotonic()
             state = await asyncio.wait_for(_capture_rotation_storage_state(tab), 20)
