@@ -82,11 +82,18 @@ ramp; exactly 5% does not qualify. The `>=5%` confirmed-infra stop rule applies
 during the active run. Otherwise keep the current size. Within a five-iteration rotation window, retain
 the current tasks and append the next shortest unvisited tasks when size grows;
 the retained tasks repeat while the growing edge adds new coverage. After the
-fifth iteration, switch to the next unvisited cohort at the current batch size;
-do not silently carry old tasks into the new cohort. An iteration is one batch
-run and its fix round. Record iteration number, task names, size in runs,
-`-k`, concurrency, all-failure and infra numerators over the original scheduled
-denominator, and rotation cursor in state. Never change a task's
+fifth iteration, switch to the next unvisited cohort and restore that cohort's
+own saved batch size. An untouched cohort starts at 20 runs; a returning cohort
+resumes at its previously reached size (for example, 50 runs after its earlier
+five-iteration window reached 50). Save the outgoing cohort's last actually
+launched size; do not transfer its size or a pending ramp increase to the incoming
+cohort. Apply the infra-only ramp within each cohort's window. Identify cohorts
+by a persisted ID and ordered-task anchor, independent of their growing task
+list, and retain their membership and saved size across rotations. Do not
+silently carry old tasks into a new cohort. An iteration is one batch run and
+its fix round. Record iteration number, task names, size in runs, `-k`,
+concurrency, all-failure and infra numerators over the original scheduled
+denominator, rotation cursor, active cohort ID and per-cohort saved sizes in state. Never change a task's
 timeout to fit a batch. The CLI's provider capacity bounds **simultaneous
 copies**: cap `--concurrency` to the verified provider limit and let excess
 copies queue within the same launch **only after the wide-run operator proves
