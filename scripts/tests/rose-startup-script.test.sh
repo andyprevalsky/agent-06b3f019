@@ -274,4 +274,29 @@ expect_count '^npx --no-install prisma generate' 1 "stale snapshot: prisma regen
 expect_count '^uv ' 0 "stale snapshot: venv kept"
 pass "a stale snapshot falls back to the stamp-guarded install"
 
+# 10. A small sandbox (the default 1 GB E2B template) gets a swapfile before the
+# install that was OOM-killed there; the sync script removes it before the
+# snapshot. A big sandbox, or a start with nothing to install, touches no swap.
+printf 'MemTotal:        1008000 kB\nSwapTotal:             0 kB\n' >"$TMP_ROOT/meminfo-small"
+printf 'MemTotal:       16000000 kB\nSwapTotal:             0 kB\n' >"$TMP_ROOT/meminfo-big"
+make_git_repo "$TMP_ROOT/small"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_sync "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "sync on a small sandbox exits 0 (rc=$RC)"
+expect_count '^sudo -n fallocate -l 3G /swapfile' 1 "small sync: swapfile allocated"
+expect_count '^sudo -n swapon /swapfile' 1 "small sync: swap enabled"
+expect_count '^sudo -n swapoff /swapfile' 1 "small sync: swap removed before the snapshot"
+expect_count '^sudo -n rm -f /swapfile' 1 "small sync: swapfile deleted"
+expect_out 'added 3 GB swap' "small sync"
+make_git_repo "$TMP_ROOT/big"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-big" run_sync "$TMP_ROOT/uv-bin"
+expect_count '^sudo ' 0 "big sync: no swap"
+make_repo "$TMP_ROOT/small-start"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "startup install on a small sandbox exits 0 (rc=$RC)"
+expect_count '^sudo -n swapon /swapfile' 1 "small startup: swap before the install"
+expect_count '^sudo -n swapoff' 0 "small startup: swap stays for the session"
+ROSE_MEMINFO="$TMP_ROOT/meminfo-small" run_startup "$TMP_ROOT/uv-bin"
+expect_count '^sudo -n fallocate' 0 "small startup with nothing to install: no swap"
+pass "small sandboxes get swap for the install (sync removes it before the snapshot)"
+
 echo "rose-startup-script: all tests passed"

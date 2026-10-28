@@ -45,6 +45,23 @@ else
   say "note: PostgreSQL is not installed here; database-backed tests are unavailable"
 fi
 
+# The default E2B sandbox has ~1 GB RAM and an npm install of this repo is OOM-killed
+# there (measured 2026-10-28). Add a swapfile when memory is small and none exists.
+ensure_swap() {
+  local meminfo="${ROSE_MEMINFO:-/proc/meminfo}" mem swap
+  mem=$(awk '/^MemTotal:/ {print int($2/1024)}' "$meminfo" 2>/dev/null || true)
+  swap=$(awk '/^SwapTotal:/ {print $2}' "$meminfo" 2>/dev/null || true)
+  [ -n "$mem" ] && [ "$mem" -lt 3500 ] && [ "${swap:-0}" = 0 ] || return 0
+  if sudo -n fallocate -l 3G /swapfile && sudo -n chmod 600 /swapfile \
+    && sudo -n mkswap /swapfile >/dev/null && sudo -n swapon /swapfile; then
+    SWAP_ADDED=1
+    export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=900"
+    echo "[rose-startup] added 3 GB swap (this sandbox has ${mem} MB RAM)"
+  else
+    echo "[rose-startup] warning: could not add swap; a dependency install may be OOM-killed"
+  fi
+}
+
 js_hash() { cat package.json back-end/package.json front-end/package.json back-end/package-lock.json front-end/package-lock.json 2>/dev/null | sha; }
 
 js_ready() { [ -x node_modules/.bin/tsx ] || [ -x back-end/node_modules/.bin/tsx ]; }
@@ -63,6 +80,7 @@ js_deps() {
     say "js: dependencies unchanged; skipped"
   else
     say "js: npm install (root + workspaces)..."
+    ensure_swap
     # --legacy-peer-deps: npm 10.9 arborist crashes on this tree's vitest peers
     # otherwise (same flags as scripts/cloud-build.sh and the Template box).
     npm install --include=dev --no-audit --no-fund --legacy-peer-deps || return 1
