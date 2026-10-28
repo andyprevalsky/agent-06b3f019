@@ -208,7 +208,8 @@ mkdir -p "$LANE_REPO/scripts" "$LANE_REPO/back-end/src" "$LANE_REPO/front-end/sr
     "$LANE_REPO/agents/benchmarks" "$LANE_REPO/agents/tools" "$LANE_REPO/shared/contract" \
     "$LANE_REPO/mac-app/main" "$LANE_REPO/docs"
 cp "$ROOT_DIR/scripts/run-deploy-stage" "$ROOT_DIR/scripts/run_deploy_stage.py" \
-    "$ROOT_DIR/scripts/deploy_stage.py" "$LANE_REPO/scripts/"
+    "$ROOT_DIR/scripts/deploy_stage.py" "$ROOT_DIR/scripts/factory_metadata.py" \
+    "$ROOT_DIR/scripts/factory_detail.py" "$LANE_REPO/scripts/"
 for file in package.json back-end/src/server.ts front-end/src/app.ts agents/benchmarks/tasks.json \
     agents/tools/base.py shared/contract/fixtures.json mac-app/main/index.ts docs/guide.txt scripts/helper.sh; do
     printf 'original %s\n' "$file" > "$LANE_REPO/$file"
