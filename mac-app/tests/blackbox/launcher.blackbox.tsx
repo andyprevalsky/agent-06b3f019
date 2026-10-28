@@ -700,6 +700,11 @@ describe('launcher blackbox', () => {
       await waitFor(() => expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('light'));
       dispose();
 
+      // Startup before sign-in applies html.dark keeps the last mirrored value.
+      localStorage.setItem(MIRRORED_THEME_KEY, 'dark');
+      mirrorDocumentTheme()();
+      expect(localStorage.getItem(MIRRORED_THEME_KEY)).toBe('dark');
+
       const mainSource = readFileSync(path.resolve(__dirname, '../../ui/main.tsx'), 'utf8');
       expect(mainSource).toMatch(/^mirrorDocumentTheme\(\);$/m);
     });

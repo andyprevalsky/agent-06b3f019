@@ -20,10 +20,14 @@ export const MIRRORED_THEME_KEY = 'rose-theme:active-window';
 
 const isDocumentDark = (): boolean => document.documentElement.classList.contains('dark');
 
-/** Main window: mirror html.dark into shared storage; returns a disposer. */
+/**
+ * Main window: mirror html.dark changes into shared storage; returns a
+ * disposer. html.dark lands only after sign-in, so startup keeps the last
+ * mirrored value (no light flash in the launcher) and seeds only a missing key.
+ */
 export const mirrorDocumentTheme = (): (() => void) => {
   const write = (): void => setItem(MIRRORED_THEME_KEY, isDocumentDark() ? 'dark' : 'light');
-  write();
+  if (getItem(MIRRORED_THEME_KEY) === null) write();
   const observer = new MutationObserver(write);
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
   return () => observer.disconnect();

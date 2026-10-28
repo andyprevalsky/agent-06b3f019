@@ -19,11 +19,10 @@ export const LIQUID_METAL_SHADER_UNIFORMS = {
 };
 
 /**
- * Device-pixel-ratio multiplier for the shader mount. Kept at 0.5 to save
- * GPU work on high-DPI displays — the ring is thin and full DPR adds no
- * perceptible quality.
+ * Animation speed passed to ShaderMount (0 would freeze it). The launcher's
+ * slow 0.5 drift is the "liquid" look the update chip reuses.
  */
-export const LIQUID_METAL_SHADER_DPR = 0.5;
+export const LIQUID_METAL_SHADER_SPEED = 0.5;
 
 /** Left-to-right fade applied to both the shader and its CSS gradient twin. */
 export const LIQUID_METAL_MASK =

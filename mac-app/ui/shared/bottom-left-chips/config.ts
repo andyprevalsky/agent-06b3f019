@@ -14,6 +14,6 @@ export const CHIP_SLOT =
  * the dark query-box palette.
  */
 export const CHIP_BASE =
-  'relative flex items-center rounded-full bg-neutral-100 px-3 py-1.5 dark:bg-[#262624] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]';
+  'relative flex items-center rounded-full bg-neutral-100 px-3 py-1.5 dark:bg-[#262624] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.1),inset_0_0_0_1px_rgba(255,255,255,0.06)]';
 
 export const CHIP_LABEL = 'text-xs font-medium text-neutral-600 dark:text-[#e4e4df]';

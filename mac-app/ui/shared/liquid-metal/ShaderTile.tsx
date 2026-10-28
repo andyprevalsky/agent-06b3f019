@@ -10,7 +10,11 @@
 
 import { useEffect, useRef } from 'react';
 import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
-import { LIQUID_METAL_MASK, LIQUID_METAL_SHADER_DPR, LIQUID_METAL_SHADER_UNIFORMS } from './config';
+import {
+  LIQUID_METAL_MASK,
+  LIQUID_METAL_SHADER_SPEED,
+  LIQUID_METAL_SHADER_UNIFORMS,
+} from './config';
 
 const ShaderTile = (): React.JSX.Element => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -31,7 +35,7 @@ const ShaderTile = (): React.JSX.Element => {
         liquidMetalFragmentShader,
         LIQUID_METAL_SHADER_UNIFORMS,
         undefined,
-        LIQUID_METAL_SHADER_DPR
+        LIQUID_METAL_SHADER_SPEED
       );
     } catch (error) {
       // No WebGL context: the ring's CSS gradient twin still draws the border.
