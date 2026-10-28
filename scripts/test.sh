@@ -315,6 +315,7 @@ else
 fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
 run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
+run_suite "Factory Metadata" python3 scripts/tests/factory-metadata.test.py
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Biz Review Card" python3 scripts/biz_review.py self-test
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh

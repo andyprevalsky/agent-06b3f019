@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "scope": "Parent Codex thread only; benchmark models and other workers excluded. Configuration observations are retrospective, never retroactively applied to every stage.",
+  "native_thread_id": "01a17b4a-2a02-7b70-9aff-d7d703b35008",
+  "source_format": "Codex session_meta, turn_context and event_msg/token_count",
+  "source_snapshot_sha256": "bc1a5e1862d20c4f32b5aac9c3ecf79e758f5d2d82d059e205ec858647f13c2c",
+  "source_snapshot_bytes": 58020211,
+  "configuration_changes": [
+    {
+      "observed_at": "2026-10-27T02:57:01.582Z",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "service_tier": null
+    },
+    {
+      "observed_at": "2026-10-27T19:12:44.177Z",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "service_tier": null
+    }
+  ],
+  "harness": "Codex CLI",
+  "harness_version": "0.159.0",
+  "provider": "boxes-managed-openai",
+  "latest_thread_cumulative_usage": {
+    "observed_at": "2026-10-28T02:40:07.663Z",
+    "counters": {
+      "input_tokens": 263003363,
+      "cached_input_tokens": 259645824,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 666871,
+      "reasoning_output_tokens": 339589,
+      "total_tokens": 263670234
+    }
+  },
+  "usage_limitations": "Cumulative full-thread counters, not assignment deltas or billing. Input includes cache; reasoning is already included in output. Current assignment baseline, speed tier, monetary cost and throughput unavailable.",
+  "deployment_original_duration_seconds": 80254.3792822361,
+  "deployment_timing": {
+    "active_union_seconds": 20719.52847456932,
+    "approval_blocked_nonoverlap_seconds": 57305.027564287186,
+    "other_seconds": 2229.823243379593
+  },
+  "validation": "Original runtime deployment shipped and tested; prior blocked outcome retained. User explicitly waived Mac acceptance afterward. Historical financial warning skips remain.",
+  "evidence_refs": [
+    "https://github.com/Rose-Ai-Labs/rose/pull/1613",
+    "https://github.com/Rose-Ai-Labs/rose/pull/1613#issuecomment-6458416246"
+  ],
+  "current_host_observation": {
+    "observed_at": "2026-10-28T02:41:03.525508+00:00",
+    "os": "Linux",
+    "architecture": "x86_64",
+    "runtime_version": "3.12.3"
+  },
+  "metadata_validation": {
+    "observed_at": "2026-10-28T02:43:54.916030+00:00",
+    "tests": [
+      "python3 scripts/tests/factory-metadata.test.py: 6 passed",
+      "python3 scripts/tests/factory-review.test.py: 43 passed",
+      "bash scripts/tests/run-deploy-stage.test.sh: passed",
+      "python3 scripts/factory_review.py --self-test: passed"
+    ],
+    "limitations": "Only telemetry scripts/rules and sanitized history changed; no application runtime, agent workflow, database or provider mutation required."
+  }
+}

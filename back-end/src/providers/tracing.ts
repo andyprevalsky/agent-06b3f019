@@ -78,6 +78,11 @@ export async function withSpan<T>(
 const UUID_RE =
   /\/api\/(?:agents|tool-usage)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
+/** Paths that carry a credential (Index 01 MCP: `/mcp/<rose-api-key>`) are logged redacted. */
+export function redactPathSecrets(path: string): string {
+  return path.replace(/^\/mcp\/[^/]+/, '/mcp/:key');
+}
+
 export function tracingMiddleware(req: Request, res: Response, next: NextFunction): void {
   const request_id = (
     req.header('X-Request-Id') ||
@@ -92,6 +97,7 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
   const header_agent_id = (req.header('X-Agent-Id') || req.header('x-agent-id') || '').toString();
   const uuidMatch = req.path.match(UUID_RE);
   const agent_id = header_agent_id || uuidMatch?.[1];
+  const path = redactPathSecrets(req.path);
 
   const span_id = genId();
   const ctx: TraceContext = {
@@ -109,7 +115,7 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
     request_id: ctx.request_id,
     agent_id: ctx.agent_id,
     method: req.method,
-    path: req.path,
+    path,
   });
 
   res.setHeader('X-Request-Id', request_id);
@@ -123,7 +129,7 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
       request_id: ctx.request_id,
       agent_id: ctx.agent_id,
       method: req.method,
-      path: req.path,
+      path,
       status: res.statusCode,
       duration_ms: Date.now() - started,
     });
