@@ -56,7 +56,7 @@ it('uses the original grouped rows and gear settings instead of a separate Proje
   ).toBeTruthy();
   expect(within(screen.getByTestId('rose-group-home')).getByText('Home work')).toBeVisible();
   expect(within(screen.getByTestId('rose-group-p-rose')).getByText('Rose work')).toBeVisible();
-  expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeVisible();
+  expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeVisible();
   fireEvent.click(within(project).getByRole('button', { name: 'Rose project settings' }));
   expect(screen.queryByRole('button', { name: 'Download setup helper' })).toBeNull();
   expect(screen.getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');

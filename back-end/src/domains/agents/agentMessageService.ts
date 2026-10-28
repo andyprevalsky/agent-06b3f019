@@ -3,7 +3,7 @@
  */
 
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
-import { handleChatMessage } from '../../providers/chat';
+import { broadcastAgentUpdate, handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import {
   broadcastCreatedMessage,
@@ -21,6 +21,9 @@ import type { PostMessageBody } from './types';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('Agents');
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -104,6 +107,23 @@ async function routeUserMessage(
     if (count > 0) {
       agentForChat.temporalWorkflowId = null;
       agentForChat.status = 'ACTIVE';
+      // Clients still hold the finished run's status; tell them before the chat
+      // turn streams (the chat Start agent button is gated on ACTIVE).
+      await broadcastAgentUpdate(
+        agentId,
+        {
+          status: 'ACTIVE',
+          temporalWorkflowId: null,
+          progress: 0,
+          updatedAt: new Date().toISOString(),
+        },
+        agentForChat.busId ?? undefined
+      ).catch((error: unknown) =>
+        log.warn('Failed to broadcast chat reactivation', {
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
     } else {
       const fresh = await repo.findAgentUnique(agentId);
       if (fresh !== null) {

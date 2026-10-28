@@ -8,9 +8,9 @@
  *   page/bundle/model/pdf or text/html with file_pointer.usercontent_url (cross-origin http(s)):
  *       [FRAME] sandbox="allow-scripts allow-pointer-lock allow-popups" on the usercontent origin
  *       [FRAME] --rose:resize--> height clamped 200..900px
- *       fill (the Agent Display panel): the frame takes the panel's full content
+ *       fill (an expanded inline display): the frame takes its container's full
  *       height (a page that never reports its height is not boxed at 480px); a
- *       reported height becomes its minimum (taller pages scroll the panel)
+ *       reported height becomes its minimum (taller pages scroll)
  *   text/html without one (older rows) or a same-origin/invalid one → DisplayHtmlLink:
  *       [SIGNING] --signed URL--> [LINK] plain open/download link (never framed)
  *                 --failed-----> [UNAVAILABLE] filename notice
@@ -122,11 +122,14 @@ export function DisplayMediaGroup({
   items,
   agentId,
   fill,
+  hideCaption,
 }: {
   items: DisplayMediaItem[];
   agentId?: string;
-  /** Fill the parent's height (the Agent Display panel) instead of a fixed frame box. */
+  /** Fill the parent's height (an expanded inline display) instead of a fixed frame box. */
   fill?: boolean;
+  /** The caller already shows the caption (the inline display's disclosure row). */
+  hideCaption?: boolean;
 }) {
   const [lead] = items;
   if (!lead) return null;
@@ -141,7 +144,9 @@ export function DisplayMediaGroup({
       {requester?.kind === 'code_agent' && (
         <CodeAgentAttribution requester={requester} via="display" />
       )}
-      {lead.caption && <p className="whitespace-pre-wrap text-sm">{lead.caption}</p>}
+      {lead.caption && !hideCaption && (
+        <p className="whitespace-pre-wrap text-sm">{lead.caption}</p>
+      )}
       {media.length > 0 && (
         <InlineMediaGallery files={media.map((item) => item.file)} agentId={agentId} />
       )}

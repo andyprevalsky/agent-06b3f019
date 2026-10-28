@@ -306,9 +306,8 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(drawer.getByTestId('rose-agent-row-research')).toHaveCount(0);
 });
 for (const width of [320, 390, 1280]) {
-  // 8f4715813: the attach paperclip sits immediately left of the model name,
-  // so the paperclip is the flush bottom-left control and the picker follows it.
-  test(`attach + model picker are flush bottom left at ${width}px`, async ({ page }) => {
+  // Attach sits flush bottom-left with the model name immediately to its right (8f4715813).
+  test(`attach then model picker sit flush bottom left at ${width}px`, async ({ page }) => {
     await openSidebarPreview(page, width);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     const chip = page.getByTestId('query-model-selector').filter({ visible: true }).last();
@@ -316,24 +315,27 @@ for (const width of [320, 390, 1280]) {
     const m = await chip.evaluate((el) => {
       const shell = el.closest('[data-testid="query-input-surface"]')!;
       const attach = el.previousElementSibling!;
-      if (!attach.querySelector('svg.lucide-paperclip')) {
-        throw new Error('attach paperclip must immediately precede the model picker');
-      }
       const s = shell.getBoundingClientRect(),
-        c = attach.getBoundingClientRect();
+        a = attach.getBoundingClientRect(),
+        c = el.getBoundingClientRect();
       const row = shell
           .querySelector('[data-testid="query-input-controls"]')!
           .getBoundingClientRect(),
         css = getComputedStyle(shell);
       return {
-        left: c.left - s.left,
+        attachIsPaperclip: attach.querySelector('svg.lucide-paperclip') !== null,
+        left: a.left - s.left,
         inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
+        gap: c.left - a.right,
+        rowGap: parseFloat(getComputedStyle(el.parentElement!).columnGap),
         bottom: row.bottom - c.bottom,
         shellBottom: s.bottom - c.bottom,
         bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
       };
     });
+    expect(m.attachIsPaperclip).toBe(true);
     expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
+    expect(Math.abs(m.gap - m.rowGap)).toBeLessThan(1);
     expect(Math.abs(m.bottom)).toBeLessThan(1);
     expect(Math.abs(m.shellBottom - m.bottomInset)).toBeLessThan(1);
     await chip.click();
