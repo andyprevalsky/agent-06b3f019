@@ -18,8 +18,9 @@
  *   - scope: the credential works only on /api/projects; a bound credential
  *     sees only its project (others 404, create / rename-upsert / delete 403);
  *     an unbound credential never reaches another user's project
- *   - rate limit: the 11th attempt from one address is 429 with Retry-After,
- *     before the code is looked up (the code still works from another address)
+ *   - rate limit: the 11th FAILED attempt from one address is 429 with
+ *     Retry-After, before the code is looked up (the code still works from
+ *     another address); successful exchanges never spend the quota
  *   - real CLI: `rose-sync agent-init --login-code` stores the credential 0600
  *     outside the repo, prints the agent steps without the secret, and a
  *     follow-up `push` syncs through the saved credential
@@ -280,7 +281,7 @@ test('wrong user and scope: a bound credential reaches only its project', async 
   );
 });
 
-test('rate limit: the 11th exchange from one address is 429 before the code is checked', async () => {
+test('rate limit: the 11th failed exchange from one address is 429 before the code is checked', async () => {
   const s = await anonymousSession();
   const minted = await mint(s);
   const from = address();
@@ -301,6 +302,23 @@ test('rate limit: the 11th exchange from one address is 429 before the code is c
   assert(wait >= 1 && wait <= 15 * 60, `Retry-After ${wait}`);
   const elsewhere = await exchange(minted.code);
   expectStatus(elsewhere, 200, 'a limited attempt never burned the code');
+});
+
+test('rate limit: successful exchanges never spend an address quota', async () => {
+  const s = await anonymousSession();
+  const from = address();
+  // Twelve users behind one proxy address all sign in; only failures count.
+  for (let i = 0; i < 12; i++) {
+    const res = await exchange((await mint(s)).code, from);
+    expectStatus(res, 200, `legitimate exchange ${i + 1}`);
+  }
+  const malformed = await call('/api/projects/cli-login-codes/exchange', {
+    method: 'POST',
+    body: { code: 'rlc_x', extra: true },
+    headers: { 'X-Forwarded-For': from },
+  });
+  expectStatus(malformed, 400, 'strict body');
+  expectStatus(await exchange((await mint(s)).code, from), 200, 'a failure does not block yet');
 });
 
 function git(dir: string, ...args: string[]): void {

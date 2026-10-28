@@ -16,8 +16,9 @@
  *   POST   /api/projects/:id/sync               push an encrypted checkout snapshot
  *   POST   /api/projects/:id/sessions/:sessionId/startup  re-run the startup script
  *   POST   /api/projects/cli-login-codes        mint a one-time CLI login code (user session)
- *   POST   /api/projects/cli-login-codes/exchange  CLI trades the code once (no auth,
- *                                               rate-limited) for a rose_cli_ credential
+ *   POST   /api/projects/cli-login-codes/exchange  CLI trades the code once (no auth;
+ *                                               10 failed attempts per address per 15 min
+ *                                               then 429) for a rose_cli_ credential
  *
  * Auth: user JWT, hybrid API key (X-API-Key + X-User-Id), or a CLI credential
  * (`Authorization: Bearer rose_cli_…`, cliLoginService.ts). A CLI credential
@@ -151,20 +152,25 @@ function handle(fn: (req: ProjectsRequest, res: Response, userId: string) => Pro
 router.post(
   '/cli-login-codes/exchange',
   asyncHandler(async (req, res) => {
-    const verdict = exchangeLimiter.hit(clientAddress(req));
+    const address = clientAddress(req);
+    const verdict = exchangeLimiter.check(address);
     if (!verdict.allowed) {
       res.setHeader('Retry-After', String(verdict.retryAfterS));
       res.status(429).json({
-        error: 'Too many login attempts. Wait and copy a fresh prompt from Rose.',
+        error: 'Too many failed login attempts. Wait and copy a fresh prompt from Rose.',
         code: 'rate_limited',
       });
       return;
     }
     const body = parse(exchangeCliLoginCodeSchema, req.body, res);
-    if (body === null) return;
+    if (body === null) {
+      exchangeLimiter.recordFailure(address);
+      return;
+    }
     try {
       res.json(await cliLogin.exchangeCliLoginCode(body.code));
     } catch (err) {
+      exchangeLimiter.recordFailure(address);
       if (!sendProjectError(res, err)) throw err;
     }
   })

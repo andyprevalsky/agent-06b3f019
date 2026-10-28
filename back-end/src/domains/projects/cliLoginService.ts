@@ -21,7 +21,7 @@
  * stored only as SHA-256 and compared in constant time after the indexed
  * lookup. The credential is 256 random bits, also hashed at rest, accepted by
  * no router other than /api/projects, and cannot mint codes or delete
- * projects. Exchanges are rate-limited per client address with a global
+ * projects. Failed exchanges are rate-limited per client address with a global
  * backstop. Codes and credentials travel only in POST bodies / headers.
  *
  * 10k-agent behaviour: minting is a user action (one indexed delete of the
@@ -158,14 +158,17 @@ export async function verifyCliCredential(token: string): Promise<CliCredentialS
 }
 
 /**
- * Fixed-window attempt counter: `limit` hits per key and `globalLimit` hits in
- * total per window. Memory is bounded: once `maxKeys` addresses are tracked in
- * a window, further unseen addresses share one overflow bucket.
+ * Fixed-window FAILED-attempt counter: `limit` failures per key and
+ * `globalLimit` failures in total per window block further attempts until the
+ * window ends. Only failures count, so a legitimate exchange never spends the
+ * quota (several users behind one proxy address cannot lock each other out).
+ * Memory is bounded: once `maxKeys` addresses are tracked in a window, further
+ * unseen addresses share one overflow bucket.
  */
 export class ExchangeRateLimiter {
   private windowStart = 0;
   private total = 0;
-  private readonly hits = new Map<string, number>();
+  private readonly failures = new Map<string, number>();
 
   constructor(
     private readonly limit = CLI_EXCHANGE_RATE_LIMIT,
@@ -174,22 +177,34 @@ export class ExchangeRateLimiter {
     private readonly maxKeys = CLI_EXCHANGE_RATE_MAX_KEYS
   ) {}
 
-  /** Record one attempt; returns seconds to wait when it is over the limit. */
-  hit(
+  private roll(now: number): void {
+    if (now - this.windowStart < this.windowMs) return;
+    this.windowStart = now;
+    this.total = 0;
+    this.failures.clear();
+  }
+
+  private bucket(rawKey: string): string {
+    return this.failures.has(rawKey) || this.failures.size < this.maxKeys ? rawKey : '\0overflow';
+  }
+
+  /** Check before looking the code up; seconds to wait when the address is blocked. */
+  check(
     rawKey: string,
     now = Date.now()
   ): { allowed: true } | { allowed: false; retryAfterS: number } {
-    if (now - this.windowStart >= this.windowMs) {
-      this.windowStart = now;
-      this.total = 0;
-      this.hits.clear();
-    }
-    const key = this.hits.has(rawKey) || this.hits.size < this.maxKeys ? rawKey : '\0overflow';
-    const count = (this.hits.get(key) ?? 0) + 1;
-    this.hits.set(key, count);
-    this.total += 1;
-    if (count <= this.limit && this.total <= this.globalLimit) return { allowed: true };
+    this.roll(now);
+    const count = this.failures.get(this.bucket(rawKey)) ?? 0;
+    if (count < this.limit && this.total < this.globalLimit) return { allowed: true };
     const retryAfterS = Math.max(1, Math.ceil((this.windowStart + this.windowMs - now) / 1000));
     return { allowed: false, retryAfterS };
+  }
+
+  /** Record a rejected attempt (bad body, unknown, malformed, used or expired code). */
+  recordFailure(rawKey: string, now = Date.now()): void {
+    this.roll(now);
+    const key = this.bucket(rawKey);
+    this.failures.set(key, (this.failures.get(key) ?? 0) + 1);
+    this.total += 1;
   }
 }
