@@ -15,6 +15,9 @@
  *   GET    /api/projects/:id/sync               revision, salt, fingerprints
  *   POST   /api/projects/:id/sync               push an encrypted checkout snapshot
  *   POST   /api/projects/:id/sessions/:sessionId/startup  re-run the startup script
+ *   GET    /api/projects/:id/maintenance        template snapshot, schedule, recent runs
+ *   POST   /api/projects/:id/maintenance/runs   Run now {mode: sync} / Snapshot now {mode: snapshot}
+ *   GET    /api/projects/:id/maintenance/runs/:runId  one run with its (redacted) log
  *
  * Auth: user JWT or hybrid API key (X-API-Key + X-User-Id). A project owned
  * by another user is indistinguishable from a missing one (404).
@@ -26,11 +29,13 @@ import { createLogger } from '../../providers/logger';
 import { runProjectStartupForOwner } from '../../providers/projects/workspace';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as envFiles from './envFileService';
+import * as maintenance from './maintenanceService';
 import * as service from './service';
 import * as sync from './syncService';
 import {
   createEnvFileSchema,
   createProjectSchema,
+  maintenanceRunSchema,
   projectIdSchema,
   syncPushSchema,
   updateEnvFileSchema,
@@ -207,6 +212,34 @@ router.post(
     const id = idParam(req, res);
     const body = id !== null ? parse(syncPushSchema, req.body, res) : null;
     if (id !== null && body !== null) res.json(await sync.applySyncPush(userId, id, body));
+  })
+);
+
+router.get(
+  '/:id/maintenance',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    if (id !== null) res.json(await maintenance.getMaintenance(userId, id));
+  })
+);
+
+router.post(
+  '/:id/maintenance/runs',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const body = id !== null ? parse(maintenanceRunSchema, req.body ?? {}, res) : null;
+    if (id === null || body === null) return;
+    const { run } = await maintenance.triggerRun(userId, id, body.mode ?? 'sync');
+    res.status(202).json(run);
+  })
+);
+
+router.get(
+  '/:id/maintenance/runs/:runId',
+  handle(async (req, res, userId) => {
+    const id = idParam(req, res);
+    const runId = id !== null ? idParam(req, res, 'runId') : null;
+    if (id !== null && runId !== null) res.json(await maintenance.getRun(userId, id, runId));
   })
 );
 

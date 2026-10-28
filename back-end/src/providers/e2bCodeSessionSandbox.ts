@@ -12,7 +12,11 @@ import {
 } from './claudeCodeLocalSession';
 import { agentToolsForLocalHome } from './agentTools/workspace';
 import type { UserUiWorkspace } from './userUi/workspace';
-import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import type {
+  ProjectRestoreReport,
+  ProjectTemplateSnapshot,
+  ProjectWorkspace,
+} from './projects/types';
 import {
   checkpointCodeSession,
   connectPausedSandbox,
@@ -197,33 +201,75 @@ export async function acquireCodeSandbox(
   templateId: string,
   envs: Record<string, string>,
   label: string,
-  sizing: { provider?: SandboxProvider; projectSize?: unknown; agentId?: string } = {}
+  sizing: {
+    provider?: SandboxProvider;
+    projectSize?: unknown;
+    agentId?: string;
+    /**
+     * The session's project: its default size, and its published template
+     * snapshot, which a BRAND-NEW session sandbox starts from.
+     */
+    project?: ProjectWorkspace['project'] | null;
+    snapshot?: ProjectTemplateSnapshot | null;
+  } = {}
 ): Promise<{
   sandbox: Sandbox;
   resumedFrom: ResumedFrom;
   cliSessionId: string | null;
   size?: SandboxSize;
+  /** The sandbox was created from the project's template snapshot. */
+  fromSnapshot: boolean;
 }> {
   const sized =
     sizing.provider !== undefined
-      ? await resolveSpawnSandbox(codeSession, sizing.provider, sizing.projectSize ?? null)
+      ? await resolveSpawnSandbox(
+          codeSession,
+          sizing.provider,
+          sizing.project?.sandboxSize ?? sizing.projectSize ?? null
+        )
       : null;
+  const spawnSizing: SpawnSizing = {
+    ...(sized !== null ? { size: sized.size } : {}),
+    agentId: sizing.agentId,
+  };
+  const createOptions = {
+    apiKey: process.env.E2B_API_KEY,
+    timeoutMs: SANDBOX_TIMEOUT_MS,
+    envs,
+    ...codeSessionCreateOptions(codeSession),
+  };
+  let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
     codeSession,
-    () =>
-      createSandboxWithRetry(
-        sized?.templateId ?? templateId,
-        {
-          apiKey: process.env.E2B_API_KEY,
-          timeoutMs: SANDBOX_TIMEOUT_MS,
-          envs,
-          ...codeSessionCreateOptions(codeSession),
-        },
-        label
-      ),
-    { ...(sized !== null ? { size: sized.size } : {}), agentId: sizing.agentId }
+    async () => {
+      const snapshot = sizing.snapshot ?? sizing.project?.templateSnapshot ?? null;
+      // Only a session with no sandbox of its own (a new one) starts from the
+      // snapshot; a lost sandbox being replaced or resized keeps the base path.
+      if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
+        try {
+          const sandbox = await createSandboxWithRetry(snapshot.id, createOptions, label);
+          fromSnapshot = true;
+          // The held size is the snapshot's: a later resume must not read it as a resize.
+          if (snapshot.size !== null && spawnSizing.size !== undefined) {
+            spawnSizing.size = snapshot.size;
+          }
+          return sandbox;
+        } catch (error) {
+          log.warn('Project template snapshot could not start; using the base template', {
+            snapshotId: snapshot.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return createSandboxWithRetry(sized?.templateId ?? templateId, createOptions, label);
+    },
+    spawnSizing
   );
-  return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
+  return {
+    ...acquired,
+    ...(spawnSizing.size !== undefined ? { size: spawnSizing.size } : {}),
+    fromSnapshot,
+  };
 }
 
 /** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */

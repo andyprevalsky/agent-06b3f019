@@ -374,7 +374,7 @@ async function createClaudeCodeSessionUnlocked(
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
       provider: 'claude',
-      projectSize: projectWorkspace?.project.sandboxSize,
+      project: projectWorkspace?.project,
       agentId,
     });
   } catch (err) {
@@ -399,7 +399,12 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
-  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
+  const project = await restoreSandboxProject(
+    taskId,
+    sandbox,
+    projectWorkspace,
+    acquired.fromSnapshot
+  );
 
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
