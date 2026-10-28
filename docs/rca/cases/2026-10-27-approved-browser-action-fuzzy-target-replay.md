@@ -229,3 +229,16 @@ N3392r4 grounds only the ten new mandatory hunks at29e2c47e3; current real-model
 outcome replay remains separate and pending. The prior October15 root-policy
 case remains unresolved; no policy correction or model-intelligence cause is
 inferred from this distinct, locally reproduced transport loss.
+
+
+Current unchanged real-mode auth-decline benchmark subsequently passed in197.4s
+on runtime29e2c47e3 (source snapshot9963cb870). The saved native call/result pair
+occurs once; the resumed browser calls the empty-argument completion tool, and
+the accepted verifier explanation reaches the first next root input exactly
+once. That root explicitly declines to retry authentication and uses only one
+browser invocation. The strict publisher verified104messages, terminal browser
+recordings, and the [durable Rose trajectory](https://www.roselabs.ai/?agent-id=ec2b24f3-e585-4719-bb06-0b9cd98eb428).
+This is one passing outcome, not a controlled model comparison: the passing
+route used OpenAI GPT6 while the earlier failed sample used Foundry. The earlier
+failed root and historical October15 policy case remain recorded; neither is
+regraded or declared generally repaired by this transport correction.
