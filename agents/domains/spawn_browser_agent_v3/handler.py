@@ -11789,6 +11789,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         await _disconnect_browser(dom_service)
+                        _tilion_leave_session()
                         dom_service = None
                         await collect_unread_user_instructions()
 
@@ -12407,6 +12408,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
                     await _disconnect_browser(dom_service)
+                    _tilion_leave_session()
                     dom_service = None
 
                 logger.info(
@@ -12570,6 +12572,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
                     await _disconnect_browser(dom_service)
+                    _tilion_leave_session()
                     dom_service = None
 
                 await browser_stream.finish_tools(status="FINISHED")
@@ -12863,6 +12866,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
         await _disconnect_browser(dom_service)
+        _tilion_leave_session()
         dom_service = None
         await collect_unread_user_instructions()
 
@@ -12976,6 +12980,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await _disconnect_browser(dom_service)
+                _tilion_leave_session()
                 dom_service = None
 
         if task_id and browser_turn_messages:
@@ -13061,6 +13066,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await _disconnect_browser(dom_service)
+                _tilion_leave_session()
                 dom_service = None
 
         error_context = f"Failed during: {last_action}"
