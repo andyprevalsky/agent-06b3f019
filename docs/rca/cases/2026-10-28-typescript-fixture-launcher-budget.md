@@ -17,9 +17,10 @@ tags:
   - v8-coverage
   - fixture-ownership
 sources:
-  - PR 1627 integration HEAD 7c4ff6fe4acfc3e7b8caf0e6262c1fd8158e87e9
-  - back-end/coverage/shard-2.log
-  - /var/tmp/deploy-1627/rca/unit-queue-trigger/exec-observations-before.jsonl
+  - PR #1627
+  - commit 7c4ff6fe4acfc3e7b8caf0e6262c1fd8158e87e9
+  - plan:back-end/coverage/shard-2.log
+  - plan:/var/tmp/deploy-1627/rca/unit-queue-trigger/exec-observations-before.jsonl
 repro: back-end/src/tests/unit/processSafety.test.ts
 status: fixed
 ---
