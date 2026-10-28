@@ -319,15 +319,21 @@ for (const width of [320, 390, 1280]) {
           .querySelector('[data-testid="query-input-controls"]')!
           .getBoundingClientRect(),
         css = getComputedStyle(shell);
+      // The paperclip sits immediately left of the model name (Andy, 2026-10-28):
+      // it is the flush-left control and the model chip follows it.
+      const clip = el.parentElement!.firstElementChild!.getBoundingClientRect();
       return {
-        left: c.left - s.left,
+        clipLeft: clip.left - s.left,
+        clipToChip: c.left - clip.right,
         inset: parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth),
         bottom: row.bottom - c.bottom,
         shellBottom: s.bottom - c.bottom,
         bottomInset: parseFloat(css.paddingBottom) + parseFloat(css.borderBottomWidth),
       };
     });
-    expect(Math.abs(m.left - m.inset)).toBeLessThan(1);
+    expect(Math.abs(m.clipLeft - m.inset)).toBeLessThan(1);
+    expect(m.clipToChip).toBeGreaterThanOrEqual(0);
+    expect(m.clipToChip).toBeLessThan(9);
     expect(Math.abs(m.bottom)).toBeLessThan(1);
     expect(Math.abs(m.shellBottom - m.bottomInset)).toBeLessThan(1);
     await chip.click();
