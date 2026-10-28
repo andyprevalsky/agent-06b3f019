@@ -128,6 +128,48 @@ async function main() {
       assert(delivered.indexOf('ordered-a') < delivered.indexOf('ordered-b'));
     });
 
+    // Semantic gate 2026-10-28 (agent d631f487): a generator burst filled the
+    // topic's 64-message initial queue while one request was in flight, so the
+    // canonical final-answer INSERT was refused for 'capacity' and dropped.
+    await test('a stream-delta burst cannot crowd out the committed final answer', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const delivered: string[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        started();
+        await gate;
+        delivered.push(...rows.map((row) => row.payload.record.id ?? row.event));
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        await publisher.broadcastAssistantStream('burst-agent', 'gen', 'first', false, 1);
+        await firstStarted;
+        for (let sequence = 2; sequence <= 120; sequence += 1) {
+          await publisher.broadcastAssistantStream('burst-agent', 'gen', 'delta', false, sequence);
+        }
+        await publisher.broadcastMessageInsert('burst-agent', message('burst-final-answer'));
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+      assert(
+        delivered.includes('burst-final-answer'),
+        'droppable stream deltas must never cost the committed INSERT its delivery'
+      );
+      assert.equal(
+        delivered.at(-1),
+        'burst-final-answer',
+        'the committed INSERT must stay ordered after the deltas it replaces'
+      );
+    });
+
     await test('ephemeral stream failures are not retried', async () => {
       let calls = 0;
       globalThis.fetch = (async () => {

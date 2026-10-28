@@ -73,10 +73,7 @@ const MAX_IN_FLIGHT_BATCHES = 64;
 const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
   (items, enqueuedAt, settle) => {
     const committedCohort = { enqueuedAt, settle };
-    if (!initialDispatcher.enqueueGroup(items.map((item) => ({ ...item, committedCohort })))) {
-      void settle({ ok: false, retryable: false, status: 'error' });
-      return;
-    }
+    initialDispatcher.enqueueCommitted(items.map((item) => ({ ...item, committedCohort })));
     scheduleBroadcastDrain(BROADCAST_FLUSH_DELAY_MS);
   },
   (items) => sendBroadcastBatch(items),
