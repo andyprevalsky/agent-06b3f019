@@ -367,7 +367,7 @@ test('agent-init refuses a used code and never stores a credential inside the ch
     assert.equal(JSON.parse(status.stdout).stage, 'signed_out');
   });
 });
-test('the rose package exposes the rose bin for agent-init', async () => {
+test('the rose package exposes the bin the onboarding prompt tells agents to install', async () => {
   const pkgDir = resolve('../scripts/lib/rose-sync');
   const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
   assert.equal(pkg.private, true, 'publishing stays an explicit, approved change');
@@ -376,4 +376,7 @@ test('the rose package exposes the rose bin for agent-init', async () => {
   const help = await run(process.execPath, [join(pkgDir, pkg.bin.rose), 'help']);
   assert.match(help.stdout, /^usage: rose /);
   assert.match(help.stdout, /rose agent-init --login-code CODE/);
+  const prompt = readFileSync(resolve('../front-end/src/lib/agentInitPrompt.ts'), 'utf8');
+  assert(prompt.includes(`'${pkg.name}'`), `front-end prompt installs ${pkg.name}`);
+  assert(prompt.includes(`'${Object.keys(pkg.bin)[0]}'`), 'front-end prompt runs the rose bin');
 });

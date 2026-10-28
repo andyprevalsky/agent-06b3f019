@@ -11,6 +11,8 @@
  *                                                 (values never returned)
  *   POST   /api/projects/:id/env-files (NewProjectEnvFile) -> 201 ProjectEnvFile
  *   DELETE /api/projects/:id/env-files/:fileId -> 204
+ *   POST   /api/projects/cli-login-codes { projectId } -> 201 CliLoginCode
+ *                                                 (one-time code for `rose agent-init`)
  *
  * Agents carry `project_id`; agents without one (or with an id that is not in
  * the list) belong to Home, the root project. POST /api/agents takes
@@ -155,4 +157,21 @@ export async function deleteProjectEnvFile(projectId: string, fileId: string): P
     headers: getAuthHeaders(),
   });
   if (!response.ok) throw new Error(`Failed to delete environment file (${response.status})`);
+}
+
+/** One-time code for `rose agent-init --login-code` (single use, ~30 minutes). */
+export interface CliLoginCode {
+  code: string;
+  expiresAt: string;
+  project: { id: string; name: string } | null;
+}
+
+export async function createCliLoginCode(projectId: string): Promise<CliLoginCode> {
+  const response = await fetch(`${PROJECTS_URL}/cli-login-codes`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ projectId }),
+  });
+  if (!response.ok) throw new Error(`Failed to create a setup code (${response.status})`);
+  return (await response.json()) as CliLoginCode;
 }
