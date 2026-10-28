@@ -8,7 +8,7 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../../providers/e2b';
-import { checkGithubRepoAccess } from '../../providers/github';
+import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
 import { resolveSessionProject } from '../../providers/projects/session';
 import { createLogger } from '../../providers/logger';
 import {
@@ -19,8 +19,7 @@ import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredential
 import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
-export type { HealthCheckResult } from './health';
-export { checkSandboxHealth } from './health';
+export { checkSandboxHealth, type HealthCheckResult } from './health';
 
 const log = createLogger('ClaudeCode');
 
@@ -131,8 +130,9 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     resolved.repoUrl = undefined;
   }
 
-  // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
+    // Auto-inject the tree's repo; its first code session creates it.
+    if (projectWorkspace === null) resolved.repoUrl ??= await ensureAgentTreeRepo(agent_id);
     if (resolved.repoUrl !== undefined) {
       effectiveGithubRepoUrl = resolved.repoUrl;
       log.info(`Auto-injecting GitHub repo from agent tree: ${effectiveGithubRepoUrl}`);

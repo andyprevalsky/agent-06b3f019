@@ -18,10 +18,7 @@ import {
   sleep,
   randomUUID,
 } from './agents-blackbox-harness';
-import {
-  GITHUB_USER_REPOS_URL,
-  selectGithubRepoCreationCall,
-} from '../helpers/github-repo-capture';
+import { selectGithubRepoCreationCall } from '../helpers/github-repo-capture';
 
 // ---------------------------------------------------------------------------
 // Boundary capture tests (run sequentially — shared capture buffer)
@@ -128,24 +125,14 @@ export async function testBoundary_createAgentGithubRepo(): Promise<void> {
   const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const calls = (capturesRes.data as { captures: CapturedCall[] }).captures;
+  // A chat agent never creates a GitHub repo: the tree's repo is created on its
+  // first code session (2026-10-28: per-chat creates on the shared token tripped
+  // GitHub's secondary limit for production users).
   const call = selectGithubRepoCreationCall(calls);
-  // May be absent if GITHUB_TOKEN is not configured
-  if (call) {
-    assert(call.url === GITHUB_USER_REPOS_URL, `Expected GitHub repos URL, got ${call.url}`);
-    assert(call.method === 'POST', `Expected POST for GitHub, got ${call.method}`);
-    assert(
-      call.requestHeaders['accept']?.includes('application/vnd.github') ||
-        call.requestHeaders['Accept']?.includes('application/vnd.github'),
-      'Expected GitHub Accept header'
-    );
-    if (call.requestBody) {
-      const body = JSON.parse(call.requestBody);
-      assert(
-        typeof body.name === 'string' && body.name.startsWith('agent-'),
-        `Expected repo name starting with agent-, got ${body.name}`
-      );
-    }
-  }
+  assert(
+    call === undefined,
+    `creating a chat agent must not create a GitHub repo, got ${call?.url}`
+  );
 
   const listRes = await request(`${BASE_URL}/api/agents`, {
     headers: apiKeyHeaders(session.user.id),
