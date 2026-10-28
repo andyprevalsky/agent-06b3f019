@@ -299,7 +299,8 @@ async function seedRose(call, opts, root) {
       : {}),
     defaultBranch: "main",
     startupScript,
-    startupTimeoutS: 120,
+    // = ROSE_PROJECT_STARTUP_TIMEOUT_S (back-end/src/domains/projects/roseProject.ts)
+    startupTimeoutS: 900,
   });
   const existing = await call("GET", `/api/projects/${project.id}/env-files`);
   const have = new Set(existing.envFiles.map((f) => f.path));

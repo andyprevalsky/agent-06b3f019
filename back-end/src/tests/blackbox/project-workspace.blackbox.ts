@@ -430,7 +430,7 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   );
   assert(rose, 'Rose project created');
   assert(rose.startupScript === fixtureScript, 'startup script is the checked-in fixture');
-  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 120, 'Rose defaults');
+  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 900, 'Rose defaults');
   const files = await call(`/api/projects/${String(rose.id)}/env-files`, { auth: s.token });
   leakTexts.push(['Rose env-files response', files.text]);
   const byPath = new Map(
