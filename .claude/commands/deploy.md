@@ -1,5 +1,5 @@
 ---
-description: "Push current branch, obtain a CodeRabbit or Claude fallback review, merge, and wait for deploy to complete."
+description: "Push current branch, obtain a CodeRabbit review, merge, and wait for deploy to complete."
 ---
 
 # Deploy
@@ -8,7 +8,7 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
-**(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the Claude fallback, or the usage-exhaustion skip) is the only review gate.
+**(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the usage-exhaustion skip) is the only review gate.
 
 ## Provider outages: report and retry every 10 minutes
 
@@ -1787,62 +1787,29 @@ a freshness boundary.
 
 ### Step 9a: Verify CodeRabbit delivered a substantive review
 
-Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback for the same `REVIEW_HEAD` when any of these is true:
+Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable when any of these is true:
 
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
-- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]`). CodeRabbit silently ignores bot-authored commands, so post `@coderabbitai full review` once from the user's account instead of re-requesting.
 
-Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
+**The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only).
 
-```bash
-FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh label create claude-review-fallback \
-  --description "Run Claude Code review when the primary reviewer is unavailable" \
-  --color 7B61FF --force
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
-  -X DELETE >/dev/null 2>&1 || true
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels \
-  -X POST -f 'labels[]=claude-review-fallback' >/dev/null
-```
-
-Wait for the workflow run created after `FALLBACK_TS` and require it to succeed:
-
-```bash
-FALLBACK_RUN_ID=""
-for i in $(seq 1 40); do
-  FALLBACK_RUN_ID=$(gh run list \
-    --workflow claude-code-review-fallback.yml \
-    --event pull_request \
-    --limit 20 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$REVIEW_HEAD\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
-    | head -1)
-  [ -n "$FALLBACK_RUN_ID" ] && break
-  sleep 15
-done
-[ -n "$FALLBACK_RUN_ID" ] || { echo "Claude fallback did not start" >&2; exit 1; }
-gh run watch "$FALLBACK_RUN_ID" --exit-status
-```
-
-After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails for a **repairable** reason (bad checkout, workflow bug, transient 5xx, missing/rotated `CLAUDE_CODE_OAUTH_TOKEN` secret), do not merge — inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD. If it failed from **usage exhaustion**, do not repair and do not rerun — go straight to the clause below.
+When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green) and then follow the clause below: record the `⚠️ Skipped` row, close the cycle `clean`, and proceed. Do not repeatedly request reviews during a quota window.
 
 ### Review-provider usage exhaustion: TANK THROUGH, never ask
 
 **This is pre-authorized. Do NOT stop. Do NOT ask the user for permission, approval, an override, a top-up, or a decision. Do NOT wait out a quota window. Record it and keep deploying.** The review gate exists to catch code defects, not to block on billing state; the agent cannot fix user-owned billing, so pausing to ask only stalls the deploy at zero information gain. This clause **overrides** every contrary instruction in this command — the Step 6 "Escalation is ONLY for … out of credits/funds" list, the "credential/billing escalation" halt in Step 0, and the "if the workflow fails, do not merge" line above. Escalating a review-credit block is a deploy defect, not caution.
 
-**Trigger — either reviewer is usage-exhausted and the other cannot cover it:**
+**Trigger — CodeRabbit is unavailable (the Claude fallback is disabled):**
 
 - CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
-- Claude fallback: provider usage exhaustion. The signature is unmistakable — `is_error:true` with `num_turns:1`, `duration_ms` ~2000, and `total_cost_usd:0`, and/or an Anthropic "credit balance is too low" / 400 / 429 / spending-cap error. ~2s + 1 turn + $0 = provider-blocked.
-
-Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, revoked secret) — those you still fix and rerun. Exhaustion is not repairable by you.
 
 **What to do, mechanically:**
 
 1. Record in `TEST_REPORT`:
-   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)`
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback disabled)`
 2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
    ```bash
    python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
@@ -1856,13 +1823,6 @@ Distinguish this from a **repairable** fallback failure (bad checkout, workflow 
 4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
 
 **Still true:** never label an unavailable review as passing (the `⚠️ Skipped` row is mandatory — a silent `clean` is misreporting); never use this path to skip a reviewer that _did_ run and returned findings; and CodeRabbit merely declining to re-review an already-seen commit is **not** exhaustion — that is a false-green, so force `@coderabbitai full review` instead. If a reviewer can be restored with a zero-touch retry you already have in hand, prefer that — but never block, and never ask, to obtain one.
-
-Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
-
-```bash
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
-  -X DELETE >/dev/null 2>&1 || true
-```
 
 ### Step 9b: Read the optional Graphide review (skippable, never blocks)
 
@@ -1946,12 +1906,11 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
 - **GRAPHIDE CRITICAL FINDING** (Step 9b, cycle 1 only) → treat as a valid
   finding: close as `findings` and include the fix in the same batch. Graphide
   skipped or only non-critical findings → no effect on the cycle result.
-- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
-- **BOTH REVIEWERS USAGE-EXHAUSTED** → close the cycle `--result clean`, record the
+- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check; the Claude fallback is disabled) → close the cycle `--result clean`, record the
   `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
   "Review-provider usage exhaustion: TANK THROUGH, never ask."
-- **REVIEW SKIPPED** (e.g., "Too many files!") → finish the current immutable
-  HEAD through the Claude fallback. Do not push filter edits while its review
+- **REVIEW SKIPPED** (e.g., "Too many files!") → record the `⚠️ Skipped` row and close the cycle `clean` for the current
+  immutable HEAD (the Claude fallback is disabled). Do not push filter edits while the review
   cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
   the canonical safe-filter set for a later stabilized commit because those
   paths are already gated locally:

@@ -34,8 +34,11 @@ if grep -Eq 'types:.*(opened|ready_for_review|reopened)' "$WORKFLOW"; then
   fail "fallback must not run automatically on healthy CodeRabbit PRs"
 fi
 
-require_text "$DEPLOY_COMMAND" "claude-review-fallback" "/deploy does not trigger the Claude fallback"
+if grep -Fq -- "-X POST -f 'labels[]=claude-review-fallback'" "$DEPLOY_COMMAND"; then
+  fail "/deploy must not trigger the disabled Claude fallback"
+fi
+require_text "$DEPLOY_COMMAND" "Claude fallback review is DISABLED" "/deploy must state the Claude fallback is disabled"
 require_text "$DEPLOY_COMMAND" "Review limit reached" "/deploy does not recognize CodeRabbit quota failures"
 require_text "$DEPLOY_COMMAND" "usage spending cap" "/deploy does not recognize CodeRabbit spending-cap failures"
 
-echo "All Claude review fallback checks passed."
+echo "All Claude review fallback checks passed (fallback disabled in /deploy)."
