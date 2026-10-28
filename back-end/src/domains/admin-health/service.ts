@@ -18,6 +18,7 @@ import {
 } from './metrics';
 import * as costRepo from './costRepo';
 import * as repo from './repo';
+import { findProductGmvBetween } from './repoProductGmv';
 import { findProductRootTasksBetween } from './repoProductUsage';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
 import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
@@ -168,7 +169,7 @@ async function fetchInputs(
     timed('amplitudeCurrent', amplitudeFunnel(current)),
     timed('amplitudePrevious', amplitudeFunnel(previous)),
     timed('connectedConnectors', repo.findConnectedConnectors()),
-    timed('clearedGmv', repo.findClearedGmvBetween(historyStart, historyEnd)),
+    timed('clearedGmv', findProductGmvBetween(historyStart, historyEnd)),
   ]);
   return {
     tasks,
