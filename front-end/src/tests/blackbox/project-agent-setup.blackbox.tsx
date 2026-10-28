@@ -122,6 +122,46 @@ describe('Set up with your coding agent', () => {
     expect(within(section).getByRole('button', { name: 'Copy prompt' })).toBeEnabled();
   });
 
+  it('never shows one project’s code while another project mints', async () => {
+    const bodies: Array<{ projectId: string }> = [];
+    let release: (() => void) | null = null;
+    server.use(
+      http.post(`${API_BASE}/projects/cli-login-codes`, async ({ request }) => {
+        const body = (await request.json()) as { projectId: string };
+        bodies.push(body);
+        if (body.projectId === 'p-two')
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        return HttpResponse.json(
+          {
+            code: body.projectId === 'p-two' ? codeFor(2) : codeFor(1),
+            expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+            project: { id: body.projectId, name: body.projectId },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    const first = makeProject({ id: 'p-one', name: 'One' });
+    const second = makeProject({ id: 'p-two', name: 'Two' });
+    mockProjectsApi([first, second]);
+    const view = renderWithProviders(
+      <RoseProjectSettingsPanel project={first} barExpanded={false} onClose={vi.fn()} embedded />,
+    );
+    await screen.findByText(exactPrompt(codeFor(1)));
+    view.rerender(
+      <RoseProjectSettingsPanel project={second} barExpanded={false} onClose={vi.fn()} embedded />,
+    );
+    await waitFor(() => expect(bodies.map((b) => b.projectId)).toEqual(['p-one', 'p-two']));
+    const section = screen.getByRole('region', { name: 'Set up with your coding agent' });
+    expect(within(section).queryByTestId('agent-setup-prompt')).toBeNull();
+    expect(within(section).getByRole('button', { name: 'Copy prompt' })).toBeDisabled();
+    await waitFor(() => expect(release).not.toBeNull());
+    act(() => release?.());
+    expect(await within(section).findByText(exactPrompt(codeFor(2)))).toBeVisible();
+  });
+
   it('asks the user to copy by hand when the clipboard is unavailable', async () => {
     mockMint();
     writeText.mockRejectedValueOnce(new Error('denied'));
