@@ -983,6 +983,35 @@ curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT"
 
 Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall), `thinking.adaptive.effort: Extra inputs` (effort must go in `output_config`, not `thinking`), 0% cache hit on claudeAuth (check `cache.prefix_fingerprint` hashes match across calls — differing hashes = different prefix = no cache reuse).
 
+## Change → test mapping (affected-test selection)
+
+`python3 scripts/select_affected_tests.py` (default: `origin/main` + worktree;
+`--changed-file`, `--base/--head`, `--format json|lane:<name>`) lists, per
+deploy lane, the tests a change can reach. Rules:
+
+- **Tests are auto-mapped.** Lanes discover test files by their runners' own
+  globs and the graph is rebuilt from source on every call; never hand-map a
+  new test. `scripts/tests/select-affected-tests.test.py` (deploy structural
+  gate) fails when a test file maps to no lane or a lane lacks its ALL fallback.
+- **Over-include, never under-include.** A test is selected when it
+  transitively reaches the changed file (upstream/reverse deps: Python and
+  TS imports, `vi.mock`, `@/` aliases across packages, dotted-module strings,
+  executed script paths); data-read paths select their direct readers.
+- **Cross-package edges:** a backend router mounted in `server.ts` at prefix P
+  is reached by every test file in any package that names P; agents domain
+  coverage (`scripts/test-map/agents-coverage.json`, refreshed by
+  `build_agents_coverage_map.py`) only adds selections.
+- **Unknown → run all.** Lockfiles, env examples, Prisma schema/migrations,
+  test runners, shared configs (`run_all` in `scripts/test-map/edges.json`) or
+  any changed file that reaches no test and is not declared inert selects
+  every lane in full.
+- **Dynamic dependencies** (HTTP built from variables, Temporal names,
+  subprocess paths computed at runtime, env) that the graph cannot see: add an
+  `edges` entry (`from` globs → `to_files` or `to_lanes`) to
+  `scripts/test-map/edges.json`, or name the path literally in the test.
+- A selected subset runs without the lane's global coverage threshold; the
+  threshold applies only when the lane runs in full.
+
 ## Deploy command regression scheduling
 
 New tests must pass five consecutive runs with unchanged test code before being finalized, to catch flaky behavior.
