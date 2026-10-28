@@ -26,8 +26,9 @@
  *           viewport 1280x800 at (4,87); the player contain-fits the window.
  *           Display crops to the page (no window chrome in the FE).
  *   Tilion  ?embed=1 viewer streams only the page viewport (no chrome) as an
- *           object-fit:contain image anchored TOP-LEFT. The default
- *           windows-low device (screen 1366x768) has a 1366x625 viewport.
+ *           object-fit:contain image anchored TOP-LEFT. The page viewport is
+ *           1366x625 CSS px on every persona sampled (5 sessions; spoofed
+ *           screens 1366x768..1920x1080, DPR 1..1.75), so the aspect is fixed.
  *           Without embed=1 it adds its own bar/padding, so always embed.
  *           Its view token expires after 1800 s (see the Tilion helpers below).
  * Agent action / BROWSER_CURSOR coordinates are page CSS px. The cursor maps
@@ -53,7 +54,10 @@ export const STEEL_CHROME_CROP = { x: 4, y: 87 } as const;
  */
 export const KERNEL_PAGE_OFFSET = { x: 0, y: 87 } as const;
 
-/** Tilion default (windows-low, screen 1366x768) page viewport = its stream size. */
+/**
+ * Tilion page viewport = its stream (CSS px). Fixed across device personas: the
+ * spoofed device.screen/DPR vary per session but innerWidth/innerHeight did not.
+ */
 export const TILION_LIVE_VIEW_PAGE = { width: 1366, height: 625 } as const;
 
 export type LiveViewProvider = 'kernel' | 'steel' | 'tilion' | 'other';
@@ -70,8 +74,6 @@ export interface LiveViewGeometry {
   window: LiveViewRect;
   display: LiveViewRect;
   page: LiveViewRect;
-  /** How the provider player fits its frame into a larger/smaller iframe. */
-  playerFit: 'native-centered' | 'contain-centered' | 'contain-top-left' | 'fill';
 }
 
 const full = (width: number, height: number): LiveViewRect => ({ x: 0, y: 0, width, height });
@@ -81,25 +83,21 @@ export const LIVE_VIEW_GEOMETRY: Record<LiveViewProvider, LiveViewGeometry> = {
     window: full(1280, 800),
     display: full(1280, 800),
     page: { x: KERNEL_PAGE_OFFSET.x, y: KERNEL_PAGE_OFFSET.y, width: 1280, height: 713 },
-    playerFit: 'native-centered',
   },
   steel: {
     window: full(1288, 891),
     display: { x: STEEL_CHROME_CROP.x, y: STEEL_CHROME_CROP.y, width: 1280, height: 800 },
     page: { x: STEEL_CHROME_CROP.x, y: STEEL_CHROME_CROP.y, width: 1280, height: 800 },
-    playerFit: 'contain-centered',
   },
   tilion: {
     window: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
     display: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
     page: full(TILION_LIVE_VIEW_PAGE.width, TILION_LIVE_VIEW_PAGE.height),
-    playerFit: 'contain-top-left',
   },
   other: {
     window: full(1280, 800),
     display: full(1280, 800),
     page: full(1280, 800),
-    playerFit: 'fill',
   },
 };
 
