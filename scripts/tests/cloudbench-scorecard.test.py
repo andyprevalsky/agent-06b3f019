@@ -192,6 +192,32 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_descent_does_not_reload_history_for_unused_batch_trend(self):
+        paths = []
+        for index in range(4):
+            ident = f"history-perf-{index}"
+            path = self.tmp / ident
+            write(path / "_batch/report-card.json", card(ident, [task("same-task", "passed")]))
+            write(path / "teardown-ownership/provider-teardown-verified.epoch", str(T0 + 100 + index * 20))
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="history-perf", kind="fleet",
+                             run_dir=str(path), triggered_at=T0 + index * 20)
+            paths.append(path)
+        load = CARD["build"].__globals__["load"]
+        with mock.patch.dict(CARD["build"].__globals__, {"load": mock.Mock(wraps=load)}) as scope:
+            traced = scope["load"]
+            descent = render(paths[-1], self.f, iterations=4)
+            self.assertEqual(traced.call_count, 4, "descent must read each of its four history runs once")
+            self.assertEqual([call.args[0] for call in traced.call_args_list].count(paths[0]), 1)
+        self.assertEqual(len(descent["history"]), 4)
+        self.assertEqual(descent["trend"], [])
+        self.assertIn('data-section="global-trend"', self.valid(descent))
+        with mock.patch.dict(CARD["build"].__globals__, {"load": mock.Mock(wraps=load)}) as scope:
+            generic = render(paths[-1], self.f)
+            self.assertEqual(scope["load"].call_count, 6)
+        self.assertEqual(len(generic["trend"]), 4)
+        self.assertEqual(len(generic["history"]), 3)
+        self.assertIn('data-section="trend"', self.valid(generic))
+
     def test_descent_global_display_default_contract(self):
         data = render(self.f.fleet(), self.f, iterations=2)
         document = self.valid(data)
@@ -726,7 +752,7 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
         self.assertEqual(data["rate"]["launches"], 6)
         self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids)))
         self.assertEqual([r["number"] for r in data["history"]], [6, 5, 4, 3, 2, 1])
-        self.assertEqual(len(data["trend"]), 6)
+        self.assertEqual(data["trend"], [], "descent uses global history, not an unused batch trend")
         self.assertEqual(data["rate"]["goal_started_at"], launches[-6]["triggered_at"])
         self.assertEqual(self.f.ledger.read_bytes(), old, "scope selection never rewrites the original ledger")
         for invalid in (ids + ["missing"], ids[:-1], ids + [ids[0]]):
@@ -976,7 +1002,7 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
     def test_descent_iteration_count_controls_trend_threshold(self):
         run = self.f.fleet()
         sparse = render(run, self.f, iterations=4)
-        self.assertEqual(len(sparse["trend"]), 1, "four iterations may have only one recorded launch")
+        self.assertEqual(sparse["trend"], [], "descent does not load an unused batch trend")
         self.assertIn("SUCCESS RATE OVER TIME", self.valid(sparse))
         self.assertIn("SUCCESS RATE OVER TIME", CARD["render_text"](sparse))
         for number in range(2, 5):
@@ -989,7 +1015,8 @@ if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
                              outcome={"task_status": {"PASSED": number % 3, "FAILED": 2 - number % 3}})
         self.assertEqual(render(run, self.f, iterations=3)["trend"], [], "two launches may share one iteration")
         card = render(run, self.f, iterations=4)
-        self.assertEqual(len(card["trend"]), 4)
+        self.assertEqual(card["trend"], [])
+        self.assertEqual(len(card["history"]), 4)
         self.assertIn("SUCCESS RATE OVER TIME", self.valid(card))
 
     def test_native_audit_presence_and_absence(self):

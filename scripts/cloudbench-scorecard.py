@@ -1131,7 +1131,7 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     iteration_speed = finish_to_finish_speed(history, now, exp["id"] if exp["state"] == "RUNNING" else None) if iterations is not None and mine else None
     history = history[:history_limit]
     trend = []
-    if (iterations if iterations is not None else len(history_entries)) > 3:
+    if iterations is None and len(history_entries) > 3:
         for entry in history_entries:
             if mine and entry["id"] == mine["id"]:
                 item = exp
