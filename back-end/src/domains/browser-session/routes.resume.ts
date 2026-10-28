@@ -7,6 +7,7 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { resumeBrowserSession, SessionNotFoundError } from './service';
 import { resumeSessionSchema } from './types';
+import { respondIfCarriedStateRequired } from './routes.carried-state';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 const log = createLogger('BrowserSession');
@@ -36,6 +37,7 @@ export function registerBrowserResumeRoute(router: Router): void {
           res.status(404).json({ error: 'Session not found' });
           return;
         }
+        if (respondIfCarriedStateRequired(error, res)) return;
         if (error instanceof BrowserProviderRateLimitError) {
           log.warn('Browser provider rate limit hit during session resume', {
             provider: error.provider,

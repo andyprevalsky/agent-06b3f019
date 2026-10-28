@@ -15,11 +15,14 @@ import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
+  storedBrowserProvider,
+  type BrowserProviderName,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
   type BrowserFileInfo,
 } from './types';
+import { captureContextStorage } from './contextStorageCapture';
 
 const log = createLogger('BrowserUse');
 const profileCreationByContext = new Map<string, Promise<{ id: string; source: string }>>();
@@ -31,7 +34,9 @@ type BrowserUseProfile = { updatedAt: string };
 async function storageHash(browser: Browser): Promise<string> {
   const context = browser.contexts()[0];
   if (!context) throw new Error('Browser Use session has no CDP context');
-  const state = await context.storageState();
+  // A fresh client only sees origins it watched navigate; the agent drove this
+  // session, so read every open page/frame origin (localStorage + IndexedDB).
+  const state = await captureContextStorage(context);
   const cookies = [...state.cookies].sort((a, b) =>
     `${a.domain}/${a.path}/${a.name}`.localeCompare(`${b.domain}/${b.path}/${b.name}`)
   );
@@ -356,7 +361,7 @@ async function replaceSession(
 ): Promise<
   BrowserProviderResumeSession & {
     previousSessionId: string | null;
-    previousProvider: 'browser-use' | 'kernel' | 'steel';
+    previousProvider: BrowserProviderName;
   }
 > {
   const old = await prisma.browserSession.findUniqueOrThrow({
@@ -440,8 +445,8 @@ async function replaceSession(
       profileId: profile.id,
       profileSource: profile.source,
       previousSessionId: old.sessionId,
-      previousProvider:
-        old.provider === 'kernel' ? 'kernel' : old.provider === 'steel' ? 'steel' : 'browser-use',
+      // Released through this provider: keep Tilion/Kernel/Steel predecessors' own name.
+      previousProvider: storedBrowserProvider(old.provider),
     };
   } catch (error) {
     await releaseBrowserUseRemoteSession(session.id).catch(() => {});

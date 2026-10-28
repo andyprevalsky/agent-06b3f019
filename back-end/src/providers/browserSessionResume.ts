@@ -25,7 +25,6 @@ import {
 } from './steel/lifecycleClaim';
 import { inspectResumeCandidate } from './browser/resumeRecovery';
 import { withOwnedResumeTransport } from './browser/resumeTransport';
-import { iphoneCapability } from './phoneAccountPolicy';
 /* c8 ignore start -- resumeBrowserSession requires Steel SDK */
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
@@ -41,33 +40,91 @@ import {
   rotateProxy,
 } from './browser';
 import {
+  isTilionExitUnavailableError,
   ROTATION_CAP,
+  rungAfterTilionUnavailable,
+  nextRecoveryLabel,
+  recoverySameProviderOnly,
   rotationStepLabel,
+  sameProviderRotationStep,
   selectRotationStep,
   type RotationStep,
 } from './browser/rotation';
+import type { TilionCarriedState } from './browser/tilion';
+import { clearPausedState, restoreTilionBrowserState } from './browser/tilionState';
+import {
+  applyCarriedStateToReplacement,
+  carryForTilionSwitch,
+  withTilionSwitchCarry,
+} from './browserSwitchCarry';
 import { storedBrowserProvider } from './browser/types';
-import { browserUseEnabled } from './browser/config';
+import { browserProviderEnabled, browserUseEnabled } from './browser/config';
+import {
+  findPasswords,
+  findUserSettings,
+  reservePasskeysForRealm,
+  toUserSettings,
+} from './browser/resumeCredentialLookups';
+import { buildRotationMessage } from './browser/rotationMessage';
+export { buildRotationMessage };
 
-export class ProxyRotationExhaustedError extends Error {
-  constructor(public readonly cap: number) {
-    super(
-      `PROXY_ROTATION_EXHAUSTED: rotated ${cap} times and the target is still blocking ` +
-        `our proxy pool for this session. Do not rotate again — try a different approach ` +
-        `or report the target as unreachable.`
-    );
-    this.name = 'ProxyRotationExhaustedError';
-  }
-}
-
-export class RotationSessionNotFoundError extends Error {
-  constructor(taskId: string) {
-    super(`Browser task not found: ${taskId}`);
-    this.name = 'RotationSessionNotFoundError';
-  }
-}
+export {
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+  SameProviderRotationExhaustedError,
+} from './browserRotationErrors';
+import {
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+  SameProviderRotationExhaustedError,
+} from './browserRotationErrors';
 
 const log = createLogger('BrowserSessionResume');
+
+/** Provider operations behind resume/rotate_ip, injectable for persistence tests. */
+export interface BrowserSessionResumeDependencies {
+  resumeSession: typeof resumeSession;
+  rotateProxy: typeof rotateProxy;
+  injectUserData: typeof injectUserData;
+  closeSession: typeof closeSession;
+  getBrowserCaptchaTelemetry: typeof getBrowserCaptchaTelemetry;
+  /** Writes worker-carried state into a non-Tilion replacement (defaults to the real restore). */
+  restoreCarriedState?: typeof restoreTilionBrowserState;
+  /** Whether a Tilion session is still running (defaults to Tilion /status). */
+  tilionSessionLive?: (sessionId: string) => Promise<boolean>;
+}
+
+/**
+ * Worker-captured browser state (cookies, localStorage, IndexedDB; Playwright
+ * storageState shape). Tilion admits one CDP client, so the backend never
+ * harvests a live Tilion session itself: the worker's capture is the state a
+ * Tilion replacement carries.
+ */
+export interface BrowserStateCarry {
+  carriedState?: TilionCarriedState;
+}
+
+/** Provider options for a replacement; a non-literal so providers ignoring the carry still type-check. */
+function replacementOptions(carry: BrowserStateCarry) {
+  const options: { keepValidationConnection: true; carriedState?: TilionCarriedState } = {
+    keepValidationConnection: true,
+  };
+  if (carry.carriedState !== undefined) options.carriedState = carry.carriedState;
+  return options;
+}
+
+const defaultResumeDependencies: BrowserSessionResumeDependencies = {
+  resumeSession,
+  rotateProxy,
+  injectUserData,
+  closeSession,
+  getBrowserCaptchaTelemetry,
+};
+
+/** Tilion kill switch: off means no rotation step ever lands on a new Tilion session. */
+function tilionRotationAvailable(): boolean {
+  return browserProviderEnabled('BROWSER_AGENT_TILION_ENABLED', true);
+}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
@@ -88,85 +145,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
 
-type SettingsAccount = UserSettings & { userId: string; isAnonymous: boolean };
-function toUserSettings(user: SettingsAccount | null): UserSettings | null {
-  if (user === null) return null;
-  const { userId, isAnonymous, ...settings } = user;
-  return { ...settings, ...iphoneCapability({ userId, isAnonymous, phone: user.phone }) };
-}
-
-async function findUserSettings(userId: string): Promise<SettingsAccount | null> {
-  return prisma.user.findUnique({
-    where: { userId },
-    select: {
-      userId: true,
-      isAnonymous: true,
-      name: true,
-      email: true,
-      phone: true,
-      deliveryRecipientName: true,
-      addressLine1: true,
-      addressLine2: true,
-      city: true,
-      state: true,
-      postalCode: true,
-      country: true,
-      encryptedPaymentInformation: true,
-      systemName: true,
-      profilePicture: true,
-      customSystemPrompt: true,
-    },
-  });
-}
-
-async function findPasswords(userId: string) {
-  return prisma.browserPassword.findMany({
-    where: { userId, disabledAt: null },
-    select: {
-      id: true,
-      origin: true,
-      username: true,
-      encryptedPassword: true,
-      dateLastUsed: true,
-    },
-    orderBy: { dateLastUsed: 'desc' },
-  });
-}
-
-const PASSKEY_SIGNCOUNT_RESERVE_BLOCK = 100n;
-
-async function reservePasskeysForRealm(userId: string, authRealm: string) {
-  const rows = await prisma.$queryRaw<
-    Array<{
-      id: string;
-      credentialId: string;
-      encryptedPrivateKey: string;
-      rpId: string;
-      userHandle: string | null;
-      base: bigint;
-    }>
-  >`
-    UPDATE "PasskeyCredential"
-    SET "signCount" = "signCount" + ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}
-    WHERE "userId" = ${userId}
-      AND "authRealm" = ${authRealm}
-      AND "disabledAt" IS NULL
-    RETURNING id, "credentialId", "encryptedPrivateKey", "rpId", "userHandle",
-              ("signCount" - ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}) AS base
-  `;
-  return rows.map((r) => ({
-    id: r.id,
-    credentialId: r.credentialId,
-    encryptedPrivateKey: r.encryptedPrivateKey,
-    rpId: r.rpId,
-    userHandle: r.userHandle,
-    signCount: Number(r.base),
-  }));
-}
-
 export async function resumeBrowserSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean } = {}
+  options: { forceFreshProfile?: boolean } & BrowserStateCarry = {},
+  dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
 ) {
   log.info('Resuming browser task', {
     taskId,
@@ -203,9 +185,8 @@ export async function resumeBrowserSession(
       current.controlState !== 'AGENT' &&
       (current.controlLeaseExpiresAt === null ||
         current.controlLeaseExpiresAt.getTime() > Date.now())
-    ) {
+    )
       throw new Error('Browser resume cannot replace a session under user control');
-    }
     if (current.logicalOwnerKey && current.sessionId && current.status === 'ACTIVE') {
       const health = await getBrowserSessionHealth(current.sessionId);
       if (health.sessionId !== current.sessionId)
@@ -240,12 +221,18 @@ export async function resumeBrowserSession(
         })
       );
     }
-    const result = await resumeSession(taskId, {
-      ...options,
-      forceFreshProfile: current.logicalOwnerKey ? true : options.forceFreshProfile,
-      keepValidationConnection: true,
-    });
-    return assembleResumeResponse(taskId, result);
+    const forceFreshProfile = current.logicalOwnerKey ? true : options.forceFreshProfile;
+    const replaceWith = async (carry: BrowserStateCarry) => {
+      const result = await dependencies.resumeSession(taskId, {
+        ...replacementOptions(carry),
+        ...(forceFreshProfile !== undefined ? { forceFreshProfile } : {}),
+      });
+      return assembleResumeResponse(taskId, result, dependencies, carry.carriedState);
+    };
+    // Tilion kill switch off: the row resumes on Kernel, carrying its state like a rotation.
+    return current.provider === 'tilion' && !tilionRotationAvailable()
+      ? withTilionSwitchCarry(taskId, options, dependencies.tilionSessionLive, replaceWith)
+      : replaceWith(options);
   };
   if (
     !initial.logicalOwnerKey &&
@@ -295,6 +282,7 @@ export async function resumeBrowserSession(
           profileId: current.providerProfileId,
           profileSource: current.providerProfileSource ?? 'session_bound',
         },
+        dependencies,
         true
       );
     },
@@ -309,15 +297,28 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
  * Shared by resume and rotate_ip — both hand back an identical response shape,
  * including when rotate_ip crosses between provider-specific profiles.
  */
-async function assembleResumeResponse(taskId: string, result: RecreatedSession) {
-  return withOwnedResumeTransport(result, () =>
-    assembleResumeResponseWithTransport(taskId, result)
-  );
+async function assembleResumeResponse(
+  taskId: string,
+  result: RecreatedSession,
+  dependencies: BrowserSessionResumeDependencies,
+  carriedState?: TilionCarriedState
+) {
+  return withOwnedResumeTransport(result, async () => {
+    const response = await assembleResumeResponseWithTransport(taskId, result, dependencies);
+    await applyCarriedStateToReplacement(
+      taskId,
+      result,
+      dependencies.restoreCarriedState ?? restoreTilionBrowserState,
+      carriedState
+    );
+    return response;
+  });
 }
 
 async function assembleResumeResponseWithTransport(
   taskId: string,
   result: RecreatedSession,
+  dependencies: BrowserSessionResumeDependencies,
   readOnly = false
 ) {
   const session = await prisma.browserSession.findUnique({
@@ -367,7 +368,7 @@ async function assembleResumeResponseWithTransport(
     ) {
       try {
         await browserResumeScope()?.assertOwned();
-        injectionResult = await injectUserData(
+        injectionResult = await dependencies.injectUserData(
           result.sessionId,
           session.context.userId,
           result.savedUrl,
@@ -384,7 +385,7 @@ async function assembleResumeResponseWithTransport(
         // Durable resume custody must retain an ambiguous hydration outcome.
         // Only the older non-custodied path can safely use eager cleanup here.
         if (browserResumeScope()) throw error;
-        await closeSession(result.sessionId, false).catch((closeError) => {
+        await dependencies.closeSession(result.sessionId, false).catch((closeError) => {
           // Never let cleanup mask the original injection failure.
           log.error('Failed to close browser session after injection failure', {
             taskId,
@@ -465,47 +466,21 @@ async function assembleResumeResponseWithTransport(
   };
 }
 
-function buildRotationMessage(step: RotationStep, used: number, remaining: number): string {
-  const left = `${remaining} rotation${remaining === 1 ? '' : 's'} remaining.`;
-  if (step.recoveryAction === 'provider_switched' && step.provider === 'browser-use') {
-    return `Switched to Browser Use with a new country-level residential proxy session (${used}/${ROTATION_CAP}). Login and cookies preserved. ${left}`;
-  }
-  if (step.recoveryAction === 'provider_switched') {
-    return (
-      `Switched from Kernel to Steel with a fresh Steel residential IP ` +
-      `(${used}/${ROTATION_CAP}) — browser and proxy infrastructure changed, same region. ` +
-      `Login and cookies preserved. ${left}`
-    );
-  }
-  if (step.provider === 'steel') {
-    return (
-      `Rotated to another fresh Steel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
-      `login and cookies preserved. ${left}`
-    );
-  }
-  if (step.provider === 'browser-use') {
-    return `Started a new Browser Use residential proxy session (${used}/${ROTATION_CAP}) in the same country. Login and cookies preserved. ${left}`;
-  }
-  if (step.proxyType === 'mobile') {
-    return (
-      `Rotated to a fresh Kernel mobile-carrier IP (${used}/${ROTATION_CAP}) — same region. ` +
-      `Login and cookies preserved. ${left}`
-    );
-  }
-  return (
-    `Rotated to a fresh Kernel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
-    `login and cookies preserved. ${left}`
-  );
-}
-
 /**
  * rotate_ip tool backend. Atomically advances the per-run rotation counter (keyed
  * to the stable BrowserSession row id), enforces the cap, selects the tier
- * (Kernel residential -> Kernel mobile -> Steel residential -> Browser Use residential),
+ * (Kernel residential -> Kernel mobile -> Steel residential -> Browser Use residential;
+ * Tilion residential -> Tilion mobile -> Kernel residential -> Steel residential),
  * recreates the session, and returns the resume-shaped response plus escalation
  * state the agent reasons over. Provider choice is server-owned, not model-owned.
  */
-export async function rotateBrowserProxy(taskId: string, userId?: string, currentUrl?: string) {
+export async function rotateBrowserProxy(
+  taskId: string,
+  userId?: string,
+  currentUrl?: string,
+  carry: BrowserStateCarry = {},
+  dependencies: BrowserSessionResumeDependencies = defaultResumeDependencies
+) {
   // Reserve one rotation atomically. UPDATE ... RETURNING both enforces the cap
   // under concurrent calls and returns the exact ladder position this request
   // reserved. User calls also constrain the write to their BrowserContext; an
@@ -543,7 +518,33 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   }
 
   const currentProvider = storedBrowserProvider(reserved[0]!.provider);
-  const step = selectRotationStep(rotationsUsed, currentProvider, browserUseEnabled());
+  const ladderStep = selectRotationStep(
+    rotationsUsed,
+    currentProvider,
+    browserUseEnabled(),
+    tilionRotationAvailable()
+  );
+  const providerLocked = recoverySameProviderOnly();
+  const availability = { browserUse: browserUseEnabled(), tilion: tilionRotationAvailable() };
+  const lockedStep = providerLocked
+    ? sameProviderRotationStep(ladderStep, currentProvider, availability)
+    : ladderStep;
+  if (providerLocked) {
+    log.info(
+      `recovery provider-locked (BROWSER_RECOVERY_SAME_PROVIDER_ONLY): ladder ${rotationStepLabel(ladderStep)} -> ${
+        lockedStep ? rotationStepLabel(lockedStep) : 'no_same_provider_rung_left'
+      }`,
+      { taskId, rotationsUsed, currentProvider }
+    );
+  }
+  if (lockedStep === null) {
+    await prisma.browserSession.updateMany({
+      where: { id: taskId, proxyRotationCount: { gt: 0 } },
+      data: { proxyRotationCount: { decrement: 1 } },
+    });
+    throw new SameProviderRotationExhaustedError(currentProvider, rotationsUsed);
+  }
+  const step = lockedStep;
 
   log.info('Executing browser recovery rotation', {
     taskId,
@@ -555,7 +556,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   });
 
   const captchaTelemetryBeforeRotation = await withTimeout(
-    getBrowserCaptchaTelemetry(taskId),
+    dependencies.getBrowserCaptchaTelemetry(taskId),
     3_000
   ).catch((error) => {
     log.warn('Failed to read CAPTCHA telemetry before browser rotation', {
@@ -572,10 +573,49 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   });
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
+  let rotationFallbackReason: string | null = null;
+  let effectiveCarry = carry;
+  let carryFromPausedState = false;
+  const prepareSwitchOffTilion = async (target: RotationStep) => {
+    if (currentProvider !== 'tilion' || target.provider === 'tilion') return;
+    const prepared = await carryForTilionSwitch(
+      taskId,
+      effectiveCarry,
+      dependencies.tilionSessionLive
+    );
+    effectiveCarry = prepared.carry;
+    carryFromPausedState = carryFromPausedState || prepared.fromPausedState;
+  };
   try {
-    result = await rotateProxy(taskId, step, {
-      keepValidationConnection: true,
-    });
+    try {
+      await prepareSwitchOffTilion(step);
+      result = await dependencies.rotateProxy(taskId, step, replacementOptions(effectiveCarry));
+    } catch (error) {
+      // Tilion could not serve this exit (e.g. mobile: 409 proxy_type_unavailable).
+      // The reserved rotation still owes the agent a new IP: take the next rung now.
+      if (step.provider !== 'tilion' || !isTilionExitUnavailableError(error)) throw error;
+      const ladderFallback = rungAfterTilionUnavailable(rotationsUsed, browserUseEnabled());
+      // Provider-locked: a Tilion exit that cannot be served falls back to a Tilion
+      // residential replacement, never another provider; none left -> typed result.
+      const fallback = providerLocked
+        ? step.proxyType === 'residential'
+          ? null
+          : sameProviderRotationStep(ladderFallback, 'tilion', availability)
+        : ladderFallback;
+      if (fallback === null) throw new SameProviderRotationExhaustedError('tilion', rotationsUsed);
+      rotationFallbackReason = `tilion_${step.proxyType}_unavailable: ${
+        error instanceof Error ? error.message.slice(0, 200) : String(error)
+      }`;
+      log.warn('Tilion exit unavailable; advancing the rotation ladder', {
+        taskId,
+        rotationsUsed,
+        from: rotationStepLabel(step),
+        to: rotationStepLabel(fallback),
+        reason: rotationFallbackReason,
+      });
+      await prepareSwitchOffTilion(fallback);
+      result = await dependencies.rotateProxy(taskId, fallback, replacementOptions(effectiveCarry));
+    }
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes
@@ -586,7 +626,14 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     });
     throw error;
   }
-  const response = await assembleResumeResponse(taskId, result);
+  const response = await assembleResumeResponse(
+    taskId,
+    result,
+    dependencies,
+    effectiveCarry.carriedState
+  );
+  // The paused snapshot belonged to the replaced Tilion session; it is consumed.
+  if (carryFromPausedState) await clearPausedState({ taskId });
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
   const effectiveStep: RotationStep = {
     provider: result.provider === 'local' ? 'steel' : result.provider,
@@ -596,12 +643,11 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
   const nextRecovery =
     rotationsRemaining === 0
       ? 'rotation_budget_exhausted'
-      : rotationStepLabel(
-          selectRotationStep(
-            rotationsUsed + 1,
-            result.provider === 'local' ? 'steel' : result.provider,
-            browserUseEnabled()
-          )
+      : nextRecoveryLabel(
+          rotationsUsed + 1,
+          result.provider === 'local' ? 'steel' : result.provider,
+          providerLocked,
+          availability
         );
 
   return {
@@ -612,8 +658,14 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     proxy_tier: effectiveStep.proxyType,
     rotations_used: rotationsUsed,
     rotations_remaining: rotationsRemaining,
+    rotation_fallback_reason: rotationFallbackReason,
     next_recovery: nextRecovery,
-    rotation_message: buildRotationMessage(effectiveStep, rotationsUsed, rotationsRemaining),
+    rotation_message: buildRotationMessage(
+      effectiveStep,
+      rotationsUsed,
+      rotationsRemaining,
+      result.previousProvider
+    ),
     captcha_telemetry_before_rotation: captchaTelemetryBeforeRotation,
     // Steel exposes an in-flight flag. Kernel currently exposes terminal
     // outcomes only, so preserve unknown as null instead of reporting false.

@@ -1,7 +1,7 @@
 /**
  * Remote-browser selection for the compute-grants domain.
  *
- * Kernel is the DEFAULT. Steel and Browser Use stay selectable via
+ * Kernel is the DEFAULT. Steel, Browser Use and Tilion stay selectable via
  * `COMPUTE_GRANT_BROWSER_PROVIDER` so a provider outage does not block
  * account connect or grant recovery -- the two paths that, when broken, silently
  * push every request onto paid models.
@@ -17,12 +17,14 @@ import type { CdpProvider } from './minter';
 import { kernelCdpProvider, computeGrantBrowserProvider, openKernelCdpSession } from './kernelCdp';
 import { steelCdpProvider } from './steelCdp';
 import { browserUseCdpProvider, openBrowserUseCdpSession } from './browserUseCdp';
+import { openTilionCdpSession, tilionCdpProvider } from './tilionCdp';
 
 export { computeGrantBrowserProvider };
 
 /** CdpProvider for minting, honouring the configured provider. */
 export function computeGrantCdpProvider(): CdpProvider {
   const provider = computeGrantBrowserProvider();
+  if (provider === 'tilion') return tilionCdpProvider();
   return provider === 'steel'
     ? steelCdpProvider()
     : provider === 'browser-use'
@@ -47,6 +49,7 @@ export interface ComputeGrantBrowser {
  */
 export async function openComputeGrantBrowser(label: string): Promise<ComputeGrantBrowser> {
   if (computeGrantBrowserProvider() === 'browser-use') return openBrowserUseCdpSession(label);
+  if (computeGrantBrowserProvider() === 'tilion') return openTilionCdpSession(label);
   if (computeGrantBrowserProvider() === 'steel') {
     const [{ createSteelRecoverySession }, { releaseSteelRemoteSession }] = await Promise.all([
       import('../../providers/steel/sessionRecovery'),

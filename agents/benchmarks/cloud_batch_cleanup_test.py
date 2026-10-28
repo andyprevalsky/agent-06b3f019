@@ -1233,6 +1233,88 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
                 cleanup.pending_root_payments(payload)
 
 
+def test_exact_database_proof_recognises_tilion_rows_and_releases_them_by_exact_id():
+    """Tilion is one shared account: only this tree's exact DB rows authorize release."""
+    import os
+    import runpy
+
+    recovery = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory)
+        (context / "services.json").write_text(json.dumps({
+            "worktree": str(cleanup.REPO_ROOT),
+            "benchmark_mode": True,
+            "status": "running",
+            "temporal_task_queue": "owned-queue",
+            "ports": {"backend": 31001},
+            "database": {"name": "owned_fixture", "port": 31006},
+        }))
+        tilion_row = {"agent_id": CHILD, "provider": "tilion",
+                      "session_id": "sess_3d245e56b86d4bc8ae32095b644117d4"}
+        payload = {
+            "root_exists": True,
+            "root_user_id": ROOT,
+            "root_deleted": True,
+            "unsealed_tree_agent_ids": [],
+            "tree_agent_ids": [ROOT, CHILD],
+            "browser_sessions": [tilion_row],
+            "purchase_cleanup": [],
+        }
+        recovery["run_exact_psql"] = lambda _command, **_kwargs: json.dumps(payload)
+        environment = {
+            "BENCHMARK_CLOUD_BATCH_CLEANUP": "true",
+            "BENCHMARK_ISOLATED_RUN": "true",
+            "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+            "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+            "BENCHMARK_CONTEXT_DIR": directory,
+            "TEMPORAL_TASK_QUEUE": "owned-queue",
+        }
+        with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+            assert cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True) == payload
+            payload["browser_sessions"] = [{**tilion_row, "provider": "browserbase"}]
+            with pytest.raises(RuntimeError, match="unrecognized provider"):
+                cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
+
+    sealed = {**payload, "browser_sessions": [tilion_row]}
+    calls = []
+
+    def release(provider, sid, _paths):
+        calls.append((provider, sid))
+        return 410, "digest"
+
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=sealed),
+        patch.object(cleanup.runpy, "run_path", return_value={"provider_request": release}),
+    ):
+        result = cleanup.close_exact_root_sessions("http://localhost:1", ROOT, sealed)
+    assert calls == [("tilion", tilion_row["session_id"])]
+    assert result["provider_receipts"] == [{
+        "provider": "tilion", "session_id": tilion_row["session_id"],
+        "status": 410, "response_sha256": "digest",
+    }]
+
+
+def test_preparation_cancellation_receipt_accepts_tilion_and_rejects_unknown_providers():
+    from benchmarks import browser_zero_allocation
+
+    def receipts_for(provider):
+        receipt = {
+            "version": 1, "agent_id": ROOT, "task_id": CHILD, "tool_call_id": "call-prep",
+            "session_id": "sess_3d245e56b86d4bc8ae32095b644117d4", "provider": provider,
+            "phase": "initial_session_preparation", "init_acknowledged": True,
+            "task_actions_started": False,
+        }
+        meta = {
+            "toolName": "spawn_browser_agent", "action_type": "task_complete",
+            "toolStatus": "FINISHED", "task_id": CHILD, "toolCallId": "call-prep",
+            "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+        }
+        return browser_zero_allocation.preparation_cancelled_task_receipts([{"metadata": meta}], ROOT)
+
+    assert set(receipts_for("tilion")) == {CHILD}
+    assert receipts_for("browserbase") == {}
+
+
 def _postgres_binary(name):
     import glob
     import shutil
