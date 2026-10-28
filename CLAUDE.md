@@ -23,8 +23,14 @@ usage history and original lifetime; less than 15 minutes reads warming <age>,
 missing counters read UNMETERED. Beneath red rows, state the blocker and
 corrective owner/action. Completed work and healthy monitoring need no false
 stall alarm. No nulls or explanatory legends.
-Benchmark cards start with the Experiment Number and numeric experiments/day
-for this goal. Show only the latest three actual experiments with concise timing,
+Generic benchmark cards start with the Experiment Number and numeric experiments/day
+for this goal and show the latest three actual experiments. For `/descend`, put
+**Iterations/Hour** prominently above the Experiment Number, calculated from the
+latest consecutive completed producer finish timestamps (3600 / seconds between
+finishes, including intervening work). Show up to the latest ten actual selected
+experiments, each with T- age since its own producer finish; use T-RUNNING or
+T-UNRECORDED when appropriate. Missing or nonpositive finish intervals are
+UNMEASURED; never bridge an intervening missing finish. Keep concise timing,
 queue/verdict, cost/cache/LLM and lifecycle subrows, replacing the old standalone
 active-run/progress/metrics and last-slice blocks. Preserve unknown classifications
 and original clocks; never invent zero measurements or failures.
@@ -46,7 +52,9 @@ links. A file pointer never substitutes for the diff.
 ### Standing scorecard memory — all current and future agents
 
 - Every future CLI benchmark uses the shared scorecard: headline **QUEUED / IN_PROGRESS / COMPLETED**, then **PASS / HARNESS FAILURE / INFRA FAILURE**; preserve genuine agent failures, cancellations and unknowns separately, keep the infra threshold in a minor note, and refresh on agent starts/completions, every fixed 15 minutes and benchmark-state changes. Follow `.claude/shared/report-display-format.md` and the CLI-emitted `.claude/shared/benchmark-report-format.txt`.
-- Use actual text colors, latest **3** runs, Experiment # and launches/day,
+- Use actual text colors, latest **3** generic runs (**10** for `/descend`),
+  Experiment # and secondary launches/day; descent leads with finish-to-finish
+  **Iterations/Hour**,
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
 - At the top, show elapsed time since the latest actual benchmark ended, from
   its producer terminal timestamp. Diagnostics, cleanup and card renders never

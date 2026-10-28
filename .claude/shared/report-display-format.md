@@ -88,7 +88,7 @@ at its actual completion receipt; later assignments get their own baseline.
 ## Conditional placement
 
 - If **any sub-agent blocks** the report's next action, move the **whole ACTIVE
-  SUB-AGENTS section** above `LAST 3 EXPERIMENTS`. Do this if and only if a
+  SUB-AGENTS section** above the experiment history (LAST 10 for descent; LAST 3 otherwise). Do this if and only if a
   sub-agent is blocking; show the section once, never duplicate it.
 - With no blocking sub-agent, place it after the experiment history. Show `No active agents`
   when the scorecard requires the section and no sub-agents are active.
@@ -146,7 +146,7 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
 - Put the infra stop rule in a small note, using the original scheduled total
   (for example `Stop at 30/600 unique infra-failed jobs`). It is not a headline
   metric. Machine admission and qualification counts belong in supporting details.
-- Retain the inline CSS-colored card, last-run age, latest three experiments,
+- Retain the inline CSS-colored card, last-run age, latest three generic experiments (ten for descent),
   original clocks, current-assignment tokens, rolling 15-minute tokens/min,
   rightmost LIFE, lifecycle/resource evidence and explicit coverage gaps.
 - Publish a fresh card when an agent starts or completes, every fixed 15-minute
@@ -154,6 +154,20 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
   existing checkpoint. Keep underlying 30-second operational monitoring active.
 
 ## Benchmark experiment history
+
+For `/descend` cards (`--iterations N`, including zero), the following overrides
+the generic three-row and launch-rate presentation: show up to the last **10**
+actual selected experiments, newest first. Put **Iterations/Hour** prominently
+at the top, using 3600 / the latest consecutive completed finish interval.
+A currently running #8 uses #6 → #7; after #8 ends use #7 → #8. Include all work
+between finishes. Missing, invalid, reversed or nonpositive endpoints are
+UNMEASURED; do not bridge an intervening missing finish. Every finished row has
+**T-<age> since finish**, calculated from NOW and its immutable producer finish.
+Running rows use **T-RUNNING**; missing or future finish clocks use
+**T-UNRECORDED**. Live client updates may change age text only, never the finish.
+Generic experiments/day may remain secondary. Explicit history IDs, original
+sources, verdicts, costs and lifecycle remain unchanged; do not pad to ten.
+The existing >3 iteration success-graph threshold is unchanged.
 
 - At the top, show **Since last benchmark ended** with the run label and elapsed
   time from its actual producer terminal timestamp. Keep this clock across
@@ -166,7 +180,8 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
   a launch count. If receipts cover only part of history, label the numeric rate
   as a lower bound and state the verified launch count and elapsed days.
 - Replace LAST SLICE TRIGGERED, WHY NO NEW SLICE, BENCHMARK PROGRESS, ACTIVE RUN
-  and the standalone cost/cache/LLM section with **LAST 3 EXPERIMENTS**, newest
+  and the standalone cost/cache/LLM section with **LAST 3 EXPERIMENTS**
+  (**LAST 10 EXPERIMENTS** for descent), newest
   first. Each main row gives experiment, state, trigger, end and elapsed; use
   aligned concise subrows for QUEUED/IN_PROGRESS/COMPLETED counts, PASS/HARNESS FAILURE/
   INFRA FAILURE, genuine agent failures, unknown outcomes, cost, cache and LLM metrics, and lifecycle.
@@ -222,5 +237,5 @@ recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
 - Retain the signed rate colors and one status emoji per agent. Active work
   is not a verified outcome. Color changes must not alter classifications,
   measurements, original clocks or the existing sections.
-- Show only the latest three original experiments; retain complete history
-  internally and use all verified launches for experiments/day.
+- Show the latest three generic original experiments or ten for descent; retain
+  complete history internally and use all verified launches for secondary experiments/day.

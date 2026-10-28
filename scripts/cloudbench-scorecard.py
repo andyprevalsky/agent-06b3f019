@@ -50,7 +50,7 @@ LIFE_ICON = {"ok": "✅", "fail": "🔴", "warn": "🟠", "pending": "🔵"}
 REQUIRED_SECTIONS = ("header", "kpis", "outcomes", "causes", "timing", "lifecycle", "history",
                      "agents", "issues", "footer")
 REQUIRED_TEXT = ("Experiment #", "experiments/day", "Since last benchmark ended", "PASS", "HARNESS",
-                 "INFRA", "Stop at", "LAST 3 EXPERIMENTS", "Lifecycle", "ISSUES / NEXT ACTION",
+                 "INFRA", "Stop at", "EXPERIMENTS", "Lifecycle", "ISSUES / NEXT ACTION",
                  "ACTIVE SUB-AGENTS", "Cost", "Cache", "LLM")
 SENTINEL = re.compile(r"(?<![\w/.-])(null|None|NaN|undefined|N/A|n/a)(?![\w/.-])|—")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -1110,9 +1110,10 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
             entry for entry in every if entry["id"] in selected)]
     number = next((e["number"] for e in history_entries if mine and e["id"] == mine["id"]), None)
     rate = ledger_mod.launch_rate(history_entries, now) if history_entries else None
+    history_limit = 10 if iterations is not None else 3
     history = []
     for entry in reversed(history_entries):
-        if len(history) == 3:
+        if len(history) == history_limit:
             break
         if mine and entry["id"] == mine["id"]:
             item = dict(exp, number=entry["number"])
@@ -1124,7 +1125,8 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
         history.append(_history_row(item))
     if not mine:
         history.insert(0, _history_row(dict(exp, number=None)))
-        history = history[:3]
+    iteration_speed = finish_to_finish_speed(history, now, exp["id"] if exp["state"] == "RUNNING" else None) if iterations is not None and mine else None
+    history = history[:history_limit]
     trend = []
     if (iterations if iterations is not None else len(history_entries)) > 3:
         for entry in history_entries:
@@ -1155,9 +1157,57 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     exp_issues = _issues(exp) + overlay_issues
     return {"format": FORMAT, "generated_at": now, "goal": goal, "number": number, "rate": rate,
             "since": since, "experiment": exp, "history": history, "trend": trend,
+            "history_limit": history_limit,
+            "iteration_speed": iteration_speed,
             "iterations": iterations, "agents": agents,
             "agents_blocking": any(a.get("blocking") for a in agents), "issues": exp_issues,
             "in_ledger": bool(mine)}
+
+
+
+def valid_finish(value, now: float) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and 0 < value <= now)
+
+
+def finish_to_finish_speed(history: list[dict], now: float, running_id: str | None = None) -> dict | None:
+    """Latest adjacent completed pair in selected launch order, newest first."""
+    rows = list(history)
+    if rows and rows[0].get("id") == running_id and rows[0].get("state") == "RUNNING" and rows[0].get("ended_at") is None:
+        rows.pop(0)
+    if len(rows) < 2:
+        return None
+    newer, older = rows[:2]
+    numbers = [older.get("number"), newer.get("number")]
+    if (any(type(number) is not int or number <= 0 for number in numbers)
+            or numbers[1] != numbers[0] + 1):
+        return None
+    if any(row.get("state") == "RUNNING" or not valid_finish(row.get("ended_at"), now)
+           for row in (older, newer)):
+        return None
+    interval = newer["ended_at"] - older["ended_at"]
+    if interval <= 0 or not math.isfinite(3600 / interval):
+        return None
+    return {"per_hour": 3600 / interval, "seconds": interval,
+            "older_id": older["id"], "newer_id": newer["id"],
+            "older_number": older.get("number"), "newer_number": newer.get("number")}
+
+
+def finish_age(row: dict, now: float) -> str:
+    if row.get("state") == "RUNNING":
+        return "T-RUNNING"
+    if not valid_finish(row.get("ended_at"), now):
+        return "T-UNRECORDED"
+    return "T-" + duration(now - row["ended_at"]) + " since finish"
+
+
+def iteration_speed_text(card: dict) -> str:
+    speed = card.get("iteration_speed")
+    if not speed:
+        return "Iterations/Hour UNMEASURED · finish-to-finish"
+    return (f'Iterations/Hour {speed["per_hour"]:.2f} · finish-to-finish '
+            f'#{speed["older_number"]} → #{speed["newer_number"]} '
+            f'({duration(speed["seconds"])} including work between experiments)')
 
 
 def _from_ledger(entry: dict) -> dict:
@@ -1221,6 +1271,26 @@ def _issues(exp: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- HTML
 
+
+# Browser clock updates only the age label; producer finish timestamps stay fixed.
+FINISH_AGE_SCRIPT = r"""
+function finishAgeLabel(end, now) {
+  if (!Number.isFinite(end) || end <= 0 || !Number.isFinite(now) || end > now) return 'T-UNRECORDED';
+  const s = Math.floor(now - end + 0.5), d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  const m = Math.floor(s % 3600 / 60), sec = s % 60, pad = n => String(n).padStart(2, '0');
+  const age = d ? `${d}d${h}h` : h ? `${h}h${pad(m)}m` : m ? `${m}m${pad(sec)}s` : `${sec}s`;
+  return `T-${age} since finish`;
+}
+function updateFinishAges() {
+  const now = Date.now() / 1000;
+  document.querySelectorAll('[data-finished-at]').forEach(node => {
+    node.textContent = finishAgeLabel(Number(node.dataset.finishedAt), now);
+  });
+}
+updateFinishAges();
+setInterval(updateFinishAges, 1000);
+"""
+
 CSS = """
 :root{color-scheme:light dark;--fg:light-dark(#1f2328,#e6edf3);--muted:light-dark(#59636e,#9198a1);
 --line:light-dark(#d1d9e0,#3d444d);--tile:light-dark(#f6f8fa,#151b23);--ok:light-dark(#1a7f37,#3fb950);
@@ -1232,6 +1302,7 @@ body{margin:0;padding:12px;background:transparent}main{max-width:760px;margin:0 
 section{margin:0 0 14px}h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--run);margin:0 0 6px;font-weight:650}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.run{color:var(--run)}.warn{color:var(--warn)}.na{color:var(--na)}
 .agent{color:var(--agent)}.harness{color:var(--harness)}.muted{color:var(--muted)}
+.iteration-speed{font-size:26px;font-weight:800;color:var(--run);padding:10px 12px;border:2px solid var(--run);border-radius:10px;margin-bottom:10px;overflow-wrap:anywhere}
 .title{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;font-size:19px;font-weight:700}
 .badge{font-size:13px;font-weight:700;padding:1px 8px;border:1px solid currentColor;border-radius:999px}
 .sub{color:var(--muted);font-size:13px;overflow-wrap:anywhere}.sub b{color:var(--fg)}
@@ -1340,6 +1411,10 @@ def render_html(card: dict) -> str:
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            f'<meta name="generator" content="{GENERATOR}"><title>{e(exp["label"])} scorecard</title>',
            f"<style>{CSS}</style></head><body><main>"]
+    # Descent speed is distinct from the secondary generic launch-rate metric.
+    if card.get("iterations") is not None:
+        out.append('<section data-section="iteration-speed" class="iteration-speed">'
+                   + e(iteration_speed_text(card)) + '</section>')
     # Header
     since = card.get("since") or {}
     since_html = (_span("run", "RUNNING") if since.get("state") == "RUNNING" else
@@ -1476,7 +1551,10 @@ def render_html(card: dict) -> str:
                + (f" · {e(reason)}" if reason else "") +
                f'<div class="gen">Rendered by scripts/run-bench scorecard ({FORMAT}) at {e(pacific(card["generated_at"]))} from recorded artifacts.</div></footer>')
     data = json.dumps(_public(card), sort_keys=True, allow_nan=False).replace("</", "<\\/")
-    out.append(f'</main><script type="application/json" id="scorecard-data">{data}</script></body></html>\n')
+    out.append(f'</main><script type="application/json" id="scorecard-data">{data}</script>')
+    if card.get("iterations") is not None:
+        out.append('<script>' + FINISH_AGE_SCRIPT + '</script>')
+    out.append('</body></html>\n')
     return "".join(out)
 
 
@@ -1544,14 +1622,18 @@ def _history_html(card) -> str:
         cost_text = f'💲 {money(cost["metered_usd"])} metered' if cost.get("metered_usd") is not None else "💲 UNMETERED"
         blocks.append(f'<div class="hist"><div class="l1"><span>{e(number)}</span><span class="{STATE_CLASS[state]}">'
                       f'{STATE_ICON[state]} {e(state)}</span><span>{e(h["label"])}</span><span class="muted">{e(elapsed)}</span></div>'
-                      f'<div class="l2">{e(pacific(h.get("triggered_at")))} → {e(end)} · {e(prog_text)} · {e(cost_text)}</div>'
+                      + ((f'<div class="l2 finish-age" data-finished-at="{h["ended_at"]}">{e(finish_age(h, card["generated_at"]))}</div>'
+                          if h["state"] != "RUNNING" and valid_finish(h.get("ended_at"), card["generated_at"])
+                          else f'<div class="l2">{e(finish_age(h, card["generated_at"]))}</div>')
+                         if card.get("iterations") is not None else "")
+                      + f'<div class="l2">{e(pacific(h.get("triggered_at")))} → {e(end)} · {e(prog_text)} · {e(cost_text)}</div>'
                       f'<div class="l3">{_bar(o, total, mini=True, label=str(number) + " outcomes")}<span>{e(stats)}</span></div>'
                       + (f'<div class="l2 clip" title="{e(h["state_reason"])}">{e(h["state_reason"])}</div>'
                          if h.get("state_reason") and state != "COMPLETE" else "")
                       + "</div>")
     if not blocks:
         blocks.append('<div class="note">No launched experiments recorded.</div>')
-    return _trend_html(card) + f'<section data-section="history"><h2>LAST 3 EXPERIMENTS</h2>{"".join(blocks)}</section>'
+    return _trend_html(card) + f'<section data-section="history"><h2>LAST {card.get("history_limit", 3)} EXPERIMENTS</h2>{"".join(blocks)}</section>'
 
 
 def _trend_html(card: dict) -> str:
@@ -1592,6 +1674,8 @@ def render_text(card: dict) -> str:
              f'{exp["label"]} · {total or "UNRECORDED"} scheduled · {exp.get("surface")} · src {short_ref(exp.get("source_ref"))}',
              f'Triggered {pacific(exp.get("triggered_at"))}',
              _rate_text(card)]
+    if card.get("iterations") is not None:
+        lines.insert(0, iteration_speed_text(card))
     since = card.get("since") or {}
     lines.append("Since last benchmark ended: " + ("RUNNING" if since.get("state") == "RUNNING" else
                  f'{duration(since["age"])} ({since["label"]})' if since.get("state") == "ENDED" else "END UNRECORDED"))
@@ -1630,10 +1714,11 @@ def render_text(card: dict) -> str:
         lines.append("SUCCESS RATE OVER TIME")
         lines.append("  " + " · ".join(f'#{t["number"]} {t["rate"]*100:.1f}%{" (running)" if t["running"] else ""}'
                                        if t["rate"] is not None else f'#{t["number"]} gap' for t in card["trend"]))
-    lines.append("LAST 3 EXPERIMENTS")
+    lines.append(f'LAST {card.get("history_limit", 3)} EXPERIMENTS')
     for h in card.get("history") or []:
         ho = h.get("outcomes") or {}
-        lines.append(f'  #{h.get("number") or "?"} {STATE_ICON[h["state"]]} {h["state"]} {h["label"]} · '
+        age = (" · " + finish_age(h, card["generated_at"])) if card.get("iterations") is not None else ""
+        lines.append(f'  #{h.get("number") or "?"} {STATE_ICON[h["state"]]} {h["state"]} {h["label"]}{age} · '
                      f'{pacific(h.get("triggered_at"))} → '
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
@@ -1697,6 +1782,8 @@ def validate_html(raw: str) -> list[str]:
     for label in REQUIRED_TEXT:
         if label not in text:
             problems.append(f"missing required field: {label}")
+    if not re.search(r"LAST (3|10) EXPERIMENTS", text):
+        problems.append("missing required experiment history heading")
     for match in SENTINEL.finditer(text):
         problems.append(f"empty sentinel displayed: {match.group(0)!r} near {text[max(0, match.start() - 30):match.end() + 30]!r}")
     for url in parser.urls:

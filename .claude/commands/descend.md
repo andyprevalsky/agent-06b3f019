@@ -1134,9 +1134,19 @@ Read `.claude/shared/benchmark-report-format.txt`, or retrieve it with
 `scripts/run-bench report-format`. It is the sole scorecard contract; render
 each card with `scripts/run-bench scorecard <run-dir> --html <file>` and publish
 that output instead of hand-writing it; preserve
-the Experiment Number in the first row, experiments/day for this goal, and
-the last three experiments with concise timing, queue/verdict, cost/cache/latency
-and lifecycle subrows. Preserve the frame, denominators and active-worker lines;
+**Iterations/Hour** prominently at the top, the Experiment Number, and
+the last ten actual selected experiments with concise timing, queue/verdict, cost/cache/latency
+and lifecycle subrows. Use the existing `--iterations N` to select this descent
+presentation (including N=0). Iterations/Hour is 3600 divided by the latest
+consecutive completed producer finish interval: while #8 runs use #6 → #7;
+after #8 finishes use #7 → #8. Include all intervening work and gaps. Never
+substitute launch rate, execution duration, render time or observer completion;
+missing, reversed or nonpositive endpoints remain UNMEASURED without bridging
+an intervening missing experiment. Every finished row shows T- elapsed time
+since its original finish, explicitly labelled “since finish”; running and
+unknown rows show T-RUNNING and T-UNRECORDED. Refresh live ages without changing
+stored finish clocks. Keep the generic launches/day secondary when displayed.
+Preserve the frame, denominators and active-worker lines;
 remove the old standalone active-run/progress/metrics and last-slice blocks. Never
 display nulls or empty sentinels: use a concrete coverage state or an evidenced
 milestone estimate, and use `warming <age>` for incomplete rate history rather

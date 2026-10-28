@@ -31,7 +31,7 @@ Communication contract (mandatory)
   threshold, QUEUED/IN_PROGRESS/COMPLETED progress, elapsed and execution
   window), the outcome bar with PASS, HARNESS FAILURE and INFRA FAILURE always
   shown, failure causes, timing/cost/cache/LLM coverage, the lifecycle
-  checklist, LAST 3 EXPERIMENTS, active sub-agents and ISSUES / NEXT ACTION.
+  checklist, LAST 3 EXPERIMENTS (10 for descent), active sub-agents and ISSUES / NEXT ACTION.
 - Publish the card on agent start/completion, every fixed 15-minute checkpoint,
   and benchmark-state changes. Events never reset the checkpoint or run clock.
 - User-requested approval messages use .claude/shared/approval-format.md instead:
@@ -46,6 +46,22 @@ Communication contract (mandatory)
 - The card never displays null, —, N/A, blank fields or empty sentinels; missing
   evidence renders as RUNNING, UNMEASURED, UNMETERED, UNRECORDED or NOT SCORED.
   Never invent zeros or measurements.
+
+
+Descent presentation override (explicit user default)
+- `--iterations N` (including zero) selects the `/descend` display: up to LAST 10
+  actual selected experiments, newest first; generic cards retain LAST 3.
+- Put Iterations/Hour prominently at the top: 3600 / seconds between the latest
+  consecutive completed producer finishes. While #8 runs use #6 → #7; after #8
+  finishes use #7 → #8. Count all intervening work/gaps, never launch rate or
+  execution time. Missing/reversed/nonpositive intervals remain UNMEASURED and
+  never bridge an intervening missing experiment.
+- Each finished history row shows T-<age> since finish (NOW minus original
+  producer finish). Running rows show T-RUNNING; unknown/future ends show
+  T-UNRECORDED. Browser updates age text only; original timestamps never move.
+- Keep sources, grades, costs, lifecycle and explicit history scope unchanged.
+  Do not add fake rows. Generic experiments/day may remain secondary. The >3
+  descent-iteration threshold for the success graph is unchanged.
 
 Maintain the run (mandatory; this card is not a stopping point)
 - Continuously make progress toward the authorized benchmark goal: observe,
@@ -106,7 +122,7 @@ Measurement contract
   3 EXPERIMENTS from it. Exclude local diagnostics, tests and prepared drafts.
   Backfilled history is labelled a lower bound; never equate the experiment
   sequence number with the launch count or type these values by hand.
-- Show only the latest three actual qualification experiments, newest first, as
+- Show the latest three generic actual qualification experiments (ten for descent), newest first, as
   compact rows with a mini outcome bar. For each, retain trigger, producer end,
   total elapsed, QUEUED/IN_PROGRESS/COMPLETED counts, task verdicts, infrastructure
   reliability, costs, cache rates, LLM latencies and lifecycle coverage. These
@@ -114,7 +130,7 @@ Measurement contract
   ends RUNNING; an unknown historical end reads END UNRECORDED, not capture time.
 - Once a descent goal has more than three completed iterations, pass its count
   to `scripts/run-bench scorecard` with `--iterations N` and show SUCCESS RATE
-  OVER TIME above the latest-three rows. Outside descent, use more than three
+  OVER TIME above the history rows. Outside descent, use more than three
   launched experiments as the threshold. Plot task PASS divided by scored tasks for
   every experiment in goal order. Leave experiments with no scored tasks as
   gaps, and draw a still-running experiment's point hollow. The text fallback
@@ -164,7 +180,7 @@ Measurement contract
   Keep actual milestones and result counts separately. Low usage alone is not
   a stall. Every red row names its real blocker and corrective owner/action;
   completed work and healthy monitoring get no false stall alarm. No legends.
-  If any worker blocks the next action, put the whole agent section above LAST 3
+  If any worker blocks the next action, put the whole agent section above the experiment history
   EXPERIMENTS; otherwise put it after that history. Include it once. Show No active
   agents when empty. Do not pause workers to edit or discuss their scorecard.
 - Evidence must identify this concrete slice/group and its durable viewer, retaining
@@ -174,6 +190,7 @@ Text fallback (the exact shape `scripts/run-bench scorecard <run-dir> --text`
 prints; never type it by hand):
 
 ```diff
+[Descent only] Iterations/Hour <rate or UNMEASURED> · finish-to-finish #<older> → #<newer>
 🧪 EXPERIMENT #<number> · <state emoji> <STATE>
 <slice> · <scheduled> scheduled · <cloud/local> · src <checkpoint>
 Triggered <Month D, h:mm:ss AM/PM PDT/PST>
@@ -190,8 +207,8 @@ Lifecycle
   <✅/🔴/🟠/🔵> <release, controllers, exports, results, publication evidence>
 SUCCESS RATE OVER TIME (after >3 completed descent iterations, or >3 generic experiments)
   #<n> <task pass % | gap> [running]
-LAST 3 EXPERIMENTS
-  #<n> <state> <label> · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>
+LAST 3 EXPERIMENTS (LAST 10 for descent)
+  #<n> <state> <label> · [descent: T-<age> since finish | T-RUNNING | T-UNRECORDED] · <TRIGGERED> → <ENDED/RUNNING> · PASS <n>/<scored> · INFRA <n>/<attempts>
 ACTIVE SUB-AGENTS / PARENT
   <status> <name>/<work> · <tokens> · <15m tok/min | warming <age> | UNMETERED> · <LIFE>
 ISSUES / NEXT ACTION

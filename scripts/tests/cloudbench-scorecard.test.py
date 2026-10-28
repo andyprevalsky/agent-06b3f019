@@ -192,6 +192,124 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_descent_last_ten_and_finish_speed_include_interexperiment_work(self):
+        ids = [f"history-{i:02d}" for i in range(1, 13)]
+        for i, ident in enumerate(ids, 1):
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal=f"cohort-{i % 2}",
+                             run_dir=str(self.tmp / ident), triggered_at=T0 + i * 1000)
+            if i < 12:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=T0 + i * 1000 + 100,
+                                 state="ABORTED" if i == 10 else "COMPLETE")
+        directory = self.tmp / ids[-1]
+        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "running",
+              "started_at": "2026-10-18T22:48:52Z", "jobs": [], "total_jobs": 1})
+        before = self.f.ledger.read_bytes()
+        data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)),
+                             iterations=8, now=T0 + 13000)
+        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids[-10:])))
+        self.assertEqual(data["iteration_speed"]["per_hour"], 3.6)
+        self.assertEqual((data["iteration_speed"]["older_number"], data["iteration_speed"]["newer_number"]), (10, 11))
+        text = CARD["render_text"](data)
+        self.assertTrue(text.startswith("Iterations/Hour 3.60"))
+        self.assertIn("finish-to-finish #10 → #11", text)
+        self.assertIn("LAST 10 EXPERIMENTS", text)
+        self.assertIn("T-RUNNING", text)
+        self.assertIn("T-31m40s since finish", text)
+        document = self.valid(data)
+        self.assertLess(document.index('class="iteration-speed"'), document.index('data-section="header"'))
+        self.assertEqual(document.count('class="hist"'), 10)
+        self.assertIn('data-finished-at=', document)
+        generic = CARD["build"](directory, ledger=self.f.ledger, history_ids=ids, now=T0 + 13000)
+        self.assertEqual(len(generic["history"]), 3)
+        self.assertIsNone(generic["iteration_speed"])
+        self.assertNotIn("Iterations/Hour", CARD["render_text"](generic))
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "failed",
+              "started_at": "2026-10-18T22:48:52Z", "finished_at": "2026-10-18T22:55:32Z",
+              "jobs": [], "total_jobs": 1})
+        finished = CARD["build"](directory, ledger=self.f.ledger, history_ids=ids,
+                                 iterations=8, now=T0 + 13000)
+        self.assertEqual((finished["iteration_speed"]["older_number"],
+                          finished["iteration_speed"]["newer_number"]), (11, 12))
+        self.assertAlmostEqual(finished["iteration_speed"]["per_hour"], 3600 / 1300)
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_descent_public_render_speed_and_finish_age(self):
+        run = self.f.fleet()
+        LEDGER["record"]("launch", "older", ledger=self.f.ledger, goal="fleet-goal",
+                         run_dir=str(self.tmp / "older"), triggered_at=T0 - 3600)
+        LEDGER["record"]("end", "older", ledger=self.f.ledger, ended_at=T0 - 1800, state="ABORTED")
+        card = render(run, self.f, iterations=1)
+        text = CARD["render_text"](card)
+        self.assertTrue(text.startswith("Iterations/Hour 1.30 · finish-to-finish #1 → #2"))
+        self.assertIn("T-44m00s since finish", text)
+        self.assertIn("Iterations/Hour 1.30", self.valid(card))
+        newer = render(run, self.f, iterations=1)
+        newer["generated_at"] += 3600
+        self.assertIn("T-1h44m since finish", CARD["render_text"](newer))
+        self.assertEqual(card["experiment"]["ended_at"], newer["experiment"]["ended_at"])
+
+    def test_public_descent_render_rejects_missing_future_or_nonpositive_interval(self):
+        run = self.f.fleet()
+        LEDGER["record"]("launch", "older", ledger=self.f.ledger, goal="fleet-goal",
+                         run_dir=str(self.tmp / "older"), triggered_at=T0 - 3600)
+        LEDGER["record"]("end", "older", ledger=self.f.ledger, ended_at=T0 - 1800, state="COMPLETE")
+        entries = LEDGER["read"](self.f.ledger)
+        for end in (None, 0, NOW + 1, T0 + 960, T0 + 1000):
+            changed = [dict(e, ended_at=end) if e.get("id") == "older" and e.get("event") == "end" else e for e in entries]
+            self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in changed))
+            card = render(run, self.f, iterations=1)
+            self.assertIsNone(card["iteration_speed"])
+            self.assertTrue(CARD["render_text"](card).startswith("Iterations/Hour UNMEASURED"))
+            self.valid(card)
+            if end is None or end == 0 or end > NOW:
+                self.assertIn("T-UNRECORDED", CARD["render_text"](card))
+
+    def test_unrecorded_current_finish_cannot_supply_iteration_speed(self):
+        run = self.f.fleet()
+        other = self.tmp / "unrecorded"
+        write(other / "summary.json", {"campaign_id": "unrecorded", "status": "failed", "jobs": [],
+              "started_at": "2026-10-18T19:50:00Z", "finished_at": "2026-10-18T20:00:00Z"})
+        card = CARD["build"](other, ledger=self.f.ledger, goal="fleet-goal", iterations=1, now=NOW)
+        self.assertFalse(card["in_ledger"])
+        self.assertIsNone(card["iteration_speed"])
+        self.assertTrue(CARD["render_text"](card).startswith("Iterations/Hour UNMEASURED"))
+        self.valid(card)
+
+    def test_finish_speed_and_age_do_not_bridge_missing_or_invalid_clocks(self):
+        older = {"id": "a", "number": 6, "state": "COMPLETE", "ended_at": 1000}
+        newer = {"id": "b", "number": 7, "state": "FAILED", "ended_at": 4600}
+        running = {"id": "c", "number": 8, "state": "RUNNING", "ended_at": None}
+        speed = CARD["finish_to_finish_speed"]([running, newer, older], 10000, "c")
+        self.assertEqual(speed["per_hour"], 1)
+        for invalid in (None, 0, -1, True, float("nan"), float("inf"), 11000, 4600, 5000):
+            broken = dict(older, ended_at=invalid)
+            self.assertIsNone(CARD["finish_to_finish_speed"]([running, newer, broken], 10000, "c"))
+        # A missing intervening finish cannot be bridged to the prior good one.
+        self.assertIsNone(CARD["finish_to_finish_speed"]([newer, dict(running, number=6), older], 10000))
+        self.assertIsNone(CARD["finish_to_finish_speed"]([dict(newer, ended_at=None), older], 10000))
+        self.assertIsNone(CARD["finish_to_finish_speed"]([running], 10000))
+        self.assertEqual(CARD["finish_age"](older, 4600), "T-1h00m since finish")
+        self.assertEqual(CARD["finish_age"](older, 8200), "T-2h00m since finish")
+        self.assertEqual(CARD["finish_age"](running, 4600), "T-RUNNING")
+        self.assertEqual(CARD["finish_age"](dict(older, ended_at=None), 4600), "T-UNRECORDED")
+        self.assertEqual(CARD["finish_age"](dict(older, ended_at=5000), 4600), "T-UNRECORDED")
+
+    def test_finish_age_browser_clock_updates_only_age_text(self):
+        script = """const nodes = [{dataset:{finishedAt:'1000'}, textContent:''}];
+let clock=4600000, tick;
+global.Date={now:()=>clock};
+global.document={querySelectorAll:()=>nodes};
+global.setInterval=(f,ms)=>{tick=f;if(ms!==1000)throw Error('cadence');};
+""" + CARD["FINISH_AGE_SCRIPT"] + """
+if(nodes[0].textContent!=='T-1h00m since finish')throw Error('first age');
+clock=8200000;tick();
+if(nodes[0].textContent!=='T-2h00m since finish')throw Error('live age');
+if(nodes[0].dataset.finishedAt!=='1000')throw Error('finish changed');
+if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_explicit_history_scope_preserves_rotating_cohort_continuity(self):
         entries = LEDGER["read"](GOLDEN / "rotating-cohort-ledger.jsonl")
         launches = LEDGER["experiments"](entries)
@@ -209,8 +327,8 @@ class Scorecard(unittest.TestCase):
         data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)), iterations=5, now=1793147000)
         self.assertEqual(data["number"], 6)
         self.assertEqual(data["rate"]["launches"], 6)
-        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids[-3:])))
-        self.assertEqual([r["number"] for r in data["history"]], [6, 5, 4])
+        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids)))
+        self.assertEqual([r["number"] for r in data["history"]], [6, 5, 4, 3, 2, 1])
         self.assertEqual(len(data["trend"]), 6)
         self.assertEqual(data["rate"]["goal_started_at"], launches[-6]["triggered_at"])
         self.assertEqual(self.f.ledger.read_bytes(), old, "scope selection never rewrites the original ledger")
