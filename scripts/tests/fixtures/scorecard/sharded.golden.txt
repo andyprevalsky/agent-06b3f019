@@ -9,7 +9,7 @@ AGENT FAIL 2
 Stop at 1/4 unique infra-failed jobs (5%)
      2 AGENT FAIL: reason UNRECORDED
 Cost $0.25 metered (1/4) · infra/wmh_grounding UNMETERED
-Cache agent demo-cache avg 80% (1/4) · LLM latency UNMEASURED
+Cache UNMEASURED · LLM latency UNMEASURED
 Lifecycle
   ✅ Global start barrier released · Oct 18, 12:38:52 PM PDT
   ✅ Guests released (native audit) · Oct 18, 1:03:52 PM PDT: none present of 2 owned guests + 1 controllers

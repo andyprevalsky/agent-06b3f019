@@ -192,6 +192,59 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_explicit_history_scope_preserves_rotating_cohort_continuity(self):
+        entries = LEDGER["read"](GOLDEN / "rotating-cohort-ledger.jsonl")
+        launches = LEDGER["experiments"](entries)
+        ids = [entry["id"] for entry in launches[-6:]]
+        for entry in entries:
+            if "run_dir" in entry:
+                entry["run_dir"] = str(self.tmp / entry["id"])
+        self.f.ledger.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        directory = self.tmp / ids[-1]
+        write(directory / "summary.json", {"campaign_id": ids[-1], "jobs": [], "total_jobs": 30,
+              "started_at": "2026-10-28T00:05:53Z", "status": "running"})
+        old = self.f.ledger.read_bytes()
+        default = CARD["build"](directory, ledger=self.f.ledger, iterations=5, now=1793147000)
+        self.assertEqual(default["number"], 1, "the original cohort-local scope remains available")
+        data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)), iterations=5, now=1793147000)
+        self.assertEqual(data["number"], 6)
+        self.assertEqual(data["rate"]["launches"], 6)
+        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids[-3:])))
+        self.assertEqual([r["number"] for r in data["history"]], [6, 5, 4])
+        self.assertEqual(len(data["trend"]), 6)
+        self.assertEqual(data["rate"]["goal_started_at"], launches[-6]["triggered_at"])
+        self.assertEqual(self.f.ledger.read_bytes(), old, "scope selection never rewrites the original ledger")
+        for invalid in (ids + ["missing"], ids[:-1], ids + [ids[0]]):
+            with self.assertRaises(ValueError):
+                CARD["build"](directory, ledger=self.f.ledger, history_ids=invalid, now=1793147000)
+        command = [sys.executable, str(ROOT / "scripts/cloudbench-scorecard.py"), str(directory),
+                   "--ledger", str(self.f.ledger), "--json", "--iterations", "5", "--now", "1793147000"]
+        for ident in reversed(ids):
+            command += ["--history-id", ident]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout)["number"], 6)
+        self.assertEqual(self.f.ledger.read_bytes(), old)
+
+    def test_provider_prompt_cache_share_requires_complete_denominator(self):
+        capture = json.loads((GOLDEN / "provider-prompt-cache.json").read_text())
+        recorded = task("task-1", "passed")
+        recorded.update(prompt_cache_read_input_tokens=capture["legacy_read"],
+                        prompt_cache_creation_input_tokens=capture["legacy_write"],
+                        prompt_cache_uncached_input_tokens=capture["prompt_uncached"])
+        report = card("r1", [recorded])
+        report["cost"]["fast_cache_hit_rate"] = 1.0
+        row = CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]}, {"r1": report})[0]
+        self.assertAlmostEqual(row["cache_hit"], 213760 / 231563)
+        for invalid in (None, -1, True, float("nan"), float("inf")):
+            recorded["prompt_cache_uncached_input_tokens"] = invalid
+            self.assertIsNone(CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]},
+                                                   {"r1": report})[0]["cache_hit"])
+        for key in list(recorded):
+            if key.startswith("prompt_cache_"):
+                recorded.pop(key)
+        self.assertIsNone(CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]},
+                                               {"r1": report})[0]["cache_hit"], "legacy ratio is not a complete denominator")
+
     def test_preallocation_controller_cancellation_receipts(self):
         capture = json.loads((GOLDEN / "preallocation-campaign-receipts.json").read_text())
         root = self.tmp / "workspace"
@@ -641,7 +694,7 @@ class Scorecard(unittest.TestCase):
         exp = data["experiment"]
         self.assertEqual((exp["state"], exp["progress"]["completed"]), ("COMPLETE", 2))
         self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"]), (1, 1))
-        self.assertEqual(exp["cache"]["avg"], 0.938)
+        self.assertIsNone(exp["cache"], "legacy summary percentage lacks uncached-input coverage")
         self.assertIn("Timeout after 300s", CARD["render_text"](data))
         self.valid(data)
         # The run ends when its last required cleanup receipt lands, including a

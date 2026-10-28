@@ -216,6 +216,16 @@ def card_for(job: dict, cards: dict) -> dict | None:
     return None
 
 
+def provider_prompt_cache_share(task: dict) -> float | None:
+    """Read provider prompt reuse only with the uncached-input denominator."""
+    counts = [task.get("prompt_cache_" + name + "_input_tokens") for name in ("read", "creation", "uncached")]
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) or value < 0 for value in counts):
+        return None
+    total = sum(counts)
+    return counts[0] / total if math.isfinite(total) and total > 0 else None
+
+
 def compact_rows(summary: dict, cards: dict | None = None) -> list[dict]:
     """Bounded per-job rows from a campaign summary plus its fleet report cards."""
     cards = cards or {}
@@ -241,7 +251,7 @@ def compact_rows(summary: dict, cards: dict | None = None) -> list[dict]:
             "released": job.get("resources_released"), "lifecycle": job.get("lifecycle_verified"),
             "exec_s": task.get("duration_s"), "cost_usd": task.get("cost_usd"),
             "reason": reason_key(task.get("failure_reason")), "agent_id": task.get("agent_id"),
-            "cache_hit": ((card or {}).get("cost") or {}).get("fast_cache_hit_rate"),
+            "cache_hit": provider_prompt_cache_share(task),
             "window_s": _window(card),
             "unmetered": sorted(k.replace("_usd", "") for k, v in ((card or {}).get("cost") or {}).items()
                                 if k.endswith("_usd") and k != "total_usd" and v is None),
@@ -413,7 +423,6 @@ def load_fleet(run_dir: Path) -> dict:
     local_run = read_json(run_dir / "run.json") if local else None
     local_tasks = {task.get("name"): task for task in (local_run or {}).get("tasks", [])
                    if isinstance(task, dict) and task.get("name")}
-    local_cache_pct = ((local_run or {}).get("summary") or {}).get("cache_hit_pct")
     stack_owner = read_json(run_dir / "local-stack-owner.json") if local else None
     benchmark_owner = read_json(run_dir / "local-benchmark-owner.json") if local else None
     stack_token = (stack_owner or {}).get("token")
@@ -470,8 +479,7 @@ def load_fleet(run_dir: Path) -> dict:
             "agent_url": task.get("agent_url"),
             "reason": reason_key(task.get("failure_reason") or local_task.get("failure_reason")),
             "released": (local_released if local else True if (isinstance(lifecycle, dict) and lifecycle.get("status") == "verified") else None),
-            "cache_hit": (card.get("cost") or {}).get("fast_cache_hit_rate") if not local else (
-                local_cache_pct / 100 if isinstance(local_cache_pct, (int, float)) else None),
+            "cache_hit": provider_prompt_cache_share(local_task if local and local_task else task),
             "unmetered": sorted(k.replace("_usd", "") for k, v in (card.get("cost") or {}).items()
                                 if k.endswith("_usd") and k != "total_usd" and v is None),
             "wall_s": (read_epoch(task_dir / "bench-e2e.finished-epoch") or 0) - (read_epoch(task_dir / "bench-e2e.started-epoch") or 0)
@@ -1049,7 +1057,7 @@ def stale_overlay_rows(rows: list[dict], kind: str, *, now: float, evidence_at: 
 
 
 def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None, iterations: int | None = None,
-          agents=None, issues=None,
+          agents=None, issues=None, history_ids: list[str] | None = None,
           now: float | None = None, deep: bool = True) -> dict:
     now = time.time() if now is None else now
     exp = load(run_dir, deep)
@@ -1063,6 +1071,19 @@ def build(run_dir: Path, *, ledger: Path | None = None, goal: str | None = None,
     if exp.get("label") is None:
         exp["label"] = (mine or {}).get("slice") or exp["id"]
     history_entries = ledger_mod.experiments(entries, goal) if goal else ([mine] if mine else [])
+    if history_ids is not None:
+        # A descent may rotate task cohorts; its explicit membership, not task
+        # overlap or elapsed time, joins those original launches for reporting.
+        if len(history_ids) != len(set(history_ids)):
+            raise ValueError("history scope contains duplicate experiment IDs")
+        selected = set(history_ids)
+        known = {entry["id"] for entry in every}
+        if selected - known:
+            raise ValueError("history scope contains unrecorded experiment IDs: " + ", ".join(sorted(selected - known)))
+        if not mine or mine["id"] not in selected:
+            raise ValueError("history scope must include the current recorded experiment")
+        history_entries = [dict(entry, number=index + 1) for index, entry in enumerate(
+            entry for entry in every if entry["id"] in selected)]
     number = next((e["number"] for e in history_entries if mine and e["id"] == mine["id"]), None)
     rate = ledger_mod.launch_rate(history_entries, now) if history_entries else None
     history = []
@@ -1397,7 +1418,7 @@ def render_html(card: dict) -> str:
         timing.append(("💲 Cost", f'{e(money(cost["metered_usd"]))} agent LLM metered · {cost["n"]}/{cost["of"]} runs{unmetered}'))
     else:
         timing.append(("💲 Cost", _span("warn", "UNMETERED")))
-    timing.append(("Cache", f'agent demo-cache hit avg {cache["avg"] * 100:.0f}% · {cache["n"]}/{cache["of"]} runs'
+    timing.append(("Cache", f'provider prompt-cache share avg {cache["avg"] * 100:.1f}% · {cache["n"]}/{cache["of"]} runs'
                    if cache else _span("warn", "UNMEASURED")))
     timing.append(("LLM latency", _span("warn", "UNMEASURED")))
     out.append('<section data-section="timing"><h2>Timing · Cost</h2><dl>'
@@ -1574,7 +1595,7 @@ def render_text(card: dict) -> str:
     lines.append("Cost " + (f'{money(cost["metered_usd"])} metered ({cost["n"]}/{cost["of"]})' if cost.get("metered_usd") is not None else "UNMETERED")
                  + (" · " + "/".join(cost["unmetered"]) + " UNMETERED" if cost.get("unmetered") else ""))
     cache = exp.get("cache")
-    lines.append("Cache " + (f'agent demo-cache avg {cache["avg"] * 100:.0f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
+    lines.append("Cache " + (f'provider prompt-cache share avg {cache["avg"] * 100:.1f}% ({cache["n"]}/{cache["of"]})' if cache else "UNMEASURED")
                  + " · LLM latency UNMEASURED")
     lines.append("Lifecycle")
     lines += [f'  {LIFE_ICON[i["state"]]} {i["label"]}' + (f' · {i["detail"]}' if i["detail"] else "") for i in exp["lifecycle"]]
@@ -1701,6 +1722,7 @@ def main(argv=None) -> int:
     parser.add_argument("--issues", type=Path, help="JSON list of {text, owner, action, severity}")
     parser.add_argument("--ledger", type=Path, help="experiments ledger (default: git-common)")
     parser.add_argument("--goal", help="experiment goal for numbering and history")
+    parser.add_argument("--history-id", action="append", help="exact recorded experiment ID in this descent (repeat across cohort rotations)")
     parser.add_argument("--iterations", type=int, help="completed descent iterations; controls the >3 trend threshold")
     parser.add_argument("--now", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--shallow", action="store_true", help="skip reading verified export archives")
@@ -1724,9 +1746,10 @@ def main(argv=None) -> int:
     try:
         card = build(args.run_dir, ledger=args.ledger or ledger_mod.ledger_path(HERE.parent), goal=args.goal,
                      iterations=args.iterations,
+                     history_ids=args.history_id,
                      agents=agents if isinstance(agents, list) else None,
                      issues=issues if isinstance(issues, list) else None, now=args.now, deep=not args.shallow)
-    except StaleOverlay as error:
+    except (StaleOverlay, ValueError) as error:
         print(f"scorecard refused: {error}", file=sys.stderr)
         return 1
     if args.html:

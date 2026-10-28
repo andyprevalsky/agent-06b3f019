@@ -10,7 +10,7 @@ Stop at 1/5 unique infra-failed jobs (5%)
      1 AGENT FAIL: Expected tool 'spawn_browser_agent' not found in messages
      1 INFRA: reason UNRECORDED
 Cost $0.25 metered (1/5) · infra/wmh_grounding UNMETERED
-Cache agent demo-cache avg 80% (1/5) · LLM latency UNMEASURED
+Cache UNMEASURED · LLM latency UNMEASURED
 Lifecycle
   ✅ Guests released · 3/3 terminal jobs
   ✅ Lifecycle verified · 3/3 terminal jobs
