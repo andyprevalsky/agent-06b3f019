@@ -326,7 +326,7 @@ GATES = (
     ),
     Gate(
         "cloudbench-bootstrap-recovery",
-        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=440, shards=4
+        ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=200, shards=2
     ),
     Gate(
         "cloudbench-static-service-observation",
