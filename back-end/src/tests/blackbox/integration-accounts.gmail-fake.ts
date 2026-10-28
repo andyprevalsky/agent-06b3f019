@@ -1,8 +1,8 @@
 /**
  * Gmail faked at the global fetch boundary for the Gmail sync-progress case:
  * one mailbox per access token, with knobs for the failures a real sync meets
- * (profile outage, list error, a batch that fails mid-sync) and a log of what
- * was asked. `install()` routes only Google API hosts here; every other request
+ * (profile outage, list error, a batch that fails mid-sync, the per-user quota
+ * wall) and a log of what was asked. `install()` routes only Google API hosts here; every other request
  * (the backend under test) goes to the real fetch.
  */
 
@@ -43,6 +43,16 @@ export class FakeMailbox {
   batchCalls = 0;
   /** Ids Google returned full content for, in request order. */
   fullFetched: string[] = [];
+  /**
+   * Google's per-user quota wall: after `skip` metered requests (profile,
+   * messages.get, each batch sub-request), answer every request for the next
+   * `forMs` with the exact 403 rateLimitExceeded body Gmail sends ("Units per
+   * minute per user"). The budget refills when the window ends.
+   */
+  quotaWall: { skip: number; forMs: number } | null = null;
+  private quotaWallUntil: number | null = null;
+  /** How many requests the quota wall rejected. */
+  quotaRejected = 0;
   /** history.list answers keyed by startHistoryId. */
   history = new Map<string, { added: string[]; newHistoryId: string }>();
 
@@ -63,7 +73,38 @@ export class FakeMailbox {
   byId(id: string): FakeMessage | undefined {
     return this.messages.find((m) => m.id === id);
   }
+
+  /** Meter one request; true when the quota wall rejects it. */
+  overQuota(): boolean {
+    if (this.quotaWall === null) return false;
+    if (this.quotaWall.skip > 0) {
+      this.quotaWall.skip -= 1;
+      return false;
+    }
+    this.quotaWallUntil ??= Date.now() + this.quotaWall.forMs;
+    if (Date.now() >= this.quotaWallUntil) return false;
+    this.quotaRejected += 1;
+    return true;
+  }
 }
+
+/** Gmail's real quota-exhausted body (captured from production, 2026-10-28). */
+const QUOTA_EXCEEDED = {
+  error: {
+    code: 403,
+    message:
+      "Quota exceeded for quota metric 'Queries' and limit 'Previous quota: Units per minute per user' of service 'gmail.googleapis.com'.",
+    errors: [
+      {
+        message:
+          "Quota exceeded for quota metric 'Queries' and limit 'Previous quota: Units per minute per user' of service 'gmail.googleapis.com'.",
+        domain: 'usageLimits',
+        reason: 'rateLimitExceeded',
+      },
+    ],
+    status: 'PERMISSION_DENIED',
+  },
+};
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -95,9 +136,18 @@ function batchResponse(box: FakeMailbox, body: string): Response {
     ...body.matchAll(/GET \/gmail\/v1\/users\/me\/messages\/([^?\s]+)\?format=full/g),
   ].map((match) => match[1]);
   const parts = ids.map((id) => {
-    const message = box.byId(id);
-    const status = message ? 'HTTP/1.1 200 OK' : 'HTTP/1.1 404 Not Found';
-    const payload = message ? fullMessage(message) : { error: { code: 404 } };
+    const limited = box.overQuota();
+    const message = limited ? undefined : box.byId(id);
+    const status = limited
+      ? 'HTTP/1.1 403 Forbidden'
+      : message
+        ? 'HTTP/1.1 200 OK'
+        : 'HTTP/1.1 404 Not Found';
+    const payload = limited
+      ? QUOTA_EXCEEDED
+      : message
+        ? fullMessage(message)
+        : { error: { code: 404 } };
     if (message) box.fullFetched.push(id);
     return (
       `--${BATCH_BOUNDARY}\r\nContent-Type: application/http\r\nContent-ID: <response-${id}>\r\n\r\n` +
@@ -173,6 +223,9 @@ export class FakeGmail {
       return batchResponse(box, String(init?.body ?? ''));
     }
     const path = url.pathname.replace('/gmail/v1/users/me', '');
+    if ((path === '/profile' || path.startsWith('/messages/')) && box.overQuota()) {
+      return json(QUOTA_EXCEEDED, 403);
+    }
     if (path === '/profile') {
       if (box.profileFailures > 0) {
         box.profileFailures -= 1;

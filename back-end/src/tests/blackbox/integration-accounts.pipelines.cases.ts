@@ -17,6 +17,9 @@
  *   <source>_passwords  passwords     passwords stored / uploaded, per source row
  *   (plaid: integration-accounts.plaid.cases.ts; Mac pipelines: mac-app blackboxes)
  *
+ *   gmail at Google's per-user quota wall (403 rateLimitExceeded) waits and
+ *   retries: every wanted message is still saved and the historyId recorded.
+ *
  * Registered by integration-accounts.blackbox.ts.
  */
 import fs from 'node:fs';
@@ -158,6 +161,56 @@ async function gmailFailureEndsFailed(): Promise<void> {
     assert(row.state === 'failed' && row.finishedAt !== null, 'gmail: the run is terminal');
   } finally {
     const where = { userId: session.userId };
+    await prisma.integrationSyncProgress.deleteMany({ where });
+    await prisma.emailIntegrationCredential.deleteMany({ where });
+    await prisma.integration.deleteMany({ where });
+  }
+}
+
+/**
+ * Google answers an over-quota mailbox with 403 rateLimitExceeded, not 429. The
+ * sync must back off and finish with every wanted message -- never drop the
+ * rejected ones or fail the run, which left the historyId unsaved and restarted
+ * a 30k-message full sync every 5 minutes (prod, 2026-10-28).
+ */
+async function gmailQuotaWallStillSavesEverything(skip: number): Promise<void> {
+  const session = await anonymousSession();
+  try {
+    const address = `quota.${randomUUID().slice(0, 8)}@example.com`;
+    const gmail = new FakeGmail();
+    const box = gmail.mailbox(address, 10, '4242');
+    const { selected } = fillMailbox(box, { contacts: 3, perContact: 2, newsletters: 4, tag: 'q' });
+    // Over quota for one second -- far shorter than Google's real minute window.
+    box.quotaWall = { skip, forMs: 1_000 };
+    await gmailCredential(session.userId, address, box.token);
+    const restore = gmail.install();
+    try {
+      await runGmailSyncJob();
+    } finally {
+      restore();
+    }
+    assert(box.quotaRejected > 0, 'gmail: the sync ran into the quota wall');
+    const row = await progressRow(session.userId, 'gmail');
+    assert(row.state === 'synced', `gmail: run synced past the quota wall, got ${row.state}`);
+    const saved = await prisma.messageRecord.count({
+      where: { person: { userId: session.userId } },
+    });
+    assert(
+      saved === selected.length,
+      `gmail: saved all ${selected.length} wanted messages past the quota wall, got ${saved}`
+    );
+    const integration = await prisma.integration.findFirstOrThrow({
+      where: { userId: session.userId, name: 'gmail' },
+    });
+    const historyIds = (integration.config as { historyIds?: Record<string, string> }).historyIds;
+    assert(
+      historyIds?.[address] === '4242',
+      `gmail: historyId recorded, got ${historyIds?.[address]}`
+    );
+  } finally {
+    const where = { userId: session.userId };
+    await prisma.messageRecord.deleteMany({ where: { person: where } });
+    await prisma.person.deleteMany({ where });
     await prisma.integrationSyncProgress.deleteMany({ where });
     await prisma.emailIntegrationCredential.deleteMany({ where });
     await prisma.integration.deleteMany({ where });
@@ -500,6 +553,20 @@ export function cases(user: User): Array<{ name: string; fn: () => Promise<void>
       fn: () => gmailSyncReportsMessagesSaved(user),
     },
     { name: 'Gmail sync: a failed address ends the run sync_failed', fn: gmailFailureEndsFailed },
+    {
+      name: 'Gmail sync: 403 rateLimitExceeded on the profile read is retried, nothing dropped',
+      fn: () => gmailQuotaWallStillSavesEverything(0),
+    },
+    {
+      name: 'Gmail sync: 403 rateLimitExceeded on metadata reads is retried, nothing dropped',
+      // the profile passes, then the wall rejects the metadata reads
+      fn: () => gmailQuotaWallStillSavesEverything(1),
+    },
+    {
+      name: 'Gmail sync: 403 rateLimitExceeded batch sub-requests are re-fetched, nothing dropped',
+      // profile + 10 metadata pass, then the wall rejects the full-content batch
+      fn: () => gmailQuotaWallStillSavesEverything(11),
+    },
     {
       name: 'LinkedIn upload: bytes received, then parsed records, ends synced',
       fn: () => linkedinUploadReportsRecords(user),
