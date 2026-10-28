@@ -10,7 +10,8 @@
  *
  * Sections (Rose light styles): Code repo (repository URL + Change, default
  * branch, GitHub "Connected"/"Not connected" — never an error — and Last synced)
- * · Startup script · Startup timeout · Environment files (own resource, saved
+ * · Set up with your coding agent (copyable one-time setup prompt; its own
+ * state machine in ProjectAgentSetupSection) · Startup script · Startup timeout · Environment files (own resource, saved
  * immediately; header count = project.envFileCount) · Lifecycle (Auto-wake,
  * Startup script set/not set).
  */
@@ -21,6 +22,7 @@ import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/li
 import { cn } from '@/lib/utils';
 
 import LeftPanelShell from './LeftPanelShell';
+import { ProjectAgentSetupSection } from './ProjectAgentSetupSection';
 import { ProjectEnvFilesSection } from './ProjectEnvFilesSection';
 import { ROSE_ACTIVE_COLOR } from './roseSidebarLayout';
 import { useProjectSettingsForm, type ProjectDraft } from './useProjectSettingsForm';
@@ -204,6 +206,7 @@ export default function RoseProjectSettingsPanel({
         />
       </label>
       <CodeRepoSection draft={form.draft} setField={form.setField} project={project} />
+      <ProjectAgentSetupSection projectId={project.id} />
       <StartupSection
         draft={form.draft}
         setField={form.setField}
