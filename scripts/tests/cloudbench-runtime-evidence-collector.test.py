@@ -360,6 +360,31 @@ def guest_diagnostics_sampler_and_inventory():
             "user": 30.0, "system": 25.0, "iowait": 5.0, "steal": 20.0,
         }, sampler["cpu_mode_pct"](before, after)
         assert sampler["cpu_mode_pct"](before, before) is None
+        # Exercise the real /proc parser and interval arithmetic across comm
+        # renames and PID reuse without relying on the host scheduler.
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        def process_sample(comm, used, born):
+            fields = ["0"] * 20
+            fields[11], fields[19] = str(used), str(born)
+            stat = "123 (" + comm + ") " + " ".join(fields)
+            globals_ = sampler["process_ticks"].__globals__
+            with patch.dict(globals_, {
+                "os": SimpleNamespace(scandir=lambda _: [SimpleNamespace(name="123", path="unused")]),
+                "Path": lambda *args: SimpleNamespace(read_text=lambda: stat),
+            }):
+                return sampler["process_ticks"]()
+
+        renamed = sampler["top_processes"](
+            process_sample("worker-old", 10000, 77), process_sample("worker-new", 10001, 77), 1.0
+        )
+        assert renamed == [{"pid": 123, "comm": "worker-new", "cpu_pct": round(100 / sampler["CLOCK_TICKS"], 1)}]
+        assert sampler["top_processes"](
+            process_sample("worker", 10000, 77), process_sample("worker", 20000, 88), 1.0
+        ) == []
+        assert sampler["top_processes"]({}, process_sample("worker", 20000, 88), 1.0) == []
+
         for sample in samples:
             assert set(sample["cpu_mode_pct"]) == {"user", "system", "iowait", "steal"}, sample
             assert sum(sample["cpu_mode_pct"].values()) <= 100.5, sample

@@ -91,9 +91,9 @@ def cpu_mode_pct(before: list[int], after: list[int]) -> dict | None:
             "iowait": pct(iowait), "steal": pct(steal)}
 
 
-def process_ticks() -> dict[int, tuple[str, int]]:
+def process_ticks() -> dict[int, tuple[str, int, int]]:
     """utime+stime ticks and kernel comm for every live process."""
-    ticks: dict[int, tuple[str, int]] = {}
+    ticks: dict[int, tuple[str, int, int]] = {}
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
@@ -103,18 +103,24 @@ def process_ticks() -> dict[int, tuple[str, int]]:
             continue
         open_paren, close_paren = stat.find("("), stat.rfind(")")
         fields = stat[close_paren + 2:].split()
-        if open_paren < 0 or len(fields) < 13:
+        if open_paren < 0 or len(fields) < 20:
             continue
-        ticks[int(entry.name)] = (stat[open_paren + 1:close_paren], int(fields[11]) + int(fields[12]))
+        ticks[int(entry.name)] = (
+            stat[open_paren + 1:close_paren], int(fields[11]) + int(fields[12]), int(fields[19])
+        )
     return ticks
 
 
 def top_processes(previous: dict, current: dict, elapsed_s: float) -> list[dict]:
     """Processes that used the most CPU between two scans (% of one core)."""
     rows = []
-    for pid, (comm, used) in current.items():
+    for pid, (comm, used, born) in current.items():
         before = previous.get(pid)
-        delta = used - (before[1] if before and before[0] == comm else 0)
+        # Compare the same process lifetime; comm can legitimately change (e.g. kworkers).
+        # An unseen/reused PID has no interval baseline and warms up for one sample.
+        if before is None or before[2] != born:
+            continue
+        delta = used - before[1]
         if delta > 0 and elapsed_s > 0:
             rows.append({"pid": pid, "comm": comm, "cpu_pct": round(100.0 * delta / CLOCK_TICKS / elapsed_s, 1)})
     try:

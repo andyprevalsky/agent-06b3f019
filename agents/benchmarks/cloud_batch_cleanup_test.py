@@ -2654,3 +2654,62 @@ async def test_genuine_cleanup_failure_still_fails_the_task():
     assert (row.passed, row.benchmark_status) == (False, "ERROR")
     assert row.failure_reason == "Cloud cleanup failed: provider: provider session still live"
     assert getattr(row, "cleanup_failure", None) is None
+
+
+@async_case
+async def test_archive_retains_completed_snapshot_before_gather_resumes():
+    logs = {"messages": [{"text": "pre-pause snapshot"}]}
+    snapshot = {"messages": browser_rows(attached=False)}
+    owner = asyncio.current_task()
+
+    async def fetch(_url, aid):
+        assert aid == ROOT
+        owner.cancel()
+        return snapshot
+
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}])),
+        patch.object(bench, "get_agent", fetch),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await bench._refresh_browser_archive_snapshot(
+                "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+            )
+    observation = logs["browser_archive_observation"]
+    assert observation["completed_agent_ids"] == [ROOT]
+    assert observation["snapshots"] == {ROOT: snapshot}
+    assert observation["ready"] is False
+    assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+    assert "tree" not in logs
+
+
+@async_case
+async def test_archive_timeout_retains_only_completed_snapshots():
+    snapshot = {"messages": browser_rows(attached=False)}
+    for return_root in (True, False):
+        logs = {"messages": [{"text": "pre-pause snapshot"}]}
+        pending_cancelled = set()
+
+        async def fetch(_url, aid):
+            if return_root and aid == ROOT:
+                return snapshot
+            try:
+                await asyncio.Event().wait()
+            finally:
+                pending_cancelled.add(aid)
+
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}, {"agent_id": CHILD}])),
+            patch.object(bench, "get_agent", fetch),
+        ):
+            with pytest.raises(TimeoutError):
+                await bench._refresh_browser_archive_snapshot(
+                    "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
+                )
+        observation = logs["browser_archive_observation"]
+        assert observation["snapshots"] == ({ROOT: snapshot} if return_root else {})
+        assert set(observation["completed_agent_ids"]) == ({ROOT} if return_root else set())
+        assert pending_cancelled == ({CHILD} if return_root else {ROOT, CHILD})
+        assert observation["ready"] is False
+        assert logs["messages"] == [{"text": "pre-pause snapshot"}]
+        assert "tree" not in logs

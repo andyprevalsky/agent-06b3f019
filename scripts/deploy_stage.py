@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib.util
 import json
 import math
 import os
@@ -17,7 +18,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from factory_metadata import load_metadata
+# File-spec callers do not add this script's directory to module search paths.
+_METADATA_PATH = Path(__file__).resolve().with_name("factory_metadata.py")
+_METADATA_SPEC = importlib.util.spec_from_file_location(
+    "rose_factory_metadata", _METADATA_PATH
+)
+if _METADATA_SPEC is None or _METADATA_SPEC.loader is None:
+    raise ImportError(f"could not load factory metadata module: {_METADATA_PATH}")
+_METADATA_MODULE = importlib.util.module_from_spec(_METADATA_SPEC)
+_METADATA_SPEC.loader.exec_module(_METADATA_MODULE)
+load_metadata = _METADATA_MODULE.load_metadata
 
 ACTIVE_STATUSES = {"active", "finishing"}
 

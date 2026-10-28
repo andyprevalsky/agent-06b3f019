@@ -84,6 +84,8 @@ const log = createLogger('BrowserSessionResume');
 
 import {
   retryAcknowledgedHydration,
+  assembleRotationResponse,
+  reserveRotation,
   replacementOptions,
   tilionRotationAvailable,
   withTimeout,
@@ -474,24 +476,7 @@ export async function rotateBrowserProxy(
   // reserved. User calls also constrain the write to their BrowserContext; an
   // ownership mismatch deliberately looks the same as a missing task.
   const ownerUserId = userId ?? null;
-  const reserved = await prisma.$queryRaw<Array<{ proxyRotationCount: number; provider: string }>>`
-    UPDATE "BrowserSession"
-       SET "proxyRotationCount" = "proxyRotationCount" + 1,
-           "currentUrl" = COALESCE(${currentUrl ?? null}::text, "currentUrl")
-     WHERE "id" = ${taskId}
-       AND "proxyRotationCount" < ${ROTATION_CAP}
-       AND (
-         ${ownerUserId}::text IS NULL
-         OR EXISTS (
-           SELECT 1
-             FROM "BrowserContext"
-            WHERE "BrowserContext"."id" = "BrowserSession"."contextId"
-              AND "BrowserContext"."userId" = ${ownerUserId}
-         )
-       )
-    RETURNING "proxyRotationCount", "provider"
-  `;
-
+  const reserved = await reserveRotation(taskId, ownerUserId, currentUrl, ROTATION_CAP);
   const rotationsUsed = reserved[0]?.proxyRotationCount;
   if (rotationsUsed === undefined) {
     const session = await prisma.browserSession.findFirst({
@@ -614,11 +599,13 @@ export async function rotateBrowserProxy(
     });
     throw error;
   }
-  const response = await assembleResumeResponse(
+  const response = await assembleRotationResponse(
     taskId,
     result,
-    dependencies,
-    effectiveCarry.carriedState
+    reserved[0]!,
+    userId,
+    () => assembleResumeResponse(taskId, result, dependencies, effectiveCarry.carriedState),
+    () => assembleResumeResponseWithTransport(taskId, result, dependencies, true)
   );
   // The paused snapshot belonged to the replaced Tilion session; it is consumed.
   if (carryFromPausedState) await clearPausedState({ taskId });

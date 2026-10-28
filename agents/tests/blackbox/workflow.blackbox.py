@@ -1193,6 +1193,44 @@ from helpers.workflow_sandbox import production_workflow_runner
 
 _WORKFLOW_RUNNER = production_workflow_runner()
 
+
+def test_workflow_sandbox_import_does_not_initialize_activity_package():
+    """Replay imports preserve the pure policy without initializing activities."""
+    import sys
+    from datetime import timedelta
+
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+
+    initialized = []
+    policies = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, _arg):
+        filename = frame.f_code.co_filename.replace("\\", "/")
+        if frame.f_code.co_name != "<module>":
+            return
+        if event == "call" and filename.endswith("/helpers/__init__.py"):
+            initialized.append(filename)
+        if event == "return" and filename.endswith("/workflows/agent_workflow.py"):
+            policies.append(frame.f_globals["wmh_activity_timeout_options"])
+
+    sys.setprofile(observe)
+    try:
+        _WORKFLOW_RUNNER.prepare_workflow(workflow._Definition.must_from_class(AgentWorkflow))
+    finally:
+        sys.setprofile(previous)
+    assert len(policies) == 1, "Expected the actual replay workflow module to execute once"
+    timeout = timedelta(seconds=7)
+    for mode in ("real", "simulate", "shadow", "unknown"):
+        actual = policies[0](mode, timeout)
+        expected = wmh_activity_timeout_options(mode, timeout)
+        assert actual == expected, f"Replay changed the WMH deadline policy for {mode}"
+        actual.clear()
+        assert policies[0](mode, timeout) == expected, "Policy results must not share mutable state"
+    assert not initialized, "Workflow replay initialized activity helpers before their import boundary"
+    assert policies[0] is wmh_activity_timeout_options, "Replay must retain the immutable policy export"
+
+
 # Default workflow args matching AgentWorkflow.run() signature
 DEFAULT_WF_ARGS: list = [
     "agent-test-1",  # agent_id
@@ -13433,6 +13471,11 @@ async def run_all_tests():
     await r.record_async(
         "wf_fast_mode_post_message_nonblocking",
         test_workflow_fast_mode_post_message_does_not_block_loop,
+    )
+
+    r.record(
+        "wf_sandbox_import_avoids_activity_initialization",
+        test_workflow_sandbox_import_does_not_initialize_activity_package,
     )
 
     # Temporal workflow tests (all run inside one shared environment)

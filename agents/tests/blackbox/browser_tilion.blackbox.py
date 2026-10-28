@@ -3018,15 +3018,23 @@ async def test_classifier_reads_are_bounded_on_a_busy_renderer():
 
     from domains.spawn_browser_agent_v3 import challenge_llm_classifier, handler
 
+    busy_started = asyncio.Event()
+
+    async def busy_entry(_request):
+        busy_started.set()
+        return web.Response()
+
     async def page(_request):
         return web.Response(
             content_type="text/html",
             text="<title>Just a moment...</title><script>document.title = 'busy';"
-            "setTimeout(() => { const end = Date.now() + 60000; while (Date.now() < end) {} }, 300);</script>",
+            "window.startBusyRenderer = () => { navigator.sendBeacon('/busy-entered');"
+            "const end = Date.now() + 60000; while (Date.now() < end) {} };</script>",
         )
 
     app = web.Application()
     app.router.add_get("/{tail:.*}", page)
+    app.router.add_post("/busy-entered", busy_entry)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -3038,6 +3046,9 @@ async def test_classifier_reads_are_bounded_on_a_busy_renderer():
             tab = pw_browser.contexts[0].pages[0]
             await tab.goto(f"http://127.0.0.1:{port}/api/menu", wait_until="domcontentloaded")
             await tab.wait_for_function("document.title === 'busy'", timeout=10_000)
+            # Confirm readiness before arming the block; observe entry outside the renderer.
+            await tab.evaluate("setTimeout(() => window.startBusyRenderer(), 0)")
+            await asyncio.wait_for(busy_started.wait(), 10)
             await asyncio.sleep(1)
 
             with patch.object(challenge_llm_classifier, "CHALLENGE_CONTEXT_READ_SECONDS", 1.5):
