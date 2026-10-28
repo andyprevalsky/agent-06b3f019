@@ -612,6 +612,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
 `python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
@@ -632,6 +633,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
@@ -1835,9 +1837,9 @@ After success, read the three comment endpoints again and filter at `FALLBACK_TS
 **Trigger — either reviewer is usage-exhausted and the other cannot cover it:**
 
 - CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
-- Claude fallback: provider usage exhaustion. The signature is unmistakable — `is_error:true` with `num_turns:1`, `duration_ms` ~2000, and `total_cost_usd:0`, and/or an Anthropic "credit balance is too low" / 400 / 429 / spending-cap error. ~2s + 1 turn + $0 = provider-blocked.
+- Claude fallback: provider usage exhaustion, i.e. the workflow's `Diagnose Claude failure` step reports `USAGE_EXHAUSTED` (`api_error_status=429`). `is_error:true`, `num_turns:1`, ~2s and `$0` alone are **not** exhaustion: a revoked `CLAUDE_CODE_OAUTH_TOKEN` (401) produces the identical signature and was misread as exhaustion for three months (RCA 2026-10-28).
 
-Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, revoked secret) — those you still fix and rerun. Exhaustion is not repairable by you.
+Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, `CREDENTIAL_INVALID`/401 revoked secret) — those you still fix and rerun. For `CREDENTIAL_INVALID`, ask the user to mint `claude setup-token` and update the `CLAUDE_CODE_OAUTH_TOKEN` repository secret (secret writes need approval); do not record it as exhaustion. Exhaustion is not repairable by you.
 
 **What to do, mechanically:**
 
