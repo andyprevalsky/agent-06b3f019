@@ -4,6 +4,8 @@
 //
 //   rose display <file|folder|url>... [--html PAGE] [--caption T]
 //   rose message <text> [--inline-view NAME] [--props JSON]
+//   rose video <prompt> [--out FILE] [--duration S] [--resolution R] ... [--caption T]
+//                                 (real footage via Gemini Omni; the key stays in Rose)
 //   rose env status [--json]      (size, memory/swap/load, OOM kills, top processes)
 //   rose env size [--cpu N] [--memory-gb M] --reason TEXT
 //   rose mcp                      (stdio MCP server: display, send_message_to_user,
@@ -21,8 +23,8 @@
 // CommonJS: ~/.rose/bin is a {"type":"commonjs"} package scope, where an ES
 // module silently exits 0 without running (back-end userUi/workspace.ts).
 const { execFileSync } = require('node:child_process');
-const { randomUUID } = require('node:crypto');
-const { readFileSync, readdirSync, statSync } = require('node:fs');
+const { createHash, randomUUID } = require('node:crypto');
+const { readFileSync, readdirSync, statSync, writeFileSync } = require('node:fs');
 const { cpus, freemem, homedir, loadavg, totalmem } = require('node:os');
 const { basename, dirname, join, posix, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
@@ -582,6 +584,134 @@ async function environmentSizeTool(args) {
   return { text: result.message || `resize ${result.status}`, rejected: false };
 }
 
+// ── video: Gemini Omni clips through Rose (back-end domains/agent-tools/videoService.ts) ──
+// Mirrors back-end/src/domains/agent-tools/videoTypes.ts.
+const VIDEO_RESOLUTIONS = ['360p', '720p', '1080p', '4k'];
+const VIDEO_ASPECTS = ['16:9', '9:16'];
+const VIDEO_MIN_SECONDS = 3;
+const VIDEO_MAX_SECONDS = 10;
+const VIDEO_MAX_REFS = 3;
+const VIDEO_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+function videoImage(role, ref) {
+  const abs = resolve(ref);
+  let stat;
+  try {
+    stat = statSync(abs);
+  } catch {
+    throw new ToolError(`${ref}: no such file`);
+  }
+  if (!stat.isFile()) throw new ToolError(`${ref}: not a regular file`);
+  if (stat.size > VIDEO_MAX_IMAGE_BYTES) throw new ToolError(`${ref}: larger than 10 MB`);
+  return { role, content_base64: readFileSync(abs).toString('base64') };
+}
+
+function videoInteger(value, name, min, max) {
+  if (value === undefined) return undefined;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) {
+    throw new ToolError(`${name} must be a whole number from ${min} to ${max}`);
+  }
+  return number;
+}
+
+function videoChoice(value, name, choices) {
+  if (value === undefined) return undefined;
+  if (!choices.includes(value)) throw new ToolError(`${name} must be one of ${choices.join(', ')}`);
+  return value;
+}
+
+/** The request body; the idempotency key is a hash of it, so a rerun replays (no new charge). */
+function videoRequest(args) {
+  const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+  if (!prompt) throw new ToolError('video needs a prompt describing the shot');
+  // A flag-looking prompt ("-h", "-x") is a typo, never a shot to pay for.
+  if (prompt.startsWith('-')) throw new ToolError(`not a shot description: ${prompt.slice(0, 40)}`);
+  const refs = args.refs || [];
+  if (refs.length > VIDEO_MAX_REFS) throw new ToolError(`at most ${VIDEO_MAX_REFS} --ref images`);
+  if (args.last_frame !== undefined && args.first_frame === undefined) {
+    throw new ToolError('--last-frame needs --first-frame');
+  }
+  if (args.audio === false && args.audio_direction !== undefined) {
+    throw new ToolError('--audio and --no-audio conflict');
+  }
+  const images = [
+    ...(args.first_frame !== undefined ? [videoImage('first_frame', args.first_frame)] : []),
+    ...(args.last_frame !== undefined ? [videoImage('last_frame', args.last_frame)] : []),
+    ...refs.map((ref) => videoImage('reference', ref)),
+  ];
+  const take = videoInteger(args.take, 'take', 1, 1000) ?? 1;
+  const body = {
+    prompt,
+    duration_seconds: videoInteger(
+      args.duration_seconds,
+      'duration',
+      VIDEO_MIN_SECONDS,
+      VIDEO_MAX_SECONDS
+    ),
+    aspect_ratio: videoChoice(args.aspect_ratio, 'aspect', VIDEO_ASPECTS),
+    resolution: videoChoice(args.resolution, 'resolution', VIDEO_RESOLUTIONS),
+    seed: videoInteger(args.seed, 'seed', 0, 2147483647),
+    audio: args.audio === false ? false : undefined,
+    audio_direction: args.audio_direction,
+    avoid: args.avoid,
+    images: images.length > 0 ? images : undefined,
+  };
+  for (const key of Object.keys(body)) if (body[key] === undefined) delete body[key];
+  const digest = createHash('sha256')
+    .update(JSON.stringify({ ...body, take }))
+    .digest('hex');
+  return { ...body, idempotency_key: `rose-video-${digest.slice(0, 48)}` };
+}
+
+async function download(path) {
+  const { url, token } = config();
+  let lastError = '';
+  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(url + path, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) return Buffer.from(await res.arrayBuffer());
+      lastError = `HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`;
+      if (res.status < 500 && res.status !== 429) break;
+    } catch (err) {
+      lastError = `could not reach Rose: ${err?.cause?.message || err.message}`;
+    }
+    await sleep(Math.min(1000 * 2 ** (attempt - 1), 15_000));
+  }
+  throw new ToolError(`video download failed (${lastError})`);
+}
+
+async function videoTool(args) {
+  const body = videoRequest(args);
+  const result = await call('POST', '/generate-video', body);
+  const bytes = await download(result.download_path);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  if (sha !== result.file_pointer.sha256) throw new ToolError('downloaded video does not match');
+  const out = resolve(args.out || `video-${sha.slice(0, 12)}.mp4`);
+  writeFileSync(out, bytes);
+  const cost = result.replayed
+    ? 'no new charge (same request as an earlier take; pass --take N for a new one)'
+    : `$${result.cost.usd.toFixed(2)} ($${result.cost.rate_usd_per_second.toFixed(3)}/s)`;
+  const lines = [
+    `video: ${out} (${Number(result.duration_seconds).toFixed(1)} s, ${result.resolution} ${result.aspect_ratio}, ${(bytes.length / 1e6).toFixed(1)} MB)`,
+    `cost: ${cost}`,
+  ];
+  const caption = typeof args.caption === 'string' ? args.caption.trim() : '';
+  if (caption) {
+    const shown = await call('POST', '/display', {
+      items: [{ file: result.display_path }],
+      caption,
+      placement: 'inline',
+    });
+    for (const item of shown.items || []) {
+      lines.push(
+        `${item.status === 'duplicate' ? 'already displayed' : 'displayed'} ${item.mime_type} (message ${item.message_id})`
+      );
+    }
+  }
+  return { text: lines.join('\n'), rejected: false };
+}
+
 // ── MCP stdio server ──
 
 const ENV_SIZE_MCP_TOOL = {
@@ -743,9 +873,15 @@ function serveMcp() {
 
 // ── CLI ──
 
+const VIDEO_USAGE = `  rose video <prompt> [--out FILE.mp4] [--duration 3-10] [--aspect 16:9|9:16]
+      [--resolution 360p|720p|1080p|4k] [--seed N] [--first-frame IMG] [--last-frame IMG]
+      [--ref IMG]... [--audio TEXT | --no-audio] [--avoid TEXT] [--take N] [--caption TEXT]
+      real footage with native audio (Gemini Omni); --caption also displays it`;
+
 const STOCK_USAGE = `usage:
   rose display <file|url>... [--html PAGE] [--caption TEXT]
   rose message <text>
+${VIDEO_USAGE}
   rose env status [--json]
   rose env size [--cpu N] [--memory-gb M] --reason TEXT
   rose mcp`;
@@ -756,6 +892,7 @@ const ROSE_DESKTOP_USAGE = `usage:
       .js/.mjs modules (run full-window; import 'three' works),
       3D models (.glb .gltf .obj .stl .usdz) and PDFs
   rose message <text> [--inline-view NAME] [--props JSON]
+${VIDEO_USAGE}
   rose env status [--json]
   rose env size [--cpu N] [--memory-gb M] --reason TEXT
   rose mcp`;
@@ -823,6 +960,52 @@ async function main(argv) {
       ...(flags['inline-view']
         ? { inline_view: { view: flags['inline-view'][0], ...(props ? { props } : {}) } }
         : {}),
+    });
+  } else if (command === 'video') {
+    if (
+      rest.length === 0 ||
+      rest.some((arg) => arg === '-h' || arg === '--help' || arg === 'help')
+    ) {
+      console.log(`${VIDEO_USAGE}\n  guide: ~/.rose/skills/talk-to-user/video.md`);
+      return 0;
+    }
+    const { positional, flags } = parseFlags(
+      rest,
+      new Set([
+        'out',
+        'duration',
+        'aspect',
+        'resolution',
+        'seed',
+        'first-frame',
+        'last-frame',
+        'ref',
+        'audio',
+        'avoid',
+        'take',
+        'caption',
+      ]),
+      new Set(['no-audio'])
+    );
+    const one = (name) => {
+      if ((flags[name] || []).length > 1) throw new ToolError(`--${name} given more than once`);
+      return (flags[name] || [])[0];
+    };
+    result = await videoTool({
+      prompt: positional.join(' '),
+      out: one('out'),
+      duration_seconds: one('duration'),
+      aspect_ratio: one('aspect'),
+      resolution: one('resolution'),
+      seed: one('seed'),
+      first_frame: one('first-frame'),
+      last_frame: one('last-frame'),
+      refs: flags.ref || [],
+      audio: flags['no-audio'] ? false : undefined,
+      audio_direction: one('audio'),
+      avoid: one('avoid'),
+      take: one('take'),
+      caption: one('caption'),
     });
   } else if (command === 'env') {
     const [sub, ...envArgs] = rest;

@@ -18,7 +18,7 @@ import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResi
 import { sendMessageToUser } from './messageService';
 import { answerQuestion } from './questionService';
 import { waitForRequest } from './requestService';
-import { generateVideo } from './videoService';
+import { generateVideo, readGeneratedVideo } from './videoService';
 import { generateVideoRequestSchema } from './videoTypes';
 import { AgentToolsError, resolveContext } from './service';
 import {
@@ -150,6 +150,22 @@ router.post(
     try {
       const result = await generateVideo(await resolveContext(caller), parsed.data);
       res.status(result.replayed ? 200 : 201).json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  })
+);
+
+/** GET /:agentId/generated-video/:sha256 — the MP4 bytes of a video the owner generated. */
+router.get(
+  '/:agentId/generated-video/:sha256',
+  agentToolsAuth,
+  asyncHandler<AgentToolsRequest>(async (req, res) => {
+    const caller = callerFor(req, res);
+    if (caller === null) return;
+    try {
+      const bytes = await readGeneratedVideo(await resolveContext(caller), req.params.sha256);
+      res.status(200).type('video/mp4').send(bytes);
     } catch (err) {
       sendError(res, err);
     }

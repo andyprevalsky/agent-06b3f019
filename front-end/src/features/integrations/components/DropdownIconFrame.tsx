@@ -11,21 +11,22 @@
 
 import type { CSSProperties, ReactNode } from 'react';
 
+import {
+  liquidMetalBorderBackground,
+  roseIconGlowGradient,
+} from '@/components/ui/liquidMetalBorder';
+
 interface DropdownIconFrameProps {
   children: ReactNode;
   className?: string;
   iconFit?: 'contain' | 'cover' | 'fill';
   iconScale?: number;
   isSynced?: boolean;
-  /** Override the synced glow gradient (defaults to the rose integrations glow). */
+  /** Override the synced glow gradient (defaults to roseIconGlowGradient, the rose glow). */
   glowGradient?: string;
 }
 
 export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
-
-/** Rose glow (ROSE_GRADIENT tints) used for synced integrations and the mac-app onboarding ring. */
-export const connectedRoseGlowGradient =
-  'linear-gradient(to bottom left, rgba(254, 117, 3, 0.5), rgba(252, 88, 92, 0.45), rgba(224, 98, 204, 0.45), rgba(122, 107, 236, 0.5))';
 
 /**
  * Amber glow for a connected-but-damaged integration. Same shape and opacity as
@@ -101,7 +102,7 @@ export default function DropdownIconFrame({
   iconFit = 'cover',
   iconScale = 100,
   isSynced = false,
-  glowGradient = connectedRoseGlowGradient,
+  glowGradient = roseIconGlowGradient,
 }: DropdownIconFrameProps): JSX.Element {
   return (
     <div className="relative h-[34px] w-[34px] shrink-0">
@@ -118,8 +119,7 @@ export default function DropdownIconFrame({
           {
             '--dropdown-icon-fit': iconFit,
             '--dropdown-icon-scale': String(iconScale / 100),
-            background:
-              'linear-gradient(#f5f5f5, #f5f5f5) padding-box, conic-gradient(from 45deg, rgba(16,16,16,0.9) 0deg, rgba(255,255,255,0.96) 90deg, rgba(16,16,16,0.9) 180deg, rgba(255,255,255,0.96) 270deg, rgba(16,16,16,0.9) 360deg) border-box',
+            background: liquidMetalBorderBackground('#f5f5f5'),
           } as CSSProperties
         }
       >

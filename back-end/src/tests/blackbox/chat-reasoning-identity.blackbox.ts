@@ -13,9 +13,17 @@ import { replayCall, stalledResponse } from './chat-search-escalation.network.su
 
 type Action = 'direct_answer' | 'web_search' | 'start_superintelligence';
 type Stream = { agentId?: string; stream_id?: string; delta?: string; sequence?: number };
+type Frame = { topic: string; event: string; record: Record<string, unknown> };
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function runCase(name: string, actions: Action[]) {
+/**
+ * `followUp`: the agent's cloud run already COMPLETED (chat mode is restored in
+ * the client, which still holds status COMPLETED). Posting a message reactivates
+ * the row for chat; clients only learn that from an UPDATE frame, and the chat
+ * Start agent button is gated on ACTIVE (docs/rca/cases/
+ * 2026-10-28-chat-start-agent-button-stale-status-and-no-pending-state.md).
+ */
+async function runCase(name: string, actions: Action[], followUp = false) {
   const userId = randomUUID();
   const agentId = randomUUID();
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -24,7 +32,8 @@ async function runCase(name: string, actions: Action[]) {
       id: agentId,
       userId,
       goal: `Reasoning identity ${name}`,
-      status: 'ACTIVE',
+      status: followUp ? 'COMPLETED' : 'ACTIVE',
+      temporalWorkflowId: followUp ? `finished-run-${agentId}` : null,
       source: 'MAC_APP',
       model: 'rose-labs/rose-1-ultra',
       verifier: { create: {} },
@@ -32,16 +41,20 @@ async function runCase(name: string, actions: Action[]) {
   });
   const originalFetch = globalThis.fetch;
   const streams = new Map<string, string>();
+  const frames: Frame[] = [];
   const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
   let routed = 0;
   globalThis.fetch = (async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith('/realtime/v1/api/broadcast')) {
       const body = JSON.parse(String(init?.body)) as {
-        messages: Array<{ event: string; payload: { record: Stream } }>;
+        messages: Array<{ topic: string; event: string; payload: { record: Stream } }>;
       };
       for (const row of body.messages) {
         const record = row.payload.record;
+        if (row.topic === `agent:${agentId}`) {
+          frames.push({ topic: row.topic, event: row.event, record });
+        }
         if (row.event === 'ASSISTANT_STREAM' && record.agentId === agentId && record.stream_id) {
           streams.set(
             record.stream_id,
@@ -150,6 +163,26 @@ async function runCase(name: string, actions: Action[]) {
       'UI stream identity must not be passed to the model'
     );
     assert.equal(routed, actions.length);
+    if (followUp) {
+      const reactivated = frames.findIndex(
+        (frame) =>
+          frame.event === 'UPDATE' &&
+          frame.record.status === 'ACTIVE' &&
+          frame.record.temporalWorkflowId === null
+      );
+      const answered = frames.findIndex(
+        (frame) =>
+          frame.event === 'INSERT' &&
+          (frame.record.metadata as { toolName?: string } | null)?.toolName ===
+            'send_message_to_user'
+      );
+      assert(
+        reactivated !== -1,
+        `the chat reactivation of a finished run must broadcast UPDATE {status: ACTIVE, temporalWorkflowId: null}; saw ${JSON.stringify(frames.map((frame) => frame.event))}`
+      );
+      assert(answered !== -1, 'the follow-up answer must be broadcast');
+      assert(reactivated < answered, 'clients must see the reactivation before the answer');
+    }
   } finally {
     await __flushBroadcastQueueForTests();
     globalThis.fetch = originalFetch;
@@ -165,16 +198,17 @@ async function main() {
   process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
   process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
   process.env.PARRALLEL_API_KEY = 'blackbox-parallel-key';
-  const cases: Array<[string, Action[]]> = [
+  const cases: Array<[string, Action[], boolean?]> = [
     ['direct', ['direct_answer']],
+    ['follow-up-after-completed-run', ['direct_answer'], true],
     ['search-again', ['web_search', 'web_search', 'direct_answer']],
     ['initial-escalation', ['start_superintelligence']],
     ['search-escalation', ['web_search', 'start_superintelligence']],
   ];
   let failed = 0;
-  for (const [name, actions] of cases) {
+  for (const [name, actions, followUp] of cases) {
     try {
-      await runCase(name, actions);
+      await runCase(name, actions, followUp);
       process.stdout.write(`PASS ${name}\n`);
     } catch (error) {
       failed += 1;

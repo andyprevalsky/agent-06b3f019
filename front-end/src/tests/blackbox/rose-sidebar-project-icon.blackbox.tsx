@@ -8,8 +8,8 @@
  *   no repo / non-GitHub / no repo segment             -> folder icon
  *   avatar load error                                  -> folder icon, never retried
  *
- * The collapsed 64px rail shows no project rows (only group line pills), so its
- * coverage here is the collapse -> expand remount keeping the same URL / fallback.
+ * The collapsed 64px rail keeps each project row's icon (name faded, no
+ * buttons), so the avatar must survive collapse -> expand with the same URL.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fireEvent, screen } from '@testing-library/react';
@@ -83,9 +83,10 @@ describe('Project icon: GitHub owner avatar instead of the folder (UI item 32)',
     expect(img).toHaveClass('h-5', 'w-5', 'flex-none', 'rounded-[4px]', 'object-cover');
     expect(screen.getByTestId('rose-project-row-p-rose')).toHaveTextContent('Rose');
 
-    // Collapsed rail hides project rows; re-expanding remounts with the same URL.
+    // The collapsed rail keeps the project icon (same URL), without its buttons.
     collapseBar();
-    expect(screen.queryByTestId('rose-project-row-p-rose')).toBeNull();
+    expectAvatar('p-rose', 'Rose-Ai-Labs');
+    expect(screen.queryByRole('button', { name: 'Create Super Agent' })).toBeNull();
     expandBar();
     expectAvatar('p-rose', 'Rose-Ai-Labs');
   });

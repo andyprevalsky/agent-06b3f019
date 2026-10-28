@@ -229,6 +229,23 @@ async function main(): Promise<unknown> {
       await repo.clearSmsSession(args[0]);
       return { dropped: lostAck.dropped() };
     }
+    case 'seq-next-lost-ack': {
+      // The sequence UPSERT commits but its reply is lost; the replay must
+      // return the same value, not skip one.
+      const lostAck = await dropFirstCommitAck(['INSERT 0 1']);
+      const { nextSequenceValue } = await import('../../providers/sharedState');
+      await barrier();
+      const taken = await nextSequenceValue('mi-seq', args[0], 60_000);
+      return { value: taken.value, dropped: lostAck.dropped() };
+    }
+    case 'seq-next': {
+      const { nextSequenceValue, releaseSequenceValue } =
+        await import('../../providers/sharedState');
+      await barrier();
+      const taken = await nextSequenceValue('mi-seq', args[0], 60_000);
+      if (args[1] === 'release') await releaseSequenceValue('mi-seq', args[0], taken);
+      return { value: taken.value };
+    }
     case 'hub-serve': {
       // Owns the Mac's control channel; serves until the parent's next line.
       const served = await serveRoutedHub(Number(args[0]));
@@ -399,6 +416,121 @@ async function main(): Promise<unknown> {
       const foreign = await session.pollConnectSession('someone-else', connectId);
       await session.cancelConnectSession(userId, connectId);
       return { poll, foreign };
+    }
+    case 'e2b-create-slot': {
+      // Records when this instance's create ran, holding the slot for args[0] ms.
+      const { withClaudeCodeCreateSlot } = await import('../../providers/e2bCreateSlot');
+      await barrier();
+      return withClaudeCodeCreateSlot(async () => {
+        const start = Date.now();
+        await sleep(Number(args[0]));
+        return { start, end: Date.now() };
+      });
+    }
+    case 'messaging-slow-drain': {
+      // Drain with a short claim lease while every message insert stalls, so a
+      // part outlives its original lease unless the claim is renewed.
+      const { prisma } = await import('../../providers/database');
+      const delegate = prisma.messageRecord as unknown as Record<string, unknown>;
+      const createMany = delegate.createMany as (...a: unknown[]) => Promise<unknown>;
+      delegate.createMany = async (...a: unknown[]) => {
+        await sleep(Number(args[1]));
+        return createMany.apply(prisma.messageRecord, a);
+      };
+      const jobs = await import('../../domains/integrations/uploadService.messagingJobs');
+      await barrier();
+      await sleep(Number(args[2] ?? 0));
+      await jobs.runMessagingUploadJobs({ claimLeaseMs: Number(args[0]) });
+      return { done: true };
+    }
+    case 'catalog-seed': {
+      const { seedBenchmarkTasks } = await import('../../domains/benchmarks/hubCatalogSeed');
+      await barrier();
+      return seedBenchmarkTasks();
+    }
+    case 'error-alert': {
+      let sent = 0;
+      globalThis.fetch = (async () => {
+        sent += 1;
+        return new Response('ok', { status: 200 });
+      }) as typeof fetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.invalid/multi-instance';
+      const { alertError } = await import('../../providers/errorAlert');
+      await barrier();
+      alertError({ source: 'e2b_capacity', message: args[0] });
+      await sleep(3_000);
+      return { sent };
+    }
+    case 'x402-wallet-user': {
+      // Widen the gap between a lookup that finds no user and the write that
+      // follows, so both instances' first payments race on the same wallet.
+      const { prisma } = await import('../../providers/database');
+      const users = prisma.user as unknown as Record<string, unknown>;
+      const findUnique = users.findUnique as (...a: unknown[]) => Promise<unknown>;
+      users.findUnique = async (...a: unknown[]) => {
+        const found = await findUnique.apply(prisma.user, a);
+        await sleep(500);
+        return found;
+      };
+      const { getOrCreateWalletUser } = await import('../../providers/hybridAuth');
+      await barrier();
+      const user = await getOrCreateWalletUser(args[0]);
+      return { userId: user.userId };
+    }
+    case 'proxy-ordinal': {
+      // The production proxy core with the routes' ordinal reserver; only the
+      // upstream and the cache are faked. Reports the slot key it recorded.
+      const [kind, traceHash, sessionId] = args;
+      const routes = await import('../../domains/demo-cache/routes.proxy');
+      const keys: string[] = [];
+      const cacheGet = async () => ({ hit: false, value: null });
+      const cacheSet = async ({ key }: { key: string }) => {
+        keys.push(key);
+      };
+      await barrier();
+      if (kind === 'anthropic') {
+        const { resolveAnthropic } = await import('../../providers/anthropicProxyCore');
+        await resolveAnthropic(
+          traceHash,
+          { messages: [{ role: 'user', content: 'hi' }] },
+          {},
+          {
+            cacheGet,
+            cacheSet,
+            fetchUpstream: async () => ({
+              status: 200,
+              contentType: 'text/event-stream',
+              body: 'ok',
+            }),
+            reserveOrdinal: routes.PROXY_ORDINAL_RESERVER,
+          },
+          false,
+          { sessionId }
+        );
+      } else {
+        const { resolveCodex } = await import('../../providers/codexProxyCore');
+        await resolveCodex(
+          traceHash,
+          'POST',
+          '/backend-api/codex/responses',
+          { input: [{ role: 'user', content: 'hi' }] },
+          {},
+          {
+            cacheGet,
+            cacheSet,
+            fetchUpstream: async () => ({
+              status: 200,
+              contentType: 'text/event-stream',
+              body: 'ok',
+            }),
+            reserveOrdinal: routes.PROXY_ORDINAL_RESERVER,
+          },
+          false,
+          { sessionId }
+        );
+      }
+      return { keys };
     }
     default:
       throw new Error(`unknown op ${op}`);

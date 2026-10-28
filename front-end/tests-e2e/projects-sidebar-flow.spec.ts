@@ -142,7 +142,8 @@ for (const width of [1280, 390]) {
       page.getByTestId('rose-project-row-created').filter({ visible: true }),
     ).toBeVisible();
     if (width >= 768) await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
-    await row.click({ button: 'right' });
+    // A held press (like a person's), so the menu's pre-measure position cannot swallow the release.
+    await row.click({ button: 'right', delay: 120 });
     const menu = page.getByTestId('rose-project-menu');
     await expect(menu.getByRole('menuitem', { name: 'Rename project' })).toBeVisible();
     const hit = await menu.boundingBox();

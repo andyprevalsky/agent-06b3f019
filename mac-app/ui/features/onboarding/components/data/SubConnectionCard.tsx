@@ -15,9 +15,8 @@ import { Check, Loader2, Plus } from 'lucide-react';
 import type { JSX, ReactNode } from 'react';
 
 import ConnectedAccountChip from '@/features/integrations/components/ConnectedAccountChip';
-import DropdownIconFrame, {
-  connectedRoseGlowGradient,
-} from '@/features/integrations/components/DropdownIconFrame';
+import { roseIconGlowGradient } from '@/components/ui/liquidMetalBorder';
+import DropdownIconFrame from '@/features/integrations/components/DropdownIconFrame';
 
 export type SubRowState = 'idle' | 'loading' | 'connected' | 'coming-soon';
 
@@ -81,7 +80,7 @@ function SubRow({ row, isLast }: { row: SubRowModel; isLast: boolean }): JSX.Ele
           iconScale={row.iconScale}
           iconFit={row.iconFit}
           isSynced={isConnected}
-          glowGradient={connectedRoseGlowGradient}
+          glowGradient={roseIconGlowGradient}
         >
           <span
             className="onb-sub-icon flex items-center justify-center"

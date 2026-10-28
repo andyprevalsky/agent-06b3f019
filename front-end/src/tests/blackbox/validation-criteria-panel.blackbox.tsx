@@ -57,13 +57,13 @@ describe('Validation Criteria toolbar panel', () => {
     expect(screen.queryByText('No validation criteria have been set for this agent.')).toBeNull();
   });
 
-  it('keeps the same five app controls on Home and selected agents', () => {
+  it('keeps the same four app controls on Home and selected agents', () => {
     const view = renderWithProviders(scene(null, null));
     const labels = () =>
       within(screen.getByRole('navigation', { name: 'Apps' }))
         .getAllByRole('button')
         .map((button) => button.getAttribute('aria-label'));
-    const expected = ['Agent Display', 'Browser', 'Phone', 'Integrations', 'Dark mode'];
+    const expected = ['Browser', 'Phone', 'Integrations', 'Dark mode'];
     expect(labels()).toEqual(expected);
     view.rerender(scene('a', 'Actual criteria'));
     expect(labels()).toEqual(expected);

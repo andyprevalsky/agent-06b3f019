@@ -194,6 +194,9 @@ export function useAuth(options?: { passive?: boolean }) {
   );
   const [session, setSession] = useState<Session | null>(null);
   const [isFullySignedIn, setIsFullySignedIn] = useState(archiveMode);
+  // Unlike isFullySignedIn (false while the invite check is pending or failed),
+  // true only when the check answered "needs invite": a known waitlisted account.
+  const [inviteRequired, setInviteRequired] = useState(false);
   const [loading, setLoading] = useState(!archiveMode);
   const [realtimeReady, setRealtimeReady] = useState(false);
   const initRef = useRef(false);
@@ -205,6 +208,7 @@ export function useAuth(options?: { passive?: boolean }) {
     setUser,
     setSession,
     setIsFullySignedIn,
+    setInviteRequired,
     setRealtimeReady,
   });
   const guardedActions = useArchiveGuardedAuthActions(archiveMode, { refreshAuthState, signOut });
@@ -247,6 +251,7 @@ export function useAuth(options?: { passive?: boolean }) {
     isAuthenticated,
     isAnonymous,
     isFullySignedIn,
+    inviteRequired,
     loading,
     realtimeReady,
     refreshAuthState: guardedActions.refreshAuthState,

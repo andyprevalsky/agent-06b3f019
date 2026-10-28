@@ -26,6 +26,11 @@
  *  - an E2B code session created on A runs project commands from B
  *  - a held lease is renewed past its TTL, so no instance takes it over
  *  - a Plaid sync that lost its lease cannot overwrite the newer sync's cursor
+ *  - Claude Code sandbox creates run one at a time across instances
+ *  - a slow messaging upload part keeps its claim, so it is processed once
+ *  - two instances seeding the benchmark catalog at boot both succeed
+ *  - one error-alert signature posts once across instances
+ *  - concurrent first x402 payments from one wallet resolve to one user
  *
  * Usage: npx tsx src/tests/blackbox/multi-instance.blackbox.ts
  */
@@ -43,10 +48,12 @@ import {
   waitFor,
   waitForAsync,
 } from './multi-instance.harness';
+import { runProxyOrdinalCases } from './multi-instance.proxy-ordinal.cases';
 import { saveUserToken } from '../../providers/agentcard/store';
 import { claimPlaidItemSync } from '../../domains/integrations/service.plaidTransactions';
 import { markPlaidItemSyncSucceeded } from '../../domains/integrations/repo.plaid';
 import { createPrismaGrantStore, upsertAccountConnection } from '../../domains/compute-grants/repo';
+import { runN2Cases } from './multi-instance.n2.cases';
 
 config();
 
@@ -83,6 +90,8 @@ async function main(): Promise<void> {
       const [again] = await concurrently([['pkce-take', [state]]]);
       assert(again.found === false, 'PKCE state must stay single-use across instances');
     });
+
+    await runProxyOrdinalCases(test, assert);
 
     await test('the per-user SMS commit lock serializes commits across instances', async () => {
       const lockUser = randomUUID();
@@ -623,6 +632,7 @@ async function main(): Promise<void> {
         await prisma.plaidItem.deleteMany({ where: { id: item.id } });
       }
     });
+    await runN2Cases({ test, assert, userId, integrationIds });
   } finally {
     await prisma.integration.deleteMany({ where: { userId } });
     await prisma.integration.deleteMany({ where: { id: { in: integrationIds } } });

@@ -1,6 +1,8 @@
 /**
  * Blackbox tests for the Rose Desktop left bar (AppSidebar with the flag on):
- * order, project grouping, collapsed dividers, hover-expand, run-state glyphs,
+ * order (Back | Search, projects, Home project last), group dividers, the
+ * collapsed icon/agents/pill layout, the pending new-agent project ring,
+ * hover-expand, run-state glyphs,
  * bottom rows (Feedback / Biz health / Archived / account), account glyph and
  * Settings drawer. Flag off keeps the stock sidebar (app-sidebar suites).
  * The "View X old agents" row lives in rose-sidebar-old-agents.blackbox.tsx.
@@ -22,6 +24,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { server } from './msw/server';
 import {
   anonymousUser,
+  createAgentButton,
   collapseBar,
   expandBar,
   makeProject,
@@ -91,9 +94,15 @@ function rowOrder(): string[] {
   const groups = screen.getByTestId('rose-agent-groups');
   return [
     ...groups.querySelectorAll<HTMLElement>(
-      '[data-testid^="rose-agent-row-"], [data-testid^="rose-project-row-"]',
+      '[data-testid^="rose-agent-row-"], [data-testid^="rose-project-row-"], [data-testid="rose-home-project-row"], [data-testid="rose-group-divider"]',
     ),
-  ].map((el) => el.dataset.testid!.replace(/^rose-(agent|project)-row-/, '$1:'));
+  ].map((el) =>
+    el.dataset.testid === 'rose-home-project-row'
+      ? 'project:home'
+      : el.dataset.testid === 'rose-group-divider'
+        ? '──'
+        : el.dataset.testid!.replace(/^rose-(agent|project)-row-/, '$1:'),
+  );
 }
 
 describe('Rose left bar (flag on)', () => {
@@ -138,73 +147,121 @@ describe('Rose left bar (flag on)', () => {
     expect(screen.queryByLabelText('Resize sidebar')).toBeNull();
   });
 
-  it('orders Home, New Super Agent (black), Search, then each project with its agents, then Home agents', async () => {
+  it('orders Back | Search, then the created projects with their agents, then the Home project last, divided', async () => {
     renderBar();
     const bar = roseBar();
-    const top = within(bar).getAllByRole('button').slice(0, 2);
-    expect(top.map((b) => b.getAttribute('aria-label'))).toEqual(['Home', 'New Super Agent']);
-    const create = within(bar).getByRole('button', { name: 'New Super Agent' });
-    // Light: raw black with white label/plus (unchanged). Dark inverts it like
-    // the mock (.nb: #f2f2ef fill, #1f1f1d label/plus) instead of black on the dark bar.
-    expect(create).toHaveClass('bg-gray-950', 'text-white', 'hover:bg-gray-800');
-    expect(create).toHaveClass(
-      'dark:bg-[#f2f2ef]',
-      'dark:text-[#1f1f1d]',
-      'dark:hover:bg-[#e4e4df]',
-    );
-    expect(create.className).not.toMatch(/(^|\s)(bg|text)-\[#(f2f2ef|1f1f1d)\]/);
-    expect(create).not.toHaveTextContent('New Super Agent');
-    expect(within(bar).getByRole('searchbox', { name: 'Search agents' })).toBeInTheDocument();
+    // Collapsed: the top row is just Search (Back appears once expanded); the
+    // old Home row and black New Super Agent button are gone (Andy, 2026-10-28).
+    expect(within(bar).queryByRole('button', { name: 'New Super Agent' })).toBeNull();
+    expect(within(bar).queryByRole('button', { name: 'Home' })).toBeNull();
+    expect(within(bar).queryByRole('button', { name: 'Back' })).toBeNull();
+    const top = screen.getByTestId('rose-sidebar-top-row');
+    expect(within(top).getByRole('searchbox', { name: 'Search agents' })).toBeInTheDocument();
 
     expandBar();
-    expect(create).toHaveTextContent('New Super Agent');
+    const topControls = [...top.querySelectorAll('button, input')];
+    expect(topControls.map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Back',
+      'Search agents',
+    ]);
+    // The top row precedes every group.
+    const groups = screen.getByTestId('rose-agent-groups');
+    expect(top.compareDocumentPosition(groups) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await screen.findByTestId('rose-project-row-p-rose');
     expect(rowOrder()).toEqual([
-      // Projects on top (Rose first), then Home: running first (sortAgents),
-      // an unknown project_id falls back to Home.
+      // Created projects on top (Rose first), a thin divider between groups,
+      // then the Home project last: running first (sortAgents), an unknown
+      // project_id falls back to Home.
       'project:p-rose',
       'agent:rose-run',
       'agent:rose-fail',
+      '──',
       'project:p-habits',
       'agent:habits-done',
+      '──',
+      'project:home',
       'agent:home-run',
       'agent:orphan',
       'agent:home-done',
     ]);
-    // Project agents sit indented while expanded; Home agents do not.
+    // Expanded dividers are thin full-width lines.
+    const line = screen.getAllByTestId('rose-group-divider')[0].querySelector('i')!;
+    expect(line).toHaveClass('h-px', 'w-full', 'dark:bg-white/[0.07]');
+    // Agents sit indented under their project, Home included.
     expect(screen.getByTestId('rose-agent-row-rose-run').className).toContain('pl-[34px]');
-    expect(screen.getByTestId('rose-agent-row-home-run').className).not.toContain('pl-[34px]');
-    // Project rows carry + (new agent here) and ⚙ (settings).
+    expect(screen.getByTestId('rose-agent-row-home-run').className).toContain('pl-[34px]');
+    // Project rows carry + (new agent here) and ⚙ (settings); Home carries +.
     const project = screen.getByTestId('rose-project-row-p-rose');
-    expect(within(project).getByRole('button', { name: 'New agent in Rose' })).toBeInTheDocument();
+    expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
     expect(
       within(project).getByRole('button', { name: 'Rose project settings' }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '+ New project' })).toBeInTheDocument();
+    const home = screen.getByTestId('rose-home-project-row');
+    expect(home).toHaveTextContent('Home');
+    expect(within(home).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
+    // "+ New project" is the first row of the list: right under Back | Search,
+    // above the first project (Andy: "new project above rose").
+    const newProject = screen.getByRole('button', { name: '+ New project' });
+    expect(groups.firstElementChild).toBe(newProject);
+    expect(
+      newProject.compareDocumentPosition(project) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
-  it('Home (label just "Home") returns home and New Super Agent starts one (same handler as stock)', async () => {
+  it('Back collapses the bar; the Home project + starts a Home agent (same handler as stock)', async () => {
     const user = userEvent.setup();
     const onCreateAgent = vi.fn();
     renderBar({ onCreateAgent });
     expandBar();
-    const home = within(roseBar()).getByRole('button', { name: 'Home' });
-    expect(home.textContent).toBe('Home');
     expect(roseBar()).not.toHaveTextContent(/root project/i);
-    await user.click(home);
+    await user.click(within(roseBar()).getByRole('button', { name: 'Create Super Agent' }));
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
-    await user.click(within(roseBar()).getByRole('button', { name: 'New Super Agent' }));
-    expect(onCreateAgent).toHaveBeenCalledTimes(2);
+    await user.click(within(roseBar()).getByRole('button', { name: 'Back' }));
+    expect(roseBar()).toHaveAttribute('data-expanded', 'false');
   });
 
-  it('hover expands to titles; collapsed hides project rows behind 18x3 line-pill dividers', async () => {
+  it.each(['p-rose', 'home'])(
+    'hovering the %s "+" shows the tooltip "Create Super Agent" (its accessible name too)',
+    async (group) => {
+      const user = userEvent.setup();
+      renderBar();
+      expandBar();
+      await screen.findByTestId('rose-project-row-p-rose');
+      const plus = createAgentButton(group);
+      expect(plus).toHaveAttribute('aria-label', 'Create Super Agent');
+      await user.hover(plus);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent('Create Super Agent');
+    },
+  );
+
+  it('collapsed: each project icon, then its agents, then a line pill; the Home project last', async () => {
     renderBar();
     const bar = roseBar();
     expect(bar.style.width).toBe('64px');
     expect(bar).toHaveAttribute('data-expanded', 'false');
-    await waitFor(() => expect(screen.getAllByTestId('rose-group-divider')).toHaveLength(2));
-    expect(screen.queryByTestId('rose-project-row-p-rose')).toBeNull();
-    expect(screen.queryByRole('button', { name: '+ New project' })).toBeNull();
+    await screen.findByTestId('rose-project-row-p-rose');
+    expect(rowOrder()).toEqual([
+      'project:p-rose',
+      'agent:rose-run',
+      'agent:rose-fail',
+      '──',
+      'project:p-habits',
+      'agent:habits-done',
+      '──',
+      'project:home',
+      'agent:home-run',
+      'agent:orphan',
+      'agent:home-done',
+    ]);
+    // Icons only: names faded, no + / ⚙ buttons. New project keeps its icon in
+    // the same top slot (label faded), so expanding never shifts the rows.
+    const project = screen.getByTestId('rose-project-row-p-rose');
+    expect(within(project).getByText('Rose').className).toContain('opacity-0');
+    expect(within(project).queryByRole('button')).toBeNull();
+    expect(within(screen.getByTestId('rose-home-project-row')).queryByRole('button')).toBeNull();
+    const newProject = screen.getByRole('button', { name: '+ New project' });
+    expect(screen.getByTestId('rose-agent-groups').firstElementChild).toBe(newProject);
+    expect(within(newProject).getByText('New project').className).toContain('opacity-0');
     const pill = screen.getAllByTestId('rose-group-divider')[0].querySelector('i')!;
     expect(pill.className).toContain('h-[3px]');
     expect(pill.className).toContain('w-[18px]');
@@ -214,11 +271,88 @@ describe('Rose left bar (flag on)', () => {
     expandBar();
     expect(bar.style.width).toBe('236px');
     expect(bar).toHaveAttribute('data-expanded', 'true');
-    expect(screen.queryByTestId('rose-group-divider')).toBeNull();
+    expect(screen.getAllByTestId('rose-group-divider')).toHaveLength(2);
     expect(screen.getByText('Plan Tahoe trip').className).toContain('opacity-100');
 
     collapseBar();
     expect(bar.style.width).toBe('64px');
+  });
+
+  it('+ on a project marks it pending: liquid-metal ring + shadow + glow, in both widths, until an agent is selected', async () => {
+    const user = userEvent.setup();
+    const onCreateAgentInProject = vi.fn();
+    const user0 = signedInUser();
+    const props = (selectedAgentId: string | null) =>
+      defaultProps({
+        agents: AGENTS,
+        user: user0,
+        selectedAgentId,
+        roseActions: { onCreateAgentInProject },
+      });
+    const { rerender } = renderWithProviders(<AppSidebar {...props('home-run')} />);
+    expandBar();
+    await screen.findByTestId('rose-project-row-p-rose');
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
+
+    await user.click(createAgentButton('p-rose'));
+    expect(onCreateAgentInProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-rose' }));
+    // The terminal clears the selection for the new agent's composer.
+    rerender(<AppSidebar {...props(null)} />);
+    const row = screen.getByTestId('rose-project-row-p-rose');
+    expect(row).toHaveAttribute('data-pending', 'true');
+    const ring = within(row).getByTestId('pending-project-ring');
+    // The integration icons' liquid-metal ring (shared helper) and light tile,
+    // with shadow; screen readers hear the pending state too.
+    expect(ring.getAttribute('style')).toContain('conic-gradient');
+    expect(ring.getAttribute('style')).toContain('rgb(245, 245, 245)');
+    expect(ring.className).toMatch(/shadow-\[/);
+    expect(row).toHaveTextContent('(new agents go here)');
+    // Only one project is pending.
+    expect(screen.getAllByTestId('pending-project-frame')).toHaveLength(1);
+    collapseBar();
+    expect(
+      within(screen.getByTestId('rose-project-row-p-rose')).getByTestId('pending-project-ring'),
+    ).toBeInTheDocument();
+
+    // Another project's + moves it.
+    expandBar();
+    await user.click(createAgentButton('p-habits'));
+    expect(screen.getByTestId('rose-project-row-p-habits')).toHaveAttribute('data-pending', 'true');
+    expect(screen.getByTestId('rose-project-row-p-rose')).toHaveAttribute('data-pending', 'false');
+
+    // The created (or a picked) agent becomes selected: nothing is pending, and
+    // returning to the empty composer does not bring the stale mark back.
+    rerender(<AppSidebar {...props('habits-done')} />);
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
+    rerender(<AppSidebar {...props(null)} />);
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
+  });
+
+  it("the terminal's newAgentProjectId decides the pending project; Home + marks Home", async () => {
+    const user = userEvent.setup();
+    const base = defaultProps({ agents: AGENTS, user: signedInUser(), selectedAgentId: null });
+    const { rerender } = renderWithProviders(
+      <AppSidebar
+        {...base}
+        roseActions={{ onCreateAgentInProject: vi.fn(), newAgentProjectId: 'p-habits' }}
+      />,
+    );
+    expandBar();
+    await screen.findByTestId('rose-project-row-p-habits');
+    expect(screen.getByTestId('rose-project-row-p-habits')).toHaveAttribute('data-pending', 'true');
+    // The create request carried it and reset it to null (Home): no ring.
+    rerender(
+      <AppSidebar
+        {...base}
+        roseActions={{ onCreateAgentInProject: vi.fn(), newAgentProjectId: null }}
+      />,
+    );
+    expect(screen.queryByTestId('pending-project-frame')).toBeNull();
+    await user.click(createAgentButton('home'));
+    expect(screen.getByTestId('rose-home-project-row')).toHaveAttribute('data-pending', 'true');
+    expect(
+      within(screen.getByTestId('rose-home-project-row')).getByTestId('pending-project-ring'),
+    ).toBeInTheDocument();
   });
 
   it('collapsed icons use the gray Bot glyph plus only the supported status glyphs', async () => {
@@ -435,14 +569,9 @@ describe('Rose left bar (flag on)', () => {
     expect(bar.className).toContain('bg-white');
     expect(bar.className).toContain('dark:bg-[#262624]');
     expect(bar.className).toContain('dark:border-white/[0.09]');
-    expect(within(bar).getByRole('button', { name: 'Home' }).className).toContain(
-      'dark:text-[#ecece8]',
-    );
+    expect(screen.getByTestId('rose-home-project-row').className).toContain('dark:text-[#a3a39d]');
     expect(within(bar).getByRole('button', { name: 'Archived' }).className).toContain(
       'dark:text-[#a3a39d]',
-    );
-    expect(within(bar).getByRole('button', { name: 'New Super Agent' }).className).toContain(
-      'dark:bg-[#f2f2ef]',
     );
     const bot = screen
       .getByTestId('rose-agent-row-home-run')

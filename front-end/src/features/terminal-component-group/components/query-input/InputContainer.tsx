@@ -17,6 +17,9 @@
  *
  * TEXT ONLY (attachable=false, the code-agent direct channel): no paperclip.
  *
+ * LAYOUT (every variant): the paperclip sits immediately LEFT of the model
+ * name (ModelSelector / session model controls / read-only model label).
+ *
  * ROSE DESKTOP (roseDesktop): bare paperclip (no background/border) at the
  * model selector's 26px height, no model info button, short Rose model names
  * (rose-flash / rose-ultra), the 3-state SpeedToggle
@@ -118,7 +121,7 @@ export function InputContainer(props: InputContainerProps) {
         }
       >
         <div className={roseDesktop ? 'flex items-end gap-1.5' : 'flex items-center gap-1.5'}>
-          {!roseDesktop && paperclip}
+          {paperclip}
           {!props.hideModelSelector && (
             <ModelSelector
               selectedModel={props.selectedModel}
@@ -137,7 +140,6 @@ export function InputContainer(props: InputContainerProps) {
               onFastModeChange={speed.onFastModeChange ?? (() => {})}
             />
           )}
-          {roseDesktop && paperclip}
         </div>
         <SubmitOrStopButton
           canSubmit={props.canSubmit}

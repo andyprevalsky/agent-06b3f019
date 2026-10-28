@@ -31,6 +31,7 @@ import type { SubAgentStreamingMetrics } from './useMessageFiltering';
 import { WaitForConditionChip } from './wait-for-chip/WaitForConditionChip';
 import { WaitForTimestampChip } from './wait-for-chip/WaitForTimestampChip';
 import { localizeTimestamps } from '@/lib/localDateTime';
+import { waitTarget } from './waitForPhrase';
 
 export type { WaitForCheck } from '../types';
 
@@ -107,9 +108,8 @@ const WaitForChip = memo(function WaitForChip({
   const completedChecks = checks.filter(
     (c) => c.status === 'FINISHED' || c.status === 'ERROR',
   ).length;
-  const condition =
-    metadata?.condition || title.replace(/^Waiting for /, '').replace(/^Polling: /, '');
-  const description = localizeTimestamps(metadata?.description || condition);
+  const condition = metadata?.condition || waitTarget(title.replace(/^Polling: /, ''));
+  const description = localizeTimestamps(waitTarget(metadata?.description || condition));
 
   return (
     <WaitForConditionChip
