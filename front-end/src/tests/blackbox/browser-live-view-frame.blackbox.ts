@@ -77,7 +77,7 @@ describe('live-view window vs display contract', () => {
 });
 
 describe('Steel chrome crop (display-only)', () => {
-  it('excludes the 91px toolbar and 4px side borders from the visible stream rect', () => {
+  it('excludes the 87px chrome and 4px side/bottom borders from the visible stream rect', () => {
     const crop = resolveLiveViewChromeCrop(STEEL_PLAYER);
     expect(crop).toEqual({
       window: STEEL_LIVE_VIEW_WINDOW,
@@ -86,8 +86,9 @@ describe('Steel chrome crop (display-only)', () => {
       offsetY: STEEL_CHROME_CROP.y,
     });
     const visible = visibleSteelStreamRect();
-    expect(visible).toEqual({ x: 4, y: 91, width: 1280, height: 800 });
-    expect(visible.y + visible.height).toBe(STEEL_LIVE_VIEW_WINDOW.height);
+    // Measured on a live 1288x891 Steel session: page origin (4, 87), 4px bottom border.
+    expect(visible).toEqual({ x: 4, y: 87, width: 1280, height: 800 });
+    expect(visible.y + visible.height + STEEL_CHROME_CROP.x).toBe(STEEL_LIVE_VIEW_WINDOW.height);
     expect(visible.x + visible.width + STEEL_CHROME_CROP.x).toBe(STEEL_LIVE_VIEW_WINDOW.width);
     expect(visible.y).toBeGreaterThan(0);
   });
@@ -99,7 +100,7 @@ describe('Steel chrome crop (display-only)', () => {
     expect(style.transformOrigin).toBe('top left');
     expect(style.transform).toContain('scale(calc(100cqw / 1280))');
     expect(style.transform).toContain('-4');
-    expect(style.transform).toContain('-91');
+    expect(style.transform).toContain('-87');
 
     const paneWidth = 1100;
     const paneHeight = 700;
@@ -189,12 +190,14 @@ describe('Tilion live-view URL contract', () => {
   const TILION =
     'https://back.tilion.dev/v1/session/sess_3d245e56b86d4bc8ae32095b644117d4/live-view?token=abc';
 
-  it('recognises Tilion viewer pages and treats them as uncropped 1280x800 content', () => {
+  it('recognises Tilion viewer pages as uncropped page-only streams at the session viewport', () => {
     expect(tilionLiveViewSessionId(TILION)).toBe('sess_3d245e56b86d4bc8ae32095b644117d4');
     expect(isTilionLiveViewUrl(TILION)).toBe(true);
     expect(resolveLiveViewChromeCrop(TILION)).toBeNull();
-    expect(resolveLiveViewWindowSize(TILION)).toEqual(KERNEL_LIVE_VIEW_WINDOW);
-    expect(resolveLiveViewDisplaySize(TILION)).toEqual(LIVE_VIEW_CONTENT_VIEWPORT);
+    // Measured: embedded viewer image natural size 1366x625 (windows-low device).
+    expect(resolveLiveViewWindowSize(TILION)).toEqual({ width: 1366, height: 625 });
+    expect(resolveLiveViewDisplaySize(TILION)).toEqual({ width: 1366, height: 625 });
+    expect(resolveLiveViewDisplaySize(KERNEL_LIVE)).toEqual(KERNEL_LIVE_VIEW_WINDOW);
   });
 
   it.each([
