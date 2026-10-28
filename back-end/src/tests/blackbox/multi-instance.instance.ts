@@ -417,6 +417,67 @@ async function main(): Promise<unknown> {
       await session.cancelConnectSession(userId, connectId);
       return { poll, foreign };
     }
+    case 'e2b-create-slot': {
+      // Records when this instance's create ran, holding the slot for args[0] ms.
+      const { withClaudeCodeCreateSlot } = await import('../../providers/e2bCreateSlot');
+      await barrier();
+      return withClaudeCodeCreateSlot(async () => {
+        const start = Date.now();
+        await sleep(Number(args[0]));
+        return { start, end: Date.now() };
+      });
+    }
+    case 'messaging-slow-drain': {
+      // Drain with a short claim lease while every message insert stalls, so a
+      // part outlives its original lease unless the claim is renewed.
+      const { prisma } = await import('../../providers/database');
+      const delegate = prisma.messageRecord as unknown as Record<string, unknown>;
+      const createMany = delegate.createMany as (...a: unknown[]) => Promise<unknown>;
+      delegate.createMany = async (...a: unknown[]) => {
+        await sleep(Number(args[1]));
+        return createMany.apply(prisma.messageRecord, a);
+      };
+      const jobs = await import('../../domains/integrations/uploadService.messagingJobs');
+      await barrier();
+      await sleep(Number(args[2] ?? 0));
+      await jobs.runMessagingUploadJobs({ claimLeaseMs: Number(args[0]) });
+      return { done: true };
+    }
+    case 'catalog-seed': {
+      const { seedBenchmarkTasks } = await import('../../domains/benchmarks/hubCatalogSeed');
+      await barrier();
+      return seedBenchmarkTasks();
+    }
+    case 'error-alert': {
+      let sent = 0;
+      globalThis.fetch = (async () => {
+        sent += 1;
+        return new Response('ok', { status: 200 });
+      }) as typeof fetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.invalid/multi-instance';
+      const { alertError } = await import('../../providers/errorAlert');
+      await barrier();
+      alertError({ source: 'e2b_capacity', message: args[0] });
+      await sleep(3_000);
+      return { sent };
+    }
+    case 'x402-wallet-user': {
+      // Widen the gap between a lookup that finds no user and the write that
+      // follows, so both instances' first payments race on the same wallet.
+      const { prisma } = await import('../../providers/database');
+      const users = prisma.user as unknown as Record<string, unknown>;
+      const findUnique = users.findUnique as (...a: unknown[]) => Promise<unknown>;
+      users.findUnique = async (...a: unknown[]) => {
+        const found = await findUnique.apply(prisma.user, a);
+        await sleep(500);
+        return found;
+      };
+      const { getOrCreateWalletUser } = await import('../../providers/hybridAuth');
+      await barrier();
+      const user = await getOrCreateWalletUser(args[0]);
+      return { userId: user.userId };
+    }
     case 'proxy-ordinal': {
       // The production proxy core with the routes' ordinal reserver; only the
       // upstream and the cache are faked. Reports the slot key it recorded.
