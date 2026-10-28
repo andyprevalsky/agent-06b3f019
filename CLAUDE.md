@@ -146,7 +146,8 @@ works in the real world over long horizons on the user's behalf. Judge every
 design, UI and harness decision by whether it makes Rose a better RWLH.
 
 - Production: https://roselabs.ai
-- Backend API: https://navi-j9a9.onrender.com
+- Backend API: https://api.roselabs.ai (custom domain on Render service `Navi`; `https://navi-j9a9.onrender.com` is the same service and still works)
+- Index 01 / MCP: `https://api.roselabs.ai/mcp/<rose-api-key>` (Streamable HTTP; `spawn_agent` → plan mode, rose-1-ultra)
 - API Docs: https://docs.roselabs.ai
 
 ## Sub-agent delegation
