@@ -76,6 +76,12 @@ apex host; the regional naming is how the API answers now.
 - Outcome proof: the unchanged `scripts/run-bench --local browser-smoke` with
   `BROWSER_PROVIDER=tilion` failed on 87438cdc3 with the 4409 above and is rerun on the
   fixed revision.
+- Secondary finding from the outcome-proof run: `browser-smoke` PASSED on Tilion with the fix,
+  but the command exited 1 because `scripts/cloudbench-exact-session-cleanup.py` retried
+  only HTTP 503 on the idempotent Tilion DELETE and a single gateway 502 failed the
+  run's owned-cloud-evidence finalization (the session was already gone). 502 and 504 are
+  now retried like 503 (bounded; 401/500 still fail at once); the existing
+  `cloudbench-exact-session-multi-root` test covers it and fails without the change.
 - 10k agents: pure string comparison per session; no new shared state, connections, or
   queries. The multiplexer already owns one upstream socket per session.
 
