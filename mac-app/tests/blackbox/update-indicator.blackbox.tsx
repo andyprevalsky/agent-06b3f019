@@ -298,6 +298,31 @@ describe('UpdateIndicator — state rendering (file boundary)', () => {
 
     expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
   });
+
+  it('every visible chip sits inside the launcher liquid-metal ring with dark-mode styling', () => {
+    const { emitStatus } = setupHarness();
+    renderWithProviders(<UpdateIndicator />);
+
+    const states: UpdateStatusPayload[] = [
+      { state: 'available', version: '9.9.9' },
+      { state: 'downloading', percent: 40 },
+      { state: 'downloaded', version: '9.9.9' },
+      { state: 'error', message: 'boom' },
+    ];
+    for (const payload of states) {
+      emitStatus(payload);
+      const chip = screen.getByTestId('update-chip');
+      expect(chip.querySelector('[data-testid="liquid-metal-ring"]')).not.toBeNull();
+      const fill = chip.lastElementChild as HTMLElement;
+      expect(fill.className).toContain('dark:bg-[#262624]');
+      expect(chip.querySelector('svg, span')?.getAttribute('class') ?? '').toMatch(/dark:/);
+    }
+
+    emitStatus({ state: 'available', version: '9.9.9' });
+    expect(screen.getByText('New update available').className).toContain('dark:text-');
+    expect(screen.getByRole('button', { name: 'Install Now' }).className).toContain('dark:bg-');
+    expect(screen.getByRole('button', { name: 'Later' }).className).toContain('dark:text-');
+  });
 });
 
 // ---------------------------------------------------------------------------

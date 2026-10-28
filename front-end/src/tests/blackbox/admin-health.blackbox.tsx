@@ -94,7 +94,7 @@ describe('AdminHealth page', () => {
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
     expect(
       screen.getByText(
-        'Completed customer product root tasks / all customer product root tasks issued in the selected period. Excludes benchmarks, tests, simulations, and operator accounts.',
+        'Completed / finished real agent runs started in the selected period, with a retried goal counted once. Running or archived-while-running tasks have no outcome yet; chat-only questions, benchmarks, test fixtures and simulations are excluded.',
       ),
     ).toBeInTheDocument();
     // Cost labels/values appear in both the summary strip and chart legend.
@@ -161,6 +161,26 @@ describe('AdminHealth page', () => {
     expect(screen.getAllByText('Volume')).toHaveLength(10);
     expect(screen.getAllByText('Conversion')).toHaveLength(10);
     expect(screen.getAllByLabelText(/vs prior 30 days/).length).toBeGreaterThan(10);
+  });
+
+  it('shows "No finished tasks" instead of 0% when no task in the period has an outcome', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health`, () => {
+        const payload = adminHealthPayload('monthly');
+        return HttpResponse.json({
+          ...payload,
+          summary: { ...payload.summary, taskCompletionRate: null },
+          series: payload.series.map((point, index) =>
+            index === payload.series.length - 1 ? { ...point, taskCompletionRate: null } : point,
+          ),
+        });
+      }),
+    );
+    renderWithProviders(<AdminHealth />);
+
+    const value = await screen.findByText('No finished tasks');
+    // The tile's value slot (directly under its title) reads the empty state, not 0%.
+    expect(value.previousElementSibling?.textContent).toBe('Task Completion Rate');
   });
 
   it('requests the selected time slice with auth', async () => {

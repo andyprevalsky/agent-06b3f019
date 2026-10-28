@@ -4,7 +4,12 @@ import { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 import type * as repo from './repo';
 import type { ProductRootTaskRecord } from './repoProductUsage';
 import type { SubscriberSeriesPoint } from './subscriberMetrics';
-import { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskStats';
+import {
+  averageOutputTokens,
+  isResolvedTask,
+  taskCompletionRate,
+  tasksIssuedPerUser,
+} from './taskStats';
 import { findPeriodIndex } from './time';
 import type {
   AdminHealthPeriod,
@@ -76,8 +81,20 @@ export function buildSeries(
       tasksIssuedPerUser: tasksIssuedPerUser(periodTasks, subscriberPoint.userCount),
       outputTokensPerTask: averageOutputTokens(periodTasks),
       gmvPerTask: gmvPerTaskCents(gmvCents, periodTasks.length),
-      taskCompletionRate: taskCompletionRate(productTasksByPeriod[index]),
+      taskCompletionRate: taskCompletionRate(latestResolvedAttempts(productTasksByPeriod[index])),
       costPerTask: calculateTaskCostPerTask(rootAgentRunsByPeriod[index], rootAgentRunUsage),
     };
   });
+}
+
+/**
+ * An operator retrying the same goal is one task: keep its latest resolved
+ * attempt so repeated test prompts neither inflate nor dilute the rate.
+ * Customer tasks are never collapsed (see dedupeInternalRepeatTasks).
+ */
+function latestResolvedAttempts(tasks: ProductRootTaskRecord[]): ProductRootTaskRecord[] {
+  const newestFirst = tasks
+    .filter(isResolvedTask)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  return dedupeInternalRepeatTasks(newestFirst);
 }

@@ -18,6 +18,7 @@ import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
+import { ADMIN_USER_IDS } from '../../domains/admin-health/config';
 import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
 import { isCacheableAdminHealthResponse } from '../../domains/admin-health/service';
 import {
@@ -365,16 +366,28 @@ async function testAdminHappyWeekly() {
     new Date(body.range.start),
     new Date(body.range.end)
   );
+  // Completed / resolved, with an operator's retried goal counted once by its
+  // latest resolved attempt; no resolved task is null rather than 0%.
+  const latestByKey = new Map<string, (typeof productTasks)[number]>();
+  for (const task of productTasks) {
+    if (['STARTING_UP', 'ACTIVE', 'PAUSED'].includes(task.status) || task.archivedBeforeOutcome)
+      continue;
+    const key = ADMIN_USER_IDS.has(task.userId) ? `${task.userId} ${task.goal}` : task.taskId;
+    const kept = latestByKey.get(key);
+    if (!kept || task.createdAt > kept.createdAt) latestByKey.set(key, task);
+  }
+  const resolvedTasks = [...latestByKey.values()];
   const expectedCompletionRate =
-    productTasks.length === 0
-      ? 0
+    resolvedTasks.length === 0
+      ? null
       : Number(
           (
-            productTasks.filter((task) => task.status === 'COMPLETED').length / productTasks.length
+            resolvedTasks.filter((task) => task.status === 'COMPLETED').length /
+            resolvedTasks.length
           ).toFixed(4)
         );
   if (body.summary.taskCompletionRate !== expectedCompletionRate) {
-    throw new Error('Completion summary and chart must use the real customer product cohort');
+    throw new Error('Completion summary and chart must use the real product cohort');
   }
   if (
     body.velocity.dev.linearPointsCompleted.status === 'ready' &&

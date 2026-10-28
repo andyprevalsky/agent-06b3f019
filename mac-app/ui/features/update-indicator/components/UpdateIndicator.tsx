@@ -11,19 +11,48 @@
  *
  * This component is a thin renderer over `useUpdateIndicator`; no IPC or
  * business logic lives here.
+ *
+ * Look: every chip sits inside the Quick-Query launcher's liquid-metal ring
+ * (ui/shared/liquid-metal) and follows the main window's html.dark via
+ * Tailwind dark: variants (theme only; no state change).
  */
 
 import { createPortal } from 'react-dom';
-import { CHIP_BASE, ROSE_GRADIENT } from '../config';
+import type { ReactNode } from 'react';
+import { LiquidMetalRing, LIQUID_METAL_RING_PX } from '../../../shared/liquid-metal';
+import { CHIP_BASE, CHIP_LABEL, ROSE_GRADIENT } from '../config';
 import { useUpdateIndicator } from '../hooks';
 import type { UpdateStatusPayload } from '../types';
 import { CheckIcon, GiftIcon, WarningIcon } from './Icons';
 
-const CHIP_LABEL = 'text-xs font-medium text-neutral-600';
 const BTN_SECONDARY =
-  'text-xs font-medium text-neutral-500 hover:text-neutral-700 transition-colors';
+  'text-xs font-medium text-neutral-500 hover:text-neutral-700 transition-colors dark:text-[#a3a39d] dark:hover:text-[#f2f2ef]';
 const BTN_PRIMARY =
-  'text-xs font-medium text-neutral-700 bg-neutral-200 hover:bg-neutral-300 px-2.5 py-1 rounded-full transition-colors';
+  'text-xs font-medium text-neutral-700 bg-neutral-200 hover:bg-neutral-300 px-2.5 py-1 rounded-full transition-colors dark:text-[#f2f2ef] dark:bg-white/10 dark:hover:bg-white/[0.16]';
+const METAL_CHIP_SHADOW =
+  'relative rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15),0_2px_4px_rgba(0,0,0,0.1)] dark:shadow-[0_6px_18px_rgba(0,0,0,0.45),0_2px_4px_rgba(0,0,0,0.3)]';
+
+/** Chip fill inside the launcher's liquid-metal ring. */
+const MetalChip = ({
+  className,
+  onClick,
+  children,
+}: {
+  className: string;
+  onClick?: () => void;
+  children: ReactNode;
+}): React.ReactElement => (
+  <div
+    className={METAL_CHIP_SHADOW}
+    style={{ padding: LIQUID_METAL_RING_PX }}
+    data-testid="update-chip"
+  >
+    <LiquidMetalRing radius={9999} />
+    <div className={`${CHIP_BASE} ${className}`} onClick={onClick}>
+      {children}
+    </div>
+  </div>
+);
 
 const renderInPortal = (
   container: HTMLElement,
@@ -39,7 +68,7 @@ const CheckingChip = ({ container }: { container: HTMLElement }): React.ReactEle
   renderInPortal(
     container,
     false,
-    <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-400 border-t-transparent" />
+    <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-400 border-t-transparent dark:border-[#8c8c86] dark:border-t-transparent" />
   );
 
 const UpToDateChip = ({
@@ -52,13 +81,13 @@ const UpToDateChip = ({
   renderInPortal(
     container,
     true,
-    <div
-      className={`${CHIP_BASE} gap-2 cursor-pointer hover:bg-neutral-200 transition-colors`}
+    <MetalChip
+      className="gap-2 cursor-pointer hover:bg-neutral-200 transition-colors dark:hover:bg-[#2f2f2c]"
       onClick={onDismiss}
     >
       <CheckIcon />
       <span className={CHIP_LABEL}>Up to date</span>
-    </div>
+    </MetalChip>
   );
 
 const ActionableChip = ({
@@ -75,7 +104,7 @@ const ActionableChip = ({
   renderInPortal(
     container,
     true,
-    <div className={`${CHIP_BASE} justify-between gap-4`}>
+    <MetalChip className="justify-between gap-4">
       <div className="flex items-center gap-2">
         <GiftIcon />
         <span className={CHIP_LABEL}>New update available</span>
@@ -88,7 +117,7 @@ const ActionableChip = ({
           {actionLabel}
         </button>
       </div>
-    </div>
+    </MetalChip>
   );
 
 const DownloadingChip = ({
@@ -101,9 +130,9 @@ const DownloadingChip = ({
   renderInPortal(
     container,
     true,
-    <div className={`${CHIP_BASE} gap-3 min-w-[200px]`}>
+    <MetalChip className="gap-3 min-w-[200px]">
       <span className={CHIP_LABEL}>Downloading...</span>
-      <div className="flex-1 h-1.5 rounded-full bg-neutral-200 overflow-hidden">
+      <div className="flex-1 h-1.5 rounded-full bg-neutral-200 overflow-hidden dark:bg-white/10">
         <div
           className="h-full rounded-full transition-all duration-200"
           style={{
@@ -112,7 +141,7 @@ const DownloadingChip = ({
           }}
         />
       </div>
-    </div>
+    </MetalChip>
   );
 
 const ErrorChip = ({
@@ -125,7 +154,7 @@ const ErrorChip = ({
   renderInPortal(
     container,
     true,
-    <div className={`${CHIP_BASE} justify-between gap-4`}>
+    <MetalChip className="justify-between gap-4">
       <div className="flex items-center gap-2">
         <WarningIcon />
         <span className={CHIP_LABEL}>Update failed</span>
@@ -133,7 +162,7 @@ const ErrorChip = ({
       <button onClick={onRetry} className={BTN_PRIMARY}>
         Retry
       </button>
-    </div>
+    </MetalChip>
   );
 
 const getDownloadingPercent = (status: UpdateStatusPayload, progress: number): number => {

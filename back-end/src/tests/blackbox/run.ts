@@ -176,6 +176,16 @@ const lateExclusiveDomainNames = new Set([
   // Its feedback cases deliberately set a process-wide funded-key cooldown.
   // Keep that mutation after every other domain that may need the key.
   'codex-code',
+  // It publishes the singleton queue pointer under the global exclusive
+  // queue-admission lock, which waits for every sibling workflow start holding
+  // the shared side; under the parallel coverage pool its 10s interactive
+  // transaction expired (2026-10-27, 2 of 4 coverage runs; it passes alone).
+  'agent-queue-pointer',
+  // Its archived-agent status backfill settles every archived non-terminal row in
+  // the database and asserts a second run finds none; sibling fixture writers in
+  // the parallel pool add archived rows mid-case (2026-10-27 coverage) and would
+  // have their own rows rewritten by it.
+  'agents',
 ]);
 const domainWeights = new Map<string, number>([
   ['benchmarks-hub-pipeline', 90],

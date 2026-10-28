@@ -31,11 +31,14 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
-import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
 import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
+import { runLiveCrossProviderCases } from './browser-provider.tilion-live-cases.support';
+import { runLiveTilionHarvest } from './browser-provider.tilion-harvest.live';
 import { assertKernelUnhealthyProxyRelaxesLocation } from './browser-provider-proxy-health.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
+import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
+import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
   browserUseProxyCountry,
@@ -70,13 +73,9 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,
   ],
-  [
-    'Kernel is the default provider',
-    () =>
-      withProvider(undefined, () =>
-        assert(selectedBrowserProvider() === 'kernel', 'expected kernel')
-      ),
-  ],
+  // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
+  ...tilionWiringCases,
+  ...steelAuthShareCases,
   [
     'Kernel is selected by one environment parameter',
     () =>
@@ -549,6 +548,7 @@ async function main(): Promise<void> {
   }
 
   failed += await runOptionalLiveBrowserUseProvider();
+  failed += await runLiveTilionHarvest();
 
   if (process.env.RUN_BROWSER_USE_HANDOFF_LIVE === '1') {
     try {
@@ -578,16 +578,7 @@ async function main(): Promise<void> {
     );
   }
 
-  if (process.env.TEST_BASE_URL) {
-    try {
-      await runLiveKernelSteelAuthPersist();
-    } catch (error) {
-      failed++;
-      console.error(
-        `FAIL live Kernel/Steel auth persist: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
+  failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
   console.log(

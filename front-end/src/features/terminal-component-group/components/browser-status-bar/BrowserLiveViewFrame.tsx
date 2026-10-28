@@ -10,11 +10,16 @@
  *                             translate(-4*s, -91*s) scale(s)
  *                             s = clipWidth/1280 so Amazon cart stays in frame
  *                             Kernel 1280x800 inset-0 (no chrome)
+ *                             Tilion viewer page inset-0 (page-only stream)
  *
  * LOAD STATE: [LOADING] (LiveViewLoading covers the iframe)
  *   --iframe load for this url--> [STREAMING]; a new url restarts at LOADING.
  *   live=false (bound session closed/ended) --> [NOT_LIVE] LiveViewLoading and
  *   no iframe, so a provider "session closed" page is never shown.
+ *
+ * INPUT STATE: interactive=true -> the provider viewer receives real mouse
+ *   and keyboard (Tilion /live-view sends them as page input);
+ *   interactive=false -> inert + pointer-events-none + tabIndex -1.
  *
  * The remote browser is never resized from here (antibot / fingerprint-stable
  * session size). Steel session create stays 1288x891.
