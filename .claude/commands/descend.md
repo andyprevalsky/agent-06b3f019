@@ -513,8 +513,13 @@ for `DONE` and `--status blocked` for `BLOCKED`:
 python3 scripts/descend_step_log.py transition \
   --run-id "$RUN_ID" --lane main --step DONE --epoch "$EPOCH"
 python3 scripts/descend_step_log.py finish \
-  --run-id "$RUN_ID" --lane main --status completed --run-terminal
+  --run-id "$RUN_ID" --lane main --status completed --run-terminal \
+  --detail scheduled_total="$SCHEDULED_TOTAL" --detail infra_failed="$INFRA_FAILED" \
+  --detail failed_count="$FAILED" --detail passed_count="$PASSED"
 ```
+
+Pass each benchmark-slice `transition`/`finish` the same verified counts with
+`--detail`; omit a count that is not yet known rather than writing zero.
 
 Before every `/sync`, commit any newly appended ledger rows in a log-only
 commit so merging cannot discard them. Commit only the ledger path; never fold

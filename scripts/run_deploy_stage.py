@@ -19,6 +19,14 @@ from pathlib import Path
 from typing import Sequence
 
 from deploy_stage import LifecycleError, admit_stage, append_stage, release_stage
+from factory_detail import (
+    HostSampler,
+    active_admissions,
+    attempt_detail,
+    reuse_detail,
+    source_detail,
+    stage_detail,
+)
 from factory_metadata import load_metadata
 
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -105,6 +113,41 @@ def _record_cache_hit(run_dir: Path, stage: str, fingerprint: str) -> None:
     temporary.replace(path)
 
 
+def _append_reused(
+    run_dir: Path,
+    run_id: str,
+    stage: str,
+    fingerprint: str,
+    telemetry: dict,
+    invoked_epoch: float,
+) -> None:
+    """Record an exact-input reuse so reviews can count skipped reruns."""
+
+    now = time.time()
+    try:
+        append_stage(
+            run_dir,
+            run_id=run_id,
+            stage=stage,
+            started_at=_utc_timestamp(),
+            finished_at=_utc_timestamp(),
+            started_epoch=now,
+            finished_epoch=now,
+            exit_code=0,
+            log="",
+            telemetry=telemetry,
+            status="reused",
+            detail={
+                "schema_version": 1,
+                "outcome": {"exit_code": 0, "failure_class": None},
+                "reuse": reuse_detail(run_dir, fingerprint, requested=True, hit=True),
+                "timing": {"setup_seconds": round(max(0.0, now - invoked_epoch), 3), "exec_seconds": 0.0},
+            },
+        )
+    except OSError as error:
+        print(f"warning: could not append reused stage record: {error}", file=sys.stderr)
+
+
 def _run_logged(log_path: Path, command: Sequence[str]) -> int:
     received_signal = 0
     child: subprocess.Popen[bytes] | None = None
@@ -189,7 +232,24 @@ def _run_logged(log_path: Path, command: Sequence[str]) -> int:
     return child_exit
 
 
+def _source_in_background() -> tuple[threading.Thread, dict]:
+    """Collect source detail concurrently so it never adds to stage wall time."""
+
+    source: dict = {}
+
+    def collect() -> None:
+        try:
+            source.update(source_detail(REPO_ROOT))
+        except Exception as error:  # Telemetry must never change a gate result.
+            print(f"warning: could not collect source detail: {type(error).__name__}", file=sys.stderr)
+
+    thread = threading.Thread(target=collect, daemon=True)
+    thread.start()
+    return thread, source
+
+
 def main() -> int:
+    invoked_epoch = time.time()
     args = _parser().parse_args()
     command = list(args.command)
     if command and command[0] == "--":
@@ -212,6 +272,7 @@ def main() -> int:
         return 2
 
     run_dir = args.run_root / run_id
+    concurrent_stages = max(0, active_admissions(run_dir) - 1)
     fingerprint: str | None = None
     if args.reuse_passed:
         try:
@@ -219,6 +280,7 @@ def main() -> int:
         except (OSError, subprocess.SubprocessError) as error:
             print(f"warning: could not fingerprint deploy inputs: {error}", file=sys.stderr)
         if fingerprint is not None and _cache_hit(run_dir, args.stage, fingerprint):
+            _append_reused(run_dir, run_id, args.stage, fingerprint, telemetry, invoked_epoch)
             try:
                 release_stage(args.run_root, run_id=run_id, token=token)
             except (LifecycleError, OSError) as error:
@@ -233,8 +295,33 @@ def main() -> int:
     started_epoch = time.time()
     print(f"== deploy stage: {args.stage} ==")
 
+    source_thread, source = _source_in_background()
+    sampler = HostSampler().start()
     stage_exit = _run_logged(log_path, command)
     finished_epoch = time.time()
+    host = sampler.stop()
+    source_thread.join(timeout=30)
+    try:
+        detail = stage_detail(
+            exit_code=stage_exit,
+            log_path=log_path,
+            invoked_epoch=invoked_epoch,
+            started_epoch=started_epoch,
+            finished_epoch=finished_epoch,
+            concurrent_stages=concurrent_stages,
+            host=host,
+            source=dict(source),
+            attempt=attempt_detail(run_dir, args.stage, source),
+            reuse=reuse_detail(
+                run_dir / "passed-cache" / args.stage,
+                fingerprint,
+                requested=args.reuse_passed,
+                hit=False,
+            ),
+        )
+    except Exception as error:  # Telemetry must never change a gate result.
+        print(f"warning: could not build stage detail: {type(error).__name__}", file=sys.stderr)
+        detail = None
     try:
         append_stage(
             run_dir,
@@ -247,6 +334,7 @@ def main() -> int:
             exit_code=stage_exit,
             log=log_relative,
             telemetry=telemetry,
+            detail=detail,
         )
     except OSError as error:
         print(f"warning: could not append deploy stage record: {error}", file=sys.stderr)

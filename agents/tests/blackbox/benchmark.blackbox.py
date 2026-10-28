@@ -13857,6 +13857,37 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
     assert recorded == []
     # ...but the attempt is still recorded in the run-stats ledger
     assert len(attempts) == 1 and attempts[0]["fast_mode_cache_enabled"] is True
+    # Factory reviews group attempts per benchmark run and outcome.
+    assert attempts[0]["run_id"] == run.run_id and attempts[0]["outcome_class"] == "passed"
+
+
+def test_attempt_ledger_records_run_id_and_outcome_class():
+    """Attempts carry run/campaign identity and outcome; absent values stay absent."""
+    import tempfile
+    from unittest.mock import patch
+
+    import benchmarks.timeout_history as timeout_history
+
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+        ):
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "campaign-7"}):
+                timeout_history.record_attempt(
+                    task_name="t", passed=False, status="COMPLETED", duration_seconds=4.0,
+                    cost_cents=0.0, run_id="run-1", outcome_class="cleanup-failure",
+                )
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": ""}):
+                timeout_history.record_attempt(
+                    task_name="t", passed=True, status="COMPLETED", duration_seconds=2.0, cost_cents=0.0,
+                )
+        first, second = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert (first["run_id"], first["group_run_id"], first["outcome_class"]) == (
+        "run-1", "campaign-7", "cleanup-failure",
+    )
+    assert not {"run_id", "group_run_id", "outcome_class"} & set(second)
 
 
 def test_non_fast_mode_pass_still_seeds_timeout_history():
@@ -26238,6 +26269,7 @@ async def run_all_tests():
         test_normal_run_never_implicitly_shortens_the_benchmark_timeout,
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
+    r.record("attempt_ledger_records_run_id_and_outcome_class", test_attempt_ledger_records_run_id_and_outcome_class)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
         "test_history_success_output_pipe_preserves_save_and_later_tasks",
