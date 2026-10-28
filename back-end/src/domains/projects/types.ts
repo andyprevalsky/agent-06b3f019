@@ -139,9 +139,18 @@ export const syncPushSchema = z
   })
   .strict();
 
+/** POST /api/projects/cli-login-codes — mint a one-time CLI login code. */
+export const mintCliLoginCodeSchema = z.object({ projectId: projectIdSchema.optional() }).strict();
+
+/** POST /api/projects/cli-login-codes/exchange — the CLI trades its code once. */
+export const exchangeCliLoginCodeSchema = z
+  .object({ code: z.string().trim().min(1).max(200) })
+  .strict();
+
 export type CreateProjectBody = z.infer<typeof createProjectSchema>;
 export type UpdateProjectBody = z.infer<typeof updateProjectSchema>;
 export type CreateEnvFileBody = z.infer<typeof createEnvFileSchema>;
 export type UpdateEnvFileBody = z.infer<typeof updateEnvFileSchema>;
 export type SyncPushBody = z.infer<typeof syncPushSchema>;
 export type SyncFileBody = z.infer<typeof syncFileSchema>;
+export type MintCliLoginCodeBody = z.infer<typeof mintCliLoginCodeSchema>;

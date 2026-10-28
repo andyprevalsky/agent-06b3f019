@@ -459,6 +459,7 @@ model User {
   localDevices                LocalDevice[]
   projects                    Project[]
   previewHandoffCodes         PreviewHandoffCode[]
+  projectCliLogins            ProjectCliLogin[]
   iphoneDevice                IPhoneDevice?
   iphoneLeases                IPhoneLease[]
 
@@ -2170,6 +2171,7 @@ model Project {
   envFiles        ProjectEnvFile[]
   syncSnapshot    ProjectSyncSnapshot?
   agents          Agent[]
+  cliLogins       ProjectCliLogin[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
@@ -2215,6 +2217,31 @@ model ProjectSyncSnapshot {
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
   project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+/// One-time CLI sign-in for `rose agent-init --login-code <code>` (Rose's
+/// "Set up with your coding agent"). A signed-in user mints a single-use code
+/// (optionally bound to one project); the CLI exchanges it once for a personal
+/// credential that only /api/projects accepts (only that project when bound).
+/// Only SHA-256 hashes of the code and the credential are stored. Backend-only
+/// (service role); no client policy.
+model ProjectCliLogin {
+  id                  String    @id @default(uuid())
+  userId              String
+  /// Bound project; null = any of the user's projects (and creating one).
+  projectId           String?
+  codeHash            String    @unique
+  codeExpiresAt       DateTime
+  /// Set by the first presentation of the code, whatever its outcome.
+  exchangedAt         DateTime?
+  credentialHash      String?   @unique
+  credentialExpiresAt DateTime?
+  createdAt           DateTime  @default(now())
+  user                User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  project             Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, codeExpiresAt])
+  @@index([projectId])
 }
 
 model AgentTaskProgressEstimate {
