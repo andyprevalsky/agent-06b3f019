@@ -3848,6 +3848,55 @@ async def test_cc_execute_tool_readtimeout_soft_fails_finished():
     await _assert_cc_sandbox_infra_soft_fail("ReadTimeout('')", "tc-readtimeout")
 
 
+async def test_cc_execute_tool_invalid_code_session_id_is_not_sent_or_called_capacity():
+    """RCA 942d8562 (2026-10-27): code_session_id="null" must not reach the backend.
+
+    The model sent the literal string "null" for an omitted optional. The
+    backend's uuid schema rejected it (HTTP 500 zod invalid_string) and the
+    tool reported "a transient sandbox capacity error". A non-UUID id is an
+    invalid argument: say so truthfully, without scheduling a session create.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from tools.base import MessageStatus
+
+    handle = _FakeActivityHandle(result={"success": True})
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(
+                _FakeCCWorkflowInstance(),
+                {"goal": "g", "code_session_id": "null"},
+                "tc-bad-session-id",
+            )
+        )
+    finally:
+        restore()
+
+    assert fake.started_activity_args is None, "invalid code_session_id was forwarded to session create"
+    finished = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished.metadata.get("success") is False
+    assert "code_session_id" in finished.message
+    assert "capacity" not in finished.message.lower()
+
+
+def test_cc_validation_failure_is_not_classified_as_sandbox_capacity():
+    """RCA 942d8562: a 4xx request-validation failure is not a transient capacity flake."""
+    from domains.spawn_claude_code_agent.handler import _maybe_soft_fail_session_create_result
+
+    validation = Exception(
+        "Failed to create code session (provider=codex): HTTP 400: "
+        '{"error":"Invalid request","code":"INVALID_REQUEST","issues":[{"path":["code_session_id"],"message":"Invalid uuid"}]}'
+    )
+    assert _maybe_soft_fail_session_create_result(code_provider="codex", error=validation) is None
+    capacity = Exception(
+        "Failed to create code session (provider=codex): HTTP 500: "
+        '{"error":"500: Failed to create sandbox: redis: connection pool timeout"}'
+    )
+    soft = _maybe_soft_fail_session_create_result(code_provider="codex", error=capacity)
+    assert soft is not None and "capacity" in soft["message"].lower()
+
+
 def test_code_agent_activity_has_no_deadline_and_no_attempt_cap():
     """C11 structural check: the code-agent activity's only liveness limit is its heartbeat.
 
@@ -4195,6 +4244,14 @@ async def _run_all_tests():
     await r.record_async(
         "cc_exec_readtimeout_soft_fail",
         test_cc_execute_tool_readtimeout_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_invalid_code_session_id_not_sent",
+        test_cc_execute_tool_invalid_code_session_id_is_not_sent_or_called_capacity,
+    )
+    r.record(
+        "cc_validation_failure_not_capacity",
+        test_cc_validation_failure_is_not_classified_as_sandbox_capacity,
     )
     r.record(
         "cc_activity_no_deadline_no_attempt_cap",

@@ -18,6 +18,8 @@ import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResi
 import { sendMessageToUser } from './messageService';
 import { answerQuestion } from './questionService';
 import { waitForRequest } from './requestService';
+import { generateVideo } from './videoService';
+import { generateVideoRequestSchema } from './videoTypes';
 import { AgentToolsError, resolveContext } from './service';
 import {
   agentToolsAgentIdSchema,
@@ -130,6 +132,24 @@ router.post(
     try {
       const result = await displayMedia(await resolveContext(caller), parsed.data);
       res.status(result.posted_count > 0 || result.question !== undefined ? 201 : 200).json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  })
+);
+
+/** POST /:agentId/generate-video — Gemini Omni video → stored file (videoService.ts). */
+router.post(
+  '/:agentId/generate-video',
+  agentToolsAuth,
+  asyncHandler<AgentToolsRequest>(async (req, res) => {
+    const caller = callerFor(req, res);
+    if (caller === null) return;
+    const parsed = generateVideoRequestSchema.safeParse(req.body);
+    if (!parsed.success) return invalidBody(res, parsed.error.issues);
+    try {
+      const result = await generateVideo(await resolveContext(caller), parsed.data);
+      res.status(result.replayed ? 200 : 201).json(result);
     } catch (err) {
       sendError(res, err);
     }
