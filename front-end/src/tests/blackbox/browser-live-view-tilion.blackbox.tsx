@@ -284,6 +284,12 @@ describe('Tilion live-view token lifecycle', () => {
       `https://back.tilion.dev/v1/session/${TILION_SESSION}/live-view`,
     );
     expect(src.searchParams.get('token')).toBe('tok-ro');
+    // Embedded viewer: page-only image (no Tilion bar/padding), so the cursor
+    // geometry (1366x625 page, contain top-left) holds at any pane size.
+    expect(src.searchParams.get('embed')).toBe('1');
+    expect(
+      document.querySelector<HTMLElement>('[data-testid="live-view-stream"]')?.style.aspectRatio,
+    ).toBe('1366 / 625');
     // Tilion streams the page only: no Steel chrome crop transform.
     expect(liveIframe()!.style.transform).toBe('');
   });
