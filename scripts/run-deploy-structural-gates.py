@@ -273,6 +273,7 @@ GATES = (
         "prebuild-agents-image",
         ("bash", "scripts/tests/prebuild-agents-image.test.sh"),
     ),
+    Gate("deploy-pipeline", ("python3", "scripts/tests/run-deploy-pipeline.test.py")),
     Gate(
         "deploy-structural-runner",
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
