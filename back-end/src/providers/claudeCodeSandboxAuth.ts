@@ -6,6 +6,7 @@
  */
 
 import { createLogger } from './logger';
+import { foundryRegions } from './rose/foundry';
 import type { ClaudeCodeCredentialResult } from './claudeCredentials';
 import type { GptCodeCredentialEnvelopeResult } from './gptCredentials';
 
@@ -346,55 +347,77 @@ export function isRefreshOnlyOauthEnvelope(
   );
 }
 
+/** Azure resource and deployment that fund Codex sandboxes when user OAuth is unusable. */
+export const CODEX_AZURE_DEFAULT_HOST = 'rose-foundry-westus.openai.azure.com';
+export const CODEX_AZURE_DEFAULT_DEPLOYMENT = 'gpt-5.6-terra';
+
+export interface CodexAzureFunding {
+  /** Key of the configured AZURE_FOUNDRY_* region whose endpoint is the funding host. */
+  apiKey: string;
+  /** Azure OpenAI v1 base URL, the Codex `model_providers.azure.base_url`. */
+  baseUrl: string;
+  /** Deployment name the funded Codex run uses as its model. */
+  deployment: string;
+}
+
+/**
+ * The Azure OpenAI deployment that funds Codex sandboxes, read from the same
+ * AZURE_FOUNDRY_* regions the Rose router uses (no separate key). The resource
+ * defaults to rose-foundry-westus, whose `gpt-5.6-terra` deployment matches the
+ * Codex sandbox model; CODEX_AZURE_FOUNDRY_HOST / CODEX_AZURE_DEPLOYMENT
+ * override. Null when no configured region serves that host.
+ */
+export function resolveCodexAzureFunding(): CodexAzureFunding | null {
+  const host = (process.env.CODEX_AZURE_FOUNDRY_HOST ?? '').trim() || CODEX_AZURE_DEFAULT_HOST;
+  const deployment =
+    (process.env.CODEX_AZURE_DEPLOYMENT ?? '').trim() || CODEX_AZURE_DEFAULT_DEPLOYMENT;
+  const region = foundryRegions().find(
+    (candidate) => candidate.endpoint.startsWith('https://') && candidate.host === host
+  );
+  if (region === undefined) return null;
+  return { apiKey: region.apiKey(), baseUrl: `${region.endpoint}/openai/v1`, deployment };
+}
+
+/** Sandbox env for the Azure-funded Codex provider (ws-server selects it with -c flags). */
+function codexAzureEnvs(funding: CodexAzureFunding): Record<string, string> {
+  return {
+    AZURE_OPENAI_API_KEY: funding.apiKey,
+    CODEX_AZURE_BASE_URL: funding.baseUrl,
+    CODEX_AZURE_MODEL: funding.deployment,
+  };
+}
+
 /**
  * Decide which auth env vars the Codex Code CLI sandbox should receive.
  *
- * Mirrors {@link resolveClaudeCodeAuthEnvs} (and the Rose completions fallback)
- * so the Codex code agent stays usable whenever an OAuth token would be:
+ * User OAuth stays first; the funded path bills to our Azure credits:
  *   1. A synced/pool ChatGPT/Codex OAuth credential → CODEX_AUTH_JSON (primary).
- *      When a funded OpenAI key is also configured, it is injected ALONGSIDE the
- *      OAuth token as OPENAI_API_KEY so the sandbox can re-login and retry if the
- *      OAuth token hits `usage_limit_reached` MID-RUN. This is the real failure
- *      mode that stalled deploy: `fetchGptCodeCredentialsWithMeta` only filters
- *      tokens the DB already marked rate-limited, so a token that is over quota
- *      but not yet flagged is returned as valid and only fails at runtime inside
- *      the sandbox — where a null-credential fallback never gets a chance to fire.
- *   2. No OAuth credential (absent, or every pool token DB-rate-limited → null) →
- *      the funded OpenAI API key alone → OPENAI_API_KEY, which the sandbox
- *      ws-server logs in with via `codex login --with-api-key`.
+ *      When the Azure deployment is configured it is injected ALONGSIDE so the
+ *      sandbox can switch provider and retry if OAuth hits `usage_limit_reached`
+ *      or proves revoked MID-RUN (`fetchGptCodeCredentialsWithMeta` only filters
+ *      tokens the DB already marked rate-limited).
+ *   2. No OAuth credential → the Azure deployment alone.
  *   3. Otherwise throw — nothing usable.
  *
- * Pure + exported so the selection is unit-testable without spinning an E2B
- * sandbox (the real session path isn't otherwise reachable in tests).
+ * The Azure key goes only to E2B sandboxes (the same exposure the funded OpenAI
+ * key had); local-device sessions never call this.
  */
 export function resolveCodexCodeAuthEnvs(
   credentialMeta: GptCodeCredentialEnvelopeResult | null,
-  openaiApiKey: string | undefined,
-  openaiApiKeyOnCooldown = false
+  funding: CodexAzureFunding | null | undefined
 ): Record<string, string> {
-  const fundedKey =
-    !openaiApiKeyOnCooldown && openaiApiKey !== undefined && openaiApiKey !== ''
-      ? openaiApiKey
-      : undefined;
   if (credentialMeta) {
-    const envs: Record<string, string> = { CODEX_AUTH_JSON: credentialMeta.credentials };
-    if (fundedKey !== undefined) {
-      envs.OPENAI_API_KEY = fundedKey;
-    }
-    return envs;
+    return {
+      CODEX_AUTH_JSON: credentialMeta.credentials,
+      ...(funding ? codexAzureEnvs(funding) : {}),
+    };
   }
-  if (fundedKey !== undefined) {
-    return { OPENAI_API_KEY: fundedKey };
-  }
+  if (funding) return codexAzureEnvs(funding);
   // Same split as the Claude path: the credential-inventory breakdown is operator-only, because the
   // [REDACTED] route returns `error.message` verbatim to the API client.
   const detail =
     'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
-    `and no usable OPENAI_API_KEY (GPT_API_KEY) fallback (${
-      openaiApiKey !== undefined && openaiApiKey !== ''
-        ? 'configured but on its out-of-credits/bad-key cooldown'
-        : 'not set'
-    })`;
+    `and no Azure Codex deployment (AZURE_FOUNDRY_* region for ${CODEX_AZURE_DEFAULT_HOST} not configured)`;
   log.error('Codex Code credential resolution failed', { detail });
   throw new CodeAgentCredentialError(CODE_AGENT_CREDENTIALS_UNAVAILABLE, detail);
 }
