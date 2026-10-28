@@ -66,7 +66,39 @@ interface QueuedBroadcast {
   };
 }
 
-const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>();
+/**
+ * Folds a stream delta into the previous unsent delta of the same stream. The
+ * client appends `delta` and keeps the highest `sequence` (realtimeHandlers
+ * handleAssistantStream), so one merged frame renders the same text as many.
+ */
+export function coalesceAssistantStream(
+  queued: QueuedBroadcast,
+  next: QueuedBroadcast
+): QueuedBroadcast | undefined {
+  if (queued.event !== 'ASSISTANT_STREAM' || next.event !== 'ASSISTANT_STREAM') return undefined;
+  if (queued.committedCohort !== undefined || next.committedCohort !== undefined) return undefined;
+  const previous = queued.payload;
+  const latest = next.payload;
+  if (previous.stream_id !== latest.stream_id || previous.done === true) return undefined;
+  // The stream-start frame (sequence 0) stays its own event so the client opens
+  // the bubble at the LLM start, before any token.
+  if (typeof previous.sequence !== 'number' || previous.sequence <= 0) return undefined;
+  if (typeof previous.delta !== 'string' || typeof latest.delta !== 'string') return undefined;
+  return {
+    ...next,
+    trace: queued.trace,
+    enqueuedAt: queued.enqueuedAt,
+    payload: {
+      ...latest,
+      delta: previous.delta + latest.delta,
+      ...(latest.llm_started_at_ms === undefined && previous.llm_started_at_ms !== undefined
+        ? { llm_started_at_ms: previous.llm_started_at_ms }
+        : {}),
+    },
+  };
+}
+
+const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>(coalesceAssistantStream);
 let flushTimer: NodeJS.Timeout | null = null;
 const inFlightBatches = new Set<Promise<void>>();
 const MAX_IN_FLIGHT_BATCHES = 64;

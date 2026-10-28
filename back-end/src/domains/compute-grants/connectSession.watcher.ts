@@ -9,6 +9,7 @@ import {
 import { createLogger } from '../../providers/logger';
 import { getKernelCaptchaTelemetry } from '../../providers/browser/kernel';
 import { getSteelCaptchaTelemetry } from '../../providers/steel/sessionInspect';
+import { getTilionCaptchaTelemetry } from '../../providers/browser/tilion';
 import {
   CAPTCHA_WIDGET_PRESENT_SCRIPT,
   captchaSolveIndicatorSetPhaseScript,
@@ -31,16 +32,21 @@ async function syncCaptchaSolveIndicator(entry: PendingConnect): Promise<void> {
       ? await getKernelCaptchaTelemetry(entry.steelSessionId)
       : provider === 'steel'
         ? await getSteelCaptchaTelemetry(entry.steelSessionId)
-        : {
-            provider: 'browser-use' as const,
-            telemetryEnabled: false,
-            isSolving: null,
-            activeTaskCount: null,
-            pages: [],
-            latestOutcome: null,
-          };
+        : provider === 'tilion'
+          ? await getTilionCaptchaTelemetry(entry.steelSessionId)
+          : {
+              provider: 'browser-use' as const,
+              telemetryEnabled: false,
+              isSolving: null,
+              activeTaskCount: null,
+              pages: [],
+              latestOutcome: null,
+            };
   let kernelWidgets = false;
-  if (telemetry.isSolving === null && telemetry.provider === 'kernel') {
+  if (
+    telemetry.isSolving === null &&
+    (telemetry.provider === 'kernel' || telemetry.provider === 'tilion')
+  ) {
     kernelWidgets = (await entry.cdp.evaluate<boolean>(CAPTCHA_WIDGET_PRESENT_SCRIPT)) === true;
   }
   const memory = entry.captchaIndicatorMemory ?? emptyCaptchaIndicatorMemory();

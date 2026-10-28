@@ -173,6 +173,12 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
             row.status = 'CLOSED';
           },
         };
+      // Provider dispatch reads the persisted provider through its own module.
+      if (id === './sessionProvider')
+        return {
+          providerForSession: async () => 'kernel',
+          providerForTask: async () => 'kernel',
+        };
       if (id === './sessionAuthPersist')
         return {
           persistSignedInBrowserState: async () => {

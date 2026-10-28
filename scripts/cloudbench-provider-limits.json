@@ -34,6 +34,21 @@
       "limit_source": "kernel.sh/pricing Start-up plan; provider error unified_concurrent_sessions: limit=150.",
       "demand_source": "run600c peak demand ~530 concurrent sessions at 600 concurrent benches.",
       "exhaustion": "Browser session creation fails; no unlimited fallback."
+    },
+    {
+      "id": "tilion-browser-sessions",
+      "name": "Tilion browser sessions",
+      "limit": 20,
+      "limit_unit": "concurrent browsers",
+      "limit_qualifier": "pilot plan",
+      "credential_env": "TILION_API_KEY",
+      "per_bench_peak": 1,
+      "per_bench_peak_unit": "sessions per bench",
+      "limit_source": "Tilion pilot: 20 concurrent browsers on one account shared by prod, dev and benchmarks; a 21st create answers 429 concurrency_limit.",
+      "demand_source": "Not yet measured on Tilion; one live session per bench assumed until a Tilion fleet census exists.",
+      "exhaustion": "Browser session creation fails with a typed 429; no unlimited fallback.",
+      "browser_provider": "tilion",
+      "demand_measurement": "assumed, not yet measured on Tilion"
     }
   ],
   "informational": [

@@ -1,4 +1,4 @@
-/** Live Kernel/Steel: sign-in survives session close and a later browser-agent call. */
+/** Live Kernel→Steel|Tilion→Kernel: sign-in survives session close and a later browser-agent call. */
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -8,6 +8,7 @@ import { benchmarkSavedBrowserAuthDisabled } from '../../providers/benchmarkBrow
 import { CHROME_EPOCH_OFFSET_MICROSECONDS } from '../../domains/integrations/config';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import { releaseKernelRemoteSession } from '../../providers/browser/kernel';
+import { releaseTilionRemoteSession } from '../../providers/browser/tilion';
 import { releaseSteelRemoteSession } from '../../providers/steel/session';
 import { steelCdpConnectionUrl } from '../../providers/steel/urls';
 import {
@@ -45,14 +46,32 @@ async function readSignedIn(wsUrl: string): Promise<{ cookie: string; storage: s
   }
 }
 
-export async function runLiveKernelSteelAuthPersist(): Promise<void> {
+/** The provider the second call is switched to between the two Kernel calls. */
+export type AuthPersistMiddleProvider = 'steel' | 'tilion';
+
+function middlePreferredConfig(middle: AuthPersistMiddleProvider) {
+  return middle === 'tilion'
+    ? buildPreferredBrowserConfig(
+        { provider: 'tilion', proxyMode: 'residential_country', tilionProxyType: 'residential' },
+        LOCATION
+      )
+    : buildPreferredBrowserConfig(
+        { provider: 'steel', proxyMode: 'residential_country', steelProxyMode: 'managed' },
+        LOCATION
+      );
+}
+
+export async function runLiveKernelSteelAuthPersist(
+  middle: AuthPersistMiddleProvider = 'steel'
+): Promise<void> {
   const base = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
-  const steelApiKey = process.env.STEEL_API_KEY?.trim();
-  if (!base || !apiKey || !kernelApiKey || !steelApiKey) {
+  const middleKeyName = middle === 'tilion' ? 'TILION_API_KEY' : 'STEEL_API_KEY';
+  const middleApiKey = process.env[middleKeyName]?.trim();
+  if (!base || !apiKey || !kernelApiKey || !middleApiKey) {
     throw new Error(
-      'Live Kernel/Steel auth persist needs TEST_BASE_URL, BACKEND_API_KEY, KERNEL_API_KEY, and STEEL_API_KEY'
+      `Live Kernel/${middle} auth persist needs TEST_BASE_URL, BACKEND_API_KEY, KERNEL_API_KEY, and ${middleKeyName}`
     );
   }
 
@@ -197,7 +216,16 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
   try {
     await prisma.user.create({ data: { userId, name: 'Auth persist live' } });
     userCreated = true;
-    const context = await prisma.browserContext.create({ data: { userId } });
+    // Pin the first call to Kernel: the deployment default (Tilion) must not pick it.
+    const context = await prisma.browserContext.create({
+      data: {
+        userId,
+        preferredBrowserConfig: buildPreferredBrowserConfig(
+          { provider: 'kernel', proxyMode: 'residential_city', kernelProxyType: 'residential' },
+          LOCATION
+        ),
+      },
+    });
     // A real independent cookie keeps phone minting outside this persistence test.
     // It cannot satisfy either target state that the live handoff must restore.
     const browserProfile = 'AuthPersistFixture';
@@ -286,21 +314,12 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
 
     await prisma.browserContext.update({
       where: { id: context.id },
-      data: {
-        preferredBrowserConfig: buildPreferredBrowserConfig(
-          {
-            provider: 'steel',
-            proxyMode: 'residential_country',
-            steelProxyMode: 'managed',
-          },
-          LOCATION
-        ),
-      },
+      data: { preferredBrowserConfig: middlePreferredConfig(middle) },
     });
-    const steelAgent = await startAgent('Resume signed-in state on Steel');
+    const middleAgent = await startAgent(`Resume signed-in state on ${middle}`);
     const switched = await post('/api/browser-session/init', {
       user_id: userId,
-      agent_id: steelAgent.id,
+      agent_id: middleAgent.id,
       start_url: 'https://example.com',
     });
     const switchedMeta = asRecord(switched.browser_session_metadata);
@@ -319,7 +338,10 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       switchedState.storage === 'signed-in',
       `${switchedProvider} did not restore Kernel localStorage`
     );
-    if (switchedProvider !== 'steel') {
+    if (middle === 'tilion') {
+      // Tilion is pinned by preference with no fallback ladder: landing elsewhere is a defect.
+      assert(switchedProvider === 'tilion', `preferred Tilion landed on ${switchedProvider}`);
+    } else if (switchedProvider !== 'steel') {
       console.warn(
         `WARN live auth persist: preferred Steel fell back to ${switchedProvider}; sequential resume still passed`
       );
@@ -369,7 +391,7 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       (await prisma.agentIdentity.findUnique({ where: { userId } })) === null,
       'auth-persist fixture created an unrelated identity before completion'
     );
-    passedMessage = `PASS live Kernel/Steel auth persist (second=${switchedProvider}, later=${String(laterMeta.provider)})`;
+    passedMessage = `PASS live Kernel/${middle} auth persist (second=${switchedProvider}, later=${String(laterMeta.provider)})`;
   } catch (error) {
     originalFailure = error;
     throw error;
@@ -386,6 +408,7 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       releaseBrowser: async (session) => {
         if (session.provider === 'steel') await releaseSteelRemoteSession(session.sessionId);
         else if (session.provider === 'kernel') await releaseKernelRemoteSession(session.sessionId);
+        else if (session.provider === 'tilion') await releaseTilionRemoteSession(session.sessionId);
         else throw new Error('Unsupported owned browser provider');
       },
       deleteProfile: deleteKernelProfile,

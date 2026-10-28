@@ -131,6 +131,12 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
     # process: a flag one suite exports (e.g. a benchmark-only kill switch)
     # must not silently change the code paths a later suite exercises.
     structlog.contextvars.clear_contextvars()
+    # A suite's leftover httpx mock handler would also answer later suites'
+    # loopback requests (the capture harness routes localhost through an
+    # installed mock): e.g. a real Chromium's /json/version came back as {}.
+    from helpers.httpx_capture import clear_mock_handler
+
+    clear_mock_handler()
     env_snapshot = dict(os.environ)
     try:
         spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)

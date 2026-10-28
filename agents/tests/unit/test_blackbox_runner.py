@@ -38,6 +38,34 @@ def test_sequential_domains_do_not_share_structlog_context(tmp_path: Path):
     assert structlog.contextvars.get_contextvars() == {}
 
 
+def test_sequential_domains_do_not_share_httpx_mock_handler(tmp_path: Path):
+    """A suite's leftover mock must not answer a later suite's loopback requests
+    (it returned {} for real Chromium's /json/version)."""
+    runner = load_runner()
+    leaking_domain = tmp_path / "leaking_mock.blackbox.py"
+    leaking_domain.write_text(
+        "import httpx\n"
+        "from helpers.httpx_capture import set_mock_handler\n"
+        "async def run_all_tests():\n"
+        "    set_mock_handler(lambda request: httpx.Response(200, json={}))\n"
+        "    return True\n"
+    )
+    observing_domain = tmp_path / "observing_mock.blackbox.py"
+    observing_domain.write_text(
+        "import helpers.httpx_capture as capture\n"
+        "async def run_all_tests():\n"
+        "    return capture._mock_handler is None\n"
+    )
+
+    try:
+        assert asyncio.run(runner.run_single_domain(leaking_domain, "leaking-mock"))[1]
+        assert asyncio.run(runner.run_single_domain(observing_domain, "observing-mock"))[1]
+    finally:
+        from helpers.httpx_capture import clear_mock_handler
+
+        clear_mock_handler()
+
+
 def test_sequential_domains_do_not_share_environment(tmp_path: Path, monkeypatch):
     runner = load_runner()
     monkeypatch.setenv("BLACKBOX_RUNNER_KEPT", "original")

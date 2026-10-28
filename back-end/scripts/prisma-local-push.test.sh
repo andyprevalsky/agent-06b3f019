@@ -236,6 +236,31 @@ SQL
   psql "$SCRATCH_URL" -v ON_ERROR_STOP=1 -qc \
     'CREATE UNIQUE INDEX "User_phone_key" ON "User"("phone")' >/dev/null
   echo "local User.phone normalization SQL: PASS"
+
+  # db push ignores the hand-written workflow functions/triggers in migrations.
+  # A database built only by this wrapper must still carry them, or local unit
+  # tests (workflow-terminal-cleanup) run against a schema prod does not have.
+  PUSH_DB="prisma_local_push_ddl_test_$$"
+  PUSH_URL="postgresql://postgres:postgres@localhost:5432/$PUSH_DB"
+  psql "$ADMIN_URL" -qc "CREATE DATABASE $PUSH_DB" >/dev/null
+  trap 'psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $SCRATCH_DB" >/dev/null 2>&1 || true;
+        psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $PUSH_DB" >/dev/null 2>&1 || true' EXIT
+  if ! push_output=$(cd "$(dirname "$SCRIPT")/.." && DB_CONTAINER=victoria-db-unrelated-fixture \
+      DATABASE_URL="$PUSH_URL" DIRECT_URL="$PUSH_URL" bash "$SCRIPT" --skip-generate 2>&1); then
+    printf '%s\n' "$push_output" >&2
+    echo "local Prisma push into a scratch database failed" >&2
+    exit 1
+  fi
+  triggers=$(psql "$PUSH_URL" -Atc \
+    "SELECT string_agg(tgname, ',' ORDER BY tgname) FROM pg_trigger WHERE NOT tgisinternal")
+  for trigger in Agent_enqueue_temporal_workflow_cleanup Agent_fence_descendant_workflow_start \
+      Message_trajectory_search_sync; do
+    case ",$triggers," in
+      *",$trigger,"*) ;;
+      *) echo "local Prisma push left $PUSH_DB without trigger $trigger (have: ${triggers:-none})" >&2; exit 1 ;;
+    esac
+  done
+  echo "local Prisma push applies workflow DDL: PASS"
 else
   echo "local User.phone normalization SQL: skipped (no local Postgres)"
 fi
