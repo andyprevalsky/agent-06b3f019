@@ -86,7 +86,7 @@ describe('Project icon: GitHub owner avatar instead of the folder (UI item 32)',
     // The collapsed rail keeps the project icon (same URL), without its buttons.
     collapseBar();
     expectAvatar('p-rose', 'Rose-Ai-Labs');
-    expect(screen.queryByRole('button', { name: 'New agent in Rose' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create Super Agent' })).toBeNull();
     expandBar();
     expectAvatar('p-rose', 'Rose-Ai-Labs');
   });

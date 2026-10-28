@@ -23,7 +23,9 @@ import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { server } from './msw/server';
 import {
+  createAgentButton,
   expandBar,
+  findCreateAgentButton,
   expectAgentMenuEntries,
   makeProject,
   mockProjectsApi,
@@ -96,7 +98,7 @@ describe('Rose projects in the left bar', () => {
     ).toBeInTheDocument();
   });
 
-  it('Projects sit at the top: project rows and + New project come before Home agents', async () => {
+  it('+ New project heads the list, above every project; projects come before Home agents', async () => {
     api = mockProjectsApi([makeProject({ id: 'p-site', name: 'Website' }), makeProject()]);
     renderBar();
     const rose = await screen.findByTestId('rose-project-row-p-rose');
@@ -106,7 +108,14 @@ describe('Rose projects in the left bar', () => {
     expect(precedesHome(rose)).toBe(true);
     expect(precedesHome(screen.getByTestId('rose-project-row-p-site'))).toBe(true);
     expect(precedesHome(screen.getByTestId('rose-agent-row-a-rose'))).toBe(true);
-    expect(precedesHome(screen.getByRole('button', { name: '+ New project' }))).toBe(true);
+    const newProject = screen.getByRole('button', { name: '+ New project' });
+    expect(precedesHome(newProject)).toBe(true);
+    for (const id of ['p-rose', 'p-site']) {
+      const row = screen.getByTestId(`rose-project-row-${id}`);
+      expect(
+        newProject.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
   });
 
   it('+ New project creates inline: Enter creates, Escape cancels', async () => {
@@ -219,7 +228,7 @@ describe('Rose projects in the left bar', () => {
   it('project + shows a not-yet toast until a handler is wired', async () => {
     const user = userEvent.setup();
     renderBar();
-    await user.click(await screen.findByRole('button', { name: 'New agent in Rose' }));
+    await user.click(await findCreateAgentButton('p-rose'));
     expect(
       await screen.findByText('New agent in a project is not available yet'),
     ).toBeInTheDocument();
@@ -229,7 +238,7 @@ describe('Rose projects in the left bar', () => {
     const user = userEvent.setup();
     const onCreateAgentInProject = vi.fn();
     renderBar({ roseActions: { onCreateAgentInProject } });
-    await user.click(await screen.findByRole('button', { name: 'New agent in Rose' }));
+    await user.click(await findCreateAgentButton('p-rose'));
     expect(onCreateAgentInProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-rose' }));
   });
 
@@ -545,7 +554,7 @@ describe('New agent from a project (Terminal)', () => {
     renderWithProviders(<Terminal />);
     await screen.findByTestId('rose-sidebar');
     expandBar();
-    await user.click(await screen.findByRole('button', { name: 'New agent in Rose' }));
+    await user.click(await findCreateAgentButton('p-rose'));
 
     // The project's icon wears the liquid-metal ring until the agent exists.
     expandBar();
@@ -570,7 +579,7 @@ describe('New agent from a project (Terminal)', () => {
     expect(screen.queryByTestId('pending-project-frame')).toBeNull();
 
     expandBar();
-    fireEvent.click(screen.getByRole('button', { name: 'New agent in Home' }));
+    fireEvent.click(createAgentButton('home'));
     expect(screen.getByTestId('rose-home-project-row')).toHaveAttribute('data-pending', 'true');
     const home = await screen.findByPlaceholderText('Enter any goal');
     await user.click(home);

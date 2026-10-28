@@ -7,27 +7,26 @@
  * [OPEN]
  *     |
  *     +--> [IDLE] <-- isDeleting: false
- *     |       |
- *     |       +--> (delete click)
- *     |       |       |
- *     |       |       v
- *     |       |   [CONFIRM_DELETE] <-- showDeleteSection: true, confirmEnabled: false
- *     |       |       |
- *     |       |       | (1.8s delay)
- *     |       |       v
- *     |       |   [CONFIRM_ENABLED] <-- confirmEnabled: true
- *     |       |       |
- *     |       |       +--> (confirm) --> [DELETING] <-- isDeleting: true
- *     |       |       +--> (cancel) --> [IDLE]
- *     |
- *     +--> [REPORT_BUG] <-- admin only; composer open for bug description
  *             |
- *             +--> (submit) --> boxes.dev Bug Report run titled from description
- *             |                 (no SMS, no auto-open; Open/Copy stay explicit)
- *             +--> (cancel) --> [IDLE]
+ *             +--> (delete click; stock 'icon' variant only — the Rose Desktop
+ *             |     tab drawer ('nub') shows no Delete Agent)
+ *             |       |
+ *             |       v
+ *             |   [CONFIRM_DELETE] <-- showDeleteSection: true, confirmEnabled: false
+ *             |       |
+ *             |       | (1.8s delay)
+ *             |       v
+ *             |   [CONFIRM_ENABLED] <-- confirmEnabled: true
+ *             |       |
+ *             |       +--> (confirm) --> [DELETING] <-- isDeleting: true
+ *             |       +--> (cancel) --> [IDLE]
+ *
+ * Report bug is NOT here: it is its own control (ReportBugDialog) beside the
+ * gear. Hovering the gear shows only the plain "Agent settings" label; the
+ * panel opens on click.
  *
  * Delete-flow state is owned by useDeleteFlow; price-limit editing state is
- * owned by usePriceLimitEdit; report-bug state is owned by useReportBug;
+ * owned by usePriceLimitEdit;
  * anchor position is owned by useModalPosition (clamped inside the viewport,
  * height capped below the mobile header, re-fit on rotation). Phones (< md)
  * get an opaque panel; the desktop panel stays transparent glass.
@@ -52,17 +51,13 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Settings } from 'lucide-react';
-import { isAdminOperator } from '@/lib/adminAccounts';
-import { useAuth } from '../hooks';
 import type { AgentSettingsDialogProps } from './agent-settings-dialog/types';
 import MetricsSection from './agent-settings-dialog/MetricsSection';
 import ResponseSchemaSection from './agent-settings-dialog/ResponseSchemaSection';
 import DeleteSection from './agent-settings-dialog/DeleteSection';
-import ReportBugSection from './agent-settings-dialog/ReportBugSection';
 import { useDeleteFlow } from './agent-settings-dialog/useDeleteFlow';
 import { usePriceLimitEdit } from './agent-settings-dialog/usePriceLimitEdit';
 import { useModalPosition } from './agent-settings-dialog/useModalPosition';
-import { useReportBug } from './agent-settings-dialog/useReportBug';
 import { NUB_ITEM_CLASS, NubTip } from './query-input/NubTip';
 
 /** Stock muted gear, or the bare white nub gear with its instant tooltip. */
@@ -101,8 +96,6 @@ export default function AgentSettingsDialog({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const modalPosition = useModalPosition(open, triggerRef, variant === 'nub' ? 'start' : 'end');
-  const { user: authUser } = useAuth();
-  const showReportBug = isAdminOperator(authUser);
 
   const deleteFlow = useDeleteFlow({
     agent,
@@ -117,8 +110,6 @@ export default function AgentSettingsDialog({
     agent,
     onUpdated: () => onUpdate?.(),
   });
-
-  const reportBug = useReportBug({ agent, open });
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
@@ -151,8 +142,7 @@ export default function AgentSettingsDialog({
             <div className="space-y-6">
               <MetricsSection agent={agent} priceLimitEdit={priceLimitEdit} />
               <ResponseSchemaSection agent={agent} />
-              {showReportBug ? <ReportBugSection flow={reportBug} /> : null}
-              <DeleteSection flow={deleteFlow} />
+              {variant === 'nub' ? null : <DeleteSection flow={deleteFlow} />}
             </div>
           )}
         </div>
