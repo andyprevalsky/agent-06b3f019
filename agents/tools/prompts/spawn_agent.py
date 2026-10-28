@@ -7,9 +7,7 @@ inline view. Both code lines end with ``CODE_VIDEO_SENTENCE``: video generation
 and editing go to a code agent (the sandbox ``rose video`` tool + ffmpeg).
 """
 
-CODE_VIDEO_SENTENCE = (
-    "Send every video generation or editing request to a code agent: it has the video tool (real footage) and ffmpeg."
-)
+CODE_VIDEO_SENTENCE = "Send video generation or editing to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
 CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "

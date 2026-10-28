@@ -461,8 +461,8 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
 STOCK_SPAWN_CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
-    "completion. The task should be tightly scoped and self-sufficient. Send every video generation or "
-    "editing request to a code agent: it has the video tool (real footage) and ffmpeg."
+    "completion. The task should be tightly scoped and self-sufficient. Send video generation or editing "
+    "to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
 )
 ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
 
@@ -556,7 +556,7 @@ def test_root_agent_routes_video_requests_to_a_code_agent():
     from domains.set_plan.service import get_planner_tools_description
     from tools.prompts.spawn_agent import CODE_LINE, CODE_LINE_ROSE_DESKTOP, CODE_VIDEO_SENTENCE
 
-    rule = "Send every video generation or editing request to a code agent"
+    rule = "Send video generation or editing to a code agent; tell it to make real footage with `rose video`"
     assert CODE_VIDEO_SENTENCE.startswith(rule)
     for line in (CODE_LINE, CODE_LINE_ROSE_DESKTOP):
         assert line.endswith(" " + CODE_VIDEO_SENTENCE), line

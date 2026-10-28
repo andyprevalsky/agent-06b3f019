@@ -14,7 +14,7 @@ screen animations) are still yours to build with code; combine both freely.
    the user. Make the caption commentary: what this shot is and what comes
    next. Check a frame yourself (`ffmpeg -ss 1 -i shot1.mp4 -frames:v 1 f.png`)
    and regenerate a bad shot with `--take 2`.
-4. Edit in this sandbox with ffmpeg: trim, concat, crossfades, titles, music
+4. Edit in this sandbox with ffmpeg (`sudo apt-get install -y ffmpeg` if missing): trim, concat, crossfades, titles, music
    bed, loudness. Re-encode to one codec, size and frame rate before concat.
 5. Show the final cut with `rose display final.mp4 --caption "<what it is>"`
    and give its path in your final response.

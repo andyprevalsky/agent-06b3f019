@@ -597,6 +597,19 @@ test('`rose video` CLI: route → generate → byte-identical download → capti
     assert.match(again.stdout, /no new charge/);
     assert.equal(calls.length, providerCalls, 'a rerun of the same command never reaches Google');
 
+    // Help never spends: `rose video`, `-h`, `--help` print usage; a flag-looking prompt is refused.
+    const before = calls.length;
+    for (const help of [[], ['-h'], ['--help'], ['a shot', '--help']]) {
+      const shown = await run('node', [cli, 'video', ...help], { env, cwd: home });
+      assert.match(shown.stdout, /rose video <prompt>[\s\S]*talk-to-user\/video\.md/);
+    }
+    const flagPrompt = await run('node', [cli, 'video', '-x'], { env, cwd: home }).then(
+      () => null,
+      (err: { code?: number; stderr?: string }) => err
+    );
+    assert.ok(flagPrompt !== null && /not a shot description/.test(String(flagPrompt.stderr)));
+    assert.equal(calls.length, before, 'help and typos never reach Google');
+
     const bad = await run('node', [cli, 'video', 'x', '--duration', '12'], { env, cwd: home }).then(
       () => null,
       (err: { code?: number; stderr?: string }) => err

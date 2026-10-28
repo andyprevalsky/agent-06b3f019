@@ -625,6 +625,8 @@ function videoChoice(value, name, choices) {
 function videoRequest(args) {
   const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
   if (!prompt) throw new ToolError('video needs a prompt describing the shot');
+  // A flag-looking prompt ("-h", "-x") is a typo, never a shot to pay for.
+  if (prompt.startsWith('-')) throw new ToolError(`not a shot description: ${prompt.slice(0, 40)}`);
   const refs = args.refs || [];
   if (refs.length > VIDEO_MAX_REFS) throw new ToolError(`at most ${VIDEO_MAX_REFS} --ref images`);
   if (args.last_frame !== undefined && args.first_frame === undefined) {
@@ -960,6 +962,13 @@ async function main(argv) {
         : {}),
     });
   } else if (command === 'video') {
+    if (
+      rest.length === 0 ||
+      rest.some((arg) => arg === '-h' || arg === '--help' || arg === 'help')
+    ) {
+      console.log(`${VIDEO_USAGE}\n  guide: ~/.rose/skills/talk-to-user/video.md`);
+      return 0;
+    }
     const { positional, flags } = parseFlags(
       rest,
       new Set([
